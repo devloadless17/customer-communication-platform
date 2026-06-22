@@ -262,7 +262,7 @@ export function AvailabilityPicker({
 
   return (
     <div className="flex flex-col px-1 py-1">
-      <div className="px-2 pb-1.5 pt-0.5 text-3xs font-semibold uppercase tracking-[0.08em] text-muted-foreground/60">
+      <div className="px-2 pb-1.5 pt-0.5 text-3xs font-semibold uppercase tracking-wider text-muted-foreground">
         Availability
       </div>
       <div className="flex flex-col gap-0.5">
@@ -285,10 +285,15 @@ export function AvailabilityPicker({
               aria-pressed={active}
             >
               <span
+                // Re-key the active dot on the selected status so it remounts
+                // and replays the one-shot spring-pop — a brief, reduced-motion-
+                // safe "registered" cue on each pick. Inactive dots share a
+                // stable key so they don't animate on unrelated selections.
+                key={active ? `active-${status}` : s}
                 className={cn(
                   "size-2.5 shrink-0 rounded-full ring-2 ring-background transition-shadow",
                   AVAILABILITY_DOT_CLASSES[s],
-                  active && "ring-accent/80",
+                  active && "ring-accent/80 animate-badge-pop",
                 )}
               />
               <span className="flex-1 font-medium">{AVAILABILITY_LABELS[s]}</span>

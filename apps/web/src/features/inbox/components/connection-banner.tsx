@@ -38,7 +38,7 @@ export function ConnectionBanner() {
             "absolute inset-x-0 top-0 z-50 flex items-center justify-center gap-2 px-3 py-1.5 text-xs font-medium shadow-xs",
             state === "offline"
               ? "bg-destructive text-destructive-foreground"
-              : "bg-amber-500 text-white",
+              : "bg-warning-bg text-warning-fg",
           )}
         >
           {state === "offline" ? (

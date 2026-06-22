@@ -44,7 +44,7 @@ function RadioRow({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-accent/60",
+        "flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-accent",
         active && "bg-accent/40",
       )}
     >
@@ -155,7 +155,7 @@ export function MoreFilterMenu({
           <RadioRow
             active={windowFilter === "open"}
             onClick={() => onWindowChange("open")}
-            leading={<span className="size-2 shrink-0 rounded-full bg-emerald-500" />}
+            leading={<span className="size-2 shrink-0 rounded-full bg-success-fg" />}
           >
             Open
           </RadioRow>

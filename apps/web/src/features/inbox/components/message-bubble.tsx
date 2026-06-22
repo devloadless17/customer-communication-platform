@@ -276,18 +276,18 @@ function BubbleContent({
             isFailed && "opacity-80 ring-destructive/60",
             isOut
               ? "bg-outbound-bg text-outbound-fg ring-transparent"
-              : "bg-inbound-bg text-inbound-fg ring-border",
+              : "bg-inbound-bg text-inbound-fg ring-border/50",
             // Flat tail corner ONLY on the group's last bubble; continuation
             // bubbles keep all four corners rounded so a stack reads as one
             // unit. (`rounded-2xl` above already rounds every corner.)
             isTail && (isOut ? "rounded-br-xs" : "rounded-bl-xs"),
-            // Active search match — a soft neutral ring that stays for as
-            // long as the bubble is the selected match. Uses the
-            // foreground color at low opacity so it adapts to light/dark
-            // mode (a subtle dark wash in light, a subtle light wash in
-            // dark) without competing with the bubble's own color.
+            // Active search match — a soft primary ring that stays for as
+            // long as the bubble is the selected match. The primary hue is
+            // instantly readable as a selection/focus signal (matching the
+            // reply-jump ring) so the active hit pops out of the thread
+            // without darkening the bubble's own color.
             isActiveSearchMatch &&
-              "ring-2 ring-foreground/30 ring-offset-2 ring-offset-background",
+              "ring-2 ring-primary/50 ring-offset-2 ring-offset-background",
           )}
         >
           {reply && (

@@ -211,7 +211,7 @@ export function CountryCodePicker({
                           setQuery("");
                         }}
                         className={cn(
-                          "flex w-full cursor-pointer items-center gap-2 px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-accent/60",
+                          "flex w-full cursor-pointer items-center gap-2 px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-accent",
                           selected && "bg-accent/40",
                         )}
                       >

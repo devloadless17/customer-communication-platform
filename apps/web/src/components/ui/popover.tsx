@@ -116,7 +116,7 @@ export function Popover({
                 ...(align === "end" ? { right: rect.right } : { left: rect.left }),
               }}
               className={cn(
-                "z-60 rounded-lg border border-border bg-popover text-popover-foreground shadow-lg",
+                "z-60 rounded-lg border border-border bg-popover text-popover-foreground shadow-md",
                 open
                   ? "animate-in fade-in-0 zoom-in-95 duration-150"
                   : "animate-out fade-out-0 zoom-out-95 duration-100",

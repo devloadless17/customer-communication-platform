@@ -511,7 +511,7 @@ function ConversationListImpl({
               className={cn(
                 "flex size-8 pointer-coarse:size-9 items-center justify-center rounded-md transition-colors",
                 selectionMode
-                  ? "bg-primary/10 text-primary"
+                  ? "bg-primary/15 text-primary ring-1 ring-inset ring-primary/40"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground",
               )}
               aria-label={selectionMode ? "Exit selection mode" : "Select multiple"}
@@ -532,7 +532,7 @@ function ConversationListImpl({
             className={cn(
               "flex size-8 pointer-coarse:size-9 items-center justify-center rounded-md transition-colors",
               sortMode === "waiting"
-                ? "bg-primary/10 text-primary"
+                ? "bg-primary/15 text-primary ring-1 ring-inset ring-primary/40"
                 : "text-muted-foreground hover:bg-accent hover:text-foreground",
             )}
           >
@@ -560,7 +560,7 @@ function ConversationListImpl({
               type="button"
               onClick={() => onSearchChange("")}
               aria-label="Clear search"
-              className="absolute right-2 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+              className="absolute right-2 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
             >
               <X className="size-3.5" />
             </button>

@@ -100,7 +100,7 @@ export interface NodeData extends Record<string, unknown> {
 }
 
 const NODE_BASE =
-  "rounded-lg border-2 bg-card shadow-sm transition-all hover:shadow-md";
+  "rounded-lg border-2 bg-card shadow-xs transition-all hover:shadow-md";
 
 export function TriggerNode({ data }: NodeProps) {
   const d = data as NodeData;
@@ -108,7 +108,7 @@ export function TriggerNode({ data }: NodeProps) {
   return (
     <div
       className={`${NODE_BASE} w-64 border-amber-500/40 ${
-        d.selected ? "ring-2 ring-amber-500" : ""
+        d.selected ? "shadow-md ring-2 ring-amber-500" : ""
       }`}
     >
       <div className="flex items-center gap-2 border-b border-border bg-amber-500/10 px-3 py-2">
@@ -117,7 +117,7 @@ export function TriggerNode({ data }: NodeProps) {
           <div className="text-3xs font-medium uppercase tracking-wider text-amber-700 dark:text-amber-300">
             Trigger
           </div>
-          <div className="truncate text-sm font-medium">{trigger?.label ?? "Pick a trigger"}</div>
+          <div className="truncate text-sm font-medium leading-tight">{trigger?.label ?? "Pick a trigger"}</div>
         </div>
       </div>
       {trigger?.description && (
@@ -155,7 +155,7 @@ export function StepNode({ id, data }: NodeProps) {
   return (
     <div
       className={`${NODE_BASE} w-64 ${borderColor} ${
-        d.selected ? "ring-2 ring-primary" : ""
+        d.selected ? "shadow-md ring-2 ring-primary" : ""
       }`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -167,7 +167,7 @@ export function StepNode({ id, data }: NodeProps) {
           <div className="text-3xs font-medium uppercase tracking-wider text-muted-foreground">
             {step?.label ?? d.type}
           </div>
-          <div className="truncate text-sm font-medium">{d.label}</div>
+          <div className="truncate text-sm font-medium leading-tight">{d.label}</div>
         </div>
       </div>
       {d.summary && (
@@ -198,7 +198,7 @@ export function BranchNode({ id, data }: NodeProps) {
   return (
     <div
       className={`${NODE_BASE} w-64 border-indigo-500/40 ${
-        d.selected ? "ring-2 ring-indigo-500" : ""
+        d.selected ? "shadow-md ring-2 ring-indigo-500" : ""
       }`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -215,7 +215,7 @@ export function BranchNode({ id, data }: NodeProps) {
           <div className="text-3xs font-medium uppercase tracking-wider text-indigo-700 dark:text-indigo-300">
             Branch
           </div>
-          <div className="truncate text-sm font-medium">{d.label}</div>
+          <div className="truncate text-sm font-medium leading-tight">{d.label}</div>
         </div>
       </div>
       <div className="flex items-center justify-between px-3 py-2 text-2xs text-muted-foreground">
@@ -280,7 +280,7 @@ export function AskQuestionNode({ id, data }: NodeProps) {
   return (
     <div
       className={`${NODE_BASE} w-64 border-violet-500/40 ${
-        d.selected ? "ring-2 ring-violet-500" : ""
+        d.selected ? "shadow-md ring-2 ring-violet-500" : ""
       }`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -297,7 +297,7 @@ export function AskQuestionNode({ id, data }: NodeProps) {
           <div className="text-3xs font-medium uppercase tracking-wider text-violet-700 dark:text-violet-300">
             Ask a Question
           </div>
-          <div className="truncate text-sm font-medium">{d.label}</div>
+          <div className="truncate text-sm font-medium leading-tight">{d.label}</div>
         </div>
       </div>
       {d.summary && (

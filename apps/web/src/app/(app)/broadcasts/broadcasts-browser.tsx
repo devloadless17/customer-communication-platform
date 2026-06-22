@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
+import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
@@ -40,12 +41,16 @@ import {
   type BroadcastView,
 } from "./broadcasts-cookies";
 
+// Dot fills mirror the BroadcastStatusBadge tone trios so a status reads the
+// same in the filter rail as on the row chip (no raw emerald/sky literals —
+// those don't track dark mode the way the OKLCH tokens do). `scheduled` keeps
+// its deliberate indigo identity (matches the badge + calendar pills).
 const FILTERS: { id: BroadcastStatusFilter; label: string; dot: string }[] = [
-  { id: "all", label: "All", dot: "bg-sky-500" },
+  { id: "all", label: "All", dot: "bg-info-fg" },
   { id: "scheduled", label: "Scheduled", dot: "bg-indigo-500" },
   { id: "queued", label: "Queued", dot: "bg-muted-foreground" },
-  { id: "running", label: "In progress", dot: "bg-emerald-400" },
-  { id: "completed", label: "Completed", dot: "bg-emerald-600" },
+  { id: "running", label: "In progress", dot: "bg-info-fg" },
+  { id: "completed", label: "Completed", dot: "bg-success-fg" },
   { id: "failed", label: "Failed", dot: "bg-destructive" },
 ];
 
@@ -207,21 +212,20 @@ export function BroadcastsBrowser({
                   : "border-transparent text-muted-foreground hover:bg-accent hover:text-foreground",
               )}
             >
-              <span className={cn("size-1.5 rounded-full", f.dot)} />
+              <span className={cn("size-2 shrink-0 rounded-full", f.dot)} />
               {f.label}
             </button>
           ))}
         </div>
         <div className="flex items-center gap-2">
-          <div className="relative">
+          <div className="relative w-56">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <input
-              type="text"
+            <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search name or template…"
               aria-label="Search broadcasts by name or template"
-              className="w-56 rounded-md border border-border bg-background py-1.5 pl-8 pr-3 text-sm outline-none focus:border-primary"
+              className="h-9 pl-8"
             />
           </div>
           <div className="inline-flex rounded-lg border border-border bg-muted/40 p-0.5">
@@ -318,7 +322,7 @@ function TableView({
           strip on phones, so collapse each row into a compact card. */}
       <ul className="divide-y divide-border sm:hidden">
         {rows.map((b) => (
-          <li key={b.id} className="flex flex-col gap-2 px-4 py-3">
+          <li key={b.id} className="flex flex-col gap-2.5 px-4 py-3">
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <Link
@@ -327,7 +331,7 @@ function TableView({
                 >
                   {b.name || b.templateName}
                 </Link>
-                <div className="truncate text-2xs text-muted-foreground">
+                <div className="mt-0.5 truncate text-2xs text-muted-foreground">
                   {b.name ? `${b.templateName} · ` : ""}
                   {b.templateLanguage} ·{" "}
                   {b.audienceMode === "all"
@@ -359,7 +363,7 @@ function TableView({
                 )}
               </div>
             </div>
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center justify-between gap-3 border-t border-border/50 pt-2.5">
               <ProgressBar sent={b.sentCount} failed={b.failedCount} total={b.totalCount} />
               <span className="shrink-0 text-2xs text-muted-foreground">
                 {b.status === "scheduled" && b.scheduledAt ? (
@@ -392,7 +396,7 @@ function TableView({
           {rows.map((b) => (
             <tr
               key={b.id}
-              className="border-b border-border last:border-b-0 hover:bg-accent/30"
+              className="border-b border-border last:border-b-0 hover:bg-accent/50"
             >
               <td className="max-w-0 px-4 py-3">
                 <Link
@@ -684,7 +688,7 @@ function ProgressBar({
     <div className="flex items-center gap-2">
       <div className="h-1.5 w-24 overflow-hidden rounded-full bg-muted">
         <div className="flex h-full">
-          <div className="h-full bg-emerald-500" style={{ width: `${sentPct}%` }} />
+          <div className="h-full bg-success-fg" style={{ width: `${sentPct}%` }} />
           <div className="h-full bg-destructive" style={{ width: `${failedPct}%` }} />
         </div>
       </div>

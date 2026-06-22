@@ -161,7 +161,7 @@ export function DialogContent({
       // programmatically when no focusable child exists yet.
       tabIndex={-1}
       className={cn(
-        "w-full max-w-md max-h-[calc(100svh-2rem)] overflow-y-auto rounded-xl border border-border bg-popover text-popover-foreground shadow-xl outline-none",
+        "w-full max-w-md max-h-[calc(100svh-2rem)] overflow-y-auto rounded-xl border border-border bg-popover text-popover-foreground shadow-lg outline-none",
         // Fade+scale enter/exit (matches the scrim + Radix overlays).
         ctx?.closing
           ? "animate-out fade-out-0 zoom-out-95 duration-150"

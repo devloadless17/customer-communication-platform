@@ -500,7 +500,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
           transition={{ duration: 0.4 }}
         >
           <motion.div
-            className="h-full bg-emerald-500"
+            className="h-full bg-success-fg"
             animate={{ width: `${data.totalCount === 0 ? 0 : (data.sentCount / data.totalCount) * 100}%` }}
             transition={{ duration: 0.4 }}
           />
@@ -600,7 +600,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
               {visibleRecipients.map((r) => (
                 <tr
                   key={r.id}
-                  className="border-b border-border last:border-b-0 hover:bg-accent/30"
+                  className="border-b border-border last:border-b-0 transition-colors hover:bg-accent/50"
                 >
                   <td className="max-w-0 px-4 py-2.5">
                     <div className="truncate font-medium">{r.contactName}</div>

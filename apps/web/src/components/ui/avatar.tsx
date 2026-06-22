@@ -19,6 +19,7 @@ export function Avatar({
     <AvatarPrimitive.Root
       className={cn(
         "relative flex size-9 shrink-0 overflow-hidden rounded-full",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
         className,
       )}
       {...props}

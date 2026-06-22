@@ -340,13 +340,13 @@ export function EmojiPopover({
   };
 
   const renderGrid = (emojis: string[], keyPrefix: string) => (
-    <div className="grid grid-cols-8 gap-0.5">
+    <div className="grid grid-cols-8 gap-0.5 pointer-coarse:grid-cols-7">
       {emojis.map((e, idx) => (
         <button
           key={`${keyPrefix}-${idx}-${e}`}
           type="button"
           onClick={() => handlePick(e)}
-          className="flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors hover:bg-accent"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors hover:bg-accent pointer-coarse:h-9 pointer-coarse:w-9"
           aria-label={`Insert ${e}`}
         >
           <span className="leading-none">{e}</span>
@@ -364,7 +364,7 @@ export function EmojiPopover({
       animate={{ opacity: 1 }}
       transition={{ duration: 0.1, ease: "easeOut" }}
       className={cn(
-        "absolute bottom-full left-0 z-40 mb-2 w-72 rounded-xl border border-border bg-popover shadow-xl",
+        "absolute bottom-full left-0 z-50 mb-2 w-72 overflow-hidden rounded-xl border border-border bg-popover shadow-xl",
         className,
       )}
     >
@@ -390,8 +390,8 @@ export function EmojiPopover({
               title={cat.label}
               onClick={() => setActiveIdx(i)}
               className={cn(
-                "flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors",
-                i === activeIdx ? "bg-accent" : "hover:bg-accent/60",
+                "flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors pointer-coarse:h-9 pointer-coarse:w-9",
+                i === activeIdx ? "bg-accent" : "hover:bg-accent",
               )}
             >
               <span className="leading-none">{cat.icon}</span>
@@ -411,7 +411,7 @@ export function EmojiPopover({
           <>
             {recents.length > 0 && (
               <div className="mb-2">
-                <p className="px-1 pb-1 text-3xs font-medium uppercase tracking-wide text-muted-foreground">
+                <p className="px-1 pb-1 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
                   Recent
                 </p>
                 {renderGrid(recents, "recent")}

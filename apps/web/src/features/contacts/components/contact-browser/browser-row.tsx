@@ -42,7 +42,7 @@ export const BrowserRow = memo(function BrowserRow({
     <li>
       <label
         className={cn(
-          "flex cursor-pointer items-center gap-3 px-4 py-2.5 transition-colors hover:bg-accent/40",
+          "flex cursor-pointer items-center gap-3 px-4 py-2.5 transition-colors hover:bg-accent/50",
           selected && "bg-primary/5 hover:bg-primary/5",
         )}
       >
@@ -69,12 +69,25 @@ export const BrowserRow = memo(function BrowserRow({
         </div>
         <div className="hidden shrink-0 items-center gap-1 md:flex">
           {shownTags.map((t) => (
-            <TagChip key={t.id} tag={t} size="xs" />
+            <TagChip key={t.id} tag={t} size="md" />
           ))}
           {extraTags > 0 && (
-            <span className="text-3xs text-muted-foreground">+{extraTags}</span>
+            <span className="rounded-full border border-border bg-muted/30 px-1.5 py-0.5 text-3xs font-medium text-muted-foreground">
+              +{extraTags}
+            </span>
           )}
         </div>
+        {contactTags.length > 0 && (
+          // Below md the tag chips are hidden — surface a compact count so the
+          // row still signals "this contact has tags" (tap-through reveals them
+          // in the detail drawer). Tooltip lists the names for a quick peek.
+          <span
+            className="shrink-0 rounded-full border border-border bg-muted/30 px-1.5 py-0.5 text-3xs font-medium text-muted-foreground md:hidden"
+            title={contactTags.map((t) => t.name).join(", ")}
+          >
+            {contactTags.length} {contactTags.length === 1 ? "tag" : "tags"}
+          </span>
+        )}
         {stage && (
           <span
             className={cn(

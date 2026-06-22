@@ -289,7 +289,7 @@ function highlight(text: string, query: string) {
 }
 
 const rowBase =
-  "flex w-full items-start gap-3 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-accent/60";
+  "flex w-full items-start gap-3 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-accent/50";
 
 function ContactRow({
   hit,

@@ -199,14 +199,14 @@ export function MobileShellChrome({
 
   return (
     <>
-      <header className="sticky top-0 z-30 flex h-12 items-center gap-2 border-b border-border bg-background/95 px-2 backdrop-blur md:hidden">
+      <header className="sticky top-0 z-30 flex h-12 items-center gap-1.5 border-b border-border bg-background/95 px-2 backdrop-blur md:hidden">
         <button
           type="button"
           onClick={() => setOpen(true)}
           aria-label="Open navigation"
           aria-expanded={open}
           aria-controls="mobile-nav-drawer"
-          className="inline-flex size-9 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          className="inline-flex size-9 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 active:scale-[0.95]"
         >
           <Menu className="size-5" />
         </button>

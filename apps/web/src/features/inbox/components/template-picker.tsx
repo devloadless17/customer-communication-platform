@@ -189,9 +189,14 @@ function PickerPanel(props: PickerProps) {
             <ArrowLeft className="size-4" />
           </button>
         ) : (
-          <div className="inline-flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
+          <motion.div
+            initial={{ scale: 0.8, rotate: -10 }}
+            animate={{ scale: 1, rotate: 0 }}
+            transition={{ type: "spring", duration: 0.32, bounce: 0.4 }}
+            className="inline-flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary"
+          >
             <Sparkles className="size-3.5" />
-          </div>
+          </motion.div>
         )}
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold">

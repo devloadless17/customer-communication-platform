@@ -102,7 +102,7 @@ export function ActiveFilterChips({
   if (!hasAny) return null;
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
+    <div className="flex flex-wrap items-center gap-1.5 border-t border-border/40 pt-3">
       {sourceFilter !== "all" && (
         <FilterChip onRemove={() => onSourceChange("all")}>
           {SOURCE_LABEL[sourceFilter]}
@@ -116,7 +116,7 @@ export function ActiveFilterChips({
             <span
               className={cn(
                 "size-1.5 rounded-full",
-                windowFilter === "open" ? "bg-emerald-500" : "bg-destructive",
+                windowFilter === "open" ? "bg-success-fg" : "bg-destructive",
               )}
             />
           }

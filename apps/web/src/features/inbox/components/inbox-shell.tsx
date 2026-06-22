@@ -1245,7 +1245,7 @@ export function InboxShell({
             <span className="absolute inset-y-0 -left-1.5 -right-1.5 z-10" />
             {/* Thin, subtle resize indicator — transparent until hover / keyboard
                 focus, so it never reads as a big translucent green bar. */}
-            <span className="pointer-events-none absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-transparent transition-colors group-hover:bg-primary/60 group-focus-visible:bg-primary" />
+            <span className="pointer-events-none absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-transparent transition-[background-color,width] group-hover:w-1 group-hover:bg-primary/75 group-focus-visible:w-1 group-focus-visible:bg-primary" />
           </div>
           {/* Single-pane (md and below): thread visible only when a thread is
               active. Multi-pane (lg+): always visible beside the list. This is a
@@ -1392,12 +1392,12 @@ function ThreadLoadingBar({ pending }: { pending: boolean }) {
     <div
       aria-hidden
       data-thread-loading-bar=""
-      className="pointer-events-none absolute inset-x-0 top-0 z-20 h-0.5"
-      style={{ opacity: visible ? 1 : 0, transition: "opacity 160ms ease" }}
+      className="pointer-events-none absolute inset-x-0 top-0 z-20 h-0.5 transition-opacity duration-150 ease-out motion-reduce:transition-none"
+      style={{ opacity: visible ? 1 : 0 }}
     >
       <div
-        className="h-full bg-primary"
-        style={{ width: `${width}%`, transition: "width 300ms ease" }}
+        className="h-full bg-primary transition-[width] duration-300 ease-out motion-reduce:transition-none"
+        style={{ width: `${width}%` }}
       />
     </div>
   );
@@ -1606,8 +1606,8 @@ function ChatSkeleton({
             <div
               className={
                 b.side === "out"
-                  ? "h-9 animate-pulse rounded-2xl rounded-br-md bg-primary/20"
-                  : "h-9 animate-pulse rounded-2xl rounded-bl-md bg-muted/50"
+                  ? "h-9 animate-pulse rounded-2xl rounded-br-md bg-outbound-bg/60"
+                  : "h-9 animate-pulse rounded-2xl rounded-bl-md bg-inbound-bg"
               }
               style={{ width: b.width }}
             />
@@ -1625,7 +1625,7 @@ function ChatSkeleton({
 function ThreadError({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="flex flex-1 items-center justify-center px-6">
-      <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+      <div className="surface flex max-w-sm flex-col items-center gap-3 px-8 py-7 text-center">
         <div className="flex size-10 items-center justify-center rounded-full bg-destructive/10 text-destructive">
           <AlertTriangle className="size-5" />
         </div>
@@ -1636,7 +1636,7 @@ function ThreadError({ onRetry }: { onRetry: () => void }) {
             try again, or click a different chat.
           </p>
         </div>
-        <Button size="sm" onClick={onRetry}>
+        <Button onClick={onRetry} className="mt-1">
           Try again
         </Button>
       </div>
@@ -1648,11 +1648,11 @@ function EmptyInboxState() {
   return (
     <div className="flex flex-1 items-center justify-center">
       <div className="flex max-w-sm flex-col items-center gap-4 text-center">
-        <div className="flex size-12 items-center justify-center rounded-2xl border border-border bg-muted text-muted-foreground">
-          <InboxIcon className="size-5" />
+        <div className="flex size-14 items-center justify-center rounded-3xl border border-primary/20 bg-gradient-to-br from-primary/8 to-primary/5 text-primary">
+          <InboxIcon className="size-6" />
         </div>
         <div className="space-y-1">
-          <h2 className="text-base font-medium">No conversation selected</h2>
+          <h2 className="text-base font-semibold tracking-tight">No conversation selected</h2>
           <p className="text-sm text-muted-foreground">
             Pick a conversation from the list to start replying. Your team's most recent
             customer threads are sorted by activity.

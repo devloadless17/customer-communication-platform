@@ -22,8 +22,8 @@ export function ReplyTargetPill({
   const bodyLabel = reply.body || replyMediaLabel(reply.mediaKind) || "Message";
 
   return (
-    <div className="flex items-stretch gap-2 px-3 py-2">
-      <CornerUpLeft className="mt-1 size-3.5 shrink-0 text-muted-foreground" />
+    <div className="flex items-stretch gap-2.5 px-3 py-2">
+      <CornerUpLeft className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1">
         <div className="truncate text-2xs text-muted-foreground">
           Replying to <span className="font-medium text-foreground">{senderLabel}</span>
@@ -33,8 +33,9 @@ export function ReplyTargetPill({
       <button
         type="button"
         onClick={onCancel}
-        className="self-start rounded p-1 text-muted-foreground hover:text-foreground"
+        className="self-start rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:bg-destructive/10 focus-visible:text-destructive focus-visible:outline-none"
         title="Cancel reply"
+        aria-label="Cancel reply"
       >
         <X className="size-3.5" />
       </button>

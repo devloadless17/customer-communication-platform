@@ -285,7 +285,7 @@ export function ChannelComposer({
           onRemove={() => setPendingFile(null)}
         />
       )}
-      <div className="flex items-end gap-2 rounded-xl border border-border bg-muted/30 p-2 focus-within:border-primary/40 focus-within:bg-background">
+      <div className="flex items-end gap-2 rounded-xl border border-border bg-muted/30 p-2 transition-all duration-150 focus-within:border-primary/70 focus-within:bg-background focus-within:shadow-sm focus-within:ring-1 focus-within:ring-primary/20">
         <Textarea
           ref={textareaRef}
           value={body}
@@ -414,7 +414,7 @@ function PendingFileChip({
       <button
         type="button"
         onClick={onRemove}
-        className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         aria-label="Remove attachment"
         title="Remove"
       >

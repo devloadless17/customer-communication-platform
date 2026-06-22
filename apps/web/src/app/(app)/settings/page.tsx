@@ -185,7 +185,7 @@ export default async function SettingsIndex() {
 
       {groups.map((g) => (
         <section key={g.label} className="mb-8">
-          <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          <h2 className="mb-3 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
             {g.label}
           </h2>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -214,7 +214,7 @@ function SettingsCard({ href, icon: Icon, title, description }: Card) {
   return (
     <Link
       href={href}
-      className="group flex items-start gap-3 rounded-lg border border-border bg-card p-4 transition-colors hover:border-foreground/20 hover:bg-accent/30"
+      className="group flex items-start gap-3 rounded-lg border border-border bg-card p-4 transition-colors hover:border-foreground/20 hover:bg-accent/50"
     >
       <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground transition-colors group-hover:bg-primary/10 group-hover:text-primary">
         <Icon className="size-4" />

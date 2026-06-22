@@ -169,7 +169,7 @@ export function TranslatePopover({
       initial={{ opacity: 0, y: 6, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ duration: 0.12 }}
-      className="absolute bottom-full left-0 z-40 mb-2 w-56 overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
+      className="absolute bottom-full left-0 z-50 mb-2 w-56 overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
     >
       {applied ? (
         <div>
@@ -185,7 +185,7 @@ export function TranslatePopover({
             <button
               type="button"
               onClick={undoApply}
-              className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+              className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
               <Undo2 className="size-3.5" /> Undo
             </button>
@@ -208,7 +208,7 @@ export function TranslatePopover({
             <button
               type="button"
               onClick={cancelPreview}
-              className="inline-flex cursor-pointer items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent/60"
+              className="inline-flex cursor-pointer items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
               <X className="size-3.5" /> Cancel
             </button>
@@ -239,7 +239,7 @@ export function TranslatePopover({
                     onClick={() => void translate(lang.label)}
                     disabled={pending !== null}
                     className={cn(
-                      "flex w-full cursor-pointer items-center gap-2.5 px-3 py-1.5 text-left text-sm hover:bg-accent/60",
+                      "flex w-full cursor-pointer items-center gap-2.5 px-3 py-1.5 text-left text-sm transition-colors hover:bg-accent",
                       pending !== null && "cursor-wait opacity-60",
                     )}
                   >

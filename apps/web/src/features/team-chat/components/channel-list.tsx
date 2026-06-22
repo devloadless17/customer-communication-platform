@@ -208,7 +208,7 @@ const ChannelRow = memo(function ChannelRow({
       className={cn(
         "group flex h-8 items-center gap-2 rounded-md px-2 text-sm transition-colors",
         active
-          ? "bg-accent text-accent-foreground font-medium"
+          ? "border-l-2 border-primary bg-primary/15 pl-1 font-semibold text-foreground"
           : "text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
     >

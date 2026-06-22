@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 export function WabaMissingState() {
   return (
     <div className="flex flex-col items-center justify-center gap-3 px-6 py-12 text-center">
-      <div className="inline-flex size-10 items-center justify-center rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">
+      <div className="inline-flex size-10 items-center justify-center rounded-full bg-warning-bg text-warning-fg">
         <SettingsIcon className="size-5" />
       </div>
       <div className="text-sm font-medium">WhatsApp Business Account ID needed</div>

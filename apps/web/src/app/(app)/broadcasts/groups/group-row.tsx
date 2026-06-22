@@ -22,7 +22,7 @@ export function GroupRow({ group, sampleTags }: { group: AudienceGroupDto; sampl
   return (
     <tr
       onClick={() => router.push(href)}
-      className="cursor-pointer border-b border-border last:border-b-0 hover:bg-accent/40"
+      className="cursor-pointer border-b border-border last:border-b-0 transition-colors hover:bg-accent/50"
     >
       <td className="max-w-0 px-4 py-3">
         <Link

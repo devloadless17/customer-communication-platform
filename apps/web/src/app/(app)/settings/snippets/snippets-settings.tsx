@@ -156,11 +156,11 @@ export function SnippetsSettings({
         description={
           <>
             Saved replies your team can paste into a conversation by typing{" "}
-            <code className="rounded bg-muted px-1 text-xs">/name</code> in
+            <code className="rounded-sm bg-muted px-1 text-xs">/name</code> in
             the reply box. Use{" "}
-            <code className="rounded bg-muted px-1 text-xs">$var.contact.name</code>{" "}
+            <code className="rounded-sm bg-muted px-1 text-xs">$var.contact.name</code>{" "}
             for per-recipient values, or{" "}
-            <code className="rounded bg-muted px-1 text-xs">$var.agent.name</code>{" "}
+            <code className="rounded-sm bg-muted px-1 text-xs">$var.agent.name</code>{" "}
             for sign-offs that use whoever inserted the snippet.
           </>
         }
@@ -208,7 +208,7 @@ export function SnippetsSettings({
                     onClick={() => setEditingId(s.id)}
                     className={cn(
                       "group flex w-full items-start gap-2 px-3 py-2 text-left transition-colors",
-                      "hover:bg-accent/40",
+                      "hover:bg-accent/50",
                       editingId === s.id && "bg-primary/5",
                     )}
                   >
@@ -245,7 +245,7 @@ export function SnippetsSettings({
               <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
                 Pick a snippet to edit, or create a new one. Snippets show up
                 in the reply box when an agent types{" "}
-                <code className="rounded bg-muted px-1 text-2xs">/</code>.
+                <code className="rounded-sm bg-muted px-1 text-2xs">/</code>.
               </p>
               <Button type="button" size="sm" onClick={() => setEditingId("new")}>
                 <Plus className="size-3.5" />
@@ -394,7 +394,7 @@ function SnippetEditor({
               onChange={(e) => setName(e.target.value.toLowerCase())}
               placeholder="welcome_new_user"
               maxLength={64}
-              className="font-mono text-sm"
+              className="font-mono text-sm aria-invalid:border-destructive aria-invalid:ring-1 aria-invalid:ring-destructive/30"
             />
           </div>
         )}
@@ -450,7 +450,7 @@ function SnippetEditor({
       </Field>
 
       <div>
-        <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
+        <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
           Sample preview
         </div>
         <div className="whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-sm leading-relaxed">

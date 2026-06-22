@@ -33,18 +33,18 @@ function ConversationViewersPill({ viewers }: { viewers: User[] }) {
       : `${viewers.map((v) => v.name).join(", ")} are also viewing this chat`;
   return (
     <div
-      className="ml-2 flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-warning-border bg-warning-bg px-2 py-0.5 text-2xs text-warning-fg"
+      className="ml-2 flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-warning-border bg-warning-bg px-2.5 py-1 text-2xs text-warning-fg"
       title={title}
       aria-label={title}
     >
-      <div className="flex shrink-0 -space-x-1.5">
+      <div className="flex shrink-0 -space-x-2">
         {shown.map((u) => (
           <Avatar
             key={u.id}
             className="size-4 ring-1 ring-warning-bg"
           >
             <AvatarFallback
-              className="text-[8px] text-white"
+              className="text-4xs text-white"
               style={{ backgroundImage: avatarGradient(u.id) }}
             >
               {initials(u.name)}
@@ -166,10 +166,12 @@ export function ThreadHeader({
       </div>
 
       {/* Stage pill — contact metadata, lower priority than the customer's
-          name/phone. Container-query gated (@2xl ≈ 672px of HEADER width, not
+          name/phone. Container-query gated (@[740px] of HEADER width, not
           viewport) so when the thread column is narrow it hides instead of
-          squeezing the name into "Ali …". Reappears once there's room. */}
-      <div className="ml-3 hidden shrink-0 @2xl:flex">
+          squeezing the name into "Ali …". Reappears once there's room. The
+          740px threshold sits wide enough that the pill never competes with the
+          assignment/status triggers for space on a mid-width thread. */}
+      <div className="ml-2 hidden shrink-0 @[740px]:flex">
         {/* Just the clickable stage pill (opens the picker to jump to any
             stage). The prev/next stepper arrows were removed per design —
             the pill's dropdown covers the same moves. */}

@@ -8,9 +8,9 @@ export function Section({
   right?: React.ReactNode;
 }) {
   return (
-    <div className="px-5 py-4">
-      <div className="mb-2 flex items-center justify-between">
-        <div className="text-3xs font-semibold uppercase tracking-wider text-muted-foreground">
+    <div className="px-5 py-3">
+      <div className="mb-2.5 flex items-center justify-between">
+        <div className="text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
           {title}
         </div>
         {right}

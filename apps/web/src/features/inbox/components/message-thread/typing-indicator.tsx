@@ -49,9 +49,11 @@ export function TypingIndicator({
             transition={{ duration: 0.14 }}
             className="bg-background"
           >
-            <div className="mx-auto flex w-full max-w-6xl items-center gap-2 px-6 py-1.5 text-2xs text-muted-foreground">
-              <TypingDots />
-              <span>{sentence}</span>
+            <div className="mx-auto flex w-full max-w-6xl items-center px-6 py-1.5 text-2xs">
+              <span className="inline-flex items-center gap-2 rounded-full bg-muted/30 px-3 py-1 text-foreground/70">
+                <TypingDots />
+                <span>{sentence}</span>
+              </span>
             </div>
           </motion.div>
         )}
@@ -66,7 +68,7 @@ function TypingDots() {
       {[0, 1, 2].map((i) => (
         <motion.span
           key={i}
-          className="size-1 rounded-full bg-muted-foreground"
+          className="size-1.5 rounded-full bg-muted-foreground"
           animate={{ opacity: [0.3, 1, 0.3], y: [0, -1, 0] }}
           transition={{
             duration: 0.9,

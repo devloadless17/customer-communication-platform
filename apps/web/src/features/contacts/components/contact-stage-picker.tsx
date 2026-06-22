@@ -148,7 +148,7 @@ export function ContactStagePicker({
                     onClick={() => void pick(s.id)}
                     disabled={isCurrent || saving}
                     className={cn(
-                      "flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent/60",
+                      "flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-accent",
                       isCurrent && "bg-accent/40",
                       saving && "cursor-wait opacity-60",
                     )}
@@ -172,7 +172,7 @@ export function ContactStagePicker({
           {canManage && (
             <Link
               href="/settings/stages"
-              className="flex items-center gap-2 border-t border-border bg-muted/30 px-3 py-2 text-2xs text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+              className="flex items-center gap-2 border-t border-border bg-muted/30 px-3 py-2 text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
               <Settings2 className="size-3" />
               Manage stages…

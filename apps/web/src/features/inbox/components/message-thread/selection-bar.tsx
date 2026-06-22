@@ -18,7 +18,7 @@ export function SelectionBar({
   onCancel: () => void;
 }) {
   return (
-    <div className="border-t border-border bg-background">
+    <div className="border-t-2 border-primary/30 bg-accent/20">
       <div className="mx-auto flex w-full max-w-3xl items-center gap-3 px-4 py-3">
         <span className="text-sm text-muted-foreground">
           <span className="font-medium text-foreground tabular-nums">{count}</span>{" "}

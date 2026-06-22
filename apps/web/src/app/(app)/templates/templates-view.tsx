@@ -283,14 +283,27 @@ export function TemplatesView({
         </div>
       )}
 
-      {templates.length === 0 ? (
+      {templates.length === 0 && syncing ? (
+        // Pulling from Meta with nothing seeded yet — reserve the grid's shape
+        // with placeholder cards so the layout doesn't jump when results land.
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <TemplateCardSkeleton key={i} />
+          ))}
+        </div>
+      ) : templates.length === 0 ? (
         <EmptyState canCreate={connected && hasWabaId && canManage} />
       ) : filtered.length === 0 ? (
         <div className="rounded-xl border border-dashed border-border bg-card px-6 py-12 text-center text-sm text-muted-foreground">
           No templates match the current filters.
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+        <div
+          className={cn(
+            "grid grid-cols-1 gap-3 transition-opacity md:grid-cols-2 lg:grid-cols-3",
+            syncing && "opacity-60",
+          )}
+        >
           {filtered.map((t) => (
             <TemplateCard
               key={t.id}
@@ -347,9 +360,10 @@ function TemplateCard({
       type="button"
       onClick={onClick}
       className={cn(
-        "group flex h-full flex-col gap-3 rounded-xl border bg-card p-4 text-left transition-all",
-        "hover:border-primary/30 hover:shadow-xs",
-        selected ? "border-primary ring-2 ring-primary/20" : "border-border",
+        "group flex h-full flex-col gap-3 rounded-xl border p-4 text-left transition-all",
+        selected
+          ? "border-primary bg-primary/5 shadow-xs"
+          : "border-border bg-card hover:border-primary/30 hover:shadow-xs",
       )}
     >
       <div className="flex items-start justify-between gap-2">
@@ -391,6 +405,29 @@ function TemplateCard({
         )}
       </div>
     </button>
+  );
+}
+
+function TemplateCardSkeleton() {
+  return (
+    <div className="flex h-full animate-pulse flex-col gap-3 rounded-xl border border-border bg-card p-4">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="size-7 shrink-0 rounded-md bg-muted" />
+          <div className="flex flex-col gap-1.5">
+            <span className="h-3 w-28 rounded bg-muted" />
+            <span className="h-2 w-16 rounded bg-muted/70" />
+          </div>
+        </div>
+        <span className="h-4 w-14 rounded-full bg-muted/70" />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <span className="h-2.5 w-full rounded bg-muted/70" />
+        <span className="h-2.5 w-5/6 rounded bg-muted/70" />
+        <span className="h-2.5 w-2/3 rounded bg-muted/70" />
+      </div>
+      <span className="mt-auto h-4 w-20 rounded-full bg-muted/60" />
+    </div>
   );
 }
 

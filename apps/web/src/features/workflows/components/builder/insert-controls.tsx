@@ -170,7 +170,7 @@ export function InsertEdge(props: EdgeProps) {
             type="button"
             onClick={onInsertClick}
             aria-label="Insert step"
-            className="pointer-events-auto inline-flex size-6 cursor-pointer items-center justify-center rounded-full border border-primary/40 bg-background text-primary shadow-sm transition-all hover:scale-110 hover:bg-primary hover:text-primary-foreground"
+            className="pointer-events-auto inline-flex size-6 cursor-pointer items-center justify-center rounded-full border border-primary/60 bg-background text-primary shadow-sm transition-all duration-150 hover:scale-110 hover:bg-primary hover:text-primary-foreground hover:shadow-md"
           >
             <Plus className="size-3.5" />
           </button>
@@ -180,7 +180,7 @@ export function InsertEdge(props: EdgeProps) {
               onClick={onDeleteClick}
               aria-label="Delete connection"
               title="Delete connection"
-              className="pointer-events-auto inline-flex size-6 cursor-pointer items-center justify-center rounded-full border border-destructive/40 bg-background text-destructive shadow-sm transition-all hover:scale-110 hover:bg-destructive hover:text-destructive-foreground"
+              className="pointer-events-auto inline-flex size-6 cursor-pointer items-center justify-center rounded-full border border-destructive/40 bg-background text-destructive shadow-sm transition-all duration-150 hover:scale-110 hover:bg-destructive hover:text-destructive-foreground hover:shadow-md"
             >
               <X className="size-3.5" />
             </button>
@@ -224,7 +224,7 @@ export function TrailingPlus({
           });
         }}
         aria-label="Add step below"
-        className="inline-flex size-6 cursor-pointer items-center justify-center rounded-full border border-primary/40 bg-background text-primary shadow-sm transition-all hover:scale-110 hover:bg-primary hover:text-primary-foreground"
+        className="inline-flex size-6 cursor-pointer items-center justify-center rounded-full border border-primary/60 bg-background text-primary shadow-sm transition-all duration-150 hover:scale-110 hover:bg-primary hover:text-primary-foreground hover:shadow-md"
       >
         <Plus className="size-3.5" />
       </button>
@@ -330,7 +330,7 @@ function BranchPlusButton({
       onClick={onClick}
       aria-label={label}
       title={label}
-      className={`inline-flex size-6 cursor-pointer items-center justify-center rounded-full border bg-background shadow-sm transition-all hover:scale-110 ${ring}`}
+      className={`inline-flex size-6 cursor-pointer items-center justify-center rounded-full border bg-background shadow-sm transition-all duration-150 hover:scale-110 hover:shadow-md ${ring}`}
     >
       <Plus className="size-3.5" />
     </button>
@@ -465,7 +465,7 @@ export function NodeActions({
   if (!visible) return null;
   return (
     <NodeToolbar isVisible position={Position.Right} offset={8} align="start">
-      <div className="flex items-center gap-1 rounded-md border border-border bg-background/95 px-1 py-1 shadow-sm backdrop-blur">
+      <div className="flex items-center gap-0.5 rounded-md border border-border bg-background/95 px-0.5 py-0.5 shadow-md backdrop-blur">
         <button
           type="button"
           onClick={(e) => {
@@ -474,7 +474,7 @@ export function NodeActions({
           }}
           aria-label="Duplicate step"
           title="Duplicate"
-          className="inline-flex size-7 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
+          className="inline-flex size-6 cursor-pointer items-center justify-center rounded-sm text-muted-foreground transition-[transform,background-color,color] hover:scale-125 hover:bg-accent hover:text-foreground pointer-coarse:size-9"
         >
           <Copy className="size-3.5" />
         </button>
@@ -486,7 +486,7 @@ export function NodeActions({
           }}
           aria-label="Delete step"
           title="Delete"
-          className="inline-flex size-7 cursor-pointer items-center justify-center rounded text-destructive transition-colors hover:bg-destructive/10 pointer-coarse:size-9"
+          className="inline-flex size-6 cursor-pointer items-center justify-center rounded-sm text-destructive transition-[transform,background-color,color] hover:scale-125 hover:bg-destructive/10 pointer-coarse:size-9"
         >
           <Trash2 className="size-3.5" />
         </button>

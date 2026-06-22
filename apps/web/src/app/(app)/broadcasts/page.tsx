@@ -88,12 +88,12 @@ export default async function BroadcastsPage() {
 
 function EmptyState({ canManage }: { canManage: boolean }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border bg-card px-6 py-16 text-center">
-      <div className="inline-flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary">
-        <Megaphone className="size-5" />
+    <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-dashed border-border bg-card px-6 py-20 text-center">
+      <div className="inline-flex size-14 items-center justify-center rounded-full bg-primary/10 text-primary">
+        <Megaphone className="size-6" />
       </div>
-      <div className="text-sm font-medium">No broadcasts yet</div>
-      <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
+      <div className="text-base font-semibold text-foreground">No broadcasts yet</div>
+      <p className="max-w-md text-sm leading-relaxed text-muted-foreground">
         Reach out to many contacts at once with an approved WhatsApp template.
         Each broadcast tracks per-recipient delivery so you can spot failures.
       </p>

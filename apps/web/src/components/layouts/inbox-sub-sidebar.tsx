@@ -196,7 +196,7 @@ export function InboxSubSidebar({
 
   return (
     <SubSidebar title="Inbox">
-      <SubSidebarSection>
+      <SubSidebarSection label="Filters">
         {PRESETS.map(({ id, label, icon: Icon }) => {
           const active = filter.kind === "preset" && filter.id === id;
           const unread = unreadCounts[id];
@@ -271,7 +271,7 @@ export function InboxSubSidebar({
           <span className="flex-1 text-left">Calls</span>
           {liveCalls > 0 && (
             <span
-              className="flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-emerald-500 px-1 text-3xs font-bold tabular-nums text-white"
+              className="flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-success-fg px-1 text-3xs font-bold tabular-nums text-white"
               title={`${liveCalls} call${liveCalls === 1 ? "" : "s"} in progress`}
             >
               {liveCalls > 99 ? "99+" : liveCalls}
@@ -332,7 +332,7 @@ export function InboxSubSidebar({
                     <span className="flex-1 truncate text-left">{stage.name}</span>
                     {stage.isDefault && (
                       <span
-                        className="text-[9px] uppercase tracking-wider text-muted-foreground/70"
+                        className="text-4xs uppercase tracking-wider text-muted-foreground/70"
                         aria-label="Default stage"
                       >
                         def
@@ -418,7 +418,7 @@ export function InboxSubSidebar({
                   >
                     <div className="relative shrink-0">
                       <Avatar className="size-5">
-                        <AvatarFallback seed={u.id} className="text-[9px]">
+                        <AvatarFallback seed={u.id} className="text-3xs">
                           {initials(u.name)}
                         </AvatarFallback>
                       </Avatar>

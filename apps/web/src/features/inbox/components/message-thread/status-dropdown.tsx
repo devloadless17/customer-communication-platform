@@ -30,8 +30,8 @@ import { readError } from "./utils";
  * status-meta) because the menu items use the coloured icon, not a dot.
  */
 const STATUS_DOT_CLS: Record<ConversationStatus, string> = {
-  open: "bg-emerald-500",
-  pending: "bg-amber-500",
+  open: "bg-success-fg",
+  pending: "bg-warning-fg",
   closed: "bg-muted-foreground/50",
 };
 

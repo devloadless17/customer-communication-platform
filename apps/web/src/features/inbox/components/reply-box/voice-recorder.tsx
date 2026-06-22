@@ -407,17 +407,17 @@ export function RecordingBar({
         <Trash2 className="size-4" />
       </Button>
 
-      <div className="flex flex-1 items-center gap-2 rounded-full bg-muted/60 px-3 py-1.5">
+      <div className="flex flex-1 items-center gap-2 rounded-full bg-muted/80 px-3 py-1.5">
         <span className="relative flex size-2 shrink-0">
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-destructive opacity-75" />
           <span className="relative inline-flex size-2 rounded-full bg-destructive" />
         </span>
-        <span className="w-12 shrink-0 font-mono text-xs tabular-nums text-foreground">
+        <span className="w-12 shrink-0 font-mono text-xs font-semibold tabular-nums text-foreground">
           {formatDuration(durationSec)}
         </span>
         {showCountdown && (
           <span
-            className="shrink-0 font-mono text-xs tabular-nums text-destructive"
+            className="shrink-0 font-mono text-xs font-semibold tabular-nums text-warning-fg"
             aria-live="polite"
             title="Time remaining before the recording auto-stops"
           >
@@ -429,7 +429,7 @@ export function RecordingBar({
             <span
               key={i}
               className={cn(
-                "w-[3px] rounded-full bg-foreground/70",
+                "w-[4px] rounded-full bg-foreground/70",
                 "transition-[height] duration-75",
               )}
               style={{ height: `${Math.max(8, v * 100)}%` }}
@@ -473,7 +473,7 @@ export function MicButton({
     <Button
       variant="ghost"
       size="icon"
-      className="size-8 pointer-coarse:size-9 text-muted-foreground"
+      className="size-8 pointer-coarse:size-9 text-muted-foreground disabled:text-muted-foreground/40"
       type="button"
       disabled={disabled}
       aria-label={ariaLabel ?? title}

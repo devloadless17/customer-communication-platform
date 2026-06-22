@@ -260,7 +260,7 @@ const TimelineRows = memo(function TimelineRows({
               // detach and OVERLAP messages/activity rows (the dividers piled
               // up). A plain in-flow opaque pill flows cleanly between days.
               <div className="my-3 flex justify-center">
-                <span className="rounded-full bg-card px-2.5 py-0.5 text-2xs font-medium uppercase tracking-wider text-muted-foreground">
+                <span className="rounded-full border border-border/40 bg-card px-3 py-0.5 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
                   {dayLabel}
                 </span>
               </div>
@@ -282,7 +282,7 @@ const TimelineRows = memo(function TimelineRows({
               }
               data-continuation={isContinuation ? "" : undefined}
               className={cn(
-                "rounded-2xl transition-shadow",
+                "rounded-xl transition-shadow",
                 // Within a same-sender group, collapse the inter-bubble gap from
                 // the content list's gap-2 (8px) down via a negative top margin.
                 // Outbound (solid, high-contrast) → 2px. Inbound (grey+bordered,

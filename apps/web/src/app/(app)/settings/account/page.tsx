@@ -16,7 +16,7 @@ export default async function AccountPage() {
         description="Update your name, avatar, and password. Email and role are managed by your admin."
       />
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl border border-border bg-muted/20 p-5">
         <div className="mb-4">
           <div className="text-sm font-medium">Profile</div>
           <div className="text-2xs text-muted-foreground">
@@ -34,7 +34,7 @@ export default async function AccountPage() {
         />
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl border border-border bg-muted/20 p-5">
         <div className="mb-4">
           <div className="text-sm font-medium">Change password</div>
           <div className="text-2xs text-muted-foreground">
@@ -44,7 +44,7 @@ export default async function AccountPage() {
         <ChangePasswordForm />
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl border border-border bg-muted/20 p-5">
         <div className="mb-4">
           <div className="text-sm font-medium">Email + role</div>
           <div className="text-2xs text-muted-foreground">

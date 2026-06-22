@@ -569,7 +569,7 @@ export function ContactDetailDrawer({
               </div>
             </div>
           )}
-          <div className="flex items-center gap-2 px-4 py-3">
+          <div className="flex flex-wrap items-center gap-2 px-4 py-3">
           {activeConversationId ? (
             <Button asChild size="sm" className="flex-1 gap-1.5">
               <Link href={`/inbox/${activeConversationId}`}>

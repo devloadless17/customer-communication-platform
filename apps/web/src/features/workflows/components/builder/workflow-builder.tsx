@@ -54,7 +54,7 @@ const WorkflowCanvas = dynamic<WorkflowCanvasProps>(
   {
     ssr: false,
     loading: () => (
-      <div className="flex h-full w-full items-center justify-center bg-muted/20 text-xs text-muted-foreground">
+      <div className="flex h-full w-full items-center justify-center bg-gradient-to-b from-background to-muted/10 text-xs text-muted-foreground">
         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
         Loading canvas...
       </div>

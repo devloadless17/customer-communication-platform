@@ -265,7 +265,7 @@ function ChannelMessageImpl({
       data-message-id={message.id}
       className={cn(
         "group relative flex gap-3 px-4 py-1.5 transition-colors hover:bg-muted/40",
-        message.pinned && !isThreadReply && "bg-amber-50/40 dark:bg-amber-500/10",
+        message.pinned && !isThreadReply && "bg-warning-bg/30",
         message.failed && "bg-destructive/10",
       )}
     >
@@ -277,20 +277,20 @@ function ChannelMessageImpl({
       </Avatar>
 
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-baseline gap-2">
+        <div className="flex min-w-0 items-baseline gap-1">
           <span className="min-w-0 truncate text-sm font-semibold">{authorName}</span>
           <LocalTime
             iso={message.createdAt}
             format="messageTime"
-            className="shrink-0 text-2xs text-muted-foreground"
+            className="shrink-0 text-2xs text-muted-foreground/70"
           />
           {message.editedAt && (
-            <span className="shrink-0 text-2xs text-muted-foreground">(edited)</span>
+            <span className="shrink-0 text-2xs text-muted-foreground/70">(edited)</span>
           )}
           {message.pinned && !isThreadReply && (
             <Tooltip>
               <TooltipTrigger asChild>
-                <Pin className="size-3 text-amber-600" />
+                <Pin className="size-3 text-warning-fg" />
               </TooltipTrigger>
               <TooltipContent>Pinned to this channel</TooltipContent>
             </Tooltip>
@@ -343,7 +343,7 @@ function ChannelMessageImpl({
         )}
 
         {message.reactions.length > 0 && (
-          <div className="mt-1.5 flex flex-wrap gap-1">
+          <div className="mt-1.5 flex flex-wrap gap-0.5">
             {message.reactions.map((r) => {
               const mine = r.userIds.includes(currentUser.id);
               return (
@@ -354,8 +354,8 @@ function ChannelMessageImpl({
                   className={cn(
                     "flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors",
                     mine
-                      ? "border-primary/40 bg-primary/10 text-primary"
-                      : "border-border bg-muted/50 hover:bg-muted",
+                      ? "border-primary/70 bg-primary/20 text-primary"
+                      : "border-border bg-muted/70 hover:border-primary/40 hover:bg-accent",
                   )}
                   title={`${r.userIds.length} ${r.userIds.length === 1 ? "reaction" : "reactions"}`}
                 >
@@ -429,6 +429,7 @@ function ChannelMessageImpl({
               <button
                 type="button"
                 onClick={() => setShowReactions((s) => !s)}
+                aria-label="Add reaction"
                 className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
               >
                 <SmilePlus className="size-3.5" />
@@ -442,6 +443,7 @@ function ChannelMessageImpl({
                 <button
                   type="button"
                   onClick={() => onOpenThread(message.id)}
+                  aria-label="Reply in thread"
                   className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
                 >
                   <MessageSquareText className="size-3.5" />
@@ -454,6 +456,7 @@ function ChannelMessageImpl({
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
+                aria-label="More actions"
                 className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
               >
                 <MoreHorizontal className="size-3.5" />

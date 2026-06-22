@@ -433,17 +433,17 @@ function CanvasInner({
         type: "insert",
         label: labelText,
         labelStyle: {
-          fontSize: 11,
-          fontWeight: 600,
+          fontSize: 12,
+          fontWeight: 700,
           ...(labelColor ? { fill: labelColor } : {}),
         },
-        // Soft pill background behind the label so it stays readable
-        // against the edge stroke at every zoom level.
+        // Opaque pill background behind the label so it stays crisp and
+        // high-contrast against the edge stroke at every zoom level.
         labelBgStyle: labelColor
-          ? { fill: "var(--background)", fillOpacity: 0.9 }
+          ? { fill: "var(--card)", fillOpacity: 1 }
           : undefined,
         labelBgPadding: [4, 2] as [number, number],
-        labelBgBorderRadius: 4,
+        labelBgBorderRadius: 3,
         data: { onInsert: openPicker },
       };
     });
@@ -717,7 +717,7 @@ function CanvasInner({
         maxZoom={1.5}
         proOptions={{ hideAttribution: true }}
       >
-        <Background gap={20} size={1} />
+        <Background gap={20} size={1} color="var(--border)" />
         {/* First-run hint — only while the canvas is effectively empty (no
             steps added yet, so just the synthetic trigger). Non-interactive
             (`pointer-events-none`) so it never blocks panning, the trigger

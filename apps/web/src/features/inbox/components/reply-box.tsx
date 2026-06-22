@@ -1253,7 +1253,7 @@ export function ReplyBox({
             the toggle + window badge + Send template can't share one line, they
             wrap onto the next line instead of overlapping. The resizers also
             clamp the thread to MIN_THREAD_WIDTH so this is just a safety net. */}
-        <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-2">
+        <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1.5">
           <div className="inline-flex shrink-0 rounded-md border border-border bg-muted/40 p-0.5">
             <ToggleButton active={mode === "reply"} onClick={() => switchMode("reply")} icon={MessageSquare} label="Reply" />
             <ToggleButton active={mode === "note"} onClick={() => switchMode("note")} icon={StickyNote} label="Note" />
@@ -1315,6 +1315,7 @@ export function ReplyBox({
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: "auto" }}
                 exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.2, ease: "easeOut" }}
                 className="overflow-hidden border-b border-border"
               >
                 <AttachmentPreview
@@ -1394,7 +1395,7 @@ export function ReplyBox({
               // min-h floor up to max-h-48, then scrolls internally — so a
               // multi-line reply is fully visible instead of trapped in a
               // fixed 88px window.
-              "max-h-48 min-h-22 resize-none overflow-y-auto border-0 bg-transparent px-3.5 py-3 text-sm shadow-none field-sizing-content focus-visible:ring-0",
+              "max-h-48 min-h-22 resize-none overflow-y-auto border-0 bg-transparent px-3.5 py-3 text-sm shadow-none transition-[box-shadow] field-sizing-content focus-visible:ring-1 focus-visible:ring-ring/40",
               !isNote && windowClosed && "cursor-not-allowed opacity-60",
             )}
             onKeyDown={(e) => {
@@ -1505,7 +1506,7 @@ export function ReplyBox({
             <Button
               variant="ghost"
               size="icon"
-              className="size-8 pointer-coarse:size-9 text-muted-foreground"
+              className="size-8 pointer-coarse:size-9 text-muted-foreground disabled:text-muted-foreground/40"
               type="button"
               disabled={isNote || windowClosed}
               aria-label="Attach file"
@@ -1523,7 +1524,7 @@ export function ReplyBox({
             <Button
               variant="ghost"
               size="icon"
-              className="size-8 pointer-coarse:size-9 text-muted-foreground"
+              className="size-8 pointer-coarse:size-9 text-muted-foreground disabled:text-muted-foreground/40"
               type="button"
               disabled={isNote}
               aria-label="Send a template"
@@ -1540,7 +1541,7 @@ export function ReplyBox({
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-8 pointer-coarse:size-9 text-muted-foreground"
+                className="size-8 pointer-coarse:size-9 text-muted-foreground disabled:text-muted-foreground/40"
                 type="button"
                 disabled={isNote || windowClosed}
                 aria-label="Send buttons"
@@ -1681,7 +1682,7 @@ export function ReplyBox({
                 aria-label={isNote ? "Save note" : attachment ? "Send media" : "Send"}
                 title={isNote ? "Save note" : attachment ? "Send media" : "Send"}
                 className={cn(
-                  "h-8 gap-1.5 @max-[26rem]:w-8 @max-[26rem]:gap-0 @max-[26rem]:rounded-full @max-[26rem]:px-0",
+                  "h-8 gap-1.5 shadow-xs hover:shadow-sm @max-[26rem]:w-8 @max-[26rem]:gap-0 @max-[26rem]:rounded-full @max-[26rem]:px-0",
                   // Note mode: a warm caramel that complements the beige note
                   // palette (not the dark `note-fg`, which is the note TEXT
                   // color and reads as muddy on a button).

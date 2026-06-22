@@ -503,11 +503,16 @@ export function ContactFilterBar({
     setOpenMenu(null);
   }
 
+  const hasGroupedFilters =
+    (onStageFilterChange && stages.length > 0) || (onTagsChange && tags.length > 0);
+
   return (
-    <div className="flex flex-col gap-2">
-      {/* One calm toolbar: prominent search + a few smart filter buttons.
-          Each button opens a portal popover (works inside the picker modal),
-          and active filters surface below as removable chips. */}
+    <div className="flex flex-col gap-3">
+      {/* One calm toolbar: prominent search + a few smart filter buttons
+          grouped into a soft rail so they read as a related cluster, distinct
+          from the search field. Each button opens a portal popover (works
+          inside the picker modal), and active filters surface below as
+          removable chips. */}
       <div className="flex items-center gap-2">
         <div className="relative min-w-0 flex-1">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -531,73 +536,81 @@ export function ContactFilterBar({
           )}
         </div>
 
-        {onStageFilterChange && stages.length > 0 && (
-          <Popover
-            open={openMenu === "stage"}
-            onOpenChange={(o) => setOpenMenu(o ? "stage" : null)}
-            content={
-              <StageFilterMenu
-                stages={stages}
-                value={stageFilter}
-                onChange={(v) => {
-                  onStageFilterChange(v);
-                  setOpenMenu(null);
-                }}
-              />
-            }
-          >
-            <FilterButton
-              label="Stage"
-              active={stageActive}
-              open={openMenu === "stage"}
-              onClick={() => setOpenMenu((m) => (m === "stage" ? null : "stage"))}
-            />
-          </Popover>
-        )}
-
-        {onTagsChange && tags.length > 0 && (
-          <Popover
-            open={openMenu === "tags"}
-            onOpenChange={(o) => setOpenMenu(o ? "tags" : null)}
-            content={
-              <TagFilterList
-                tags={tags}
-                selectedTagIds={selectedTagIds}
-                onChange={onTagsChange}
-              />
-            }
-          >
-            <FilterButton
-              label="Tags"
-              count={selectedTagIds.length}
-              open={openMenu === "tags"}
-              onClick={() => setOpenMenu((m) => (m === "tags" ? null : "tags"))}
-            />
-          </Popover>
-        )}
-
-        <Popover
-          open={openMenu === "more"}
-          onOpenChange={(o) => setOpenMenu(o ? "more" : null)}
-          content={
-            <MoreFilterMenu
-              sourceFilter={sourceFilter}
-              onSourceChange={onSourceChange}
-              windowFilter={windowFilter}
-              onWindowChange={onWindowChange}
-              fieldFilter={fieldFilter}
-              onFieldChange={onFieldChange}
-              fieldDefinitions={fieldDefinitions}
-            />
-          }
+        <div
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1.5",
+            hasGroupedFilters &&
+              "rounded-md border border-border/40 bg-muted/20 p-1",
+          )}
         >
-          <FilterButton
-            label="More"
-            active={moreActive}
+          {onStageFilterChange && stages.length > 0 && (
+            <Popover
+              open={openMenu === "stage"}
+              onOpenChange={(o) => setOpenMenu(o ? "stage" : null)}
+              content={
+                <StageFilterMenu
+                  stages={stages}
+                  value={stageFilter}
+                  onChange={(v) => {
+                    onStageFilterChange(v);
+                    setOpenMenu(null);
+                  }}
+                />
+              }
+            >
+              <FilterButton
+                label="Stage"
+                active={stageActive}
+                open={openMenu === "stage"}
+                onClick={() => setOpenMenu((m) => (m === "stage" ? null : "stage"))}
+              />
+            </Popover>
+          )}
+
+          {onTagsChange && tags.length > 0 && (
+            <Popover
+              open={openMenu === "tags"}
+              onOpenChange={(o) => setOpenMenu(o ? "tags" : null)}
+              content={
+                <TagFilterList
+                  tags={tags}
+                  selectedTagIds={selectedTagIds}
+                  onChange={onTagsChange}
+                />
+              }
+            >
+              <FilterButton
+                label="Tags"
+                count={selectedTagIds.length}
+                open={openMenu === "tags"}
+                onClick={() => setOpenMenu((m) => (m === "tags" ? null : "tags"))}
+              />
+            </Popover>
+          )}
+
+          <Popover
             open={openMenu === "more"}
-            onClick={() => setOpenMenu((m) => (m === "more" ? null : "more"))}
-          />
-        </Popover>
+            onOpenChange={(o) => setOpenMenu(o ? "more" : null)}
+            content={
+              <MoreFilterMenu
+                sourceFilter={sourceFilter}
+                onSourceChange={onSourceChange}
+                windowFilter={windowFilter}
+                onWindowChange={onWindowChange}
+                fieldFilter={fieldFilter}
+                onFieldChange={onFieldChange}
+                fieldDefinitions={fieldDefinitions}
+              />
+            }
+          >
+            <FilterButton
+              label="More"
+              active={moreActive}
+              open={openMenu === "more"}
+              onClick={() => setOpenMenu((m) => (m === "more" ? null : "more"))}
+            />
+          </Popover>
+        </div>
       </div>
 
       <ActiveFilterChips

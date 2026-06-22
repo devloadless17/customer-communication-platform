@@ -133,7 +133,7 @@ export function EditableField({
             }
           }}
           disabled={busy}
-          className={`h-6 min-w-0 flex-1 text-xs ${mono ? "font-mono" : ""}`}
+          className={`h-auto min-w-0 flex-1 py-1.5 text-xs ${mono ? "font-mono" : ""}`}
         />
       )}
       {actionHref && value && !editing && (
@@ -142,7 +142,7 @@ export function EditableField({
           aria-label={actionLabel ?? "Open"}
           // Match the delete button's hover-reveal affordance so the action
           // doesn't add visual weight to the row at rest.
-          className="ml-0.5 rounded p-0.5 text-muted-foreground opacity-0 transition hover:bg-accent hover:text-foreground group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+          className="ml-0.5 rounded-md p-0.5 text-muted-foreground opacity-40 transition-[opacity,background-color,color] hover:bg-accent hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
         >
           <ActionIcon className="size-3" />
         </a>
@@ -160,7 +160,7 @@ export function EditableField({
             if (ok) await onDelete?.();
           }}
           aria-label={`Remove ${label}`}
-          className="ml-0.5 rounded p-0.5 text-muted-foreground opacity-0 transition hover:bg-accent hover:text-destructive group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+          className="ml-0.5 rounded-md p-0.5 text-muted-foreground opacity-40 transition-[opacity,background-color,color] hover:bg-accent hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
         >
           <Trash2 className="size-3" />
         </button>

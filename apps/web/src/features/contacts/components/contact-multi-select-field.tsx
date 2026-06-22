@@ -108,7 +108,7 @@ export function ContactMultiSelectField({
                 className="inline-flex min-w-0 items-center gap-1.5 rounded-full bg-primary/10 py-0.5 pl-0.5 pr-1.5 text-xs"
               >
                 <Avatar className="size-5 shrink-0">
-                  <AvatarFallback className="text-[9px]">{initials(label)}</AvatarFallback>
+                  <AvatarFallback className="text-3xs">{initials(label)}</AvatarFallback>
                 </Avatar>
                 <span className="max-w-50 truncate font-medium">{label}</span>
                 <button

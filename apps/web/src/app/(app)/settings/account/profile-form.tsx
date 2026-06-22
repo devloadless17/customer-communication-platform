@@ -203,6 +203,12 @@ export function ProfileForm({ user }: ProfileFormProps) {
             {savingName ? <Loader2 className="size-4 animate-spin" /> : null}
             Save
           </Button>
+          {nameChanged && !savingName && (
+            <span className="inline-flex items-center gap-1.5 text-2xs text-muted-foreground">
+              <span className="size-1.5 rounded-full bg-warning-fg" aria-hidden />
+              Unsaved
+            </span>
+          )}
         </div>
       </div>
     </div>

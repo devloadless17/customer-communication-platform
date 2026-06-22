@@ -81,7 +81,7 @@ export function SubSidebar({
             // Width: w-40 (160px) md–lg, w-52 (208px) at xl+. Floor min-w-32.
             // Tight on purpose so the main pane keeps room at laptop widths;
             // each row is icon + short word so labels stay readable at 160px.
-            "hidden h-svh w-40 min-w-32 shrink flex-col border-r border-sidebar-border bg-sidebar/40 text-sidebar-foreground md:flex xl:w-52",
+            "hidden h-svh w-40 min-w-32 shrink flex-col border-r border-sidebar-border bg-sidebar/60 text-sidebar-foreground md:flex xl:w-52",
       )}
     >
       <header className="flex items-center gap-2 px-4 pb-3 pt-4">
@@ -147,9 +147,9 @@ export function SubSidebarGroup({
         className="flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1 text-left text-2xs font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:text-foreground"
       >
         {open ? (
-          <ChevronDown className="size-3" />
+          <ChevronDown className="size-3.5" />
         ) : (
-          <ChevronRight className="size-3" />
+          <ChevronRight className="size-3.5" />
         )}
         <span className="flex-1 truncate">{label}</span>
       </button>

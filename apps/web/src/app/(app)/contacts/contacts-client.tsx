@@ -990,7 +990,7 @@ const ContactRow = memo(function ContactRow({
     <li
       onClick={() => onOpen(contact.id)}
       className={cn(
-        "group flex cursor-pointer items-center gap-3 px-4 py-2.5 transition-colors hover:bg-accent/40",
+        "group flex cursor-pointer items-center gap-3 px-4 py-2.5 transition-colors hover:bg-accent/50",
         selected && "bg-primary/5 hover:bg-primary/5",
       )}
     >
@@ -1409,7 +1409,7 @@ function BulkTagMenu({
               key={t.id}
               type="button"
               onClick={() => onPick(t.id)}
-              className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left hover:bg-accent/60"
+              className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-accent"
             >
               <TagChip tag={t} size="xs" />
             </button>
@@ -1473,7 +1473,7 @@ function BulkTagMenu({
       <button
         type="button"
         onClick={onClose}
-        className="block w-full cursor-pointer border-t border-border px-3 py-1.5 text-center text-2xs text-muted-foreground hover:bg-accent/40"
+        className="block w-full cursor-pointer border-t border-border px-3 py-1.5 text-center text-2xs text-muted-foreground transition-colors hover:bg-accent"
       >
         Cancel
       </button>

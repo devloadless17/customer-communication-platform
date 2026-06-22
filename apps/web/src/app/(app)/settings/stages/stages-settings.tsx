@@ -253,7 +253,7 @@ export function StagesSettings({
       />
 
       {error && (
-        <div className="mb-3 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <div className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {error}
         </div>
       )}
@@ -277,7 +277,12 @@ export function StagesSettings({
             />
           ))}
           {creating && (
-            <li className="px-4 py-3">
+            <li
+              className={cn(
+                "px-4 py-3 transition-opacity",
+                busyId === "__new__" && "opacity-60",
+              )}
+            >
               <div className="flex flex-wrap items-center gap-2">
                 <StageDot color={newColor} />
                 <Input
@@ -426,7 +431,7 @@ function StageRow({
           onClick={onMoveUp}
           disabled={isFirst || busy}
           aria-label="Move up"
-          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent pointer-coarse:size-9"
+          className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 disabled:hover:bg-transparent pointer-coarse:size-9"
         >
           <ArrowUp className="size-3.5" />
         </button>
@@ -435,7 +440,7 @@ function StageRow({
           onClick={onMoveDown}
           disabled={isLast || busy}
           aria-label="Move down"
-          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent pointer-coarse:size-9"
+          className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 disabled:hover:bg-transparent pointer-coarse:size-9"
         >
           <ArrowDown className="size-3.5" />
         </button>
@@ -464,7 +469,7 @@ function StageRow({
         <button
           type="button"
           onClick={startEditing}
-          className="group inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-sm font-medium hover:bg-accent"
+          className="group inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-sm font-medium transition-colors hover:bg-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card active:scale-[0.98]"
         >
           <span>{stage.name}</span>
           <Pencil className="size-3 opacity-0 transition-opacity group-hover:opacity-50" />
@@ -492,7 +497,7 @@ function StageRow({
         </button>
       )}
 
-      <ColorSwatches selected={stage.color} onChange={onRecolor} compact />
+      <ColorSwatches selected={stage.color} onChange={onRecolor} compact disabled={busy} />
 
       <a
         href={`/contacts?stage=${stage.id}`}
@@ -508,7 +513,7 @@ function StageRow({
         onClick={onDelete}
         disabled={busy}
         aria-label={`Delete ${stage.name}`}
-        className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50 pointer-coarse:size-9"
+        className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/15 hover:text-destructive hover:ring-1 hover:ring-destructive/30 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-destructive/40 disabled:opacity-50 pointer-coarse:size-9"
       >
         {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
       </button>
@@ -525,10 +530,12 @@ function ColorSwatches({
   selected,
   onChange,
   compact = false,
+  disabled = false,
 }: {
   selected: TagColor;
   onChange: (color: TagColor) => void;
   compact?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <div className={cn("flex items-center gap-1", compact && "ml-2")}>
@@ -539,11 +546,13 @@ function ColorSwatches({
             key={c}
             type="button"
             onClick={() => onChange(c)}
+            disabled={disabled}
             aria-label={`${c} color`}
             className={cn(
               "size-4 cursor-pointer rounded-full ring-1 ring-border transition-transform",
               classes.solid,
               selected === c && "ring-2 ring-foreground/60 ring-offset-1 ring-offset-card scale-110",
+              "disabled:cursor-not-allowed disabled:opacity-50",
             )}
           >
             {selected === c && (

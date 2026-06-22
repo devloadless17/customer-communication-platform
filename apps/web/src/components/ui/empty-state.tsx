@@ -37,7 +37,7 @@ export function EmptyState({
       {...props}
     >
       <div className="flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary">
-        <Icon className="size-5" />
+        <Icon className="size-6" />
       </div>
       <div>
         <div className="text-sm font-medium">{title}</div>

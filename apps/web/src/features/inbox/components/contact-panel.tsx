@@ -860,13 +860,13 @@ function ContactPanelImpl({
           keeps the label clear of it). */}
       {isSheet ? (
         <div className="flex h-11 shrink-0 items-center border-b border-border pl-4 pr-11">
-          <span className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <span className="text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
             Details
           </span>
         </div>
       ) : (
       <div className="flex h-11 shrink-0 items-center justify-between border-b border-border pl-4 pr-1.5">
-        <span className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
+        <span className="text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
           Details
         </span>
         <Tooltip>
@@ -874,7 +874,7 @@ function ContactPanelImpl({
             <button
               type="button"
               onClick={toggleCollapsed}
-              className="flex size-8 pointer-coarse:size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+              className="flex size-8 pointer-coarse:size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               aria-label="Collapse contact panel"
             >
               <PanelRightClose className="size-4" />
@@ -886,14 +886,20 @@ function ContactPanelImpl({
       )}
       {/* View tabs (Details / Files). Sits between the header strip and the
           panel body. Tiny segmented control to match the panel's density. */}
-      <div className="flex shrink-0 items-center gap-1 border-b border-border px-3 py-2">
+      <div
+        role="tablist"
+        aria-label="Contact panel view"
+        className="flex shrink-0 items-center gap-1 border-b border-border px-3 py-2"
+      >
         <button
           type="button"
+          role="tab"
+          aria-selected={view === "details"}
           onClick={() => setView("details")}
           className={cn(
             "flex-1 rounded-md px-2 py-1 text-xs font-medium transition-colors",
             view === "details"
-              ? "bg-accent text-foreground"
+              ? "bg-primary text-primary-foreground"
               : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
           )}
         >
@@ -901,11 +907,13 @@ function ContactPanelImpl({
         </button>
         <button
           type="button"
+          role="tab"
+          aria-selected={view === "files"}
           onClick={() => setView("files")}
           className={cn(
             "flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors",
             view === "files"
-              ? "bg-accent text-foreground"
+              ? "bg-primary text-primary-foreground"
               : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
           )}
         >
@@ -1231,7 +1239,7 @@ function ContactPanelImpl({
           />
 
           {error && (
-            <div className="mt-2 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-2xs text-destructive">
+            <div className="mt-2 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-2xs text-destructive">
               {error}
             </div>
           )}
@@ -1338,7 +1346,7 @@ function ContactPanelImpl({
             <button
               type="button"
               onClick={toggleCollapsed}
-              className="flex h-11 w-12 shrink-0 items-center justify-center border-b border-border text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+              className="flex h-11 w-12 shrink-0 items-center justify-center border-b border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               aria-label="Expand contact panel"
             >
               <ChevronLeft className="size-4" />

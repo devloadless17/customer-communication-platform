@@ -101,11 +101,11 @@ export function ConfirmDialog({
           <div
             className={
               destructive
-                ? "inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-destructive"
-                : "inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
+                ? "inline-flex size-10 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-destructive"
+                : "inline-flex size-10 shrink-0 items-center justify-center rounded-full border border-border bg-muted text-muted-foreground"
             }
           >
-            {destructive ? <AlertTriangle className="size-4" /> : <HelpCircle className="size-4" />}
+            {destructive ? <AlertTriangle className="size-5" /> : <HelpCircle className="size-5" />}
           </div>
           <div className="min-w-0 flex-1">
             <h2 id={titleId} className="text-base font-semibold">{title}</h2>
@@ -156,6 +156,7 @@ export function ConfirmDialog({
             // input is present — the input is autofocused instead.
             autoFocus={!requireText}
             disabled={confirmBlocked}
+            title={confirmBlocked ? "Type the confirmation text to proceed" : undefined}
             onClick={() => onResolve(true)}
           >
             {confirmLabel}

@@ -4,7 +4,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@ccp/shared/utils";
 
 const badgeVariants = cva(
-  "inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium transition-colors",
+  "inline-flex items-center whitespace-nowrap rounded-md border font-medium transition-colors",
   {
     variants: {
       variant: {
@@ -20,9 +20,18 @@ const badgeVariants = cva(
         info: "border-info-border bg-info-bg text-info-fg",
         destructive: "border-transparent bg-destructive/15 text-destructive",
       },
+      // `default` reproduces the prior fixed sizing exactly (px-2 py-0.5 text-xs)
+      // so every existing callsite is unchanged; `sm` retires hand-rolled micro
+      // pills (StatusPill text-[9.5px]) and `lg` is for prominent status chips.
+      size: {
+        default: "px-2 py-0.5 text-xs",
+        sm: "px-1.5 py-0.5 text-2xs",
+        lg: "px-3 py-1 text-sm",
+      },
     },
     defaultVariants: {
       variant: "default",
+      size: "default",
     },
   },
 );
@@ -31,8 +40,8 @@ export interface BadgeProps
   extends React.HTMLAttributes<HTMLSpanElement>,
     VariantProps<typeof badgeVariants> {}
 
-export function Badge({ className, variant, ...props }: BadgeProps) {
-  return <span className={cn(badgeVariants({ variant }), className)} {...props} />;
+export function Badge({ className, variant, size, ...props }: BadgeProps) {
+  return <span className={cn(badgeVariants({ variant, size }), className)} {...props} />;
 }
 
 export { badgeVariants };

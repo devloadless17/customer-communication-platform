@@ -16,7 +16,9 @@ export function ReadOnlyRow({
       ) : (
         <span className="size-3.5 shrink-0" />
       )}
-      <span className="w-20 shrink-0 text-muted-foreground">{label}</span>
+      <span className="w-20 shrink-0 truncate text-muted-foreground" title={label}>
+        {label}
+      </span>
       <span className={`min-w-0 flex-1 truncate ${mono ? "font-mono" : ""}`}>{value}</span>
     </div>
   );

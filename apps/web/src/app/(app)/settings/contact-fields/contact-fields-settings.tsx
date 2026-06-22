@@ -21,6 +21,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
+import { cn } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
   ContactPanelBuiltins,
@@ -280,7 +281,7 @@ export function ContactFieldsSettings({
       />
 
       {error && (
-        <div className="mb-3 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <div className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {error}
         </div>
       )}
@@ -293,7 +294,7 @@ export function ContactFieldsSettings({
         const shadowed = defs.filter((d) => isReservedFieldKey(d.label));
         if (shadowed.length === 0) return null;
         return (
-          <div className="mb-3 rounded border border-warning-border bg-warning-bg px-3 py-2 text-xs">
+          <div className="mb-3 rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-xs">
             <div className="font-medium text-warning-fg">
               {shadowed.length === 1 ? "A custom field" : `${shadowed.length} custom fields`} shadow built-in contact columns.
             </div>
@@ -301,7 +302,7 @@ export function ContactFieldsSettings({
               {shadowed.map((d) => (
                 <span
                   key={d.id}
-                  className="mr-1 inline-flex items-center gap-1 rounded border border-warning-border bg-warning-bg px-1.5 py-0.5"
+                  className="mr-1 inline-flex items-center gap-1 rounded-sm border border-warning-border bg-warning-bg px-1.5 py-0.5"
                 >
                   {d.label}
                 </span>
@@ -385,7 +386,12 @@ export function ContactFieldsSettings({
             />
           ))}
           {creating && (
-            <li className="px-4 py-3">
+            <li
+              className={cn(
+                "px-4 py-3 transition-opacity",
+                busyId === "__new__" && "opacity-60",
+              )}
+            >
               <div className="flex flex-wrap items-center gap-2">
                 <Input
                   ref={newInputRef}
@@ -402,7 +408,7 @@ export function ContactFieldsSettings({
                   }}
                   placeholder="New field name…"
                   aria-label="New field name"
-                  className="h-8 max-w-xs text-sm"
+                  className="h-8 max-w-xs text-sm aria-invalid:border-destructive aria-invalid:ring-1 aria-invalid:ring-destructive/30"
                   disabled={busyId === "__new__"}
                   aria-invalid={isReservedFieldKey(newLabel) || undefined}
                   aria-describedby={
@@ -519,7 +525,7 @@ function FieldRow({
           onClick={onMoveUp}
           disabled={isFirst || busy}
           aria-label="Move up"
-          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent pointer-coarse:size-9"
+          className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 disabled:hover:bg-transparent pointer-coarse:size-9"
         >
           <ArrowUp className="size-3.5" />
         </button>
@@ -528,7 +534,7 @@ function FieldRow({
           onClick={onMoveDown}
           disabled={isLast || busy}
           aria-label="Move down"
-          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent pointer-coarse:size-9"
+          className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 disabled:hover:bg-transparent pointer-coarse:size-9"
         >
           <ArrowDown className="size-3.5" />
         </button>
@@ -555,7 +561,7 @@ function FieldRow({
         <button
           type="button"
           onClick={startEditing}
-          className="group inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-sm font-medium hover:bg-accent"
+          className="group inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-sm font-medium transition-colors hover:bg-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card active:scale-[0.98]"
         >
           <span>{field.label}</span>
           <Pencil className="size-3 opacity-0 transition-opacity group-hover:opacity-50" />
@@ -564,12 +570,12 @@ function FieldRow({
 
       {/* The key is immutable — surface it so admins know what JSON path
           shows up in exports / API responses. */}
-      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-3xs text-muted-foreground">
+      <code className="rounded-sm bg-muted px-1.5 py-0.5 font-mono text-3xs text-muted-foreground">
         {field.key}
       </code>
 
       {!field.isVisible && (
-        <span className="rounded bg-warning-bg px-1.5 py-0.5 text-3xs font-medium text-warning-fg">
+        <span className="rounded-sm bg-warning-bg px-1.5 py-0.5 text-3xs font-medium text-warning-fg">
           Hidden
         </span>
       )}
@@ -581,7 +587,7 @@ function FieldRow({
           disabled={busy}
           aria-label={field.isVisible ? `Hide ${field.label}` : `Show ${field.label}`}
           title={field.isVisible ? "Hide from contact panel" : "Show on contact panel"}
-          className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50 pointer-coarse:size-9"
+          className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 pointer-coarse:size-9"
         >
           {field.isVisible ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
         </button>
@@ -590,7 +596,7 @@ function FieldRow({
           onClick={onDelete}
           disabled={busy}
           aria-label={`Delete ${field.label}`}
-          className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50 pointer-coarse:size-9"
+          className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/15 hover:text-destructive hover:ring-1 hover:ring-destructive/30 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-destructive/40 disabled:opacity-50 pointer-coarse:size-9"
         >
           {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
         </button>
@@ -616,7 +622,7 @@ function BuiltinRow({
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">{label}</span>
           {!visible && (
-            <span className="rounded bg-warning-bg px-1.5 py-0.5 text-3xs font-medium text-warning-fg">
+            <span className="rounded-sm bg-warning-bg px-1.5 py-0.5 text-3xs font-medium text-warning-fg">
               Hidden
             </span>
           )}
@@ -628,7 +634,7 @@ function BuiltinRow({
         onClick={onToggle}
         aria-label={visible ? `Hide ${label}` : `Show ${label}`}
         title={visible ? "Hide from contact panel" : "Show on contact panel"}
-        className="inline-flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
+        className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:size-9"
       >
         {visible ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
       </button>

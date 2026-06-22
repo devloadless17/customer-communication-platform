@@ -104,9 +104,12 @@ function ConversationListItemImpl({
         // stacked rows all single-line-truncate, so 80px fits them with a couple
         // px to spare and the height never varies → estimate === measured →
         // zero reposition. overflow-hidden guards a future taller variant.
-        "group relative flex h-20 cursor-pointer gap-3 overflow-hidden rounded-lg px-2.5 py-2.5 transition-colors",
+        "group relative flex h-20 cursor-pointer gap-3 overflow-hidden rounded-lg px-2.5 py-3 transition-colors",
         active
-          ? "bg-primary/10"
+          ? // Mirrors the 3px left-rail primary bar with a right-edge bracket,
+            // giving the open row a 'bookend' so it reads as selected even when
+            // the 10% primary fill is subtle (dark theme / dense lists).
+            "bg-primary/10 after:absolute after:inset-y-2.5 after:right-0 after:w-0.5 after:rounded-l-full after:bg-primary"
           : pending
             ? "bg-accent/50"
             : "hover:bg-accent/50",
@@ -170,7 +173,7 @@ function ConversationListItemImpl({
               renders nothing. */}
           {conversation.lastMessageDirection === "out" && (
             <CornerUpLeft
-              className="size-3 shrink-0 text-muted-foreground/60"
+              className="size-3 shrink-0 text-muted-foreground/75"
               aria-label="You replied"
             />
           )}
@@ -180,7 +183,7 @@ function ConversationListItemImpl({
             dir="auto"
             className={cn(
               "min-w-0 flex-1 truncate text-xs leading-snug",
-              unread ? "text-foreground/80" : "text-muted-foreground",
+              unread ? "text-foreground" : "text-muted-foreground",
             )}
           >
             {conversation.lastMessagePreview}
@@ -195,7 +198,7 @@ function ConversationListItemImpl({
                mount animation. Subsequent count increases don't re-mount. */
             <span
               key="badge-visible"
-              className="animate-badge-pop flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-3xs font-bold tabular-nums text-primary-foreground"
+              className="animate-badge-pop flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-2xs font-bold tabular-nums text-primary-foreground"
             >
               {conversation.unreadCount > 99 ? "99+" : conversation.unreadCount}
             </span>
@@ -209,12 +212,12 @@ function ConversationListItemImpl({
         {showMeta && (
           <div className="flex items-center gap-1.5">
             {conversation.status === "pending" && (
-              <span className="inline-flex h-4.5 shrink-0 items-center rounded-sm bg-warning-bg px-1.5 text-3xs font-semibold text-warning-fg">
+              <span className="inline-flex h-4.5 shrink-0 items-center rounded-sm border-l-2 border-warning-fg bg-warning-bg pl-2.5 pr-1.5 text-3xs font-semibold text-warning-fg">
                 Pending
               </span>
             )}
             {conversation.status === "closed" && (
-              <span className="inline-flex h-4.5 shrink-0 items-center rounded-sm bg-muted px-1.5 text-3xs font-medium text-muted-foreground">
+              <span className="inline-flex h-4.5 shrink-0 items-center rounded-sm border-l-2 border-muted-foreground/50 bg-muted pl-2.5 pr-1.5 text-3xs font-medium text-muted-foreground">
                 Closed
               </span>
             )}
@@ -244,14 +247,17 @@ function ConversationListItemImpl({
                 className={cn(
                   "inline-flex shrink-0 items-center gap-1 text-2xs",
                   assignedToMe
-                    ? "font-semibold text-foreground"
+                    ? // A tight 'You' chip — primary tint + inset ring so the
+                      // ownership cue registers at 11px where bold weight alone
+                      // doesn't. Scoped tighter than the selected-row styling.
+                      "rounded-md bg-primary/8 px-1.5 py-0.5 font-semibold text-foreground ring-1 ring-inset ring-primary/30"
                     : "text-muted-foreground",
                 )}
               >
                 <Avatar className="size-3.5">
                   <AvatarFallback
                     seed={assignedUser.id}
-                    className="text-[7px] font-semibold"
+                    className="text-4xs font-semibold"
                   >
                     {initials(assignedUser.name)}
                   </AvatarFallback>

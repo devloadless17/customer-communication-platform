@@ -110,7 +110,7 @@ export function SnippetPopup({
       // we want the caret to stay put so the replacement can find it.
       onMouseDown={(e) => e.preventDefault()}
     >
-      <div className="flex items-center gap-1.5 border-b border-border bg-muted/30 px-3 py-1.5 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
+      <div className="flex items-center gap-1.5 border-b border-border bg-muted/60 px-3 py-2 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
         <Sparkles className="size-3 text-primary" />
         <span>Snippets</span>
         <span className="ml-auto font-mono text-3xs normal-case text-muted-foreground">
@@ -120,7 +120,7 @@ export function SnippetPopup({
       {matches.length === 0 ? (
         <div className="px-3 py-3 text-xs text-muted-foreground">
           No snippets match{" "}
-          <code className="rounded bg-muted px-1 font-mono">/{query}</code>.
+          <code className="rounded-sm bg-muted px-1 font-mono">/{query}</code>.
         </div>
       ) : (
         <ul className="max-h-60 overflow-y-auto">
@@ -133,10 +133,10 @@ export function SnippetPopup({
                 onClick={() => onSelect(s)}
                 className={cn(
                   "flex w-full items-start gap-2 px-3 py-2 text-left transition-colors",
-                  i === activeIdx ? "bg-primary/10" : "hover:bg-accent/40",
+                  i === activeIdx ? "bg-primary/10" : "hover:bg-accent",
                 )}
               >
-                <span className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded bg-primary/10 font-mono text-3xs font-bold text-primary">
+                <span className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-sm bg-primary/10 font-mono text-3xs font-bold text-primary">
                   /
                 </span>
                 <span className="min-w-0 flex-1">

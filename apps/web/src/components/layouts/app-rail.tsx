@@ -284,7 +284,7 @@ export function AppRail({
                 <span
                   className={cn(
                     "absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-sidebar transition-colors",
-                    connected ? "bg-emerald-500" : "bg-muted-foreground/40",
+                    connected ? "bg-success-fg" : "bg-muted-foreground/40",
                   )}
                   aria-label={connected ? "Realtime connected" : "Realtime disconnected"}
                 />
@@ -364,8 +364,8 @@ export function AppRail({
           <button
             type="button"
             className={cn(
-              "group flex h-10 w-full cursor-pointer items-center rounded-lg transition-colors hover:bg-accent/60",
-              collapsed ? "justify-center" : "gap-2.5 px-2",
+              "group flex h-9 w-full cursor-pointer items-center rounded-lg transition-colors hover:bg-accent/60",
+              collapsed ? "justify-center" : "gap-2 px-2",
             )}
             aria-label="Open account menu"
           >
@@ -456,7 +456,7 @@ function RailLink({
             reads as "unread on Inbox" even with no label. ring-sidebar lifts it
             off the icon. */}
         {hasBadge && collapsed && (
-          <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-3xs font-semibold leading-none text-primary-foreground ring-2 ring-sidebar">
+          <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-3xs font-semibold leading-none text-primary-foreground ring-2 ring-sidebar">
             {badgeText}
           </span>
         )}
@@ -475,9 +475,12 @@ function RailLink({
           {badgeText}
         </span>
       )}
-      {/* Active indicator — lives at the inner left edge of the rail */}
+      {/* Active indicator — a bolder bar pinned to the inner left edge of the
+          rail. The 4px width + rounded-r-md reads as deliberate (Linear-style)
+          vs. the prior hairline. The collapsed state stays legible via the
+          icon's own text-primary fill (active branch above). */}
       {active && (
-        <span className="absolute left-0 top-1.5 h-6 w-0.5 -translate-x-2 rounded-r-full bg-primary" />
+        <span className="absolute -left-2 top-1.5 h-6 w-1 rounded-r-md bg-primary" />
       )}
     </Link>
   );

@@ -270,14 +270,14 @@ function FileRow({
         onClick={() => {
           void openAttachment(media.url, media.filename ?? media.caption ?? null);
         }}
-        className="rounded-md px-2 py-1 text-xs font-medium text-primary hover:bg-primary/10"
+        className="rounded-md border border-primary/20 px-2 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
       >
         Open
       </button>
       <button
         type="button"
         onClick={onGoToMessage}
-        className="rounded-md px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+        className="rounded-md border border-border px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         title="Jump to message"
       >
         Jump

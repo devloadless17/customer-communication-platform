@@ -36,23 +36,26 @@ export function QuotedReply({
       onClick={onClick}
       disabled={!onClick}
       className={cn(
-        "flex w-full items-stretch gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors",
-        // Tinted background that reads as a quote against either bubble.
-        isOut ? "bg-white/15 hover:bg-white/20" : "bg-background/60 hover:bg-background/80",
+        "flex w-full items-stretch gap-2 rounded-lg px-2.5 py-1.5 text-left ring-1 transition-colors",
+        // Tinted background + a clear frame so the quote anchors as essential
+        // context against either bubble rather than fading into it.
+        isOut
+          ? "bg-white/15 ring-white/20 hover:bg-white/20"
+          : "bg-background/60 ring-border/60 hover:bg-background/80",
         !onClick && "cursor-default",
       )}
     >
       <span
         className={cn(
-          "w-1 shrink-0 rounded-full",
+          "w-1.5 shrink-0 rounded-full",
           isOut ? "bg-white/70" : "bg-primary",
         )}
       />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-2xs font-medium opacity-90">
+        <span className="block truncate text-2xs font-medium opacity-100">
           {senderLabel}
         </span>
-        <span dir="auto" className="block truncate text-2xs opacity-75">
+        <span dir="auto" className="block truncate text-2xs opacity-85">
           {bodyLabel}
         </span>
       </span>

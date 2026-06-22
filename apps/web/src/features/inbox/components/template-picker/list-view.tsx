@@ -71,7 +71,7 @@ export function TemplateListView({
                   disabled={t.status !== "approved"}
                   className={cn(
                     "group flex w-full cursor-pointer items-start gap-3 px-4 py-3 text-left transition-colors",
-                    "hover:bg-accent/60 focus:bg-accent/60 focus:outline-hidden",
+                    "hover:bg-accent/50 focus:bg-accent/50 focus:outline-hidden",
                     t.status !== "approved" && "cursor-not-allowed opacity-60 hover:bg-transparent",
                   )}
                 >
@@ -82,7 +82,7 @@ export function TemplateListView({
                     <div className="flex items-center gap-2">
                       <span className="truncate text-sm font-medium">{t.name}</span>
                       <CategoryPill category={t.category} />
-                      <span className="rounded border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground">
+                      <span className="rounded-sm border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground">
                         {t.language}
                       </span>
                       {t.status !== "approved" && <StatusPill status={t.status} />}
@@ -169,7 +169,7 @@ function CategoryPill({ category }: { category: string }) {
 function StatusPill({ status }: { status: string }) {
   const tone =
     status === "pending"
-      ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+      ? "border-warning-border bg-warning-bg text-warning-fg"
       : status === "rejected"
         ? "border-destructive/30 bg-destructive/10 text-destructive"
         : "border-border bg-muted/40 text-muted-foreground";

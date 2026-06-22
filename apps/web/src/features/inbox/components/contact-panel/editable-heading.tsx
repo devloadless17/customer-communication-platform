@@ -43,7 +43,7 @@ export function EditableHeading({
         className="group -ml-1 inline-flex max-w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-base font-semibold hover:bg-accent/50"
       >
         <span className="truncate">{value}</span>
-        <Pencil className="size-3 opacity-0 transition group-hover:opacity-60" />
+        <Pencil className="size-3 opacity-30 transition-opacity group-hover:opacity-100" />
       </button>
     );
   }

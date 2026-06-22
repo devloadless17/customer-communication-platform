@@ -28,7 +28,7 @@ function InternalNoteImpl({
               a note. Author + time sit at the top-RIGHT, signature-style. */}
           <div className="mb-0.5 flex items-center justify-end gap-1.5 text-2xs opacity-80">
             <Avatar className="size-4">
-              <AvatarFallback seed={author.id} className="text-[8px]">{initials(author.name)}</AvatarFallback>
+              <AvatarFallback seed={author.id} className="text-4xs">{initials(author.name)}</AvatarFallback>
             </Avatar>
             <span className="font-medium">{author.name}</span>
             <span className="opacity-60">·</span>

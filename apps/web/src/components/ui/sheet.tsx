@@ -109,7 +109,7 @@ export function Sheet({
       <div
         ref={ref}
         className={cn(
-          "absolute flex flex-col bg-background text-foreground shadow-xl transition-transform duration-200 ease-out",
+          "absolute flex flex-col bg-background text-foreground shadow-lg transition-transform duration-200 ease-out",
           positionClass,
           slideClass,
           // Sensible default width for side sheets; callers override via
