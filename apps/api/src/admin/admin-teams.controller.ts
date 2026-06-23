@@ -155,17 +155,15 @@ export class AdminTeamsController {
    */
   @Patch(":id/max-members")
   async setMaxMembers(
-    @CurrentSession() session: ApiSession,
     @Param("id") teamId: string,
     @Body(zBody(SetMaxMembersSchema)) body: SetMaxMembersInput,
   ) {
-    // Symmetry with setStatus/remove: an operator never administers their own
-    // org's cap through the cross-team surface (use /api/team for self).
-    if (teamId === session.teamId) {
-      throw new BadRequestException({
-        error: "cannot change your own organization's member cap",
-      });
-    }
+    // No self-team guard here (unlike setStatus/remove): a member cap is NOT a
+    // lockout. superAdmins don't count as seats (see the count below), so an
+    // operator capping their own org can't lock anyone out, and it's trivially
+    // reversible by raising it again. Guarding it added zero safety and only
+    // created a UI/server mismatch — the platform org-detail "Limit" control is
+    // rendered for every org including the operator's own.
     const updated = await this.db.team.updateMany({
       where: { id: teamId },
       data: { maxMembers: body.maxMembers },
