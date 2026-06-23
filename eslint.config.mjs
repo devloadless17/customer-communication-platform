@@ -24,6 +24,11 @@ export default tseslint.config(
       "**/coverage/**",
       "**/*.tsbuildinfo",
       "apps/web/next-env.d.ts",
+      // Claude Code tooling, not app source. Persisted Workflow scripts (.mjs)
+      // use runtime-injected globals (agent/parallel/log/phase) that aren't
+      // real JS, so `eslint .` would flag them as no-undef. The committed
+      // skills/ assets here are Markdown/CSV/Python — none of them ours to lint.
+      ".claude/**",
     ],
   },
 

@@ -54,6 +54,9 @@ next-env.d.ts
 .claude/projects/
 # Claude Code runtime locks (transient scheduler/loop artifacts — never commit)
 .claude/*.lock
+# Persisted Workflow scripts dropped at the .claude root (one-off audit/agent
+# harnesses — runtime-only DSL, not app source). Skills under .claude/skills/ stay tracked.
+.claude/*.mjs
 
 # Playwright auth storage (per-machine session cookies)
 tests/e2e/.auth/
