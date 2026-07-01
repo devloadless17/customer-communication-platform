@@ -21,7 +21,7 @@ RUN apt-get update \
 # stage switches to `USER node` and the compose CMD runs `pnpm prisma migrate
 # deploy` on every freshly-created container's first boot — with root's private
 # cache, that pnpm shim found an empty cache under /home/node and re-downloaded
-# pnpm@10.33.3 from registry.npmjs.org BEFORE the migration could run, putting
+# pnpm@10.34.4 from registry.npmjs.org BEFORE the migration could run, putting
 # an external network dependency (npmjs/DNS availability) in the boot path of
 # an otherwise self-contained image. A world-readable cache means the
 # build-time `corepack prepare` download is reused by the node user at runtime
@@ -29,7 +29,7 @@ RUN apt-get update \
 ENV COREPACK_HOME=/opt/corepack
 RUN corepack enable \
  && mkdir -p /opt/corepack \
- && corepack prepare pnpm@10.33.3 --activate \
+ && corepack prepare pnpm@10.34.4 --activate \
  && chmod -R a+rX /opt/corepack
 
 # -----------------------------------------------------------------------------

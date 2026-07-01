@@ -56,7 +56,7 @@ jobs:
       # latent risk. setup-node's pnpm cache key uses pnpm-lock.yaml.
       - uses: pnpm/action-setup@d15e628ca66d93ee5f352c71671a7bc6a97af5c9  # v6.0.8
         with:
-          version: 10.33.3
+          version: 10.34.4
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: '24'
@@ -266,6 +266,7 @@ jobs:
           ignore-unfixed: true
           severity: HIGH,CRITICAL
           vuln-type: os,library
+          trivyignores: .trivyignore
 
   build-api:
     if: needs.changes.outputs.api == 'true'
@@ -308,6 +309,7 @@ jobs:
           ignore-unfixed: true
           severity: HIGH,CRITICAL
           vuln-type: os,library
+          trivyignores: .trivyignore
 
   smoke:
     # Run if at least one image was rebuilt and neither build failed.

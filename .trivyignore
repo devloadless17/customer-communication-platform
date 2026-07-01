@@ -1,0 +1,15 @@
+# Trivy ignore file — HIGH/CRITICAL CVEs we consciously accept, with a reason.
+# The deploy Trivy gate uses `ignore-unfixed: true`, so only FIXABLE HIGH/CRITICAL
+# reach here. Keep this list tiny and justified; re-check on every pnpm bump.
+
+# pnpm — Repository-controlled configDependencies can select a package's native
+# install engine. Fixed ONLY in pnpm 11.5.3 (no 10.x backport per Trivy DB).
+# We pin pnpm to 10.34.x, which clears every OTHER pnpm CVE from this advisory
+# batch (CVE-2026-50015/55487/55698, GHSA-72r4/qrv3). We deliberately stay on
+# pnpm 10.x because pnpm 11 (a) drops `pnpm.overrides` from package.json and
+# (b) adds a `minimumReleaseAge` policy that rejects the AWS SDK — a larger,
+# separate migration.
+# Not exploitable in our pipeline: every install runs `--frozen-lockfile`
+# against OUR committed lockfile (no attacker-supplied manifest), and we do not
+# use `configDependencies`. Revisit when we migrate to pnpm 11.x.
+CVE-2026-55697

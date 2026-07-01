@@ -13,6 +13,11 @@ onlyBuiltDependencies:
 
 # Resolution overrides live in package.json `pnpm.overrides` (the ONLY source
 # pnpm 10.x reads here — confirmed against pnpm-lock.yaml). An `overrides:` key
-# in this file is silently ignored, so it is intentionally NOT defined here to
-# avoid a second, dead source of truth. To pin a transitive dep, edit
+# in this file is silently ignored on 10.x, so it is intentionally NOT defined
+# here to avoid a second, dead source of truth. To pin a transitive dep, edit
 # package.json `pnpm.overrides` and run `pnpm install`.
+#
+# NOTE: pnpm 11 moves overrides HERE (package.json is ignored) AND adds a
+# `minimumReleaseAge` supply-chain policy that rejects freshly-published deps
+# (e.g. the AWS SDK) — staying on pnpm 10.x deliberately avoids both until a
+# dedicated pnpm-11 migration.

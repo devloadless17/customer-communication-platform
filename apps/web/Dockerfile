@@ -31,7 +31,7 @@ RUN apt-get update \
 # Pin pnpm via corepack to match package.json's `packageManager` field.
 # Avoids the "lockfile written by pnpm X, can't be read by pnpm Y" class
 # of bug.
-RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
+RUN corepack enable && corepack prepare pnpm@10.34.4 --activate
 
 # -----------------------------------------------------------------------------
 # deps — workspace-aware install. Only package.json + lockfile + Prisma
@@ -183,7 +183,7 @@ RUN echo "apt cache bust: ${APT_CACHE_BUST}" \
 # though the project never executes any of them. Removing it eliminates
 # a whole class of false-positives.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
-RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
+RUN corepack enable && corepack prepare pnpm@10.34.4 --activate
 
 # Standalone bundle: server.js + minimal traced node_modules.
 COPY --from=build --chown=node:node /app/apps/web/.next/standalone ./
