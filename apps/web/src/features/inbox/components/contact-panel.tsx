@@ -40,6 +40,7 @@ import type {
   ContactPanelBuiltins,
   ConversationStatus,
   ConversationWithRefs,
+  InternalNote,
   Tag,
   User,
 } from "@ccp/shared/types";
@@ -254,6 +255,13 @@ function ContactPanelImpl({
   const [liveNoteCount, setLiveNoteCount] = useState<number>(
     data.noteCount ?? notes.length,
   );
+  // Live notes ARRAY for the gallery (AttachmentGallery "Notes" tab). The
+  // `notes` prop is the inbox-shell LRU snapshot (frozen while the thread is
+  // displayed — note:new isn't wired into the silent snapshot patch), so
+  // without this the gallery only shows a newly-created note after a refresh /
+  // chat-switch. Mirrors the liveStatus/liveNoteCount direct-subscription
+  // pattern above. Re-seeded from the prop on switch/refetch (effect below).
+  const [liveNotes, setLiveNotes] = useState<InternalNote[]>(notes);
   // Dedupe live tally bumps by id. message:new / note:* frames REPLAY on
   // Socket.io connection-state-recovery (and any transient duplicate), and an
   // un-guarded `n + 1` would over-count the panel's "Messages"/"Notes" totals
@@ -276,6 +284,14 @@ function ContactPanelImpl({
     seenNoteDelRef.current = new Set();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversation.id, conversation.status, data.messageCount, data.noteCount]);
+
+  // Re-seed the live notes array from the authoritative prop whenever it
+  // changes identity (conversation switch or a refetch/router.refresh) — the
+  // snapshot is referentially stable while displayed, so this doesn't clobber
+  // live-appended notes mid-thread.
+  useEffect(() => {
+    setLiveNotes(notes);
+  }, [notes]);
 
   useEffect(() => {
     const socket = getClientSocket();
@@ -315,6 +331,11 @@ function ContactPanelImpl({
       if (seenNoteAddRef.current.has(payload.note.id)) return;
       seenNoteAddRef.current.add(payload.note.id);
       setLiveNoteCount((n) => n + 1);
+      // Append to the gallery array too (guard against a racing duplicate that
+      // slipped the seen-set, e.g. optimistic + server frame).
+      setLiveNotes((prev) =>
+        prev.some((n) => n.id === payload.note.id) ? prev : [...prev, payload.note],
+      );
     };
     const onNoteDeleted: Parameters<typeof socket.on<"note:deleted">>[1] = (
       payload,
@@ -323,6 +344,7 @@ function ContactPanelImpl({
       if (seenNoteDelRef.current.has(payload.noteId)) return;
       seenNoteDelRef.current.add(payload.noteId);
       setLiveNoteCount((n) => Math.max(0, n - 1));
+      setLiveNotes((prev) => prev.filter((n) => n.id !== payload.noteId));
     };
 
     socket.on("conversation:status", onStatus);
@@ -954,7 +976,7 @@ function ContactPanelImpl({
           <AttachmentGallery
             conversationId={conversation.id}
             onGoToMessage={onGoToMessage}
-            notes={notes}
+            notes={liveNotes}
             teamMembers={teamMembers}
           />
         </ScrollArea>

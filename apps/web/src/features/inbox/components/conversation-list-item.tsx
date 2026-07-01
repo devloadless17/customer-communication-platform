@@ -3,7 +3,7 @@
 import { memo } from "react";
 import { CornerUpLeft, Loader2 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { LocalTime } from "@/components/local-time";
 import { useTimezone } from "@/providers/tz-provider";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
@@ -255,6 +255,9 @@ function ConversationListItemImpl({
                 )}
               >
                 <Avatar className="size-3.5">
+                  {assignedUser.avatarUrl ? (
+                    <AvatarImage src={assignedUser.avatarUrl} alt={assignedUser.name} />
+                  ) : null}
                   <AvatarFallback
                     seed={assignedUser.id}
                     className="text-4xs font-semibold"
