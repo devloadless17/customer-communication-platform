@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 
 import { getClientSocket } from "@/lib/socket-client";
 import { apiFetch } from "@/lib/api/client-fetch";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { initials } from "@ccp/shared/utils";
 
 /**
@@ -23,7 +23,7 @@ export function CurrentActivityPanel({
   members,
   initial,
 }: {
-  members: { userId: string; name: string }[];
+  members: { userId: string; name: string; avatarUrl?: string | null }[];
   initial: Record<string, number>;
 }) {
   const [counts, setCounts] = useState<Record<string, number>>(initial);
@@ -83,6 +83,7 @@ export function CurrentActivityPanel({
             className="flex items-center gap-2.5 rounded-lg border border-border/60 bg-muted/20 px-3 py-2"
           >
             <Avatar className="size-7 shrink-0">
+              {r.avatarUrl ? <AvatarImage src={r.avatarUrl} alt={r.name} /> : null}
               <AvatarFallback seed={r.userId} className="text-3xs">
                 {initials(r.name)}
               </AvatarFallback>

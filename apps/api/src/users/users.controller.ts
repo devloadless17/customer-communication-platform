@@ -9,16 +9,22 @@ import {
   Delete,
   Get,
   HttpCode,
+  NotFoundException,
   Param,
   Patch,
   Post,
   Query,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
+import type { Response } from "express";
 import { diskStorage } from "multer";
+
+import { avatarObjectKey } from "../lib/blob-storage/avatar";
+import { streamBlob } from "../media/stream-blob";
 
 import { RequireCapability } from "../auth/capability.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
@@ -102,6 +108,25 @@ export class UsersController {
   async activeAssignments(@CurrentSession() session: ApiSession) {
     const counts = await this.users.getActiveAssignments(session.teamId);
     return { counts };
+  }
+
+  /**
+   * Avatar serving — authenticated SAME-ORIGIN stream of the private avatar
+   * object. The UI renders `<img src="/api/users/:id/avatar?v=…">` (the value
+   * stored in `avatarUrl`) and lands here. Same-team check first; 404 when the
+   * target user has no avatar. The `?v` cache-buster changes on replace, so the
+   * bytes are safely cached hard. Two-segment path can't shadow `stats` /
+   * the `:id` routes.
+   */
+  @Get(":userId/avatar")
+  async avatar(
+    @CurrentSession() session: ApiSession,
+    @Param("userId") userId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const hasAvatar = await this.users.hasAvatar(session.teamId, userId);
+    if (!hasAvatar) throw new NotFoundException({ error: "not_found" });
+    await streamBlob(res, avatarObjectKey(userId), undefined);
   }
 
   // `me` is a static segment — must appear before `:id` routes so Express

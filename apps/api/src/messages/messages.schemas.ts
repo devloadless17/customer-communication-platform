@@ -32,8 +32,8 @@ export const SendTemplateSchema = z.object({
     .object({
       body: z.array(z.string()).default([]),
       header: z.string().optional(),
-      // Media for an IMAGE/VIDEO/DOCUMENT template header. `link` is a public
-      // URL (the UploadThing URL the composer already produces).
+      // Media for an IMAGE/VIDEO/DOCUMENT template header. `link` is the stable
+      // R2 object URL the composer produces (presigned fresh at send time).
       headerMedia: z
         .object({
           kind: z.enum(["image", "video", "document"]),

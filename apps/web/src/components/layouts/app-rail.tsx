@@ -18,7 +18,7 @@ import {
   Workflow,
 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -371,6 +371,9 @@ export function AppRail({
           >
             <div className="relative shrink-0">
               <Avatar className="size-7 ring-1 ring-sidebar-border transition-shadow group-hover:ring-foreground/20">
+                {currentUser.avatarUrl ? (
+                  <AvatarImage src={currentUser.avatarUrl} alt={currentUser.name} />
+                ) : null}
                 <AvatarFallback seed={currentUser.id} className="text-3xs">
                   {initials(currentUser.name)}
                 </AvatarFallback>

@@ -16,7 +16,7 @@ import {
   Workflow,
 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Sheet } from "@/components/ui/sheet";
 import { AvailabilityPicker } from "@/components/layouts/availability-picker";
 import { MobileSubSidebarProvider } from "@/components/layouts/sub-sidebar";
@@ -265,6 +265,9 @@ export function MobileShellChrome({
           <div className="mt-auto border-t border-border p-2">
             <div className="flex items-center gap-2 px-2 py-1.5">
               <Avatar className="size-7">
+                {currentUser.avatarUrl ? (
+                  <AvatarImage src={currentUser.avatarUrl} alt={currentUser.name} />
+                ) : null}
                 <AvatarFallback seed={currentUser.id} className="text-3xs">
                   {initials(currentUser.name)}
                 </AvatarFallback>

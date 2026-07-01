@@ -5,6 +5,7 @@
 
 import { Prisma } from "@prisma/client";
 
+import { blobStorage } from "@/lib/blob-storage";
 import { db } from "@/lib/db";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
@@ -183,12 +184,24 @@ export async function sendTemplateInternal(
     }
   }
   // Build the media payload once: only attach when the template header is a
-  // media format AND the caller supplied one (validated above).
-  const headerMedia =
+  // media format AND the caller supplied one (validated above). Meta FETCHES
+  // this link, and our R2 bucket is private — so if the stored link is one of
+  // our own (stable) object URLs, mint a fresh short-lived presigned URL here,
+  // at send time. Doing it here (the single choke point for direct + workflow +
+  // broadcast + external template sends) means the persisted config keeps the
+  // never-expiring stable URL and every send gets a valid signature. A foreign
+  // link (not ours) passes through untouched.
+  const headerMediaLink =
     headerMediaKind && args.variables.headerMedia
+      ? blobStorage.isOwnUrl(args.variables.headerMedia.link)
+        ? await blobStorage.presignGetUrl(args.variables.headerMedia.link)
+        : args.variables.headerMedia.link
+      : undefined;
+  const headerMedia =
+    headerMediaKind && args.variables.headerMedia && headerMediaLink
       ? {
           kind: headerMediaKind,
-          link: args.variables.headerMedia.link,
+          link: headerMediaLink,
           ...(args.variables.headerMedia.filename
             ? { filename: args.variables.headerMedia.filename }
             : {}),

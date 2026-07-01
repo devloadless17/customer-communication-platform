@@ -57,6 +57,7 @@ function ConversationListImpl({
   onSearchChange,
   hasMore,
   loadingMore,
+  listRefetching,
   onLoadMore,
   activeConversationId,
   pendingConversationId,
@@ -79,6 +80,9 @@ function ConversationListImpl({
   onSearchChange: (s: string) => void;
   hasMore: boolean;
   loadingMore: boolean;
+  /** True while a filter-switch refetch is in flight — show a skeleton, not the
+   *  "all caught up" empty state, until the new filter's rows land. */
+  listRefetching: boolean;
   onLoadMore: () => void;
   /** Id of the conversation the shell is currently showing. Drives the
    *  highlighted-row style. */
@@ -578,7 +582,23 @@ function ConversationListImpl({
         />
       ) : (
         <ScrollArea viewportRef={viewportRef} className="flex-1">
-        {visible.length === 0 ? (
+        {visible.length === 0 && listRefetching ? (
+          // Filter-switch in flight and the loaded slice had no rows for this
+          // view yet — show a calm skeleton instead of flashing "all caught up"
+          // for the ~50-400ms until the server page lands. Matches the h-20 row
+          // rhythm so there's no layout jump when the real rows replace it.
+          <div className="flex flex-col gap-px p-2" aria-hidden>
+            {Array.from({ length: 7 }).map((_, i) => (
+              <div key={i} className="flex h-20 items-center gap-3 rounded-lg px-3">
+                <div className="size-10 shrink-0 animate-pulse rounded-full bg-muted" />
+                <div className="flex min-w-0 flex-1 flex-col gap-2">
+                  <div className="h-3.5 w-1/3 animate-pulse rounded bg-muted" />
+                  <div className="h-3 w-2/3 animate-pulse rounded bg-muted" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : visible.length === 0 ? (
           // Context-aware empty copy. Three distinct cases, in priority order:
           //   1. First-run — no conversations exist at all (broad `active`/`all`
           //      preset, no active search). Guide setup instead of reading like

@@ -118,11 +118,11 @@ function buildCsp(nonce: string): string {
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",
     CONNECT_SRC,
-    // /api/media/<id> 302-redirects to the UploadThing CDN, so the browser
-    // resolves the final URL against media-src — keep `'self'` for the route
-    // itself and add the CDN hosts so <video> / <audio> can actually load.
-    // Matches the allow-list in [blob-storage/uploadthing.ts](../../api/src/lib/blob-storage/uploadthing.ts) `isOwnUrl`.
-    "media-src 'self' blob: https://*.ufs.sh https://*.utfs.io",
+    // All media (image/video/audio/documents/avatars) is streamed SAME-ORIGIN
+    // through /api/media/* + the avatar/team-chat routes — the browser never
+    // touches the R2 host directly (the bucket is private). So `'self'` is all
+    // <video>/<audio> need; `blob:` covers optimistic local previews.
+    "media-src 'self' blob:",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",

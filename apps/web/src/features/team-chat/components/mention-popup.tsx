@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo } from "react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { cn, initials } from "@ccp/shared/utils";
 import type { User } from "@ccp/shared/types";
 
@@ -81,6 +81,7 @@ export function MentionPopup({
             )}
           >
             <Avatar className="size-6">
+              {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
               <AvatarFallback seed={u.id} className="text-3xs">{initials(u.name)}</AvatarFallback>
             </Avatar>
             <div className="min-w-0 flex-1">

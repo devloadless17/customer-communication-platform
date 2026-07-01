@@ -399,12 +399,17 @@ export interface ProviderTemplate {
  * Media supplied for an IMAGE/VIDEO/DOCUMENT template header at SEND time.
  * Distinct from the `example.header_handle` used at template CREATE time —
  * that handle is only valid for the create call. For a send, Meta wants the
- * actual media for THIS message, by public `link` (we use the UploadThing URL
- * the composer already produces) or a pre-uploaded media `id`.
+ * actual media for THIS message, by `link` (a URL Meta fetches) or a
+ * pre-uploaded media `id`. For our own media the composer produces a stable R2
+ * object URL that the send path presigns fresh (Meta needs a fetchable URL).
  */
 export interface TemplateHeaderMedia {
   kind: "image" | "video" | "document";
-  /** Public URL to the media (e.g. an UploadThing utfs.io URL). */
+  /**
+   * URL to the media Meta will fetch. For our own media this is a stable R2
+   * object URL, presigned fresh at send time (send-template-internal.ts);
+   * external callers may pass any public URL.
+   */
   link: string;
   /** Filename shown to the recipient — DOCUMENT headers only. */
   filename?: string;

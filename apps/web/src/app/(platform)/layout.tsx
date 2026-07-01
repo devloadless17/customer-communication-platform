@@ -23,7 +23,12 @@ export default async function PlatformLayout({
   return (
     <div className="flex h-svh w-full flex-col overflow-hidden bg-background text-foreground md:flex-row">
       <PlatformRail
-        user={{ name: user.name, email: user.email, role: user.role }}
+        user={{
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          avatarUrl: user.avatarUrl ?? null,
+        }}
       />
       <main className="min-w-0 flex-1 overflow-y-auto">{children}</main>
     </div>

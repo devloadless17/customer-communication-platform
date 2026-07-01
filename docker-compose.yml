@@ -215,7 +215,8 @@ services:
       # We sit behind one trusted reverse proxy (Caddy on the host). The
       # rate limiter in middleware.ts uses this to pick the right XFF entry.
       TRUSTED_PROXY_HOPS: "1"
-      UPLOADTHING_TOKEN: ${UPLOADTHING_TOKEN}
+      # No R2 vars on web: media is streamed same-origin through the api's
+      # /api/media/* routes, so the web process never touches R2.
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
       # NEXT_PUBLIC_API_URL is intentionally NOT set at runtime. Next.js
       # inlines NEXT_PUBLIC_* into the client bundle at `next build` (see
@@ -326,7 +327,13 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v25.0}
-      UPLOADTHING_TOKEN: ${UPLOADTHING_TOKEN}
+      # Cloudflare R2 (private bucket) — all media + avatar uploads/serving.
+      # The api uploads bytes, presigns GETs, and lists/deletes objects.
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
+      R2_BUCKET: ${R2_BUCKET:-central-ccp}
+      R2_PRESIGN_TTL_SECONDS: ${R2_PRESIGN_TTL_SECONDS:-3600}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
       TRUSTED_PROXY_HOPS: "1"
       API_PORT: "4000"
@@ -373,7 +380,7 @@ services:
       INTERNAL_BUS_SECRET: ${INTERNAL_BUS_SECRET}
       # Optional: tunable Meta Graph fetch timeout. Default 15s.
       META_FETCH_TIMEOUT_MS: ${META_FETCH_TIMEOUT_MS:-}
-      # Orphan-blob sweeper cadence (UploadThing files referenced by no live
+      # Orphan-blob sweeper cadence (R2 objects referenced by no live
       # Message row). Default 6h — bumps to hourly on high-churn deploys.
       BLOB_ORPHAN_SWEEP_INTERVAL_MS: ${BLOB_ORPHAN_SWEEP_INTERVAL_MS:-21600000}
       # iOS voice-message transcode profile. Set 0 to disable the WhatsApp

@@ -142,7 +142,7 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Name or phone number"
-            className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-hidden focus-visible:border-foreground/30 focus-visible:ring-2 focus-visible:ring-foreground/10"
           />
         </div>
         <div className="flex flex-col gap-1">
@@ -155,7 +155,7 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
             value={from}
             max={to || undefined}
             onChange={(e) => setFrom(e.target.value)}
-            className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-hidden focus-visible:border-foreground/30 focus-visible:ring-2 focus-visible:ring-foreground/10"
           />
         </div>
         <div className="flex flex-col gap-1">
@@ -168,7 +168,7 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
             value={to}
             min={from || undefined}
             onChange={(e) => setTo(e.target.value)}
-            className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-hidden focus-visible:border-foreground/30 focus-visible:ring-2 focus-visible:ring-foreground/10"
           />
         </div>
         {(q !== "" || from !== "" || to !== "") && (

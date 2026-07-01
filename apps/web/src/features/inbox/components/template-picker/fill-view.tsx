@@ -5,7 +5,7 @@ import { AlertTriangle, Check, FileText, Loader2, Send } from "lucide-react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
 import { Button } from "@/components/ui/button";
-import { HeaderMediaField } from "@/features/templates/components/header-media-field";
+import { HeaderMediaField, headerMediaPreviewSrc } from "@/features/templates/components/header-media-field";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import type {
   Contact,
@@ -435,13 +435,13 @@ function PreviewBubble({
             headerMedia.kind === "image" ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={headerMedia.link}
+                src={headerMediaPreviewSrc(headerMedia.link)}
                 alt="Header preview"
                 className="mb-2 max-h-40 w-full rounded-md object-cover"
               />
             ) : headerMedia.kind === "video" ? (
               <video
-                src={headerMedia.link}
+                src={headerMediaPreviewSrc(headerMedia.link)}
                 className="mb-2 max-h-40 w-full rounded-md"
                 controls
                 muted

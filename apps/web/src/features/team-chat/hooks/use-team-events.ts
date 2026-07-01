@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { getClientSocket } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
@@ -11,11 +11,27 @@ import {
 import type { Contact, ConversationWithRefs, CursorPage } from "@ccp/shared/types";
 import type { Filter } from "@/features/inbox/components/inbox-controls";
 
+// Runs the effect BEFORE the browser paints (client), plain effect on the
+// server (avoids the "useLayoutEffect does nothing on the server" warning
+// during Next's SSR of this client component). Used for the filter-switch
+// reconcile so the stale-slice frame never paints — see the filter-change
+// effect below.
+const useIsomorphicLayoutEffect =
+  typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
 export interface TeamEventsState {
   conversations: ConversationWithRefs[];
   hasMore: boolean;
   loadingMore: boolean;
   loadMore: () => void;
+  /**
+   * True while a FILTER-SWITCH refetch is in flight. Lets the list show a
+   * skeleton (not the "all caught up" empty state) during the ~50-400ms fetch
+   * when the loaded slice has no rows for the new filter — otherwise Mine /
+   * Unassigned / Closed / stage tabs flash the empty state before their data
+   * lands, while All / Active (already in the loaded slice) don't.
+   */
+  refetching: boolean;
 }
 
 /**
@@ -141,6 +157,8 @@ export function useTeamEvents(
   );
   const [nextCursor, setNextCursor] = useState<string | null>(initialNextCursor);
   const [loadingMore, setLoadingMore] = useState(false);
+  // True only while a filter-switch refetch is in flight (see TeamEventsState).
+  const [refetching, setRefetching] = useState(false);
 
   // Stable filter ref so socket handlers + resync can read the latest
   // without re-binding on every change. Sync-assigned during render (not
@@ -417,7 +435,14 @@ export function useTeamEvents(
         : "calls"
     : "p:all";
   const lastFilterKeyRef = useRef<string | null>(null);
-  useEffect(() => {
+  // LAYOUT effect (not useEffect): the instant re-derive below must run BEFORE
+  // the browser paints. On a switch from a NARROW filter to a disjoint one
+  // (e.g. Active → Closed), the loaded slice has no matching rows, so a plain
+  // post-paint effect let the stale/empty frame paint for ~1 frame before the
+  // skeleton — the "bad flash" the user saw. Running it pre-paint means the
+  // skeleton (or the kept rows, for All/Active supersets) is what actually
+  // paints. The async fetch below is unchanged.
+  useIsomorphicLayoutEffect(() => {
     // Skip the initial mount — SSR data is current, no refetch needed.
     if (lastFilterKeyRef.current === null) {
       lastFilterKeyRef.current = filterKey;
@@ -439,6 +464,11 @@ export function useTeamEvents(
     setConversations((prev) =>
       prev.filter((row) => rowMatchesFilterFor(filter, currentUserId, row)),
     );
+
+    // Signal "loading" so the list shows a skeleton instead of the empty state
+    // when the instant re-derive above pruned to zero (loaded slice had no rows
+    // for this filter). Cleared when the fetch settles.
+    setRefetching(true);
 
     const params = filterParams(filter);
     fetchWithSessionGuard(`/api/conversations?${params.toString()}`)
@@ -482,6 +512,9 @@ export function useTeamEvents(
         // convention every sibling recovery path follows. Swallowing also
         // prevents an unhandled-promise-rejection that would pollute error
         // triage.
+      })
+      .finally(() => {
+        if (!cancelled) setRefetching(false);
       });
     return () => {
       cancelled = true;
@@ -1346,5 +1379,5 @@ export function useTeamEvents(
     // the SAME way; a useEffect-synced ref reintroduces the stale-first-event bug.
   }, [teamId, currentUserId]);
 
-  return { conversations, hasMore: nextCursor !== null, loadingMore, loadMore };
+  return { conversations, hasMore: nextCursor !== null, loadingMore, loadMore, refetching };
 }

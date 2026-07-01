@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@ccp/shared/utils";
-import { openAttachment } from "@/features/inbox/lib/open-attachment";
+import { downloadAttachment, openAttachment } from "@/features/inbox/lib/open-attachment";
 import { fileIconForName } from "@/features/inbox/lib/file-icon";
 import { MediaLightbox } from "@/features/inbox/components/attachments/media-lightbox";
 import type { MediaAttachment, MediaKind, Message } from "@ccp/shared/types";
@@ -694,15 +694,21 @@ function unavailablePresentation(kind: "image" | "video" | "audio" | "document")
 
 function DocumentBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }) {
   const DocIcon = fileIconForName(media.filename, media.kind);
-  // Open via the probe-aware helper instead of a raw <a target="_blank">.
-  // Without the probe a missing blob (upstream 404 / orphan-swept / never
-  // uploaded) yanks the user to the provider's branded 404 page; the helper
-  // surfaces a clean in-app toast and keeps them in the app.
+  // PDFs render inline in the browser's viewer, so open them in a new tab
+  // (probe-aware: a missing blob surfaces an in-app toast instead of a 404
+  // page). Everything else (Word/Excel/PowerPoint/zip/…) can't render inline —
+  // opening a tab would leave an empty about:blank behind while the download
+  // starts, so download it directly in place with its real filename.
+  const viewable = media.mimeType === "application/pdf";
   return (
     <button
       type="button"
       onClick={() => {
-        void openAttachment(media.url, media.filename ?? media.caption ?? null);
+        if (viewable) {
+          void openAttachment(media.url, media.filename ?? media.caption ?? null);
+        } else {
+          downloadAttachment(media.url);
+        }
       }}
       className={cn(
         "flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors",

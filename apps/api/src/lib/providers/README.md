@@ -54,7 +54,7 @@ every message row.
   `;codecs=opus` strip) live inline in `messages/messages.service.ts`. When a
   second channel adds media send, move those behind a provider method/capability
   rather than reading them here. NOTE: the blob-storage allowlist in
-  `lib/blob-storage/uploadthing.ts` is a STORAGE-level security boundary (it
+  `lib/blob-storage/mime-guard.ts` is a STORAGE-level security boundary (it
   excludes e.g. SVG for XSS) and is intentionally channel-agnostic — don't make
   it provider-aware; that's the wrong layer.
 - **Per-channel error normalization.** `normalizeMetaSendError` is Meta-specific.

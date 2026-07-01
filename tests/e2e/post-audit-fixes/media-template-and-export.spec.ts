@@ -3,14 +3,14 @@ import { test, expect } from "@playwright/test";
 /**
  * Post-audit (2026-06-11) coverage for the two new API surfaces:
  *   - media-header template send: POST /api/messages/template-header-media
- *     (the upload leg that stages an IMAGE/VIDEO/DOCUMENT header to UploadThing)
+ *     (the upload leg that stages an IMAGE/VIDEO/DOCUMENT header to R2)
  *   - contact-export capability gate: GET /api/contacts/export
  *
  * Runs under the chromium project's app-admin storageState (a regular admin,
  * so contacts:export defaults to true → export is allowed). Assertions are
- * deliberately tolerant of the upload provider (a CI env may carry a dummy
- * UPLOADTHING_TOKEN) — the point is that the routes EXIST, AUTH, and VALIDATE,
- * not that the blob store is live.
+ * deliberately tolerant of the upload provider (a CI env may carry dummy R2
+ * creds) — the point is that the routes EXIST, AUTH, and VALIDATE, not that the
+ * blob store is live.
  */
 
 test.describe("media-header template upload route", () => {

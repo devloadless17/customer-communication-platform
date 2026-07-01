@@ -2164,9 +2164,9 @@ export class MessagesService {
             // message vs. the previous strict serial order.
             //
             // The blob upload's `externalId` context field gets a
-            // placeholder (it's only used for diagnostic labelling on
-            // UploadThing's side); the canonical link to Meta lives on
-            // the Message row via `externalId` after the send completes.
+            // placeholder (it only shapes the R2 object key + label); the
+            // canonical link to Meta lives on the Message row via
+            // `externalId` after the send completes.
             const [uploaded, saved] = await Promise.all([
               uploadMedia(
                 { bytes: mb.bytes, mimeType: mb.mime, filename },
@@ -2184,7 +2184,14 @@ export class MessagesService {
                     contactPhone,
                     contactName: contact.name,
                     conversationId: conversation.id,
-                    externalId: "pending-meta-send",
+                    // MUST be unique per upload: the R2 provider derives the
+                    // object KEY deterministically from externalId (+kind+ext),
+                    // so a constant here would make every forwarded file of the
+                    // same kind in the same month collide onto ONE key and
+                    // overwrite each other (both bubbles then show the last
+                    // file). The old UploadThing provider minted its own unique
+                    // key so a constant was harmless; R2 does not.
+                    externalId: `fwd-${src.id}-${randomUUID()}`,
                     originalFilename: filename,
                   },
                 })
@@ -2425,11 +2432,12 @@ export class MessagesService {
 
   /**
    * Upload a media file for an IMAGE/VIDEO/DOCUMENT template header and return
-   * its public CDN link. Templates with a media header need the actual media
-   * supplied at SEND time as a public `link` (Meta fetches it). We store it on
-   * UploadThing — a link is reusable across recipients (broadcasts) and across
-   * the 24h gap, unlike Meta's single-use upload-media id. The returned link is
-   * then passed back as `variables.headerMedia.link` on the template send.
+   * its STABLE R2 object link. Templates with a media header need the actual
+   * media supplied at SEND time as a `link` Meta fetches — the send path
+   * presigns this stable link fresh (send-template-internal.ts). A stored key
+   * is reusable across recipients (broadcasts) and across the 24h gap, unlike
+   * Meta's single-use upload-media id. The returned link is passed back as
+   * `variables.headerMedia.link` on the template send.
    */
   async uploadTemplateHeaderMedia(
     teamId: string,

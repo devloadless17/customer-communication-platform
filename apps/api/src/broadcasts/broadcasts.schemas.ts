@@ -58,7 +58,7 @@ export const BroadcastVariablesSchema = z.object({
   body: z.array(z.string()).default([]),
   header: z.string().optional(),
   // Campaign-level media for an IMAGE/VIDEO/DOCUMENT template header — a single
-  // public link (UploadThing) reused across every recipient.
+  // stable R2 object link (presigned fresh per send) reused across recipients.
   headerMedia: z
     .object({
       kind: z.enum(["image", "video", "document"]),

@@ -5,15 +5,24 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Get,
+  Headers,
+  NotFoundException,
   Post,
+  Query,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
+import type { Response } from "express";
 import { diskStorage } from "multer";
 import { randomUUID } from "node:crypto";
 
+import { blobStorage } from "@/lib/blob-storage";
+
+import { streamBlob } from "../media/stream-blob";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
@@ -142,10 +151,30 @@ export class MessagesController {
   }
 
   /**
+   * Preview for staged template-header media. The upload below returns a STABLE
+   * (private, non-fetchable) R2 object URL as `link`; the composer renders its
+   * thumbnail through this authenticated route, which validates the URL is ours
+   * and STREAMS the object same-origin. Keeps the persisted / sent `link`
+   * signature-free while still previewing.
+   */
+  @Get("template-header-media")
+  async previewTemplateHeaderMedia(
+    @Query("url") rawUrl: string | undefined,
+    @Headers("range") range: string | undefined,
+    @Res() res: Response,
+  ): Promise<void> {
+    if (!rawUrl || !blobStorage.isOwnUrl(rawUrl)) {
+      throw new NotFoundException({ error: "not_found" });
+    }
+    await streamBlob(res, rawUrl, range);
+  }
+
+  /**
    * Upload a media file for an IMAGE/VIDEO/DOCUMENT template header. Returns a
-   * public link (UploadThing) the caller passes back as
-   * `variables.headerMedia.link` on the subsequent template send. Separate
-   * from `media` (which sends a message) — this only stages the header media.
+   * STABLE R2 object URL the caller passes back as `variables.headerMedia.link`
+   * on the subsequent template send (presigned fresh at send time so Meta can
+   * fetch it). Separate from `media` (which sends a message) — this only stages
+   * the header media. Preview it via GET /api/messages/template-header-media.
    */
   @Post("template-header-media")
   @UseInterceptors(

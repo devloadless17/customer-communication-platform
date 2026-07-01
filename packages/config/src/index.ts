@@ -100,12 +100,24 @@ const prodRequired: Check[] = [
       "loopback bucket). Set to '1' for the default single-Caddy topology.",
   },
   {
-    name: "UPLOADTHING_TOKEN",
+    name: "R2_ACCOUNT_ID",
     hint:
-      "Blob storage token. Without it EVERY inbound media message is silently " +
-      "swallowed (the webhook records a text-only bubble with no image — the " +
-      "agent never sees the customer's attachment). Promoted to prodRequired " +
-      "after that exact failure mode shipped on a prior misconfiguration.",
+      "Cloudflare R2 account id (the <id> in <id>.r2.cloudflarestorage.com). " +
+      "Part of the blob-storage credentials — without them EVERY inbound media " +
+      "message is silently swallowed (the webhook records a text-only bubble " +
+      "with no image; the agent never sees the customer's attachment).",
+  },
+  {
+    name: "R2_ACCESS_KEY_ID",
+    hint: "Cloudflare R2 S3 API access key id (Object Read & Write token).",
+  },
+  {
+    name: "R2_SECRET_ACCESS_KEY",
+    hint: "Cloudflare R2 S3 API secret access key.",
+  },
+  {
+    name: "R2_BUCKET",
+    hint: "R2 bucket name that stores all media + avatars (e.g. central-ccp).",
   },
 ];
 
@@ -257,6 +269,9 @@ export function validateEnv(label: "api" | "web" = "api"): void {
       { name: "WEBHOOK_WORKER_CONCURRENCY", min: 1, max: 1000 },
       { name: "WEBHOOK_DELIVERY_RETENTION_DAYS", min: 1, max: 3650 },
       { name: "WEBHOOK_ORPHAN_GRACE_MS", min: 1000, max: 86_400_000 },
+      // SigV4 presigned URLs cap at 7 days (604800s). Keep the default (3600)
+      // unless a slow Meta broadcast-header fetch needs longer.
+      { name: "R2_PRESIGN_TTL_SECONDS", min: 60, max: 604_800 },
     ];
     for (const v of positiveIntVars) {
       const raw = process.env[v.name];

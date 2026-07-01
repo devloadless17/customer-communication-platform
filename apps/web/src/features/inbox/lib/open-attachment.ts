@@ -5,21 +5,13 @@ import { toast } from "@/lib/toast";
  * user never lands on the blob provider's branded 404 page when a file is
  * missing (deleted, never uploaded, or expired upstream).
  *
- * Two probe paths, depending on the URL shape:
- *
- *   - `/api/media/<id>` (customer messages): the route accepts `?probe=1`
- *     and short-circuits with `{ available: boolean }` instead of issuing
- *     the 302 redirect.
- *   - Raw provider URLs (team-chat messages, where the upstream URL is
- *     embedded directly in the row payload): go through the generic
- *     `/api/media/probe?url=` endpoint, which HEADs the upstream after
- *     validating the host against the active provider's allow-list.
- *
- * Either way the answer is "is this file actually fetchable right now",
- * and the client only opens a tab when the answer is yes. Probe failures
- * (network error, timeout) fall through to opening the tab — the upstream
- * 404 page is still better UX than a false-positive toast blocking a
- * working link.
+ * Every media URL is now one of our own same-origin proxy routes
+ * (`/api/media/<id>`, `/api/team/channels/.../media`, …). Each accepts
+ * `?probe=1` and short-circuits with `{ available: boolean }` (a cheap
+ * server-side existence check) instead of streaming the bytes. The client
+ * only opens a tab when the answer is yes. Probe failures (network error,
+ * timeout) fall through to opening the tab — a plain 404 is still better UX
+ * than a false-positive toast blocking a working link.
  */
 export async function openAttachment(url: string, filename?: string | null): Promise<void> {
   // I-9: open the tab SYNCHRONOUSLY, inside the user-gesture call stack. Browsers
@@ -75,8 +67,24 @@ export async function openAttachment(url: string, filename?: string | null): Pro
 }
 
 function buildProbeUrl(url: string): string {
-  if (url.startsWith("/api/media/")) {
-    return url.includes("?") ? `${url}&probe=1` : `${url}?probe=1`;
-  }
-  return `/api/media/probe?url=${encodeURIComponent(url)}`;
+  // All media URLs are our own same-origin proxy routes that accept ?probe=1.
+  return url.includes("?") ? `${url}&probe=1` : `${url}?probe=1`;
+}
+
+/**
+ * Download a file directly — no tab, no navigation. For file types the browser
+ * can't render inline (Word / Excel / PowerPoint / zip / …), opening a tab just
+ * leaves an empty `about:blank` behind while the download starts. Instead we
+ * hit `?download=1` (the api responds `Content-Disposition: attachment` with the
+ * real filename) via a transient same-origin anchor, so the browser downloads
+ * in place. Use `openAttachment` for VIEWABLE types (PDF/images) instead.
+ */
+export function downloadAttachment(url: string): void {
+  const dl = url.includes("?") ? `${url}&download=1` : `${url}?download=1`;
+  const a = document.createElement("a");
+  a.href = dl;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }

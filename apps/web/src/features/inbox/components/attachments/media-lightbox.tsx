@@ -173,14 +173,12 @@ export function MediaLightbox({
             size="sm"
             className="text-white hover:bg-white/10 hover:text-white"
           >
-            {/* `/api/media/<id>` 302-redirects to a cross-origin CDN, where the
-                `download` attribute is ignored. Without target=_blank the click
-                navigated the whole tab to the file, kicking the agent out of the
-                inbox. Open in a new tab instead so the inbox stays put. */}
+            {/* `?download=1` makes the api send `Content-Disposition: attachment`,
+                so this same-origin click downloads the file (with its original
+                name) WITHOUT navigating the tab away from the inbox. No
+                `download` attr / `target=_blank` needed — the server drives it. */}
             <a
-              href={current.media.url}
-              download={current.media.filename ?? undefined}
-              target="_blank"
+              href={`${current.media.url}${current.media.url.includes("?") ? "&" : "?"}download=1`}
               rel="noopener noreferrer"
             >
               <ArrowDownToLine className="size-4" />

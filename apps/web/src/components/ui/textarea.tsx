@@ -11,8 +11,8 @@ export function Textarea({ className, ...props }: TextareaProps) {
       className={cn(
         "flex min-h-15 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs transition-[color,box-shadow,border-color]",
         "placeholder:text-muted-foreground",
-        // Shared form-control focus recipe (see input.tsx): border-ring + soft halo.
-        "focus-visible:outline-hidden focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30",
+        // Shared form-control focus recipe (see input.tsx): neutral border tint + soft halo.
+        "focus-visible:outline-hidden focus-visible:border-foreground/30 focus-visible:ring-2 focus-visible:ring-foreground/10",
         "disabled:cursor-not-allowed disabled:opacity-50",
         "resize-none",
         className,

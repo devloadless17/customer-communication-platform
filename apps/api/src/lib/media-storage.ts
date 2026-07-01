@@ -2,7 +2,7 @@ import type { MediaKind } from "@ccp/shared/types";
 
 /**
  * Mime-type helpers + per-kind size caps. The actual byte storage lives behind
- * `lib/blob-storage/` (UploadThing today, swappable later). This module
+ * `lib/blob-storage/` (Cloudflare R2 today, swappable later). This module
  * intentionally has no filesystem access.
  *
  * Caps mirror Meta's documented per-type limits. Outbound uploads hit these

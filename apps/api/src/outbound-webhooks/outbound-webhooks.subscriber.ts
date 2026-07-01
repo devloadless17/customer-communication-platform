@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import type { Channel as ChannelMedium } from "@prisma/client";
 
+import { toExternalMediaUrl } from "@/lib/blob-storage";
 import { subscribe, SubscriberPriority } from "@/lib/events/bus";
 import type {
   AssigneeInfo,
@@ -426,8 +427,12 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       if (!msg) continue;
       msg.external_id = row.externalId ?? null;
       if (msg.media) {
-        msg.media.url = row.mediaUrl ?? null;
-        msg.media.thumbnail_url = row.mediaThumbnailUrl ?? null;
+        // Presign into fetchable URLs — the stored urls point at the PRIVATE R2
+        // bucket (403 for the webhook receiver). See toExternalMediaUrl. A
+        // slow-upload row still null here is filled + presigned later by the
+        // worker's resolvePendingMediaUrl.
+        msg.media.url = await toExternalMediaUrl(row.mediaUrl);
+        msg.media.thumbnail_url = await toExternalMediaUrl(row.mediaThumbnailUrl);
       }
       if (row.replyToMessageId && msg.reply_to == null) {
         const list = quotedIdToTargets.get(row.replyToMessageId) ?? [];

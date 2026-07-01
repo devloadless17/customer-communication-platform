@@ -50,7 +50,7 @@ test.describe("Security: MIME magic-byte sniff on team-chat media upload", () =>
     request,
   }) => {
     // The team-chat media controller (channels.controller.ts:362) routes
-    // through blob-storage/uploadthing.ts → assertSignatureMatches.
+    // through blob-storage/mime-guard.ts → assertSignatureMatches.
     // SVG bytes: starts with "<?xml" or "<svg"; sniff returns null
     // (not in the table) so the gate passes... but a PNG-labeled GIF
     // (different family) WOULD fail. Let's test the unambiguous case:
@@ -112,12 +112,11 @@ test.describe("Security: MIME magic-byte sniff on team-chat media upload", () =>
       },
     );
     // The sniff runs BEFORE the upload call, so any status that proves
-    // bytes reached UploadThing confirms the sniffer passed. Acceptable:
-    //   200/201 — upload succeeded
-    //   500    — UploadThing returned 409 "File already exists" (UT
-    //            dedupes by content hash; the deterministic 1×1 PNG
-    //            fixture hits dedup on every run after the first)
-    //   502/503 — UploadThing unreachable in local stack
+    // bytes reached R2 confirms the sniffer passed. Acceptable:
+    //   200/201 — upload succeeded (deterministic key just overwrites on
+    //             repeat runs — R2 PutObject is idempotent, no 409)
+    //   500    — R2 misconfigured/unreachable in the local stack
+    //   502/503 — R2 unreachable in the local stack
     // What's NOT acceptable is a 400-class signature refusal, which would
     // mean the sniffer rejected valid PNG bytes — the actual concern.
     expect([200, 201, 500, 502, 503]).toContain(resp.status());

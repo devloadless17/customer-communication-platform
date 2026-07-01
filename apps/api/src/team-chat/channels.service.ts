@@ -1403,7 +1403,7 @@ export class ChannelsService {
    * stays symmetric. The controller 302-redirects to the returned URL; the
    * raw CDN URL is never embedded in the message DTO (M4).
    */
-  async getMessageMediaUrl(
+  async getMessageMediaKey(
     teamId: string,
     userId: string,
     channelId: string,
@@ -1412,15 +1412,15 @@ export class ChannelsService {
     await this.requireChannelMembership(teamId, userId, channelId);
     const message = await this.db.teamChannelMessage.findFirst({
       where: { id: messageId, channelId, teamId },
-      select: { mediaUrl: true },
+      select: { mediaKey: true },
     });
-    // Indistinguishable from "no such message" on the missing / non-own-url
-    // paths so we don't teach the caller the validation rules — same posture
-    // as MediaController.get's open-redirect guard.
-    if (!message?.mediaUrl || !blobStorage.isOwnUrl(message.mediaUrl)) {
+    // Indistinguishable from "no such message" on the missing path so we don't
+    // teach the caller the validation rules. The controller streams the object
+    // same-origin from this key (private bucket, no URL ever exposed).
+    if (!message?.mediaKey) {
       throw new NotFoundException({ error: "not_found" });
     }
-    return message.mediaUrl;
+    return message.mediaKey;
   }
 
   // ---- helpers ----------------------------------------------------------

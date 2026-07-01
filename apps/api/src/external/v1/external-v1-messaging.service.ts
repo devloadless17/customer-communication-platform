@@ -18,9 +18,25 @@ import {
   EXTERNAL_CONVERSATION_INCLUDE,
   type ExternalMessage,
 } from "@/lib/external-shapes";
+import { toExternalMediaUrl } from "@/lib/blob-storage";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { MAX_CHAIN_DEPTH } from "@/lib/workflows/events";
+
+/**
+ * Presign an ExternalMessage's media links so a `/v1` API caller can actually
+ * fetch them — `toExternalMessage` emits the stored PRIVATE R2 urls (403 to
+ * anyone outside our process). Legacy/foreign urls pass through. Applied at
+ * every response site that returns a message. See toExternalMediaUrl.
+ */
+async function withPresignedMedia(msg: ExternalMessage): Promise<ExternalMessage> {
+  if (!msg.media) return msg;
+  const [url, thumbnailUrl] = await Promise.all([
+    toExternalMediaUrl(msg.media.url),
+    toExternalMediaUrl(msg.media.thumbnailUrl),
+  ]);
+  return { ...msg, media: { ...msg.media, url, thumbnailUrl } };
+}
 
 import {
   sendTemplateInternal,
@@ -501,7 +517,9 @@ export class ExternalV1MessagingService {
       take: q.limit + 1,
       ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
     });
-    const items = rows.slice(0, q.limit).map(toExternalMessage);
+    const items = await Promise.all(
+      rows.slice(0, q.limit).map((r) => withPresignedMedia(toExternalMessage(r))),
+    );
     const lastItem = items[items.length - 1];
     const nextCursor = rows.length > q.limit && lastItem ? lastItem.id : null;
     return { conversation: conversationRowToExternal(conv), items, nextCursor };
@@ -517,7 +535,7 @@ export class ExternalV1MessagingService {
     });
     if (!row) throw new NotFoundException({ error: "message_not_found", detail: "message not found" });
     return {
-      message: toExternalMessage(row),
+      message: await withPresignedMedia(toExternalMessage(row)),
       conversation: conversationRowToExternal(row.conversation),
     };
   }
@@ -818,7 +836,7 @@ export class ExternalV1MessagingService {
       },
     });
 
-    const result = { message: toExternalMessage(created) };
+    const result = { message: await withPresignedMedia(toExternalMessage(created)) };
 
     // Complete the claim — flip the pending sentinel to the real response.
     // AWAITED (not fire-and-forget) so concurrent retries arriving at the
@@ -1101,7 +1119,7 @@ export class ExternalV1MessagingService {
         });
         out = {
           ok: true,
-          message: toExternalMessage(message),
+          message: await withPresignedMedia(toExternalMessage(message)),
           clientTempId: input.client_temp_id ?? null,
         };
       } catch (err) {

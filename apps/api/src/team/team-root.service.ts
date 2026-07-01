@@ -17,7 +17,7 @@ import { EventBus } from "../events/event-bus.module";
  *   - DELETE /api/team          (admin removing their own org)
  *   - DELETE /api/admin/teams/:id (superAdmin removing any org)
  *
- * Blob cleanup is best-effort: a partial UploadThing failure leaves orphan
+ * Blob cleanup is best-effort: a partial R2 failure leaves orphan
  * files but does NOT block the DB delete. Orphans cost storage, not
  * correctness.
  */
@@ -209,9 +209,9 @@ export class TeamRootService {
     }
 
     // Fire-and-forget blob cleanup. blobStorage.delete promises never
-    // throw — UploadThing's deleteFiles is the underlying call and it
-    // batches internally, but throwing thousands of keys in one POST
-    // can hit their request-size cap on a chatty large team. Chunk to
+    // throw — R2's DeleteObjects is the underlying call and it batches
+    // internally (≤1000/req), but throwing thousands of keys in one POST
+    // can hit the request-size cap on a chatty large team. Chunk to
     // 500 keys per call so the worst-case is ~20 sequential batch calls
     // for a 10k-key team, not one giant payload. Sequential (not
     // parallel) inside the fire-and-forget: this is post-delete cleanup,

@@ -23,7 +23,7 @@
 FROM node:24-slim AS base
 WORKDIR /app
 # openssl: required by Prisma's query engine.
-# ca-certificates: HTTPS to Meta, HIBP, UploadThing.
+# ca-certificates: HTTPS to Meta, HIBP, Cloudflare R2.
 # wget: minimal health-check CLI used by compose's wget-based probes.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssl ca-certificates wget \

@@ -12,6 +12,7 @@ import {
   createWebhookWorkerConnection,
   type WebhookDeliverJobData,
 } from "./queue";
+import { toExternalMediaUrl } from "@/lib/blob-storage";
 import { db } from "@/lib/db";
 import { recordJobFailure } from "@/common/job-failure-metrics";
 import { decryptSecret } from "@/lib/crypto/envelope";
@@ -604,12 +605,20 @@ async function resolvePendingMediaUrl(
       select: { mediaUrl: true, mediaThumbnailUrl: true, mediaKind: true },
     });
     if (row?.mediaUrl) {
+      // The stored url points at the PRIVATE R2 bucket (403 for the webhook
+      // receiver). Presign both the media + thumbnail into fetchable URLs so an
+      // external consumer can actually download the attachment (legacy/foreign
+      // urls pass through untouched). See toExternalMediaUrl.
+      const [signedUrl, signedThumb] = await Promise.all([
+        toExternalMediaUrl(row.mediaUrl),
+        toExternalMediaUrl(row.mediaThumbnailUrl),
+      ]);
       // Defensive shallow-copy of the media object before mutating: replace the
       // reference on `message.media` rather than rewriting the existing object
       // in place. BullMQ retry is already idempotent (we re-read delivery.payload
       // on each attempt), but if a future caller ever shares the payload
       // reference, in-place mutation here would leak through unexpectedly.
-      message!.media = { ...media, url: row.mediaUrl, thumbnail_url: row.mediaThumbnailUrl ?? media.thumbnail_url ?? null };
+      message!.media = { ...media, url: signedUrl, thumbnail_url: signedThumb ?? media.thumbnail_url ?? null };
       return;
     }
     // mediaKind cleared → the download failed and the message fell back to

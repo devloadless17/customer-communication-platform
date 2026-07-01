@@ -146,7 +146,7 @@ export function TeamStatusControls({
             rows={2}
             maxLength={500}
             placeholder="e.g. Payment overdue — contact billing to restore."
-            className="w-full resize-none rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            className="w-full resize-none rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-hidden focus-visible:border-foreground/30 focus-visible:ring-2 focus-visible:ring-foreground/10"
           />
           <div className="flex justify-end gap-2">
             <Button

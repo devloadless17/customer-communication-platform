@@ -14,7 +14,7 @@ import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
 import {
   AvatarUploadError,
-  deleteAvatarByUrl,
+  deleteAvatar,
   uploadAvatar,
 } from "../lib/blob-storage/avatar";
 import { mapUser } from "../lib/queries/_shared";
@@ -83,7 +83,14 @@ export class UsersService {
   ): Promise<User> {
     const data: { name?: string; avatarUrl?: string | null } = {};
     if (typeof input.name === "string") data.name = input.name;
-    if (input.avatarUrl !== undefined) data.avatarUrl = input.avatarUrl;
+    // `avatarUrl` is server-managed (see users.schemas): clients may only send
+    // `null` to clear. Setting it is done by uploadMyAvatar. On clear, GC the
+    // R2 object too (the orphan sweeper skips the `avatars/` prefix, so it
+    // would otherwise leak forever).
+    if (input.avatarUrl === null) {
+      data.avatarUrl = null;
+      await deleteAvatar(userId);
+    }
 
     // Default-select returns the full row — including the availability
     // columns mapUser carries through. Cheap (single-row read), and lets
@@ -174,34 +181,33 @@ export class UsersService {
     file: AvatarUploadFile,
   ): Promise<{ url: string }> {
     try {
-      const prev = await this.db.user.findUnique({
-        where: { id: userId },
-        select: { avatarUrl: true },
-      });
-      const out = await uploadAvatar({
+      await uploadAvatar({
         userId,
         bytes: file.bytes,
         mimeType: file.mimeType,
         originalFilename: file.originalFilename,
       });
+      // `avatarUrl` holds a STABLE same-origin route path — the bucket is
+      // private, so the UI can't render an R2 URL directly; it renders this
+      // route, which auth-checks then 302s to a fresh presigned URL. The
+      // avatar object key is deterministic (`avatars/{userId}`), so a replace
+      // overwrites in place — no prior blob to GC.
+      // `?v` busts the browser/img cache on replace — the route path itself is
+      // stable (deterministic key), so without a version a swapped avatar would
+      // keep showing the old cached image.
+      const avatarUrl = `/api/users/${userId}/avatar?v=${Date.now()}`;
       await this.db.user.update({
         where: { id: userId },
-        data: { avatarUrl: out.url },
+        data: { avatarUrl },
       });
-      // GC the prior avatar blob now that the row points at the new one — the
-      // timestamped customId means the old blob would otherwise leak forever
-      // (the orphan sweeper skips the `avatar-` prefix). Best-effort.
-      if (prev?.avatarUrl && prev.avatarUrl !== out.url) {
-        await deleteAvatarByUrl(prev.avatarUrl);
-      }
       this.sessionInvalidator.bustCache(userId);
       await this.bus.publish({
         type: "user.profile_updated",
         teamId,
         userId,
-        avatarUrl: out.url,
+        avatarUrl,
       });
-      return { url: out.url };
+      return { url: avatarUrl };
     } catch (err) {
       if (err instanceof AvatarUploadError) {
         if (err.code === "unsupported_mime" || err.code === "empty_file" || err.code === "too_large") {
@@ -211,6 +217,20 @@ export class UsersService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Does this user (scoped to the caller's team) have an avatar object? Gates
+   * the `GET /api/users/:userId/avatar` presign route — 404 otherwise so we
+   * never redirect to a nonexistent R2 object. Team-scoped so one team can't
+   * probe another's avatars.
+   */
+  async hasAvatar(teamId: string, userId: string): Promise<boolean> {
+    const row = await this.db.user.findFirst({
+      where: { id: userId, teamId },
+      select: { avatarUrl: true },
+    });
+    return Boolean(row?.avatarUrl);
   }
 
   async list(teamId: string): Promise<User[]> {

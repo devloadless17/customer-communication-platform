@@ -1,15 +1,41 @@
 /**
  * Cross-provider blob storage interface. CLAUDE.md rule #1 applied to media:
- * the app talks to this interface, never directly to UploadThing's API shape,
- * so swapping in S3 / R2 / Supabase later only adds a new impl under
- * lib/blob-storage/ — call sites don't move.
+ * the app talks to this interface, never directly to a vendor's API shape, so
+ * swapping the provider only adds a new impl under lib/blob-storage/ — call
+ * sites don't move.
  *
- * The "key" returned from upload is the provider's reference for the file
- * (UploadThing fileKey, S3 object key, etc). It's what we hand back to
- * `delete`. The "url" is the public CDN URL we serve to browsers.
+ * The "key" returned from upload is the provider's reference for the file (S3 /
+ * R2 object key). It's what we hand back to `delete` and `presignGetUrl`, and it
+ * is the CANONICAL identifier we persist. The "url" is a STABLE object address
+ * for the key — with the R2 impl the bucket is private, so this url is NOT
+ * directly fetchable; serving always goes through `presignGetUrl(key)`. Keeping
+ * the key canonical means changing domain / serving model later is a code-only
+ * change with no DB migration.
  */
 
+import type { Readable } from "node:stream";
+
 import type { MediaKind } from "@ccp/shared/types";
+
+/** Thrown by `getObject` when the key doesn't exist (maps to a 404 at the edge). */
+export class BlobObjectNotFoundError extends Error {
+  constructor(public readonly key: string) {
+    super(`blob object not found: ${key}`);
+    this.name = "BlobObjectNotFoundError";
+  }
+}
+
+/** A streamable object read — proxied to the browser same-origin (no redirect). */
+export interface BlobObjectStream {
+  body: Readable;
+  contentType: string;
+  /** Present on a full (200) response; absent on some range responses. */
+  contentLength?: number;
+  /** Present on a 206 partial response. */
+  contentRange?: string;
+  acceptRanges: string;
+  statusCode: 200 | 206;
+}
 
 /** Pieces of context used to build a human-readable filename in the provider's dashboard. */
 export interface MediaNameContext {
@@ -42,17 +68,42 @@ export interface UploadInput {
 }
 
 export interface UploadResult {
-  /** Provider key — pass to `delete` later. (UploadThing: fileKey) */
+  /** Provider key — pass to `delete` / `presignGetUrl` later. (R2/S3 object key) */
   key: string;
-  /** Public CDN URL the browser should load. */
+  /**
+   * Stable object address for the key. With a private bucket this is NOT
+   * directly fetchable — it's a durable identifier that (a) doubles as the
+   * "media ready" sentinel on the row and (b) lets `isOwnUrl` recover the key.
+   * Serve to browsers via `presignGetUrl(key)`, never this url directly.
+   */
   url: string;
   sizeBytes: number;
 }
 
 export interface BlobStorageProvider {
-  name: "uploadthing" | (string & {});
-  /** Upload bytes; returns the key + public URL. */
+  name: "r2" | (string & {});
+  /** Upload bytes; returns the key + stable object url. */
   upload(input: UploadInput): Promise<UploadResult>;
+  /**
+   * Stream a stored object back for a same-origin proxy response (how browsers
+   * fetch media — we never hand the browser a storage URL). Accepts a key or
+   * one of our own stable object URLs. `range` forwards the client's Range
+   * header so <video>/<audio> seeking works (returns a 206 with Content-Range).
+   * Throws `BlobObjectNotFoundError` when the key is missing.
+   */
+  getObject(keyOrUrl: string, opts?: { range?: string }): Promise<BlobObjectStream>;
+  /**
+   * Presign a short-lived GET URL — used ONLY where a third party must fetch
+   * the object directly (Meta fetching template-header media). Browser media
+   * goes through `getObject` instead. Accepts a key or one of our own stable
+   * object URLs (isOwnUrl-gated) so call sites that persisted only a url
+   * (header media threaded through workflow/broadcast config) can presign fresh
+   * at send time without re-plumbing a key field.
+   */
+  presignGetUrl(
+    keyOrUrl: string,
+    opts?: { ttlSeconds?: number; downloadFilename?: string },
+  ): Promise<string>;
   /** Delete one or many keys. Idempotent — missing keys must NOT throw. */
   delete(keys: string | string[]): Promise<void>;
   /**
@@ -72,22 +123,24 @@ export interface BlobStorageProvider {
    * Enumerate stored blobs in pages. Used by the blob-orphan sweeper to
    * cross-check provider state against the DB and reclaim leaked uploads
    * (e.g. a contact delete whose blobStorage.delete() got swallowed by a
-   * transient UploadThing outage). `uploadedAt` is unix-ms so the sweeper
-   * can skip recent uploads and avoid racing with in-flight sends.
+   * transient provider outage). `uploadedAt` is unix-ms so the sweeper can
+   * skip recent uploads and avoid racing with in-flight sends.
    *
-   * Returns `null` when the provider has no list capability — sweeper
-   * treats that as "no orphan cleanup possible" rather than throwing,
-   * keeping providers without a list API still usable for upload/delete.
+   * Pagination is cursor-based (S3/R2 ListObjectsV2 continuation token) — pass
+   * `cursor` from the previous page's `nextCursor`; a nullish `nextCursor`
+   * means the listing is exhausted.
+   *
+   * Returns `null` when the provider has no list capability — sweeper treats
+   * that as "no orphan cleanup possible" rather than throwing.
    */
   listKeys?(opts: {
     limit: number;
-    offset: number;
+    cursor?: string;
   }): Promise<{
-    // `customId` lets the sweeper tell apart blob categories that are NOT
-    // cross-checked against a `mediaKey` column (e.g. avatars, which persist
-    // only a URL) so they aren't mistaken for orphans. Null when the provider
-    // didn't record one.
-    keys: ReadonlyArray<{ key: string; uploadedAt: number; customId: string | null }>;
-    hasMore: boolean;
+    // Blob categories NOT cross-checked against a `mediaKey` column (avatars,
+    // which persist only a URL) are told apart by KEY PREFIX (`avatars/`), so
+    // no per-object customId is needed anymore.
+    keys: ReadonlyArray<{ key: string; uploadedAt: number }>;
+    nextCursor?: string;
   }>;
 }

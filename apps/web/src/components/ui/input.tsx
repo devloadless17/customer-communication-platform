@@ -13,10 +13,12 @@ export function Input({ className, type, ...props }: InputProps) {
         "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-[color,box-shadow,border-color]",
         "placeholder:text-muted-foreground",
         // Form-control focus recipe (shared verbatim by Input/Textarea/Select):
-        // border shifts to the ring color + a soft same-color halo hugs the
-        // field. No offset ring (that's the button/switch category) — this is
-        // the modern Linear/Stripe input treatment.
-        "focus-visible:outline-hidden focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30",
+        // a NEUTRAL focus — the border darkens to a foreground tint + a soft
+        // neutral halo hugs the field. Deliberately not the brand-green ring
+        // (that read as loud/dated on a large field); this is the quiet
+        // Linear/Vercel input treatment. Keyboard-nav a11y is still covered by
+        // the global :focus-visible outline for non-input controls.
+        "focus-visible:outline-hidden focus-visible:border-foreground/30 focus-visible:ring-2 focus-visible:ring-foreground/10",
         "file:border-0 file:bg-transparent file:text-sm file:font-medium",
         "disabled:cursor-not-allowed disabled:opacity-50",
         className,

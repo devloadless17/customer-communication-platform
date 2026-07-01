@@ -982,6 +982,7 @@ export function InboxShell({
   const conversationList = live.conversations;
   const hasMore = live.hasMore;
   const loadingMore = live.loadingMore;
+  const listRefetching = live.refetching;
   const loadMore = live.loadMore;
 
   // useConnectionStatus is mounted for its side effect only; ConnectionBanner
@@ -1215,6 +1216,7 @@ export function InboxShell({
               onSearchChange={setSearch}
               hasMore={hasMore}
               loadingMore={loadingMore}
+              listRefetching={listRefetching}
               onLoadMore={loadMore}
               activeConversationId={activeId}
               pendingConversationId={pendingId}

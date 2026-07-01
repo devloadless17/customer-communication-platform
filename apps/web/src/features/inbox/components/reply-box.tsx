@@ -1273,7 +1273,12 @@ export function ReplyBox({
         </div>
 
         <motion.div
-          layout
+          // NO `layout`: it made framer-motion spring-animate every size change
+          // — including the WIDTH change while the user drags the list/thread
+          // resize handle, so the composer visibly lagged behind the edge in
+          // slow motion. The inner reply-pill / attachment previews animate
+          // their own height via AnimatePresence, so the card still grows
+          // smoothly on content changes without the outer layout animation.
           // Drag-and-drop a file anywhere onto the composer card to attach it
           // (mirrors the paste-to-attach path). No-op in note / closed-window
           // mode where attachments aren't allowed.
@@ -1289,8 +1294,13 @@ export function ReplyBox({
             }
           }}
           className={cn(
-            "relative rounded-xl border transition-colors",
-            isNote ? "border-note-border bg-note-bg/40" : "border-border bg-card",
+            // Neutral focus-within on the CARD (matches the input.tsx recipe):
+            // border darkens + soft neutral halo when the textarea inside is
+            // focused. Replaces the old loud green ring.
+            "relative rounded-xl border transition-[color,box-shadow,border-color] focus-within:ring-2 focus-within:ring-foreground/10",
+            isNote
+              ? "border-note-border bg-note-bg/40 focus-within:border-note-border"
+              : "border-border bg-card focus-within:border-foreground/30",
           )}
         >
           <AnimatePresence>
@@ -1395,7 +1405,10 @@ export function ReplyBox({
               // min-h floor up to max-h-48, then scrolls internally — so a
               // multi-line reply is fully visible instead of trapped in a
               // fixed 88px window.
-              "max-h-48 min-h-22 resize-none overflow-y-auto border-0 bg-transparent px-3.5 py-3 text-sm shadow-none transition-[box-shadow] field-sizing-content focus-visible:ring-1 focus-visible:ring-ring/40",
+              // No focus ring on the textarea itself — the composer CARD shows
+              // the focus state (focus-within) so we don't double up. Green ring
+              // removed here too (see input.tsx neutral recipe).
+              "max-h-48 min-h-22 resize-none overflow-y-auto border-0 bg-transparent px-3.5 py-3 text-sm shadow-none focus-visible:ring-0 field-sizing-content",
               !isNote && windowClosed && "cursor-not-allowed opacity-60",
             )}
             onKeyDown={(e) => {

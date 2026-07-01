@@ -22,9 +22,16 @@ const HEADER_MEDIA_ACCEPT: Record<HeaderMediaKind, string> = {
 /**
  * Attach + preview control for an IMAGE/VIDEO/DOCUMENT template header. Shared
  * by the inbox template picker and the broadcast composer — both POST the file
- * to `/api/messages/template-header-media` and pass the returned public link
- * back as `variables.headerMedia` on the send.
+ * to `/api/messages/template-header-media` and pass the returned link back as
+ * `variables.headerMedia` on the send.
+ *
+ * The returned `link` is a stable, private R2 object URL (not directly
+ * fetchable). To preview it, render through the authenticated GET presign
+ * route rather than the raw link.
  */
+export function headerMediaPreviewSrc(link: string): string {
+  return `/api/messages/template-header-media?url=${encodeURIComponent(link)}`;
+}
 export function HeaderMediaField({
   kind,
   media,
@@ -47,9 +54,9 @@ export function HeaderMediaField({
       <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-2">
         {media.kind === "image" ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={media.link} alt="" className="size-12 shrink-0 rounded object-cover" />
+          <img src={headerMediaPreviewSrc(media.link)} alt="" className="size-12 shrink-0 rounded object-cover" />
         ) : media.kind === "video" ? (
-          <video src={media.link} className="size-12 shrink-0 rounded object-cover" muted />
+          <video src={headerMediaPreviewSrc(media.link)} className="size-12 shrink-0 rounded object-cover" muted />
         ) : (
           <div className="flex size-12 shrink-0 items-center justify-center rounded bg-success-bg">
             <FileText className="size-5 text-success-fg" />

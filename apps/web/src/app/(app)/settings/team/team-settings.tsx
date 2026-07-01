@@ -17,7 +17,7 @@ import {
   X,
 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -49,6 +49,8 @@ export interface TeamUserRow {
   role: Role;
   deactivated: boolean;
   createdAt: string;
+  /** Serve-route path for the member's avatar, or null → initials fallback. */
+  avatarUrl: string | null;
 }
 
 /** A still-redeemable invite — un-accepted and un-expired. */
@@ -449,6 +451,7 @@ function UserRow({
   return (
     <li className="flex items-center gap-3 px-4 py-3">
       <Avatar className="size-8">
+        {user.avatarUrl ? <AvatarImage src={user.avatarUrl} alt={user.name} /> : null}
         <AvatarFallback seed={user.id} className="text-2xs">{initials(user.name)}</AvatarFallback>
       </Avatar>
       <div className="min-w-0 flex-1">

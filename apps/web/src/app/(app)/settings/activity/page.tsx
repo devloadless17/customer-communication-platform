@@ -3,8 +3,8 @@ import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/current-user";
 import { roleLabel } from "@ccp/shared/auth/permissions";
-import { getMemberStats, type StatsPeriod } from "@/lib/api/queries";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { getMemberStats, listTeamMembers, type StatsPeriod } from "@/lib/api/queries";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { initials } from "@ccp/shared/utils";
 import { cn } from "@ccp/shared/utils";
 import { PageHeader } from "@/components/layouts/page-header";
@@ -48,7 +48,13 @@ export default async function TeamActivityPage({
     ? (sp.period as StatsPeriod)
     : "all";
 
-  const stats = await getMemberStats(period);
+  const [stats, teamMembers] = await Promise.all([
+    getMemberStats(period),
+    listTeamMembers(),
+  ]);
+  // Member stats carry no avatarUrl (the stats endpoint is counts-only), so map
+  // it in from the team roster (same cached /api/users fetch the sidebar uses).
+  const avatarById = new Map(teamMembers.map((u) => [u.id, u.avatarUrl ?? null]));
 
   const totals = stats.reduce(
     (acc, s) => ({
@@ -61,7 +67,11 @@ export default async function TeamActivityPage({
 
   // Seed the live panel from the same fetch (point-in-time at load); it then
   // re-polls on socket events.
-  const members = stats.map((s) => ({ userId: s.userId, name: s.name }));
+  const members = stats.map((s) => ({
+    userId: s.userId,
+    name: s.name,
+    avatarUrl: avatarById.get(s.userId) ?? null,
+  }));
   const initialActive = Object.fromEntries(
     stats.map((s) => [s.userId, s.activeAssigned]),
   );
@@ -114,6 +124,9 @@ export default async function TeamActivityPage({
                 <td className="px-4 py-2.5">
                   <div className="flex items-center gap-2.5">
                     <Avatar className="size-7 shrink-0">
+                      {avatarById.get(s.userId) ? (
+                        <AvatarImage src={avatarById.get(s.userId)!} alt={s.name} />
+                      ) : null}
                       <AvatarFallback seed={s.userId} className="text-3xs">
                         {initials(s.name || s.email)}
                       </AvatarFallback>

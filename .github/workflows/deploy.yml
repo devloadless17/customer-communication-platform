@@ -93,7 +93,10 @@ jobs:
           BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
           INTERNAL_BUS_SECRET: ${{ secrets.INTERNAL_BUS_SECRET }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
           APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
           HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
@@ -111,7 +114,8 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          for v in ENCRYPTION_KEY BETTER_AUTH_SECRET INTERNAL_BUS_SECRET POSTGRES_PASSWORD UPLOADTHING_TOKEN \
+          for v in ENCRYPTION_KEY BETTER_AUTH_SECRET INTERNAL_BUS_SECRET POSTGRES_PASSWORD \
+                   R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET \
                    APP_DOMAIN ADMIN_EMAIL HEALTHCHECK_URL DOCKER_USERNAME DOCKER_PASSWORD \
                    POSTGRES_DB POSTGRES_USER \
                    VPS_HOST VPS_USER VPS_SSH_KEY; do
@@ -374,7 +378,10 @@ jobs:
           BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
           INTERNAL_BUS_SECRET: ${{ secrets.INTERNAL_BUS_SECRET }}
-          UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           set -euo pipefail
           umask 077
@@ -391,7 +398,10 @@ jobs:
           BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
           ENCRYPTION_KEY=${ENCRYPTION_KEY}
           INTERNAL_BUS_SECRET=${INTERNAL_BUS_SECRET}
-          UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}
+          R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
+          R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
+          R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
+          R2_BUCKET=${R2_BUCKET}
           META_GRAPH_VERSION=v25.0
           NEXT_PUBLIC_API_URL=
           EOF
@@ -559,14 +569,17 @@ jobs:
           BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
           INTERNAL_BUS_SECRET: ${{ secrets.INTERNAL_BUS_SECRET }}
-          UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,UPLOADTHING_TOKEN,DOCKER_USERNAME,DOCKER_PASSWORD
+          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,DOCKER_USERNAME,DOCKER_PASSWORD
           script: |
             set -euo pipefail
             rm -rf /tmp/ccp-deploy
@@ -595,7 +608,10 @@ jobs:
             # catalog mutates; the endpoint requires this exact value.
             # validateEnv refuses to boot prod without it.
             INTERNAL_BUS_SECRET=${INTERNAL_BUS_SECRET}
-            UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}
+            R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
+            R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
+            R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
+            R2_BUCKET=${R2_BUCKET}
             META_GRAPH_VERSION=v25.0
             # NEXT_PUBLIC_API_URL intentionally empty — Caddy fronts both
             # processes on a single origin so the browser falls back to

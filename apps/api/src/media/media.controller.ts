@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Headers,
   NotFoundException,
   Param,
   Query,
@@ -9,81 +10,47 @@ import {
 } from "@nestjs/common";
 import type { Response } from "express";
 
-import { blobStorage } from "@/lib/blob-storage";
+import { extFromMime } from "@/lib/media-storage";
 
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { DbService } from "../db/db.service";
+import { probeBlob, streamBlob } from "./stream-blob";
 
 /**
  * GET /api/media/:messageId
  *
- * Authenticated redirect to the blob provider's CDN URL.
- *   - Same-team check before leaking the URL.
- *   - Stable public path while the underlying provider can swap.
- *   - 302 with `private, max-age=31536000, immutable` (1 year) so each
- *     user's browser caches the redirect for the lifetime of the install
- *     AND skips revalidation on F5 / new tab. Safe because the underlying
- *     blob URL is content-addressed (UploadThing fileKey is derived from
- *     bytes) — the URL for a given messageId never changes. `Vary: Cookie`
- *     belt-and-suspenders against a future shared cache misroute.
- *   - Open-redirect guard: refuses URLs that aren't from the active
- *     blob provider's host (defense against a future ingest bug that
- *     ends up writing an attacker URL into the column).
+ * Authenticated SAME-ORIGIN proxy of a private R2 object.
+ *   - Same-team check before any bytes are served.
+ *   - Streams the object (Range-forwarded so <video>/<audio> seeking works) —
+ *     no redirect, no presigned URL, no CSP host juggling. The bucket stays
+ *     private; the browser only ever talks to us.
+ *   - Bytes for a (messageId → key) never change, so cached 1-year immutable.
+ *   - `?probe=1` returns `{ available }` (existence check) so the client can
+ *     show an in-app "unavailable" state instead of opening a tab onto a 404.
+ *   - Legacy rows whose `mediaKey` points at the old provider simply 404 (the
+ *     object isn't in R2) — clean, no special-casing.
  */
 @Controller("api/media")
 @UseGuards(SessionGuard)
 export class MediaController {
   constructor(private readonly db: DbService) {}
 
-  /**
-   * Liveness probe for a raw blob-provider URL (e.g. the team-chat path
-   * exposes the upstream URL directly). Returns `{ available: boolean }`
-   * without redirecting so the client can render an in-app fallback
-   * instead of landing the user on the provider's branded 404 page.
-   * Hosts that aren't from the active blob provider are rejected —
-   * symmetric with the open-redirect guard on the message-id route.
-   */
-  @Get("probe")
-  async probe(
-    @Query("url") rawUrl: string | undefined,
-    @Res() res: Response,
-  ): Promise<void> {
-    if (!rawUrl || !blobStorage.isOwnUrl(rawUrl)) {
-      res.status(200).json({ available: false, reason: "missing" });
-      return;
-    }
-    const ok = await probeUpstream(rawUrl);
-    res.status(200).json(
-      ok ? { available: true } : { available: false, reason: "upstream_missing" },
-    );
-  }
-
   @Get(":messageId")
   async get(
     @CurrentSession() session: ApiSession,
     @Param("messageId") messageId: string,
     @Query("probe") probe: string | undefined,
+    @Query("download") download: string | undefined,
+    @Headers("range") range: string | undefined,
     @Res() res: Response,
   ): Promise<void> {
     const message = await this.db.message.findFirst({
       where: { id: messageId, teamId: session.teamId },
-      select: { mediaUrl: true, mediaKind: true },
+      select: { mediaKey: true, mediaFilename: true, mediaKind: true, mediaMimeType: true },
     });
-    if (!message?.mediaUrl) {
-      // Probe variant returns a clean JSON shape so the client can render
-      // an in-app "file unavailable" state instead of redirecting the user
-      // to the upstream's branded 404 page.
-      if (probe) {
-        res.status(200).json({ available: false, reason: "missing" });
-        return;
-      }
-      throw new NotFoundException({ error: "not_found" });
-    }
-    if (!blobStorage.isOwnUrl(message.mediaUrl)) {
-      // Open-redirect guard — keep the response indistinguishable from
-      // "no such message" so attackers don't learn the validation rules.
+    if (!message?.mediaKey) {
       if (probe) {
         res.status(200).json({ available: false, reason: "missing" });
         return;
@@ -91,67 +58,56 @@ export class MediaController {
       throw new NotFoundException({ error: "not_found" });
     }
     if (probe) {
-      // HEAD the upstream so the client can avoid opening a tab that would
-      // land on the third-party 404 page. 6s ceiling — well under the UI's
-      // "user clicked Open" patience. Network errors or non-2xx upstream
-      // collapse to `available: false` so the client always shows the
-      // in-app fallback rather than the upstream brand.
-      const upstreamOk = await probeUpstream(message.mediaUrl);
+      const ok = await probeBlob(message.mediaKey);
       res.status(200).json(
-        upstreamOk
-          ? { available: true }
-          : { available: false, reason: "upstream_missing" },
+        ok ? { available: true } : { available: false, reason: "upstream_missing" },
       );
       return;
     }
-    res.set("Cache-Control", "private, max-age=31536000, immutable");
-    res.set("Vary", "Cookie");
-    res.redirect(302, message.mediaUrl);
+    // Default = inline (PDFs/images/video open in-tab). `?download=1` forces a
+    // download with a friendly name: the original filename for documents, else
+    // a `<kind>.<ext>` derived from the mime (e.g. image.jpg, video.mp4) — never
+    // the raw message id.
+    await streamBlob(res, message.mediaKey, range, {
+      ...(download ? { downloadFilename: downloadNameFor(message) } : {}),
+    });
   }
 
   /**
-   * Video poster frame — same auth-redirect contract as the main media route
-   * above. 404s on rows without a thumbnail (rows that predate M8 or whose
-   * ffmpeg extraction failed); the VideoBlock falls back to bg-black there.
+   * Video poster frame — same proxy contract as the main route. 404s on rows
+   * without a thumbnail (rows that predate M8 or whose ffmpeg extraction
+   * failed); the VideoBlock falls back to bg-black there.
    */
   @Get(":messageId/thumb")
   async getThumbnail(
     @CurrentSession() session: ApiSession,
     @Param("messageId") messageId: string,
+    @Headers("range") range: string | undefined,
     @Res() res: Response,
   ): Promise<void> {
     const message = await this.db.message.findFirst({
       where: { id: messageId, teamId: session.teamId },
-      select: { mediaThumbnailUrl: true },
+      select: { mediaThumbnailKey: true },
     });
-    if (!message?.mediaThumbnailUrl) {
+    if (!message?.mediaThumbnailKey) {
       throw new NotFoundException({ error: "not_found" });
     }
-    if (!blobStorage.isOwnUrl(message.mediaThumbnailUrl)) {
-      throw new NotFoundException({ error: "not_found" });
-    }
-    res.set("Cache-Control", "private, max-age=31536000, immutable");
-    res.set("Vary", "Cookie");
-    res.redirect(302, message.mediaThumbnailUrl);
+    await streamBlob(res, message.mediaThumbnailKey, range);
   }
 }
 
 /**
- * Quick liveness check against the blob provider's CDN. Used by the `?probe=1`
- * branch above to tell the client whether opening a tab will land on the file
- * or on the provider's branded 404. Bounded at 6s so a hung upstream can't
- * stall the request — a slow provider reads the same as "gone" from a UX
- * perspective, both surface the in-app fallback.
+ * A human-friendly download name. Documents keep the sender's original filename;
+ * everything else gets `<kind>.<ext>` from the stored mime (image.jpg,
+ * video.mp4, voice.ogg) — anything but the opaque message id the UI used to
+ * fall back to.
  */
-async function probeUpstream(url: string): Promise<boolean> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 6_000);
-  try {
-    const r = await fetch(url, { method: "HEAD", signal: controller.signal });
-    return r.ok;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
+function downloadNameFor(m: {
+  mediaFilename: string | null;
+  mediaKind: string | null;
+  mediaMimeType: string | null;
+}): string {
+  if (m.mediaFilename) return m.mediaFilename;
+  const ext = extFromMime(m.mediaMimeType ?? "");
+  return `${m.mediaKind ?? "file"}.${ext}`;
 }

@@ -10,7 +10,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { roleLabel } from "@ccp/shared/auth/permissions";
 import { cn, initials } from "@ccp/shared/utils";
 import type { Role } from "@ccp/shared/types";
@@ -49,7 +49,7 @@ const NAV: NavItem[] = [
 export function PlatformRail({
   user,
 }: {
-  user: { name: string; email: string; role: Role };
+  user: { name: string; email: string; role: Role; avatarUrl?: string | null };
 }) {
   const pathname = usePathname() ?? "";
 
@@ -102,6 +102,7 @@ export function PlatformRail({
 
       <div className="mt-auto hidden items-center gap-2.5 border-t border-sidebar-border px-3 py-3 md:flex">
         <Avatar className="size-8 shrink-0">
+          {user.avatarUrl ? <AvatarImage src={user.avatarUrl} alt={user.name} /> : null}
           <AvatarFallback seed={user.email} className="text-3xs">
             {initials(user.name)}
           </AvatarFallback>

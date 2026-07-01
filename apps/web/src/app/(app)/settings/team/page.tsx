@@ -40,6 +40,7 @@ export default async function TeamSettingsPage() {
       role: u.role,
       deactivated: !u.isActive,
       createdAt: u.createdAt ?? "",
+      avatarUrl: u.avatarUrl ?? null,
     }));
 
   const pendingInvites: PendingInviteRow[] = pendingInviteRows.map((r) => ({

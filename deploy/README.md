@@ -191,10 +191,13 @@ POSTGRES_PASSWORD     (openssl rand -hex 32)
 BETTER_AUTH_SECRET    (openssl rand -base64 32)
 ENCRYPTION_KEY        (openssl rand -base64 32)
 INTERNAL_BUS_SECRET   (openssl rand -base64 32)
-UPLOADTHING_TOKEN     (from UploadThing dashboard)
+R2_ACCOUNT_ID         (Cloudflare R2 account id)
+R2_ACCESS_KEY_ID      (R2 S3 API token — Object Read & Write)
+R2_SECRET_ACCESS_KEY  (R2 S3 API token secret)
+R2_BUCKET             (e.g. central-ccp)
 ```
 
-14 secrets. ENCRYPTION_KEY and INTERNAL_BUS_SECRET are **hard-validated** by the
+17 secrets. ENCRYPTION_KEY and INTERNAL_BUS_SECRET are **hard-validated** by the
 deploy workflow's `changes` job (empty → the deploy fails fast), so missing
 either breaks the very first deploy — they belong in this list. The superAdmin
 login is **not** in GitHub Secrets — it's seeded automatically on every deploy
@@ -231,8 +234,11 @@ gh secret set BETTER_AUTH_SECRET --repo "$REPO" --body "$(openssl rand -base64 3
 gh secret set ENCRYPTION_KEY     --repo "$REPO" --body "$(openssl rand -base64 32)"
 gh secret set INTERNAL_BUS_SECRET --repo "$REPO" --body "$(openssl rand -base64 32)"
 
-# Blob storage
-gh secret set UPLOADTHING_TOKEN --repo "$REPO" --body "<your-uploadthing-token>"
+# Blob storage (Cloudflare R2 — private bucket + presigned serving)
+gh secret set R2_ACCOUNT_ID        --repo "$REPO" --body "<r2-account-id>"
+gh secret set R2_ACCESS_KEY_ID     --repo "$REPO" --body "<r2-access-key-id>"
+gh secret set R2_SECRET_ACCESS_KEY --repo "$REPO" --body "<r2-secret-access-key>"
+gh secret set R2_BUCKET            --repo "$REPO" --body "central-ccp"
 ```
 
 ## First-time superAdmin seed

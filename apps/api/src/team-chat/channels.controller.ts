@@ -8,6 +8,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   HttpCode,
   Param,
   Patch,
@@ -22,6 +23,7 @@ import { FileInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 import { diskStorage } from "multer";
 
+import { probeBlob, streamBlob } from "../media/stream-blob";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
@@ -342,28 +344,35 @@ export class ChannelsController {
   /**
    * Auth-gated, team-scoped, membership-gated proxy for a channel message's
    * attachment. Mirrors MediaController.get for WhatsApp media: the service
-   * verifies channel membership + team scope + `isOwnUrl` before we 302 to the
-   * CDN URL. mapMessage emits this RELATIVE path (not the raw CDN URL) so
-   * internal attachments are protected by auth + membership, not just key
-   * unguessability (M4). Same 1-year immutable cache as MediaController — the
-   * underlying blob URL is content-addressed.
+   * verifies channel membership + team scope, then we STREAM the object
+   * same-origin from R2 (private bucket, no URL ever exposed). mapMessage emits
+   * this RELATIVE path so internal attachments are protected by auth +
+   * membership, not just key unguessability (M4). Range-forwarded for
+   * <video>/<audio> seeking; `?probe=1` = cheap existence check.
    */
   @Get(":id/messages/:mid/media")
   async getMessageMedia(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
     @Param("mid") mid: string,
+    @Query("probe") probe: string | undefined,
+    @Headers("range") range: string | undefined,
     @Res() res: Response,
   ): Promise<void> {
-    const url = await this.channels.getMessageMediaUrl(
+    const key = await this.channels.getMessageMediaKey(
       session.teamId,
       session.userId,
       id,
       mid,
     );
-    res.set("Cache-Control", "private, max-age=31536000, immutable");
-    res.set("Vary", "Cookie");
-    res.redirect(302, url);
+    if (probe) {
+      const ok = await probeBlob(key);
+      res.status(200).json(
+        ok ? { available: true } : { available: false, reason: "upstream_missing" },
+      );
+      return;
+    }
+    await streamBlob(res, key, range);
   }
 
   @Post(":id/messages/:mid/thread")

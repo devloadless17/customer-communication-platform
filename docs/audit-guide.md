@@ -115,7 +115,7 @@ flaw in code — never as "you should add X".
 - **No encryption-at-rest** for `Message.body` / `Contact.phoneNumber` — only
   credentials (`Team.metaAppSecret`, `TeamApiKey.secret`) are envelope-encrypted.
   Trigger to revisit: enterprise compliance requirement.
-- **Single shared `UPLOADTHING_TOKEN`** across teams until ~10 customers.
+- **Single shared R2 bucket** (private, `media/{teamId}/…` prefixes) across teams until ~10 customers.
 - **`Contact.phoneNumber` is immutable** (it IS the WhatsApp identity).
 - **Assignment never sets status `open`** (only chatting does); assign-to-closed
   → pending; close unassigns.
@@ -127,8 +127,10 @@ flaw in code — never as "you should add X".
 - **24-hour customer-service window:** free-form outbound only within 24h of the
   last inbound. Outside → pre-approved templates only.
 - **No history sync:** events only from subscription onward.
-- **Media templates** (IMAGE/VIDEO/DOCUMENT header) send via a public `link`
-  (UploadThing), threaded as `variables.headerMedia` through every send path.
+- **Media templates** (IMAGE/VIDEO/DOCUMENT header) send via a `link` Meta
+  fetches — a stable R2 object URL presigned fresh at send time
+  (send-template-internal.ts), threaded as `variables.headerMedia` through every
+  send path.
 - Test recipients only while the Meta app is unpublished.
 
 ---

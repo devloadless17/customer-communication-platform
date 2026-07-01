@@ -664,7 +664,7 @@ export class MetaWebhookController implements OnModuleDestroy {
 }
 
 /**
- * Tiny bounded-retry helper. Used for transient Meta / UploadThing errors
+ * Tiny bounded-retry helper. Used for transient Meta / R2 errors
  * inside the webhook handler — long enough to ride out a single blip,
  * short enough to stay inside Meta's ~10s webhook retry window.
  */

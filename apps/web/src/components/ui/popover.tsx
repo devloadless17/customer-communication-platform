@@ -117,6 +117,10 @@ export function Popover({
               }}
               className={cn(
                 "z-60 rounded-lg border border-border bg-popover text-popover-foreground shadow-md",
+                // Anchor the zoom to the trigger edge (this popover is pinned at
+                // the trigger's top-left/right) so it grows from there instead of
+                // scaling from its center — the center-scale read as a wobble.
+                align === "end" ? "origin-top-right" : "origin-top-left",
                 open
                   ? "animate-in fade-in-0 zoom-in-95 duration-150"
                   : "animate-out fade-out-0 zoom-out-95 duration-100",

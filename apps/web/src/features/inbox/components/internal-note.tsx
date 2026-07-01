@@ -3,7 +3,7 @@
 import { memo } from "react";
 import { Trash2 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { LocalTime } from "@/components/local-time";
 import { initials } from "@ccp/shared/utils";
 import type { InternalNote as InternalNoteType, User } from "@ccp/shared/types";
@@ -28,6 +28,7 @@ function InternalNoteImpl({
               a note. Author + time sit at the top-RIGHT, signature-style. */}
           <div className="mb-0.5 flex items-center justify-end gap-1.5 text-2xs opacity-80">
             <Avatar className="size-4">
+              {author.avatarUrl ? <AvatarImage src={author.avatarUrl} alt={author.name} /> : null}
               <AvatarFallback seed={author.id} className="text-4xs">{initials(author.name)}</AvatarFallback>
             </Avatar>
             <span className="font-medium">{author.name}</span>

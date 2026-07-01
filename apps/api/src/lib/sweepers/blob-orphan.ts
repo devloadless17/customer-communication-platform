@@ -3,27 +3,26 @@ import { blobStorage } from "@/lib/blob-storage";
 import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
- * Reclaim orphan blobs at the provider (UploadThing today).
+ * Reclaim orphan blobs at the provider (Cloudflare R2).
  *
  * Leak vectors:
- *   1. `blobStorage.delete()` is intentionally non-throwing (uploadthing.ts:88-98)
- *      so a transient provider outage during a contact/conversation/team delete
- *      drops the blob from the DB but leaves the file on the provider's
- *      storage. We log the failure but don't queue a retry.
+ *   1. `blobStorage.delete()` is intentionally non-throwing (r2.ts) so a
+ *      transient provider outage during a contact/conversation/team delete
+ *      drops the blob from the DB but leaves the object in the bucket. We log
+ *      the failure but don't queue a retry.
  *   2. A crash between the `blobStorage.upload()` return and the DB row write
- *      for the message — the file is on UploadThing with no Message row
- *      pointing to it.
+ *      for the message — the object is in R2 with no Message row pointing to it.
  *
  * Strategy: page through provider files, cross-check each batch against
  * Message.mediaKey + TeamChannelMessage.mediaKey, delete files older than a
  * grace window whose keys appear in neither table.
  *
- * URL-only blobs are EXCLUDED. Avatars upload to the same UploadThing app but
- * persist only `User.avatarUrl` (no `mediaKey`), so a naive "delete unless in
- * a mediaKey column" scan would falsely orphan and permanently delete every
- * avatar. They carry a stable `avatar-<userId>-...` customId — see
- * `isUrlOnlyBlob` — which we skip before the cross-check. Any future blob
- * category that stores only a URL must add its customId prefix there.
+ * URL-only blobs are EXCLUDED. Avatars store only `User.avatarUrl` (no
+ * `mediaKey`), so a naive "delete unless in a mediaKey column" scan would
+ * falsely orphan and permanently delete every avatar. They live under the
+ * `avatars/` key prefix — see `isUrlOnlyBlob` — which we skip before the
+ * cross-check. Any future blob category that stores only a URL must add its
+ * key prefix there.
  *
  * Grace window: 24h. Long enough that an in-flight upload (between
  * provider-side commit and our DB write) isn't mistaken for an orphan. Short
@@ -54,19 +53,18 @@ const PAGE_SIZE = 500;
 const MAX_PAGES_PER_TICK = 4;
 
 // Blob categories that persist only a URL (no `mediaKey` to cross-check), keyed
-// by their customId prefix. These must be skipped by the orphan scan or they'd
-// be deleted as false orphans. Avatars (lib/blob-storage/avatar.ts) use the
-// `avatar-<userId>-<ts>` customId.
-const URL_ONLY_CUSTOM_ID_PREFIXES = ["avatar-"] as const;
-// NOTE: video poster thumbnails (customId `<wamid>_thumb`, key on
+// by their object-key prefix. These must be skipped by the orphan scan or
+// they'd be deleted as false orphans. Avatars (lib/blob-storage/avatar.ts) live
+// under `avatars/`.
+const URL_ONLY_KEY_PREFIXES = ["avatars/"] as const;
+// NOTE: video poster thumbnails (key `...-video.jpg` under `media/`, stored on
 // Message.mediaThumbnailKey) are NOT excluded here — they ARE db-keyed, so the
 // exact `mediaThumbnailKey` cross-check below folds every REFERENCED poster
 // into `referenced`. That protects live posters while still letting a
-// genuinely-orphaned poster (parent row gone) be reclaimed — a blanket suffix
+// genuinely-orphaned poster (parent row gone) be reclaimed — a blanket
 // exclusion would leak those forever.
-function isUrlOnlyBlob(customId: string | null): boolean {
-  if (customId == null) return false;
-  return URL_ONLY_CUSTOM_ID_PREFIXES.some((p) => customId.startsWith(p));
+function isUrlOnlyBlob(key: string): boolean {
+  return URL_ONLY_KEY_PREFIXES.some((p) => key.startsWith(p));
 }
 
 let timer: NodeJS.Timeout | null = null;
@@ -126,13 +124,13 @@ async function sweepOnce(): Promise<void> {
 
   const ageCutoffMs = Date.now() - GRACE_MS;
   const orphanKeys: string[] = [];
-  let offset = 0;
+  let cursor: string | undefined;
   let scannedCount = 0;
 
   for (let page = 0; page < MAX_PAGES_PER_TICK; page++) {
-    const { keys, hasMore } = await blobStorage.listKeys({
+    const { keys, nextCursor } = await blobStorage.listKeys({
       limit: PAGE_SIZE,
-      offset,
+      cursor,
     });
     if (keys.length === 0) break;
     scannedCount += keys.length;
@@ -142,12 +140,12 @@ async function sweepOnce(): Promise<void> {
     // (avatars) — they persist no `mediaKey`, so the cross-check below would
     // classify every one as an orphan and permanently delete it.
     const eligible = keys.filter(
-      (k) => k.uploadedAt < ageCutoffMs && !isUrlOnlyBlob(k.customId),
+      (k) => k.uploadedAt < ageCutoffMs && !isUrlOnlyBlob(k.key),
     );
     if (eligible.length > 0) {
       const eligibleKeyList = eligible.map((k) => k.key);
       // Cross-check both customer-message media AND team-chat-message media.
-      // Both tables store the UploadThing fileKey in `mediaKey`. ALSO cross-
+      // Both tables store the R2 object key in `mediaKey`. ALSO cross-
       // check Message.mediaThumbnailKey — video poster frames are stored on a
       // separate key there, not in `mediaKey`, so without this a referenced
       // poster thumbnail would be classified an orphan and deleted.
@@ -175,8 +173,8 @@ async function sweepOnce(): Promise<void> {
       }
     }
 
-    if (!hasMore) break;
-    offset += PAGE_SIZE;
+    if (!nextCursor) break;
+    cursor = nextCursor;
   }
 
   if (orphanKeys.length === 0) {

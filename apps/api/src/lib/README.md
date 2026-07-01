@@ -37,7 +37,7 @@ branching.
 
 | Folder | What's inside | Consumers |
 |---|---|---|
-| `blob-storage/` | UploadThing client + the `BlobStorageProvider` interface; swap impls here to change providers | media upload paths in messages/messaging |
+| `blob-storage/` | Cloudflare R2 client (private bucket + presigned serving) + the `BlobStorageProvider` interface; swap impls here to change providers | media upload paths in messages/messaging |
 | `broadcast-runner.ts` | The async loop that walks a broadcast's recipient list, sends templates, and publishes per-recipient bus events | `BroadcastsService` (kicked off via `setImmediate`) |
 | `conversations/` | Analytics helpers (event-recording, audit-trail entries) | audit subscriber + ConversationsService |
 | `crypto/` | AES-256-GCM envelope wrapper for per-team Meta secrets | `lib/providers/config.ts` |

@@ -1,15 +1,26 @@
-import { UTApi, UTFile } from "uploadthing/server";
+import {
+  DeleteObjectCommand,
+  PutObjectCommand,
+} from "@aws-sdk/client-s3";
+
+import { r2Internal } from "./r2";
 
 /**
  * Avatar upload — deliberately separate from the WhatsApp `MediaKind` blob
- * pipeline. Avatars are public, image-only, lightweight; they don't share
- * Meta's per-kind mime allowlist or the customId-keyed dedup the message
- * media path needs. Keeping a focused helper means a future S3/R2 swap for
- * avatars only doesn't have to fork the BlobStorageProvider interface.
+ * pipeline. Avatars are image-only, lightweight, and served through the
+ * authenticated `GET /api/users/:userId/avatar` route (not directly), so they
+ * don't share Meta's per-kind mime allowlist.
  *
- * Cap: 2 MiB. PNG/JPG/WEBP only — SVG excluded for the same stored-XSS
- * reason called out in [uploadthing.ts](./uploadthing.ts) and GIF excluded
- * because animated avatars distract more than they help in dense lists.
+ * Key scheme: DETERMINISTIC `avatars/{userId}` (no timestamp/extension). A
+ * replace overwrites in place, so there's no orphan to GC on re-upload, and the
+ * serve route can presign the key knowing only the userId. The stored
+ * ContentType drives what the browser renders regardless of the missing ext.
+ * The `avatars/` prefix is how the orphan sweeper tells avatars apart from
+ * `media/` objects.
+ *
+ * Cap: 2 MiB. PNG/JPG/WEBP only — SVG excluded (stored-XSS, same rationale as
+ * [mime-guard.ts](./mime-guard.ts)); GIF excluded (animated avatars distract in
+ * dense lists).
  */
 
 const ALLOWED_AVATAR_MIME = new Set([
@@ -20,27 +31,22 @@ const ALLOWED_AVATAR_MIME = new Set([
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024; // 2 MiB
 
-let utApi: UTApi | null = null;
-function getUtApi(): UTApi {
-  if (utApi) return utApi;
-  if (!process.env.UPLOADTHING_TOKEN) {
-    throw new Error("UPLOADTHING_TOKEN env var is required for avatar uploads");
-  }
-  utApi = new UTApi();
-  return utApi;
+/** Deterministic object key for a user's avatar. Exported so the serve route
+ *  can stream it directly (bucket is private — no URL is ever exposed). */
+export function avatarObjectKey(userId: string): string {
+  return `avatars/${userId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
 export interface AvatarUploadInput {
   userId: string;
   bytes: Uint8Array;
   mimeType: string;
-  /** Used only to derive the file extension in the UploadThing dashboard. */
+  /** Unused now (deterministic key ignores the name) — kept for call-site compat. */
   originalFilename?: string | null;
 }
 
 export interface AvatarUploadResult {
   key: string;
-  url: string;
   sizeBytes: number;
 }
 
@@ -62,45 +68,39 @@ export async function uploadAvatar(input: AvatarUploadInput): Promise<AvatarUplo
     );
   }
 
-  const ext = extFromMime(mime);
-  const filename = `avatar-${input.userId}-${Date.now()}.${ext}`;
-
-  const file = new UTFile([input.bytes as Uint8Array<ArrayBuffer>], filename, {
-    type: mime,
-    customId: `avatar-${input.userId}-${Date.now()}`,
-  } as unknown as ConstructorParameters<typeof UTFile>[2]);
-
-  const res = await getUtApi().uploadFiles(file);
-  if (res.error || !res.data) {
-    const detail = res.error?.message ?? "unknown upload error";
-    throw new AvatarUploadError("upload_failed", `uploadthing avatar upload failed: ${detail}`);
+  const key = avatarObjectKey(input.userId);
+  try {
+    await r2Internal.client().send(
+      new PutObjectCommand({
+        Bucket: r2Internal.bucket(),
+        Key: key,
+        Body: input.bytes,
+        ContentType: mime,
+      }),
+    );
+  } catch (err) {
+    throw new AvatarUploadError(
+      "upload_failed",
+      `r2 avatar upload failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  return { key: res.data.key, url: res.data.ufsUrl, sizeBytes: res.data.size };
+  return { key, sizeBytes: input.bytes.length };
 }
 
 /**
- * Best-effort delete of a previously-uploaded avatar blob, given its URL.
- * Avatars use a timestamped customId, so each re-upload mints a NEW blob and
- * the orphan sweeper deliberately skips the `avatar-` prefix — without this a
- * replaced avatar would leak in shared storage forever. Never throws: blob GC
- * must not block a profile update. No-op for non-UploadThing URLs (the key
- * sits in the `/f/<fileKey>` path segment).
+ * Best-effort delete of a user's avatar object. Called when an avatar is
+ * cleared (revert to initials). Never throws: a leaked blob is far less bad
+ * than a failed profile update. (On REPLACE there's nothing to delete — the
+ * deterministic key overwrites in place.)
  */
-export async function deleteAvatarByUrl(url: string): Promise<void> {
+export async function deleteAvatar(userId: string): Promise<void> {
   try {
-    const key = url.split("/f/")[1]?.split(/[?#]/)[0];
-    if (!key) return;
-    await getUtApi().deleteFiles(key);
+    await r2Internal.client().send(
+      new DeleteObjectCommand({ Bucket: r2Internal.bucket(), Key: avatarObjectKey(userId) }),
+    );
   } catch {
-    // swallow — a leaked blob is far less bad than a failed avatar change
+    // swallow — see doc comment
   }
-}
-
-function extFromMime(mime: string): string {
-  if (mime === "image/png") return "png";
-  if (mime === "image/jpeg") return "jpg";
-  if (mime === "image/webp") return "webp";
-  return "bin";
 }
 
 export class AvatarUploadError extends Error {

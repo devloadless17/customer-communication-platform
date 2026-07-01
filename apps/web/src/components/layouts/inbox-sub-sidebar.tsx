@@ -13,7 +13,7 @@ import {
   UserPlus,
 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { cn, initials } from "@ccp/shared/utils";
@@ -418,6 +418,9 @@ export function InboxSubSidebar({
                   >
                     <div className="relative shrink-0">
                       <Avatar className="size-5">
+                        {u.avatarUrl ? (
+                          <AvatarImage src={u.avatarUrl} alt={u.name} />
+                        ) : null}
                         <AvatarFallback seed={u.id} className="text-3xs">
                           {initials(u.name)}
                         </AvatarFallback>

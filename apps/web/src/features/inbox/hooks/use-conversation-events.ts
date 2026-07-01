@@ -1149,11 +1149,11 @@ export function useConversationEvents(
               //
               // Media-url swap: when the server returns a media URL,
               // SWAP to it (don't preserve the blob:). The /api/media/<id>
-              // path 302s to UploadThing's CDN with
-              // `Cache-Control: immutable, max-age=31536000`, so the
-              // browser fetches the redirect target once and caches it
-              // forever — back-navigation, page reload, snapshot replay
-              // all hit the disk cache. Preserving the blob URL across
+              // path STREAMS the bytes same-origin from the private R2 bucket
+              // (no redirect) with `Cache-Control: immutable, max-age=1y`, so
+              // back-navigation, page reload, and snapshot replay hit the
+              // browser disk cache. Preserving the
+              // blob URL across
               // reconcile pinned the underlying File bytes in V8 heap
               // for the lifetime of the LRU cache snapshot (~hours);
               // earlier we patched that with a 5s delayed revoke, but
