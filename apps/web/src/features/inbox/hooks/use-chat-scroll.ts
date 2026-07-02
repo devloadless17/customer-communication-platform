@@ -50,6 +50,20 @@ interface Options {
   hasMoreOlder: boolean;
   /** Fetch + prepend the next older page. Hook wraps the commit in flushSync. */
   loadOlder: (commit: (run: () => void) => void) => Promise<number>;
+  /**
+   * Viewport orientation.
+   *   - `true` (default): a `flex-col-reverse` viewport — the customer inbox
+   *     thread. `scrollTop` 0 = the bottom (newest); scrolling up goes
+   *     negative. Appending older rows at the DOM end never shifts the view.
+   *   - `false`: a NORMAL top-down viewport — the virtualized team-chat channel
+   *     feed (@tanstack/react-virtual positions rows by a downward-growing
+   *     `translateY`, which only works in a non-reversed box). `scrollTop` 0 =
+   *     the top (oldest); the bottom (newest) is `scrollHeight - clientHeight`.
+   * All scroll-model math (isAtBottom / snapToBottom / load-older anchor)
+   * branches on this so the same behavior — land at newest, stick to bottom,
+   * "↓ N new" pill, zero-shift load-older — holds in both layouts.
+   */
+  inverted?: boolean;
 }
 
 /**
@@ -80,6 +94,7 @@ export function useChatScroll({
   isActivityTail,
   hasMoreOlder,
   loadOlder,
+  inverted = true,
 }: Options): {
   unreadBelow: number;
   scrollToBottom: () => void;
@@ -104,12 +119,16 @@ export function useChatScroll({
   const isAtBottom = useCallback((slack = 80) => {
     const el = viewportRef.current;
     if (!el) return true;
-    // column-reverse: scrollTop 0 = the bottom (newest); scrolling up toward
-    // older goes NEGATIVE (down to -(scrollHeight-clientHeight)). "At bottom"
-    // is therefore within `slack` px of 0. (Measured: positive scrollTop is
-    // clamped to 0 in a column-reverse box.)
-    return el.scrollTop >= -slack;
-  }, [viewportRef]);
+    if (inverted) {
+      // column-reverse: scrollTop 0 = the bottom (newest); scrolling up toward
+      // older goes NEGATIVE (down to -(scrollHeight-clientHeight)). "At bottom"
+      // is therefore within `slack` px of 0. (Measured: positive scrollTop is
+      // clamped to 0 in a column-reverse box.)
+      return el.scrollTop >= -slack;
+    }
+    // top-down: the bottom (newest) is scrollTop = scrollHeight - clientHeight.
+    return el.scrollHeight - el.clientHeight - el.scrollTop <= slack;
+  }, [viewportRef, inverted]);
 
   // Timestamp of the most recent programmatic snap. Setting scrollTop in JS
   // fires a scroll event ASYNCHRONOUSLY (queued by the browser to the next
@@ -132,8 +151,10 @@ export function useChatScroll({
     if (!el) return;
     lastProgrammaticSnapAtRef.current = Date.now();
     // column-reverse: the bottom (newest) is scrollTop 0, NOT scrollHeight.
-    el.scrollTop = 0;
-  }, [viewportRef]);
+    // top-down: the bottom is the max scrollTop; assigning scrollHeight lets
+    // the browser clamp to (scrollHeight - clientHeight).
+    el.scrollTop = inverted ? 0 : el.scrollHeight;
+  }, [viewportRef, inverted]);
 
   // Scroll listener — the single arbiter of `stickyRef`. Every other piece
   // of behavior reads from this boolean. Writing it here also means the
@@ -382,17 +403,30 @@ export function useChatScroll({
         inFlightRef.current = true;
 
         void loadOlder((run) => {
-          // column-reverse: distance from the bottom (newest) is simply
-          // -scrollTop (0 at bottom, growing negative as you scroll up). Older
-          // pages are appended at the DOM END (visual top), which a column-
-          // reverse box keeps from shifting the current view — so this pin is
-          // effectively a no-op, kept only to re-assert position if a late
-          // reflow (image decode of the just-loaded older media) nudges it.
-          const distanceFromBottom = -root.scrollTop;
+          // Distance from the bottom (newest), captured BEFORE the prepend so
+          // we can re-assert the exact same view AFTER it.
+          //   - column-reverse: distance is -scrollTop (0 at bottom, growing
+          //     negative up). Older pages append at the DOM END (visual top),
+          //     which a column-reverse box keeps from shifting the view — so
+          //     pin is effectively a no-op, re-asserted only if a late reflow
+          //     (older media decode) nudges it.
+          //   - top-down: distance is scrollHeight - clientHeight - scrollTop.
+          //     Older pages insert ABOVE (content grows upward), which WOULD
+          //     shift the view down by the added height; pinning to a constant
+          //     distance-from-bottom holds the user exactly in place across the
+          //     prepend AND the virtualizer's estimate→measure reflows.
+          const distanceFromBottom = inverted
+            ? -root.scrollTop
+            : root.scrollHeight - root.clientHeight - root.scrollTop;
           flushSync(run);
-          const pin = () => {
-            root.scrollTop = -distanceFromBottom;
-          };
+          const pin = inverted
+            ? () => {
+                root.scrollTop = -distanceFromBottom;
+              }
+            : () => {
+                root.scrollTop =
+                  root.scrollHeight - root.clientHeight - distanceFromBottom;
+              };
           pin();
 
           settleStopRef.current?.();
@@ -432,7 +466,7 @@ export function useChatScroll({
     );
     obs.observe(sentinel);
     return () => obs.disconnect();
-  }, [hasMoreOlder, loadOlder, contentRef, topSentinelRef, viewportRef]);
+  }, [hasMoreOlder, loadOlder, contentRef, topSentinelRef, viewportRef, inverted]);
 
   const markBenignTailUpdate = useCallback(() => {
     skipNextTailEffectRef.current = true;

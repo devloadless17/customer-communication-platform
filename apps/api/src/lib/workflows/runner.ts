@@ -1095,7 +1095,14 @@ export async function failRunFromRetryExhaustion(
   try {
     const run = await db.workflowRun.findUnique({
       where: { id: runId },
-      select: { id: true, teamId: true, workflowId: true, contactId: true, status: true },
+      select: {
+        id: true,
+        teamId: true,
+        workflowId: true,
+        contactId: true,
+        status: true,
+        stepLog: true,
+      },
     });
     if (!run) return;
     if (
@@ -1113,9 +1120,11 @@ export async function failRunFromRetryExhaustion(
         finishedAt: new Date(),
       },
     });
-    // WF-1: a terminally-failed once-per-contact run must release its ledger
-    // row so the workflow can re-fire for this contact on a future trigger.
-    await rollbackOncePerContactLedger(run.workflowId, run.contactId);
+    // WF-1: a terminally-failed once-per-contact run releases its ledger row so
+    // the workflow can re-fire for this contact — UNLESS an irreversible side
+    // effect already fired (WF-1b), in which case the ledger stays to prevent a
+    // double-send on the next trigger.
+    await rollbackOncePerContactLedger(run.workflowId, run.contactId, run.stepLog);
   } catch (err) {
     console.warn(
       `[workflow-runner] failRunFromRetryExhaustion(${runId}) threw:`,
@@ -1134,11 +1143,43 @@ export async function failRunFromRetryExhaustion(
  * (workflowId, contactId) — a no-op for non-once-per-contact runs (no ledger
  * row exists) and for runs with no contact. Best-effort; never throws.
  */
+/**
+ * True when the failed run ALREADY fired (or is presumed to have fired) an
+ * irreversible side effect — a `success` / `in_progress` / `skipped_after_crash`
+ * entry on a side-effecting step (Meta send, tag/status/field mutation). If one
+ * exists we must NOT release the once-per-contact ledger: re-firing the whole
+ * graph on the next trigger would double-send. "Locked out" is the correct
+ * trade over "duplicate irreversible send" — matches the runner's own
+ * orphan-`in_progress` → skip-not-rerun posture.
+ */
+function runFiredIrreversibleSideEffect(stepLog: StepLogEntry[]): boolean {
+  return stepLog.some(
+    (e) =>
+      (e.status === "success" ||
+        e.status === "in_progress" ||
+        e.status === "skipped_after_crash") &&
+      hasSideEffect(e.type as WorkflowStepType),
+  );
+}
+
 export async function rollbackOncePerContactLedger(
   workflowId: string,
   contactId: string | null,
+  stepLogJson?: unknown,
 ): Promise<void> {
   if (!contactId) return;
+  // Keep the ledger when an irreversible side effect already fired in this run
+  // (WF-1b): releasing it would let the next trigger re-run the whole graph and
+  // double-send. A run that failed BEFORE any side effect (transient outage on
+  // step 1, config typo, or a never-executed unpublished/deleted run with an
+  // empty stepLog) safely releases. `stepLogJson` is the raw WorkflowRun.stepLog
+  // JSON; absent (undefined) preserves the legacy always-release behavior.
+  const stepLog: StepLogEntry[] = Array.isArray(stepLogJson)
+    ? (stepLogJson as unknown as StepLogEntry[])
+    : [];
+  if (runFiredIrreversibleSideEffect(stepLog)) {
+    return;
+  }
   try {
     await db.workflowContactState.deleteMany({ where: { workflowId, contactId } });
   } catch (err) {

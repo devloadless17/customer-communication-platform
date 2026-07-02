@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Phone, PhoneOff } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -62,19 +62,24 @@ export function IncomingCallToast({
   const canReceiveCallsRef = useRef(canReceiveCalls);
   canReceiveCallsRef.current = canReceiveCalls;
 
+  // Dismiss one call: stop its ring, remove the card, and clear its expiry
+  // timer. Lifted out of the effect (was a local closure) so the card's
+  // answer/reject onClick handlers reuse it instead of a bare setCalls filter —
+  // otherwise an optimistic dismiss left the ring playing and the 60s expiry
+  // timer leaked until unmount.
+  const drop = useCallback((callId: string) => {
+    notificationSound.stopCallRing(callId);
+    setCalls((prev) => prev.filter((c) => c.callId !== callId));
+    const t = expiryTimers.current.get(callId);
+    if (t) {
+      clearTimeout(t);
+      expiryTimers.current.delete(callId);
+    }
+  }, []);
+
   useEffect(() => {
     const socket = getClientSocket();
     const timers = expiryTimers.current;
-
-    const drop = (callId: string) => {
-      notificationSound.stopCallRing(callId);
-      setCalls((prev) => prev.filter((c) => c.callId !== callId));
-      const t = timers.get(callId);
-      if (t) {
-        clearTimeout(t);
-        timers.delete(callId);
-      }
-    };
 
     const onIncoming = (payload: {
       callId: string;
@@ -127,7 +132,7 @@ export function IncomingCallToast({
       timers.clear();
       notificationSound.stopAllCallRings();
     };
-  }, []);
+  }, [drop]);
 
   if (calls.length === 0) return null;
 
@@ -142,15 +147,16 @@ export function IncomingCallToast({
           key={call.callId}
           call={call}
           onAnswer={() => {
-            // Optimistic dismiss — the answer flow will replace it with the
-            // CallPanel. Multiple-clicks safe because answer is idempotent
-            // server-side (CAS); failed answer (already_answered) re-emits
-            // the right state.
-            setCalls((prev) => prev.filter((c) => c.callId !== call.callId));
+            // Optimistic dismiss via drop() (not a bare setCalls filter) so the
+            // ring stops + the expiry timer is cleared immediately. The answer
+            // flow replaces the card with the CallPanel. Multiple-clicks safe:
+            // answer is idempotent server-side (CAS); a failed answer
+            // (already_answered) re-emits the right state.
+            drop(call.callId);
             onAnswer(call.callId, call.contactName, call.conversationId);
           }}
           onReject={() => {
-            setCalls((prev) => prev.filter((c) => c.callId !== call.callId));
+            drop(call.callId);
             onReject(call.callId);
           }}
         />

@@ -191,19 +191,26 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
   const worker = new Worker<WebhookDeliverJobData>(
     WEBHOOK_DELIVER_QUEUE_NAME,
     async (job: Job<WebhookDeliverJobData>, token?: string) => {
-      // Per-team concurrency gate. Resolve the owning team from the delivery
-      // row (single indexed read; the job payload only carries deliveryId).
-      const owner = await db.outboundWebhookDelivery.findUnique({
-        where: { id: job.data.deliveryId },
-        select: { webhook: { select: { teamId: true } } },
-      });
-      if (!owner) {
-        // Row deleted between enqueue and pickup (webhook revoked). deliverOnce
-        // handles this too, but bail early so we don't claim a team slot for a
-        // no-op.
-        return;
+      // Per-team concurrency gate. teamId rides on the job (set at enqueue from
+      // the publishing event), so the common path needs NO DB read — critical
+      // because a single-team burst that keeps deferring used to re-run this
+      // findUnique on every re-pickup, a DB/Redis busy-spin. Only legacy jobs
+      // enqueued before the field existed fall back to the delivery-row read
+      // (drains within one queue cycle post-deploy).
+      let teamId = job.data.teamId;
+      if (!teamId) {
+        const owner = await db.outboundWebhookDelivery.findUnique({
+          where: { id: job.data.deliveryId },
+          select: { webhook: { select: { teamId: true } } },
+        });
+        if (!owner) {
+          // Row deleted between enqueue and pickup (webhook revoked).
+          // deliverOnce handles this too, but bail early so we don't claim a
+          // team slot for a no-op.
+          return;
+        }
+        teamId = owner.webhook.teamId;
       }
-      const teamId = owner.webhook.teamId;
       if (!tryAcquireTeamSlot(teamId)) {
         // Team at cap — defer this delivery and free the BullMQ slot for other
         // teams' work. moveToDelayed + DelayedError doesn't count against

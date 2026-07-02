@@ -149,6 +149,12 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   // timer can't fire a competing save that aborts the flush's AbortController.
   const exitingRef = useRef(false);
   const [exiting, setExiting] = useState(false);
+  // Same guard for the OTHER explicit persists (Save / Test / Live-toggle):
+  // each `await persist(...)` those handlers rely on would silently return
+  // false if the 1.5s debounce fired mid-flight and aborted its controller —
+  // so the follow-up (open test drawer, POST /publish) never ran. Set around
+  // the awaited persist; the debounce below skips while it's true.
+  const explicitPersistRef = useRef(false);
 
   // Auto-save in edit mode. Cheap (~one PATCH per couple seconds of
   // idle); the alternative — manual save button only — leads to "I lost
@@ -158,9 +164,10 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     if (mode !== "edit" || !workflow) return;
     const handle = setTimeout(() => {
       // Don't let the debounce restart a save that would abort an in-flight
-      // Exit flush's controller (which would make handleExit's await return
-      // false and navigate before the real save lands).
-      if (exitingRef.current) return;
+      // explicit persist's controller — Exit flush (exitingRef) OR Save / Test
+      // / Live-toggle (explicitPersistRef). Aborting any of them makes their
+      // awaited persist() return false and their follow-up action never run.
+      if (exitingRef.current || explicitPersistRef.current) return;
       void persist({ silent: true });
     }, 1500);
     return () => clearTimeout(handle);
@@ -316,7 +323,12 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   function handleSave(e?: React.FormEvent) {
     e?.preventDefault();
     startTransition(async () => {
-      await persist();
+      explicitPersistRef.current = true;
+      try {
+        await persist();
+      } finally {
+        explicitPersistRef.current = false;
+      }
     });
   }
 
@@ -332,7 +344,14 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     const goLive = !published;
     if (goLive) {
       // Save the latest canvas first so /publish validates what's on screen.
-      const ok = await persist({ silent: true });
+      // Guard against the debounce aborting this save mid-flight.
+      explicitPersistRef.current = true;
+      let ok: boolean;
+      try {
+        ok = await persist({ silent: true });
+      } finally {
+        explicitPersistRef.current = false;
+      }
       if (!ok) return;
     }
     const res = await apiFetch(`/api/team/workflows/${workflow.id}/publish`, {
@@ -363,8 +382,15 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     setTestError(null);
     setTestRunId(null);
     // Persist the on-screen canvas first so /test runs what the author sees,
-    // not the last auto-saved snapshot (debounced ~1.5s behind).
-    const saved = await persist({ silent: true });
+    // not the last auto-saved snapshot (debounced ~1.5s behind). Guard against
+    // the debounce aborting this save mid-flight (which would drop the test).
+    explicitPersistRef.current = true;
+    let saved: boolean;
+    try {
+      saved = await persist({ silent: true });
+    } finally {
+      explicitPersistRef.current = false;
+    }
     if (!saved) return;
     const res = await apiFetch(`/api/team/workflows/${workflow.id}/test`, {
       method: "POST",

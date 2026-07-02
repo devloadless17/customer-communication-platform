@@ -759,7 +759,12 @@ function ContactPanelImpl({
       });
       return false;
     }
-    startSaving(() => router.refresh());
+    // No router.refresh(): the optimistic `contact:updated` dispatch above plus
+    // the server's authoritative `contact.updated` socket frame already
+    // converge every consumer (same as persistTagIds). Re-SSRing the whole
+    // inbox page (with ?c=<id>, which refetches the full open thread) on every
+    // field edit was pure waste. router.refresh stays only in onAddTeamWide,
+    // where SSR must genuinely re-run to load a new team-wide field definition.
     return true;
   }
 

@@ -14,6 +14,7 @@ import {
 
 import {
   conversationRowToExternal,
+  redactExternalContactPii,
   toExternalMessage,
   EXTERNAL_CONVERSATION_INCLUDE,
   type ExternalMessage,
@@ -141,7 +142,11 @@ export class ExternalV1MessagingService {
   // CONVERSATIONS
   // ===========================================================================
 
-  async listConversations(teamId: string, q: ListConversationsQueryInput) {
+  async listConversations(
+    teamId: string,
+    q: ListConversationsQueryInput,
+    includeContactPii = true,
+  ) {
     // API-1: keyset cursor over the COMPOSITE (lastMessageAt, id) sort, not a
     // bare `cursor:{id}, skip:1`. `lastMessageAt` is mutable (every inbound /
     // outbound bumps it), so the old id-cursor over a moving sort key silently
@@ -170,7 +175,13 @@ export class ExternalV1MessagingService {
       take: q.limit + 1,
     });
     const page = rows.slice(0, q.limit);
-    const items = page.map(conversationRowToExternal);
+    const items = page
+      .map(conversationRowToExternal)
+      .map((c) =>
+        includeContactPii
+          ? c
+          : { ...c, contact: redactExternalContactPii(c.contact) },
+      );
     const lastRow = page[page.length - 1];
     const nextCursor =
       rows.length > q.limit && lastRow
@@ -179,7 +190,7 @@ export class ExternalV1MessagingService {
     return { items, nextCursor };
   }
 
-  async getConversation(teamId: string, id: string) {
+  async getConversation(teamId: string, id: string, includeContactPii = true) {
     const row = await this.db.conversation.findFirst({
       where: { id, teamId },
       include: EXTERNAL_CONVERSATION_INCLUDE,
@@ -188,7 +199,10 @@ export class ExternalV1MessagingService {
     // `conversation.contact` is embedded; the top-level `contact` is kept as a
     // convenience alias so the single-conversation response still surfaces it
     // at the root for callers that read response.contact directly.
-    const conversation = conversationRowToExternal(row);
+    const full = conversationRowToExternal(row);
+    const conversation = includeContactPii
+      ? full
+      : { ...full, contact: redactExternalContactPii(full.contact) };
     return { conversation, contact: conversation.contact };
   }
 
@@ -475,6 +489,7 @@ export class ExternalV1MessagingService {
     teamId: string,
     conversationId: string,
     q: ListMessagesQueryInput,
+    includeContactPii = true,
   ) {
     // The existence check doubles as the conversation context we return
     // alongside the messages, so a page of messages always tells the caller
@@ -522,10 +537,17 @@ export class ExternalV1MessagingService {
     );
     const lastItem = items[items.length - 1];
     const nextCursor = rows.length > q.limit && lastItem ? lastItem.id : null;
-    return { conversation: conversationRowToExternal(conv), items, nextCursor };
+    const convWire = conversationRowToExternal(conv);
+    return {
+      conversation: includeContactPii
+        ? convWire
+        : { ...convWire, contact: redactExternalContactPii(convWire.contact) },
+      items,
+      nextCursor,
+    };
   }
 
-  async findMessage(teamId: string, id: string) {
+  async findMessage(teamId: string, id: string, includeContactPii = true) {
     const row = await this.db.message.findFirst({
       where: { id, teamId },
       omit: { rawPayload: true },
@@ -534,9 +556,12 @@ export class ExternalV1MessagingService {
       include: { conversation: { include: EXTERNAL_CONVERSATION_INCLUDE } },
     });
     if (!row) throw new NotFoundException({ error: "message_not_found", detail: "message not found" });
+    const convWire = conversationRowToExternal(row.conversation);
     return {
       message: await withPresignedMedia(toExternalMessage(row)),
-      conversation: conversationRowToExternal(row.conversation),
+      conversation: includeContactPii
+        ? convWire
+        : { ...convWire, contact: redactExternalContactPii(convWire.contact) },
     };
   }
 
@@ -1101,6 +1126,29 @@ export class ExternalV1MessagingService {
           { refuseStaleOnAmbiguity: true },
         );
         if (claim.kind === "replay") return claim.result;
+      }
+
+      // Per-conversation send ceiling — SAME gate as the text path. Templates
+      // are the BILLED cold-outbound path, so a partner hot-potato here is the
+      // most expensive to leave uncapped. Claimed idempotency above is released
+      // on rate-limit so a retry after Retry-After can re-claim fresh.
+      try {
+        consumeConversationSendBudget(teamId, conv.id);
+      } catch (err) {
+        if (err instanceof ConversationSendRateLimitedError) {
+          if (idempotencyKey) {
+            await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+          }
+          throw new HttpException(
+            {
+              error: "conversation_rate_limited",
+              detail: err.message,
+              retryAfter: err.retryAfter,
+            },
+            429,
+          );
+        }
+        throw err;
       }
 
       let out: { ok: true; message: ExternalMessage; clientTempId: string | null };

@@ -48,9 +48,48 @@ import { WsAdapter } from "./realtime/ws-adapter";
 // not inside `bootstrap()`. NestFactory's failure path also routes through
 // these — without them a single bad `onModuleInit` would crash before the
 // logger is ready and you'd see only the unhelpful default Node stack.
+// Set by bootstrap() once the app + graceful shutdown are wired, so the fatal
+// handler below can drain in-flight work before exiting.
+let triggerGracefulShutdown: ((signal: string) => Promise<void>) | null = null;
+let fatalExiting = false;
+
+/**
+ * Handle a truly-uncaught synchronous exception. The process state is now
+ * UNDEFINED — it must NOT keep serving (it could corrupt data or, worse, leave
+ * a half-run worker job that another pickup re-executes → double Meta send).
+ *
+ * The one documented benign case (BullMQ blocking-connection ECONNRESET on the
+ * duplicated Redis socket) is handled UPSTREAM at each Worker's `.on("error")`,
+ * so reaching here is genuinely unexpected. We drain in-flight work first —
+ * abrupt `exit()` would strand a mid-flight BullMQ job whose lock expires in 90s
+ * and gets re-executed (the exact double-fire the graceful path prevents) — then
+ * exit so Docker's `restart: unless-stopped` brings up a clean process. A
+ * watchdog forces exit if the drain itself hangs (likely, given a corrupt
+ * state); its 30s budget stays under compose's `stop_grace_period`.
+ */
+function fatalExit(reason: string): void {
+  if (fatalExiting) return;
+  fatalExiting = true;
+  const backstop = setTimeout(() => {
+    console.error(`[${reason}] graceful drain timed out — forcing exit`);
+    process.exit(1);
+  }, 30_000);
+  backstop.unref();
+  if (triggerGracefulShutdown) {
+    void triggerGracefulShutdown(reason);
+  } else {
+    // Crashed before the app was ready — no in-flight work to drain.
+    process.exit(1);
+  }
+}
+
 process.on("uncaughtException", (err) => {
   console.error("[uncaughtException]", err);
+  fatalExit("uncaughtException");
 });
+// unhandledRejection stays log-and-continue: it's dominated by fire-and-forget
+// `void publish(...)` sites whose failure must not take down the api. A missing
+// `.catch` is a bug to fix at the call site, not a reason to crash the process.
 process.on("unhandledRejection", (reason) => {
   console.error("[unhandledRejection]", reason);
 });
@@ -450,6 +489,9 @@ async function bootstrap(): Promise<void> {
 
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
+  // Let the top-level fatal handler (uncaughtException) drain via this same
+  // path instead of exiting abruptly mid-job.
+  triggerGracefulShutdown = shutdown;
 
   const logger = new Logger("Bootstrap");
   logger.log(`NestJS API listening on http://${host}:${port}`);

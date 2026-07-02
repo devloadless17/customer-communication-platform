@@ -30,6 +30,33 @@ import {
 import { buildTokenContext } from "./token-context";
 
 /**
+ * Parse a free-text numeric answer without corrupting decimal-comma or
+ * thousands-grouped replies. A blind `replace(/,/g, "")` turned "3,5" (→ 3.5 in
+ * comma-decimal locales) into 35 and mis-validated ranges.
+ *
+ * Deterministic, locale-heuristic (no locale detection needed):
+ *   - has a "." → "." is the decimal sep, "," is thousands grouping → drop ","
+ *     ("1,234.56" → 1234.56).
+ *   - no "." + exactly one "," with 1–2 trailing digits → decimal comma
+ *     ("3,5" → 3.5, "1234,56" → 1234.56).
+ *   - otherwise (multiple commas, or a 3-digit group like "1,000") → thousands
+ *     grouping → drop "," ("1,000" → 1000, "12,345,678" → 12345678).
+ * Returns NaN for unparseable input; the caller routes NaN to the clarifier.
+ */
+function parseAnswerNumber(body: string): number {
+  const s = body.trim();
+  let normalized: string;
+  if (s.includes(".")) {
+    normalized = s.replace(/,/g, "");
+  } else if ((s.match(/,/g) ?? []).length === 1 && /,\d{1,2}$/.test(s)) {
+    normalized = s.replace(",", ".");
+  } else {
+    normalized = s.replace(/,/g, "");
+  }
+  return Number.parseFloat(normalized);
+}
+
+/**
  * `ask_question` step. Sends a free-form question to the trigger contact,
  * pauses the run waiting for their next inbound message (or `timeoutHours`,
  * whichever comes first), then routes:
@@ -263,8 +290,7 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
       let parsedAnswer: string | null = null;
       if (answered && ctx.pendingAnswer) {
         if (config.answerKind === "number") {
-          const raw = ctx.pendingAnswer.body.trim().replace(/,/g, "");
-          const n = Number.parseFloat(raw);
+          const n = parseAnswerNumber(ctx.pendingAnswer.body);
           const inRange =
             Number.isFinite(n) &&
             (config.numberMin === undefined || n >= config.numberMin) &&

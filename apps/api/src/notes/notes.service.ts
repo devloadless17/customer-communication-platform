@@ -2,8 +2,8 @@ import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/commo
 
 import type { InternalNote, Role } from "@ccp/shared/types";
 
-import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
+import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 import type { CreateNoteInput } from "./notes.schemas";
 
 /**
@@ -12,10 +12,7 @@ import type { CreateNoteInput } from "./notes.schemas";
  */
 @Injectable()
 export class NotesService {
-  constructor(
-    private readonly db: DbService,
-    private readonly bus: EventBus,
-  ) {}
+  constructor(private readonly db: DbService) {}
 
   async create(
     teamId: string,
@@ -28,29 +25,37 @@ export class NotesService {
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
-    const created = await this.db.internalNote.create({
-      data: {
+    // Insert + event commit atomically via publishInTx (same durability the
+    // messages path uses). A bare create()-then-publish() dropped the audit row
+    // AND the outbound-webhook delivery permanently on any crash between the DB
+    // commit and the emit; the transactional outbox guarantees the drainer
+    // delivers the event at-least-once. kickOutbox() drains it in ~1ms so the
+    // note still appears live.
+    const created = await this.db.$transaction(async (tx) => {
+      const row = await tx.internalNote.create({
+        data: {
+          teamId,
+          conversationId: input.conversationId,
+          authorUserId,
+          body: input.body,
+        },
+      });
+      const note: InternalNote = {
+        id: row.id,
+        conversationId: row.conversationId,
+        authorUserId: row.authorUserId,
+        body: row.body,
+        timestamp: row.timestamp.toISOString(),
+      };
+      await publishInTx(tx, {
+        type: "note.created",
         teamId,
         conversationId: input.conversationId,
-        authorUserId,
-        body: input.body,
-      },
+        note,
+      });
+      return row;
     });
-
-    const note: InternalNote = {
-      id: created.id,
-      conversationId: created.conversationId,
-      authorUserId: created.authorUserId,
-      body: created.body,
-      timestamp: created.timestamp.toISOString(),
-    };
-
-    await this.bus.publish({
-      type: "note.created",
-      teamId,
-      conversationId: input.conversationId,
-      note,
-    });
+    kickOutbox();
 
     return { noteId: created.id };
   }
@@ -85,14 +90,16 @@ export class NotesService {
       });
     }
 
-    await this.db.internalNote.delete({ where: { id } });
-
-    await this.bus.publish({
-      type: "note.deleted",
-      teamId,
-      conversationId: note.conversationId,
-      noteId: id,
-      deletedByUserId: requesterUserId,
+    await this.db.$transaction(async (tx) => {
+      await tx.internalNote.delete({ where: { id } });
+      await publishInTx(tx, {
+        type: "note.deleted",
+        teamId,
+        conversationId: note.conversationId,
+        noteId: id,
+        deletedByUserId: requesterUserId,
+      });
     });
+    kickOutbox();
   }
 }

@@ -53,8 +53,19 @@ export function useConversationAttachments(
   // unmount so a slow first-page request doesn't land into the next view.
   const controllerRef = useRef<AbortController | null>(null);
 
+  // Fetch modes:
+  //   "replace" — chat-switch / kind-change / manual refresh: reset to a
+  //               loading skeleton and swap in page 1.
+  //   "append"  — load-more: append the next keyset page.
+  //   "silent"  — live socket refetch (message:new / media:ready): MERGE page
+  //               1 into the existing list WITHOUT clearing items, dropping
+  //               loaded older pages, or flashing a skeleton. Preserves the
+  //               nextCursor too. This is load-bearing: a "replace" here would
+  //               blank an open MediaLightbox (it indexes into `items`) and
+  //               collapse every loaded page back to page 1 on any inbound
+  //               media frame.
   const fetchPage = useCallback(
-    async (cursor: string | null, append: boolean) => {
+    async (cursor: string | null, mode: "replace" | "append" | "silent") => {
       if (!conversationId) {
         setState({ ...INITIAL, loading: false });
         return;
@@ -62,9 +73,12 @@ export function useConversationAttachments(
       controllerRef.current?.abort();
       const ctrl = new AbortController();
       controllerRef.current = ctrl;
-      setState((s) =>
-        append ? { ...s, loadingMore: true } : { ...INITIAL, loading: true },
-      );
+      if (mode === "append") {
+        setState((s) => ({ ...s, loadingMore: true }));
+      } else if (mode === "replace") {
+        setState({ ...INITIAL, loading: true });
+      }
+      // "silent": leave state untouched until the merge below — no flash.
       try {
         const params = new URLSearchParams();
         if (cursor) params.set("cursor", cursor);
@@ -77,13 +91,42 @@ export function useConversationAttachments(
         if (!res.ok) throw new Error(`http_${res.status}`);
         const data = (await res.json()) as CursorPage<Message>;
         if (ctrl.signal.aborted) return;
-        setState((s) => ({
-          items: append ? [...s.items, ...data.items] : data.items,
-          nextCursor: data.nextCursor,
-          loading: false,
-          loadingMore: false,
-          error: null,
-        }));
+        setState((s) => {
+          if (mode === "append") {
+            return {
+              items: [...s.items, ...data.items],
+              nextCursor: data.nextCursor,
+              loading: false,
+              loadingMore: false,
+              error: null,
+            };
+          }
+          if (mode === "silent") {
+            // Merge page 1 into the loaded list: refresh any items the fresh
+            // page also returned (e.g. a pending→ready media patch) and
+            // prepend genuinely-new ones, keeping loaded older pages + the
+            // existing nextCursor so pagination + an open lightbox survive.
+            const freshById = new Map(data.items.map((m) => [m.id, m]));
+            const existingIds = new Set(s.items.map((m) => m.id));
+            const merged = s.items.map((m) => freshById.get(m.id) ?? m);
+            const added = data.items.filter((m) => !existingIds.has(m.id));
+            return {
+              ...s,
+              items: [...added, ...merged],
+              loading: false,
+              loadingMore: false,
+              error: null,
+            };
+          }
+          // "replace"
+          return {
+            items: data.items,
+            nextCursor: data.nextCursor,
+            loading: false,
+            loadingMore: false,
+            error: null,
+          };
+        });
       } catch (err) {
         if (ctrl.signal.aborted) return;
         setState((s) => ({
@@ -99,7 +142,7 @@ export function useConversationAttachments(
 
   // Fetch first page on mount + whenever conversationId / kind changes.
   useEffect(() => {
-    void fetchPage(null, false);
+    void fetchPage(null, "replace");
     return () => controllerRef.current?.abort();
   }, [fetchPage]);
 
@@ -122,7 +165,7 @@ export function useConversationAttachments(
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         timer = null;
-        void fetchPage(null, false);
+        void fetchPage(null, "silent");
       }, 300);
     };
     const onMessageNew: Parameters<typeof socket.on<"message:new">>[1] = (payload) => {
@@ -145,11 +188,11 @@ export function useConversationAttachments(
 
   const loadMore = useCallback(() => {
     if (state.loadingMore || !state.nextCursor) return;
-    void fetchPage(state.nextCursor, true);
+    void fetchPage(state.nextCursor, "append");
   }, [fetchPage, state.loadingMore, state.nextCursor]);
 
   const refresh = useCallback(() => {
-    void fetchPage(null, false);
+    void fetchPage(null, "replace");
   }, [fetchPage]);
 
   return {

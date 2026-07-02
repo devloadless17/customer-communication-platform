@@ -47,6 +47,11 @@ const RECOVERY_HORIZON_MS = 24 * 60 * 60 * 1000;
 // promptly once the dependency returns. Process-local (resets on restart, which
 // just triggers a fresh attempt — the download + CAS patch is idempotent).
 const RETRY_THROTTLE_MS = 60 * 60 * 1000;
+// Max DISTINCT rows we re-download per tick. Each attempt can block on the
+// Meta CDN / R2 for the full request timeout, so bounding the batch keeps a
+// sustained outage from turning one tick into a multi-minute run. The hourly
+// per-row throttle already limits re-attempts; this caps work-per-tick.
+const MAX_RETRIABLE_PER_TICK = 10;
 
 let timer: NodeJS.Timeout | null = null;
 // In-flight guard — prevents a slow sweep (re-downloads + batched UPDATE + N
@@ -62,10 +67,19 @@ async function runTick(label: string): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    // Mutex serializes against heavy daily/weekly sweepers. The query here
-    // is small (100-row partial-index scan) so the skip-when-busy semantics
-    // are fine — a missed 60s tick is recovered on the next.
-    await withSweeperMutex("inbound-media", sweepOnce);
+    // PHASE 1 — under the mutex: the pool-pressuring DB work ONLY (the 100-row
+    // partial-index scan + the batched downgrade UPDATE + the downgrade
+    // publishes). Small + fast, so the skip-when-busy mutex semantics are fine.
+    // `undefined` when the mutex was held (another sweeper running) — treat as
+    // "nothing to retry this tick".
+    const retriable =
+      (await withSweeperMutex("inbound-media", selectAndDowngrade)) ?? [];
+    // PHASE 2 — NO mutex: the network-bound re-downloads. These hit the Meta
+    // CDN + R2, NOT the Prisma pool the mutex exists to protect. Holding the
+    // single global sweeper mutex across a multi-minute Meta/R2 outage would
+    // starve every other mutex-protected sweeper (stale-calls, retention,
+    // blob-orphan). The batch is already capped in PHASE 1.
+    if (retriable.length > 0) await retryParkedRows(retriable);
   } catch (err) {
     console.error(`[sweeper.inbound-media] ${label} failed`, err);
   } finally {
@@ -91,7 +105,13 @@ export function stopInboundMediaSweeper(): void {
   }
 }
 
-async function sweepOnce(): Promise<void> {
+/**
+ * PHASE 1 (under mutex): scan for parked rows, downgrade the expired ones in
+ * one batched UPDATE, and RETURN the throttle-eligible retriable rows (capped)
+ * for the caller to re-download OUTSIDE the mutex. Only DB/pool + socket work
+ * runs here — nothing network-bound.
+ */
+async function selectAndDowngrade(): Promise<ParkedRow[]> {
   const now = Date.now();
   const cutoff = new Date(now - STALE_THRESHOLD_MS);
   const horizon = new Date(now - RECOVERY_HORIZON_MS);
@@ -126,17 +146,84 @@ async function sweepOnce(): Promise<void> {
     take: 100,
   });
 
-  if (stuck.length === 0) return;
+  if (stuck.length === 0) return [];
 
   // Partition: rows past the recovery horizon get the final downgrade; the
   // rest are eligible for a throttled re-download attempt.
   const expired = stuck.filter((r) => r.createdAt < horizon);
   const retriable = stuck.filter((r) => r.createdAt >= horizon);
 
-  for (const row of retriable) {
-    const last = lastAttemptAt.get(row.id) ?? 0;
-    if (now - last < RETRY_THROTTLE_MS) continue;
-    lastAttemptAt.set(row.id, now);
+  // Downgrade the expired rows FIRST — both the batched UPDATE and the
+  // media_ready publishes are DB/socket-bound (cheap), so they belong under
+  // the mutex.
+  if (expired.length > 0) {
+    // Clear the expired rows in one batched UPDATE — far cheaper than per-row.
+    const ids = expired.map((r) => r.id);
+    await db.message.updateMany({
+      where: { id: { in: ids } },
+      data: {
+        mediaKind: null,
+        mediaMimeType: null,
+        mediaCaption: null,
+        mediaFilename: null,
+        mediaDurationMs: null,
+        mediaKey: null,
+        mediaUrl: null,
+        mediaSizeBytes: null,
+      },
+    });
+
+    // Tell every live client to drop the pending placeholder. Same payload
+    // shape as the success path: omit `media` so the bubble strips its
+    // media block and renders as a regular text row.
+    for (const row of expired) {
+      lastAttemptAt.delete(row.id);
+      // Per-row isolation: the DB downgrade already committed in the batched
+      // updateMany above, so these rows will NOT be re-selected next tick
+      // (mediaKind is null). If one publish throws, swallowing it here keeps
+      // the remaining rows' "drop the placeholder" frames flowing instead of
+      // aborting the loop and stranding every later row's live shimmer.
+      try {
+        await publish({
+          type: "message.media_ready",
+          teamId: row.teamId,
+          conversationId: row.conversationId,
+          messageId: row.id,
+          // No media → socket-fanout emits the "ready" event without payload.
+        });
+      } catch (err) {
+        console.warn(
+          `[sweeper.inbound-media] downgrade publish failed for ${row.id} (DB already correct; client refreshes on reload)`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+
+    console.warn(
+      `[sweeper.inbound-media] downgraded ${expired.length} stale pending media row(s) to text-only after recovery horizon`,
+    );
+  }
+
+  // Select the re-download batch: throttle-eligible rows only (hourly per
+  // row), capped per tick. Stamp lastAttemptAt NOW so the throttle accounts
+  // for this attempt even though the download itself runs in PHASE 2 outside
+  // the mutex. Filter BEFORE the cap so the budget isn't wasted on throttled
+  // rows (which would stall recovery of the eligible ones behind them).
+  const batch = retriable
+    .filter((r) => now - (lastAttemptAt.get(r.id) ?? 0) >= RETRY_THROTTLE_MS)
+    .slice(0, MAX_RETRIABLE_PER_TICK);
+  for (const row of batch) lastAttemptAt.set(row.id, now);
+  return batch;
+}
+
+/**
+ * PHASE 2 (NO mutex): re-download each parked row from its Meta media id. Each
+ * call is network-bound (Meta CDN + R2) and may block on the full request
+ * timeout during an outage — which is exactly why this runs OFF the mutex, so
+ * a slow dependency can't starve the other mutex-protected sweepers.
+ */
+async function retryParkedRows(rows: ParkedRow[]): Promise<void> {
+  for (const row of rows) {
     try {
       await retryDownload(row);
     } catch (err) {
@@ -148,54 +235,6 @@ async function sweepOnce(): Promise<void> {
       );
     }
   }
-
-  if (expired.length === 0) return;
-
-  // Clear the expired rows in one batched UPDATE — far cheaper than per-row.
-  const ids = expired.map((r) => r.id);
-  await db.message.updateMany({
-    where: { id: { in: ids } },
-    data: {
-      mediaKind: null,
-      mediaMimeType: null,
-      mediaCaption: null,
-      mediaFilename: null,
-      mediaDurationMs: null,
-      mediaKey: null,
-      mediaUrl: null,
-      mediaSizeBytes: null,
-    },
-  });
-
-  // Tell every live client to drop the pending placeholder. Same payload
-  // shape as the success path: omit `media` so the bubble strips its
-  // media block and renders as a regular text row.
-  for (const row of expired) {
-    lastAttemptAt.delete(row.id);
-    // Per-row isolation: the DB downgrade already committed in the batched
-    // updateMany above, so these rows will NOT be re-selected next tick
-    // (mediaKind is null). If one publish throws, swallowing it here keeps the
-    // remaining rows' "drop the placeholder" frames flowing instead of
-    // aborting the loop and stranding every later row's live shimmer.
-    try {
-      await publish({
-        type: "message.media_ready",
-        teamId: row.teamId,
-        conversationId: row.conversationId,
-        messageId: row.id,
-        // No media → socket-fanout emits the "ready" event without payload.
-      });
-    } catch (err) {
-      console.warn(
-        `[sweeper.inbound-media] downgrade publish failed for ${row.id} (DB already correct; client refreshes on reload)`,
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
-
-  console.warn(
-    `[sweeper.inbound-media] downgraded ${expired.length} stale pending media row(s) to text-only after recovery horizon`,
-  );
 }
 
 type ParkedRow = {

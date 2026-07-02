@@ -9,6 +9,7 @@ import {
 } from "@nestjs/common";
 
 import { MAX_CHAIN_DEPTH } from "@/lib/workflows/events";
+import { toExternalAvatarUrl } from "@/lib/blob-storage";
 
 import {
   contactRowToExternal,
@@ -119,12 +120,16 @@ export class ExternalV1Service {
   // Delegations to ExternalV1MessagingService — pass-through, no behavior here.
   // ===========================================================================
 
-  listConversations(teamId: string, q: ListConversationsQueryInput) {
-    return this.messaging.listConversations(teamId, q);
+  listConversations(
+    teamId: string,
+    q: ListConversationsQueryInput,
+    includeContactPii = true,
+  ) {
+    return this.messaging.listConversations(teamId, q, includeContactPii);
   }
 
-  getConversation(teamId: string, id: string) {
-    return this.messaging.getConversation(teamId, id);
+  getConversation(teamId: string, id: string, includeContactPii = true) {
+    return this.messaging.getConversation(teamId, id, includeContactPii);
   }
 
   assign(
@@ -161,12 +166,13 @@ export class ExternalV1Service {
     teamId: string,
     conversationId: string,
     q: ListMessagesQueryInput,
+    includeContactPii = true,
   ) {
-    return this.messaging.listMessages(teamId, conversationId, q);
+    return this.messaging.listMessages(teamId, conversationId, q, includeContactPii);
   }
 
-  findMessage(teamId: string, id: string) {
-    return this.messaging.findMessage(teamId, id);
+  findMessage(teamId: string, id: string, includeContactPii = true) {
+    return this.messaging.findMessage(teamId, id, includeContactPii);
   }
 
   sendMessage(
@@ -1486,15 +1492,22 @@ export class ExternalV1Service {
       orderBy: { name: "asc" },
     });
     return {
-      items: rows.map((u) => ({
-        id: u.id,
-        teamId: u.teamId,
-        role: u.role,
-        name: u.name,
-        email: u.email,
-        ...(u.avatarUrl ? { avatarUrl: u.avatarUrl } : {}),
-        isActive: u.deactivatedAt === null,
-      })),
+      items: await Promise.all(
+        rows.map(async (u) => {
+          // Presign the R2 avatar for external fetchers — `u.avatarUrl` is the
+          // internal session-gated path, unusable by an API-key partner.
+          const avatarUrl = await toExternalAvatarUrl(u.id, !!u.avatarUrl);
+          return {
+            id: u.id,
+            teamId: u.teamId,
+            role: u.role,
+            name: u.name,
+            email: u.email,
+            ...(avatarUrl ? { avatarUrl } : {}),
+            isActive: u.deactivatedAt === null,
+          };
+        }),
+      ),
     };
   }
 
@@ -1503,6 +1516,7 @@ export class ExternalV1Service {
       where: { teamId, OR: [{ id: idOrEmail }, { email: idOrEmail }] },
     });
     if (!row) throw new NotFoundException({ error: "user_not_found", detail: "user not found" });
+    const avatarUrl = await toExternalAvatarUrl(row.id, !!row.avatarUrl);
     return {
       user: {
         id: row.id,
@@ -1510,7 +1524,7 @@ export class ExternalV1Service {
         role: row.role,
         name: row.name,
         email: row.email,
-        ...(row.avatarUrl ? { avatarUrl: row.avatarUrl } : {}),
+        ...(avatarUrl ? { avatarUrl } : {}),
         isActive: row.deactivatedAt === null,
       },
     };

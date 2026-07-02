@@ -1,5 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 
+import { createTokenBucket } from "./token-bucket";
+
 /**
  * Per-IP token bucket applied BEFORE the session guard. The session guard's
  * own bucket only fires once `req.session.userId` is set, which means a
@@ -20,55 +22,18 @@ import type { Request, Response, NextFunction } from "express";
  *   - `/api/health` — must remain responsive for liveness probes.
  *   - `/api/socket/*` — Socket.io handshakes are throttled in the gateway.
  *
- * Same in-memory shape as `rate-limit.interceptor.ts`; moves to Redis on the
- * same trigger (second app instance).
+ * Backed by the canonical `createTokenBucket` helper (same one the session
+ * guard + 6 other call sites use) — one implementation of the refill/LRU/idle-
+ * sweep logic instead of a third hand-rolled copy. Moves to Redis on the same
+ * trigger (second app instance).
  */
 
 const PER_MINUTE = 600;
-const WINDOW_MS = 60_000;
 const BUCKET_MAX = 20_000;
-const BUCKET_IDLE_SWEEP_MS = 10 * 60_000;
-const BUCKET_SWEEP_INTERVAL_MS = 5 * 60_000;
 
-interface Bucket {
-  tokens: number;
-  lastRefill: number;
-}
-
-const buckets = new Map<string, Bucket>();
-const sweeper = setInterval(() => {
-  const cutoff = Date.now() - BUCKET_IDLE_SWEEP_MS;
-  for (const [k, b] of buckets) {
-    if (b.lastRefill < cutoff) buckets.delete(k);
-  }
-}, BUCKET_SWEEP_INTERVAL_MS);
-sweeper.unref?.();
-
-function consume(ip: string): { ok: true } | { ok: false; retryAfter: number } {
-  const now = Date.now();
-  const refillPerMs = PER_MINUTE / WINDOW_MS;
-  let bucket = buckets.get(ip);
-  if (!bucket) {
-    if (buckets.size >= BUCKET_MAX) {
-      const oldest = buckets.keys().next().value;
-      if (oldest !== undefined) buckets.delete(oldest);
-    }
-    bucket = { tokens: PER_MINUTE - 1, lastRefill: now };
-    buckets.set(ip, bucket);
-    return { ok: true };
-  }
-  const elapsed = now - bucket.lastRefill;
-  bucket.tokens = Math.min(PER_MINUTE, bucket.tokens + elapsed * refillPerMs);
-  bucket.lastRefill = now;
-  if (bucket.tokens < 1) {
-    return {
-      ok: false,
-      retryAfter: Math.max(1, Math.ceil((1 - bucket.tokens) / refillPerMs / 1000)),
-    };
-  }
-  bucket.tokens -= 1;
-  return { ok: true };
-}
+// 20k distinct IPs before LRU eviction — sized for a spray attack without
+// unbounded growth. The shared module-level sweeper time-evicts idle keys.
+const ipBucket = createTokenBucket({ perMin: PER_MINUTE, maxKeys: BUCKET_MAX });
 
 function shouldSkip(url: string): boolean {
   return (
@@ -89,7 +54,7 @@ export function ipRateLimitMiddleware(): (
     const url = req.url ?? "";
     if (shouldSkip(url)) return next();
     const ip = req.ip ?? "unknown";
-    const r = consume(ip);
+    const r = ipBucket.consume(ip);
     if (!r.ok) {
       res.setHeader("Retry-After", String(r.retryAfter));
       res.status(429).json({

@@ -18,6 +18,7 @@ import { CurrentApiKey } from "../../auth/current-session.decorator";
 import type { ApiKeyContext } from "../../auth/api-key.guard";
 import { RequireScope } from "../../auth/scope.decorator";
 import { ScopeGuard } from "../../auth/scope.guard";
+import { hasScope } from "@ccp/shared/api-keys/scopes";
 import { RateLimit } from "../../common/rate-limit.interceptor";
 import { zBody, zQuery } from "../../common/zod-validation.pipe";
 import { MAX_CHAIN_DEPTH, parseChainDepth } from "@/lib/workflows/events";
@@ -533,7 +534,11 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Query(zQuery(ListConversationsQuerySchema)) query: ListConversationsQueryInput,
   ) {
-    return this.api.listConversations(auth.teamId, query);
+    return this.api.listConversations(
+      auth.teamId,
+      query,
+      hasScope(auth.scopes, "read:contacts"),
+    );
   }
 
   @Get("conversations/:id")
@@ -542,7 +547,11 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
   ) {
-    return this.api.getConversation(auth.teamId, id);
+    return this.api.getConversation(
+      auth.teamId,
+      id,
+      hasScope(auth.scopes, "read:contacts"),
+    );
   }
 
   @Post("conversations/:id/assign")
@@ -702,7 +711,11 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
   ) {
-    return this.api.findMessage(auth.teamId, id);
+    return this.api.findMessage(
+      auth.teamId,
+      id,
+      hasScope(auth.scopes, "read:contacts"),
+    );
   }
 
   @Get("conversations/:id/messages")
@@ -712,7 +725,12 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Query(zQuery(ListMessagesQuerySchema)) query: ListMessagesQueryInput,
   ) {
-    return this.api.listMessages(auth.teamId, id, query);
+    return this.api.listMessages(
+      auth.teamId,
+      id,
+      query,
+      hasScope(auth.scopes, "read:contacts"),
+    );
   }
 
   @Post("conversations/:id/messages")

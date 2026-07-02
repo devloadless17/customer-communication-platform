@@ -568,6 +568,18 @@ export class ChannelsService {
           where: { id: channelId },
           data: { lastMessageAt: receivedAt, lastMessagePreview: preview },
         });
+        // Advance the AUTHOR's own read receipt to their post time — posting is
+        // proof they're viewing the channel (mirrors the inbox's
+        // markReadOnAgentSend). Without this the sender's own channel shows
+        // badged-unread on SSR/reload (unreadForMe compares the channel's
+        // lastMessageAt, which THIS post just bumped, against the reader's
+        // lastReadAt). receivedAt is `now`, so this never moves the receipt
+        // backward. In the same tx so it can't lag or drop behind the commit.
+        await tx.teamChannelReadReceipt.upsert({
+          where: { userId_channelId: { userId, channelId } },
+          create: { userId, channelId, lastReadAt: receivedAt },
+          update: { lastReadAt: receivedAt },
+        });
         return msg;
       });
     } catch (err) {

@@ -361,31 +361,6 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
    * silently routes every inbound socket emit to `team:undefined` and
    * the user has to refresh to see new conversations.
    */
-  /**
-   * Race a dispatch against DISPATCH_TIMEOUT_MS so a hung subscriber can't pin
-   * the tick forever (obs-1). On timeout the underlying promise keeps running
-   * (it can't be cancelled), but the tick moves on and the row is recorded as a
-   * dispatch error via the caller's catch — never silently re-dispatched.
-   */
-  private withDispatchTimeout<T>(p: Promise<T>, rowId: string): Promise<T> {
-    let timer: NodeJS.Timeout;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () =>
-          reject(
-            new Error(
-              `outbox dispatch timed out after ${OutboxDrainerService.DISPATCH_TIMEOUT_MS}ms (row=${rowId})`,
-            ),
-          ),
-        OutboxDrainerService.DISPATCH_TIMEOUT_MS,
-      );
-    });
-    return Promise.race([
-      p.finally(() => clearTimeout(timer)),
-      timeout,
-    ]) as Promise<T>;
-  }
-
   private async dispatch(
     row: {
       id: string;
@@ -414,9 +389,12 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
       const subscriberError = await runWithCorrelationContext(
         { requestId: row.correlationId ?? row.id, chainDepth: row.chainDepth },
         () =>
-          this.withDispatchTimeout(
-            this.bus.dispatchOutboxRow(event as DomainEventOf<DomainEventType>),
-            row.id,
+          // Timeout is applied PER-SUBSCRIBER inside the bus (not once around
+          // the whole chain) so one hung handler can't drop every downstream
+          // subscriber for this tx-durable event with no retry.
+          this.bus.dispatchOutboxRow(
+            event as DomainEventOf<DomainEventType>,
+            OutboxDrainerService.DISPATCH_TIMEOUT_MS,
           ),
       );
       // dispatchOutboxRow RETURNED → all subscribers ran (a subscriberError

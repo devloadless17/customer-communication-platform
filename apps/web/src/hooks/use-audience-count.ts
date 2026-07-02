@@ -48,8 +48,10 @@ export function useAudienceCount(
         if (!cancelled) setCount(data.count ?? 0);
       } catch {
         // Either an abort (a newer query superseded this one — `cancelled` is
-        // already true, so no write) or a real network error. Swallow both.
-        if (!cancelled) setCount(0);
+        // already true, so no write) or a real network error. On a real error
+        // KEEP the last known count: zeroing it here disabled Send for a valid
+        // audience on a transient blip. A genuinely-empty audience is already
+        // handled by the early return above.
       } finally {
         if (!cancelled) setLoading(false);
       }

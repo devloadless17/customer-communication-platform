@@ -21,10 +21,22 @@ interface Bucket {
 
 const buckets = new Map<string, Bucket>();
 
-// Opportunistic GC so a long-lived process doesn't accumulate dead keys —
-// cheap because it only runs when the map is already large.
+// Hard ceiling on distinct keys so a high-cardinality IP spray can't grow the
+// map without bound (the very attack this limiter defends against).
+const HARD_CAP = 20_000;
+// The full-map GC scan is O(n); a high-cardinality spray keeps the map large
+// with mostly non-expired entries, so running it on EVERY request amplified
+// the attack's own cost. Throttle it to at most once per interval.
+const SWEEP_MIN_INTERVAL_MS = 30_000;
+let lastSweepAt = 0;
+
+// Opportunistic GC so a long-lived process doesn't accumulate dead keys — only
+// runs when the map is already large AND at most once per SWEEP_MIN_INTERVAL_MS
+// (not per-call), so the O(n) scan can't ride the hot path under a spray.
 function sweep(now: number): void {
   if (buckets.size < 5000) return;
+  if (now - lastSweepAt < SWEEP_MIN_INTERVAL_MS) return;
+  lastSweepAt = now;
   for (const [key, b] of buckets) {
     if (b.resetAt <= now) buckets.delete(key);
   }
@@ -52,6 +64,12 @@ export function rateLimit(key: string, limit: number, windowMs: number): RateLim
 
   const existing = buckets.get(key);
   if (!existing || existing.resetAt <= now) {
+    // Bound memory even if the throttled sweep hasn't fired: drop the oldest
+    // entry (Map preserves insertion order) before inserting a fresh key.
+    if (buckets.size >= HARD_CAP) {
+      const oldest = buckets.keys().next().value;
+      if (oldest !== undefined) buckets.delete(oldest);
+    }
     buckets.set(key, { count: 1, resetAt: now + windowMs });
     return { ok: true, retryAfter: 0 };
   }

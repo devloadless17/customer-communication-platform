@@ -71,15 +71,29 @@ export function Popover({
   }, [sideOffset]);
 
   // Measure on open; keep aligned while scrolling (capture catches inner
-  // scroll containers like the picker modal body) or resizing.
+  // scroll containers like the picker modal body) or resizing. The scroll/
+  // resize handler is rAF-coalesced (same pattern as sheet.tsx): a capture-
+  // phase scroll listener fires for EVERY nested scroll container on every
+  // scroll event, so an unthrottled getBoundingClientRect + setState per event
+  // was a real jank source while a popover stayed open over a scrolling list.
   useLayoutEffect(() => {
     if (!open) return;
     reposition();
-    window.addEventListener("scroll", reposition, true);
-    window.addEventListener("resize", reposition);
+    let raf = 0;
+    const onFrame = () => {
+      raf = 0;
+      reposition();
+    };
+    const schedule = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(onFrame);
+    };
+    window.addEventListener("scroll", schedule, true);
+    window.addEventListener("resize", schedule);
     return () => {
-      window.removeEventListener("scroll", reposition, true);
-      window.removeEventListener("resize", reposition);
+      if (raf) cancelAnimationFrame(raf);
+      window.removeEventListener("scroll", schedule, true);
+      window.removeEventListener("resize", schedule);
     };
   }, [open, reposition]);
 

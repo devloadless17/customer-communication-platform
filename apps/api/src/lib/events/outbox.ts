@@ -107,16 +107,19 @@ export async function publishInTx<K extends DomainEventType>(
  * this insert, the audit row is lost. Acceptable per the existing "better
  * stale audit than dropped fanout" posture — in-process subscriber state
  * mutations are already partial in that crash scenario.
+ *
+ * Returns the new row's id so `publish()` can stamp `dispatchedAt` on it AFTER
+ * the DETACHED background tier resolves (see below).
  */
 export async function persistDispatchedRow<K extends DomainEventType>(
   event: DomainEventOf<K>,
   error: string | null,
-): Promise<void> {
+): Promise<string> {
   const { type, teamId, ...rest } = event as DomainEventOf<K> & { teamId: string };
   const now = new Date();
   const truncatedError =
     error && error.length > 1000 ? error.slice(0, 1000) + "…" : error;
-  await db.outboundEvent.create({
+  const row = await db.outboundEvent.create({
     data: {
       teamId,
       type,
@@ -127,23 +130,25 @@ export async function persistDispatchedRow<K extends DomainEventType>(
       // consistency with the tx path (never re-dispatched, so not load-bearing).
       chainDepth: getChainDepth(),
       correlationId: getCorrelationId() ?? null,
-      ...(truncatedError
-        ? { failedAt: now, lastError: truncatedError }
-        : // I-2: the synchronous publish() path already finished dispatching every
-          // in-process subscriber BEFORE this row is written, so close the
-          // published→dispatched bracket immediately. Without it, EVERY successful
-          // publish() row (the bulk of events) kept dispatchedAt NULL forever:
-          //   1) the retention sweeper requires `dispatchedAt: { not: null }`, so
-          //      it could never GC them → OutboundEvent grows unbounded; and
-          //   2) they permanently matched the "hard-crash loss-window" detection
-          //      query (publishedAt old + dispatchedAt NULL + failedAt NULL),
-          //      burying the rare genuine signal.
-          // The error branch above intentionally leaves dispatchedAt NULL: failedAt
-          // is set, so the sweeper KEEPS the row for operator triage.
-          { dispatchedAt: now }),
+      // dispatchedAt is intentionally left NULL here. The bare publish() path
+      // spawns the background tier (audit → analytics → workflow-dispatch →
+      // outbound-webhooks) DETACHED — those subscribers have NOT run yet when
+      // this row is written. Stamping dispatchedAt=NOW now produced a
+      // false-green forensic trail: a crash between this write and the
+      // background subscribers creating their rows (e.g. an OutboundWebhook
+      // delivery) looked fully dispatched, hiding the loss. Instead publish()
+      // stamps dispatchedAt via markDispatched() once the background promise
+      // resolves; a crash before that leaves publishedAt set + dispatchedAt
+      // NULL — exactly the "hard-crash loss window" the detection query looks
+      // for, and the retention sweeper's `dispatchedAt: { not: null }` GC only
+      // fires once the bracket is honestly closed.
+      // The error branch also leaves dispatchedAt NULL: failedAt is set, so the
+      // sweeper KEEPS the row for operator triage.
+      ...(truncatedError ? { failedAt: now, lastError: truncatedError } : {}),
     },
     select: { id: true },
   });
+  return row.id;
 }
 
 /**

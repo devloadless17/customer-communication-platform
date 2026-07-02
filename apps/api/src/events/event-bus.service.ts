@@ -55,7 +55,8 @@ export class EventBus {
    */
   dispatchOutboxRow<K extends DomainEventType>(
     event: DomainEventOf<K>,
+    perSubscriberTimeoutMs?: number,
   ): Promise<string | null> {
-    return busDispatchPersistedEvent(event);
+    return busDispatchPersistedEvent(event, perSubscriberTimeoutMs);
   }
 }

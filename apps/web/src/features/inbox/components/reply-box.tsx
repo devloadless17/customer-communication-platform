@@ -349,6 +349,14 @@ export function ReplyBox({
       { file: File; caption: string; replyToMessageId?: string }
     >(),
   );
+  // clientTempId of a failed message being RETRIED (set when a retry prefill
+  // fires; consumed by the next send). The next send REUSES it instead of
+  // minting a fresh one so the server's jobId (`msg-send-<clientTempId>`) +
+  // OutboundSendAttempt idempotency dedupe the retry against the original —
+  // the send pipeline is explicitly designed around this (see send-queue.ts).
+  // Minting a new id on retry defeated it: an ambiguously-failed original that
+  // Meta actually delivered would double-send on retry.
+  const retryClientTempIdRef = useRef<string | null>(null);
 
   // Idempotency guard: while a submit is in flight, additional Enter
   // presses / Send-button clicks no-op. The fetch IIFE clears the flag in
@@ -756,6 +764,9 @@ export function ReplyBox({
     if (!prefill) return;
     setMode("reply");
     setError(null);
+    // Reuse the failed message's clientTempId on the next send so the server
+    // dedupes the retry against the original (jobId + OutboundSendAttempt).
+    retryClientTempIdRef.current = prefill.clientTempId ?? null;
     let restoredCaption: string | null = null;
     let fileRestored = false;
     if (prefill.clientTempId) {
@@ -804,7 +815,11 @@ export function ReplyBox({
     sendInFlightRef.current = true;
     setSendInFlight(true);
 
-    const clientTempId = newClientTempId();
+    // Reuse a retried message's clientTempId (set by the retry prefill) so the
+    // server dedupes this against the original send; otherwise mint a fresh
+    // one. Consumed once — a subsequent fresh compose gets a new id.
+    const clientTempId = retryClientTempIdRef.current ?? newClientTempId();
+    retryClientTempIdRef.current = null;
     const snapshotValue = value;
     // Set when this send optimistically pauses AI / self-assigns / reopens (see
     // the block after the optimistic paint); the catch path rolls each back if
@@ -1188,7 +1203,15 @@ export function ReplyBox({
         // the onOptimisticRetry side effect inside a state updater triggers
         // React 19's "setState while rendering another component" warning,
         // because updaters can run during render.
-        if (valueRef.current === "") {
+        // Only remove the failed bubble + restore the composer for a TEXT send:
+        // the text lives in `snapshotValue`, so dropping the bubble loses
+        // nothing. For a MEDIA send the attachment File lives only in the
+        // failed bubble's retry path (prefill re-seats it from pendingFilesRef
+        // via clientTempId); removing the bubble here would orphan the File and
+        // restore only the caption — silently losing the attachment. So keep
+        // the failed bubble (already flipped by onOptimisticFail) so its Retry
+        // stays actionable.
+        if (valueRef.current === "" && !file) {
           if (!isNote) onOptimisticRetry?.(clientTempId);
           setValue(snapshotValue);
         }

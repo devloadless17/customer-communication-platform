@@ -352,7 +352,10 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
             return;
           }
           try {
-            await enqueueWebhookDelivery(deliveryId, chainDepth);
+            // Carry teamId so the worker's per-team gate reads it off the job
+            // (no per-pickup DB findUnique). All webhooks here belong to
+            // event.teamId (queried by it above).
+            await enqueueWebhookDelivery(deliveryId, chainDepth, event.teamId);
           } catch (err) {
             this.logger.error(
               `enqueue failed for delivery ${deliveryId}: ${err instanceof Error ? err.message : err}`,

@@ -8,7 +8,7 @@ import type {
 } from "@ccp/shared/events/types";
 
 import { withCorrelation } from "@/common/correlation";
-import { persistDispatchedRow } from "@/lib/events/outbox";
+import { markDispatched, persistDispatchedRow } from "@/lib/events/outbox";
 
 /**
  * Typed in-process event bus.
@@ -180,8 +180,10 @@ export async function publish<K extends DomainEventType>(
   // Spawn background tier DETACHED. The HTTP handler that called us isn't
   // forced to wait for analytics + workflow dispatch + outbound webhooks
   // before returning. Background errors are logged inside runBackgroundTier
-  // (per-subscriber try/catch) — they don't propagate.
-  void runBackgroundTier(event);
+  // (per-subscriber try/catch) — they don't propagate, so this promise always
+  // resolves. We keep the handle (not `void`) so we can stamp dispatchedAt
+  // only AFTER the background subscribers have actually created their rows.
+  const backgroundPromise = runBackgroundTier(event);
 
   // Await realtime so its rejection (if any) makes it into the outbox row.
   if (realtimePromise) {
@@ -192,13 +194,27 @@ export async function publish<K extends DomainEventType>(
     }
   }
 
+  let rowId: string | null = null;
   try {
-    await persistDispatchedRow(event, realtimeErrorSink.error);
+    rowId = await persistDispatchedRow(event, realtimeErrorSink.error);
   } catch (err) {
     console.error(
       withCorrelation(`[bus] outbox persist for "${event.type}" failed:`),
       err instanceof Error ? err.message : err,
     );
+  }
+
+  // Close the published→dispatched bracket ONLY after the detached background
+  // tier resolves — i.e. after audit/analytics/workflow-dispatch/outbound-
+  // webhook subscribers have created their rows. Detached from the HTTP
+  // response (not awaited here), so response latency is unchanged, but a crash
+  // mid-background now leaves publishedAt set + dispatchedAt NULL, which the
+  // forensic "hard-crash loss window" query surfaces instead of a false-green
+  // trail. Skip when realtime errored: persistDispatchedRow stamped failedAt,
+  // and a failed row is intentionally KEPT undispatched for operator triage.
+  if (rowId && !realtimeErrorSink.error) {
+    const id = rowId;
+    void backgroundPromise.then(() => markDispatched([id])).catch(() => {});
   }
 }
 
@@ -219,9 +235,10 @@ export async function publish<K extends DomainEventType>(
  */
 export async function dispatchPersistedEvent<K extends DomainEventType>(
   event: DomainEventOf<K>,
+  perSubscriberTimeoutMs?: number,
 ): Promise<string | null> {
   const errors: string[] = [];
-  await runAllSubscribersAwaited(event, errors);
+  await runAllSubscribersAwaited(event, errors, perSubscriberTimeoutMs);
   if (errors.length === 0) return null;
   // Bound the persisted message — `lastError` is bounded text and the
   // operator only needs the head of the trail. When truncating, prepend the
@@ -323,6 +340,7 @@ async function runBackgroundTier<K extends DomainEventType>(
 async function runAllSubscribersAwaited<K extends DomainEventType>(
   event: DomainEventOf<K>,
   errorSink: string[],
+  perSubscriberTimeoutMs?: number,
 ): Promise<void> {
   const list = state.handlers.get(event.type as DomainEventType);
   if (!list || list.length === 0) return;
@@ -333,7 +351,24 @@ async function runAllSubscribersAwaited<K extends DomainEventType>(
         ? `#${i}(realtime)`
         : `#${i}`;
     try {
-      await record.handler(event as DomainEventOf<DomainEventType>);
+      // Timeout is applied PER-SUBSCRIBER (not once around the whole chain):
+      // a single hung handler is recorded as an error and we CONTINUE to the
+      // next one, so it can't starve every downstream subscriber of a
+      // tx-durable event (which previously got permanently dropped with no
+      // retry). A timed-out handler keeps running detached; we just stop
+      // awaiting it.
+      const handled = Promise.resolve(
+        record.handler(event as DomainEventOf<DomainEventType>),
+      );
+      if (perSubscriberTimeoutMs && perSubscriberTimeoutMs > 0) {
+        await withSubscriberTimeout(
+          handled,
+          perSubscriberTimeoutMs,
+          `subscriber ${label} for "${event.type}"`,
+        );
+      } else {
+        await handled;
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(
@@ -343,4 +378,25 @@ async function runAllSubscribersAwaited<K extends DomainEventType>(
       errorSink.push(`${label}: ${msg}`);
     }
   }
+}
+
+/**
+ * Race a single subscriber against a timeout. On timeout the returned promise
+ * rejects (recorded as that subscriber's error by the caller) while the
+ * handler's own promise keeps running detached — Promise.race can't cancel it,
+ * but the point is only to stop BLOCKING the remaining subscribers.
+ */
+function withSubscriberTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms,
+    );
+  });
+  return Promise.race([p.finally(() => clearTimeout(timer)), timeout]) as Promise<T>;
 }

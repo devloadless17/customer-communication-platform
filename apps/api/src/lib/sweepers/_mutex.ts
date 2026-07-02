@@ -81,10 +81,10 @@ const NEVER_COMPLETED_GRACE_MS = 60 * 60 * 1000;
  * — operators care about "did this sweeper actually run recently?" not
  * "did we attempt it?".
  */
-export async function withSweeperMutex(
+export async function withSweeperMutex<T>(
   name: SweeperName,
-  fn: () => Promise<void>,
-): Promise<void> {
+  fn: () => Promise<T>,
+): Promise<T | undefined> {
   // Record the first attempt so emitStaleWarnIfDue can fire for a sweeper that
   // has NEVER completed (failure-recovery-added-1).
   if (!firstAttempt.has(name)) firstAttempt.set(name, Date.now());
@@ -96,12 +96,14 @@ export async function withSweeperMutex(
   if (mutexHeld) {
     // Skipped because another sweeper is already running. Quiet — emitting
     // a log per skip would be noisy when daily sweepers cluster on boot.
-    return;
+    // Callers that read the return value treat `undefined` as "skipped".
+    return undefined;
   }
   mutexHeld = true;
   try {
-    await fn();
+    const result = await fn();
     lastCompletion.set(name, Date.now());
+    return result;
   } finally {
     mutexHeld = false;
   }

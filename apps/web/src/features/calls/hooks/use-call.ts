@@ -602,7 +602,10 @@ export function useCall(): {
       }
       const offer = pendingOffersRef.current.get(callId);
       if (!offer) {
-        setError("Hold on — the call is still connecting.");
+        // Use fail() (which toasts) not bare setError(): the incoming card was
+        // optimistically dismissed and CallPanel only renders when liveCall !=
+        // null (still null here), so a setError message would never be seen.
+        fail("The call is still connecting — try again in a moment.");
         return;
       }
 

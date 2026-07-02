@@ -116,6 +116,7 @@ async function pinnedFetch(
     headers: NonNullable<RequestInit["headers"]> | undefined;
     body: RequestInit["body"];
     signal: AbortSignal;
+    maxResponseBytes: number;
   },
 ): Promise<Response> {
   const u = new URL(url);
@@ -148,15 +149,17 @@ async function pinnedFetch(
       (res) => {
         const chunks: Buffer[] = [];
         let size = 0;
-        res.on("data", (c: Buffer) => {
-          size += c.length;
-          if (size > MAX_RESPONSE_BYTES) {
-            req.destroy(new Error("response body exceeded cap"));
-            return;
-          }
-          chunks.push(c);
-        });
-        res.on("end", () => {
+        let settled = false;
+        // Cap at the caller's ceiling (never above the 16 MB hard cap). A
+        // response exceeding it is TRUNCATED (not errored) and the socket torn
+        // down at the cap, so we never buffer more than `cap` bytes AND a
+        // caller that only reads the first N bytes via readLimitedBody still
+        // gets a usable Response. Previously the pinned path always buffered up
+        // to the full 16 MB before returning, defeating a small caller cap.
+        const cap = Math.min(opts.maxResponseBytes, MAX_RESPONSE_BYTES);
+        const settle = () => {
+          if (settled) return;
+          settled = true;
           const headers = new Headers();
           for (const [k, v] of Object.entries(res.headers)) {
             if (v == null) continue;
@@ -173,8 +176,26 @@ async function pinnedFetch(
               headers,
             }),
           );
+        };
+        res.on("data", (c: Buffer) => {
+          if (settled) return;
+          const room = cap - size;
+          if (c.length >= room) {
+            if (room > 0) {
+              chunks.push(c.subarray(0, room));
+              size = cap;
+            }
+            settle();
+            req.destroy(); // stop the transfer — we have all we'll keep
+            return;
+          }
+          chunks.push(c);
+          size += c.length;
         });
-        res.on("error", reject);
+        res.on("end", settle);
+        res.on("error", (e) => {
+          if (!settled) reject(e);
+        });
       },
     );
     req.on("error", reject);
@@ -417,6 +438,15 @@ export interface SafeFetchOptions extends Omit<RequestInit, "redirect"> {
   timeoutMs?: number;
   /** Override the default redirect cap (3). */
   maxRedirects?: number;
+  /**
+   * Cap the number of response-body bytes the PINNED path buffers into memory
+   * before returning (default 16 MB). Set this to just above the caller's own
+   * `readLimitedBody(res, N)` ceiling so a hostile/huge response is destroyed
+   * on the socket at ~N bytes instead of buffering the full 16 MB and letting
+   * the caller trim afterward — the streaming cap must bite BEFORE the memory
+   * is committed, not after.
+   */
+  maxResponseBytes?: number;
 }
 
 /**
@@ -461,6 +491,7 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
           headers: currentHeaders,
           body: currentBody,
           signal: controller.signal,
+          maxResponseBytes: opts.maxResponseBytes ?? MAX_RESPONSE_BYTES,
         });
       } else {
         // IP-literal target (no re-resolution gap) or dev allow-private hatch —

@@ -203,15 +203,23 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
         },
         body: serializedBody,
         timeoutMs: timeout,
+        // We only keep the first 16 KB (readLimitedBody below) — tell safeFetch
+        // to buffer at most that, so a huge/hostile response is torn off the
+        // socket instead of buffering up to the 16 MB hard cap first.
+        maxResponseBytes: 16_384,
       });
     } catch (err) {
-      if (err instanceof SsrfBlockedError) {
-        // Permanent — don't retry. Treat like a 4xx so the run advances past
-        // this step with the error logged, rather than burning BullMQ
-        // backoff cycles on an address that won't resolve any differently
-        // next attempt.
+      if (err instanceof SsrfBlockedError && !err.transient) {
+        // Permanent block (private/blocked range) — don't retry. Treat like a
+        // 4xx so the run advances past this step with the error logged, rather
+        // than burning BullMQ backoff cycles on an address that won't resolve
+        // any differently next attempt.
         return advanceWithError(400, "http_request blocked", err.reason);
       }
+      // A TRANSIENT SsrfBlockedError (e.g. `dns-failure` — not-yet-propagated
+      // DNS for a healthy public host) must behave like any other transient
+      // network error: fall through to the throw below so BullMQ retries with
+      // backoff, matching the outbound-webhook worker's classification.
       // Network / timeout — throw so BullMQ retries with backoff.
       throw new Error(`http_request failed: ${err instanceof Error ? err.message : String(err)}`);
     }

@@ -169,7 +169,20 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
         //     the contact out permanently even after re-publishing.
         // "waiting"/"completed" and the terminal/stale-resume skips keep the ledger.
         if (result?.status === "failed" || result?.releaseLedger) {
-          await rollbackOncePerContactLedger(run.workflowId, run.contactId);
+          // Re-read stepLog only on this rare terminal path (keeps the hot
+          // per-pickup select lean) so the ledger release can be suppressed
+          // when an irreversible side effect already fired (WF-1b). The
+          // releaseLedger case (never-executed run) has an empty stepLog and
+          // still releases correctly.
+          const finalRun = await db.workflowRun.findUnique({
+            where: { id: job.data.runId },
+            select: { stepLog: true },
+          });
+          await rollbackOncePerContactLedger(
+            run.workflowId,
+            run.contactId,
+            finalRun?.stepLog,
+          );
         }
       } finally {
         releaseTeamSlot(run.teamId);

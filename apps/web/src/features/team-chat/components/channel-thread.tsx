@@ -117,6 +117,12 @@ export function ChannelThread({
     isActivityTail: false,
     hasMoreOlder,
     loadOlder: onLoadOlder,
+    // The channel feed is a NORMAL top-down virtualized list (react-virtual
+    // positions rows by a downward-growing translateY), NOT the inbox's
+    // flex-col-reverse viewport. Tell the hook so its scroll-model math
+    // (snap-to-newest, isAtBottom, load-older anchor) uses top-down
+    // coordinates instead of assuming scrollTop:0 == bottom.
+    inverted: false,
   });
 
   // Virtualizer. Stable keys per message id; clientTempId for optimistic

@@ -59,8 +59,20 @@ export async function streamBlob(
   // affordance sends `?download=1`. Setting `attachment` here is what makes a
   // same-origin download reliable now that media isn't a cross-origin redirect.
   if (opts?.downloadFilename) {
-    const safe = opts.downloadFilename.replace(/["\\\r\n]/g, "_").slice(0, 200);
-    res.set("Content-Disposition", `attachment; filename="${safe}"`);
+    const raw = opts.downloadFilename.slice(0, 200);
+    // ASCII fallback for legacy agents: strip quotes/backslash/CR/LF AND any
+    // non-ASCII byte (code point > 0x7E). Node's `res.set` serializes headers
+    // as latin1 and THROWS ERR_INVALID_CHAR on a code point > 255, so a plain
+    // `filename="<utf8>"` crashes the whole response for any emoji/CJK/accented
+    // filename. RFC 5987's `filename*=UTF-8''<pct-encoded>` carries the real
+    // name for modern browsers; `filename=` is the ASCII fallback.
+    const asciiFallback =
+      raw.replace(/["\\\r\n]/g, "_").replace(/[^\x20-\x7E]/g, "_") || "download";
+    const encoded = encodeURIComponent(raw);
+    res.set(
+      "Content-Disposition",
+      `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`,
+    );
   }
 
   // If the client aborts (closes the tab, seeks away), tear down the upstream

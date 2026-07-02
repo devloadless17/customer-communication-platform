@@ -1107,9 +1107,14 @@ export class ContactsService {
     // (to every subscriber a revived contact is a new one). Tags are linked in
     // the shared block below, which keys off phone for both created + revived.
     const revivedIds: string[] = [];
-    for (const p of toRevive) {
+    // Parallelize the per-row revive CAS at the same 16-lane concurrency the
+    // bulk-fanout paths use (line 575/648) — a re-import of a large deleted
+    // list was O(N) SEQUENTIAL round-trips (one updateMany-await per row).
+    // `revivedIds.push` is safe across lanes: JS is single-threaded, only the
+    // awaits interleave, and the push itself is synchronous.
+    await runWithConcurrency(toRevive, 16, async (p) => {
       const id = tombstonedIdByPhone.get(p.phoneNumber);
-      if (!id) continue;
+      if (!id) return;
       try {
         // CAS-guard the revive on the row STILL being tombstoned. Between the
         // earlier tombstoned-row read and this write, a concurrent inbound
@@ -1118,8 +1123,7 @@ export class ContactsService {
         // would clobber the now-live row's name/stage/customFields and bump
         // version. `updateMany` lets us add `deletedAt: { not: null }` to the
         // WHERE (Prisma `update` only accepts unique fields), so the write
-        // CAS-misses (count 0) on an already-live row and we skip it. The
-        // count===0 branch makes the surrounding try/catch comment finally true.
+        // CAS-misses (count 0) on an already-live row and we skip it.
         const flip = await this.db.contact.updateMany({
           where: { id, teamId, deletedAt: { not: null } },
           data: {
@@ -1141,14 +1145,14 @@ export class ContactsService {
         if (flip.count === 0) {
           // Already revived by a concurrent path — don't clobber, don't double-
           // count, don't re-publish. The contact exists and is live either way.
-          continue;
+          return;
         }
         revivedIds.push(id);
       } catch {
         // A concurrent inbound may have revived this phone already (the row is
         // no longer tombstoned). Skip — the contact exists either way.
       }
-    }
+    });
     // minor#15: batch the read-back + publish. The prior shape ran a
     // findUniqueOrThrow PER revived row (2 queries/contact in a serial loop);
     // one findMany over all revived ids replaces N reads. Ordering + semantics
@@ -1170,6 +1174,13 @@ export class ContactsService {
           }),
           source: "manual",
           createdByUserId: userId,
+          // Socket fanout is coalesced into the single `contact.bulk_updated`
+          // frame below (which covers revived rows too) — same as the toCreate
+          // loop. Without this, a revived batch fires one socket frame PER row
+          // AND the coalesced frame, storming every open tab. The non-socket
+          // subscribers (webhook / audit / workflow) still get this granular
+          // per-row event.
+          suppressSocketFanout: true,
         });
       }
     }
@@ -1625,10 +1636,17 @@ export class ContactsService {
       return row;
     });
 
-    const total = contacts.length;
-    const truncated = total > 50_000;
-    const cappedRows = truncated ? rows.slice(0, 50_000) : rows;
+    const truncated = contacts.length > EXPORT_HARD_CAP;
+    const cappedRows = truncated ? rows.slice(0, EXPORT_HARD_CAP) : rows;
     const csv = serializeCsv(columns, cappedRows);
+    // Report the TRUE total. `contacts.length` is capped at EXPORT_HARD_CAP + 1
+    // by the query's `take`, so using it as `total` understates a large team's
+    // real size — which defeats the whole point of the truncation signal ("we
+    // gave you a partial file of N"). When truncated, run a real count over the
+    // same predicate; otherwise the loaded length IS the total.
+    const total = truncated
+      ? await this.db.contact.count({ where: { teamId, deletedAt: null } })
+      : contacts.length;
     // Date-stamp so multiple exports in a day don't overwrite each other. When
     // truncated, encode the cap in the filename itself — the export is a plain
     // <a download> navigation, so the filename is the only truncation signal
@@ -1637,7 +1655,7 @@ export class ContactsService {
     // partial backup believing it's complete.
     const stamp = new Date().toISOString().slice(0, 10);
     const filename = truncated
-      ? `contacts-${stamp}-first-50000-of-${total}.csv`
+      ? `contacts-${stamp}-first-${EXPORT_HARD_CAP}-of-${total}.csv`
       : `contacts-${stamp}.csv`;
     return { csv, filename, truncated, total };
   }

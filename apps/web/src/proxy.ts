@@ -413,5 +413,12 @@ export default function proxy(req: NextRequest): NextResponse {
 export const config = {
   // Match everything except Next internals and static assets. The handler
   // above does the fine-grained allow/deny.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\..*).*)"],
+  //
+  // `.*\.[\w]+$` excludes only paths ENDING in a file extension (real static
+  // assets: .png/.css/.js/.woff2/…). The prior `.*\..*` excluded any path with
+  // a dot ANYWHERE, so a legit app route carrying a dot mid-path (e.g. an email
+  // in a segment) silently bypassed BOTH the session-cookie gate and the CSP
+  // header. App routes don't end in a dotted extension, so this keeps assets
+  // excluded while gating those dotted routes.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.[\\w]+$).*)"],
 };

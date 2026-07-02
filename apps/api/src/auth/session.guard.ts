@@ -301,7 +301,19 @@ export async function resolveSession(
   // userId, not by session — a user with two browsers has two session
   // rows, and `session.sessionId` must reflect THIS request's row.
   const cached = cacheGet(result.user.id);
-  if (cached) return { ...cached, sessionId };
+  if (cached) {
+    // Repopulate the cookie-hash cache so the NEXT request on THIS cookie hits
+    // the fast-path at the top and short-circuits `auth.api.getSession`
+    // entirely — matching the full path below and the socket handshake
+    // (socket-auth.service.ts). Without this, a user warmed only via the
+    // userId cache (socket handshake / another device) kept paying the Better
+    // Auth DB roundtrip on every HTTP request even though the cookie cache
+    // could have served it.
+    if (typeof cookieHeader === "string" && cookieHeader.length > 0) {
+      sessionCacheSetByCookie(cookieHeader, result.user.id, sessionId);
+    }
+    return { ...cached, sessionId };
+  }
 
   // Deactivation re-check — the edge sees only the signed cookie, not
   // deactivatedAt. Without this an admin's deactivation is up to 90 days

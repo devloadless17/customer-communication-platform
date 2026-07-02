@@ -1,3 +1,4 @@
+import { avatarObjectKey } from "./avatar";
 import { r2Provider } from "./r2";
 import type { BlobStorageProvider } from "./types";
 
@@ -29,6 +30,24 @@ export async function toExternalMediaUrl(url: string | null | undefined): Promis
   if (!url) return null;
   if (!blobStorage.isOwnUrl(url)) return url;
   return blobStorage.presignGetUrl(url, { ttlSeconds: EXTERNAL_MEDIA_TTL_SECONDS });
+}
+
+/**
+ * Presigned, externally-fetchable URL for a user's avatar — for the `/v1` API
+ * and outbound webhooks. `User.avatarUrl` stores the INTERNAL same-origin,
+ * session-cookie-gated path (`/api/users/:id/avatar?v=…`) the browser uses;
+ * handing that to an API-key partner yields a 401/non-resolvable link. When the
+ * user has an avatar, presign the R2 object directly (self-authenticating, same
+ * 7-day TTL as media). Returns null when the user has no avatar.
+ */
+export async function toExternalAvatarUrl(
+  userId: string,
+  hasAvatar: boolean,
+): Promise<string | null> {
+  if (!hasAvatar) return null;
+  return blobStorage.presignGetUrl(avatarObjectKey(userId), {
+    ttlSeconds: EXTERNAL_MEDIA_TTL_SECONDS,
+  });
 }
 
 export type { BlobStorageProvider, UploadInput, UploadResult, MediaNameContext } from "./types";

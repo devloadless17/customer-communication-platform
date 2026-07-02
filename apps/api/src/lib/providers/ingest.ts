@@ -260,19 +260,10 @@ async function ingestStatusUpdate(
     return;
   }
 
-  // Decide whether `incoming` should overwrite `current`, applying both guards:
-  //   - `failed` is terminal: as TARGET it wins from any non-failed state
-  //     (Meta can fail a message async after delivered/read and the agent must
-  //     see it); as SOURCE it's sticky (a late delivered/read can't revert a
-  //     failed back to green — rank alone would allow it since rank(failed)=-1).
-  //   - Otherwise the monotonic rank guard (sent < delivered < read) wins.
-  const winsOver = (incoming: Message["status"], current: Message["status"]): boolean => {
-    if (current === "failed") return false; // failed is terminal — nothing overwrites it
-    if (incoming === "failed") return true; // failure overwrites any non-failed
-    return statusRank(incoming) > statusRank(current as Message["status"]);
-  };
-
-  if (!winsOver(evt.status, existing.status as Message["status"])) return;
+  // `statusWinsOver` (module-level, shared with drainParkedStatus) applies both
+  // the terminal-`failed` rule and the monotonic rank guard (sent < delivered
+  // < read).
+  if (!statusWinsOver(evt.status, existing.status as Message["status"])) return;
 
   // CAS the write against the status we just read. A single Meta batch (or two
   // near-simultaneous deliveries) can carry both `delivered` and `read` for the
@@ -314,7 +305,7 @@ async function ingestStatusUpdate(
       select: { status: true },
     });
     if (!current) return; // row vanished (hard delete) — nothing to do
-    if (!winsOver(evt.status, current.status as Message["status"])) return; // lost legitimately
+    if (!statusWinsOver(evt.status, current.status as Message["status"])) return; // lost legitimately
     pinnedStatus = current.status as Message["status"];
   }
   if (written.count === 0) return;
@@ -476,10 +467,35 @@ export async function drainParkedStatus(
     return;
   }
   if (!parked) return;
-  await db.message.update({
+  // Apply the SAME rank/CAS guard as ingestStatusUpdate. A bare update here
+  // could regress a row a concurrent live webhook already advanced: the parked
+  // status was captured earlier, so by drain time the row may already be at a
+  // HIGHER rank (e.g. parked=`delivered` but a live `read` landed first). Pin
+  // the write on the status we read and re-decide on a CAS miss, so only a
+  // genuinely-winning parked status lands. Bounded by the rank ladder
+  // (sent→delivered→read = 3 states).
+  const existing = await db.message.findUnique({
     where: { id: messageId },
-    data: { status: parked },
+    select: { status: true },
   });
+  if (!existing) return; // row vanished (hard delete) — nothing to drain onto
+  let pinnedStatus = existing.status as Message["status"];
+  let written = { count: 0 };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (!statusWinsOver(parked, pinnedStatus)) return; // parked lost — discard it
+    written = await db.message.updateMany({
+      where: { id: messageId, status: pinnedStatus },
+      data: { status: parked },
+    });
+    if (written.count > 0) break;
+    const current = await db.message.findUnique({
+      where: { id: messageId },
+      select: { status: true },
+    });
+    if (!current) return;
+    pinnedStatus = current.status as Message["status"];
+  }
+  if (written.count === 0) return;
   await publish({
     type: "message.status_changed",
     teamId,
@@ -515,6 +531,22 @@ function statusRank(s: Message["status"]): number {
     case "read":
       return 2;
   }
+}
+
+/**
+ * Status transition guard shared by live status ingest (`ingestStatusUpdate`)
+ * AND parked-status drain (`drainParkedStatus`):
+ *   - `failed` is terminal: as TARGET it wins from any non-failed state; as
+ *     SOURCE it's sticky (a late delivered/read can't revert a failed).
+ *   - Otherwise the monotonic rank guard (sent < delivered < read) wins.
+ */
+function statusWinsOver(
+  incoming: Message["status"],
+  current: Message["status"],
+): boolean {
+  if (current === "failed") return false; // failed is terminal — nothing overwrites it
+  if (incoming === "failed") return true; // failure overwrites any non-failed
+  return statusRank(incoming) > statusRank(current);
 }
 
 async function ingestInboundMessage(

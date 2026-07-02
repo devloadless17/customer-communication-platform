@@ -917,18 +917,49 @@ export class MessagesService {
           });
           if (prior?.completedAt && prior.externalId) {
             // (a) Prior attempt succeeded — Meta already sent the message
-            // and we have the wamid. Look up the Message row written by
-            // the prior attempt and re-publish message.sent so the
-            // originating client gets the bubble swap. Idempotent at the
-            // socket layer (frontend reducer dedups by externalId).
-            const existing = await this.db.message.findFirst({
+            // and we recorded the wamid. Ensure the Message row exists, then
+            // re-publish message.sent so the originating client gets the
+            // bubble swap. Idempotent at the socket layer (frontend reducer
+            // dedups by externalId).
+            let existing = await this.db.message.findFirst({
               where: {
                 teamId,
                 channel,
                 externalId: prior.externalId,
               },
             });
-            if (existing) {
+            if (!existing) {
+              // No Message row despite a completed attempt: a crash/rollback
+              // landed between the (pre-insert) attempt stamp and a committed
+              // Message insert. Meta ALREADY delivered this wamid, so we must
+              // NOT re-call Meta — re-insert idempotently from the recorded
+              // externalId instead. createOutboundMessageIdempotent dedups on
+              // (teamId, channel, externalId), so a concurrent recovery is
+              // harmless. This closes the ghost+double-send window: pre
+              // 2026-07-02 this fell through to `send_in_progress_or_lost`,
+              // which surfaced as a Failed bubble and drove the agent to
+              // re-send a message Meta had already delivered.
+              const recoveredTs =
+                exists.lastMessageAt && exists.lastMessageAt >= receivedAt
+                  ? new Date(exists.lastMessageAt.getTime() + 1)
+                  : receivedAt;
+              existing = await createOutboundMessageIdempotent({
+                teamId,
+                conversationId,
+                externalId: prior.externalId,
+                senderUserId: userId,
+                body,
+                direction: "out",
+                channel,
+                status: "sent",
+                rawPayload: {
+                  sentVia: "api/messages",
+                } as Prisma.InputJsonValue,
+                timestamp: recoveredTs,
+                ...(replyToMessageId ? { replyToMessageId } : {}),
+              });
+            }
+            {
               const replySnapshot = await replySnapshotPromise;
               const replayed: Message = {
                 id: existing.id,
@@ -980,11 +1011,6 @@ export class MessagesService {
               } as DomainEventOf<"message.sent">);
               return;
             }
-            // No Message row despite a completed attempt — extremely rare
-            // (would require a process death after the attempt completed
-            // but before the message commit). Fall through to the
-            // refuse-to-retry path; user can re-send with a new
-            // clientTempId.
           }
           // (b) Prior attempt incomplete and AMBIGUOUS — Meta MAY have already
           // sent the message. Reached for the AMBIGUOUS failure classes whose
@@ -1086,58 +1112,53 @@ export class MessagesService {
       exists.lastMessageAt && exists.lastMessageAt >= receivedAt
         ? new Date(exists.lastMessageAt.getTime() + 1)
         : receivedAt;
-    // Atomic Message insert + OutboundSendAttempt completed-stamp.
-    // Pre-2026-05-29 these were two separate writes with a race window:
-    // a crash between (stamp completed) and (insert message) left the
-    // attempt marked complete but no Message row → retry path refused
-    // to retry → user re-sends with new clientTempId → message that
-    // Meta actually delivered stayed uncatalogued. Wrapping both in
-    // one tx closes the window: either both commit (happy path) or
-    // both roll back (retry can re-stamp + re-insert; createOutbound's
-    // P2002 catch handles the case where Meta delivered the same wamid
-    // twice across the retry).
+    // Stamp completedAt + externalId on the attempt row in its OWN committed
+    // write BEFORE the Message insert. This is the load-bearing idempotency
+    // fact: once Meta has accepted the send, the wamid must survive even if
+    // the insert below fails. With the stamp already committed, a BullMQ
+    // retry lands in branch (a) above and RE-INSERTS from the known
+    // externalId — it never re-calls Meta and never refuses.
     //
-    // createOutboundMessageIdempotent has internal retries for transient
-    // DB errors. Inside a tx those retries would just rollback-retry the
-    // whole tx, which is the correct semantic.
+    // Pre-2026-07-02 the stamp lived INSIDE a shared tx with the insert. A
+    // transient P2024/P1017 on the insert rolled the stamp back too (the
+    // attempt row was created outside the tx, so it survived as incomplete),
+    // stranding the retry in the `send_in_progress_or_lost` refuse path →
+    // Failed bubble → agent re-send → duplicate WhatsApp message. Splitting
+    // the writes + recovering in branch (a) closes that window.
+    if (attemptCreated && jobId) {
+      // Ignore failures (e.g. attempt row vanished) — the Message insert is
+      // the load-bearing write and branch (a) re-inserts if it's ever missing.
+      await this.db.outboundSendAttempt
+        .update({
+          where: { jobId },
+          data: { completedAt: new Date(), externalId: send.externalId },
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `OutboundSendAttempt completed-stamp failed for jobId=${jobId}: ${
+              err instanceof Error ? err.message : err
+            }`,
+          );
+        });
+    }
+    // No tx: createOutboundMessageIdempotent's internal retry-with-backoff
+    // (5 attempts, ~3s) absorbs transient DB errors (Postgres restart / pool
+    // blip) instead of bubbling them to a jobId retry that would refuse. A
+    // hard crash between the stamp and a committed insert is recovered
+    // idempotently by branch (a).
     const [created, replySnapshot] = await Promise.all([
-      this.db.$transaction(async (tx) => {
-        if (attemptCreated && jobId) {
-          // Same scope guard as the standalone update used to do —
-          // ignore failures (e.g. attempt row vanished); the Message
-          // insert is the load-bearing write.
-          await tx.outboundSendAttempt
-            .update({
-              where: { jobId },
-              data: {
-                completedAt: new Date(),
-                externalId: send.externalId,
-              },
-            })
-            .catch((err) => {
-              this.logger.warn(
-                `OutboundSendAttempt completed-stamp failed for jobId=${jobId}: ${
-                  err instanceof Error ? err.message : err
-                }`,
-              );
-            });
-        }
-        return createOutboundMessageIdempotent(
-          {
-            teamId,
-            conversationId,
-            externalId: send.externalId,
-            senderUserId: userId,
-            body,
-            direction: "out",
-            channel,
-            status: "sent",
-            rawPayload: { sentVia: "api/messages" } as Prisma.InputJsonValue,
-            timestamp: messageTimestamp,
-            ...(replyToMessageId ? { replyToMessageId } : {}),
-          },
-          tx,
-        );
+      createOutboundMessageIdempotent({
+        teamId,
+        conversationId,
+        externalId: send.externalId,
+        senderUserId: userId,
+        body,
+        direction: "out",
+        channel,
+        status: "sent",
+        rawPayload: { sentVia: "api/messages" } as Prisma.InputJsonValue,
+        timestamp: messageTimestamp,
+        ...(replyToMessageId ? { replyToMessageId } : {}),
       }),
       replySnapshotPromise,
     ]);

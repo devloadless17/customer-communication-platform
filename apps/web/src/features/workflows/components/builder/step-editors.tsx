@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { Tag as TagIcon } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
@@ -787,6 +787,19 @@ export function BranchEditor({
   const mode: "preset" | "custom" = config.preset ? "preset" : "custom";
   const preset = config.preset;
 
+  // Stamp stable client-only `_id` keys ONCE per conditions identity, not on
+  // every render. ensureConditionIds mints fresh random ids for rows lacking
+  // one, so calling it inline in the render body re-keyed every condition input
+  // on any external re-render (autosave tick, sibling state) until the tree was
+  // first edited — remounting the inputs and dropping the user's focus mid-type.
+  // Memoizing on `config.conditions` (a stable reference between external
+  // re-renders; only a real edit swaps it, and that value already carries _ids)
+  // keeps the keys stable. persist() strips _id back out so the DB never sees them.
+  const conditionGroup = useMemo(
+    () => ensureConditionIds(toGroup(config.conditions)),
+    [config.conditions],
+  );
+
   function switchToPreset() {
     // Default to window_open — most-asked check.
     onChange({ ...config, preset: { type: "window_open" } });
@@ -841,9 +854,7 @@ export function BranchEditor({
       {mode === "custom" && (
         <ConditionGroupEditor
           trigger={trigger}
-          // Stamp stable _id on hydrated rows for React keying; persist() strips
-          // _id back out, so the DB never sees these client-only keys.
-          group={ensureConditionIds(toGroup(config.conditions))}
+          group={conditionGroup}
           onChange={(g) => onChange({ ...config, conditions: g })}
           catalogs={catalogs}
         />

@@ -194,6 +194,36 @@ export function conversationRowToExternal(
   return toExternalConversation(r, contactRowToExternal(r.contact));
 }
 
+/**
+ * Redact an embedded contact to the minimal identity when the caller's API key
+ * lacks `read:contacts` but reaches the contact via a conversation/message read
+ * (where it's always embedded). Keeps id + display name + channel — enough to
+ * know who a thread is with — and drops every other PII field (phone, email,
+ * location, language, country, custom fields, tags). Without this,
+ * `read:conversations` / `read:messages` become a side door onto the contact
+ * directory that `read:contacts` is supposed to gate.
+ */
+export function redactExternalContactPii(c: ExternalContact): ExternalContact {
+  return {
+    id: c.id,
+    name: c.name,
+    identityChannel: c.identityChannel,
+    phoneNumber: null,
+    externalContactId: null,
+    firstName: null,
+    lastName: null,
+    language: null,
+    countryCode: null,
+    avatarUrl: null,
+    email: null,
+    location: null,
+    customFields: {},
+    stageId: null,
+    tagIds: [],
+    createdAt: c.createdAt,
+  };
+}
+
 export function toExternalConversation(
   c: DbConversation & { assignedUser?: AssigneeRow },
   contact: ExternalContact,

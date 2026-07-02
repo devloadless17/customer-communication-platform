@@ -99,22 +99,28 @@ export function usePresence(
     >[1] = (payload) => {
       if (payload.teamId !== teamId) return;
       setAvailabilityByUserId((prev) => {
-        // Drop the entry when the new state is the default (available + no
-        // note) so the map stays sparse — matches the snapshot rule and keeps
-        // consumers' `byUserId[id] ?? default` lookups correct.
-        const isDefault =
-          payload.status === "available" &&
-          (payload.message === null || payload.message === undefined);
+        const existing = prev[payload.userId];
+        // Wire contract: `message === undefined` means UNCHANGED — preserve the
+        // teammate's existing note instead of dropping it (mirrors the
+        // app-rail / mobile-shell self-avatar consumers). A status-only frame
+        // must not silently wipe "brb" off a colleague's badge.
+        const nextMessage =
+          payload.message === undefined
+            ? (existing?.message ?? null)
+            : payload.message;
+        // Drop the entry when the RESULTING state is the default (available +
+        // no note) so the map stays sparse — matches the snapshot rule and
+        // keeps consumers' `byUserId[id] ?? default` lookups correct.
+        const isDefault = payload.status === "available" && nextMessage === null;
         if (isDefault) {
           if (!(payload.userId in prev)) return prev;
           const next = { ...prev };
           delete next[payload.userId];
           return next;
         }
-        const existing = prev[payload.userId];
         const nextEntry: TeammateAvailability = {
           status: payload.status,
-          ...(payload.message !== undefined ? { message: payload.message } : {}),
+          ...(nextMessage !== null ? { message: nextMessage } : {}),
         };
         if (
           existing &&

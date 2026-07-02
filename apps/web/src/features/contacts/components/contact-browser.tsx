@@ -377,10 +377,24 @@ export function useContactList(opts?: {
     setItems((prev) => {
       const idx = prev.findIndex((row) => row.contact.id === contact.id);
       if (idx === -1) {
-        // Not in the current view. If it matches the non-window dimensions
-        // of the filter, it MIGHT belong on the page now — schedule a
-        // refetch and let the server's window/sort be authoritative.
-        if (matchesContactFiltersExceptWindow(contact, filters)) {
+        // Not in the current view. Only schedule a refetch when an ACTIVE
+        // narrowing filter means this contact might now belong on the page.
+        // Under the DEFAULT (no) filter, matchesContactFiltersExceptWindow is
+        // unconditionally true, so an unrelated contact:updated would collapse
+        // a deeply-scrolled list back to page 1 — pointless (a hidden contact
+        // is already conceptually in the unpaginated set) and harmful (loses
+        // the user's scroll position).
+        const hasNarrowingFilter =
+          filters.search.trim() !== "" ||
+          filters.fieldFilter !== null ||
+          filters.sourceFilter !== "all" ||
+          filters.windowFilter !== "any" ||
+          filters.tagIds.length > 0 ||
+          filters.stageFilter !== "any";
+        if (
+          hasNarrowingFilter &&
+          matchesContactFiltersExceptWindow(contact, filters)
+        ) {
           needsRefetch = true;
         }
         return prev;

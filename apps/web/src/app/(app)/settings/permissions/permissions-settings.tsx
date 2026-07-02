@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, ShieldCheck } from "lucide-react";
 
 import {
@@ -30,6 +30,18 @@ export function PermissionsSettings() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Latest committed matrix, so a rapid second toggle (before React re-renders)
+  // builds on the first instead of a stale snapshot. Kept in sync with state.
+  const matrixRef = useRef<EditableMatrix | null>(matrix);
+  useEffect(() => {
+    matrixRef.current = matrix;
+  }, [matrix]);
+  // Serializes PATCHes: each waits for the previous so a slower earlier request
+  // can't land AFTER a newer one and silently revert a permission (last-toggle
+  // must win). Each PATCH sends the FULL matrix, so ordered application is
+  // enough — no per-field merge needed.
+  const persistChain = useRef<Promise<void>>(Promise.resolve());
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -49,7 +61,7 @@ export function PermissionsSettings() {
     };
   }, []);
 
-  const persist = useCallback(async (next: EditableMatrix) => {
+  const runPersist = useCallback(async (next: EditableMatrix) => {
     // Send only the editable roles; the server validates + ignores anything
     // else. Sending the full resolved map (incl. defaulted keys) is fine —
     // it's still a valid sparse override.
@@ -83,18 +95,37 @@ export function PermissionsSettings() {
     }
   }, []);
 
+  const persist = useCallback(
+    (next: EditableMatrix) => {
+      // Serialize onto the chain so concurrent rapid toggles apply IN ORDER on
+      // the server (`.then(run, run)` keeps the chain alive even if a prior run
+      // rejected — runPersist catches internally, so it won't).
+      persistChain.current = persistChain.current.then(
+        () => runPersist(next),
+        () => runPersist(next),
+      );
+      return persistChain.current;
+    },
+    [runPersist],
+  );
+
   const toggle = useCallback(
     (role: EditableRole, cap: Capability) => {
-      setMatrix((prev) => {
-        if (!prev) return prev;
-        const next: EditableMatrix = {
-          manager: { ...prev.manager },
-          agent: { ...prev.agent },
-        };
-        next[role][cap] = !next[role][cap];
-        void persist(next);
-        return next;
-      });
+      // Compute next OUTSIDE the state updater. Firing the persist() network
+      // mutation from inside a setState updater is unsafe — React can invoke
+      // updaters more than once (StrictMode / concurrent), double-sending the
+      // PATCH. Read the latest committed matrix from the ref so a rapid second
+      // toggle builds on the first.
+      const prev = matrixRef.current;
+      if (!prev) return;
+      const next: EditableMatrix = {
+        manager: { ...prev.manager },
+        agent: { ...prev.agent },
+      };
+      next[role][cap] = !next[role][cap];
+      matrixRef.current = next;
+      setMatrix(next);
+      void persist(next);
     },
     [persist],
   );

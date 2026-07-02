@@ -19,6 +19,13 @@ export interface WebhookDeliverJobData {
    *  an incrementing counter that trips at MAX_CHAIN_DEPTH — the cross-system
    *  loop guard. Rides on the job, not the delivery row, so no schema change. */
   chainDepth?: number;
+  /** Owning team, carried from the publishing event so the worker's per-team
+   *  concurrency gate reads it off the job instead of a per-pickup DB
+   *  findUnique (join webhook.teamId) — which, under a single-team burst that
+   *  keeps deferring, became a DB/Redis busy-spin. Optional for backward-compat
+   *  with jobs enqueued before this field existed (worker falls back to the
+   *  delivery row for those). */
+  teamId?: string;
 }
 
 export const WEBHOOK_DELIVER_QUEUE_NAME = "webhook-deliver";
@@ -105,11 +112,16 @@ export function getWebhookDeliverQueue(): Queue<WebhookDeliverJobData> {
 export async function enqueueWebhookDelivery(
   deliveryId: string,
   chainDepth?: number,
+  teamId?: string,
 ): Promise<string> {
   const q = getWebhookDeliverQueue();
   const job = await q.add(
     "deliver",
-    { deliveryId, ...(chainDepth ? { chainDepth } : {}) },
+    {
+      deliveryId,
+      ...(chainDepth ? { chainDepth } : {}),
+      ...(teamId ? { teamId } : {}),
+    },
     { jobId: `deliver-${deliveryId}` },
   );
   return job.id as string;

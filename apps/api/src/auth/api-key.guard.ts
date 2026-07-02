@@ -147,9 +147,27 @@ export class ApiKeyGuard implements CanActivate {
     const tokenHash = createHash("sha256").update(token).digest("hex");
     const row = await this.db.teamApiKey.findUnique({
       where: { tokenHash },
-      select: { id: true, teamId: true, revokedAt: true, scopes: true },
+      select: {
+        id: true,
+        teamId: true,
+        revokedAt: true,
+        scopes: true,
+        team: { select: { status: true } },
+      },
     });
     if (!row || row.revokedAt) rejectUnauth(req, "invalid api key");
+
+    // Org-approval gate — mirror SessionGuard's `org_not_active`. A pending
+    // (awaiting review) or suspended (platform-revoked) org has NO external
+    // /v1 access, same as it has no session access. Without this a suspended
+    // org keeps full API-key reach. 403 (authenticated but forbidden), not
+    // 401, so a valid key isn't treated as "bad credentials".
+    if (row.team?.status !== "active") {
+      throw new HttpException(
+        { error: "org_not_active", detail: "organization is not active" },
+        403,
+      );
+    }
 
     // Per-key rate limit — bounds cost on a leaked/abused key. Each request
     // hits Meta's Cloud API and counts against the team's quality rating,
