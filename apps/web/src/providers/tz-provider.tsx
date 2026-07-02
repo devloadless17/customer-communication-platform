@@ -59,7 +59,7 @@ export function useTzNow(): TzContextValue {
  * is the cheaper tradeoff.
  */
 export function TimezoneProvider({
-  tz,
+  tz: serverTz,
   serverNow,
   children,
 }: {
@@ -72,6 +72,10 @@ export function TimezoneProvider({
   // clock (within ~milliseconds, usually a no-op visually) and then ticks
   // every minute for live "Xm ago" updates.
   const [now, setNow] = useState<number>(serverNow);
+  // `tz` starts at the server-rendered zone so the FIRST client paint matches
+  // SSR exactly (no hydration mismatch), then the effect below corrects it to
+  // the browser's ACTUAL zone once mounted.
+  const [tz, setTz] = useState<string>(serverTz);
   useEffect(() => {
     setNow(Date.now());
     const interval = setInterval(() => setNow(Date.now()), 60_000);
@@ -80,17 +84,28 @@ export function TimezoneProvider({
 
   useEffect(() => {
     const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (!detected || detected === tz) return;
-    document.cookie =
-      `${COOKIE_NAME}=${encodeURIComponent(detected)}; path=/; max-age=31536000; samesite=lax`;
-    // No router.refresh() — see the comment block at the top of this
-    // function for why. The cookie is in place; the next navigation
-    // picks it up.
-  }, [tz]);
+    if (!detected) return;
+    // Persist for the server's next render (SSR then matches from the start).
+    if (detected !== serverTz) {
+      document.cookie =
+        `${COOKIE_NAME}=${encodeURIComponent(detected)}; path=/; max-age=31536000; samesite=lax`;
+    }
+    // AND apply it to THIS session immediately. Previously we only wrote the
+    // cookie and waited for the next navigation, so absolute timestamps kept
+    // rendering in the stale/server zone while <input type="datetime-local">
+    // (and `new Date(localString)`) used the browser's real zone — a scheduled
+    // broadcast then displayed hours off from what the user picked. This is a
+    // client-only setState (no server round-trip), so it does NOT reintroduce
+    // the router.refresh() auth-flow race. A no-op when already correct
+    // (React bails on an equal value).
+    setTz(detected);
+  }, [serverTz]);
 
   // `tz` rides its own provider so the 60s `now` tick can't re-render the
-  // (large) set of absolute-timestamp consumers. `now` is a bare number, so
-  // its provider re-renders only the few live-relative-time subscribers.
+  // (large) set of absolute-timestamp consumers. It changes at most ONCE per
+  // session (the post-mount correction above), never on the tick. `now` is a
+  // bare number, so its provider re-renders only the few live-relative-time
+  // subscribers.
   return (
     <TzContext.Provider value={tz}>
       <NowContext.Provider value={now}>{children}</NowContext.Provider>

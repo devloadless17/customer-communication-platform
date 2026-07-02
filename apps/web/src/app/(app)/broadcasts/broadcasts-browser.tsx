@@ -352,7 +352,7 @@ function TableView({
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
-                <BroadcastStatusBadge status={b.status} />
+                <BroadcastStatusBadge status={b.status} failedCount={b.failedCount} totalCount={b.totalCount} />
                 {canManage && canRetry(b) && (
                   <BroadcastRetryButton broadcastId={b.id} failedCount={b.failedCount} />
                 )}
@@ -429,7 +429,7 @@ function TableView({
                   : `${b.totalCount} selected`}
               </td>
               <td className="px-4 py-3">
-                <BroadcastStatusBadge status={b.status} />
+                <BroadcastStatusBadge status={b.status} failedCount={b.failedCount} totalCount={b.totalCount} />
               </td>
               <td className="px-4 py-3">
                 <ProgressBar sent={b.sentCount} failed={b.failedCount} total={b.totalCount} />

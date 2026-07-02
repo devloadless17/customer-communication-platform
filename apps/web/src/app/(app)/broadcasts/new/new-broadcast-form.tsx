@@ -40,6 +40,21 @@ import { FieldTokenPicker } from "@/features/templates/components/field-token-pi
 import { HeaderMediaField } from "@/features/templates/components/header-media-field";
 import { TokenHighlightInput } from "@/features/templates/components/token-highlight";
 
+/** Result of POST /api/broadcasts/preview-missing — recipients whose template
+ *  variables would resolve to empty (missing field, no default) and be rejected
+ *  by WhatsApp. Drives the pre-send warning. */
+type MissingFieldsPreview = {
+  total: number;
+  sampled: boolean;
+  affectedCount: number;
+  missing: Array<{
+    location: "body" | "header";
+    position: number;
+    fieldLabel: string | null;
+    missingCount: number;
+  }>;
+};
+
 /**
  * New broadcast wizard.
  *
@@ -421,6 +436,70 @@ export function NewBroadcastForm({
     !headerMediaUploading;
   const readyToSend = audienceDone && templateDone && variablesDone;
 
+  // ── Pre-send warning ──────────────────────────────────────────────────────
+  // Ask the server (read-only) how many recipients would resolve a template
+  // variable to EMPTY (a mapped field like email is missing, no default) and be
+  // rejected by WhatsApp — so the agent finds out BEFORE sending, not from a
+  // wall of failed rows after. Same audience shape the create call sends.
+  const audiencePayload = useMemo(() => {
+    if (audience.mode === "all") return { mode: "all" as const };
+    if (audience.mode === "group")
+      return { mode: "group" as const, groupId: audience.selectedGroupId };
+    return {
+      mode: "custom" as const,
+      tagIds: audience.selectedTagIds,
+      contactIds: audience.selectedIds,
+    };
+  }, [audience]);
+  const [missingPreview, setMissingPreview] = useState<MissingFieldsPreview | null>(
+    null,
+  );
+  useEffect(() => {
+    // Only relevant once a template with variables + a non-empty audience exist.
+    if (!selectedTemplate || (bodyVarCount === 0 && headerVarCount === 0)) {
+      setMissingPreview(null);
+      return;
+    }
+    const hasAudience =
+      audience.mode === "all" ||
+      (audience.mode === "group" && !!audience.selectedGroupId) ||
+      (audience.mode === "custom" &&
+        (audience.selectedTagIds.length > 0 || audience.selectedIds.length > 0));
+    if (!hasAudience) {
+      setMissingPreview(null);
+      return;
+    }
+    const controller = new AbortController();
+    const t = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const res = await apiFetch("/api/broadcasts/preview-missing", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              templateId: selectedTemplate.id,
+              audience: audiencePayload,
+              variables: {
+                body: bodyVars,
+                ...(headerVarCount > 0 ? { header: headerVar } : {}),
+              },
+            }),
+            signal: controller.signal,
+          });
+          if (!res.ok) return;
+          setMissingPreview((await res.json()) as MissingFieldsPreview);
+        } catch {
+          // Aborted (newer edit) or transient — keep the prior state, no churn.
+        }
+      })();
+    }, 500);
+    return () => {
+      controller.abort();
+      window.clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTemplate?.id, audiencePayload, bodyVars, headerVar, bodyVarCount, headerVarCount]);
+
   const filteredTemplates = useMemo(() => {
     const q = templateQuery.trim().toLowerCase();
     if (!q) return templates;
@@ -786,6 +865,38 @@ export function NewBroadcastForm({
           >
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
             <span className="wrap-break-word">{sendError}</span>
+          </div>
+        )}
+        {/* Pre-send warning: recipients missing a mapped template field. Advisory
+            only (Send stays enabled) — the agent can set a default, exclude them,
+            or knowingly proceed (those recipients will fail with a clear reason). */}
+        {missingPreview && missingPreview.affectedCount > 0 && (
+          <div className="rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-xs text-warning-fg">
+            <div className="flex items-center gap-1.5 font-medium">
+              <AlertTriangle className="size-3.5 shrink-0" />
+              {missingPreview.sampled ? "At least " : ""}
+              {missingPreview.affectedCount} recipient
+              {missingPreview.affectedCount === 1 ? "" : "s"} will fail
+            </div>
+            <p className="mt-1 text-warning-fg/80">
+              A template variable resolves to empty for{" "}
+              {missingPreview.affectedCount === 1 ? "this contact" : "them"} —
+              WhatsApp rejects templates with a blank variable. Set a default
+              value on the variable (in the template&apos;s variable settings),
+              or remove these contacts from the audience.
+            </p>
+            <ul className="mt-1 space-y-0.5 text-warning-fg/80">
+              {missingPreview.missing.map((m, i) => (
+                <li key={`${m.location}-${m.position}-${i}`}>
+                  •{" "}
+                  {m.location === "header"
+                    ? "Header variable"
+                    : `Variable {{${m.position}}}`}
+                  {m.fieldLabel ? ` (${m.fieldLabel})` : ""}: {m.missingCount}{" "}
+                  missing
+                </li>
+              ))}
+            </ul>
           </div>
         )}
         <div className="flex items-center justify-between gap-3">

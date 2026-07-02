@@ -24,13 +24,34 @@ import {
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import { resolveAudienceGroupMembers } from "@/lib/queries";
+import {
+  parseVariableBindings,
+  resolveBinding,
+  type VariableBinding,
+} from "@ccp/shared/template-bindings";
+import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 
 import { DbService } from "../db/db.service";
 import { EventBus } from "../events/event-bus.module";
 import type {
+  AudienceInput,
   BroadcastListQuery,
   CreateBroadcastInput,
+  PreviewMissingFieldsInput,
 } from "./broadcasts.schemas";
+
+/** Friendly field name for a variable binding, for the pre-send warning.
+ *  null for manual (agent-typed) variables — those "empty" cases are the
+ *  agent's own blank input, not a missing contact field. */
+function bindingFieldLabel(binding: VariableBinding | undefined): string | null {
+  if (!binding || binding.source.kind === "manual") return null;
+  if (binding.source.kind === "contact_field") {
+    return binding.source.field === "phoneNumber"
+      ? "phone number"
+      : binding.source.field;
+  }
+  return binding.source.key;
+}
 
 @Injectable()
 export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
@@ -428,6 +449,197 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       totalCount: broadcast.totalCount,
       scheduled: isFutureSchedule,
     };
+  }
+
+  /**
+   * Pre-send preflight for the composer. Resolves the SAME audience the create
+   * body would, then runs the ACTUAL runtime binding resolution
+   * (resolveBinding → resolveFieldTokens, identical to the broadcast runner)
+   * over a bounded sample of recipients to count how many would resolve a
+   * template variable to EMPTY — which WhatsApp rejects. Read-only: it never
+   * creates rows or touches the create path, so it's safe to call live as the
+   * agent builds the campaign.
+   */
+  async previewMissingFields(
+    teamId: string,
+    input: PreviewMissingFieldsInput,
+  ): Promise<{
+    total: number;
+    sampled: boolean;
+    affectedCount: number;
+    missing: Array<{
+      location: "body" | "header";
+      /** 1-based body variable position; 0 for the header variable. */
+      position: number;
+      /** Human field label when the variable is bound to a contact field
+       *  (e.g. "email"), else null (a manual variable left blank). */
+      fieldLabel: string | null;
+      missingCount: number;
+    }>;
+  }> {
+    const empty = { total: 0, sampled: false, affectedCount: 0, missing: [] as [] };
+    const { templateId, audience, variables } = input;
+
+    const template = await this.db.messageTemplate.findFirst({
+      where: { id: templateId, teamId },
+      select: { variableBindings: true },
+    });
+    if (!template) return empty;
+    const bindings = parseVariableBindings(template.variableBindings as never);
+
+    // Bounded to keep the composer snappy even on a huge audience. The count is
+    // exact up to the cap; past it we flag `sampled` so the UI says "at least".
+    const SCAN_CAP = 3000;
+    const scanIds = await this.previewRecipientIds(teamId, audience, SCAN_CAP + 1);
+    if (scanIds.length === 0) return empty;
+    const sampled = scanIds.length > SCAN_CAP;
+    const ids = sampled ? scanIds.slice(0, SCAN_CAP) : scanIds;
+
+    const contacts = await this.db.contact.findMany({
+      where: { teamId, id: { in: ids } },
+      select: {
+        name: true,
+        phoneNumber: true,
+        email: true,
+        location: true,
+        customFields: true,
+      },
+    });
+
+    const bodyMissing = variables.body.map(() => 0);
+    let headerMissing = 0;
+    let affected = 0;
+    for (const c of contacts) {
+      let recipientAffected = false;
+      variables.body.forEach((literal, i) => {
+        const v = resolveFieldTokens(resolveBinding(bindings.body[i], literal, c), c);
+        if (v.trim().length === 0) {
+          bodyMissing[i] = (bodyMissing[i] ?? 0) + 1;
+          recipientAffected = true;
+        }
+      });
+      if (variables.header !== undefined) {
+        const hv = resolveFieldTokens(
+          resolveBinding(bindings.header, variables.header, c),
+          c,
+        );
+        if (hv.trim().length === 0) {
+          headerMissing++;
+          recipientAffected = true;
+        }
+      }
+      if (recipientAffected) affected++;
+    }
+
+    const missing: Array<{
+      location: "body" | "header";
+      position: number;
+      fieldLabel: string | null;
+      missingCount: number;
+    }> = [];
+    bodyMissing.forEach((cnt, i) => {
+      if (cnt > 0) {
+        missing.push({
+          location: "body",
+          position: i + 1,
+          fieldLabel: bindingFieldLabel(bindings.body[i]),
+          missingCount: cnt,
+        });
+      }
+    });
+    if (headerMissing > 0) {
+      missing.push({
+        location: "header",
+        position: 0,
+        fieldLabel: bindingFieldLabel(bindings.header),
+        missingCount: headerMissing,
+      });
+    }
+
+    return { total: contacts.length, sampled, affectedCount: affected, missing };
+  }
+
+  /**
+   * Read-only audience → recipient-id resolver for {@link previewMissingFields}.
+   * Mirrors create's mode resolution but NEVER throws (returns [] on any invalid
+   * / empty input) and bounds the result, so the preview stays a pure, safe
+   * read. Deliberately separate from create's resolver so the highest-blast
+   * -radius send path stays untouched.
+   */
+  private async previewRecipientIds(
+    teamId: string,
+    audience: AudienceInput,
+    limit: number,
+  ): Promise<string[]> {
+    try {
+      if (audience.mode === "all") {
+        return (
+          await this.db.contact.findMany({
+            where: { teamId, deletedAt: null },
+            select: { id: true },
+            take: limit,
+          })
+        ).map((c) => c.id);
+      }
+      if (audience.mode === "by_tag") {
+        if (!audience.tagIds?.length) return [];
+        const tagRows = await this.db.tag.findMany({
+          where: { teamId, id: { in: audience.tagIds } },
+          select: { id: true },
+        });
+        const validTagIds = tagRows.map((t) => t.id);
+        if (validTagIds.length === 0) return [];
+        return (
+          await this.db.contact.findMany({
+            where: { teamId, deletedAt: null, tags: { some: { id: { in: validTagIds } } } },
+            select: { id: true },
+            take: limit,
+          })
+        ).map((c) => c.id);
+      }
+      if (audience.mode === "group") {
+        if (!audience.groupId) return [];
+        const group = await this.db.audienceGroup.findFirst({
+          where: { id: audience.groupId, teamId },
+          include: { tags: { select: { id: true } }, contacts: { select: { id: true } } },
+        });
+        if (!group) return [];
+        const ids = await resolveAudienceGroupMembers(teamId, {
+          tagIds: group.tags.map((t) => t.id),
+          manualContactIds: group.contacts.map((c) => c.id),
+        });
+        return ids.slice(0, limit);
+      }
+      if (audience.mode === "custom") {
+        const tagRows = audience.tagIds?.length
+          ? await this.db.tag.findMany({
+              where: { teamId, id: { in: audience.tagIds } },
+              select: { id: true },
+            })
+          : [];
+        const ids = await resolveAudienceGroupMembers(teamId, {
+          tagIds: tagRows.map((t) => t.id),
+          manualContactIds: audience.contactIds ?? [],
+        });
+        return ids.slice(0, limit);
+      }
+      // mode === "selected"
+      return Array.from(
+        new Set(
+          (
+            await this.db.contact.findMany({
+              where: { teamId, deletedAt: null, id: { in: audience.contactIds ?? [] } },
+              select: { id: true },
+              take: limit,
+            })
+          ).map((c) => c.id),
+        ),
+      );
+    } catch {
+      // Preview must never break the composer — a bad/foreign id or a transient
+      // read error just yields "no warning".
+      return [];
+    }
   }
 
   async list(teamId: string, query?: BroadcastListQuery) {

@@ -356,28 +356,34 @@ function MemberRow({
       onSelect={() => onPick(user.id)}
       className={cn("items-start", dimmed && "text-muted-foreground")}
     >
-      {isCurrent ? (
-        <Check className="size-3.5" />
-      ) : (
-        <div className="relative">
-          <Avatar className={cn("size-5", dimmed && "opacity-80")}>
-            {user.avatarUrl ? <AvatarImage src={user.avatarUrl} alt={user.name} /> : null}
-            <AvatarFallback seed={user.id} className="text-3xs">{initials(user.name)}</AvatarFallback>
-          </Avatar>
-          <span
-            className={cn(
-              "absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full ring-1 ring-popover",
-              dotClass,
-            )}
-            aria-hidden
-          />
-        </div>
-      )}
+      {/* Always show the member's avatar + live status dot — even when they're
+          the current assignee. Selection is indicated by the trailing check
+          below, NOT by hiding the avatar (which read as "the photo vanished
+          after assigning"). */}
+      <div className="relative">
+        <Avatar className={cn("size-5", dimmed && "opacity-80")}>
+          {user.avatarUrl ? <AvatarImage src={user.avatarUrl} alt={user.name} /> : null}
+          <AvatarFallback seed={user.id} className="text-3xs">{initials(user.name)}</AvatarFallback>
+        </Avatar>
+        <span
+          className={cn(
+            "absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full ring-1 ring-popover",
+            dotClass,
+          )}
+          aria-hidden
+        />
+      </div>
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center gap-2">
           <span className="min-w-0 flex-1 truncate">{user.name}</span>
           {cue && (
             <span className="shrink-0 text-3xs text-muted-foreground">{cue}</span>
+          )}
+          {isCurrent && (
+            <Check
+              className="size-3.5 shrink-0 text-primary"
+              aria-label="Currently assigned"
+            />
           )}
         </div>
         {/* Availability note — the teammate's own status message. Surfaced

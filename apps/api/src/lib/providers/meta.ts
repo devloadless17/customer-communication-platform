@@ -329,6 +329,16 @@ interface MetaMessage {
   // / list-preview stay correct instead of the message vanishing silently.
   location?: MetaLocationPayload;
   contacts?: MetaContactsPayload[];
+  // Present on `type: "unsupported"` inbound (and some others): Meta's reason
+  // the Cloud API can't represent the message — e.g. a template/interactive
+  // message received BY a business number from another business. The content
+  // is NOT included, so this is the only context we can surface.
+  errors?: Array<{
+    code?: number;
+    title?: string;
+    message?: string;
+    error_data?: { details?: string };
+  }>;
 }
 
 const META_MEDIA_TYPES: MediaKind[] = ["image", "video", "audio", "document", "sticker"];
@@ -367,8 +377,16 @@ function placeholderForUnhandledType(m: MetaMessage): string | null {
     }
     case "order":
       return "🛒 Order shared";
-    case "unsupported":
-      return "⚠️ Unsupported message";
+    case "unsupported": {
+      // Meta strips the content for unsupported types; the errors array is the
+      // only context. Common cause: a template/interactive message received by
+      // a WhatsApp Business (Cloud API) number from another business — the
+      // phone renders it, but the inbound webhook can't. Surface Meta's reason
+      // when present so it's not a context-free "Unsupported message".
+      const err = m.errors?.[0];
+      const reason = err?.error_data?.details?.trim() || err?.title?.trim();
+      return reason ? `⚠️ Unsupported message — ${reason}` : "⚠️ Unsupported message";
+    }
     default:
       // Unknown future type Meta might add — surface SOMETHING so it's
       // visible + counts toward unread, rather than vanishing.

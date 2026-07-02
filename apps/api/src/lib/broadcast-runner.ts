@@ -1140,6 +1140,29 @@ async function processOneRecipient(
     }
     const toPhone = recipient.contact.phoneNumber;
 
+    // Empty-variable guard. WhatsApp REJECTS a template whose variable resolved
+    // to an empty value ("parameter value is empty"), so firing the send would
+    // just waste a Meta round-trip and surface a cryptic error. The usual cause
+    // is a variable bound to a contact field (e.g. email) the recipient doesn't
+    // have, with no default on the binding. Fail fast with a clear, actionable
+    // reason instead of a cryptic Meta rejection — the fix is to set a default
+    // value on the template variable binding (or exclude field-less contacts).
+    const emptyBodyIdx = perRecipientVars.body.findIndex(
+      (v) => v.trim().length === 0,
+    );
+    const headerEmpty =
+      perRecipientVars.header !== undefined &&
+      perRecipientVars.header.trim().length === 0;
+    if (emptyBodyIdx !== -1 || headerEmpty) {
+      const which = headerEmpty ? "the header variable" : `variable {{${emptyBodyIdx + 1}}}`;
+      await markRecipientFailed(
+        recipient.id,
+        `Skipped — ${which} resolved to empty for this contact (a mapped field like email is missing and the template has no default value). WhatsApp rejects templates with an empty variable.`,
+      );
+      bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
+      return;
+    }
+
     // Double-send guard — claim a per-recipient OutboundSendAttempt BEFORE
     // touching Meta. On a resumed re-entry the prior row tells us whether the
     // send already reached Meta, so a crash between the Meta accept and the

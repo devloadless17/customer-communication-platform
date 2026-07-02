@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   CalendarClock,
   CheckCircle2,
   CircleSlash,
@@ -12,9 +13,22 @@ import { cn } from "@ccp/shared/utils";
 /**
  * Visual chip for a Broadcast.status value. Server component — no animations,
  * the loader icon spins via Tailwind's `animate-spin`.
+ *
+ * `failedCount` / `totalCount` refine the terminal `completed` case: a run that
+ * "completed" but had failures must NOT read as a clean green success (the
+ * source of "it says Completed so I thought it sent"). All-failed → red,
+ * partial → amber, clean → green.
  */
-export function BroadcastStatusBadge({ status }: { status: string }) {
-  const { Icon, tone, label, spin } = mapStatus(status);
+export function BroadcastStatusBadge({
+  status,
+  failedCount = 0,
+  totalCount = 0,
+}: {
+  status: string;
+  failedCount?: number;
+  totalCount?: number;
+}) {
+  const { Icon, tone, label, spin } = mapStatus(status, failedCount, totalCount);
   return (
     <span
       className={cn(
@@ -28,7 +42,7 @@ export function BroadcastStatusBadge({ status }: { status: string }) {
   );
 }
 
-function mapStatus(status: string) {
+function mapStatus(status: string, failedCount: number, totalCount: number) {
   switch (status) {
     case "scheduled":
       // Future send; a delayed job fires it at scheduledAt. Indigo to read as
@@ -53,13 +67,32 @@ function mapStatus(status: string) {
         label: "Sending",
         spin: true,
       };
-    case "completed":
+    case "completed": {
+      // All recipients failed → this is really a failure; don't paint it green.
+      if (failedCount > 0 && totalCount > 0 && failedCount >= totalCount) {
+        return {
+          Icon: CircleSlash,
+          tone: "border-destructive/30 bg-destructive/10 text-destructive",
+          label: totalCount > 1 ? "All failed" : "Failed",
+          spin: false,
+        };
+      }
+      // Some failed → amber "N failed" so it's visibly not a clean success.
+      if (failedCount > 0) {
+        return {
+          Icon: AlertTriangle,
+          tone: "border-warning-border bg-warning-bg text-warning-fg",
+          label: `Completed · ${failedCount} failed`,
+          spin: false,
+        };
+      }
       return {
         Icon: CheckCircle2,
         tone: "border-success-border bg-success-bg text-success-fg",
         label: "Completed",
         spin: false,
       };
+    }
     case "failed":
       return {
         Icon: CircleSlash,

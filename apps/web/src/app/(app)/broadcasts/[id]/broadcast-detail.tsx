@@ -417,7 +417,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                   Retry {data.failedCount} failed
                 </button>
               )}
-            <BroadcastStatusBadge status={data.status} />
+            <BroadcastStatusBadge status={data.status} failedCount={data.failedCount} totalCount={data.totalCount} />
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -708,13 +708,25 @@ function RecipientStatusPill({
   }
   if (recipient.status === "failed") {
     return (
-      <span
-        className="inline-flex items-center gap-1 text-xs text-destructive"
-        title={recipient.errorMessage ?? undefined}
-      >
-        <XCircle className="size-3.5" />
-        Failed
-      </span>
+      <div className="flex flex-col gap-0.5">
+        <span className="inline-flex items-center gap-1 text-xs text-destructive">
+          <XCircle className="size-3.5" />
+          Failed
+        </span>
+        {/* Surface the actual reason INLINE (was a hover-only tooltip nobody
+            could find). For a broadcast that "Completed" with an all-red bar,
+            this is where the real cause lives — e.g. Meta's
+            "131030: Recipient phone number not in allowed list" (app still in
+            development mode → real numbers rejected). */}
+        {recipient.errorMessage && (
+          <span
+            className="max-w-[280px] truncate text-2xs text-muted-foreground"
+            title={recipient.errorMessage}
+          >
+            {recipient.errorMessage}
+          </span>
+        )}
+      </div>
     );
   }
   return (

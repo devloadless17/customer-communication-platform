@@ -82,6 +82,20 @@ export const CreateBroadcastSchema = z.object({
 });
 export type CreateBroadcastInput = z.infer<typeof CreateBroadcastSchema>;
 
+/**
+ * Pre-send preflight: given the SAME audience + template + variables the create
+ * body would carry, report how many recipients would resolve a template
+ * variable to EMPTY (a field like email is missing, no default on the binding)
+ * — which WhatsApp rejects. Read-only; never mutates. Lets the composer warn
+ * before the agent sends into a partial failure.
+ */
+export const PreviewMissingFieldsSchema = z.object({
+  templateId: z.string().min(1),
+  audience: AudienceSchema,
+  variables: BroadcastVariablesSchema.default({ body: [] }),
+});
+export type PreviewMissingFieldsInput = z.infer<typeof PreviewMissingFieldsSchema>;
+
 /** Status filter for the list page rail. `all` = no filter. */
 export const BroadcastListQuerySchema = z.object({
   status: z

@@ -18,9 +18,11 @@ import {
   BroadcastListQuerySchema,
   BroadcastRecipientsQuerySchema,
   CreateBroadcastSchema,
+  PreviewMissingFieldsSchema,
   type BroadcastListQuery,
   type BroadcastRecipientsQuery,
   type CreateBroadcastInput,
+  type PreviewMissingFieldsInput,
 } from "./broadcasts.schemas";
 import { BroadcastsService } from "./broadcasts.service";
 
@@ -54,6 +56,18 @@ export class BroadcastsController {
       body,
     );
     return { ok: true, broadcastId, totalCount, scheduled };
+  }
+
+  // Pre-send preflight: how many recipients would resolve a template variable
+  // to empty (missing field, no default) and get rejected by WhatsApp. Read
+  // -only; lets the composer warn before sending. Same capability as create.
+  @Post("preview-missing")
+  @RequireCapability("broadcasts:manage")
+  async previewMissing(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(PreviewMissingFieldsSchema)) body: PreviewMissingFieldsInput,
+  ) {
+    return this.broadcasts.previewMissingFields(session.teamId, body);
   }
 
   @Get()
