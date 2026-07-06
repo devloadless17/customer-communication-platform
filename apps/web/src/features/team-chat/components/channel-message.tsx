@@ -119,24 +119,27 @@ function ChannelMessageImpl({
     // the server can no longer make this frame out-rank — and discard — the
     // authoritative server frame (the bug this `optimistic` flag fixes).
     const existing = message.reactions.find((r) => r.emoji === emoji);
-    const has = existing?.userIds.includes(currentUser.id) ?? false;
+    const priorUserIds = existing?.userIds ?? [];
+    const has = priorUserIds.includes(currentUser.id);
     const nextUserIds = has
-      ? (existing?.userIds ?? []).filter((id) => id !== currentUser.id)
-      : [...(existing?.userIds ?? []), currentUser.id];
-    dispatchLocalSocketEvent("team:channel:reaction:changed", {
-      teamId: currentUser.teamId,
-      channelId,
-      messageId: message.id,
-      emoji,
-      userIds: nextUserIds,
-      version: Date.now(),
-      // Mark as client-predicted: the version guard applies ONLY to optimistic
-      // frames (so consecutive re-toggles still order correctly), while the
-      // authoritative server frame is always applied regardless of version.
-      optimistic: true,
-    });
+      ? priorUserIds.filter((id) => id !== currentUser.id)
+      : [...priorUserIds, currentUser.id];
+    const emit = (userIds: string[]) =>
+      dispatchLocalSocketEvent("team:channel:reaction:changed", {
+        teamId: currentUser.teamId,
+        channelId,
+        messageId: message.id,
+        emoji,
+        userIds,
+        version: Date.now(),
+        // Mark as client-predicted: the version guard applies ONLY to optimistic
+        // frames (so consecutive re-toggles still order correctly), while the
+        // authoritative server frame is always applied regardless of version.
+        optimistic: true,
+      });
+    emit(nextUserIds);
     try {
-      await fetchWithSessionGuard(
+      const res = await fetchWithSessionGuard(
         `/api/team/channels/${channelId}/messages/${message.id}/reactions`,
         {
           method: "POST",
@@ -144,8 +147,12 @@ function ChannelMessageImpl({
           body: JSON.stringify({ emoji }),
         },
       );
+      // Roll back on failure — unlike a live change there's no server
+      // reaction:changed coming to reconcile, so the optimistic toggle would
+      // otherwise stick (out of sync with the server + other clients).
+      if (!res.ok) emit(priorUserIds);
     } catch {
-      // Server is authoritative — the next reaction:changed event reconciles.
+      emit(priorUserIds);
     }
   };
 
@@ -282,10 +289,10 @@ function ChannelMessageImpl({
           <LocalTime
             iso={message.createdAt}
             format="messageTime"
-            className="shrink-0 text-2xs text-muted-foreground/70"
+            className="shrink-0 text-2xs text-muted-foreground"
           />
           {message.editedAt && (
-            <span className="shrink-0 text-2xs text-muted-foreground/70">(edited)</span>
+            <span className="shrink-0 text-2xs text-muted-foreground">(edited)</span>
           )}
           {message.pinned && !isThreadReply && (
             <Tooltip>

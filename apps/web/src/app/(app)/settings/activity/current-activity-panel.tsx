@@ -68,8 +68,8 @@ export function CurrentActivityPanel({
     <section className="rounded-xl border border-border bg-card p-4">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="relative flex size-2" aria-hidden>
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500/60" />
-          <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success-fg/60" />
+          <span className="relative inline-flex size-2 rounded-full bg-success-fg" />
         </span>
         <h2 className="text-sm font-medium">Current activity</h2>
         <span className="text-2xs text-muted-foreground">

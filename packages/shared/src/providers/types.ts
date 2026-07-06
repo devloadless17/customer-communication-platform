@@ -226,12 +226,66 @@ export interface NormalizedReaction {
   rawPayload: Record<string, unknown>;
 }
 
+/**
+ * A message the BUSINESS sent from the WhatsApp Business App on the owner's
+ * phone (WhatsApp Coexistence), mirrored back to us so the shared inbox stays
+ * in sync with the phone. Two sources emit this:
+ *   - the live `smb_message_echoes` webhook (an owner reply after onboarding), and
+ *   - the `history` backfill for past outbound messages (where `from` = the
+ *     business number and the payload carries a `to`).
+ *
+ * The dedupe/direction subtlety that makes this its own variant: the wire
+ * payload's `from` is the BUSINESS number and `to` is the CUSTOMER, the inverse
+ * of an inbound message. `contactPhone` here is therefore taken from `to` — the
+ * customer whose conversation this belongs in — NOT `from`. Ingest writes it as
+ * a `direction:"out"`, `senderUserId:null`, `origin:"business_app"` row via
+ * `createOutboundMessageIdempotent`, so an echo of a message our own API already
+ * sent collides on the wamid unique and is a safe no-op (returns the existing
+ * row) rather than creating a phantom.
+ */
+export interface NormalizedOutboundEcho {
+  kind: "echo";
+  /** Provider-assigned id (wamid) — the dedupe key. */
+  externalId: string;
+  /** E.164 digits, no '+'. The CUSTOMER (`to`), not the business (`from`). */
+  contactPhone: string;
+  /** Body text (or media caption); empty for media-only. */
+  body: string;
+  /** Set when the echoed message carries an attachment that needs downloading. */
+  media?: NormalizedMediaRef;
+  timestamp: Date;
+  rawPayload: Record<string, unknown>;
+}
+
+/**
+ * The owner's WhatsApp Business App address-book changed (Coexistence
+ * `smb_app_state_sync`): a phone contact was added, edited, or removed. We use
+ * it only to NAME contacts that already exist in the inbox (someone who has
+ * messaged us) — we do NOT create empty contacts for address-book entries who
+ * never messaged (that would bloat the directory and violate "Contact = a
+ * channel identity we actually converse with"). Naming respects the existing
+ * "agent owns the name, sticky after create" policy: it fills a blank/default
+ * name, never clobbers one an agent typed.
+ */
+export interface NormalizedContactSync {
+  kind: "contact_sync";
+  /** E.164 digits, no '+'. */
+  phone: string;
+  /** The contact's name from the owner's phone address book, if any. */
+  fullName: string | null;
+  /** `add` (added/edited) or `remove` (deleted from the address book). */
+  action: "add" | "remove";
+  rawPayload: Record<string, unknown>;
+}
+
 export type NormalizedEvent =
   | NormalizedInboundMessage
   | NormalizedStatusUpdate
   | NormalizedCallEvent
   | NormalizedReaction
-  | NormalizedTemplateStatusUpdate;
+  | NormalizedTemplateStatusUpdate
+  | NormalizedOutboundEcho
+  | NormalizedContactSync;
 
 export interface SendTextArgs {
   /** E.164 digits, no '+'. */

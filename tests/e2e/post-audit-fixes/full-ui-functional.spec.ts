@@ -62,9 +62,12 @@ function track(page: Page): string[] {
   return errs;
 }
 
-/** Click the confirm button inside the (portalled) confirm dialog. */
+/** Click the confirm button inside the (portalled) confirm dialog. `.last()`
+ *  targets the TOPMOST dialog — the confirm can stack over an editor dialog
+ *  (e.g. delete-from-snippet-editor), and the confirm is the one opened last /
+ *  portalled on top. With a single dialog, `.last()` is just that dialog. */
 function confirmButton(page: Page, label: string) {
-  return page.getByRole("dialog").getByRole("button", { name: label });
+  return page.getByRole("dialog").last().getByRole("button", { name: label });
 }
 
 test.beforeAll(async () => {

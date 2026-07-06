@@ -108,6 +108,9 @@ export const BroadcastListQuerySchema = z.object({
   // list was hard-capped at 100 with no way to reach row 101+.
   cursor: z.string().optional(),
   take: z.coerce.number().int().min(1).max(200).optional(),
+  /** 1-based page for numbered (offset) pagination. When present the query runs
+   *  in offset mode (cursor ignored, totalCount returned). */
+  page: z.coerce.number().int().min(1).optional(),
 });
 export type BroadcastListQuery = z.infer<typeof BroadcastListQuerySchema>;
 

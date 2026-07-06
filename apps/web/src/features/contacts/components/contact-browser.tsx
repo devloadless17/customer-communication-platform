@@ -74,6 +74,10 @@ export interface ContactListFilters {
 export async function fetchContactsPage(
   filters: ContactListFilters,
   cursor: string | null,
+  /** Numbered (offset) pagination. When `page` is set the server ignores the
+   *  cursor and returns `totalCount` on every page — used by the /contacts
+   *  page. Omit for the keyset/infinite-scroll callers (the picker). */
+  paging?: { page?: number; take?: number },
 ): Promise<CursorPage<ContactListItem>> {
   const params = new URLSearchParams();
   if (filters.search.trim()) params.set("search", filters.search.trim());
@@ -85,6 +89,8 @@ export async function fetchContactsPage(
   if (filters.windowFilter !== "any") params.set("window", filters.windowFilter);
   if (filters.tagIds.length > 0) params.set("tagIds", filters.tagIds.join(","));
   if (filters.stageFilter !== "any") params.set("stageId", filters.stageFilter);
+  if (paging?.page != null) params.set("page", String(paging.page));
+  if (paging?.take != null) params.set("take", String(paging.take));
   if (cursor) params.set("cursor", cursor);
   const res = await apiFetch(`/api/contacts?${params.toString()}`);
   if (!res.ok) throw new Error("fetch failed");
@@ -186,6 +192,13 @@ export interface UseContactListResult {
    *  0; the next page-1 fetch makes the server authoritative again. */
   adjustTotalCount: (delta: number) => void;
   nextCursor: string | null;
+  /** Current 1-based page (numbered/`paged` mode only; always 1 otherwise). */
+  page: number;
+  /** Total pages for the current filter set (`ceil(totalCount / pageSize)`,
+   *  min 1). 1 when not in `paged` mode. */
+  pageCount: number;
+  /** Jump to a page (numbered mode). Clamped to [1, pageCount] by the caller. */
+  setPage: (page: number) => void;
   search: string;
   setSearch: (v: string) => void;
   fieldFilter: FieldFilter | null;
@@ -227,8 +240,24 @@ export function useContactList(opts?: {
   initialNextCursor?: string | null;
   initialTotalCount?: number | null;
   initialStageFilter?: StageFilter;
+  /** Opt into numbered (offset) pagination: filter changes reset to page 1,
+   *  `setPage` fetches that page (replacing rows, not appending), and
+   *  `totalCount` refreshes every fetch. Default false = keyset/infinite-scroll
+   *  (the picker). */
+  paged?: boolean;
+  /** Rows per page in `paged` mode (default 25). */
+  pageSize?: number;
 }): UseContactListResult {
-  const [items, setItems] = useState<ContactListItem[]>(opts?.initialItems ?? []);
+  const paged = opts?.paged ?? false;
+  const pageSize = opts?.pageSize ?? 25;
+  // In paged mode the seed is page 1 — cap it to one page so an over-sized SSR
+  // seed (e.g. a caller that forgot to seed in offset mode) can't render more
+  // rows than the page control claims. Ordering matches the offset query.
+  const [items, setItems] = useState<ContactListItem[]>(
+    paged && opts?.initialItems
+      ? opts.initialItems.slice(0, opts?.pageSize ?? 25)
+      : (opts?.initialItems ?? []),
+  );
   const [nextCursor, setNextCursor] = useState<string | null>(
     opts?.initialNextCursor ?? null,
   );
@@ -246,6 +275,12 @@ export function useContactList(opts?: {
   const adjustTotalCount = useCallback((delta: number) => {
     setTotalCount((prev) => (prev === null ? prev : Math.max(0, prev + delta)));
   }, []);
+  // Numbered-pagination cursor. Only meaningful when `paged`; stays 1 otherwise.
+  // Mirrored in a ref so the stable refetch/reconcile callbacks can read the
+  // live page without being recreated (they subscribe socket listeners once).
+  const [page, setPage] = useState(1);
+  const pageRef = useRef(1);
+  pageRef.current = page;
   const [search, setSearch] = useState("");
   const [fieldFilter, setFieldFilter] = useState<FieldFilter | null>(null);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
@@ -273,6 +308,7 @@ export function useContactList(opts?: {
   const hasSeed = opts?.initialItems !== undefined;
   const skipFirstFetch = useRef(hasSeed);
   useEffect(() => {
+    if (paged) return; // numbered mode uses the offset effects below
     if (skipFirstFetch.current) {
       skipFirstFetch.current = false;
       return;
@@ -299,6 +335,62 @@ export function useContactList(opts?: {
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, fieldFilter, sourceFilter, windowFilter, tagKey, stageFilter]);
+
+  // ── Numbered (offset) pagination effects — `paged` mode only ──────────────
+  // A filter change resets to page 1 (page N of the old filter set is
+  // meaningless). Skip the seeded initial mount so we don't fight the SSR seed.
+  const skipPagedReset = useRef(hasSeed);
+  useEffect(() => {
+    if (!paged) return;
+    if (skipPagedReset.current) {
+      skipPagedReset.current = false;
+      return;
+    }
+    setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, fieldFilter, sourceFilter, windowFilter, tagKey, stageFilter]);
+
+  // Fetch the current page whenever filters or the page number change. Debounce
+  // ONLY the typed search (so keystrokes don't flood the API); page navigation
+  // and discrete filter-chip clicks fetch immediately so they feel instant —
+  // a 250ms lag on a page-number click reads as sluggish. When a filter change
+  // resets page N→1, this effect's cleanup cancels the stale page-N timer before
+  // it fires (see the reset above), so only one request lands.
+  const skipPagedFetch = useRef(hasSeed);
+  const prevPagedSearch = useRef(search);
+  useEffect(() => {
+    if (!paged) return;
+    if (skipPagedFetch.current) {
+      skipPagedFetch.current = false;
+      prevPagedSearch.current = search;
+      return;
+    }
+    const searchChanged = prevPagedSearch.current !== search;
+    prevPagedSearch.current = search;
+    const delay = searchChanged ? 250 : 0;
+    const my = ++reqId.current;
+    setLoading(true);
+    setError(null);
+    const t = window.setTimeout(async () => {
+      try {
+        const data = await fetchContactsPage(
+          { search, fieldFilter, sourceFilter, windowFilter, tagIds, stageFilter },
+          null,
+          { page, take: pageSize },
+        );
+        if (reqId.current !== my) return;
+        setItems(data.items);
+        setNextCursor(null);
+        if (data.totalCount !== undefined) setTotalCount(data.totalCount);
+      } catch {
+        if (reqId.current === my) setError("Couldn't load contacts");
+      } finally {
+        if (reqId.current === my) setLoading(false);
+      }
+    }, delay);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, fieldFilter, sourceFilter, windowFilter, tagKey, stageFilter, page]);
 
   function loadMore() {
     if (!nextCursor || loadingMore) return;
@@ -363,17 +455,23 @@ export function useContactList(opts?: {
     setLoading(true);
     void (async () => {
       try {
-        const page = await fetchContactsPage(filtersRef.current, null);
+        const data = await fetchContactsPage(
+          filtersRef.current,
+          null,
+          paged ? { page: pageRef.current, take: pageSize } : undefined,
+        );
         if (reqId.current !== my) return;
-        setItems(page.items);
-        setNextCursor(page.nextCursor);
-        if (page.totalCount !== undefined) setTotalCount(page.totalCount);
+        setItems(data.items);
+        setNextCursor(data.nextCursor);
+        if (data.totalCount !== undefined) setTotalCount(data.totalCount);
       } catch {
         // Silent — next filter change recovers.
       } finally {
         if (reqId.current === my) setLoading(false);
       }
     })();
+    // paged + pageSize are mount-stable; pageRef is read live.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const reconcileTimerRef = useRef<number | null>(null);
@@ -433,11 +531,15 @@ export function useContactList(opts?: {
         const my = ++reqId.current;
         void (async () => {
           try {
-            const page = await fetchContactsPage(filtersRef.current, null);
+            const data = await fetchContactsPage(
+              filtersRef.current,
+              null,
+              paged ? { page: pageRef.current, take: pageSize } : undefined,
+            );
             if (reqId.current !== my) return;
-            setItems(page.items);
-            setNextCursor(page.nextCursor);
-            if (page.totalCount !== undefined) setTotalCount(page.totalCount);
+            setItems(data.items);
+            setNextCursor(data.nextCursor);
+            if (data.totalCount !== undefined) setTotalCount(data.totalCount);
           } catch {
             // Silent — next filter change or refresh recovers. A noisy
             // banner here for a background reconciliation would be worse.
@@ -445,7 +547,14 @@ export function useContactList(opts?: {
         })();
       }, 250);
     }
+    // paged + pageSize are mount-stable; filters/page read live via refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const pageCount =
+    paged && totalCount != null
+      ? Math.max(1, Math.ceil(totalCount / pageSize))
+      : 1;
 
   return {
     items,
@@ -453,6 +562,9 @@ export function useContactList(opts?: {
     totalCount,
     adjustTotalCount,
     nextCursor,
+    page,
+    pageCount,
+    setPage,
     search,
     setSearch,
     fieldFilter,
@@ -855,6 +967,8 @@ export function ContactBrowser({
             {list.search ||
             list.fieldFilter ||
             list.windowFilter !== "any" ||
+            list.sourceFilter !== "all" ||
+            list.stageFilter !== "any" ||
             list.tagIds.length > 0
               ? "No contacts match your filters."
               : "No contacts yet."}

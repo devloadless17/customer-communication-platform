@@ -291,6 +291,10 @@ export async function listContacts(
     query: {
       search: opts.search,
       cursor: opts.cursor ?? undefined,
+      // Numbered (offset) pagination — the /contacts page seeds page 1 in this
+      // mode so the SSR rows match the paginated client (see contacts/page.tsx).
+      page: opts.page,
+      take: opts.take,
       fieldKey: opts.fieldFilter?.key,
       fieldValue: opts.fieldFilter?.value,
       source: opts.source,
@@ -437,15 +441,19 @@ export interface BroadcastDetail extends BroadcastListItem {
 export async function listBroadcasts(opts?: {
   status?: string;
   search?: string;
-}): Promise<BroadcastListItem[]> {
+  /** Numbered (offset) pagination — when set, the API returns `totalCount`. */
+  page?: number;
+  take?: number;
+}): Promise<{ broadcasts: BroadcastListItem[]; totalCount?: number }> {
   const params = new URLSearchParams();
   if (opts?.status && opts.status !== "all") params.set("status", opts.status);
   if (opts?.search) params.set("search", opts.search);
+  if (opts?.page != null) params.set("page", String(opts.page));
+  if (opts?.take != null) params.set("take", String(opts.take));
   const qs = params.toString();
-  const { broadcasts } = await api<{ broadcasts: BroadcastListItem[] }>(
+  return api<{ broadcasts: BroadcastListItem[]; totalCount?: number }>(
     `/api/broadcasts${qs ? `?${qs}` : ""}`,
   );
-  return broadcasts;
 }
 
 export async function getBroadcast(id: string): Promise<BroadcastDetail | null> {

@@ -36,6 +36,11 @@ export type AudiencePreviewInput = z.infer<typeof AudiencePreviewSchema>;
 export const ListContactsQuerySchema = z.object({
   search: z.string().optional(),
   cursor: z.string().optional(),
+  /** 1-based page for numbered pagination. When present the query runs in
+   *  offset mode (cursor ignored, totalCount always returned). */
+  page: z.coerce.number().int().min(1).optional(),
+  /** Page size for numbered pagination (clamped server-side, default 50). */
+  take: z.coerce.number().int().min(1).max(100).optional(),
   fieldKey: z.string().optional(),
   fieldValue: z.string().optional(),
   source: z.enum(["inbound", "manual"]).optional().catch(undefined),

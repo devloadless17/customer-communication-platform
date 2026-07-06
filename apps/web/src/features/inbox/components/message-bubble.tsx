@@ -175,12 +175,22 @@ function BubbleContent({
   // derivation in MessageBubbleImpl's selection branch.
   const isFailed = message.failed || message.status === "failed";
   // Attribution chip at the head of an outbound burst (shared-inbox: "which
-  // teammate sent this"). Outbound + group-head + we know the sender.
+  // teammate sent this"). Outbound + group-head. When we know the teammate we
+  // show their chip; when the message was sent from the WhatsApp Business App on
+  // the owner's phone (Coexistence — no authoring agent, so senderName is null),
+  // we mark it "via WhatsApp app" so a phone reply is distinguishable from an
+  // agent send and from a silent system/automation send.
   const senderHeader =
-    showSenderHeader && message.direction === "out" && senderName ? (
-      <span className="px-1 pb-0.5 text-2xs font-medium text-muted-foreground">
-        <SenderChip name={senderName} avatarUrl={senderAvatarUrl ?? null} />
-      </span>
+    showSenderHeader && message.direction === "out" ? (
+      senderName ? (
+        <span className="px-1 pb-0.5 text-2xs font-medium text-muted-foreground">
+          <SenderChip name={senderName} avatarUrl={senderAvatarUrl ?? null} />
+        </span>
+      ) : message.origin === "business_app" ? (
+        <span className="px-1 pb-0.5 text-2xs font-medium text-muted-foreground">
+          via WhatsApp app
+        </span>
+      ) : null
     ) : null;
   const media = message.media;
   const reply = message.replyTo ?? null;

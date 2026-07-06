@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -44,6 +44,7 @@ export function ThreadPanel({
     loadMore,
     addOptimistic,
     markOptimisticFailed,
+    confirmOptimistic,
     removeOptimistic,
     retryOptimistic,
     typingUserIds,
@@ -60,6 +61,23 @@ export function ThreadPanel({
     for (const u of teamMembers) map.set(u.id, u.name);
     return map;
   }, [teamMembers]);
+
+  // Keep the newest reply in view: land at the bottom on open, and follow the
+  // user's OWN sends (so "send → see nothing" can't happen). We deliberately do
+  // NOT follow inbound replies or Load-more so reading older replies isn't
+  // yanked — only a new LAST reply that's ours (or the first paint) scrolls.
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const lastReplyIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const last = replies[replies.length - 1];
+    const lastId = last?.id ?? null;
+    if (lastId === lastReplyIdRef.current) return;
+    const isFirstPaint = lastReplyIdRef.current === null;
+    lastReplyIdRef.current = lastId;
+    if (isFirstPaint || last?.authorUserId === currentUser.id) {
+      bottomRef.current?.scrollIntoView({ block: "end" });
+    }
+  }, [replies, currentUser.id]);
 
   return (
     // Below xl the panel OVERLAYS the feed (absolute, right-docked, shadowed)
@@ -132,6 +150,8 @@ export function ThreadPanel({
               )}
             </>
           )}
+          {/* Scroll anchor — see the auto-follow effect above. */}
+          <div ref={bottomRef} />
         </div>
       </ScrollArea>
 
@@ -150,6 +170,7 @@ export function ThreadPanel({
         teamMembers={teamMembers}
         onOptimisticAdd={addOptimistic}
         onOptimisticFail={markOptimisticFailed}
+        onOptimisticConfirm={confirmOptimistic}
       />
     </aside>
   );

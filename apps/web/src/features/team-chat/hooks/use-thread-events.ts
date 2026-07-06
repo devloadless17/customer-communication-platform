@@ -27,6 +27,14 @@ export interface ThreadEventsState {
   loadMore: () => Promise<number>;
   addOptimistic: (m: TeamChannelMessageDto) => void;
   markOptimisticFailed: (clientTempId: string) => void;
+  /**
+   * Reconcile an optimistic reply from its OWN POST response (not the socket
+   * echo) — swaps the tmp id for the server id so a lost `team:channel:message`
+   * echo (send lands while the socket is dropped past the 30s recovery window)
+   * can't leave the reply spinning `pending` forever, nor double-render it on
+   * the next reconnect converge. Mirrors the channel feed's confirmOptimistic.
+   */
+  confirmOptimistic: (message: TeamChannelMessageDto, clientTempId: string) => void;
   removeOptimistic: (clientTempId: string) => void;
   /**
    * Re-send a failed optimistic reply: flip it back to `pending` and re-POST
@@ -317,6 +325,21 @@ export function useThreadEvents(
     );
   }, []);
 
+  const confirmOptimistic = useCallback(
+    (message: TeamChannelMessageDto, clientTempId: string) => {
+      setReplies((prev) => {
+        if (prev.some((m) => m.id === message.id)) return prev;
+        const next = prev.map((m) =>
+          m.clientTempId === clientTempId && (m.pending || m.failed)
+            ? { ...message, clientTempId }
+            : m,
+        );
+        return next.some((m) => m.id === message.id) ? next : [...next, message];
+      });
+    },
+    [],
+  );
+
   const removeOptimistic = useCallback((clientTempId: string) => {
     setReplies((prev) => prev.filter((m) => m.clientTempId !== clientTempId));
   }, []);
@@ -361,6 +384,7 @@ export function useThreadEvents(
     loadMore,
     addOptimistic,
     markOptimisticFailed,
+    confirmOptimistic,
     removeOptimistic,
     retryOptimistic,
     typingUserIds,

@@ -212,6 +212,7 @@ function BindingRow({
           value={binding.label}
           onChange={(e) => onLabelChange(e.target.value)}
           placeholder="label (e.g. first_name)"
+          aria-label={`${slot} label`}
           className="h-7 max-w-45 text-xs"
         />
       </div>
@@ -275,6 +276,7 @@ function SourcePill({
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={cn(
         "rounded-full border px-2 py-0.5 text-2xs font-medium transition-colors",
         active

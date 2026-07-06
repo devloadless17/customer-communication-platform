@@ -15,6 +15,7 @@ import {
 
 import { LocalTime } from "@/components/local-time";
 import { Input } from "@/components/ui/input";
+import { Pagination } from "@/components/ui/pagination";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
@@ -55,6 +56,7 @@ const FILTERS: { id: BroadcastStatusFilter; label: string; dot: string }[] = [
 ];
 
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
+const BROADCASTS_PAGE_SIZE = 25;
 
 function writeCookie(name: string, value: string) {
   // `encodeURIComponent` on values so a search with `;` or `=` doesn't break
@@ -66,12 +68,16 @@ function writeCookie(name: string, value: string) {
 
 export function BroadcastsBrowser({
   initial,
+  initialTotalCount = null,
   canManage,
   initialFilter = "all",
   initialSearch = "",
   initialView = "table",
 }: {
   initial: BroadcastListItem[];
+  /** SSR-computed total matching the seeded filter — drives the page count so
+   *  the first paint shows the numbered control without a round-trip. */
+  initialTotalCount?: number | null;
   canManage: boolean;
   /** SSR-seeded from the `broadcasts-status` cookie. The seed `initial` was
    *  fetched for this exact filter so the first paint is correct. */
@@ -84,6 +90,8 @@ export function BroadcastsBrowser({
   initialView?: BroadcastView;
 }) {
   const [rows, setRows] = useState<BroadcastListItem[]>(initial);
+  const [page, setPage] = useState(1);
+  const [totalCount, setTotalCount] = useState<number | null>(initialTotalCount);
   const [filter, setFilterState] = useState<BroadcastStatusFilter>(initialFilter);
   const [search, setSearchState] = useState(initialSearch);
   const [view, setViewState] = useState<BroadcastView>(initialView);
@@ -119,6 +127,10 @@ export function BroadcastsBrowser({
   filterRef.current = filter;
   const searchRef = useRef(search);
   searchRef.current = search;
+  // Current page mirrored so the stable `refetch` (and the socket-driven
+  // refetch) fetch the page the user is on without re-subscribing.
+  const pageRef = useRef(page);
+  pageRef.current = page;
 
   // Monotonic request sequence shared by BOTH the filter-change refetch and the
   // socket-driven refetch. AbortController cancels a request we KNOW is stale,
@@ -134,6 +146,8 @@ export function BroadcastsBrowser({
     const params = new URLSearchParams();
     if (filterRef.current !== "all") params.set("status", filterRef.current);
     if (searchRef.current.trim()) params.set("search", searchRef.current.trim());
+    params.set("page", String(pageRef.current));
+    params.set("take", String(BROADCASTS_PAGE_SIZE));
     const qs = params.toString();
     // AbortController so cancel() actually aborts the in-flight HTTP
     // request — not just suppresses the setState. Under a 10k-recipient
@@ -144,13 +158,21 @@ export function BroadcastsBrowser({
     const promise = apiFetch(`/api/broadcasts${qs ? `?${qs}` : ""}`, {
       signal: controller.signal,
     })
-      .then((r) => (r.ok ? (r.json() as Promise<{ broadcasts: BroadcastListItem[] }>) : null))
+      .then((r) =>
+        r.ok
+          ? (r.json() as Promise<{
+              broadcasts: BroadcastListItem[];
+              totalCount?: number;
+            }>)
+          : null,
+      )
       .then((body) => {
         if (controller.signal.aborted || !body) return;
         // A newer refetch started while this one was on the wire — its rows
-        // reflect the current filter/search, so drop this stale response.
+        // reflect the current filter/search/page, so drop this stale response.
         if (seq !== seqRef.current) return;
         setRows(body.broadcasts);
+        if (body.totalCount != null) setTotalCount(body.totalCount);
       })
       .catch((err: unknown) => {
         // AbortError is the cancel path — silent. Anything else is a real
@@ -168,24 +190,43 @@ export function BroadcastsBrowser({
     return { promise, cancel: () => controller.abort() };
   }, []);
 
-  // Debounced server refetch on filter/search change. Skip the very first run
-  // (SSR `initial` was fetched matching the persisted filter + search, so
-  // they're already current).
-  const firstRef = useRef(true);
+  // A filter/search change resets to page 1 (page N of the old set is
+  // meaningless). Skip the seeded initial mount.
+  const firstResetRef = useRef(true);
+  useEffect(() => {
+    if (firstResetRef.current) {
+      firstResetRef.current = false;
+      return;
+    }
+    setPage(1);
+  }, [filter, search]);
+
+  // Server refetch on filter / search / page change. Skip the very first run
+  // ONLY when the SSR seeded the total count (so the numbered control can paint
+  // immediately) — otherwise fetch on mount to fill it in. Debounce ONLY the
+  // typed search — a filter-chip or page-number click fetches immediately so it
+  // feels instant. When a filter change resets page N→1, this effect's cleanup
+  // cancels the stale page-N ticket before it fires.
+  const firstRef = useRef(initialTotalCount != null);
+  const prevSearchRef = useRef(search);
   useEffect(() => {
     if (firstRef.current) {
       firstRef.current = false;
+      prevSearchRef.current = search;
       return;
     }
+    const searchChanged = prevSearchRef.current !== search;
+    prevSearchRef.current = search;
+    const delay = searchChanged ? 250 : 0;
     let ticket: { cancel: () => void } | null = null;
     const t = window.setTimeout(() => {
       ticket = refetch();
-    }, 250);
+    }, delay);
     return () => {
       ticket?.cancel();
       window.clearTimeout(t);
     };
-  }, [filter, search, refetch]);
+  }, [filter, search, page, refetch]);
 
   // Live sync with teammate actions. broadcast:status fires on every flip
   // (scheduled → queued → running → completed/failed/canceled, plus the new
@@ -293,6 +334,22 @@ export function BroadcastsBrowser({
         />
       ) : (
         <CalendarView rows={rows} />
+      )}
+
+      {/* Numbered pagination — table view only (the calendar groups scheduled
+          sends by month, not by page). */}
+      {view === "table" && rows.length > 0 && (
+        <Pagination
+          page={page}
+          pageCount={Math.max(1, Math.ceil((totalCount ?? rows.length) / BROADCASTS_PAGE_SIZE))}
+          onPageChange={(next) => {
+            setPage(next);
+            if (typeof window !== "undefined") window.scrollTo({ top: 0 });
+          }}
+          totalCount={totalCount ?? undefined}
+          pageSize={BROADCASTS_PAGE_SIZE}
+          itemNoun="broadcasts"
+        />
       )}
     </div>
   );

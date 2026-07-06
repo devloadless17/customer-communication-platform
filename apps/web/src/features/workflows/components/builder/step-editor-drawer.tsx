@@ -4,6 +4,7 @@ import { X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { toast } from "@/lib/toast";
 
 import { DataInspector } from "./data-inspector";
 import {
@@ -131,25 +132,25 @@ export function StepEditorDrawer({
           onChangeConfigWithEdges={onChangeConfigWithEdges}
         />
         {/* Input / Output inspector — discoverability for $var.previousStep.*
-            and $var.steps.<id>.*. The "Insert" of a leaf appends the token
-            to the end of the body text in the currently-mounted editor;
-            authors can drag/cursor it into position. A future PR can
+            and $var.steps.<id>.*. Copying a leaf writes the token to the
+            clipboard so authors can paste it into position. A future PR can
             improve this to splice at the focused-input caret. */}
         <DataInspector
           selectedNode={node}
           graph={graph}
           trigger={trigger}
           onInsertToken={(token) => {
-            // Cheap insert that works regardless of which editor is
+            // Cheap copy that works regardless of which editor is
             // mounted: write the token to clipboard so the author can
             // paste at the desired position. Avoids deep cursor wiring
             // through every per-step editor. Clipboard write is the same
-            // affordance every editor's "Insert variable" picker already
+            // affordance every editor's "Copy variable" picker already
             // exposes via its dropdown — this just gives the inspector a
             // parallel path that doesn't require knowing which input is
             // focused.
             if (typeof navigator !== "undefined" && navigator.clipboard) {
               void navigator.clipboard.writeText(token);
+              toast.success(`Copied ${token}`);
             }
           }}
         />

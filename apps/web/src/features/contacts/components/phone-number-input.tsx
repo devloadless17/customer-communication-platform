@@ -87,6 +87,7 @@ export function PhoneNumberInput({
         value={local}
         onChange={(e) => update(iso, e.target.value)}
         placeholder={placeholder}
+        aria-label="Phone number"
         inputMode="tel"
         autoFocus={autoFocus}
         disabled={disabled}

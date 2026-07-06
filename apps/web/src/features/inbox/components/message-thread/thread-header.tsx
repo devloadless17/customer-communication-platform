@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { ChevronLeft, Info, Phone, Search as SearchIcon } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -62,7 +63,11 @@ function ConversationViewersPill({ viewers }: { viewers: User[] }) {
   );
 }
 
-export function ThreadHeader({
+// Memoized — the parent MessageThread re-renders on the 60s `now` tick, every
+// teammate typing frame, and every in-thread search keystroke; the header's
+// props are all stable across those, so it should bail. (Same rationale as the
+// memoized TimelineRows extraction.)
+function ThreadHeaderImpl({
   teamId,
   conversationId,
   contactId,
@@ -268,3 +273,5 @@ export function ThreadHeader({
     </header>
   );
 }
+
+export const ThreadHeader = memo(ThreadHeaderImpl);

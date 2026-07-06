@@ -177,6 +177,7 @@ function AiBehaviorSettings({
         <Select
           value={handoffAction}
           onChange={(e) => setHandoffAction(e.target.value as HandoffAction)}
+          aria-label="When a customer asks for a human"
           className="h-8"
         >
           <option value="none">Just pause the AI</option>
@@ -211,6 +212,7 @@ function AiBehaviorSettings({
         <Select
           value={firstTouch}
           onChange={(e) => setFirstTouch(e.target.value as FirstTouchGreeter)}
+          aria-label="First-touch greeting"
           className="h-8"
         >
           <option value="ai">AI greets (don&apos;t run a welcome workflow)</option>

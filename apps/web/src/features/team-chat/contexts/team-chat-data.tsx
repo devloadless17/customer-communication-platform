@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 
 import { useTeamChannelsList } from "@/features/team-chat/hooks/use-team-channels-events";
@@ -19,18 +19,24 @@ import type { User } from "@ccp/shared/types";
  * (in /team/layout.tsx) and the workspace (the page) — share a single live list
  * instead of each maintaining its own.
  *
+ * SPLIT INTO TWO CONTEXTS (perf, world-class audit 2026-07-06): the LIVE
+ * `channels` array gets a NEW identity on essentially every team-wide message
+ * (an unread / lastMessage bump anywhere), whereas the `teamMembers` roster is
+ * stable for the session. The workspace BODY (feed + composer + scroll +
+ * virtualizer) needs only the roster; if it subscribed to the combined value it
+ * re-rendered on every message. So members and channels are separate contexts —
+ * a members consumer never re-renders because a channel badge ticked. The one
+ * place the workspace needs channels (the "active channel was deleted → leave"
+ * redirect) is isolated in a null-rendering guard so it stays off the body's
+ * render path.
+ *
  * The active channel id is derived from the pathname so the provider stays
  * route-agnostic (a layout can't read its child segment's params), and the live
  * hook can suppress the unread bump for the channel currently on screen.
  */
-interface TeamChatLayoutData {
-  channels: TeamChannelListItemDto[];
-  teamMembers: User[];
-}
 
-const TeamChatLayoutDataContext = createContext<TeamChatLayoutData | null>(
-  null,
-);
+const TeamMembersContext = createContext<User[] | null>(null);
+const TeamChannelsContext = createContext<TeamChannelListItemDto[] | null>(null);
 
 /** `/team/<channelId>` → `<channelId>`; `/team` (pre-redirect) → null. */
 function channelIdFromPathname(pathname: string | null): string | null {
@@ -54,30 +60,43 @@ export function TeamChatLayoutDataProvider({
   const activeChannelId = channelIdFromPathname(usePathname());
   const channels = useTeamChannelsList(initialChannels, currentUserId, activeChannelId);
 
-  // useMemo the context value so identity is stable across renders that
-  // didn't change channels OR teamMembers. Previously a plain object
-  // literal here re-rendered every consumer (channel sidebar, mentions
-  // surface, workspace) on EVERY parent render — and the parent renders
-  // on every `usePathname()` change inside `/team/*`. Per re-audit
-  // 2026-05-29 finding #1.
-  const value = useMemo(() => ({ channels, teamMembers }), [channels, teamMembers]);
+  // Two providers, not one memoized object: `teamMembers` is the (stable) server
+  // prop so its Provider value is referentially stable across the pathname/
+  // channel re-renders that churn `channels` — members consumers bail.
   return (
-    <TeamChatLayoutDataContext.Provider value={value}>
-      {children}
-    </TeamChatLayoutDataContext.Provider>
+    <TeamMembersContext.Provider value={teamMembers}>
+      <TeamChannelsContext.Provider value={channels}>
+        {children}
+      </TeamChannelsContext.Provider>
+    </TeamMembersContext.Provider>
   );
 }
 
 /**
- * Read the layout-level snapshot of channels + team members. Throws if
- * called outside the provider — surfaces "you forgot to mount the
- * /team layout" loudly instead of silently passing empty arrays.
+ * The stable team roster. Read this from anything that doesn't need the live
+ * channel list — it never changes because a channel's unread badge ticked.
  */
-export function useTeamChatLayoutData(): TeamChatLayoutData {
-  const value = useContext(TeamChatLayoutDataContext);
+export function useTeamMembers(): User[] {
+  const value = useContext(TeamMembersContext);
   if (!value) {
     throw new Error(
-      "useTeamChatLayoutData called outside TeamChatLayoutDataProvider — " +
+      "useTeamMembers called outside TeamChatLayoutDataProvider — " +
+        "the /team/layout.tsx provider must wrap any consumer.",
+    );
+  }
+  return value;
+}
+
+/**
+ * The LIVE channel list (unread/mention badges via sockets). Subscribing here
+ * re-renders on every channel-list change, so read it ONLY where you render the
+ * list itself (the sidebar) or genuinely need channel existence.
+ */
+export function useTeamChannels(): TeamChannelListItemDto[] {
+  const value = useContext(TeamChannelsContext);
+  if (!value) {
+    throw new Error(
+      "useTeamChannels called outside TeamChatLayoutDataProvider — " +
         "the /team/layout.tsx provider must wrap any consumer.",
     );
   }

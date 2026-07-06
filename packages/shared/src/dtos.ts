@@ -214,6 +214,10 @@ export interface ListContactsOpts {
   stageId?: string | "none";
   cursor?: string | null;
   take?: number;
+  /** 1-based page for numbered (offset) pagination. When set, the query runs
+   *  in offset mode: `cursor` is ignored, `totalCount` is always returned, and
+   *  `nextCursor` is null. Omit for the legacy keyset/infinite-scroll mode. */
+  page?: number;
 }
 
 // ---------------------------------------------------------------------------

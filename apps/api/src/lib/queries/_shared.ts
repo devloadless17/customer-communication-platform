@@ -272,6 +272,10 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
     body: m.body,
     direction: m.direction as MessageDirection,
     channel: m.channel as Channel,
+    // Coexistence provenance — only surfaced when it's a phone-app send, so the
+    // bubble can render "· via WhatsApp app". `api` stays implicit (absent) to
+    // keep the wire lean, matching the optional field on the Message type.
+    ...(m.origin === "business_app" ? { origin: "business_app" as const } : {}),
     status: m.status as MessageStatus,
     timestamp: m.timestamp.toISOString(),
     // Persisted provider failure reason — only meaningful on a `failed` send,
@@ -318,11 +322,15 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
           },
           // Row was inserted before the binary finished downloading — the
           // bubble renders a placeholder until the message:media:ready event
-          // (or a later page load) fills it in. Inbound-only: outbound has
-          // no background-download path that could ever clear the flag, so
-          // a missing mediaUrl on outbound is a hard failure (caption-only
-          // row), not pending state.
-          ...(m.direction === "in" && !m.mediaUrl ? { mediaPending: true } : {}),
+          // (or a later page load) fills it in. Two sources have this
+          // background-download path: inbound customer media AND Coexistence
+          // echoes (a photo the owner sent from the phone app, downloaded like
+          // inbound). A regular API-sent outbound uploads its media BEFORE the
+          // row exists, so a missing mediaUrl there is a hard failure
+          // (caption-only), not pending.
+          ...((m.direction === "in" || m.origin === "business_app") && !m.mediaUrl
+            ? { mediaPending: true }
+            : {}),
         }
       : {}),
   };

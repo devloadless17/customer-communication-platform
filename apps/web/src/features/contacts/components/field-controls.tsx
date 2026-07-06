@@ -137,6 +137,7 @@ function ScopeChip({
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={`rounded-full border px-2 py-0.5 transition ${
         active
           ? "border-primary bg-primary/10 text-foreground"

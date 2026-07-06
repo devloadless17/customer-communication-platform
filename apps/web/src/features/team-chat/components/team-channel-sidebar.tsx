@@ -6,7 +6,7 @@ import dynamic from "next/dynamic";
 
 import { usePresence } from "@/hooks/use-presence";
 import { useIsMobileSubSidebar } from "@/components/layouts/sub-sidebar";
-import { useTeamChatLayoutData } from "@/features/team-chat/contexts/team-chat-data";
+import { useTeamChannels } from "@/features/team-chat/contexts/team-chat-data";
 import type { User } from "@ccp/shared/types";
 
 import { ChannelList } from "./channel-list";
@@ -43,7 +43,7 @@ function channelIdFromPathname(pathname: string | null): string | null {
 export function TeamChannelSidebar({ currentUser }: { currentUser: User }) {
   const router = useRouter();
   const mobile = useIsMobileSubSidebar();
-  const { channels } = useTeamChatLayoutData();
+  const channels = useTeamChannels();
   const activeChannelId = channelIdFromPathname(usePathname());
   const { onlineUserIds } = usePresence(currentUser.teamId, currentUser.id);
 

@@ -473,10 +473,28 @@ function ConversationListImpl({
     if (item) onPrefetchConversation(item.conversation.id);
   }, [highlightedIndex, visible, onPrefetchConversation]);
 
+  // The list root is tabIndex={-1} with a keydown handler, but nothing focuses
+  // it — so j/k nav is inert until a row is clicked. On mount, move focus into
+  // the region so keyboard nav works right away. Guarded to fine-pointer
+  // (desktop) devices so touch/mobile doesn't get a stray focus ring, and
+  // skipped when focus already sits on a real control (e.g. the search box) so
+  // we never yank it. preventScroll keeps the pane from jumping.
+  const listRootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!window.matchMedia("(pointer: fine)").matches) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== listRootRef.current) {
+      return;
+    }
+    listRootRef.current?.focus({ preventScroll: true });
+  }, []);
+
   // Width is owned by the parent column in inbox-shell (drag-resizable on
   // desktop, full-width on mobile); this just fills it.
   return (
     <div
+      ref={listRootRef}
       className="flex h-full w-full flex-col bg-background outline-none"
       // Keyboard nav (j/k + arrows, Enter) — handler bails on input focus so
       // search typing is unaffected. tabIndex lets the region take focus
@@ -511,6 +529,7 @@ function ConversationListImpl({
             <button
               type="button"
               onClick={() => setSelectionMode((v) => !v)}
+              aria-pressed={selectionMode}
               title={selectionMode ? "Exit selection mode" : "Select multiple"}
               className={cn(
                 "flex size-8 pointer-coarse:size-9 items-center justify-center rounded-md transition-colors",
@@ -724,7 +743,13 @@ function ConversationListImpl({
                         highlighted &&
                           "bg-accent/30 ring-1 ring-inset ring-primary/40",
                       )}
-                      aria-current={highlighted ? "true" : undefined}
+                      aria-current={
+                        activeConversationId === conversation.id
+                          ? "page"
+                          : highlighted
+                            ? "true"
+                            : undefined
+                      }
                     >
                       <ConversationListItem
                         conversation={conversation}

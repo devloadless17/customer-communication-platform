@@ -7,6 +7,8 @@ import {
   AlertTriangle,
   Check,
   Copy,
+  Eye,
+  EyeOff,
   ExternalLink,
   Loader2,
   PlugZap,
@@ -321,11 +323,21 @@ function ConnectionStatus({
         )}
       </dl>
       {showFinalStepHint && (
-        <p className="mt-3 border-t border-success-border pt-2 text-2xs text-muted-foreground">
-          Final check: in Meta → WhatsApp → Configuration, confirm you&apos;ve subscribed
-          to the <span className="font-mono">messages</span> field. Without it, no
-          incoming messages will arrive.
-        </p>
+        <>
+          <p className="mt-3 border-t border-success-border pt-2 text-2xs text-muted-foreground">
+            Final check: in Meta → WhatsApp → Configuration, confirm you&apos;ve subscribed
+            to the <span className="font-mono">messages</span> field. Without it, no
+            incoming messages will arrive.
+          </p>
+          <p className="mt-2 text-2xs text-muted-foreground">
+            Using this number on your phone too (Coexistence)? Also subscribe to{" "}
+            <span className="font-mono">smb_message_echoes</span>,{" "}
+            <span className="font-mono">history</span>, and{" "}
+            <span className="font-mono">smb_app_state_sync</span> so replies you send
+            from the WhatsApp Business App, your past chats, and your saved contact
+            names all sync into the inbox.
+          </p>
+        </>
       )}
     </div>
   );
@@ -386,6 +398,7 @@ function ManualForm({
           placeholder="EAAOK… (long string)"
           required
           mono
+          secret
           defaultValue={current.accessToken ?? ""}
           hint="Meta Business Suite → WhatsApp → API Setup → Temporary access token (for testing) OR Business Settings → Users → System users to generate a permanent System User token."
         />
@@ -395,6 +408,7 @@ function ManualForm({
           placeholder="32-character hex string"
           required
           mono
+          secret
           defaultValue={current.appSecret ?? ""}
           hint="Meta Developers → My Apps → [your app] → App Settings → Basic → App secret, click Show."
         />
@@ -455,6 +469,7 @@ function Field({
   placeholder,
   required,
   mono,
+  secret,
   defaultValue,
   hint,
 }: {
@@ -463,22 +478,47 @@ function Field({
   placeholder?: string;
   required?: boolean;
   mono?: boolean;
+  secret?: boolean;
   defaultValue?: string;
   hint?: string;
 }) {
+  const [reveal, setReveal] = useState(false);
   return (
     <div className="flex flex-col gap-1.5">
       <label htmlFor={name} className="text-xs font-medium text-foreground">
         {label}
       </label>
-      <Input
-        id={name}
-        name={name}
-        placeholder={placeholder}
-        required={required}
-        defaultValue={defaultValue}
-        className={mono ? "font-mono text-xs" : ""}
-      />
+      {secret ? (
+        <div className="relative">
+          <Input
+            id={name}
+            name={name}
+            type={reveal ? "text" : "password"}
+            placeholder={placeholder}
+            required={required}
+            defaultValue={defaultValue}
+            className={`pr-9 ${mono ? "font-mono text-xs" : ""}`}
+          />
+          <button
+            type="button"
+            onClick={() => setReveal((r) => !r)}
+            className="absolute inset-y-0 right-0 flex w-9 items-center justify-center text-muted-foreground hover:text-foreground"
+            title={reveal ? "Hide" : "Show"}
+            tabIndex={-1}
+          >
+            {reveal ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+          </button>
+        </div>
+      ) : (
+        <Input
+          id={name}
+          name={name}
+          placeholder={placeholder}
+          required={required}
+          defaultValue={defaultValue}
+          className={mono ? "font-mono text-xs" : ""}
+        />
+      )}
       {hint && (
         <details className="[&_summary::-webkit-details-marker]:hidden">
           <summary className="cursor-pointer text-2xs text-muted-foreground hover:text-foreground">

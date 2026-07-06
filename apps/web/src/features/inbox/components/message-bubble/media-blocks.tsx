@@ -502,6 +502,25 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
     setCurrent(el.currentTime);
   };
 
+  // Keyboard scrubbing for the role="slider" seek bars: ←/→ jump ±5s, Home/End
+  // snap to start/end. Clamped to [0, duration]; mirrors the click seek().
+  const seekKeys = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const el = audioRef.current;
+    if (!el || !duration || duration <= 0) return;
+    let next: number | null = null;
+    if (e.key === "ArrowLeft") next = el.currentTime - 5;
+    else if (e.key === "ArrowRight") next = el.currentTime + 5;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = duration;
+    if (next == null) return;
+    e.preventDefault();
+    const clamped = Math.min(Math.max(next, 0), duration);
+    el.currentTime = clamped;
+    setCurrent(clamped);
+  };
+
+  const currentSeconds = Math.round(current);
+
   return (
     // Custom player — replaces the native <audio controls> chrome (which
     // renders OS-specific and clashes with the bubble palette). FIXED HEIGHT
@@ -573,9 +592,15 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
         // affordance). Bars left of the playhead fill with the accent; click
         // anywhere to seek (same handler as the bar — uses the row geometry).
         <div
-          role="presentation"
+          role="slider"
+          tabIndex={0}
+          aria-label="Seek"
+          aria-valuemin={0}
+          aria-valuemax={duration || 100}
+          aria-valuenow={currentSeconds}
           onClick={seek}
-          className="flex h-6 min-w-0 flex-1 cursor-pointer items-center gap-[1.5px]"
+          onKeyDown={seekKeys}
+          className="flex h-6 min-w-0 flex-1 cursor-pointer items-center gap-[1.5px] outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
         >
           {bars.map((hgt, i) => {
             const played = (i + 0.5) / bars.length <= fraction;
@@ -600,10 +625,16 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
       ) : (
         // Generic audio file: a thin click-to-seek progress bar.
         <div
-          role="presentation"
+          role="slider"
+          tabIndex={0}
+          aria-label="Audio position"
+          aria-valuemin={0}
+          aria-valuemax={duration || 100}
+          aria-valuenow={currentSeconds}
           onClick={seek}
+          onKeyDown={seekKeys}
           className={cn(
-            "h-1.5 min-w-0 flex-1 cursor-pointer overflow-hidden rounded-full",
+            "h-1.5 min-w-0 flex-1 cursor-pointer overflow-hidden rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
             isOut ? "bg-white/20" : "bg-muted",
           )}
         >

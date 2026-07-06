@@ -109,6 +109,8 @@ export class ContactsService {
     const opts: ListContactsOpts = {
       search: query.search,
       cursor: query.cursor,
+      page: query.page,
+      take: query.take,
       fieldFilter:
         query.fieldKey && query.fieldValue
           ? { key: query.fieldKey, value: query.fieldValue }

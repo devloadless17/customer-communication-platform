@@ -39,12 +39,12 @@ export function ReactionPicker({
       ))}
       <button
         type="button"
-        className="flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
+        // Disabled until the full picker ships — otherwise it's a dead
+        // tab-stop that focuses to nothing for keyboard/SR users.
+        disabled
+        className="flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40 pointer-coarse:size-9"
         aria-label="More reactions"
         title="More reactions — full picker coming soon"
-        onClick={(e) => {
-          e.preventDefault();
-        }}
       >
         <SmilePlus className="size-4" />
       </button>

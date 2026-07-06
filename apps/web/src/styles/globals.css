@@ -371,6 +371,15 @@
     box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 20%, transparent);
   }
 
+  /* One-shot attention pulse for a jumped-to thread row (gallery "Jump",
+     global search deep-link, in-thread match navigation). A soft primary wash
+     + ring that fades over ~1.6s — the MOTION is what makes the eye land on
+     the target; an instant jump with only a static ring is easy to miss.
+     Applied imperatively in message-thread's `flashJumpTarget`. */
+  .jump-flash {
+    animation: jump-flash 1.6s ease-out;
+  }
+
   /* Fully hide the scrollbar (standard + webkit). Used by the token-highlight
      textarea: a visible scrollbar steals width and makes its text wrap at a
      different column than the full-width colored overlay, fragmenting the
@@ -396,6 +405,7 @@
   .animate-slide-up,
   .animate-fade-in,
   .animate-scale-in,
+  .jump-flash,
   .skeleton-shimmer {
     animation: none !important;
   }
@@ -504,6 +514,25 @@
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+/* Jumped-to row pulse: soft primary wash + ring that fades out. The row
+   wrapper is rounded-xl, so the box-shadow ring traces the rounded edge. */
+@keyframes jump-flash {
+  0% {
+    background-color: color-mix(in oklab, var(--primary) 18%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 45%, transparent);
+  }
+
+  55% {
+    background-color: color-mix(in oklab, var(--primary) 11%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 26%, transparent);
+  }
+
+  100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 0%, transparent);
   }
 }
 

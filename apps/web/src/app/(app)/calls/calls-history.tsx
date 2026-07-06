@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Loader2,
@@ -14,6 +14,7 @@ import {
 
 import { cn } from "@ccp/shared/utils";
 import { Button } from "@/components/ui/button";
+import { Pagination } from "@/components/ui/pagination";
 import { LocalTime } from "@/components/local-time";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
@@ -35,13 +36,15 @@ interface CallRow {
   connected: boolean;
 }
 
-const PAGE = 50;
+const PAGE = 25;
 
 export function CallsHistory({ canCall }: { canCall: boolean }) {
   const [rows, setRows] = useState<CallRow[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [callingId, setCallingId] = useState<string | null>(null);
   // Filters: free-text (contact name OR phone) + a ringingAt date range. `q` is
   // the live input; `appliedQ` is debounced so we don't refetch on every key.
@@ -58,47 +61,57 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
   }, [q]);
 
   const hasFilters = appliedQ !== "" || from !== "" || to !== "";
+  const pageCount = Math.max(1, Math.ceil(totalCount / PAGE));
 
-  const fetchPage = useCallback(
-    async (c?: string): Promise<void> => {
-      // First-page fetches (initial load / filter change) take a request token
-      // so a slow earlier response can't overwrite newer filter results. A
-      // `loadMore` (cursor set) rides the current token and is dropped if a
-      // filter changed mid-flight (its page belongs to the old result set).
-      const isFirst = !c;
-      const reqId = isFirst ? ++reqIdRef.current : reqIdRef.current;
-      const p = new URLSearchParams({ take: String(PAGE) });
-      if (c) p.set("cursor", c);
-      if (appliedQ) p.set("q", appliedQ);
-      // Date inputs are local calendar days; widen to the full local day and
-      // send ISO so the server filters ringingAt in the agent's timezone.
-      if (from) p.set("from", new Date(`${from}T00:00:00`).toISOString());
-      if (to) p.set("to", new Date(`${to}T23:59:59.999`).toISOString());
-      const res = await apiFetch(`/api/calls?${p.toString()}`);
-      if (!res.ok) return;
-      const json = (await res.json()) as { items: CallRow[]; cursor: string | null };
-      if (reqId !== reqIdRef.current) return; // superseded by a newer filter fetch
-      setRows((prev) => (c ? [...prev, ...json.items] : json.items));
-      setCursor(json.cursor);
-    },
-    [appliedQ, from, to],
-  );
-
-  // (Re)load page 1 on mount and whenever a filter changes — `fetchPage`'s
-  // identity changes with [appliedQ, from, to], so this effect re-runs then.
+  // A filter change always resets to page 1 — page N of the old filtered set is
+  // meaningless against the new one (and would likely be out of range).
   useEffect(() => {
-    setLoading(true);
-    void fetchPage().finally(() => setLoading(false));
-  }, [fetchPage]);
+    setPage(1);
+  }, [appliedQ, from, to]);
 
-  const loadMore = async () => {
-    if (!cursor || loadingMore) return;
-    setLoadingMore(true);
-    try {
-      await fetchPage(cursor);
-    } finally {
-      setLoadingMore(false);
-    }
+  // Fetch the current page whenever filters or the page number change. A
+  // request token drops a slow earlier response so a fast filter/page switch
+  // can't be overwritten by a stale one.
+  useEffect(() => {
+    const reqId = ++reqIdRef.current;
+    setLoading(true);
+    void (async () => {
+      try {
+        const p = new URLSearchParams({ take: String(PAGE), page: String(page) });
+        if (appliedQ) p.set("q", appliedQ);
+        // Date inputs are local calendar days; widen to the full local day and
+        // send ISO so the server filters ringingAt in the agent's timezone.
+        if (from) p.set("from", new Date(`${from}T00:00:00`).toISOString());
+        if (to) p.set("to", new Date(`${to}T23:59:59.999`).toISOString());
+        const res = await apiFetch(`/api/calls?${p.toString()}`);
+        if (reqId !== reqIdRef.current) return; // superseded by a newer fetch
+        if (!res.ok) {
+          setError("Couldn't load calls");
+          return;
+        }
+        const json = (await res.json()) as {
+          items: CallRow[];
+          totalCount?: number;
+        };
+        if (reqId !== reqIdRef.current) return;
+        setError(null);
+        setRows(json.items);
+        if (json.totalCount != null) setTotalCount(json.totalCount);
+      } catch {
+        // Network error / aborted json — surface it rather than silently
+        // leaving the previous page's rows (or a blank list) with no feedback.
+        if (reqId === reqIdRef.current) setError("Couldn't load calls");
+      }
+    })().finally(() => {
+      if (reqId === reqIdRef.current) setLoading(false);
+    });
+    // reloadNonce lets the error-state Retry re-run this effect.
+  }, [appliedQ, from, to, page, reloadNonce]);
+
+  const goToPage = (next: number) => {
+    setPage(Math.min(Math.max(1, next), pageCount));
+    // Jump the viewport back to the top so the new page starts at row 1.
+    if (typeof window !== "undefined") window.scrollTo({ top: 0 });
   };
 
   const callBack = async (row: CallRow) => {
@@ -185,7 +198,19 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
         )}
       </div>
 
-      {loading ? (
+      {error && rows.length === 0 ? (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/5 py-16 text-center text-sm">
+          <p className="text-destructive">{error}.</p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-3"
+            onClick={() => setReloadNonce((n) => n + 1)}
+          >
+            Try again
+          </Button>
+        </div>
+      ) : loading && rows.length === 0 ? (
         <div className="flex justify-center py-16 text-muted-foreground">
           <Loader2 className="size-5 animate-spin" />
         </div>
@@ -197,7 +222,14 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
             : "No calls yet. Inbound and outbound WhatsApp calls will show up here."}
         </div>
       ) : (
-        <ul className="overflow-hidden rounded-lg border border-border">
+        // Keep rows mounted + dimmed during a page/filter refetch instead of
+        // blanking to a spinner — no full-height flash or layout jump.
+        <ul
+          className={cn(
+            "overflow-hidden rounded-lg border border-border transition-opacity",
+            loading && "pointer-events-none opacity-60",
+          )}
+        >
           {rows.map((row, i) => (
             <CallRowItem
               key={row.id}
@@ -211,12 +243,16 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
         </ul>
       )}
 
-      {cursor && (
-        <div className="mt-4 flex justify-center">
-          <Button variant="outline" onClick={loadMore} disabled={loadingMore}>
-            {loadingMore ? "Loading…" : "Load more"}
-          </Button>
-        </div>
+      {rows.length > 0 && (
+        <Pagination
+          className="mt-4"
+          page={page}
+          pageCount={pageCount}
+          onPageChange={goToPage}
+          totalCount={totalCount}
+          pageSize={PAGE}
+          itemNoun="calls"
+        />
       )}
     </div>
   );

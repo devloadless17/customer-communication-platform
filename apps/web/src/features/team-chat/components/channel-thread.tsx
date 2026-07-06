@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowDown } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -36,6 +36,16 @@ import { ChannelMessage } from "./channel-message";
 const ESTIMATE_HEIGHT = 56;
 const OVERSCAN = 6;
 
+// One-line announcement for a newly-arrived teammate message (text preview, or a
+// media fallback). Capped so a long message doesn't flood the AT buffer. Pure —
+// safe at module scope. Mirrors inboundAnnouncementText in the customer inbox.
+function channelAnnouncementText(m: TeamChannelMessageDto): string {
+  const body = m.body?.trim();
+  if (body) return body.length > 120 ? `${body.slice(0, 117)}…` : body;
+  if (m.media) return "sent an attachment";
+  return "sent a message";
+}
+
 /**
  * The subset of useChatScroll controls this feed publishes to its parent
  * (team-chat-workspace) so `jumpToMessage` (search jump-to) can suppress the
@@ -52,7 +62,11 @@ export interface ChannelThreadScrollControls {
   markBenignTailUpdate: () => void;
 }
 
-export function ChannelThread({
+// Memoized — the parent TeamChatWorkspace re-renders on every typing frame
+// (typingUserIds lives in the same hook as messages), but ChannelThread never
+// receives typingUserIds and all its props are stable/primitive across a typing
+// frame, so it bails instead of re-running the virtualizer + scroll hook.
+function ChannelThreadImpl({
   messages,
   channelId,
   currentUser,
@@ -209,8 +223,66 @@ export function ChannelThread({
     return () => obs.disconnect();
   }, [hasMoreNewer, scrollEl]);
 
+  // ── Screen-reader live region for newly-arrived teammate messages ─────────
+  // Mirrors the customer inbox announcer (message-thread.tsx): a polite,
+  // visually-hidden region that speaks ONLY genuinely-new messages from OTHER
+  // members — never the backlog on mount, never on history pagination, never on
+  // a channel switch. Driven by a monotonic high-water-mark on the newest
+  // non-own message's createdAt.
+  const newestInbound = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]!;
+      if (m.authorUserId !== currentUser.id) return m;
+    }
+    return null;
+  }, [messages, currentUser.id]);
+  const [inboundAnnouncement, setInboundAnnouncement] = useState("");
+  const lastAnnouncedInboundTsRef = useRef(0);
+  const lastAnnouncedInboundIdRef = useRef<string | null>(null);
+  const announceNonceRef = useRef(false);
+  // Seed the baseline to "newest teammate message right now" on mount AND on
+  // every channel switch, so the freshly-loaded backlog is never read aloud.
+  useEffect(() => {
+    lastAnnouncedInboundTsRef.current = newestInbound
+      ? new Date(newestInbound.createdAt).getTime()
+      : 0;
+    lastAnnouncedInboundIdRef.current = newestInbound?.id ?? null;
+    setInboundAnnouncement("");
+    // Re-seed once per channel, not per message — newestInbound is read but
+    // intentionally NOT a dependency (that would suppress live arrivals).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channelId]);
+  useEffect(() => {
+    if (!newestInbound) return;
+    const ts = new Date(newestInbound.createdAt).getTime();
+    // Announce anything strictly newer, OR the same ms but a different id.
+    if (ts < lastAnnouncedInboundTsRef.current) return;
+    if (
+      ts === lastAnnouncedInboundTsRef.current &&
+      newestInbound.id === lastAnnouncedInboundIdRef.current
+    )
+      return;
+    lastAnnouncedInboundTsRef.current = ts;
+    lastAnnouncedInboundIdRef.current = newestInbound.id;
+    // Toggle a trailing zero-width space so two consecutive IDENTICAL messages
+    // still produce a DOM text diff — an aria-live region only announces on
+    // change, and React skips re-setting identical text.
+    announceNonceRef.current = !announceNonceRef.current;
+    setInboundAnnouncement(
+      `${newestInbound.authorName ?? "Someone"}: ${channelAnnouncementText(newestInbound)}${
+        announceNonceRef.current ? "​" : ""
+      }`,
+    );
+  }, [newestInbound]);
+
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
+      {/* Screen-reader announcer for newly-arrived teammate messages. Polite so
+          it never interrupts an agent mid-compose. Starts empty so SSR and
+          first paint match. See the announce effect above. */}
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {inboundAnnouncement}
+      </p>
       <ScrollArea viewportRef={setViewport} className="flex-1">
         <div
           ref={contentRef}
@@ -333,3 +405,5 @@ export function ChannelThread({
     </div>
   );
 }
+
+export const ChannelThread = memo(ChannelThreadImpl);

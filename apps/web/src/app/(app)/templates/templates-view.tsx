@@ -101,6 +101,8 @@ export function TemplatesView({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [reloading, setReloading] = useState(false);
+  const [reloadError, setReloadError] = useState<string | null>(null);
 
   // Wrappers that mirror state → cookie. SSR reads on next refresh so
   // hard reload keeps the user on the same status filter + search.
@@ -132,10 +134,26 @@ export function TemplatesView({
   }, [templates, query, statusFilter]);
 
   const reload = useCallback(async () => {
-    const res = await apiFetch("/api/team/whatsapp/templates");
-    if (!res.ok) return;
-    const data = (await res.json()) as { templates?: TemplateDto[] };
-    if (data.templates) setTemplates(data.templates);
+    setReloadError(null);
+    setReloading(true);
+    try {
+      const res = await apiFetch("/api/team/whatsapp/templates");
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as
+          | { error?: string; detail?: string }
+          | null;
+        throw new Error(
+          [data?.error, data?.detail].filter(Boolean).join(": ") ||
+            `HTTP ${res.status}`,
+        );
+      }
+      const data = (await res.json()) as { templates?: TemplateDto[] };
+      if (data.templates) setTemplates(data.templates);
+    } catch (err) {
+      setReloadError(err instanceof Error ? err.message : "Reload failed");
+    } finally {
+      setReloading(false);
+    }
   }, []);
 
   const syncFromMeta = useCallback(async () => {
@@ -328,6 +346,8 @@ export function TemplatesView({
         fieldDefinitions={fieldDefinitions}
         deleting={deleting}
         deleteError={deleteError}
+        reloading={reloading}
+        reloadError={reloadError}
         canManage={canManage}
         onClose={() => setSelectedId(null)}
         onDelete={() => selected && askDelete(selected)}
@@ -532,6 +552,8 @@ function DetailDrawer({
   fieldDefinitions,
   deleting,
   deleteError,
+  reloading,
+  reloadError,
   canManage,
   onClose,
   onDelete,
@@ -542,6 +564,8 @@ function DetailDrawer({
   fieldDefinitions: ContactFieldDefinition[];
   deleting: boolean;
   deleteError: string | null;
+  reloading: boolean;
+  reloadError: string | null;
   canManage: boolean;
   onClose: () => void;
   onDelete: () => void;
@@ -671,6 +695,12 @@ function DetailDrawer({
                   <span className="wrap-break-word">{deleteError}</span>
                 </div>
               )}
+              {reloadError && (
+                <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                  <span className="wrap-break-word">{reloadError}</span>
+                </div>
+              )}
               <div className="flex items-center justify-between gap-3">
                 <span className="text-2xs text-muted-foreground">
                   Last synced <LocalTime iso={template.syncedAt} format="localeString" />
@@ -681,9 +711,14 @@ function DetailDrawer({
                     variant="outline"
                     size="sm"
                     onClick={onReload}
+                    disabled={reloading}
                     className="gap-1.5"
                   >
-                    <RefreshCw className="size-3.5" />
+                    {reloading ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="size-3.5" />
+                    )}
                     Reload
                   </Button>
                   {canManage && (

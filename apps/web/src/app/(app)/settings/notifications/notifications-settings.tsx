@@ -48,7 +48,7 @@ export function NotificationsSettings() {
       />
 
       <SectionLabel>Sounds</SectionLabel>
-      <div className="mb-7 max-w-xl divide-y divide-border overflow-hidden rounded-lg border border-border">
+      <div className="mb-7 divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
         {ROWS.map(({ key, label, description, icon: Icon }) => {
           const enabled = prefs[key];
           return (
@@ -72,7 +72,7 @@ export function NotificationsSettings() {
       </div>
 
       <SectionLabel>Incoming calls</SectionLabel>
-      <div className="max-w-xl overflow-hidden rounded-lg border border-border">
+      <div className="overflow-hidden rounded-lg border border-border bg-card">
         <div className="flex items-center gap-3 px-4 py-3.5">
           <Phone className="size-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 flex-1">

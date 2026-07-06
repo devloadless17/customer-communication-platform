@@ -264,13 +264,27 @@ export class WhatsappService {
       });
     }
 
+    // WABA-ownership guard. `wabaId` drives template sync (fetchTemplates hits
+    // `/{wabaId}/message_templates`), so a wabaId that doesn't own this phone
+    // number silently imports the WRONG account's templates — the exact failure
+    // where a real customer connection showed Meta's shared `jaspers_market_*`
+    // sample templates from a test WABA. Optional-update semantics mean a stale
+    // wabaId can also survive a phone-number/token change untouched, so we
+    // validate the RESOLVED value on every save that carries one, not just when
+    // the field itself changed.
+    const nextWabaId =
+      input.wabaId === undefined ? existingConfig.wabaId : input.wabaId || undefined;
+    if (nextWabaId) {
+      await this.assertWabaOwnsNumber(nextWabaId, phoneNumberId, accessToken);
+    }
+
     const newConfig = pruneUndefined<MetaChannelConfig>({
       phoneNumberId,
       verifyToken,
       displayPhoneNumber: displayNumber ?? undefined,
       // wabaId / appId use optional-update semantics: undefined input preserves
       // the existing value; empty string clears it.
-      wabaId: input.wabaId === undefined ? existingConfig.wabaId : input.wabaId || undefined,
+      wabaId: nextWabaId,
       appId: input.appId === undefined ? existingConfig.appId : input.appId || undefined,
     });
     // Encrypted at rest with the app-wide ENCRYPTION_KEY (lib/crypto/envelope.ts).
@@ -329,6 +343,58 @@ export class WhatsappService {
         verifyToken,
       },
     };
+  }
+
+  /**
+   * Confirm `wabaId` actually owns `phoneNumberId` before we persist it.
+   * Meta's phone-number node doesn't expose its parent WABA (asking for
+   * `whatsapp_business_account_id` there 400s — see updateConfig above), so we
+   * go the other way: list the WABA's phone numbers and check membership.
+   *
+   * A CONFIRMED mismatch (Meta answered, number absent) is a hard reject — this
+   * is the "pasted a different/test WABA id" bug. If Meta can't be reached or
+   * the token can't read the WABA, we DON'T block the save: a token without
+   * `whatsapp_business_management` can still send, and the reconciling template
+   * sync + send-time errors surface a genuinely bad wabaId without stranding
+   * the whole connection form on a permission quirk.
+   */
+  private async assertWabaOwnsNumber(
+    wabaId: string,
+    phoneNumberId: string,
+    accessToken: string,
+  ): Promise<void> {
+    let numbers: Array<{ id?: string }>;
+    try {
+      const res = await fetch(
+        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(wabaId)}/phone_numbers?fields=id&limit=200`,
+        {
+          headers: { authorization: `Bearer ${accessToken}` },
+          signal: AbortSignal.timeout(20_000),
+        },
+      );
+      if (!res.ok) {
+        this.logger.warn(
+          `skipping waba-ownership check: meta returned ${res.status} reading ${wabaId}/phone_numbers`,
+        );
+        return;
+      }
+      const data = (await res.json()) as { data?: Array<{ id?: string }> };
+      numbers = data.data ?? [];
+    } catch (err) {
+      this.logger.warn(
+        `skipping waba-ownership check: could not reach meta (${
+          err instanceof Error ? err.message : String(err)
+        })`,
+      );
+      return;
+    }
+    if (!numbers.some((n) => n.id === phoneNumberId)) {
+      throw new BadRequestException({
+        error: "waba id does not own this phone number",
+        detail:
+          "This WhatsApp Business Account ID doesn't contain the phone number you connected — you've likely pasted the WABA ID of a different (e.g. test) account. In WhatsApp Manager → Account tools → Phone numbers, copy the WABA ID that owns this number.",
+      });
+    }
   }
 
   /**
@@ -391,9 +457,15 @@ export class WhatsappService {
 
   /**
    * Force a sync from Meta. Idempotent locally — upsert by
-   * `(teamId, name, language)`. We don't delete rows that disappear from
-   * Meta — admins pause/unpause templates and we want the local row's
-   * status to flip through the lifecycle, not vanish and reappear.
+   * `(teamId, name, language)`, then RECONCILE: drop local rows Meta no longer
+   * returns for the connection's WABA. `fetchTemplates` pages fully or throws,
+   * so a returned list is the complete, authoritative catalog for that WABA;
+   * paused/disabled templates STAY in it (with a status), so pruning doesn't
+   * make a paused template vanish-and-reappear (the reason this used to be
+   * additive-only). A 60s grace window spares a template just created via
+   * createTemplate that Meta's list hasn't propagated yet. This is what clears
+   * stale rows left behind when a connection's wabaId is corrected — e.g. the
+   * shared `jaspers_market_*` sample templates imported under an old test WABA.
    */
   async syncTemplates(teamId: string): Promise<{
     templates: TemplateDto[];
@@ -450,6 +522,35 @@ export class WhatsappService {
         }),
       ),
     );
+
+    // Reconcile deletions: anything local but absent from this authoritative
+    // fetch is stale (deleted in WhatsApp Manager, or imported earlier under a
+    // now-corrected wabaId). Match on (name, language) — the upsert's identity,
+    // immutable in Meta — and spare rows touched in the last 60s so a freshly
+    // created template racing Meta's list propagation survives.
+    const fetchedKeys = new Set(
+      fetched.map((t) => `${t.name} ${t.language}`),
+    );
+    const graceCutoff = new Date(now.getTime() - 60_000);
+    const localRows = await this.db.messageTemplate.findMany({
+      where: { teamId },
+      select: { id: true, name: true, language: true, syncedAt: true },
+    });
+    const staleIds = localRows
+      .filter(
+        (r) =>
+          !fetchedKeys.has(`${r.name} ${r.language}`) &&
+          r.syncedAt < graceCutoff,
+      )
+      .map((r) => r.id);
+    if (staleIds.length > 0) {
+      await this.db.messageTemplate.deleteMany({
+        where: { teamId, id: { in: staleIds } },
+      });
+      this.logger.log(
+        `template sync for team ${teamId} pruned ${staleIds.length} stale template(s)`,
+      );
+    }
 
     const rows = await this.db.messageTemplate.findMany({
       where: { teamId },

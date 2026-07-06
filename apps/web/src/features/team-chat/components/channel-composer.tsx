@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   FileText,
   Image as ImageIcon,
@@ -76,6 +76,19 @@ export function ChannelComposer({
   // UX. Previously the picker fired the upload immediately, which made
   // accidental clicks impossible to recover from.
   const [pendingFile, setPendingFile] = useState<File | null>(null);
+
+  // ARIA combobox wiring for the @-mention popup. Stable ids so the textarea
+  // can point aria-controls at the listbox and aria-activedescendant at the
+  // highlighted option. Candidates are recomputed at render (same pure filter
+  // the keyboard handler uses) so the active-descendant id stays in sync.
+  const mentionListboxId = useId();
+  const mentionCandidates = trigger
+    ? filterMembersByQuery(teamMembers, trigger.query)
+    : [];
+  const activeMentionOptionId =
+    trigger && mentionCandidates[activeMentionIndex]
+      ? `${mentionListboxId}-opt-${mentionCandidates[activeMentionIndex]!.id}`
+      : undefined;
 
   // Recompute mention trigger whenever body or caret moves.
   const recomputeTrigger = useCallback(
@@ -339,10 +352,18 @@ export function ChannelComposer({
                 setActiveMentionIndex((i) => Math.max(i - 1, 0));
                 return;
               }
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 const pick = candidates[activeMentionIndex];
-                if (pick) handleMentionPick(pick);
+                if (pick) {
+                  handleMentionPick(pick);
+                  return;
+                }
+                // No matching member (e.g. "@qa" matches nobody) — don't swallow
+                // Enter: close the trigger and send the message as typed.
+                setTrigger(null);
+                setPopupPos(null);
+                void submit();
                 return;
               }
               if (e.key === "Escape") {
@@ -352,13 +373,23 @@ export function ChannelComposer({
                 return;
               }
             }
-            if (e.key === "Enter" && !e.shiftKey) {
+            // `isComposing` — don't send while an IME candidate is being picked
+            // (Enter confirms the IME selection, not the message).
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               void submit();
             }
           }}
           placeholder={threadRootId ? "Reply in thread…" : `Message #${channelName}`}
           aria-label={threadRootId ? "Reply in thread" : `Message #${channelName}`}
+          // Combobox ONLY while the @-mention popup is active — otherwise this is
+          // a plain message textbox (a permanent combobox role would make every
+          // message input announce as a combobox to screen readers).
+          role={trigger ? "combobox" : undefined}
+          aria-expanded={trigger ? true : undefined}
+          aria-controls={trigger ? mentionListboxId : undefined}
+          aria-activedescendant={activeMentionOptionId}
+          aria-autocomplete="list"
           rows={1}
           className="min-h-9 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
         />
@@ -390,6 +421,7 @@ export function ChannelComposer({
         <Button
           type="button"
           size="icon"
+          aria-label="Send message"
           onClick={() => void submit()}
           disabled={(!body.trim() && !pendingFile) || busy}
           className="size-9 shrink-0"
@@ -400,6 +432,7 @@ export function ChannelComposer({
 
       {trigger && popupPos && (
         <MentionPopup
+          listboxId={mentionListboxId}
           teamMembers={teamMembers}
           query={trigger.query}
           position={popupPos}

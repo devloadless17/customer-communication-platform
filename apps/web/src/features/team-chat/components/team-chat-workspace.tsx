@@ -5,7 +5,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { useTeamChannelEvents } from "@/features/team-chat/hooks/use-team-channel-events";
-import { useTeamChatLayoutData } from "@/features/team-chat/contexts/team-chat-data";
+import {
+  useTeamChannels,
+  useTeamMembers,
+} from "@/features/team-chat/contexts/team-chat-data";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
@@ -54,14 +57,16 @@ export function TeamChatWorkspace({
   initialNextCursor: string | null;
   initialPins: ChannelPinDto[];
 }) {
-  const router = useRouter();
   const softRefresh = useSoftRefresh();
   // Live channel list + team members come from the /team layout-level context.
   // The channel-list SIDEBAR (rendered in /team/layout.tsx) owns the socket
   // subscription; here we just read the live list — for the "active channel
   // deleted out from under me" redirect below — plus the roster for the
   // @-picker and member-name lookups.
-  const { channels, teamMembers } = useTeamChatLayoutData();
+  // Only the stable roster — the LIVE channel list is read by the null-rendering
+  // <ChannelExistenceGuard> below, NOT here, so a channel-badge tick doesn't
+  // re-render this whole workspace (feed + composer + virtualizer).
+  const teamMembers = useTeamMembers();
   const channelState = useTeamChannelEvents(
     initialChannel.id,
     initialMessages,
@@ -327,27 +332,15 @@ export function TeamChatWorkspace({
   // post-commit effect so React doesn't warn about setState/router calls
   // during render.
   //
-  // GUARD: only treat "channel missing from my list" as a deletion when the
-  // list is NON-EMPTY. An EMPTY list means "I'm not a member of anything" —
-  // e.g. a user whose default-channel membership row was never created (the
-  // superadmin-seed gap, fixed in migration
-  // 20260525145612_backfill_default_channel_membership). Without this guard,
-  // such a user loops: /team → redirect to /team/<general> → workspace sees
-  // channels=[] so channelExists=false → router.replace("/team") → repeat.
-  // That presented in production as an "infinite page refresh." A real
-  // deletion always leaves the user with ≥1 other channel (or zero, in which
-  // case /team's own "No channels yet" empty-state is the correct landing —
-  // not a loop back through here).
-  const channelExists = channels.some((c) => c.id === initialChannel.id);
-  useEffect(() => {
-    if (channels.length > 0 && !channelExists) router.replace("/team");
-  }, [channels.length, channelExists, router]);
-
   return (
     // The channel-list sidebar lives in /team/layout.tsx (SectionShell slot)
     // now — both the desktop column and the mobile hamburger drawer. This
     // workspace is just the active channel's feed + composer + thread panel.
     <div className="relative flex h-[calc(100svh-3rem)] md:h-svh">
+      {/* Owns the "active channel deleted → leave" redirect. A null-rendering
+          leaf so subscribing to the live channel list stays OFF this body's
+          render path. */}
+      <ChannelExistenceGuard channelId={initialChannel.id} />
       <div className="flex min-w-0 flex-1 flex-col">
         <ChannelHeader
           channel={initialChannel}
@@ -452,4 +445,28 @@ export function TeamChatWorkspace({
       {deleteChannelDialog}
     </div>
   );
+}
+
+/**
+ * Null-rendering leaf that owns the "active channel was deleted → leave"
+ * redirect. It's the ONLY thing in the workspace subtree that subscribes to the
+ * live channel list, so a channel-badge tick re-renders just this (which paints
+ * nothing) instead of the feed/composer/virtualizer.
+ */
+function ChannelExistenceGuard({ channelId }: { channelId: string }) {
+  const channels = useTeamChannels();
+  const router = useRouter();
+  // Only treat "channel missing from my list" as a deletion when the list is
+  // NON-EMPTY. An EMPTY list means "I'm not a member of anything" — e.g. a user
+  // whose default-channel membership row was never created (superadmin-seed
+  // gap, migration 20260525145612_backfill_default_channel_membership). Without
+  // this, such a user loops: /team → /team/<general> → sees channels=[] →
+  // channelExists=false → replace("/team") → repeat ("infinite page refresh" in
+  // prod). A real deletion always leaves ≥1 other channel (or zero, in which
+  // case /team's own "No channels yet" empty state is the correct landing).
+  const channelExists = channels.some((c) => c.id === channelId);
+  useEffect(() => {
+    if (channels.length > 0 && !channelExists) router.replace("/team");
+  }, [channels.length, channelExists, router]);
+  return null;
 }

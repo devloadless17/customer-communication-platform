@@ -94,10 +94,13 @@ function mapStatus(status: string, failedCount: number, totalCount: number) {
       };
     }
     case "failed":
+      // Set by the runner when every recipient failed (or a whole-broadcast
+      // pre-flight error). Mirror the completed-all-failed wording: "All failed"
+      // for a multi-recipient run, "Failed" for a single.
       return {
         Icon: CircleSlash,
         tone: "border-destructive/30 bg-destructive/10 text-destructive",
-        label: "Failed",
+        label: totalCount > 1 ? "All failed" : "Failed",
         spin: false,
       };
     case "canceled":

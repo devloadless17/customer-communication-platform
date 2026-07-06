@@ -1200,8 +1200,8 @@ export class CallsService {
     session: ApiSession,
     take: number,
     cursor: string | undefined,
-    filters: { q?: string; from?: string; to?: string } = {},
-  ): Promise<{ items: TeamCallRow[]; cursor: string | null }> {
+    filters: { q?: string; from?: string; to?: string; page?: number } = {},
+  ): Promise<{ items: TeamCallRow[]; cursor: string | null; totalCount?: number }> {
     const perms = resolvePermissions(session.role, session.rolePermissions);
     if (
       !perms["calls:make" as Capability] &&
@@ -1210,7 +1210,11 @@ export class CallsService {
       throw new ForbiddenException({ error: "forbidden" });
     }
 
-    const parsed = parseCallCursor(cursor);
+    // Numbered (offset) pagination: when `page` is set the UI drives discrete
+    // pages, so we OFFSET into the ordered set and ignore the keyset cursor.
+    const pageMode = filters.page != null && filters.page >= 1;
+    const offset = pageMode ? (filters.page! - 1) * take : 0;
+    const parsed = pageMode ? null : parseCallCursor(cursor);
     const cursorWhere: Prisma.CallWhereInput | undefined = parsed
       ? {
           OR: [
@@ -1252,7 +1256,10 @@ export class CallsService {
     const rows = await this.db.call.findMany({
       where: cursorWhere ? { AND: [baseWhere, cursorWhere] } : baseWhere,
       orderBy: [{ ringingAt: "desc" }, { id: "desc" }],
-      take: take + 1,
+      // Offset mode fetches exactly `take` at `offset`; keyset mode fetches one
+      // extra to detect `hasMore`.
+      take: pageMode ? take : take + 1,
+      ...(pageMode ? { skip: offset } : {}),
       select: {
         id: true,
         conversationId: true,
@@ -1287,9 +1294,14 @@ export class CallsService {
         (c.durationSeconds !== null && c.durationSeconds > 0),
     }));
     const last = page.at(-1);
+    // Offset mode uses page numbers (from totalCount), not a cursor. The count
+    // shares `baseWhere` (filters, no cursor) so it matches the filtered set.
     const nextCursor =
-      hasMore && last ? `${last.ringingAt.getTime()}_${last.id}` : null;
-    return { items, cursor: nextCursor };
+      !pageMode && hasMore && last ? `${last.ringingAt.getTime()}_${last.id}` : null;
+    const totalCount = pageMode
+      ? await this.db.call.count({ where: baseWhere })
+      : undefined;
+    return { items, cursor: nextCursor, totalCount };
   }
 
   /**

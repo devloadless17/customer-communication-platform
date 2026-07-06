@@ -117,6 +117,7 @@ export class CallsController {
       q: query.q,
       from: query.from,
       to: query.to,
+      page: query.page,
     });
   }
 

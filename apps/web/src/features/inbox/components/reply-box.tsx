@@ -1,9 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Languages,
-  Loader2,
   MessageSquare,
   MousePointerClick,
   Paperclip,
@@ -63,8 +62,24 @@ import { SnippetPopup } from "./snippet-popup";
 import { useSnippets } from "./snippets-context";
 import { renderPlaceholders } from "./template-picker/utils";
 
+// Heavy, open-gated popovers — kept OUT of the inbox critical-path bundle and
+// loaded on first open (they all render null when closed). The emoji popover
+// alone builds a ~20KB keyword/search index at module eval, so deferring it is
+// a real first-load win. Mirrors the TemplatePicker dynamic import above.
+const EmojiPopover = dynamic(
+  () => import("./reply-box/emoji-popover").then((m) => m.EmojiPopover),
+  { ssr: false },
+);
+const TranslatePopover = dynamic(
+  () => import("./reply-box/translate-popover").then((m) => m.TranslatePopover),
+  { ssr: false },
+);
+const InteractivePopover = dynamic(
+  () => import("./interactive-popover").then((m) => m.InteractivePopover),
+  { ssr: false },
+);
+
 import { AttachmentPreview } from "./reply-box/attachment-preview";
-import { InteractivePopover } from "./interactive-popover";
 import { ReplyTargetPill } from "./reply-box/reply-target-pill";
 import { ToggleButton } from "./reply-box/toggle-button";
 import {
@@ -73,8 +88,6 @@ import {
   newClientTempId,
   safeReadError,
 } from "./reply-box/utils";
-import { EmojiPopover } from "./reply-box/emoji-popover";
-import { TranslatePopover } from "./reply-box/translate-popover";
 import {
   MicButton,
   RecordingBar,
@@ -119,7 +132,12 @@ function formatMb(bytes: number): string {
  * The thread updates via the same Socket.io event the server fires; we
  * don't optimistic-update here.
  */
-export function ReplyBox({
+// Memoized — the parent MessageThread re-renders on the 60s `now` tick, every
+// teammate typing frame, and every in-thread search keystroke. ReplyBox's props
+// are stable across those (callbacks are useCallback'd, catalogs are
+// per-conversation), so it should bail instead of re-rendering this 1.8k-line
+// composer each time. State + context changes still re-render it normally.
+function ReplyBoxImpl({
   conversationId,
   currentUser,
   contact,
@@ -252,6 +270,20 @@ export function ReplyBox({
       // Privacy mode — no draft restore, composer still works.
     }
   }, [draftKeyFor]);
+  // Autoresize fallback for browsers without CSS `field-sizing` (Safari; Firefox
+  // by default). Chromium grows the textarea via the `field-sizing-content`
+  // class; elsewhere the composer would stay stuck at its min height and
+  // multi-line drafts scroll in a cramped box. Grow up to max-h-48 (12rem =
+  // 192px), then the class's `overflow-y-auto` scrolls internally.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (typeof CSS !== "undefined" && CSS.supports?.("field-sizing", "content")) {
+      return; // native handles sizing
+    }
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 192)}px`;
+  }, [value]);
   // Persist the live draft under the CURRENT mode's key. `switchMode` already
   // persists the outgoing buffer before flipping, so this only ever writes the
   // value under the mode that owns it.
@@ -358,17 +390,22 @@ export function ReplyBox({
   // Meta actually delivered would double-send on retry.
   const retryClientTempIdRef = useRef<string | null>(null);
 
-  // Idempotency guard: while a submit is in flight, additional Enter
-  // presses / Send-button clicks no-op. The fetch IIFE clears the flag in
-  // its finally block. Without this, holding Enter or double-clicking
-  // sends the SAME draft twice — the input is cleared synchronously, but
-  // the second keydown fires before React re-renders, so its `value`
-  // closure still has the original text. The DB unique on `externalId`
-  // doesn't save us: each click generates a fresh `clientTempId`, and
-  // Meta returns a different wamid for each accepted send → the customer
-  // gets the same message twice.
-  const sendInFlightRef = useRef(false);
-  const [sendInFlight, setSendInFlight] = useState(false);
+  // Accidental double-fire guard. Holding Enter or double-clicking sends the
+  // SAME draft twice — the input clears synchronously, but the second keydown
+  // fires before React re-renders, so its `value` closure still has the
+  // original text, and each fires a fresh `clientTempId` → Meta delivers the
+  // same message twice. We drop an IDENTICAL submission (same text + file)
+  // within ~800ms. This replaces the old blanket in-flight lock,
+  // which also froze the composer for the ENTIRE round-trip — so an agent
+  // couldn't send a quick text while a 90s video upload was still going. The
+  // pipeline already supports concurrent sends (per-`clientTempId` optimistic
+  // bubbles, confirm listeners, watchdogs, and `pendingFilesRef`); only this
+  // lock was serializing them.
+  const lastSubmitRef = useRef<{ sig: string; at: number }>({ sig: "", at: 0 });
+  // Number of sends whose HTTP request is still in flight. A COUNTER (not a
+  // boolean) so overlapping sends don't corrupt each other's lifecycle. Only
+  // used to gate the auto-assign/reopen pill re-arm during in-flight prop churn.
+  const inFlightCountRef = useRef(0);
 
   // Tracks whether THIS tab already emitted the optimistic AI-pause for the
   // current "AI on" stretch, so a rapid burst of replies fires exactly one
@@ -391,17 +428,17 @@ export function ReplyBox({
   // socket state, so during an in-flight send they can transiently flip (a
   // stale authoritative frame, the optimistic dispatch settling, a rollback) —
   // resetting on that transient would let a rapid second send emit a DUPLICATE
-  // assign/reopen pill. Gating on `!sendInFlightRef.current` ignores the
+  // assign/reopen pill. Gating on `inFlightCountRef.current === 0` ignores the
   // in-flight churn; a real teammate change (no send active) still re-arms.
   const selfAssignEmittedRef = useRef(false);
   useEffect(() => {
-    if (assignedUserId == null && !sendInFlightRef.current) {
+    if (assignedUserId == null && inFlightCountRef.current === 0) {
       selfAssignEmittedRef.current = false;
     }
   }, [assignedUserId]);
   const reopenEmittedRef = useRef(false);
   useEffect(() => {
-    if (status != null && status !== "open" && !sendInFlightRef.current) {
+    if (status != null && status !== "open" && inFlightCountRef.current === 0) {
       reopenEmittedRef.current = false;
     }
   }, [status]);
@@ -746,6 +783,22 @@ export function ReplyBox({
     if (replyTarget) ref.current?.focus();
   }, [replyTarget]);
 
+  // Auto-focus the composer once when a thread opens (the box remounts per
+  // thread via ThreadWorkspace `key`), so the agent can type immediately —
+  // matches WhatsApp Web / Slack / Telegram. Desktop only (pointer: fine) so a
+  // touch device doesn't pop the soft keyboard on open; skipped in note mode.
+  // `preventScroll` so focusing doesn't nudge the thread's scroll position.
+  useEffect(() => {
+    if (typeof window === "undefined" || isNote) return;
+    if (!window.matchMedia?.("(pointer: fine)").matches) return;
+    const id = window.requestAnimationFrame(() =>
+      ref.current?.focus({ preventScroll: true }),
+    );
+    return () => window.cancelAnimationFrame(id);
+    // Mount-only — see the per-thread remount note above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Pre-load text from a "Retry" click on a failed bubble. Each retry has a
   // unique nonce so back-to-back retries of the same body still fire. Also
   // flips back to Reply mode if the user happens to be writing a note.
@@ -799,7 +852,6 @@ export function ReplyBox({
   // taps the send-recording button. `override.voice` rides along to flag
   // the audio as a WhatsApp voice note (waveform UI on the recipient side).
   const submit = (override?: { file: File; voice?: boolean }) => {
-    if (sendInFlightRef.current) return;
     const overrideFile = override?.file ?? null;
     const overrideVoice = override?.voice === true;
 
@@ -812,8 +864,22 @@ export function ReplyBox({
     if (!file && !canSend) return;
     if (overrideFile && !isNote && windowClosed) return;
 
-    sendInFlightRef.current = true;
-    setSendInFlight(true);
+    // Drop an IDENTICAL submission fired within ~800ms (held Enter / double
+    // click) — that's the accidental double-send this guards. A DIFFERENT
+    // message is NOT blocked, so a quick text can go out while an earlier
+    // media upload is still in flight. `lastModified` disambiguates two
+    // different files that happen to share a name+size.
+    const submitSig = `${isNote ? "note" : "msg"}|${trimmed}|${
+      file ? `${file.name}:${file.size}:${file.lastModified}` : ""
+    }|${overrideVoice ? "v" : ""}`;
+    const nowMs = Date.now();
+    if (
+      submitSig === lastSubmitRef.current.sig &&
+      nowMs - lastSubmitRef.current.at < 800
+    ) {
+      return;
+    }
+    lastSubmitRef.current = { sig: submitSig, at: nowMs };
 
     // Reuse a retried message's clientTempId (set by the retry prefill) so the
     // server dedupes this against the original send; otherwise mint a fresh
@@ -1069,6 +1135,9 @@ export function ReplyBox({
       });
     }
 
+    // Mark this send in flight (balanced in the finally below) — gates the
+    // pill re-arm against transient prop churn while any send is outstanding.
+    inFlightCountRef.current += 1;
     void (async () => {
       // 30s hard cap on the request. Without this, a lost response (mobile
       // network blip, Caddy 502 mid-flight, browser sleep) leaves the
@@ -1230,12 +1299,9 @@ export function ReplyBox({
         // already read `sendConfirmed`. The post-HTTP stuck-watchdog below keeps
         // its own (separate) confirm listener for the success path.
         if (!isNote) window.removeEventListener(confirmEv, onSendConfirmed);
-        // Release the idempotency lock — the next Enter / click can now
-        // start a fresh send. Doing this in finally (not after setValue)
-        // makes sure a thrown setError or unexpected error path can't
-        // wedge the button permanently disabled.
-        sendInFlightRef.current = false;
-        setSendInFlight(false);
+        // Balance the in-flight counter. In finally (not after setValue) so an
+        // unexpected throw can't leak a count and wedge the pill-gate.
+        inFlightCountRef.current = Math.max(0, inFlightCountRef.current - 1);
       }
 
       // Post-HTTP watchdog: if the HTTP request returned successfully but
@@ -1387,6 +1453,9 @@ export function ReplyBox({
           )}
           <Textarea
             ref={ref}
+            // Accessible name — the placeholder alone is a weak label and
+            // vanishes on input, leaving the composer unnamed for screen readers.
+            aria-label={isNote ? "Internal note" : "Reply message"}
             // dir="auto" so an agent typing Arabic/Hebrew sees the composer
             // right-align with correct base direction, matching the bubble it
             // produces. Latin input stays LTR.
@@ -1464,13 +1533,19 @@ export function ReplyBox({
               }
               // Snippet picker has first dibs on Enter / Tab / Arrows / Esc
               // when it's open. Its global keydown listener calls
-              // preventDefault on those keys, but React's synthetic event
-              // pipeline still delivers Enter to this handler — so we have
-              // to explicitly skip when the popup owns the keypress.
+              // preventDefault + inserts the highlighted snippet, but React's
+              // synthetic pipeline still delivers the key here — so the send
+              // branch below must be skipped whenever the popup owns the
+              // keypress. We preventDefault here too so the composer is
+              // self-sufficient: even when the popup has NO match (its listener
+              // returns without preventDefault), Enter/Tab must never send NOR
+              // leak a stray newline into the draft. Enter only sends when the
+              // popup is closed (slashRange === null).
               if (
                 slashRange &&
                 (e.key === "Enter" || e.key === "Tab" || e.key === "ArrowUp" || e.key === "ArrowDown")
               ) {
+                e.preventDefault();
                 return;
               }
               // Enter sends, Shift+Enter inserts a newline. Skip when an IME
@@ -1507,14 +1582,11 @@ export function ReplyBox({
               onCancel={() => voice.cancel()}
               onSend={() => {
                 // Guard BEFORE collecting — `stopAndCollect()` finalizes and
-                // tears down the recording, so if `submit` then no-ops (a prior
-                // media upload still in flight, or the 24h window flipped closed
-                // mid-recording) the captured audio would vanish silently.
-                // Keep the recording running + surface why instead.
-                if (sendInFlightRef.current) {
-                  toast.info("Hold on — a previous message is still sending.");
-                  return;
-                }
+                // tears down the recording, so if `submit` then no-ops (the 24h
+                // window flipped closed mid-recording) the captured audio would
+                // vanish silently. Keep the recording running + surface why.
+                // (A send already in flight no longer blocks this — sends run
+                // concurrently now — so only the window check remains.)
                 if (!isNote && windowClosed) {
                   toast.error("Can't send: the 24-hour window has closed.", {
                     description: "Send a template to re-open the conversation.",
@@ -1724,11 +1796,12 @@ export function ReplyBox({
               <Button
                 size="sm"
                 onClick={() => submit()}
-                // Disable while a previous submit is still being POSTed — pairs
-                // with the sendInFlightRef guard in `submit()` to make double-
-                // click a no-op. The ref is the source of truth; this just
-                // mirrors it visually so the user sees the button respond.
-                disabled={!canSend || sendInFlight}
+                // No longer disabled while a send is in flight — sends run
+                // concurrently (a quick text can go out while a video uploads),
+                // and the in-thread optimistic bubble's pending state is the
+                // "sending" feedback. Accidental double-fire is caught by the
+                // same-content dedupe in `submit()`.
+                disabled={!canSend}
                 aria-label={isNote ? "Save note" : attachment ? "Send media" : "Send"}
                 title={isNote ? "Save note" : attachment ? "Send media" : "Send"}
                 className={cn(
@@ -1739,19 +1812,9 @@ export function ReplyBox({
                   isNote && "bg-note-accent text-white hover:bg-note-accent-hover",
                 )}
               >
-                {sendInFlight ? (
-                  <Loader2 className="size-3.5 animate-spin" />
-                ) : (
-                  <Send className="size-3.5" />
-                )}
+                <Send className="size-3.5" />
                 <span className="@max-[26rem]:hidden">
-                  {sendInFlight
-                    ? "Sending…"
-                    : isNote
-                      ? "Save note"
-                      : attachment
-                        ? "Send media"
-                        : "Send"}
+                  {isNote ? "Save note" : attachment ? "Send media" : "Send"}
                 </span>
               </Button>
             </div>
@@ -1786,3 +1849,5 @@ export function ReplyBox({
     </div>
   );
 }
+
+export const ReplyBox = memo(ReplyBoxImpl);

@@ -655,12 +655,14 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         { templateName: { contains: query.search, mode: "insensitive" } },
       ];
     }
-    // Keyset pagination on (createdAt DESC, id DESC). Previously hard-capped at
-    // 100 with no cursor, so a team with >100 broadcasts couldn't reach the
-    // older ones at all. `cursor` is `<createdAtMs>_<id>` of the last row of
-    // the prior page. Default page 100, max 200.
-    const take = query?.take ?? 100;
-    const cursor = parseBroadcastCursor(query?.cursor);
+    // Keyset pagination on (createdAt DESC, id DESC) by default. Numbered
+    // (offset) mode kicks in when `page` is set — the list page uses it (25/page
+    // + a numbered control), which also bounds the payload + the responsive
+    // double-DOM render; keyset stays for any cursor caller.
+    const pageMode = query?.page != null && query.page >= 1;
+    const take = query?.take ?? (pageMode ? 25 : 100);
+    const offset = pageMode ? (query!.page! - 1) * take : 0;
+    const cursor = pageMode ? null : parseBroadcastCursor(query?.cursor);
     const cursorWhere: Prisma.BroadcastWhereInput | undefined = cursor
       ? {
           OR: [
@@ -672,14 +674,19 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     const rows = await this.db.broadcast.findMany({
       where: cursorWhere ? { AND: [where, cursorWhere] } : where,
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: take + 1,
+      take: pageMode ? take : take + 1,
+      ...(pageMode ? { skip: offset } : {}),
       include: { createdBy: { select: { id: true, name: true } } },
     });
-    const hasMore = rows.length > take;
+    const hasMore = pageMode ? false : rows.length > take;
     const page = hasMore ? rows.slice(0, take) : rows;
     const last = page.at(-1);
     const nextCursor =
-      hasMore && last ? `${last.createdAt.getTime()}_${last.id}` : null;
+      !pageMode && hasMore && last ? `${last.createdAt.getTime()}_${last.id}` : null;
+    // Count shares `where` (filters, no cursor) so it matches the filtered set.
+    const totalCount = pageMode
+      ? await this.db.broadcast.count({ where })
+      : undefined;
     return {
       broadcasts: page.map((b) => ({
         id: b.id,
@@ -699,6 +706,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         completedAt: b.completedAt?.toISOString() ?? null,
       })),
       nextCursor,
+      totalCount,
     };
   }
 

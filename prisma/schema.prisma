@@ -81,6 +81,20 @@ enum MessageStatus {
   failed
 }
 
+// How an OUTBOUND message came to exist. `api` = sent through this platform
+// (an agent, an automation/workflow, a broadcast, or the /v1 API) — the vast
+// majority, and the value every legacy row defaults to. `business_app` = the
+// message was sent from the WhatsApp Business App on the owner's PHONE and
+// mirrored back to us via the Coexistence `smb_message_echoes` / `history`
+// webhook (it has no authoring agent, so senderUserId is null too). The
+// discriminator lets the inbox show "· via WhatsApp app" so the team can tell
+// an owner's phone reply apart from a system/automation send (both agentless).
+// Meaningless for inbound rows, which always carry `api`.
+enum MessageOrigin {
+  api
+  business_app
+}
+
 // The messaging CHANNEL (the medium a conversation lives on). This is the
 // single "where is this conversation from" discriminator — there is NO separate
 // "provider/vendor" concept in the data model (a Meta-vs-Twilio distinction is
@@ -996,6 +1010,11 @@ model Message {
   // the caption (or empty) so search keeps matching across both kinds.
   body           String
   direction      MessageDirection
+  // Provenance of an outbound row — see `enum MessageOrigin`. Defaults to `api`
+  // so every existing row (all sent through the platform) and every inbound row
+  // is correct without a backfill; only Coexistence phone-app echoes set
+  // `business_app`.
+  origin         MessageOrigin    @default(api)
   // Half of the dedup key `@@unique([teamId, channel, externalId])` below —
   // that's its job, NOT to classify the channel for routing. It is enforced
   // at INSERT, before any conversation link exists (dedupe runs first in

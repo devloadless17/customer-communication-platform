@@ -128,6 +128,27 @@ function jumpScrollBehavior(): ScrollBehavior {
 }
 
 /**
+ * One-shot attention pulse on a jumped-to timeline row. The gallery "Jump" and
+ * global-search deep-link land INSTANTLY (no scroll motion) so, without a cue,
+ * the eye has to hunt for the target — this fades a soft primary wash + ring
+ * over it (globals.css `.jump-flash`). Re-adds the class after a forced reflow
+ * so a repeat jump to the same row replays the animation, and self-cleans on
+ * `animationend` so nothing lingers. Reduced-motion disables the keyframe (the
+ * class is in the reduce-motion off-list), leaving an instant, motion-free jump.
+ */
+function flashJumpTarget(el: HTMLElement) {
+  el.classList.remove("jump-flash");
+  // Force reflow so removing + re-adding restarts the animation on a repeat jump.
+  void el.offsetWidth;
+  el.classList.add("jump-flash");
+  const clear = () => {
+    el.classList.remove("jump-flash");
+    el.removeEventListener("animationend", clear);
+  };
+  el.addEventListener("animationend", clear);
+}
+
+/**
  * The rendered timeline rows, extracted into a `memo`'d child so the ~500-entry
  * `.map()` (element creation + per-row `memo` comparisons) does NOT re-run when
  * MessageThreadImpl re-renders for reasons that don't touch the list: a teammate
@@ -200,7 +221,10 @@ const TimelineRows = memo(function TimelineRows({
         );
       }
     }
-  });
+    // Only walk when the timeline actually changes — without the dep this ran
+    // after every render (e.g. a search keystroke), re-scanning up to ~500
+    // entries for no reason.
+  }, [timeline]);
   return (
     <>
       {timeline.map((entry, idx) => {
@@ -1099,6 +1123,10 @@ function MessageThreadImpl({
         );
         if (!el) return;
         el.scrollIntoView({ behavior: jumpScrollBehavior(), block: "center" });
+        // Pulse the landed row so the target is instantly obvious — the Files
+        // "Jump" and global-search deep-link scroll without motion, so a static
+        // highlight alone is easy to miss.
+        flashJumpTarget(el);
 
         const content = contentRef.current;
         const viewport = viewportRef.current;
@@ -1593,6 +1621,12 @@ function MessageThreadImpl({
       if (cur.data.failed || cur.data.status === "failed") continue;
       if (cur.data.direction !== prev.data.direction) continue;
       if (cur.data.senderUserId !== prev.data.senderUserId) continue;
+      // A Coexistence phone-app send (origin "business_app") and a system/
+      // automation send both have senderUserId null, so the check above wouldn't
+      // separate them. Break the group on an origin change so the "via WhatsApp
+      // app" head-chip reliably marks the start of an echo burst (and an echo
+      // never hides under a preceding silent system send).
+      if ((cur.data.origin ?? "api") !== (prev.data.origin ?? "api")) continue;
       const dt =
         new Date(cur.data.timestamp).getTime() -
         new Date(prev.data.timestamp).getTime();
@@ -1795,6 +1829,17 @@ function MessageThreadImpl({
                 The loading indicator is rendered OUTSIDE the scroll content (a
                 floating pill below) so triggering a load never changes layout. */}
             <div ref={topSentinelRef} className="h-px" />
+            {!hasMoreOlder && !reachedSliceCap && timeline.length > 0 && (
+              // Genuine top of history: pagination is exhausted (not the
+              // in-memory slice cap above) so THIS is the first message ever.
+              // A calm centered marker so the agent knows the thread starts
+              // here rather than being cut off — mirrors the day-pill style.
+              <div className="my-3 flex justify-center">
+                <span className="rounded-full border border-border/40 bg-card px-3 py-0.5 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Start of conversation
+                </span>
+              </div>
+            )}
             {reachedSliceCap && (
               // The slice cap is the in-memory cap (MAX_THREAD_SLICE = 500 in
               // use-conversation-events.ts), not a "no more messages" signal —

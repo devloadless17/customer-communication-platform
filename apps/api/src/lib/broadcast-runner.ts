@@ -939,15 +939,28 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       status: "paused",
     });
   } else {
+    // Normal completion. But a run where EVERY recipient failed must not be
+    // stored as `completed` — that made it match the "Completed" filter while
+    // the badge (count-aware) painted it red "All failed", so the Failed tab
+    // showed nothing. Classify from the freshly-drained counters: all-failed →
+    // the discrete `failed` enum (filter + badge + stored row now agree); a
+    // partial failure stays `completed` (badge shows amber "N failed").
+    const fresh = await db.broadcast.findUnique({
+      where: { id: broadcast.id },
+      select: { totalCount: true, failedCount: true },
+    });
+    const allFailed =
+      !!fresh && fresh.totalCount > 0 && fresh.failedCount >= fresh.totalCount;
+    const finalStatus = allFailed ? "failed" : "completed";
     await db.broadcast.updateMany({
       where: { id: broadcast.id, status: "running" },
-      data: { status: "completed", completedAt: new Date() },
+      data: { status: finalStatus, completedAt: new Date() },
     });
     await publish({
       type: "broadcast.status_changed",
       teamId: broadcast.teamId,
       broadcastId: broadcast.id,
-      status: "completed",
+      status: finalStatus,
     });
   }
   } catch (err) {

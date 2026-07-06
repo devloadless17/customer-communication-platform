@@ -15,6 +15,9 @@ import { API_KEY_SCOPES } from "@ccp/shared/api-keys/scopes";
 
 import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { toast } from "@/lib/toast";
 import { apiFetch } from "@/lib/api/client-fetch";
@@ -212,12 +215,11 @@ export function ApiKeysManager({ initialKeys }: Props) {
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
               <label className="flex-1 text-xs">
                 <span className="mb-1 block font-medium text-foreground">Key name</span>
-                <input
+                <Input
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   maxLength={80}
                   placeholder="Organization"
-                  className="w-full rounded-md border border-border bg-card px-2.5 py-1.5 text-sm outline-none focus:border-foreground/30"
                 />
               </label>
               <Button type="button" size="sm" onClick={create} disabled={!canCreate}>
@@ -226,34 +228,32 @@ export function ApiKeysManager({ initialKeys }: Props) {
               </Button>
             </div>
 
-            <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs">
-              <input
-                type="checkbox"
+            <div className="mt-3 flex items-center gap-2 text-xs">
+              <Switch
                 checked={fullAccess}
-                onChange={(e) => setFullAccess(e.target.checked)}
-                className="size-3.5 accent-primary"
+                onCheckedChange={setFullAccess}
+                aria-label="Full access"
               />
               <span className="font-medium">Full access</span>
               <span className="text-muted-foreground">
                 (everything in your organization — simplest for a single organization key)
               </span>
-            </label>
+            </div>
 
             {!fullAccess && (
               <div className="mt-3 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
                 {GRANULAR_SCOPES.map((scope) => (
-                  <label key={scope} className="flex cursor-pointer items-center gap-2 text-2xs">
-                    <input
-                      type="checkbox"
+                  <div key={scope} className="flex items-center gap-2 text-2xs">
+                    <Switch
                       checked={scopes.has(scope)}
-                      onChange={() => toggleScope(scope)}
-                      className="size-3.5 accent-primary"
+                      onCheckedChange={() => toggleScope(scope)}
+                      aria-label={SCOPE_LABELS[scope] ?? scope}
                     />
                     <span className="text-foreground">{SCOPE_LABELS[scope] ?? scope}</span>
                     <code className="ml-auto rounded bg-muted px-1 py-0.5 font-mono text-3xs text-muted-foreground">
                       {scope}
                     </code>
-                  </label>
+                  </div>
                 ))}
                 {chosenScopes.length === 0 && (
                   <p className="col-span-full text-2xs text-destructive">Pick at least one scope.</p>
@@ -315,7 +315,11 @@ export function ApiKeysManager({ initialKeys }: Props) {
               Active keys ({keys.length})
             </div>
             {keys.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No keys yet. Create one above.</p>
+              <EmptyState
+                icon={KeyRound}
+                title="No keys yet"
+                description="Create one above to start calling the organization API."
+              />
             ) : (
               <ul className="divide-y divide-border rounded-md border border-border">
                 {keys.map((k) => (

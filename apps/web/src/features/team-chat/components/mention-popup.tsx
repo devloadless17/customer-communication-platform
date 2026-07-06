@@ -13,6 +13,7 @@ import type { User } from "@ccp/shared/types";
  * which forwards arrow keys / Enter through onKeyHandled.
  */
 export function MentionPopup({
+  listboxId,
   teamMembers,
   query,
   position,
@@ -21,6 +22,7 @@ export function MentionPopup({
   onActiveIndexChange,
   activeIndex,
 }: {
+  listboxId: string;
   teamMembers: User[];
   query: string;
   position: { left: number; top: number };
@@ -68,11 +70,19 @@ export function MentionPopup({
       <div className="border-b border-border px-2 py-1.5 text-2xs uppercase tracking-wider text-muted-foreground">
         Mention teammate
       </div>
-      <div className="max-h-72 overflow-y-auto py-1">
+      <div
+        role="listbox"
+        id={listboxId}
+        aria-label="Teammates"
+        className="max-h-72 overflow-y-auto py-1"
+      >
         {filtered.map((u, i) => (
           <button
             key={u.id}
             type="button"
+            role="option"
+            id={`${listboxId}-opt-${u.id}`}
+            aria-selected={i === activeIndex}
             onMouseEnter={() => onActiveIndexChange(i)}
             onClick={() => onPick(u)}
             className={cn(

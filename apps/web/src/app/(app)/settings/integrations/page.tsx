@@ -198,7 +198,7 @@ function IntegrationTile({
           }`}
         >
           {connected && (
-            <span className="size-1.5 rounded-full bg-emerald-500" />
+            <span className="size-1.5 rounded-full bg-success-fg" />
           )}
           {cta}
         </div>

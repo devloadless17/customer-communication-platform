@@ -1347,4 +1347,60 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     }
     expect(worst, "old claim logs never mis-place below the new send").toBeNull();
   });
+
+  // ── Composer send-concurrency (2026-07-06 freeze fix) ────────────────────
+  // The blanket in-flight lock was replaced by a same-content dedupe + an
+  // in-flight COUNTER, so a quick text can send while a media upload is still
+  // going. These two tests pin the safety envelope: a double-fire of the SAME
+  // content must NOT double-deliver (irreversible on Meta), while two DISTINCT
+  // sends must BOTH go through.
+  test("double-Enter of the same text sends it only ONCE (no double-delivery)", async ({
+    page,
+  }) => {
+    await freshConversation();
+    let posts = 0;
+    await page.route("**/api/messages", async (route: Route) => {
+      if (route.request().method() === "POST") posts += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+    await openThread(page);
+    const box = page.getByPlaceholder(/Reply on WhatsApp/i);
+    // Send, then re-type the SAME text and Enter again within the ~800ms dedupe
+    // window — the accidental double-fire the composer must swallow.
+    await box.fill("dedupe me");
+    await box.press("Enter");
+    await box.fill("dedupe me");
+    await box.press("Enter");
+    await page.waitForTimeout(1200);
+    expect(posts, "identical rapid resend must fire exactly one POST").toBe(1);
+  });
+
+  test("two DIFFERENT rapid sends both go through (concurrency, no blanket lock)", async ({
+    page,
+  }) => {
+    await freshConversation();
+    let posts = 0;
+    await page.route("**/api/messages", async (route: Route) => {
+      if (route.request().method() === "POST") posts += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+    await openThread(page);
+    const box = page.getByPlaceholder(/Reply on WhatsApp/i);
+    // The old lock blocked the second send until the first's round-trip
+    // finished; distinct messages now send concurrently.
+    await box.fill("first message");
+    await box.press("Enter");
+    await box.fill("second message");
+    await box.press("Enter");
+    await page.waitForTimeout(1200);
+    expect(posts, "two distinct sends must each fire a POST").toBe(2);
+  });
 });

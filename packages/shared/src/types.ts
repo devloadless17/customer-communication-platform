@@ -18,6 +18,11 @@ export type ConversationStatus = "open" | "pending" | "closed";
 export type MessageDirection = "in" | "out";
 export type MessageStatus = "sent" | "delivered" | "read" | "failed";
 export type Channel = "whatsapp";
+// Provenance of an outbound message. `api` = sent through this platform;
+// `business_app` = sent from the WhatsApp Business App on the owner's phone and
+// mirrored to us via WhatsApp Coexistence. Mirrors the Prisma `MessageOrigin`
+// enum (kept as a local union so the shared package has no Prisma dependency).
+export type MessageOrigin = "api" | "business_app";
 
 export interface Team {
   id: string;
@@ -361,6 +366,16 @@ export interface Message {
   body: string;
   direction: MessageDirection;
   channel: Channel;
+  /**
+   * Provenance of an OUTBOUND message. Absent/`"api"` for the overwhelming
+   * majority — anything sent through this platform (agent, automation,
+   * broadcast, /v1). `"business_app"` marks a message the owner sent from the
+   * WhatsApp Business App on their phone, mirrored to us via WhatsApp
+   * Coexistence — the inbox renders a "· via WhatsApp app" marker so a phone
+   * reply is distinguishable from a system/automation send (both agentless).
+   * Always `"api"` (or absent) on inbound rows.
+   */
+  origin?: MessageOrigin;
   status: MessageStatus;
   /**
    * Provider failure diagnostics — present ONLY on a `status: "failed"`

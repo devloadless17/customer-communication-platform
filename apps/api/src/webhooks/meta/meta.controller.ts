@@ -28,6 +28,7 @@ import { getMetaProvider } from "@/lib/providers";
 import { MediaTooLargeError } from "@/lib/providers/meta";
 import { getMetaSendConfig, getMetaWebhookConfig } from "@/lib/providers/config";
 import { ingestEvents, isTransientDbError } from "@/lib/providers/ingest";
+import { enqueueHistoryChunk } from "@/lib/coexistence/history-queue";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
 
 /**
@@ -189,6 +190,28 @@ export class MetaWebhookController implements OnModuleDestroy {
       return { ok: true, ingested: 0, dropped: "phone_number_id_mismatch" };
     }
 
+    // WhatsApp Coexistence history backfill. The `history` webhook can carry
+    // thousands of past messages across chunked deliveries — far too much to
+    // ingest inline within the fail-soft budget. Detect it, hand the RAW payload
+    // to the coexistence-history BullMQ worker, and 200 immediately. The worker
+    // re-parses + ingests quietly (no unread bump / no automation fanout). Live
+    // message/echo/state-sync webhooks fall through to the fast inline path
+    // below. A history webhook is its own delivery (Meta doesn't mix history
+    // with live messages), so treating any history-bearing payload as a backfill
+    // chunk is safe.
+    if (containsHistory(payload)) {
+      try {
+        await enqueueHistoryChunk(teamId, payload);
+        return { ok: true, ingested: 0 };
+      } catch (err) {
+        // Redis down / enqueue failed → 503 so Meta redelivers the chunk (the
+        // worker dedups by wamid, so a redelivery is safe). Better than dropping
+        // history the customer can never re-fetch.
+        this.logger.error(`[${teamId}] failed to enqueue history chunk`, err);
+        throw new ServiceUnavailableException("history enqueue failed");
+      }
+    }
+
     // Fail SOFT — `parseWebhook` iterates Meta's array fields, and a future
     // Meta shape where one of those fields arrives as a non-array would make
     // the walk throw a TypeError on an HMAC-valid body. A 500 here puts us in
@@ -294,8 +317,10 @@ export class MetaWebhookController implements OnModuleDestroy {
     await downloadPromise;
     const candidates = events
       .filter(
-        (e): e is Extract<NormalizedEvent, { kind: "message" }> =>
-          e.kind === "message",
+        (e): e is Extract<NormalizedEvent, { kind: "message" | "echo" }> =>
+          // Include Coexistence echoes: a photo the owner sent from the phone
+          // app needs the same fetch → patch → media_ready flow as inbound media.
+          e.kind === "message" || e.kind === "echo",
       )
       .filter((evt) => evt.media || this.hadMedia(evt));
     if (candidates.length === 0) return;
@@ -442,7 +467,7 @@ export class MetaWebhookController implements OnModuleDestroy {
    * download path deleted it on failure" (need to clear the placeholder).
    */
   private hadMedia(
-    evt: Extract<NormalizedEvent, { kind: "message" }>,
+    evt: Extract<NormalizedEvent, { kind: "message" | "echo" }>,
   ): boolean {
     // `rawPayload` is Meta's verbatim webhook body. `messages[0].type` is
     // one of "text" | "image" | "video" | "audio" | "document" | "sticker"
@@ -474,8 +499,10 @@ export class MetaWebhookController implements OnModuleDestroy {
     outcomes: Map<string, DownloadOutcome>,
   ): Promise<void> {
     const mediaEvents = events.filter(
-      (e): e is Extract<NormalizedEvent, { kind: "message" }> =>
-        e.kind === "message" && !!e.media && !e.media.storageKey,
+      (e): e is Extract<NormalizedEvent, { kind: "message" | "echo" }> =>
+        (e.kind === "message" || e.kind === "echo") &&
+        !!e.media &&
+        !e.media.storageKey,
     );
     if (mediaEvents.length === 0) return;
 
@@ -536,6 +563,12 @@ export class MetaWebhookController implements OnModuleDestroy {
     await runWithConcurrency(todo, 4, async (evt) => {
       if (!evt.media) return;
       const mediaKind = evt.media.kind;
+      // Blob-storage context differs by source: inbound customer media vs. a
+      // Coexistence echo (a photo the owner sent from the phone). Echoes carry
+      // no contactName (the `to` is just a number), so read it only when present.
+      const isEcho = evt.kind === "echo";
+      const blobDirection: "in" | "out" = isEcho ? "out" : "in";
+      const blobContactName = "contactName" in evt ? evt.contactName ?? undefined : undefined;
       try {
         // Bounded retry on transient fetch/upload errors. Meta's media
         // download endpoint occasionally returns a 500 / connection reset
@@ -571,9 +604,9 @@ export class MetaWebhookController implements OnModuleDestroy {
               context: {
                 teamId,
                 teamSlug: team?.name,
-                direction: "in",
+                direction: blobDirection,
                 contactPhone: evt.contactPhone,
-                contactName: evt.contactName ?? undefined,
+                contactName: blobContactName,
                 externalId: evt.externalId,
                 originalFilename: evt.media!.filename ?? null,
               },
@@ -601,9 +634,9 @@ export class MetaWebhookController implements OnModuleDestroy {
                     context: {
                       teamId,
                       teamSlug: team?.name,
-                      direction: "in",
+                      direction: blobDirection,
                       contactPhone: evt.contactPhone,
-                      contactName: evt.contactName ?? undefined,
+                      contactName: blobContactName,
                       // Suffix the wamid so the dashboard filename is
                       // distinct from the original video's blob.
                       externalId: `${evt.externalId}_thumb`,
@@ -719,6 +752,26 @@ function phoneNumberMismatch(
     for (const change of changes) {
       const incoming = change?.value?.metadata?.phone_number_id;
       if (incoming && incoming !== expected) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True if any change in the payload is a Coexistence `history` backfill. Cheap
+ * top-level scan so the controller can divert the (potentially huge) chunk to
+ * the background worker instead of ingesting it inline. Meta delivers history in
+ * its own webhook (never mixed with live messages), so one match ⇒ backfill.
+ */
+function containsHistory(payload: unknown): boolean {
+  const p = payload as { entry?: Array<{ changes?: Array<{ field?: string }> }> };
+  const entries = p?.entry;
+  if (!Array.isArray(entries)) return false;
+  for (const entry of entries) {
+    const changes = entry?.changes;
+    if (!Array.isArray(changes)) continue;
+    for (const change of changes) {
+      if (change?.field === "history") return true;
     }
   }
   return false;

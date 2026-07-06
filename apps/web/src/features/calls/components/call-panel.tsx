@@ -104,6 +104,7 @@ export function CallPanel({
           size="sm"
           onClick={handleMute}
           disabled={liveCall.status !== "in_progress"}
+          aria-pressed={muted}
           aria-label={muted ? "Unmute microphone" : "Mute microphone"}
           className="flex-1"
         >

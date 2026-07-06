@@ -282,7 +282,7 @@ function AssignableMembers({
     <>
       {available.length > 0 && (
         <>
-          <DropdownMenuLabel className="px-2 pb-1 pt-2 text-3xs font-semibold uppercase tracking-wider text-muted-foreground/60">
+          <DropdownMenuLabel className="px-2 pb-1 pt-2 text-3xs font-semibold uppercase tracking-wider text-muted-foreground">
             Available
           </DropdownMenuLabel>
           {available.map((u) => (
@@ -300,7 +300,7 @@ function AssignableMembers({
       {offline.length > 0 && (
         <>
           {available.length > 0 && <DropdownMenuSeparator className="my-1" />}
-          <DropdownMenuLabel className="px-2 pb-1 pt-2 text-3xs font-semibold uppercase tracking-wider text-muted-foreground/60">
+          <DropdownMenuLabel className="px-2 pb-1 pt-2 text-3xs font-semibold uppercase tracking-wider text-muted-foreground">
             Offline
           </DropdownMenuLabel>
           {offline.map((u) => (

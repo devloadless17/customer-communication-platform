@@ -403,7 +403,7 @@ function NoteRow({
           <div className="mt-0.5 truncate text-xs text-muted-foreground">
             {highlight(hit.snippet, query)}
           </div>
-          <div className="mt-0.5 truncate text-3xs text-muted-foreground/70">
+          <div className="mt-0.5 truncate text-3xs text-muted-foreground">
             — {hit.authorName ?? "Removed user"}
           </div>
         </div>

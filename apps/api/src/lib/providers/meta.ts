@@ -22,9 +22,11 @@ import type {
   FetchedMedia,
   MessagingProvider,
   NormalizedCallEvent,
+  NormalizedContactSync,
   NormalizedEvent,
   NormalizedInboundMessage,
   NormalizedMediaRef,
+  NormalizedOutboundEcho,
   NormalizedReaction,
   NormalizedStatusUpdate,
   NormalizedTemplateStatusUpdate,
@@ -206,6 +208,38 @@ interface MetaChangeValue {
   event?: string;
   /** Human reason Meta attaches on PAUSED/REJECTED (quality, policy, etc.). */
   reason?: string;
+  // WhatsApp Coexistence webhook fields (one number on both the Business App +
+  // Cloud API). Each arrives under its own `change.field`, keyed as its own
+  // array on `value` — parallel to `messages[]`.
+  //   smb_message_echoes → message_echoes[]: a message the owner sent from the
+  //                        phone app (from=business, to=customer). Outbound.
+  //   history            → history[]: the past-180d backfill, chunked in phases.
+  //   smb_app_state_sync → state_sync[]: the owner's phone address-book changes.
+  message_echoes?: MetaMessage[];
+  history?: MetaHistoryEntry[];
+  state_sync?: MetaStateSyncEntry[];
+  // Value-level errors — the history-declined signal (code 2593109, "History
+  // sync is turned off by the business from the WhatsApp Business App") can
+  // surface here or per history entry; we check both.
+  errors?: Array<{ code?: number; title?: string; message?: string }>;
+}
+
+// One chunk of the Coexistence history backfill. Meta splits the past ~180 days
+// into 3 phases (0: day 0-1, 1: day 1-90, 2: day 90-180); large phases are
+// further split across webhooks ordered by `chunk_order`, with `progress`
+// (0-100) tracking completion. Group chats are excluded by Meta.
+interface MetaHistoryEntry {
+  metadata?: { phase?: number; chunk_order?: number; progress?: number };
+  threads?: Array<{ id?: string; messages?: MetaMessage[] }>;
+  errors?: Array<{ code?: number; title?: string; message?: string }>;
+}
+
+// One address-book change from the `smb_app_state_sync` webhook.
+interface MetaStateSyncEntry {
+  type?: string; // "contact"
+  contact?: { full_name?: string; first_name?: string; phone_number?: string };
+  action?: string; // "add" (added/edited) | "remove"
+  metadata?: { timestamp?: string };
 }
 
 /**
@@ -312,6 +346,10 @@ interface MetaContactsPayload {
 
 interface MetaMessage {
   from?: string;
+  // Present on Coexistence echo/history rows the BUSINESS sent: the CUSTOMER's
+  // number. Absent on ordinary inbound `messages[]` (where `from` is already
+  // the customer).
+  to?: string;
   id?: string;
   timestamp?: string;
   type?: string;
@@ -393,6 +431,67 @@ function placeholderForUnhandledType(m: MetaMessage): string | null {
       return m.type ? `Unsupported message (${m.type})` : null;
   }
 }
+
+/**
+ * Extract the renderable content (body + optional media ref) from a Meta
+ * message object WITHOUT the direction/contact wrapper. Shared by the
+ * Coexistence echo + history parsers, which build both inbound and outbound
+ * normalized events from the same message shape depending on who sent it.
+ *
+ * Mirrors the inbound `messages[]` walk's text/media/placeholder handling. Two
+ * deliberate simplifications vs. that walk:
+ *   - interactive-reply + reaction subtypes fall through to the typed
+ *     placeholder here. Those only ever originate customer-side in the LIVE
+ *     `messages` field; an echo is business-sent (a business doesn't tap its
+ *     own buttons) and their appearance in a history backfill is rare enough
+ *     that a placeholder row is an acceptable, non-lossy fallback.
+ *   - history media first arrives as `type: "media_placeholder"` (no asset id);
+ *     we render it as a "📎 Media" row so the message is never silently lost.
+ *     For messages within 14 days of onboarding Meta follows up with the real
+ *     media; if that carries the same wamid it dedupes against this placeholder
+ *     (best-effort — historical media fidelity is not load-bearing).
+ */
+function extractMetaMessageContent(
+  m: MetaMessage,
+): { body: string; media?: NormalizedMediaRef } | null {
+  if (m.type === "text") {
+    const body = m.text?.body;
+    return body ? { body } : null;
+  }
+  if (m.type === "media_placeholder") {
+    return { body: "📎 Media" };
+  }
+  const mediaKind = m.type as MediaKind | undefined;
+  if (mediaKind && META_MEDIA_TYPES.includes(mediaKind)) {
+    const mediaPayload = m[mediaKind] as MetaMediaPayload | undefined;
+    if (!mediaPayload?.id || !mediaPayload.mime_type) return null;
+    const media: NormalizedMediaRef = {
+      kind: mediaKind,
+      externalMediaId: mediaPayload.id,
+      mimeType: mediaPayload.mime_type,
+      ...(mediaPayload.filename ? { filename: mediaPayload.filename } : {}),
+      ...(mediaPayload.duration ? { durationMs: mediaPayload.duration * 1000 } : {}),
+      ...(mediaKind === "audio" && mediaPayload.voice ? { voice: true } : {}),
+    };
+    return { body: mediaPayload.caption ?? "", media };
+  }
+  const placeholder = placeholderForUnhandledType(m);
+  return placeholder ? { body: placeholder } : null;
+}
+
+/** Digits-only phone (Meta's wa_id is digits by spec; strip defensively). */
+function digitsOnly(v: string | undefined): string | undefined {
+  const d = v ? v.replace(/\D/g, "") : "";
+  return d.length > 0 ? d : undefined;
+}
+
+function tsFromMeta(timestamp: string | undefined): Date {
+  const secs = timestamp ? Number(timestamp) : NaN;
+  return Number.isFinite(secs) ? new Date(secs * 1000) : new Date();
+}
+
+/** History-declined sentinel: the owner turned off sharing in the Business App. */
+const HISTORY_DECLINED_CODE = 2593109;
 
 function mapMetaStatus(s: string | undefined): MessageStatus | null {
   switch (s) {
@@ -623,6 +722,125 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         if (change.field === "message_template_status_update") {
           const evt = parseTemplateStatusUpdate(value, payload as Record<string, unknown>);
           if (evt) events.push(evt);
+          continue;
+        }
+
+        // --- WhatsApp Coexistence webhooks -------------------------------
+        // Emitted only when the number runs on both the Business App and the
+        // Cloud API. Each keeps the shared inbox in sync with the owner's
+        // phone. Silently dropped before this block existed (the field gate
+        // below rejects everything except messages/calls).
+
+        // smb_message_echoes: a message the owner just sent FROM the phone app.
+        // `from` is the business, `to` is the customer — so the conversation
+        // key is `to`, and we emit an OUTBOUND echo (no authoring agent).
+        if (change.field === "smb_message_echoes") {
+          for (const m of Array.isArray(value.message_echoes) ? value.message_echoes : []) {
+            const externalId = m.id;
+            const contactPhone = digitsOnly(m.to);
+            if (!externalId || !contactPhone) continue;
+            const content = extractMetaMessageContent(m);
+            if (!content) continue;
+            events.push({
+              kind: "echo",
+              externalId,
+              contactPhone,
+              body: content.body,
+              ...(content.media ? { media: content.media } : {}),
+              timestamp: tsFromMeta(m.timestamp),
+              rawPayload: payload as Record<string, unknown>,
+            } satisfies NormalizedOutboundEcho);
+          }
+          continue;
+        }
+
+        // history: the past-180d backfill. Each thread is one customer
+        // (`thread.id` = their number); each message is inbound (from=customer)
+        // or an outbound echo (from=business). Chunked across phases — we log
+        // progress and let dedup make re-delivery idempotent.
+        if (change.field === "history") {
+          const businessNumber = digitsOnly(value.metadata?.display_phone_number);
+          // Value-level decline: sharing is off, nothing to ingest.
+          if (Array.isArray(value.errors) && value.errors.some((e) => e.code === HISTORY_DECLINED_CODE)) {
+            console.warn(
+              JSON.stringify({ event: "coexistence.history_declined", severity: "info" }),
+            );
+            continue;
+          }
+          for (const h of Array.isArray(value.history) ? value.history : []) {
+            if (Array.isArray(h.errors) && h.errors.some((e) => e.code === HISTORY_DECLINED_CODE)) {
+              console.warn(
+                JSON.stringify({ event: "coexistence.history_declined", severity: "info" }),
+              );
+              continue;
+            }
+            console.log(
+              JSON.stringify({
+                event: "coexistence.history_chunk",
+                phase: h.metadata?.phase,
+                chunkOrder: h.metadata?.chunk_order,
+                progress: h.metadata?.progress,
+                threads: Array.isArray(h.threads) ? h.threads.length : 0,
+              }),
+            );
+            for (const thread of Array.isArray(h.threads) ? h.threads : []) {
+              const threadPhone = digitsOnly(thread.id);
+              for (const m of Array.isArray(thread.messages) ? thread.messages : []) {
+                const externalId = m.id;
+                if (!externalId) continue;
+                const content = extractMetaMessageContent(m);
+                if (!content) continue;
+                const ts = tsFromMeta(m.timestamp);
+                const fromDigits = digitsOnly(m.from);
+                const isBusinessSent = !!businessNumber && fromDigits === businessNumber;
+                // Customer number: prefer the thread id; else the non-business
+                // endpoint of the message (`to` for echoes, `from` for inbound).
+                const contactPhone =
+                  threadPhone ?? (isBusinessSent ? digitsOnly(m.to) : fromDigits);
+                if (!contactPhone) continue;
+                if (isBusinessSent) {
+                  events.push({
+                    kind: "echo",
+                    externalId,
+                    contactPhone,
+                    body: content.body,
+                    ...(content.media ? { media: content.media } : {}),
+                    timestamp: ts,
+                    rawPayload: payload as Record<string, unknown>,
+                  } satisfies NormalizedOutboundEcho);
+                } else {
+                  events.push({
+                    kind: "message",
+                    externalId,
+                    contactPhone,
+                    contactName: null,
+                    body: content.body,
+                    ...(content.media ? { media: content.media } : {}),
+                    timestamp: ts,
+                    rawPayload: payload as Record<string, unknown>,
+                  } satisfies NormalizedInboundMessage);
+                }
+              }
+            }
+          }
+          continue;
+        }
+
+        // smb_app_state_sync: the owner's phone address book changed. We use it
+        // only to NAME contacts that already exist (see ingestContactSync).
+        if (change.field === "smb_app_state_sync") {
+          for (const s of Array.isArray(value.state_sync) ? value.state_sync : []) {
+            if (s.type !== "contact" || !s.contact) continue;
+            const phone = digitsOnly(s.contact.phone_number);
+            if (!phone) continue;
+            events.push({
+              kind: "contact_sync",
+              phone,
+              fullName: s.contact.full_name?.trim() || null,
+              action: s.action === "remove" ? "remove" : "add",
+              rawPayload: payload as Record<string, unknown>,
+            } satisfies NormalizedContactSync);
+          }
           continue;
         }
 

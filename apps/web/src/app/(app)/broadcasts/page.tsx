@@ -45,13 +45,19 @@ export default async function BroadcastsPage() {
     cookieStore.get(BROADCASTS_VIEW_COOKIE)?.value,
   );
 
-  const [{ permissions }, rows] = await Promise.all([
+  const [{ permissions }, broadcastsPage] = await Promise.all([
     getSession(),
+    // Seed page 1 in numbered mode so the SSR rows match the paginated browser
+    // (25/page). page/take must match BROADCASTS_PAGE_SIZE in broadcasts-browser.
     listBroadcasts({
       ...(persistedStatus !== "all" ? { status: persistedStatus } : {}),
       ...(persistedSearch ? { search: persistedSearch } : {}),
+      page: 1,
+      take: 25,
     }),
   ]);
+  const rows = broadcastsPage.broadcasts;
+  const initialTotalCount = broadcastsPage.totalCount ?? null;
   const canManage = permissions["broadcasts:manage"];
 
   return (
@@ -85,6 +91,7 @@ export default async function BroadcastsPage() {
       ) : (
         <BroadcastsBrowser
           initial={rows}
+          initialTotalCount={initialTotalCount}
           canManage={canManage}
           initialFilter={persistedStatus}
           initialSearch={persistedSearch}

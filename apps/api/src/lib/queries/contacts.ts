@@ -132,7 +132,13 @@ export async function listContacts(
   opts: ListContactsOpts = {},
 ): Promise<CursorPage<ContactListItem>> {
   const take = clampTake(opts.take, CONTACTS_PAGE);
-  const cursor = parseContactCursor(opts.cursor ?? null);
+  // Numbered (offset) pagination: when `page` is set the UI drives discrete
+  // pages, so we ignore the keyset cursor and OFFSET into the ordered set
+  // instead. `totalCount` (computed below whenever there's no cursor) gives the
+  // page count. Keyset stays the default for infinite-scroll callers.
+  const pageMode = opts.page != null && opts.page >= 1;
+  const offset = pageMode ? (opts.page! - 1) * take : 0;
+  const cursor = pageMode ? null : parseContactCursor(opts.cursor ?? null);
 
   // The filter predicates (everything except the keyset cursor + sort + limit)
   // are factored out into `buildContactFilterWhere` so the COUNT(*) below AND
@@ -250,14 +256,18 @@ export async function listContacts(
     -- BOTH this ORDER BY and the cursor off that column — turning every page
     -- into a pure keyset index walk.
     ORDER BY COALESCE(conv."lastMessageAt", c."createdAt") DESC, c.id DESC
-    LIMIT ${take + 1}
+    -- Offset mode fetches exactly one page at the offset; keyset mode fetches
+    -- one extra row to detect whether more remain.
+    LIMIT ${pageMode ? take : take + 1}
+    ${pageMode ? Prisma.sql`OFFSET ${offset}` : Prisma.empty}
   `;
 
-  const hasMore = rows.length > take;
+  const hasMore = pageMode ? false : rows.length > take;
   const sliced = hasMore ? rows.slice(0, take) : rows;
   const last = sliced.at(-1);
+  // Offset mode uses page numbers (from totalCount), not a cursor.
   const nextCursor =
-    hasMore && last
+    !pageMode && hasMore && last
       ? encodeContactCursor({
           sortAt: last.lastMessageAt ?? last.createdAt,
           id: last.id,

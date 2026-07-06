@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { toast } from "@/lib/toast";
 
 import { ensureConditionIds, stripConditionIds } from "./condition-group";
 import { StepEditorDrawer } from "./step-editor-drawer";
@@ -128,6 +129,11 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   // as hard errors in topErrors instead.
   const [warnings, setWarnings] = useState<string[]>([]);
   const [pending, startTransition] = useTransition();
+  // In-flight flags so Go-Live / Test / Delete disable + spin while working —
+  // without them a double-click double-fires (two publish POSTs / two test runs).
+  const [liveToggling, setLiveToggling] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   // Enqueue-failure banner only (the success path opens the result drawer).
   const [testError, setTestError] = useState<string | null>(null);
   // Open test-run result drawer is keyed by runId; null = closed.
@@ -407,7 +413,11 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     startTransition(async () => {
       explicitPersistRef.current = true;
       try {
-        await persist();
+        const ok = await persist();
+        // Confirm the save landed — autosave is silent, so without this the
+        // author has no signal the graph actually persisted. Failures already
+        // surface in the topErrors banner.
+        if (ok) toast.success("Workflow saved");
       } finally {
         explicitPersistRef.current = false;
       }
@@ -419,80 +429,95 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   // Going Live saves the canvas then publishes; going Draft just unpublishes.
   // The /publish endpoint runs the stricter publish-tier validation.
   async function handleLiveToggle() {
+    if (liveToggling) return;
     setTopErrors([]);
     // Publish is only meaningful on a saved row. Skip in create mode (the
     // control is disabled there anyway).
     if (mode !== "edit" || !workflow) return;
     const goLive = !published;
-    if (goLive) {
-      // Save the latest canvas first so /publish validates what's on screen.
-      // Guard against the debounce aborting this save mid-flight.
-      explicitPersistRef.current = true;
-      let ok: boolean;
-      try {
-        ok = await persist({ silent: true });
-      } finally {
-        explicitPersistRef.current = false;
+    setLiveToggling(true);
+    try {
+      if (goLive) {
+        // Save the latest canvas first so /publish validates what's on screen.
+        // Guard against the debounce aborting this save mid-flight.
+        explicitPersistRef.current = true;
+        let ok: boolean;
+        try {
+          ok = await persist({ silent: true });
+        } finally {
+          explicitPersistRef.current = false;
+        }
+        if (!ok) return;
       }
-      if (!ok) return;
+      const res = await apiFetch(`/api/team/workflows/${workflow.id}/publish`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ publish: goLive }),
+      });
+      const json = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        details?: string[];
+        stepErrors?: Record<string, string>;
+      };
+      if (!res.ok) {
+        setTopErrors(json.details ?? [json.error ?? `error ${res.status}`]);
+        if (json.stepErrors) setStepErrors(json.stepErrors);
+        toast.error(
+          goLive ? "Couldn't go live — check the errors" : "Couldn't set to draft",
+        );
+        return;
+      }
+      setPublished(goLive);
+      // A successful publish means the graph validated clean — clear any stale
+      // mid-build warnings. (Going Draft never validates, but clearing is still
+      // correct: the unpublished workflow's warnings re-surface on the next save.)
+      if (goLive) setWarnings([]);
+      toast.success(goLive ? "Workflow is now live" : "Workflow set to draft");
+      softRefresh();
+    } finally {
+      setLiveToggling(false);
     }
-    const res = await apiFetch(`/api/team/workflows/${workflow.id}/publish`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ publish: goLive }),
-    });
-    const json = (await res.json().catch(() => ({}))) as {
-      error?: string;
-      details?: string[];
-      stepErrors?: Record<string, string>;
-    };
-    if (!res.ok) {
-      setTopErrors(json.details ?? [json.error ?? `error ${res.status}`]);
-      if (json.stepErrors) setStepErrors(json.stepErrors);
-      return;
-    }
-    setPublished(goLive);
-    // A successful publish means the graph validated clean — clear any stale
-    // mid-build warnings. (Going Draft never validates, but clearing is still
-    // correct: the unpublished workflow's warnings re-surface on the next save.)
-    if (goLive) setWarnings([]);
-    softRefresh();
   }
 
   async function handleTest() {
-    if (!workflow) return;
+    if (testing || !workflow) return;
     setTestError(null);
     setTestRunId(null);
-    // Persist the on-screen canvas first so /test runs what the author sees,
-    // not the last auto-saved snapshot (debounced ~1.5s behind). Guard against
-    // the debounce aborting this save mid-flight (which would drop the test).
-    explicitPersistRef.current = true;
-    let saved: boolean;
+    setTesting(true);
     try {
-      saved = await persist({ silent: true });
+      // Persist the on-screen canvas first so /test runs what the author sees,
+      // not the last auto-saved snapshot (debounced ~1.5s behind). Guard against
+      // the debounce aborting this save mid-flight (which would drop the test).
+      explicitPersistRef.current = true;
+      let saved: boolean;
+      try {
+        saved = await persist({ silent: true });
+      } finally {
+        explicitPersistRef.current = false;
+      }
+      if (!saved) return;
+      const res = await apiFetch(`/api/team/workflows/${workflow.id}/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (res.ok) {
+        const json = (await res.json()) as { runId: string };
+        // Open the result drawer; it polls GET :id/runs/:runId to completion.
+        setSelectedStepId(null);
+        setTriggerOpen(false);
+        setTestRunId(json.runId);
+      } else {
+        const txt = await res.text();
+        setTestError(`Couldn't start test run: ${txt || res.status}`);
+      }
     } finally {
-      explicitPersistRef.current = false;
-    }
-    if (!saved) return;
-    const res = await apiFetch(`/api/team/workflows/${workflow.id}/test`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    if (res.ok) {
-      const json = (await res.json()) as { runId: string };
-      // Open the result drawer; it polls GET :id/runs/:runId to completion.
-      setSelectedStepId(null);
-      setTriggerOpen(false);
-      setTestRunId(json.runId);
-    } else {
-      const txt = await res.text();
-      setTestError(`Couldn't start test run: ${txt || res.status}`);
+      setTesting(false);
     }
   }
 
   async function handleDelete() {
-    if (!workflow) return;
+    if (deleting || !workflow) return;
     const ok = await confirm({
       title: "Delete this workflow?",
       description: "The workflow and its run history will be removed. This can't be undone.",
@@ -500,9 +525,16 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
       destructive: true,
     });
     if (!ok) return;
+    setDeleting(true);
     const res = await apiFetch(`/api/team/workflows/${workflow.id}`, { method: "DELETE" });
-    if (res.ok) router.push("/workflows");
-    else setTopErrors([`delete failed: ${res.status}`]);
+    if (res.ok) {
+      toast.success("Workflow deleted");
+      router.push("/workflows"); // navigating away — leave `deleting` set
+    } else {
+      setTopErrors([`delete failed: ${res.status}`]);
+      toast.error("Couldn't delete the workflow");
+      setDeleting(false);
+    }
   }
 
   function updateSelectedConfig(config: Record<string, unknown>) {
@@ -646,7 +678,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
           <button
             type="button"
             onClick={handleLiveToggle}
-            disabled={mode !== "edit"}
+            disabled={mode !== "edit" || liveToggling}
             title={
               isLive
                 ? "Running on live triggers — click to switch back to a draft"
@@ -659,14 +691,28 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
                 : "border-border bg-muted text-muted-foreground")
             }
           >
-            <Power className="size-3.5" />
+            {liveToggling ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Power className="size-3.5" />
+            )}
             {isLive ? "Live" : "Draft"}
           </button>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {mode === "edit" && (
-            <Button type="button" variant="outline" size="sm" onClick={handleTest}>
-              <PlayCircle className="size-4" />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleTest}
+              disabled={testing}
+            >
+              {testing ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <PlayCircle className="size-4" />
+              )}
               Test
             </Button>
           )}
@@ -681,8 +727,14 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
               size="sm"
               className="text-destructive hover:bg-destructive/10 hover:text-destructive"
               onClick={handleDelete}
+              disabled={deleting}
+              aria-label="Delete workflow"
             >
-              <Trash2 className="size-4" />
+              {deleting ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Trash2 className="size-4" />
+              )}
             </Button>
           )}
           <Button

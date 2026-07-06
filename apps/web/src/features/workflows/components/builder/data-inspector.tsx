@@ -277,7 +277,8 @@ function ShapeTree({
                       "group flex items-center gap-2 rounded px-1.5 py-1 text-left text-2xs transition-colors",
                       readOnly ? "cursor-default" : "cursor-pointer hover:bg-accent/60",
                     )}
-                    title={readOnly ? leaf.description ?? leaf.type : `Insert ${token}`}
+                    title={readOnly ? leaf.description ?? leaf.type : "Copy variable"}
+                    aria-label={readOnly ? undefined : "Copy variable"}
                   >
                     <span className="truncate font-mono text-2xs">{display}</span>
                     <span className="ml-auto shrink-0 text-[9px] lowercase text-muted-foreground/50">

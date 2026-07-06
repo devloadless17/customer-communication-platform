@@ -35,9 +35,10 @@ export function AvatarImage({
     <AvatarPrimitive.Image
       // Inset ring (not outset) so the parent's overflow-hidden doesn't clip
       // it; rounded-full so the hairline traces the circle instead of touching
-      // it at 4 points. Gives white-background profile images visible edges.
+      // it at 4 points. Gives white-background profile images visible edges —
+      // strong enough to read as a defined circle on a light toolbar/card.
       className={cn(
-        "aspect-square size-full rounded-full ring-1 ring-inset ring-black/10 dark:ring-white/15",
+        "aspect-square size-full rounded-full ring-1 ring-inset ring-black/15 dark:ring-white/20",
         className,
       )}
       {...props}
@@ -63,7 +64,14 @@ export function AvatarFallback({
     <AvatarPrimitive.Fallback
       className={cn(
         "flex size-full items-center justify-center rounded-full text-xs font-medium",
-        colored ? "text-white" : "bg-muted text-muted-foreground",
+        // Same inset hairline as AvatarImage so the circle has a defined edge
+        // on any background — without it, an unseeded gray or white-ish
+        // fallback vanishes into a light toolbar/card. Seeded gradients get a
+        // subtle darker rim; unseeded gray gets a crisp border.
+        "ring-1 ring-inset",
+        colored
+          ? "text-white ring-black/15"
+          : "bg-muted text-muted-foreground ring-black/15 dark:ring-white/20",
         className,
       )}
       // Spread consumer `style` last so an explicit override still wins.

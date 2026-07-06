@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { getClientSocket } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
@@ -42,7 +42,9 @@ export function useTeamChannelsList(
   // Sync from the server-rendered prop on the first render after a server
   // nav (e.g. switching channels via the URL refreshes server data).
   const [trackedKey, setTrackedKey] = useState(() => signatureOf(initial));
-  const incomingKey = signatureOf(initial);
+  // Memoized — `signatureOf` is an O(n) concat over every channel; without this
+  // it re-ran on every provider render (which happens on each activity frame).
+  const incomingKey = useMemo(() => signatureOf(initial), [initial]);
   if (trackedKey !== incomingKey) {
     setTrackedKey(incomingKey);
     setChannels(initial);

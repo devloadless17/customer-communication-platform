@@ -294,7 +294,7 @@ export function InboxSubSidebar({
           )}
           <span className="flex-1 truncate">Stages</span>
           {!stagesOpen && stages.length > 0 && (
-            <span className="tabular-nums text-3xs font-medium text-muted-foreground/70">
+            <span className="tabular-nums text-3xs font-medium text-muted-foreground">
               {stages.length}
             </span>
           )}
@@ -448,7 +448,7 @@ export function InboxSubSidebar({
                           `title` tooltip nobody could find). */}
                       {trimmedNote && (
                         <span
-                          className="truncate text-2xs leading-tight text-muted-foreground/70"
+                          className="truncate text-2xs leading-tight text-muted-foreground"
                           title={trimmedNote}
                         >
                           {trimmedNote}

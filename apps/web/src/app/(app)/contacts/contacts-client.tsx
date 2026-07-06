@@ -61,7 +61,7 @@ import {
 import { SelectAllRow } from "@/features/contacts/components/contact-browser/select-all-row";
 import { ContactRowsSkeleton } from "@/features/contacts/components/contact-browser/row-skeleton";
 import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
-import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
+import { Pagination } from "@/components/ui/pagination";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 
 import dynamic from "next/dynamic";
@@ -92,7 +92,7 @@ const ContactDetailDrawer = dynamic(
  * unbounded pages. Lift this only by switching to the use-virtualizer pattern
  * (see conversation-list.tsx).
  */
-const CONTACTS_RENDER_CAP = 2000;
+const CONTACTS_PAGE_SIZE = 25;
 
 /**
  * Contacts directory.
@@ -141,15 +141,19 @@ export function ContactsClient({
     initialNextCursor,
     initialTotalCount,
     initialStageFilter,
+    paged: true,
+    pageSize: CONTACTS_PAGE_SIZE,
   });
   const { items, setItems, setError, reconcileContactUpdate, refetch, adjustTotalCount } =
     list;
-  // Auto-load the next page as the sentinel nears the viewport. `loadMore`
-  // self-guards while a page is already in flight.
-  const loadMoreRef = useInfiniteScroll({
-    hasMore: Boolean(list.nextCursor) && items.length < CONTACTS_RENDER_CAP,
-    onLoadMore: list.loadMore,
-  });
+  // Jump to a page and scroll back to the top so the new page starts at row 1.
+  const goToPage = useCallback(
+    (next: number) => {
+      list.setPage(Math.min(Math.max(1, next), list.pageCount));
+      if (typeof window !== "undefined") window.scrollTo({ top: 0 });
+    },
+    [list],
+  );
   // Lifted to state so dialogs can splice in newly-created definitions
   // without waiting on a router.refresh round trip.
   //
@@ -609,9 +613,17 @@ export function ContactsClient({
         </div>
       )}
 
-      <div className="rounded-lg border border-border bg-card">
+      <div
+        className={cn(
+          "rounded-lg border border-border bg-card transition-opacity",
+          // Dim in place during a page/filter refetch so the interaction reads
+          // as busy (matches broadcasts + templates), instead of leaving stale
+          // rows at full opacity with only the far-down pagination disabled.
+          list.loading && items.length > 0 && "pointer-events-none opacity-60",
+        )}
+      >
         {list.loading && items.length === 0 ? (
-          <ContactRowsSkeleton />
+          <ContactRowsSkeleton count={CONTACTS_PAGE_SIZE} />
         ) : showEmpty ? (
           (() => {
             const filtered =
@@ -655,12 +667,12 @@ export function ContactsClient({
                 else setSelectedIds(new Set());
               }}
               rightSlot={
+                // Just the total here — the "X–Y of N" range lives in the
+                // <Pagination> summary below, so two differently-phrased
+                // "Showing…" labels don't sit on the same screen.
                 <span className="tabular-nums">
-                  {list.totalCount !== null && list.totalCount > items.length
-                    ? `Showing ${items.length.toLocaleString()} of ${list.totalCount.toLocaleString()}`
-                    : `${(list.totalCount ?? items.length).toLocaleString()} contact${
-                        (list.totalCount ?? items.length) === 1 ? "" : "s"
-                      }`}
+                  {(list.totalCount ?? items.length).toLocaleString()} contact
+                  {(list.totalCount ?? items.length) === 1 ? "" : "s"}
                 </span>
               }
             />
@@ -728,32 +740,20 @@ export function ContactsClient({
             </ul>
           </>
         )}
-        {list.nextCursor && items.length < CONTACTS_RENDER_CAP && (
-          <div
-            ref={loadMoreRef}
-            className="flex items-center justify-center border-t border-border p-3 text-xs text-muted-foreground"
-          >
-            {list.loadingMore && (
-              <>
-                <Loader2 className="mr-2 size-3.5 animate-spin" />
-                Loading more…
-              </>
-            )}
-          </div>
-        )}
-        {/* Cap reached — stop auto-loading and nudge toward filters. Matches
-            the picker's behaviour so both contact surfaces stay responsive. */}
-        {list.nextCursor && items.length >= CONTACTS_RENDER_CAP && (
-          <div className="border-t border-border p-3 text-center text-xs text-muted-foreground">
-            Showing {items.length.toLocaleString()}
-            {list.totalCount !== null && list.totalCount > items.length
-              ? ` of ${list.totalCount.toLocaleString()}`
-              : ""}{" "}
-            contacts. Refine the filters or search to see more — the list is
-            capped to keep the page responsive.
-          </div>
-        )}
       </div>
+
+      {!list.loading && items.length > 0 && (
+        <Pagination
+          className="mt-4"
+          page={list.page}
+          pageCount={list.pageCount}
+          onPageChange={goToPage}
+          totalCount={list.totalCount ?? undefined}
+          pageSize={CONTACTS_PAGE_SIZE}
+          itemNoun="contacts"
+          disabled={list.loading}
+        />
+      )}
 
       {importing && (
         <ImportContactsDialog

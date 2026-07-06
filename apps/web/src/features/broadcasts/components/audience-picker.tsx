@@ -174,6 +174,7 @@ function ModeButton({
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={cn(
         "relative inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium transition-colors",
         active ? "text-foreground" : "text-muted-foreground hover:text-foreground",

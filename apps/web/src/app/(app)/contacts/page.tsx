@@ -27,8 +27,14 @@ export default async function ContactsPage({
   const stageParam = typeof params.stage === "string" ? params.stage : undefined;
 
   const [page, fieldsAndBuiltins, tags, stages] = await Promise.all([
+    // Seed page 1 in NUMBERED (offset) mode so the SSR rows match what the
+    // paginated client shows — ContactsClient runs `useContactList` in `paged`
+    // mode (25/page) and trusts this seed for page 1 without an initial refetch.
+    // `page`/`take` must match CONTACTS_PAGE_SIZE in contacts-client.tsx.
     listContacts({
       stageId: stageParam === "none" ? "none" : stageParam || undefined,
+      page: 1,
+      take: 25,
     }),
     listContactFieldsWithBuiltins(),
     listTags(),

@@ -71,6 +71,9 @@ export const ListTeamCallsQuerySchema = z
   .object({
     take: z.coerce.number().int().min(1).max(100).default(50),
     cursor: z.string().optional(),
+    /** 1-based page for numbered pagination. When present the query runs in
+     *  offset mode (cursor ignored, totalCount returned). */
+    page: z.coerce.number().int().min(1).optional(),
     q: z.string().trim().max(100).optional(),
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),

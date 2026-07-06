@@ -42,6 +42,7 @@ export function PinnedBar({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
         className="flex w-full items-center gap-2 px-4 py-2 text-xs font-medium transition-colors hover:bg-warning-bg/60"
       >
         <Pin className="size-3.5 text-warning-fg" />

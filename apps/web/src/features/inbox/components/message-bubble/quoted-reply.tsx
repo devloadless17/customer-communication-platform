@@ -66,6 +66,9 @@ export function QuotedReply({
         <img
           src={reply.thumbnailUrl}
           alt=""
+          // Off-thread decode so a reply-heavy thread doesn't block the main
+          // thread decoding these 32px thumbnails during scroll.
+          decoding="async"
           className="size-8 shrink-0 self-center rounded-md object-cover"
         />
       )}

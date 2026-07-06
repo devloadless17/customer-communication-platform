@@ -4,6 +4,8 @@ import { db } from "@/lib/db";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { publish } from "@/lib/events/bus";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
+import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
+import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { ingestCallEvent } from "@/lib/providers/ingest-call";
 import { ensureDefaultStage } from "@/lib/queries";
 import {
@@ -24,8 +26,10 @@ import { workflowConversationSnapshotAfterStatusChange } from "@/lib/workflows/e
 import { findAndConsumeAwaitingReplies } from "@/lib/workflows/resume-on-inbound";
 import { sessionKindFromFlags } from "@ccp/shared/events/types";
 import type {
+  NormalizedContactSync,
   NormalizedEvent,
   NormalizedInboundMessage,
+  NormalizedOutboundEcho,
   NormalizedReaction,
   NormalizedStatusUpdate,
   NormalizedTemplateStatusUpdate,
@@ -79,6 +83,12 @@ export async function ingestEvents(
     try {
       if (evt.kind === "message") {
         await ingestInboundMessage(teamId, channel, evt);
+      } else if (evt.kind === "echo") {
+        // WhatsApp Coexistence: a message the owner sent from the phone app.
+        await ingestOutboundEcho(teamId, channel, evt);
+      } else if (evt.kind === "contact_sync") {
+        // WhatsApp Coexistence: the owner's phone address book changed.
+        await ingestContactSync(teamId, channel, evt);
       } else if (evt.kind === "reaction") {
         await ingestReaction(teamId, channel, evt);
       } else if (evt.kind === "template_status") {
@@ -1235,6 +1245,481 @@ async function ingestInboundMessage(
       // committed); contact.created is the secondary signal here.
     }
   }
+}
+
+// WhatsApp Coexistence: the "who read it" attribution on the conversation.read
+// event a phone-app reply publishes. There's no acting agent — the owner read +
+// replied on their phone — so we stamp a stable sentinel rather than a user id.
+// Consumers use readByUserId only as a cross-tab "not me" nudge; a sentinel
+// clears the badge for everyone, which is the intent.
+const COEXISTENCE_ECHO_READER = "whatsapp-business-app";
+
+/**
+ * Build the outbound-message media block for a `message.sent` payload. Mirrors
+ * the media arm of buildMessageDomain but for an echo/outbound row. `pending`
+ * is true until the binary lands (completePendingMedia patches + emits
+ * message.media_ready, exactly like inbound media).
+ */
+function buildEchoMediaBlock(
+  createdId: string,
+  media: NormalizedOutboundEcho["media"],
+  body: string,
+): Message["media"] | undefined {
+  if (!media) return undefined;
+  return {
+    kind: media.kind,
+    url: `/api/media/${createdId}`,
+    mimeType: media.mimeType,
+    sizeBytes: media.sizeBytes ?? 0,
+    ...(body ? { caption: body } : {}),
+    ...(media.filename ? { filename: media.filename } : {}),
+    ...(media.durationMs != null ? { durationMs: media.durationMs } : {}),
+    ...(media.voice ? { voice: true } : {}),
+  };
+}
+
+/**
+ * WhatsApp Coexistence: a message the owner sent from the WhatsApp Business App
+ * on their phone, mirrored to us via `smb_message_echoes` (or the live-echo arm
+ * of `history`). We land it as a `direction:"out"`, `senderUserId:null`,
+ * `origin:"business_app"` row in the customer's conversation so the shared inbox
+ * matches the phone.
+ *
+ * Contract vs. inbound:
+ *   - dedup returns EARLY (an echo re-delivery, or an echo of a message our own
+ *     API already sent, both collide on the wamid — no phantom, no double bump);
+ *   - the conversation is resolved/created (an echo can OPEN a brand-new thread
+ *     if the owner started the chat from the phone) and REOPENED if closed;
+ *   - it does NOT increment unread — instead it CLEARS it (the owner replying is
+ *     proof they saw the customer's messages, mirroring markReadOnAgentSend);
+ *   - it does NOT send a Meta read receipt (the phone already did on the owner's
+ *     side) and does NOT re-trigger the `message_received` automations (this is
+ *     an OUTBOUND message — `message.sent` drives the same subscribers a normal
+ *     agent send would).
+ */
+async function ingestOutboundEcho(
+  teamId: string,
+  channel: Channel,
+  evt: NormalizedOutboundEcho,
+): Promise<void> {
+  // Rule #3 dedupe. The outbound idempotent-create below is the race backstop;
+  // this cheap pre-check short-circuits the common re-delivery / echo-of-our-
+  // own-send case before we touch the contact/conversation resolution.
+  const existing = await db.message.findUnique({
+    where: {
+      teamId_channel_externalId: { teamId, channel, externalId: evt.externalId },
+    },
+    select: { id: true },
+  });
+  if (existing) return;
+
+  const defaultStageId = await ensureDefaultStage(teamId);
+  const { firstName, lastName } = splitContactName(evt.contactPhone);
+
+  const { contact, conversation, isNewContact, wasRevived, isNewConversation } =
+    await runWithSerializableRetry(async (tx) => {
+      const found = await tx.contact.findFirst({
+        where: { teamId, phoneNumber: evt.contactPhone },
+        include: { tags: { select: { id: true } } },
+      });
+      const isNewContact = !found;
+      const wasRevived = !!found?.deletedAt;
+      let contact = found;
+      if (found?.deletedAt) {
+        // The owner is chatting this number again → revive the tombstoned row
+        // (same as the inbound + manual revive paths). Name/stage untouched.
+        contact = await tx.contact.update({
+          where: { id: found.id },
+          data: { deletedAt: null },
+          include: { tags: { select: { id: true } } },
+        });
+      } else if (!found) {
+        contact = await tx.contact.create({
+          data: {
+            teamId,
+            identityChannel: channel,
+            phoneNumber: evt.contactPhone,
+            name: evt.contactPhone,
+            firstName,
+            lastName,
+            countryCode: getCountryFromPhone(evt.contactPhone),
+            stageId: defaultStageId,
+          },
+          include: { tags: { select: { id: true } } },
+        });
+      }
+
+      // One conversation per contact. Reuse the existing thread (reopening a
+      // closed one — there's fresh activity); create it only when the owner
+      // started a brand-new chat from the phone.
+      const existingConvo = await tx.conversation.findFirst({
+        where: { teamId, contactId: contact!.id },
+        orderBy: { lastMessageAt: "desc" },
+      });
+      const isNewConversation = !existingConvo;
+      let conversation = existingConvo;
+      if (!conversation) {
+        conversation = await tx.conversation.create({
+          data: {
+            teamId,
+            contactId: contact!.id,
+            channel,
+            // A phone-initiated thread lands in triage like any other new
+            // conversation until an agent claims it.
+            status: "pending",
+            lastMessageAt: evt.timestamp,
+            lastMessagePreview: "",
+          },
+        });
+      } else if (conversation.status === "closed") {
+        // Reopen: the owner is chatting this contact again. CAS so a racing
+        // inbound reopen doesn't double-flip; either way the thread ends pending.
+        await tx.conversation.updateMany({
+          where: { id: conversation.id, status: "closed" },
+          data: { status: "pending", assignedUserId: null },
+        });
+        conversation = { ...conversation, status: "pending", assignedUserId: null };
+      }
+      return { contact: contact!, conversation, isNewContact, wasRevived, isNewConversation };
+    });
+
+  // Strict-monotonic timestamp so a phone reply landing in the same second as
+  // the inbound it answers still sorts AFTER it (same rule as send-text-internal).
+  const messageTimestamp =
+    conversation.lastMessageAt && conversation.lastMessageAt >= evt.timestamp
+      ? new Date(conversation.lastMessageAt.getTime() + 1)
+      : evt.timestamp;
+
+  const mediaPending = Boolean(
+    evt.media && !(evt.media.storageKey && evt.media.storageUrl),
+  );
+
+  const created = await createOutboundMessageIdempotent({
+    teamId,
+    conversationId: conversation.id,
+    externalId: evt.externalId,
+    senderUserId: null,
+    origin: "business_app",
+    body: evt.body,
+    direction: "out",
+    channel,
+    status: "sent",
+    rawPayload: evt.rawPayload as Prisma.InputJsonValue,
+    timestamp: messageTimestamp,
+    ...(evt.media
+      ? {
+          mediaKind: evt.media.kind,
+          mediaMimeType: evt.media.mimeType,
+          mediaCaption: evt.body || null,
+          mediaFilename: evt.media.filename ?? null,
+          mediaDurationMs: evt.media.durationMs ?? null,
+          mediaVoice: evt.media.voice ?? null,
+          ...(evt.media.storageKey && evt.media.storageUrl
+            ? {
+                mediaKey: evt.media.storageKey,
+                mediaUrl: evt.media.storageUrl,
+                mediaSizeBytes: evt.media.sizeBytes ?? null,
+              }
+            : {}),
+        }
+      : {}),
+  });
+
+  const preview = (evt.body.trim() || mediaPreview(evt.media?.kind)).slice(0, 200);
+  const mediaBlock = buildEchoMediaBlock(created.id, evt.media, evt.body);
+  const message: Message = {
+    id: created.id,
+    teamId,
+    conversationId: conversation.id,
+    externalId: evt.externalId,
+    senderUserId: null,
+    origin: "business_app",
+    body: evt.body,
+    direction: "out",
+    channel,
+    status: "sent",
+    timestamp: messageTimestamp.toISOString(),
+    ...(mediaBlock
+      ? { media: mediaBlock, ...(mediaPending ? { mediaPending: true } : {}) }
+      : {}),
+  };
+
+  // Splice-in row so a brand-new / reopened phone-initiated thread appears in a
+  // teammate's loaded list without a refetch (same mechanism the inbound path
+  // uses on first contact). unreadCount 0 — we clear it just below.
+  const newConversation: ConversationWithRefs | undefined = isNewConversation
+    ? {
+        conversation: toDomainConversation({
+          ...conversation,
+          lastMessageAt: messageTimestamp,
+          lastMessagePreview: preview,
+          lastMessageDirection: "out",
+          unreadCount: 0,
+        }),
+        contact: toContactWire(contact),
+        assignedUser: null,
+        messages: [],
+        notes: [],
+        lastInboundAt: null,
+      }
+    : undefined;
+
+  // Bump the conversation summary + publish `message.sent` (drives the thread
+  // bubble, the list preview, workflows chained on outbound, and outbound
+  // webhooks) — the same commit every agent/automation send goes through.
+  await commitOutboundSend({
+    conversationId: conversation.id,
+    bumpTimestamp: messageTimestamp,
+    preview,
+    event: {
+      type: "message.sent",
+      teamId,
+      conversationId: conversation.id,
+      contactId: contact.id,
+      message,
+      preview,
+      senderUserId: null,
+      ...(newConversation ? { newConversation } : {}),
+    },
+    onMissing: () => {
+      // Conversation vanished mid-ingest (rare). Nothing to bump; the row is
+      // already written. Swallow — no optimistic UI is waiting on this.
+    },
+  });
+
+  // Clear team-wide unread: the owner read the thread on their phone to reply.
+  // CAS so a concurrent inbound bump isn't clobbered; publish conversation.read
+  // ONLY on the 1→0 transition so the list badge converges (the message.sent
+  // frame above doesn't touch list unread). Best-effort — a miss re-syncs on the
+  // next inbound. NO Meta read receipt (the phone already sent it).
+  try {
+    const cleared = await db.conversation.updateMany({
+      where: { id: conversation.id, teamId, unreadCount: { gt: 0 } },
+      data: { unreadCount: 0 },
+    });
+    if (cleared.count > 0) {
+      await publish({
+        type: "conversation.read",
+        teamId,
+        conversationId: conversation.id,
+        readByUserId: COEXISTENCE_ECHO_READER,
+      });
+    }
+  } catch (err) {
+    console.error(
+      `[ingest] echo mark-read failed for conversation=${conversation.id}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  // A brand-new / revived contact is a fresh directory appearance — same as the
+  // inbound + manual revive paths.
+  if (isNewContact || wasRevived) {
+    try {
+      await publish({
+        type: "contact.created",
+        teamId,
+        contact: toContactWire(contact),
+        source: "inbound",
+        createdByUserId: null,
+      });
+    } catch (err) {
+      console.error(
+        `[ingest] publish(contact.created) failed for echo team=${teamId} contact=${contact.id}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+}
+
+/**
+ * WhatsApp Coexistence `smb_app_state_sync`: the owner's phone address book
+ * changed. We use it ONLY to give a name to a contact that ALREADY exists in
+ * the inbox and doesn't yet have an agent-set one. Deliberately conservative:
+ *   - never CREATES a contact (an address-book entry who never messaged us isn't
+ *     an inbox contact — creating one would bloat the directory and break the
+ *     "Contact = a channel identity we converse with" rule);
+ *   - never CLOBBERS a real name (the agent owns the name — same "sticky after
+ *     create" policy as inbound);
+ *   - `remove` is ignored (removing someone from the phone book doesn't delete
+ *     an inbox contact with real conversation history).
+ */
+async function ingestContactSync(
+  teamId: string,
+  channel: Channel,
+  evt: NormalizedContactSync,
+): Promise<void> {
+  if (evt.action === "remove" || !evt.fullName) return;
+
+  const contact = await db.contact.findFirst({
+    where: { teamId, phoneNumber: evt.phone, identityChannel: channel },
+    include: { tags: { select: { id: true } } },
+  });
+  if (!contact) return;
+
+  // "No agent-set name" = blank, or still the phone-number default we stamp on
+  // first contact. Anything else is a real name we must not overwrite.
+  const current = contact.name?.trim() ?? "";
+  const hasRealName = current !== "" && current !== evt.phone;
+  if (hasRealName) return;
+
+  const { firstName, lastName } = splitContactName(evt.fullName);
+  const updated = await db.contact.update({
+    where: { id: contact.id },
+    data: { name: evt.fullName, firstName, lastName },
+    include: { tags: { select: { id: true } } },
+  });
+
+  try {
+    await publish({
+      type: "contact.updated",
+      teamId,
+      contact: toContactWire(updated),
+      previousStageId: updated.stageId,
+      fieldChanges: [],
+      changedByUserId: null,
+      workflowContact: toWorkflowContact(updated),
+      // Naming from the phone book is not a business event partners subscribe
+      // to — keep it out of workflow re-triggers + outbound webhooks. It's a
+      // local display refresh only.
+      silent: true,
+    });
+  } catch (err) {
+    console.error(
+      `[ingest] publish(contact.updated) failed for state_sync team=${teamId} contact=${contact.id}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
+ * WhatsApp Coexistence `history` backfill — ONE historical message (inbound or a
+ * business echo). Runs on the `coexistence-history` BullMQ worker, NOT the live
+ * webhook path, because a phase can carry thousands of messages.
+ *
+ * Deliberately QUIET vs. live ingest — these are OLD, already-handled messages:
+ *   - NO unread increment (a 6-month backfill must not light up the triage badge);
+ *   - NO workflow / outbound-webhook fanout (an old message must not fire "on
+ *     inbound" automations);
+ *   - NO per-message socket frame (a bulk import would flood every open client —
+ *     the imported threads surface on the next list fetch / thread open);
+ *   - conversations created here land `closed` (archived context, out of triage)
+ *     — a later LIVE message reopens them via the normal inbound path.
+ * Idempotent by wamid, so chunk re-delivery is safe.
+ */
+export interface HistoricalMessageInput {
+  externalId: string;
+  contactPhone: string;
+  body: string;
+  media?: NormalizedOutboundEcho["media"];
+  timestamp: Date;
+  direction: "in" | "out";
+  rawPayload: Record<string, unknown>;
+}
+
+export async function ingestHistoricalMessage(
+  teamId: string,
+  channel: Channel,
+  msg: HistoricalMessageInput,
+): Promise<void> {
+  const existing = await db.message.findUnique({
+    where: {
+      teamId_channel_externalId: { teamId, channel, externalId: msg.externalId },
+    },
+    select: { id: true },
+  });
+  if (existing) return;
+
+  const defaultStageId = await ensureDefaultStage(teamId);
+  const { firstName, lastName } = splitContactName(msg.contactPhone);
+
+  const conversation = await runWithSerializableRetry(async (tx) => {
+    const found = await tx.contact.findFirst({
+      where: { teamId, phoneNumber: msg.contactPhone },
+      select: { id: true },
+    });
+    let contactId = found?.id;
+    if (!contactId) {
+      const createdContact = await tx.contact.create({
+        data: {
+          teamId,
+          identityChannel: channel,
+          phoneNumber: msg.contactPhone,
+          name: msg.contactPhone,
+          firstName,
+          lastName,
+          countryCode: getCountryFromPhone(msg.contactPhone),
+          stageId: defaultStageId,
+          // Historical inbound sets lastInboundAt so the 24h-window UI is
+          // accurate for a thread that only exists via backfill.
+          ...(msg.direction === "in" ? { lastInboundAt: msg.timestamp } : {}),
+        },
+        select: { id: true },
+      });
+      contactId = createdContact.id;
+    } else if (msg.direction === "in") {
+      await tx.contact.updateMany({
+        where: {
+          id: contactId,
+          OR: [{ lastInboundAt: null }, { lastInboundAt: { lt: msg.timestamp } }],
+        },
+        data: { lastInboundAt: msg.timestamp },
+      });
+    }
+
+    const existingConvo = await tx.conversation.findFirst({
+      where: { teamId, contactId },
+      orderBy: { lastMessageAt: "desc" },
+    });
+    if (existingConvo) return existingConvo;
+    // Backfilled-only threads land closed — archived context, not triage.
+    return tx.conversation.create({
+      data: {
+        teamId,
+        contactId,
+        channel,
+        status: "closed",
+        lastMessageAt: msg.timestamp,
+        lastMessagePreview: "",
+      },
+    });
+  });
+
+  await createOutboundMessageIdempotent({
+    teamId,
+    conversationId: conversation.id,
+    externalId: msg.externalId,
+    senderUserId: null,
+    origin: msg.direction === "out" ? "business_app" : "api",
+    body: msg.body,
+    direction: msg.direction,
+    channel,
+    status: msg.direction === "out" ? "sent" : "delivered",
+    rawPayload: msg.rawPayload as Prisma.InputJsonValue,
+    timestamp: msg.timestamp,
+    ...(msg.media
+      ? {
+          mediaKind: msg.media.kind,
+          mediaMimeType: msg.media.mimeType,
+          mediaCaption: msg.body || null,
+          mediaFilename: msg.media.filename ?? null,
+          mediaDurationMs: msg.media.durationMs ?? null,
+          mediaVoice: msg.media.voice ?? null,
+        }
+      : {}),
+  });
+
+  // Advance the summary ONLY when this historical message is newer than what the
+  // thread already shows (chunks arrive out of order). Monotonic guard mirrors
+  // the live paths; no unread change, no socket frame.
+  await db.conversation.updateMany({
+    where: { id: conversation.id, lastMessageAt: { lte: msg.timestamp } },
+    data: {
+      lastMessageAt: msg.timestamp,
+      lastMessagePreview: (msg.body.trim() || mediaPreview(msg.media?.kind)).slice(0, 200),
+      lastMessageDirection: msg.direction,
+    },
+  });
 }
 
 /**
