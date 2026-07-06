@@ -1472,6 +1472,40 @@ function ThreadWorkspace({
   // Mobile/tablet contact-details Sheet (below lg the desktop right rail is
   // hidden). Opened by the Info button in ThreadHeader.
   const [detailsOpen, setDetailsOpen] = useState(false);
+  // Stabilize the two props MessageThread's React.memo compares by reference so
+  // an unrelated shell re-render (a team frame for another conversation, a
+  // search keystroke) doesn't defeat the memo and re-run the whole thread
+  // subtree. Every other prop forwarded below is already stable (shell
+  // useCallbacks / server-constant arrays).
+  const onOpenContactDetails = useCallback(() => setDetailsOpen(true), []);
+  const rightPanel = useMemo(
+    () => (
+      <ContactPanel
+        data={thread.data}
+        fieldDefinitions={fieldDefinitions}
+        builtins={contactPanelBuiltins}
+        canManageFields={canManageContactFields}
+        tagCatalog={tags}
+        teamMembers={teamMembers}
+        currentUserName={currentUser.name}
+        initialCollapsed={initialContactPanelCollapsed}
+        initialDetailsWidth={initialDetailsWidth}
+        onGoToMessage={onGoToMessage}
+      />
+    ),
+    [
+      thread.data,
+      fieldDefinitions,
+      contactPanelBuiltins,
+      canManageContactFields,
+      tags,
+      teamMembers,
+      currentUser.name,
+      initialContactPanelCollapsed,
+      initialDetailsWidth,
+      onGoToMessage,
+    ],
+  );
   return (
     <>
       <MessageThread
@@ -1491,26 +1525,13 @@ function ThreadWorkspace({
         onMarkRead={onMarkRead}
         onSnapshot={onThreadSnapshot}
         onMobileBack={onMobileBack}
-        onOpenContactDetails={() => setDetailsOpen(true)}
+        onOpenContactDetails={onOpenContactDetails}
         jumpToMessageId={jumpToMessageId}
         jumpNonce={jumpNonce}
         // Details panel rendered INSIDE the thread, to the right of the
         // messages, so the thread header/action bar spans full-width above
         // both columns (the details sits under the name/status bar).
-        rightPanel={
-          <ContactPanel
-            data={thread.data}
-            fieldDefinitions={fieldDefinitions}
-            builtins={contactPanelBuiltins}
-            canManageFields={canManageContactFields}
-            tagCatalog={tags}
-            teamMembers={teamMembers}
-            currentUserName={currentUser.name}
-            initialCollapsed={initialContactPanelCollapsed}
-            initialDetailsWidth={initialDetailsWidth}
-            onGoToMessage={onGoToMessage}
-          />
-        }
+        rightPanel={rightPanel}
       />
       {/* Mobile/tablet (below lg): same panel content in a right-side Sheet.
           Only mounted while open so it doesn't double-run the panel's live

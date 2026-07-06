@@ -10,6 +10,7 @@ import {
 } from "@nestjs/common";
 
 import {
+  CANCEL_RECIPIENT_MARKER,
   MAX_RECIPIENTS_IN_PROCESS,
   getInFlightRunPromises,
   pruneBroadcastInMemoryStateForTerminalRows,
@@ -857,8 +858,15 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * Cancel a broadcast that's still scheduled, queued, running, or paused. The
    * runner checks the row's `status` between recipients and bails out the moment
    * it sees `canceled`. Already-sent recipients stay sent (Meta can't be
-   * unsent); remaining `queued` recipient rows are left untouched in the
-   * DB so the operator can audit what would have been sent.
+   * unsent); every recipient that never sent is finalized `queued` → `failed`
+   * with the CANCEL_RECIPIENT_MARKER errorMessage so the terminal counters sum
+   * to totalCount, while `retryFailed` explicitly EXCLUDES that marker so a
+   * deliberately-canceled audience is never re-sent (billed Meta template sends
+   * are irreversible). (Leaving them `queued` would be a trap: retryFailed
+   * re-opens the broadcast and the runner's refill pulls EVERY `queued` row,
+   * silently re-sending the recipients the operator deliberately stopped.) The
+   * rows stay in the DB for audit — just terminal, with the cancel recorded as
+   * their errorMessage.
    *
    * `paused` is cancelable too: a broadcast paused by graceful-shutdown OR by the
    * permanent-error breaker (dead Meta credential) has no live runner — the boot
@@ -897,6 +905,55 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // write — surface idempotently as success rather than a 409 race.
       return;
     }
+    // Finalize every recipient that never sent: flip `queued` → `failed` with a
+    // clear reason. Leaving them `queued` is a trap — a later `retryFailed`
+    // re-opens the broadcast and the runner's refill pulls EVERY `queued` row,
+    // re-sending the recipients the operator deliberately stopped, not just the
+    // failures. This also makes the terminal counters sum to totalCount. The
+    // rows stay for audit; `{ increment }` is atomic so a lane still draining its
+    // final send (whose own mark is CAS-gated on `queued`) can't double-count.
+    //
+    // EXCLUDE in-flight recipients: a recipient stays `queued` for the whole Meta
+    // send round-trip (the runner flips `queued` → `sent` via a CAS only AFTER
+    // Meta accepts), and the in-flight marker is an OutboundSendAttempt row
+    // (`bc-recipient-<id>`) that has not definitively failed (failedAt=null).
+    // Flipping such a row to `failed` here would lose the runner's post-send CAS
+    // (matches 0 rows) — the customer received the template but we'd record it
+    // `failed` with no inbox Message row, and re-send it on retry. We match on
+    // failedAt=null ALONE (not completedAt=null too): an attempt whose Meta send
+    // already landed (completedAt set) but crashed before the queued→sent CAS is
+    // still recoverable by the boot reconciler, so it must also stay `queued`.
+    // Leave all such rows `queued`; the runner/reconciler finalizes them to `sent`.
+    //
+    // ONE atomic statement (raw — Prisma's typed updateMany can't express a
+    // correlated subquery): flip queued→failed for every recipient that does NOT
+    // have an in-flight `bc-recipient-<id>` attempt. Folding the in-flight
+    // exclusion into the WHERE via NOT EXISTS removes the previous read-then-
+    // write gap (a separate findMany of queued ids + findMany of attempts + a
+    // client-side prefix map, between which a lane could create its attempt row
+    // and slip through the snapshot). $executeRaw returns the affected-row count,
+    // which is the exact failedCount bump. CANCEL_RECIPIENT_MARKER is a
+    // deliberate state-discriminator carried ON errorMessage (chosen over a
+    // schema enum value to avoid a migration): the live + boot cancel-race
+    // reconcile AND retryFailed all key on this exact string, so keep it stable.
+    const finalizedCount = await this.db.$executeRaw`
+      UPDATE "BroadcastRecipient" br
+      SET "status" = 'failed'::"BroadcastRecipientStatus",
+          "errorMessage" = ${CANCEL_RECIPIENT_MARKER}
+      WHERE br."broadcastId" = ${id}
+        AND br."status" = 'queued'::"BroadcastRecipientStatus"
+        AND NOT EXISTS (
+          SELECT 1 FROM "OutboundSendAttempt" osa
+          WHERE osa."jobId" = 'bc-recipient-' || br."id"
+            AND osa."failedAt" IS NULL
+        )
+    `;
+    if (finalizedCount > 0) {
+      await this.db.broadcast.update({
+        where: { id },
+        data: { failedCount: { increment: finalizedCount } },
+      });
+    }
     // Was it a scheduled broadcast? Pull its pending delayed job so it can't
     // fire later. The worker's CAS (scheduled→queued) already makes a late
     // fire on a now-`canceled` row a no-op, so this is belt-and-suspenders
@@ -908,6 +965,17 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         ),
       );
     }
+    // Announce the cancel. The runner's canceled-exit branch deliberately skips
+    // its own emit ("cancel endpoint already published the status change"), so
+    // THIS is the only path that tells other tabs — without it a teammate's
+    // broadcasts list / detail page spins on the stale status until a hard
+    // refresh. Mirrors the create-path status emit.
+    await this.bus.publish({
+      type: "broadcast.status_changed",
+      teamId,
+      broadcastId: id,
+      status: "canceled",
+    });
   }
 
   /**
@@ -939,8 +1007,17 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     const requeued = await this.db.$transaction(async (tx) => {
       // Grab the failed recipient ids up front so we can both reset them and
       // clear their OutboundSendAttempt rows (below) by id.
+      // NOT the CANCEL_RECIPIENT_MARKER: recipients finalized by cancel() were
+      // deliberately stopped by the operator, not genuine send failures.
+      // Re-queuing them would re-send a billed Meta template to an audience the
+      // operator explicitly canceled — irreversible. Retry re-sends ONLY the
+      // recipients that actually failed at the provider.
       const failed = await tx.broadcastRecipient.findMany({
-        where: { broadcastId: id, status: "failed" },
+        where: {
+          broadcastId: id,
+          status: "failed",
+          NOT: { errorMessage: CANCEL_RECIPIENT_MARKER },
+        },
         select: { id: true },
       });
       if (failed.length === 0) {
@@ -950,6 +1027,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         });
       }
       const failedIds = failed.map((r) => r.id);
+      // No marker re-filter here: `failedIds` came from the findMany above, which
+      // already excluded CANCEL_RECIPIENT_MARKER inside this same tx — a second
+      // filter would be dead. (The findMany's exclusion is the load-bearing one.)
       const reset = await tx.broadcastRecipient.updateMany({
         where: { id: { in: failedIds } },
         data: { status: "queued", errorMessage: null, sentAt: null, externalId: null },
@@ -1027,6 +1107,18 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       });
     }
     await this.db.broadcast.delete({ where: { id } });
+    // Tell other tabs the row is gone. There's no `deleted` status on the
+    // broadcast.status_changed union, so re-emit the row's (terminal) status —
+    // broadcasts-browser coalesces ANY broadcast:status frame into a list
+    // refetch, which drops the now-404 row. A detail-page viewer of the deleted
+    // broadcast refetches too and safely no-ops on the 404 (refreshRef skips
+    // non-ok responses), keeping its stale terminal view instead of erroring.
+    await this.bus.publish({
+      type: "broadcast.status_changed",
+      teamId,
+      broadcastId: id,
+      status: row.status,
+    });
   }
 }
 

@@ -397,14 +397,19 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // channel it goes ONLY to the members' per-user rooms — so a non-member
     // never receives a private channel's activity metadata (author, mentions,
     // even the channelId) on the wire. Carries no body/preview regardless.
-    await emitter.emitChannelActivity(e.channelId, e.teamId, {
-      teamId: e.teamId,
-      channelId: e.channelId,
-      authorUserId: e.message.authorUserId,
-      mentionedUserIds: e.message.mentionedUserIds,
-      lastMessageAt: e.lastMessageAt,
-      isReply: threadRootId !== null,
-    });
+    // Skip on a dedup re-publish (retry): the original send already badged
+    // everyone, so re-badging would resurrect a stuck unread dot for members
+    // who have since read the message. message:new / thread frames still fire.
+    if (e.redelivery !== true) {
+      await emitter.emitChannelActivity(e.channelId, e.teamId, {
+        teamId: e.teamId,
+        channelId: e.channelId,
+        authorUserId: e.message.authorUserId,
+        mentionedUserIds: e.message.mentionedUserIds,
+        lastMessageAt: e.lastMessageAt,
+        isReply: threadRootId !== null,
+      });
+    }
     if (threadRootId) {
       emitter.emitToChannel(e.channelId, "team:channel:thread:reply", {
         teamId: e.teamId,
@@ -519,14 +524,14 @@ export const FANOUT_RULES: FanoutRuleMap = {
         | "offline",
       ...(e.message !== undefined ? { message: e.message } : {}),
     });
-    // "Appear offline" (or coming OUT of it) shifts the visibly-online set, so
-    // re-emit a fresh presence snapshot to the team. Cheaper than tracking the
-    // prior status — the snapshot read is one in-memory map walk and a
-    // presence:update is small. Other status changes don't move the set, so
-    // skip the extra emit there.
-    if (e.status === "offline" || e.status === "available") {
-      emitter.emitPresenceSnapshot(e.teamId);
-    }
+    // Toggling "Appear offline" — in EITHER direction, including offline→busy /
+    // offline→away — shifts the visibly-online set (the snapshot filters only
+    // status === "offline"), so re-emit a fresh presence snapshot to the team.
+    // The event carries no previous status, so we can't tell whether this change
+    // crossed the offline boundary; just re-emit on every availability change.
+    // It's rare (a manual picker click) and cheap — the snapshot read is one
+    // in-memory map walk and a presence:update is small.
+    emitter.emitPresenceSnapshot(e.teamId);
     // "Also viewing" pills are gated on `availabilityStatus === "available"`.
     // ANY status change can shift the set (available ↔ busy / away / offline),
     // so re-emit `conversation:viewers` for every conversation this user is

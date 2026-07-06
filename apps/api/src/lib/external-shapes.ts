@@ -195,6 +195,24 @@ export function conversationRowToExternal(
 }
 
 /**
+ * When a contact is created without a profile name, both ingest and /v1 create
+ * fall back to `name = phoneNumber`. Returning that verbatim through the
+ * redaction would leak the exact phone the `read:contacts` gate withholds via a
+ * `read:conversations`-only key, so mask a name that is (digit-for-digit) the
+ * contact's phone number down to a partial form that still distinguishes threads.
+ */
+function maskPhoneLikeName(name: string, phoneNumber: string | null): string {
+  if (!phoneNumber) return name;
+  const digits = (s: string) => s.replace(/\D/g, "");
+  const phoneDigits = digits(phoneNumber);
+  if (phoneDigits === "" || digits(name) !== phoneDigits) return name;
+  // "+96170123456" -> "+9617•••456"; too short to partially mask -> generic.
+  return phoneNumber.length > 8
+    ? `${phoneNumber.slice(0, 5)}•••${phoneNumber.slice(-3)}`
+    : "WhatsApp contact";
+}
+
+/**
  * Redact an embedded contact to the minimal identity when the caller's API key
  * lacks `read:contacts` but reaches the contact via a conversation/message read
  * (where it's always embedded). Keeps id + display name + channel — enough to
@@ -206,7 +224,7 @@ export function conversationRowToExternal(
 export function redactExternalContactPii(c: ExternalContact): ExternalContact {
   return {
     id: c.id,
-    name: c.name,
+    name: maskPhoneLikeName(c.name, c.phoneNumber),
     identityChannel: c.identityChannel,
     phoneNumber: null,
     externalContactId: null,

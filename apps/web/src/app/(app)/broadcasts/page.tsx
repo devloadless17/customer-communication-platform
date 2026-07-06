@@ -30,8 +30,17 @@ export default async function BroadcastsPage() {
   const persistedStatus = parseBroadcastStatus(
     cookieStore.get(BROADCASTS_STATUS_COOKIE)?.value,
   );
-  const persistedSearch =
-    cookieStore.get(BROADCASTS_SEARCH_COOKIE)?.value ?? "";
+  // The client writes this cookie with encodeURIComponent (broadcasts-browser),
+  // but cookies().get() returns the raw value — decode it here or a search with
+  // a space/non-ASCII char seeds as percent-encoded text that matches nothing.
+  // Same manual-decode pattern as templates/page.tsx.
+  const rawSearch = cookieStore.get(BROADCASTS_SEARCH_COOKIE)?.value ?? "";
+  let persistedSearch = rawSearch;
+  try {
+    persistedSearch = decodeURIComponent(rawSearch);
+  } catch {
+    // Malformed encoding — fall back to the raw value.
+  }
   const persistedView = parseBroadcastView(
     cookieStore.get(BROADCASTS_VIEW_COOKIE)?.value,
   );

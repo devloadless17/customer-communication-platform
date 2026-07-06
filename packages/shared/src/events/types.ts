@@ -722,6 +722,13 @@ export interface TeamChannelMessageCreatedEvent {
   threadReplyCount: number;
   /** Echoed for optimistic-swap on the originating client. */
   clientTempId?: string;
+  /**
+   * Set when this is a dedup re-publish of an already-committed send (retry of
+   * a request whose row already exists). The original publish badged everyone;
+   * fanout SKIPS the sidebar activity/unread bump on a redelivery so a retry
+   * can't re-badge members who already read it. Unset on the original send.
+   */
+  redelivery?: boolean;
 }
 
 export interface TeamChannelMessageEditedEvent {

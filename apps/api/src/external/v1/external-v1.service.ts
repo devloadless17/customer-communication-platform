@@ -14,6 +14,7 @@ import { toExternalAvatarUrl } from "@/lib/blob-storage";
 import {
   contactRowToExternal,
   toExternalContact,
+  redactExternalContactPii,
   EXTERNAL_CONTACT_INCLUDE,
   type ExternalContact,
 } from "@/lib/external-shapes";
@@ -114,6 +115,21 @@ export class ExternalV1Service {
       await this.idem.release(teamId, apiKeyId, idempotencyKey);
       throw err;
     }
+  }
+
+  /**
+   * Apply the same `read:contacts` PII gate the conversation/message reads use
+   * (redactExternalContactPii) to a contact-mutation RESPONSE. A `write:contacts`
+   * key can mutate a contact but must not receive its full directory row back —
+   * otherwise tag-add / stage / update become a per-id contact-read side door.
+   * The stored idempotency result stays UNredacted (we redact only the returned
+   * value), so a later replay carrying `read:contacts` still surfaces full PII.
+   */
+  private applyContactPii(
+    contact: ExternalContact,
+    includeContactPii: boolean,
+  ): ExternalContact {
+    return includeContactPii ? contact : redactExternalContactPii(contact);
   }
 
   // ===========================================================================
@@ -603,6 +619,7 @@ export class ExternalV1Service {
     contactId: string,
     input: ExternalUpdateContactInput,
     idempotencyKey?: string,
+    includeContactPii = true,
   ): Promise<ExternalContact> {
     // Idempotency — a partner retry must not re-publish contact.updated /
     // lifecycle_changed and re-trigger workflows/webhooks. F2 in
@@ -614,14 +631,14 @@ export class ExternalV1Service {
         idempotencyKey,
         this.idem.fingerprint("update_contact", { contactId, input }),
       );
-      if (claim.kind === "replay") return claim.result;
+      if (claim.kind === "replay") return this.applyContactPii(claim.result, includeContactPii);
     }
     try {
       const result = await this.updateContactInternal(teamId, apiKeyId, contactId, input);
       if (idempotencyKey) {
         await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
       }
-      return result;
+      return this.applyContactPii(result, includeContactPii);
     } catch (err) {
       if (idempotencyKey) await this.idem.release(teamId, apiKeyId, idempotencyKey);
       throw err;
@@ -778,13 +795,14 @@ export class ExternalV1Service {
    * double-fire risk, on a soft-deleted-then-revived row). Completes the F2
    * coverage — every /v1 mutation now honors the header.
    */
-  upsertContact(
+  async upsertContact(
     teamId: string,
     apiKeyId: string,
     input: ExternalUpsertContactInput,
     idempotencyKey?: string,
+    includeContactPii = true,
   ): Promise<{ contact: ExternalContact; created: boolean }> {
-    return this.withIdempotency(
+    const result = await this.withIdempotency(
       teamId,
       apiKeyId,
       idempotencyKey,
@@ -792,6 +810,7 @@ export class ExternalV1Service {
       { input },
       () => this.upsertContactInternal(teamId, apiKeyId, input),
     );
+    return { contact: this.applyContactPii(result.contact, includeContactPii), created: result.created };
   }
 
   private async upsertContactInternal(
@@ -939,14 +958,15 @@ export class ExternalV1Service {
   // CONTACTS — tag ops (single-contact + bulk)
   // ===========================================================================
 
-  addContactTags(
+  async addContactTags(
     teamId: string,
     apiKeyId: string,
     contactId: string,
     input: ExternalContactAddTagsInput,
     idempotencyKey?: string,
+    includeContactPii = true,
   ): Promise<ExternalContact> {
-    return this.withIdempotency(
+    const contact = await this.withIdempotency(
       teamId,
       apiKeyId,
       idempotencyKey,
@@ -954,6 +974,7 @@ export class ExternalV1Service {
       { contactId, tagIds: input.tagIds },
       () => this.addContactTagsInternal(teamId, apiKeyId, contactId, input),
     );
+    return this.applyContactPii(contact, includeContactPii);
   }
 
   private async addContactTagsInternal(
@@ -1021,15 +1042,16 @@ export class ExternalV1Service {
    * removing N tags doesn't have to loop. Fires ONE `contact.tag_changed`
    * event carrying all `removed` ids.
    */
-  removeContactTags(
+  async removeContactTags(
     teamId: string,
     apiKeyId: string,
     contactId: string,
     tagIds: string[],
     silent = false,
     idempotencyKey?: string,
+    includeContactPii = true,
   ): Promise<ExternalContact> {
-    return this.withIdempotency(
+    const contact = await this.withIdempotency(
       teamId,
       apiKeyId,
       idempotencyKey,
@@ -1037,6 +1059,7 @@ export class ExternalV1Service {
       { contactId, tagIds },
       () => this.removeContactTagsInternal(teamId, apiKeyId, contactId, tagIds, silent),
     );
+    return this.applyContactPii(contact, includeContactPii);
   }
 
   private async removeContactTagsInternal(
@@ -1097,13 +1120,14 @@ export class ExternalV1Service {
     contactId: string,
     tagId: string,
     idempotencyKey?: string,
+    includeContactPii = true,
   ): Promise<ExternalContact> {
     // Delegate to the plural-tag path with a one-element array. The two
     // earlier internals (singular + plural) were almost-identical copies
     // and had drifted (singular had no `silent` param, so the public
     // DELETE /v1/contacts/:id/tags/:tagId always fanouts while the bulk
     // DELETE could be silenced). Collapsing closes the asymmetry.
-    return this.withIdempotency(
+    const contact = await this.withIdempotency(
       teamId,
       apiKeyId,
       idempotencyKey,
@@ -1112,6 +1136,7 @@ export class ExternalV1Service {
       () =>
         this.removeContactTagsInternal(teamId, apiKeyId, contactId, [tagId], false),
     );
+    return this.applyContactPii(contact, includeContactPii);
   }
 
   /**

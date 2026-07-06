@@ -3,9 +3,9 @@ import { Body, Controller, Get, Patch, UseGuards } from "@nestjs/common";
 import {
   ALL_CAPABILITIES,
   resolvePermissions,
-  zRolePermissions,
   type RolePermissionsConfig,
 } from "@ccp/shared/auth/permissions";
+import { zRolePermissions } from "@ccp/shared/auth/permissions-schema";
 
 import { RequireRole } from "../../auth/role.guard";
 import { CurrentSession } from "../../auth/current-session.decorator";

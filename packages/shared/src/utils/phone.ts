@@ -40,3 +40,67 @@ export function normalizePhoneE164(raw: string): string | null {
   }
   return digits;
 }
+
+/**
+ * Format a phone number for display in international form, e.g.
+ * "+961 71 505 894". Uses libphonenumber-js so the country-code split and
+ * national-number grouping match each country's conventions (a hand-rolled
+ * heuristic mis-grouped 3-digit codes like +961 as "+96 1...").
+ *
+ * Falls back to a "+digits" string if parsing fails — Meta's
+ * `display_phone_number` can arrive without a + or be otherwise malformed,
+ * and we'd rather show *something* than crash.
+ */
+export function formatPhone(raw: string | null | undefined): string {
+  if (!raw) return "";
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  const withPlus = trimmed.startsWith("+") ? trimmed : `+${trimmed.replace(/[^\d]/g, "")}`;
+  const parsed = parsePhoneNumberFromString(withPlus);
+  if (parsed) return parsed.formatInternational();
+  const digits = trimmed.replace(/\D/g, "");
+  return digits ? `+${digits}` : raw;
+}
+
+/**
+ * Derive a contact's ISO 3166-1 alpha-2 country code from their phone number
+ * via libphonenumber-js. Returns null when the input is missing/unparseable.
+ *
+ * Used at write time on new contacts (inbound webhook ingest + /v1 POST/PATCH)
+ * so the outbound webhook payload's `country_code` is populated without a
+ * lookup table maintained in app code. Pure function — safe to call on the
+ * hot path; libphonenumber's /min metadata bundle is already in our bundle
+ * via `formatPhone`.
+ */
+export function getCountryFromPhone(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const withPlus = trimmed.startsWith("+") ? trimmed : `+${trimmed.replace(/[^\d]/g, "")}`;
+  const parsed = parsePhoneNumberFromString(withPlus);
+  return parsed?.country ?? null;
+}
+
+/**
+ * Display string for a contact's natural identity:
+ *   - Phone number when set (WhatsApp/SMS contacts).
+ *   - "instagram:<id>", "telegram:<id>", … for channel-native identities.
+ *   - "—" fallback when neither is present (shouldn't happen post-ingest).
+ *
+ * Use this everywhere a contact is rendered as a single line and the UI
+ * doesn't already have a richer surface (channel chip + handle). Keeps
+ * non-phone contacts legible without forcing every component to learn the
+ * multi-channel identity model.
+ */
+export function formatContactIdentity(contact: {
+  phoneNumber: string | null;
+  identityChannel?: string | null;
+  externalContactId?: string | null;
+}): string {
+  if (contact.phoneNumber) return formatPhone(contact.phoneNumber);
+  if (contact.identityChannel && contact.externalContactId) {
+    const channel = contact.identityChannel.replace(/_/g, " ");
+    return `${channel}:${contact.externalContactId}`;
+  }
+  return "—";
+}

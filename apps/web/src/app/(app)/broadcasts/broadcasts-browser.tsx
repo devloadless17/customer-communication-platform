@@ -120,8 +120,17 @@ export function BroadcastsBrowser({
   const searchRef = useRef(search);
   searchRef.current = search;
 
+  // Monotonic request sequence shared by BOTH the filter-change refetch and the
+  // socket-driven refetch. AbortController cancels a request we KNOW is stale,
+  // but the two effects only cancel their own tickets — a socket refetch under
+  // the old filter is never aborted when the user flips the filter chip, so a
+  // slow response could resolve last and clobber `setRows` with wrong-filter
+  // rows. Gate every `setRows` on "am I still the latest request".
+  const seqRef = useRef(0);
+
   const refetch = useCallback((opts?: { showLoading?: boolean }) => {
     if (opts?.showLoading !== false) setLoading(true);
+    const seq = ++seqRef.current;
     const params = new URLSearchParams();
     if (filterRef.current !== "all") params.set("status", filterRef.current);
     if (searchRef.current.trim()) params.set("search", searchRef.current.trim());
@@ -138,6 +147,9 @@ export function BroadcastsBrowser({
       .then((r) => (r.ok ? (r.json() as Promise<{ broadcasts: BroadcastListItem[] }>) : null))
       .then((body) => {
         if (controller.signal.aborted || !body) return;
+        // A newer refetch started while this one was on the wire — its rows
+        // reflect the current filter/search, so drop this stale response.
+        if (seq !== seqRef.current) return;
         setRows(body.broadcasts);
       })
       .catch((err: unknown) => {
@@ -149,7 +161,9 @@ export function BroadcastsBrowser({
         }
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+        // Only the latest request owns the loading flag — a superseded response
+        // must not clear the spinner while a newer fetch is still in flight.
+        if (!controller.signal.aborted && seq === seqRef.current) setLoading(false);
       });
     return { promise, cancel: () => controller.abort() };
   }, []);

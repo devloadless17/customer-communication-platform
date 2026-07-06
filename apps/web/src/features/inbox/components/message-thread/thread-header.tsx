@@ -4,6 +4,7 @@ import { ChevronLeft, Info, Phone, Search as SearchIcon } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { useCallApi } from "@/features/calls/call-provider";
 import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { formatPhone, initials } from "@ccp/shared/utils";
@@ -135,6 +136,11 @@ export function ThreadHeader({
    *  desktop contact rail is hidden there, so this is the only way in). */
   onOpenContactDetails?: () => void;
 }) {
+  // Disable the Phone button while any call is live/in-flight. The single
+  // useCall instance lives in the app-wide CallProvider; `liveCall` is non-null
+  // from the optimistic ringing state through teardown. This is the visible
+  // affordance backing the synchronous busyRef guard in useCall.initiateOutbound.
+  const { liveCall } = useCallApi();
   return (
     <header className="@container flex h-15 shrink-0 items-center gap-2 border-b border-border px-3 md:gap-3 md:px-4">
       {onMobileBack && (
@@ -200,6 +206,7 @@ export function ThreadHeader({
             variant="ghost"
             size="icon"
             onClick={() => void onInitiateCall()}
+            disabled={liveCall != null}
             aria-label="Start a WhatsApp call with this contact"
             title="Call on WhatsApp"
             className="size-8 pointer-coarse:size-9 text-muted-foreground hover:text-foreground"

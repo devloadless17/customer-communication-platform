@@ -107,19 +107,34 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
   private static readonly DISPATCH_TIMEOUT_MS = 30_000;
 
   /**
-   * Wedge watchdog (obs-1). If a tick runs longer than this — e.g. `claimBatch`
-   * itself hangs on a dead pool, outside the per-row timeout's reach — force the
-   * inflight latch off + reschedule so the drainer self-heals instead of going
-   * dark until a human notices. Safe: at-most-once is preserved by the
-   * `publishedAt`-before-dispatch mark, so a second concurrent tick can never
-   * re-claim the first's rows. Well above any legitimate tick (seconds).
+   * Wedge watchdog (obs-1). Measures NO-PROGRESS time, not total tick time: the
+   * watchdog only force-releases a tick that has made zero forward progress
+   * (no claim, no row dispatched) for this long — see `lastProgressAt` +
+   * `checkWedge`. A legitimately long tick (large backlog, slow subscriber
+   * chains) keeps refreshing `lastProgressAt` as each row completes, so it never
+   * trips (finding#32) — only a genuinely stuck loop (e.g. `claimBatch` hung on a
+   * dead pool, outside the per-row timeout's reach) does. Force the inflight latch
+   * off + reschedule so the drainer self-heals instead of going dark until a human
+   * notices. Safe: at-most-once is preserved by the `publishedAt`-before-dispatch
+   * mark, so a second concurrent tick can never re-claim the first's rows.
+   *
+   * Must exceed the worst-case single-row dispatch so one slow-but-advancing row
+   * at the tail of a batch (no other lane refreshing progress) can't trip it: a
+   * row runs its subscriber chain PER-SUBSCRIBER-timed at `DISPATCH_TIMEOUT_MS`,
+   * so worst case ≈ subscriberCount × `DISPATCH_TIMEOUT_MS` (~5 × 30s = 150s for
+   * `conversation.status_changed`). 180s clears that with headroom.
    */
-  private static readonly WATCHDOG_MS = 120_000;
+  private static readonly WATCHDOG_MS = 180_000;
 
   private timer: NodeJS.Timeout | null = null;
   private watchdogTimer: NodeJS.Timeout | null = null;
   private inflight = false;
   private tickStartedAt: number | null = null;
+  // Wall-clock of the last forward progress within the current tick (tick start,
+  // or the completion of any dispatched row). The wedge watchdog measures
+  // no-progress time against THIS, not total tick time, so a long-but-advancing
+  // tick under backlog never trips it (finding#32).
+  private lastProgressAt: number | null = null;
   // Monotonic ownership token for the inflight latch. Each tick claims the latch
   // with a fresh token; only the holder of the CURRENT token may release it in
   // its finally. The watchdog (checkWedge) bumps this when it force-releases a
@@ -209,18 +224,25 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Watchdog (obs-1): if a tick has been inflight past WATCHDOG_MS, the loop is
-   * wedged (e.g. claimBatch hung on a dead pool) — force the latch off and
-   * reschedule. At-most-once holds regardless (publishedAt-before-dispatch), so
-   * a transient double-tick can't re-fire any row.
+   * Watchdog (obs-1): if a tick has made NO forward progress for WATCHDOG_MS, the
+   * loop is wedged (e.g. claimBatch hung on a dead pool, a hung subscriber pinning
+   * every lane) — force the latch off and reschedule. Measures no-progress time
+   * (`lastProgressAt`), NOT total tick time (finding#32): a legitimately long tick
+   * that keeps completing rows under backlog refreshes `lastProgressAt` and never
+   * trips, so the watchdog no longer force-spawns a second concurrent drain loop
+   * on top of a still-progressing one. At-most-once holds regardless
+   * (publishedAt-before-dispatch), so a transient double-tick can't re-fire any row.
    */
   private checkWedge(): void {
-    if (this.stopping || !this.inflight || this.tickStartedAt == null) return;
-    const elapsed = Date.now() - this.tickStartedAt;
-    if (elapsed < OutboxDrainerService.WATCHDOG_MS) return;
+    if (this.stopping || !this.inflight || this.lastProgressAt == null) return;
+    const stalledFor = Date.now() - this.lastProgressAt;
+    if (stalledFor < OutboxDrainerService.WATCHDOG_MS) return;
+    const inflightFor =
+      this.tickStartedAt == null ? stalledFor : Date.now() - this.tickStartedAt;
     this.logger.error(
-      `[outbox-drainer] WEDGE DETECTED — tick inflight for ${Math.round(elapsed / 1000)}s ` +
-        `(> ${OutboxDrainerService.WATCHDOG_MS / 1000}s); force-releasing the latch and rescheduling. ` +
+      `[outbox-drainer] WEDGE DETECTED — tick made no progress for ${Math.round(stalledFor / 1000)}s ` +
+        `(inflight ${Math.round(inflightFor / 1000)}s; > ${OutboxDrainerService.WATCHDOG_MS / 1000}s no-progress threshold); ` +
+        `force-releasing the latch and rescheduling. ` +
         `Event fanout (realtime/audit/analytics/workflows/webhooks) was stalled.`,
     );
     // Bump the ownership token so the wedged tick's eventual finally sees a
@@ -229,6 +251,7 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
     this.tickToken += 1;
     this.inflight = false;
     this.tickStartedAt = null;
+    this.lastProgressAt = null;
     this.schedule();
   }
 
@@ -244,6 +267,7 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
     }
     this.inflight = true;
     this.tickStartedAt = Date.now();
+    this.lastProgressAt = this.tickStartedAt;
     const myToken = ++this.tickToken;
     try {
       let drains = 0;
@@ -304,12 +328,20 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
           rows,
           OutboxDrainerService.DISPATCH_CONCURRENCY,
           (row) =>
-            this.dispatch(row, dispatched).catch((err) => {
-              this.logger.error(
-                withCorrelation(`[outbox-drainer] dispatch row=${row.id} failed`),
-                err instanceof Error ? err.message : String(err),
-              );
-            }),
+            this.dispatch(row, dispatched)
+              .catch((err) => {
+                this.logger.error(
+                  withCorrelation(`[outbox-drainer] dispatch row=${row.id} failed`),
+                  err instanceof Error ? err.message : String(err),
+                );
+              })
+              .finally(() => {
+                // A completed row IS forward progress — refresh the no-progress
+                // watchdog basis so a slow-but-advancing batch never trips it
+                // (finding#32). Only a tick where NO row completes for
+                // WATCHDOG_MS is treated as wedged.
+                this.lastProgressAt = Date.now();
+              }),
         );
         // One batched UPDATE — best-effort (a miss only loses the bracket
         // stamp, never re-dispatches). Never throws into the tick.
@@ -344,6 +376,7 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
       if (this.tickToken === myToken) {
         this.inflight = false;
         this.tickStartedAt = null;
+        this.lastProgressAt = null;
         this.schedule();
       }
     }

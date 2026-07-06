@@ -55,9 +55,24 @@ export function kindFromMime(mime: string): MediaKind {
   return "document";
 }
 
+/**
+ * The single canonical mime normalizer: strip codec/charset params
+ * (`audio/ogg;codecs=opus` → `audio/ogg`), trim, lowercase, and fall back to
+ * `application/octet-stream` for empty/blank input. Every site that used to
+ * hand-roll `split(";")[0].trim().toLowerCase()` (the Meta send path,
+ * `mime-guard`, `avatar`, and `extFromMime` below) routes through here so the
+ * parse can't drift between the security gates and the storage layer.
+ */
+export function normalizeMimeType(raw?: string): string {
+  return (
+    (raw || "application/octet-stream").split(";")[0]?.trim().toLowerCase() ||
+    "application/octet-stream"
+  );
+}
+
 /** Pick a reasonable extension from a mime type. */
 export function extFromMime(mime: string): string {
-  const m = mime.toLowerCase().split(";")[0]?.trim() ?? "";
+  const m = normalizeMimeType(mime);
   switch (m) {
     case "image/jpeg":
     case "image/jpg":

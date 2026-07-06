@@ -36,6 +36,22 @@ import { ChannelMessage } from "./channel-message";
 const ESTIMATE_HEIGHT = 56;
 const OVERSCAN = 6;
 
+/**
+ * The subset of useChatScroll controls this feed publishes to its parent
+ * (team-chat-workspace) so `jumpToMessage` (search jump-to) can suppress the
+ * hook's stick-to-bottom BEFORE it runs `loadAround` — otherwise the slice
+ * swap snaps to the anchored window's bottom and cascade-paginates back to
+ * live, defeating the jump. Identities are stable across renders.
+ */
+export interface ChannelThreadScrollControls {
+  /** Drop stick-to-bottom so a caller's own scrollIntoView isn't fought by
+   *  the hook's snap. */
+  releaseStickToBottom: () => void;
+  /** Flag the next tail-key change as a benign slice swap (no snap, no "N new"
+   *  pill bump) — call before a loadAround() that replaces the slice. */
+  markBenignTailUpdate: () => void;
+}
+
 export function ChannelThread({
   messages,
   channelId,
@@ -53,6 +69,7 @@ export function ChannelThread({
   onRetry,
   onDismiss,
   displayNameById,
+  onScrollControlsReady,
 }: {
   messages: TeamChannelMessageDto[];
   channelId: string;
@@ -77,6 +94,10 @@ export function ChannelThread({
   onDismiss: (clientTempId: string) => void;
   /** Canonical userId → name roster map for mention chip rendering. */
   displayNameById: Map<string, string>;
+  /** Publishes this feed's useChatScroll controls to the parent so
+   *  jumpToMessage can release stick-to-bottom + flag the loadAround() slice
+   *  swap benign before it runs. Stable identities; safe to store in a ref. */
+  onScrollControlsReady?: (controls: ChannelThreadScrollControls) => void;
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
@@ -106,24 +127,44 @@ export function ChannelThread({
   const isOwnSend =
     lastMessage?.pending === true && lastMessage.authorUserId === currentUser.id;
 
-  const { unreadBelow, scrollToBottom } = useChatScroll({
-    viewportRef,
-    contentRef,
-    topSentinelRef,
-    conversationId: channelId,
-    lastEntryKey,
-    isOwnSend,
-    // Team-chat timeline holds only messages — no activity-log pills.
-    isActivityTail: false,
-    hasMoreOlder,
-    loadOlder: onLoadOlder,
-    // The channel feed is a NORMAL top-down virtualized list (react-virtual
-    // positions rows by a downward-growing translateY), NOT the inbox's
-    // flex-col-reverse viewport. Tell the hook so its scroll-model math
-    // (snap-to-newest, isAtBottom, load-older anchor) uses top-down
-    // coordinates instead of assuming scrollTop:0 == bottom.
-    inverted: false,
-  });
+  const { unreadBelow, scrollToBottom, markBenignTailUpdate, releaseStickToBottom } =
+    useChatScroll({
+      viewportRef,
+      contentRef,
+      topSentinelRef,
+      conversationId: channelId,
+      lastEntryKey,
+      isOwnSend,
+      // Team-chat timeline holds only messages — no activity-log pills.
+      isActivityTail: false,
+      hasMoreOlder,
+      loadOlder: onLoadOlder,
+      // The channel feed is a NORMAL top-down virtualized list (react-virtual
+      // positions rows by a downward-growing translateY), NOT the inbox's
+      // flex-col-reverse viewport. Tell the hook so its scroll-model math
+      // (snap-to-newest, isAtBottom, load-older anchor) uses top-down
+      // coordinates instead of assuming scrollTop:0 == bottom.
+      inverted: false,
+    });
+
+  // Publish scroll controls upward. The parent's jumpToMessage calls
+  // releaseStickToBottom() + markBenignTailUpdate() BEFORE loadAround() so the
+  // search-jump slice swap isn't yanked to the bottom (which would cascade
+  // forward-pagination back to live). Identities are stable, so this settles
+  // after the first paint.
+  useEffect(() => {
+    onScrollControlsReady?.({ releaseStickToBottom, markBenignTailUpdate });
+  }, [onScrollControlsReady, releaseStickToBottom, markBenignTailUpdate]);
+
+  // "Jump to live": mark the tail swap benign so goToLive's slice replacement
+  // can't bump a phantom "1 new" pill, then snap to the live tail after the
+  // refetch commits (goToLive only replaces the slice — it doesn't scroll).
+  // scrollToBottom re-arms sticky so subsequent messages keep the view pinned.
+  const handleGoToLive = useCallback(async () => {
+    markBenignTailUpdate();
+    await onGoToLive();
+    scrollToBottom();
+  }, [markBenignTailUpdate, onGoToLive, scrollToBottom]);
 
   // Virtualizer. Stable keys per message id; clientTempId for optimistic
   // rows so the measured-height entry persists across the swap to the
@@ -258,7 +299,7 @@ export function ChannelThread({
             <motion.button
               key="jump-to-live"
               type="button"
-              onClick={() => void onGoToLive()}
+              onClick={() => void handleGoToLive()}
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 8 }}

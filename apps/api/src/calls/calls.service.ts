@@ -672,6 +672,13 @@ export class CallsService {
         id: callId,
         answeredByUserId: null,
         status: CallStatus.ringing,
+        // Answer is incoming-only. Without pinning direction, a scripted client
+        // could POST /answer with an OUTBOUND ringing callId — the CAS would
+        // match, stamp answeredAt/answeredByUserId, Meta would reject pre_accept
+        // for a business-initiated call, and the rollback would flip a live
+        // outbound to `failed` while the customer's phone keeps ringing (no Meta
+        // endCall is issued on this path). Mirrors markConnected's direction pin.
+        direction: CallDirection.in,
       },
       data: {
         answeredByUserId: session.userId,
@@ -795,7 +802,15 @@ export class CallsService {
 
     const rejectedAt = new Date();
     const cas = await this.db.call.updateMany({
-      where: { id: callId, status: CallStatus.ringing },
+      // Incoming-only, same as answerCall: pin direction so a scripted /reject
+      // on an OUTBOUND ringing callId can't flip a teammate's live outbound to
+      // `rejected` (leaving the customer's phone ringing with no Meta-side
+      // termination). Mirrors markConnected's direction pin.
+      where: {
+        id: callId,
+        status: CallStatus.ringing,
+        direction: CallDirection.in,
+      },
       data: { status: CallStatus.rejected, endedAt: rejectedAt },
     });
     if (cas.count === 0) {
@@ -964,28 +979,65 @@ export class CallsService {
     // answer". Map the never-answered case to `missed` so the persisted row,
     // the live pill, and any history reload all agree. `answeredAt` is the
     // connected discriminator (set once, on the first in_progress transition).
-    const wasConnected = call.answeredAt !== null;
-    const terminalStatus = wasConnected
-      ? CallStatus.completed
-      : CallStatus.missed;
-    const durationSeconds = call.answeredAt
-      ? Math.max(
-          0,
-          Math.floor((endedAt.getTime() - call.answeredAt.getTime()) / 1000),
-        )
-      : null;
-
-    const cas = await this.db.call.updateMany({
-      where: {
-        id: callId,
-        status: { in: [CallStatus.ringing, CallStatus.in_progress] },
-      },
-      data: {
-        status: terminalStatus,
-        endedAt,
-        durationSeconds,
-      },
-    });
+    //
+    // Classify (missed vs completed + duration) and CAS ATOMICALLY: the CAS
+    // pins `answeredAt` to the value we classified against. Without that pin, a
+    // markConnected landing in the read→CAS gap stamps answeredAt AFTER our
+    // read; our updateMany (matching status alone) would then write
+    // status=missed onto a now-answered row — connected=true but status=missed,
+    // a contradiction the later terminate webhook can't fix (alreadyTerminal
+    // guard). If the pin misses on a still-non-terminal row, the discriminator
+    // flipped under us: re-read once and retry so the decision matches the row
+    // we actually overwrite. answeredAt is set-once, so one retry always settles.
+    let answeredAt = call.answeredAt;
+    // `= false` only satisfies definite-assignment (TS can't see the loop below
+    // always runs once); the loop's first statement sets the real value.
+    let wasConnected = false;
+    let durationSeconds: number | null = null;
+    let cas = { count: 0 };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      wasConnected = answeredAt !== null;
+      const terminalStatus = wasConnected
+        ? CallStatus.completed
+        : CallStatus.missed;
+      durationSeconds = answeredAt
+        ? Math.max(
+            0,
+            Math.floor((endedAt.getTime() - answeredAt.getTime()) / 1000),
+          )
+        : null;
+      cas = await this.db.call.updateMany({
+        where: {
+          id: callId,
+          status: { in: [CallStatus.ringing, CallStatus.in_progress] },
+          answeredAt: wasConnected ? { not: null } : null,
+        },
+        data: {
+          status: terminalStatus,
+          endedAt,
+          durationSeconds,
+        },
+      });
+      if (cas.count > 0 || attempt === 1) break;
+      // count 0 with the classification pin set: either the row went terminal
+      // (webhook/race — idempotent OK below) or answeredAt flipped under us.
+      // Re-read to distinguish; on a still-non-terminal row, reclassify + retry.
+      const reread = await this.db.call.findFirst({
+        where: { id: callId, teamId: session.teamId },
+        select: { status: true, answeredAt: true },
+      });
+      if (
+        !reread ||
+        reread.status === CallStatus.completed ||
+        reread.status === CallStatus.missed ||
+        reread.status === CallStatus.rejected ||
+        reread.status === CallStatus.failed
+      ) {
+        // Terminalized between read and write. Idempotent success.
+        return { ok: true, durationSeconds: null };
+      }
+      answeredAt = reread.answeredAt;
+    }
     if (cas.count === 0) {
       // Race lost — somebody (or a webhook) terminated it between read
       // and write. Idempotent success.

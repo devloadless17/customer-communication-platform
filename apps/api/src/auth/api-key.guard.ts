@@ -157,6 +157,21 @@ export class ApiKeyGuard implements CanActivate {
     });
     if (!row || row.revokedAt) rejectUnauth(req, "invalid api key");
 
+    // Per-key rate limit — bounds cost on a leaked/abused key. Each request
+    // hits Meta's Cloud API and counts against the team's quality rating,
+    // so unbounded request rates are a real bill + reputation risk. Runs
+    // BEFORE the org-status gate: a suspended org's still-unrevoked key
+    // otherwise 403s with zero throttle (ipRateLimitMiddleware skips /v1),
+    // re-opening the unmetered-DB-probe hole `unauthIpBucket` was added to
+    // close. Metering it against its own per-key budget is the correct meter.
+    const rate = apiKeyBucket.consume(row.id);
+    if (!rate.ok) {
+      throw new HttpException(
+        { error: "rate_limited", detail: "60 req/min" },
+        429,
+      );
+    }
+
     // Org-approval gate — mirror SessionGuard's `org_not_active`. A pending
     // (awaiting review) or suspended (platform-revoked) org has NO external
     // /v1 access, same as it has no session access. Without this a suspended
@@ -166,17 +181,6 @@ export class ApiKeyGuard implements CanActivate {
       throw new HttpException(
         { error: "org_not_active", detail: "organization is not active" },
         403,
-      );
-    }
-
-    // Per-key rate limit — bounds cost on a leaked/abused key. Each request
-    // hits Meta's Cloud API and counts against the team's quality rating,
-    // so unbounded request rates are a real bill + reputation risk.
-    const rate = apiKeyBucket.consume(row.id);
-    if (!rate.ok) {
-      throw new HttpException(
-        { error: "rate_limited", detail: "60 req/min" },
-        429,
       );
     }
 

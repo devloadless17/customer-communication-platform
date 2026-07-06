@@ -21,6 +21,7 @@ import { diskStorage } from "multer";
 import { randomUUID } from "node:crypto";
 
 import { blobStorage } from "@/lib/blob-storage";
+import { r2Internal } from "@/lib/blob-storage/r2";
 
 import { streamBlob } from "../media/stream-blob";
 import { CurrentSession } from "../auth/current-session.decorator";
@@ -66,6 +67,11 @@ export class MessagesController {
   async sendText(
     @CurrentSession() session: ApiSession,
     @Body(zBody(SendTextSchema)) body: SendTextInput,
+    // `?retry=1` is a transport hint (not persisted message content, so it
+    // stays a query param rather than a body/schema field): set only when the
+    // client re-sends a failed bubble under its original clientTempId, letting
+    // the queue skip its failed-job cleanup probe on the common first-send path.
+    @Query("retry") retry?: string,
   ) {
     // Post-S1: returns `{ ok, queued, clientTempId? }` after preflight +
     // enqueue (~5 ms typical). The actual Meta send happens in the
@@ -74,7 +80,7 @@ export class MessagesController {
     // failure surfaced via `message:failed`. The frontend reply-box does
     // NOT read `messageId` from this response anymore; the legacy shape
     // returned a real messageId because the send was synchronous.
-    const out = await this.messages.sendText(session.teamId, session.userId, body);
+    const out = await this.messages.sendText(session.teamId, session.userId, body, retry === "1");
     return { ok: out.ok, queued: true, ...("clientTempId" in out ? { clientTempId: out.clientTempId } : {}) };
   }
 
@@ -159,11 +165,18 @@ export class MessagesController {
    */
   @Get("template-header-media")
   async previewTemplateHeaderMedia(
+    @CurrentSession() session: ApiSession,
     @Query("url") rawUrl: string | undefined,
     @Headers("range") range: string | undefined,
     @Res() res: Response,
   ): Promise<void> {
-    if (!rawUrl || !blobStorage.isOwnUrl(rawUrl)) {
+    // `isOwnUrl` only proves the URL is on OUR bucket host — it does NOT scope
+    // by team, so on its own it lets any session stream any team's media (keys
+    // are reconstructable from any presigned URL a team ever emitted, e.g. via
+    // toExternalMediaUrl in webhook/v1 payloads). Every other media surface
+    // checks team ownership before serving bytes; do the same here by requiring
+    // the recovered key to live under the caller's `media/{teamId}/` prefix.
+    if (!rawUrl || !blobStorage.isOwnUrl(rawUrl) || !isOwnTeamMediaUrl(rawUrl, session.teamId)) {
       throw new NotFoundException({ error: "not_found" });
     }
     await streamBlob(res, rawUrl, range);
@@ -233,6 +246,23 @@ export class MessagesController {
   ) {
     return this.messages.forward(session.teamId, session.userId, body);
   }
+}
+
+/**
+ * Team-scope gate for the header-media preview. Staged header-media objects are
+ * keyed `media/{teamId}/…` (see r2 `buildKey`), so recover the key from our own
+ * stable object URL — path-style `https://…/{bucket}/{key}` — and require it to
+ * sit under the caller's team prefix. Assumes `blobStorage.isOwnUrl` already
+ * vetted the host. teamIds are URL-safe (cuid) so no re-sanitization needed.
+ */
+function isOwnTeamMediaUrl(rawUrl: string, teamId: string): boolean {
+  // Recover the object key via r2's canonical parser (host + `/{bucket}/` prefix
+  // check) instead of re-deriving it here — one source of truth for what "our
+  // key" means, and it returns null (→ false) for foreign/malformed URLs or an
+  // env/config miss rather than throwing. Only the team-scope gate stays local.
+  const key = r2Internal.keyFromOwnUrl(rawUrl);
+  if (!key) return false;
+  return key.startsWith(`media/${teamId}/`);
 }
 
 /**

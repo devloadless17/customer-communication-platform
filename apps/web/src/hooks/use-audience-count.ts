@@ -44,11 +44,16 @@ export function useAudienceCount(
           body: JSON.stringify({ tagIds, contactIds }),
           signal: controller.signal,
         });
+        // A non-2xx (429 rate-limit, 401 session blip, 500 during an api
+        // restart) still returns JSON, but without a `count` — parsing it would
+        // zero the badge. Throw so the keep-last catch below handles it too.
+        if (!res.ok) throw new Error(`count failed: ${res.status}`);
         const data = (await res.json()) as { count?: number };
         if (!cancelled) setCount(data.count ?? 0);
       } catch {
         // Either an abort (a newer query superseded this one — `cancelled` is
-        // already true, so no write) or a real network error. On a real error
+        // already true, so no write), an HTTP error status, or a real network
+        // error. On any real error
         // KEEP the last known count: zeroing it here disabled Send for a valid
         // audience on a transient blip. A genuinely-empty audience is already
         // handled by the early return above.

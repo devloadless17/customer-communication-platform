@@ -218,25 +218,63 @@ export function ContactsClient({
   // when the live row has dropped out.
   const detailRowRef = useRef<ContactListItem | null>(null);
 
-  // Drop any selected ids that aren't in the current items (filter changed).
+  // Previous set of visible (loaded) ids, so the effect below can tell an
+  // infinite-scroll append / reconcile (every prior id still present AND the
+  // set grew) apart from a filter change or row removal (prior ids dropped) —
+  // only the latter is allowed to demote "all matching".
+  const prevVisibleIdsRef = useRef<Set<string>>(new Set());
+  // Set for exactly one commit when the effect auto-joins a freshly loaded page
+  // into an active "all matching" selection. That commit's render still sees the
+  // new rows as unselected (allVisibleSelected=false) until the union setState
+  // lands; without this flag the demotion effect would read that transient and
+  // cancel the escalation from passive scrolling.
+  const skipMatchingDemotionRef = useRef(false);
+
+  // Keep `selectedIds` in step with the loaded rows:
+  //  - infinite-scroll append / reconcile while "all matching" is active: union
+  //    the new page into the selection so scrolling can't silently demote the
+  //    escalation ("all N matching" means unloaded rows count too — a loaded but
+  //    unselected page would contradict that).
+  //  - otherwise (filter change, deletion): drop selected ids no longer visible.
   useEffect(() => {
+    const visibleIds = new Set(items.map((i) => i.contact.id));
+    const prevVisible = prevVisibleIdsRef.current;
+    const isPureAppend =
+      visibleIds.size > prevVisible.size &&
+      Array.from(prevVisible).every((id) => visibleIds.has(id));
+    prevVisibleIdsRef.current = visibleIds;
+    if (allMatching && isPureAppend) {
+      skipMatchingDemotionRef.current = true;
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const id of visibleIds) next.add(id);
+        return next;
+      });
+      return;
+    }
+    skipMatchingDemotionRef.current = false;
     setSelectedIds((prev) => {
-      const visibleIds = new Set(items.map((i) => i.contact.id));
       const filtered = Array.from(prev).filter((id) => visibleIds.has(id));
       if (filtered.length === prev.size) return prev;
       return new Set(filtered);
     });
-  }, [items]);
+  }, [items, allMatching]);
 
   // "All matching" is only valid while every LOADED row is still selected —
   // it's an escalation OF a full-visible selection. The moment the selection
   // drops below all-visible (deselect a row, filter change pruned the set,
   // socket delete removed a selected row), fall back to plain visible-selection
   // semantics so a stale filter payload can't outlive the selection that
-  // justified it.
+  // justified it. The ONE shortfall that must NOT demote is an infinite-scroll
+  // append — the effect above re-unions the new page, and
+  // `skipMatchingDemotionRef` swallows the single transient commit in between.
   const allVisibleSelected =
     items.length > 0 && items.every((i) => selectedIds.has(i.contact.id));
   useEffect(() => {
+    if (skipMatchingDemotionRef.current) {
+      skipMatchingDemotionRef.current = false;
+      return;
+    }
     if (allMatching && !allVisibleSelected) setAllMatching(false);
   }, [allMatching, allVisibleSelected]);
 

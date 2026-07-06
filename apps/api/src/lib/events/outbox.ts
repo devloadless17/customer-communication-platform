@@ -226,7 +226,8 @@ export async function markDispatched(ids: string[]): Promise<void> {
  * 100 rows/claim (and the drainer now keeps claiming within the tick — see
  * OutboxDrainerService.tick — so its real ceiling is 100 × MAX_DRAINS_PER_TICK
  * per 100ms tick), while two simultaneously-hot tenants split a claim 100/100.
- * The window function still just reorders WITHIN the `limit` budget.
+ * The cap is enforced at candidate-selection time (a LATERAL `LIMIT` per team),
+ * so a bursty tenant's backlog can never crowd another tenant out of the window.
  */
 const PER_TEAM_BATCH_CAP = 100;
 
@@ -238,17 +239,27 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
   //
   // Postgres rejects `FOR UPDATE` in any query that uses window functions
   // (SQLSTATE 0A000). To get BOTH the SKIP-LOCKED safety AND the per-team
-  // fairness, split into two steps:
-  //   1. CTE `candidates`: select a wider window (limit × 4) of oldest
-  //      unpublished rows, taking the row-level lock with FOR UPDATE SKIP
-  //      LOCKED. No window functions in this CTE.
-  //   2. CTE `ranked`: apply ROW_NUMBER() to the locked candidates and
-  //      keep at most PER_TEAM_BATCH_CAP per team.
-  //   3. Outer UPDATE: mark the ranked subset published.
-  // This preserves both invariants: nothing else can claim our locked
-  // rows (the candidates' locks are held until commit), and a single
-  // bursty tenant can't monopolize a batch — at most 4 of their rows per
-  // tick interleave with other tenants' events.
+  // fairness, select candidates PER TEAM so one tenant's backlog can never
+  // crowd the window:
+  //   1. CTE `teams`: DISTINCT teamIds present in the OLDEST pending window
+  //      (bounded to `limit × 8` rows, NOT the whole backlog — see the CTE
+  //      comment for why an unbounded DISTINCT is O(backlog) per tick).
+  //   2. CTE `candidates`: a LATERAL join per team pulling only that team's
+  //      oldest PER_TEAM_BATCH_CAP unpublished rows, taking the row-level
+  //      lock with FOR UPDATE SKIP LOCKED inside the lateral subquery (no
+  //      window functions there, so the lock is legal). Bounding the cap HERE
+  //      — instead of over a shared `limit × 4` oldest-first window — is the
+  //      whole point: a single team with >`limit × 4` pending rows used to
+  //      fully consume the flat window and starve every other team's realtime
+  //      / webhook / workflow fanout until its backlog drained (the exact
+  //      total-starvation the PER_TEAM_BATCH_CAP fairness exists to prevent).
+  //   3. CTE `ranked`: ROW_NUMBER() per team so the outer LIMIT interleaves
+  //      teams (oldest-of-each first) rather than draining one team fully.
+  //   4. Outer UPDATE: mark the ranked subset published.
+  // This preserves both invariants: nothing else can claim our locked rows
+  // (the candidates' locks are held until commit, and SKIP LOCKED keeps a
+  // second drainer from blocking or deadlocking), and a single bursty tenant
+  // contributes at most PER_TEAM_BATCH_CAP rows per claim.
   const rows = await db.$queryRaw<
     Array<{
       id: string;
@@ -261,14 +272,44 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
       correlationId: string | null;
     }>
   >`
-    WITH candidates AS (
-      SELECT "id", "teamId", "createdAt"
-      FROM   "OutboundEvent"
-      WHERE  "publishedAt" IS NULL
-        AND  "failedAt"    IS NULL
-      ORDER BY "createdAt" ASC
-      LIMIT  ${limit * 4}
-      FOR UPDATE SKIP LOCKED
+    WITH teams AS (
+      -- Distinct teamIds present in the OLDEST pending window, NOT over the
+      -- whole backlog. A plain DISTINCT teamId over every unpublished row is
+      -- O(backlog) each tick (the only pending index,
+      -- OutboundEvent_drainer_pending_idx, is a partial btree on createdAt
+      -- with no teamId, and Postgres has no DISTINCT skip-scan), so it degraded
+      -- exactly during the broadcast/fanout backlog the drainer exists to clear.
+      -- Bounding to the oldest limit*8 rows keeps the scan O(limit) while
+      -- preserving fairness: the claim can pull at most limit rows anyway, so
+      -- every team that owns a row old enough to be claimable THIS tick is
+      -- present in an 8x window (headroom for the worst realistic skew: one
+      -- team's contiguous burst pushing others' oldest rows deeper). A team
+      -- whose oldest row sits beyond the window simply isn't claimable yet and
+      -- surfaces on a later tick as the window drains, which is the correct
+      -- round-robin-among-the-oldest-backlog behavior fairness wants.
+      SELECT DISTINCT "teamId"
+      FROM   (
+        SELECT "teamId"
+        FROM   "OutboundEvent"
+        WHERE  "publishedAt" IS NULL
+          AND  "failedAt"    IS NULL
+        ORDER BY "createdAt" ASC
+        LIMIT ${limit * 8}
+      ) oldest_window
+    ),
+    candidates AS (
+      SELECT c."id", c."teamId", c."createdAt"
+      FROM   teams t
+      CROSS JOIN LATERAL (
+        SELECT "id", "teamId", "createdAt"
+        FROM   "OutboundEvent" o
+        WHERE  o."publishedAt" IS NULL
+          AND  o."failedAt"    IS NULL
+          AND  o."teamId"      = t."teamId"
+        ORDER BY o."createdAt" ASC
+        LIMIT  ${PER_TEAM_BATCH_CAP}
+        FOR UPDATE SKIP LOCKED
+      ) c
     ),
     ranked AS (
       SELECT "id",
@@ -282,12 +323,12 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
            "attempts" = "attempts" + 1
     WHERE  "id" IN (
       SELECT "id" FROM ranked
-      WHERE team_rn <= ${PER_TEAM_BATCH_CAP}
-      -- Explicit ORDER BY so the LIMIT picks the OLDEST rows across teams,
-      -- not whatever order the planner happens to materialize the CTE in.
-      -- Postgres preserves CTE row order today, but the docs don't guarantee
-      -- it — without this, a future plan change could pick non-oldest rows
-      -- under load, breaking FIFO + fairness.
+      -- Explicit ORDER BY so the LIMIT interleaves teams (each team's oldest
+      -- first) and, within a team, picks the OLDEST rows — not whatever order
+      -- the planner happens to materialize the CTE in. Postgres preserves CTE
+      -- row order today, but the docs don't guarantee it; without this a future
+      -- plan change could pick non-oldest rows under load, breaking FIFO +
+      -- fairness.
       ORDER BY team_rn, "createdAt"
       LIMIT ${limit}
     )

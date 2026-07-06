@@ -398,6 +398,7 @@ export const r2Internal = {
   bucket,
   presignTtlSeconds,
   stableObjectUrl,
+  keyFromOwnUrl,
 };
 
 /** Exposed for tests. */

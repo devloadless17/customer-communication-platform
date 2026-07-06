@@ -31,6 +31,7 @@ export function ChannelHeader({
   memberCount,
   typingUserIds,
   teamMemberNameById,
+  viewerUserId,
   onEdit,
   onDelete,
   onOpenSearch,
@@ -41,6 +42,8 @@ export function ChannelHeader({
   memberCount: number;
   typingUserIds: string[];
   teamMemberNameById: Map<string, string>;
+  /** The viewing agent — filtered out so they don't see their own name typing. */
+  viewerUserId: string;
   onEdit: () => void;
   onDelete: () => void;
   onOpenSearch: () => void;
@@ -78,7 +81,11 @@ export function ChannelHeader({
           <div className="text-xs text-muted-foreground">No description</div>
         )}
       </div>
-      <TypingIndicator userIds={typingUserIds} namesById={teamMemberNameById} />
+      <TypingIndicator
+        userIds={typingUserIds}
+        namesById={teamMemberNameById}
+        viewerUserId={viewerUserId}
+      />
       <Tooltip>
         <TooltipTrigger asChild>
           <Button

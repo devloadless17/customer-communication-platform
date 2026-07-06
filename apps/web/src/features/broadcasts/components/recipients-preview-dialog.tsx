@@ -42,6 +42,13 @@ export function RecipientsPreviewDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Stable key so a parent re-render that hands us a fresh `payload` object of
+  // the SAME audience doesn't blank the list + re-POST (same tagKey/contactKey
+  // pattern as use-audience-count.ts). `payload` is still read inside the effect.
+  const payloadKey = payload
+    ? `${payload.tagIds.join(",")}|${payload.contactIds.join(",")}`
+    : null;
+
   useEffect(() => {
     if (!open || !payload) return;
     let cancelled = false;
@@ -67,7 +74,8 @@ export function RecipientsPreviewDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, payload]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, payloadKey]);
 
   if (!open) return null;
 

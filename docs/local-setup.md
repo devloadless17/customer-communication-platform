@@ -9,7 +9,7 @@ handful of **env + cwd rules**, not version conflicts. They're below.
 
 ## pnpm-only — never npm
 
-This is a pnpm workspace (`packageManager: pnpm@10.33.3`, `workspace:*` deps, single
+This is a pnpm workspace (the `packageManager` version pinned in `package.json`, `workspace:*` deps, single
 `pnpm-lock.yaml`). **`npm install` errors** (`Unsupported URL Type "workspace:"`).
 
 ```bash
@@ -73,7 +73,7 @@ does). Setting them only at runtime does nothing for the browser/proxy — that'
 
 | | **Dev (host)** | **Docker local (`pnpm prod:local`)** | **Prod (VPS)** |
 |---|---|---|---|
-| Run | `pnpm dev` (web+api on host; DB/Redis in Docker) | `docker compose --env-file .env.local-docker --profile local up --build` (Caddy on `:8080` fronts everything) | systemd + Caddy front |
+| Run | `pnpm dev` (web+api on host; DB/Redis in Docker) | `docker compose --env-file .env.local-docker --profile local up --build` (Caddy on `:8080` fronts everything) | `docker compose` (`restart: unless-stopped`) + Caddy front (host systemd manages Caddy only — no app systemd unit) |
 | Origin | `http://localhost:3000` (web) + `:4000` (api), two ports | **one origin** `http://localhost:8080` (Caddy) | one origin `https://<host>` (Caddy) |
 | DB / Redis | `localhost:5433` / `localhost:6380` | `postgres:5432` / `redis:6379` | same (compose net) |
 | Browser → api | absolute `NEXT_PUBLIC_API_URL` = `http://localhost:4000` (dev allows plain http) | **`NEXT_PUBLIC_API_URL` EMPTY → relative same-origin URLs through Caddy** | empty → relative; Caddy routes `/api/*`,`/socket.io/*` → api |

@@ -296,6 +296,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       body,
       this.idemKey(idempotencyKey),
+      hasScope(auth.scopes, "read:contacts"),
     );
   }
 
@@ -335,6 +336,7 @@ export class ExternalV1Controller {
       id,
       parsed.data,
       this.idemKey(idempotencyKey),
+      hasScope(auth.scopes, "read:contacts"),
     );
     return { contact };
   }
@@ -378,6 +380,7 @@ export class ExternalV1Controller {
       id,
       body,
       this.idemKey(idempotencyKey),
+      hasScope(auth.scopes, "read:contacts"),
     );
     return { contact };
   }
@@ -398,6 +401,7 @@ export class ExternalV1Controller {
       id,
       tagId,
       this.idemKey(idempotencyKey),
+      hasScope(auth.scopes, "read:contacts"),
     );
     return { contact };
   }
@@ -425,6 +429,7 @@ export class ExternalV1Controller {
       body.tagIds,
       body.silent === true,
       this.idemKey(idempotencyKey),
+      hasScope(auth.scopes, "read:contacts"),
     );
     return { contact };
   }
@@ -666,6 +671,7 @@ export class ExternalV1Controller {
       id,
       { stageId: body.stageId },
       this.idemKey(idempotencyKey),
+      hasScope(auth.scopes, "read:contacts"),
     );
     return { contact };
   }
@@ -678,8 +684,8 @@ export class ExternalV1Controller {
    * contact-lookup → conversation-lookup → send chain.
    *
    * Accepts the same `Idempotency-Key` header as the conversation-scoped
-   * send. Media + template sends are stubbed for now (schema accepts them,
-   * service returns 400 until they're wired).
+   * send. Template sends work; only URL media is unwired (the schema accepts
+   * it, but the service returns 400 until it's wired).
    */
   @Post("messages")
   @RequireScope("write:messages")

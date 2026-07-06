@@ -39,7 +39,17 @@ export default async function TemplatesPage() {
   const initialStatusFilter = parseTemplatesStatus(
     cookieStore.get(TEMPLATES_STATUS_COOKIE)?.value,
   );
-  const initialQuery = cookieStore.get(TEMPLATES_SEARCH_COOKIE)?.value ?? "";
+  // The client writes this cookie with encodeURIComponent (templates-view.tsx),
+  // but cookies().get() returns the raw value — decode it here or a search with
+  // a space/non-ASCII char seeds as percent-encoded text that matches nothing.
+  // Same manual-decode pattern as server-tz.ts.
+  const rawQuery = cookieStore.get(TEMPLATES_SEARCH_COOKIE)?.value ?? "";
+  let initialQuery = rawQuery;
+  try {
+    initialQuery = decodeURIComponent(rawQuery);
+  } catch {
+    // Malformed encoding — fall back to the raw value.
+  }
 
   return (
     <TemplatesView

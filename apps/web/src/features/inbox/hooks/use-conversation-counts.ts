@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { useCoalescedAsync } from "@/features/inbox/lib/coalesce";
 import { getClientSocket } from "@/lib/socket-client";
+import { useSocketReconnect } from "@/hooks/use-socket-reconnect";
 
 // How long after a stage change to suppress the GET /counts result so it
 // can't roll back the optimistic byStage patch. Sized to comfortably cover
@@ -104,6 +105,20 @@ export function useConversationCounts(): ConversationCounts | null {
       // pile onto a real outage.
     }
   }, []);
+
+  // Reconnect + visibility recovery. The counts are one-shot socket-driven, so
+  // every frame missed during a socket gap (laptop sleep past the 30s recovery
+  // window, WiFi hop) leaves the badges stale until the next unrelated team
+  // event happens to arrive — on a quiet afternoon that is unbounded, and the
+  // sidebar disagrees with the inbox list (which DOES resync). Refetch the
+  // authoritative counts on every real reconnect and whenever the tab returns
+  // to the foreground, converging to server state like `useTeamEvents` does for
+  // the list. `refresh` is coalesced, so a connect + visibilitychange that fire
+  // within milliseconds (a laptop opening on a fresh network) collapse to one GET.
+  useSocketReconnect(
+    () => void refresh(),
+    () => void refresh(),
+  );
 
   useEffect(() => {
     void refresh();
@@ -217,6 +232,8 @@ export function useConversationCounts(): ConversationCounts | null {
         void refresh();
       }, STAGE_SETTLING_MS + 50);
     };
+
+    // Reconnect + visibility recovery is wired via `useSocketReconnect` above.
 
     socket.on("conversation:assigned", triggerSkipOptimistic);
     socket.on("conversation:status", triggerSkipOptimistic);

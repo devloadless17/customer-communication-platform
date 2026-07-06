@@ -8,8 +8,16 @@ import { withSweeperMutex } from "@/lib/sweepers/_mutex";
  * size + pg_dump time, and the inbound-media sweeper only needs it for minutes
  * after arrival (Meta retains the binary ~30d for re-download retries).
  *
- * This sweeper NULLs `rawPayload` on messages older than the retention window,
- * keeping recent payloads for debugging while bounding ancient growth.
+ * This sweeper SHEDS `rawPayload` on messages older than the retention window,
+ * keeping recent payloads for debugging while bounding ancient growth. Broadcast
+ * rows are the one exception: instead of NULLing them, we collapse them to the
+ * minimal `{"sentVia":"broadcast"}` stub. That one-key discriminator is the only
+ * signal the analytics-drift sweeper has to EXCLUDE broadcast sends from the
+ * outgoing-message recount (broadcasts don't bump the incremental counter); a
+ * bare NULL would make an aged broadcast row indistinguishable from a normal
+ * send and permanently poison drift-correction for that conversation. The bulky
+ * webhook body is still shed for every row (rule #4 intent preserved) — only the
+ * 1-key classifier survives on broadcasts.
  *
  * OPT-IN by design: rule #4 says keep raw payloads, so the default is to keep
  * them FOREVER. Set `MESSAGE_RAWPAYLOAD_RETENTION_DAYS` (e.g. `90`) to enable —
@@ -79,14 +87,24 @@ async function sweepOnce(days: number): Promise<void> {
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   let total = 0;
   for (let i = 0; i < MAX_BATCHES; i++) {
-    // Batched NULL via a LIMIT'd id subquery (Prisma updateMany has no LIMIT).
-    // `rawPayload IS NOT NULL` keeps each pass shrinking + idempotent.
+    // Batched shed via a LIMIT'd id subquery (Prisma updateMany has no LIMIT).
+    // Broadcast rows collapse to the 1-key `{"sentVia":"broadcast"}` stub (the
+    // discriminator the analytics-drift sweeper needs); everything else NULLs.
+    // The WHERE excludes rows already in their terminal shed state (NULL, or the
+    // exact broadcast stub) so each pass keeps shrinking + stays idempotent —
+    // without the `<> stub` guard, already-collapsed broadcast rows would be
+    // re-selected forever and starve the batch.
     const affected = await db.$executeRaw`
       UPDATE "Message"
-      SET "rawPayload" = NULL
+      SET "rawPayload" = CASE
+        WHEN "rawPayload"->>'sentVia' = 'broadcast' THEN '{"sentVia":"broadcast"}'::jsonb
+        ELSE NULL
+      END
       WHERE id IN (
         SELECT id FROM "Message"
-        WHERE "timestamp" < ${cutoff} AND "rawPayload" IS NOT NULL
+        WHERE "timestamp" < ${cutoff}
+          AND "rawPayload" IS NOT NULL
+          AND "rawPayload" <> '{"sentVia":"broadcast"}'::jsonb
         LIMIT ${BATCH_SIZE}
       )
     `;
@@ -95,7 +113,7 @@ async function sweepOnce(days: number): Promise<void> {
   }
   if (total > 0) {
     console.warn(
-      `[sweeper.message-rawpayload] nulled rawPayload on ${total} message(s) older than ${days} days`,
+      `[sweeper.message-rawpayload] shed rawPayload on ${total} message(s) older than ${days} days`,
     );
   }
 }

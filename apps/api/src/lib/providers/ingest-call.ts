@@ -244,10 +244,23 @@ export async function ingestCallEvent(
         if (alreadyTerminal) {
           callRow = { id: existing.id, status: existing.status };
         } else {
+          // Status-rank guard (same posture as the Message.status statusRank
+          // guard cited in the header). A non-terminal redelivery must never
+          // DOWNGRADE a row that already advanced: Meta redelivers the
+          // `connecting` webhook (→ ringing) minutes after CallsService
+          // .markConnected flipped the row to in_progress, and an
+          // unconditional write would push it back to ringing — the
+          // stale-calls sweeper then terminalizes the still-LIVE call as
+          // missed and tears down the agent's call panel. Only write status
+          // when it isn't a downgrade: a terminal phase always wins
+          // (alreadyTerminal is excluded above), and the sole non-terminal
+          // target (`ringing`) is written only when the row is still ringing.
+          const canWriteStatus =
+            isTerminalPhase || existing.status === CallStatus.ringing;
           callRow = await tx.call.update({
             where: { id: existing.id },
             data: {
-              status: effectiveStatus,
+              ...(canWriteStatus ? { status: effectiveStatus } : {}),
               // answeredAt is set-once, stamped from the provider's REAL pickup
               // time (evt.connectedAt). Never from the media-setup connect.
               ...(!existing.answeredAt && evt.connectedAt

@@ -91,8 +91,8 @@ export interface NodeData extends Record<string, unknown> {
   /** ask_question answer kind — drives whether to render N option handles
    *  or the generic answered+timeout pair. */
   askAnswerKind?: "free_text" | "buttons" | "list";
-  /** Stable ids + labels of the step's options, in declaration order. Only
-   *  populated when askAnswerKind === "buttons" (the N-way mode). */
+  /** Stable ids + labels of the step's options, in declaration order. Populated
+   *  when askAnswerKind is "buttons" or "list" (both drive the N-way mode). */
   askOptionIds?: Array<{ id: string; title: string }>;
   /** For each option id, whether an outgoing edge with that label already
    *  exists. Drives the per-option "+" affordances. */
@@ -262,21 +262,26 @@ export function BranchNode({ id, data }: NodeProps) {
  * Ask-question node: sends a question to the contact, pauses the run, then
  * branches based on the answer.
  *
- *   Free-text + list modes → 2 handles: "answered" (emerald) + "timeout" (amber).
- *   Buttons mode (1-3 options) → N+1 handles: one per option id + "timeout".
+ *   Free-text mode → 2 handles: "answered" (emerald) + "timeout" (amber).
+ *   Buttons/list mode (1-N options) → N+1 handles: one per option id + "timeout".
  *
- * The buttons N-way path keeps button workflows clean — author wires each
- * option's edge directly to the next step instead of forcing a Branch in
- * between. Buttons cap at 3 (Meta limit) so the N-handle width stays
- * comfortable on a w-64 (256px) node. List mode keeps the 2-handle shape
- * because 10 handles in 256px is unreadable.
+ * The N-way path keeps option workflows clean — author wires each option's edge
+ * directly to the next step instead of forcing a Branch in between. Buttons cap
+ * at 3 (Meta limit); list caps at 10. List MUST render the N handles too —
+ * otherwise edges already wired to per-option handles silently drop off the
+ * canvas (they can't resolve to a handle that isn't rendered). At 10 options the
+ * per-option id labels squeeze on a w-64 (256px) node, but they truncate with a
+ * `title` tooltip and the per-option "+" lives in a width-unconstrained floating
+ * toolbar, so wiring stays usable.
  */
 export function AskQuestionNode({ id, data }: NodeProps) {
   const d = data as NodeData;
   const [hovered, setHovered] = useState(false);
   const actionsVisible = hovered || !!d.selected;
   const options = d.askOptionIds ?? [];
-  const nWay = d.askAnswerKind === "buttons" && options.length > 0;
+  const nWay =
+    (d.askAnswerKind === "buttons" || d.askAnswerKind === "list") &&
+    options.length > 0;
   return (
     <div
       className={`${NODE_BASE} w-64 border-violet-500/40 ${

@@ -8,6 +8,9 @@
  *                      the api decrypts). Missing in api → exit(1).
  *   - prodRequired:    missing in production → exit(1) in BOTH processes; warn
  *                      in development.
+ *   - apiProdRequired: missing in production → exit(1), api process ONLY (e.g.
+ *                      R2_* blob-storage creds — only the api reads/writes R2;
+ *                      compose injects no R2 var into the web service).
  *   - webProdRequired: missing in production → exit(1), web process ONLY (e.g.
  *                      INTERNAL_API_URL — only the web process fetches the api).
  *   - recommended:     missing → warn in production. Boots but features degrade.
@@ -99,6 +102,15 @@ const prodRequired: Check[] = [
       "(either trusts spoofed IPs or collapses every request onto Caddy's " +
       "loopback bucket). Set to '1' for the default single-Caddy topology.",
   },
+];
+
+// Required in production, but ONLY in the api process. R2 blob storage is read
+// exclusively by apps/api (media send/receive, avatar serving) — apps/web has
+// zero R2/blob references, and docker-compose.yml deliberately injects no R2
+// var into the web (app) service. Keeping these in prodRequired (BOTH
+// processes) crash-loops the prod web container at boot. Mirrors webProdRequired
+// but gated on label === "api".
+const apiProdRequired: Check[] = [
   {
     name: "R2_ACCOUNT_ID",
     hint:
@@ -161,6 +173,8 @@ export function validateEnv(label: "api" | "web" = "api"): void {
   const missingApiRequired =
     label === "api" ? apiRequired.filter((c) => !present(c)) : [];
   const missingProdRequired = prodRequired.filter((c) => !present(c));
+  const missingApiProdRequired =
+    label === "api" ? apiProdRequired.filter((c) => !present(c)) : [];
   const missingWebProdRequired =
     label === "web" ? webProdRequired.filter((c) => !present(c)) : [];
   const missingRecommended = recommended.filter((c) => !present(c));
@@ -169,6 +183,7 @@ export function validateEnv(label: "api" | "web" = "api"): void {
     ...missingRequired,
     ...missingApiRequired,
     ...(PROD ? missingProdRequired : []),
+    ...(PROD ? missingApiProdRequired : []),
     ...(PROD ? missingWebProdRequired : []),
   ];
 
@@ -180,7 +195,11 @@ export function validateEnv(label: "api" | "web" = "api"): void {
   }
 
   if (!PROD) {
-    for (const c of [...missingProdRequired, ...missingWebProdRequired]) {
+    for (const c of [
+      ...missingProdRequired,
+      ...missingApiProdRequired,
+      ...missingWebProdRequired,
+    ]) {
       console.warn(`${tag} dev warning: ${describe(c)} (required in production)`);
     }
   }

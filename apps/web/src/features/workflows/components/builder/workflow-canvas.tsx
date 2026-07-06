@@ -275,8 +275,13 @@ function CanvasInner({
         options?: Array<{ id?: string; title?: string }>;
       };
       const answerKind = cfg.answerKind ?? "free_text";
+      // Collect per-option ids for BOTH buttons AND list: the runtime
+      // (ask-question.ts) routes list-row taps through the same option-id
+      // edges as buttons, and changeAnswerKind keeps those edges alive across
+      // a buttons↔list switch. Surfacing them here lets the node render/rewire
+      // them instead of silently dropping edges to nonexistent handles.
       const options =
-        answerKind === "buttons" && Array.isArray(cfg.options)
+        (answerKind === "buttons" || answerKind === "list") && Array.isArray(cfg.options)
           ? cfg.options
               .filter((o) => typeof o?.id === "string" && o.id.length > 0)
               .map((o) => ({ id: o.id as string, title: (o.title ?? o.id) as string }))

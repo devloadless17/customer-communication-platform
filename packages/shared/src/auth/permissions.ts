@@ -1,5 +1,3 @@
-import { z } from "zod";
-
 import type { Role } from "../types";
 
 /**
@@ -250,28 +248,3 @@ function readRoleOverrides(
   if (!sub || typeof sub !== "object") return {};
   return sub as Partial<Record<Capability, boolean>>;
 }
-
-/**
- * Zod schema for the PATCH body / stored value. Only editable roles, only
- * known capabilities, only booleans. `admin`/`superAdmin` keys are rejected so
- * a malformed write can't claim to lock out the owner. `.strict()` rejects
- * unknown role keys.
- */
-const zCapabilityMap = z
-  .object(
-    ALL_CAPABILITIES.reduce(
-      (acc, cap) => {
-        acc[cap] = z.boolean().optional();
-        return acc;
-      },
-      {} as Record<Capability, z.ZodOptional<z.ZodBoolean>>,
-    ),
-  )
-  .strict();
-
-export const zRolePermissions = z
-  .object({
-    manager: zCapabilityMap.optional(),
-    agent: zCapabilityMap.optional(),
-  })
-  .strict();

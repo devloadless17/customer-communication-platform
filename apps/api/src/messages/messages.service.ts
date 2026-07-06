@@ -21,7 +21,12 @@ import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
 import { publish } from "@/lib/events/bus";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 import type { DomainEventOf } from "@ccp/shared/events/types";
-import { MEDIA_SIZE_CAPS, META_DOCUMENT_MIME_ALLOWED, kindFromMime } from "@/lib/media-storage";
+import {
+  MEDIA_SIZE_CAPS,
+  META_DOCUMENT_MIME_ALLOWED,
+  kindFromMime,
+  normalizeMimeType,
+} from "@/lib/media-storage";
 import { transcodeToOggOpus, VOICE_IOS_PROFILE } from "@/lib/media/audio-transcode";
 import {
   consumeConversationSendBudget,
@@ -101,6 +106,32 @@ function templateHeaderKindFromMime(
   // Everything else Meta treats as a document header (pdf, docx, xlsx, …).
   return "document";
 }
+
+/**
+ * Meta's supported template-header media formats, per kind. A header's media is
+ * fetched by Meta at SEND time (and on EVERY broadcast recipient), so an
+ * unsupported type stages fine then fails every send. Image/video are far
+ * stricter than the generic media path (jpeg/png, mp4/3gp); the document set
+ * reuses Meta's standard document allowlist.
+ */
+const TEMPLATE_HEADER_MIME_ALLOWED: Record<
+  "image" | "video" | "document",
+  ReadonlySet<string>
+> = {
+  image: new Set(["image/jpeg", "image/png"]),
+  video: new Set(["video/mp4", "video/3gp", "video/3gpp"]),
+  document: META_DOCUMENT_MIME_ALLOWED,
+};
+
+const TEMPLATE_HEADER_MIME_HINT: Record<
+  "image" | "video" | "document",
+  string
+> = {
+  image: "A template image header must be JPEG or PNG.",
+  video: "A template video header must be MP4 or 3GP.",
+  document:
+    "A template document header must be a PDF, Word, Excel, PowerPoint, text, or CSV file.",
+};
 
 @Injectable()
 export class MessagesService {
@@ -611,6 +642,7 @@ export class MessagesService {
     teamId: string,
     userId: string,
     input: SendTextInput,
+    isRetry = false,
   ): Promise<{ ok: true; clientTempId?: string }> {
     return runWithSendIdempotency(
       {
@@ -634,6 +666,7 @@ export class MessagesService {
             replyToExternalId: pre.replyToExternalId,
             clientTempId: input.clientTempId,
             receivedAt: new Date().toISOString(),
+            isRetry,
           });
         } catch (err) {
           // Redis/queue down: the enqueue throws an ioredis error (bounded by
@@ -1469,10 +1502,8 @@ export class MessagesService {
     // that Chrome's MediaRecorder emits is enough to make it reject the
     // payload with a non-obvious error. Blob storage was already tolerant
     // (splits on `;` for its allowlist check) — Meta isn't.
-    const rawMime = file.mimetype || "application/octet-stream";
     // `let` so the voice-note transcode below can rewrite it to audio/ogg.
-    let mimeType =
-      rawMime.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
+    let mimeType = normalizeMimeType(file.mimetype);
     const kind = kindFromMime(mimeType);
     const cap = MEDIA_SIZE_CAPS[kind];
     if (file.size > cap) {
@@ -2261,17 +2292,23 @@ export class MessagesService {
                 ...(saved ? {} : { blobUploadFailed: true }),
               } as Prisma.InputJsonValue,
               timestamp: fwdMediaTs,
-              mediaKind: mb.kind,
+              // Persist media columns only when the blob upload succeeded —
+              // mirror the sendMedia degrade (mapMessage reads `mediaKind &&
+              // !mediaUrl` as "still downloading"; writing them when the blob
+              // failed leaves a permanently broken bubble with no recovery path,
+              // since outbound rows get no re-download sweeper). A blob failure
+              // degrades to a caption-only text row (rawPayload flags it).
               ...(saved
                 ? {
+                    mediaKind: mb.kind,
                     mediaKey: saved.key,
                     mediaUrl: saved.url,
                     mediaSizeBytes: saved.sizeBytes,
+                    mediaMimeType: mb.mime,
+                    mediaCaption: withCaption ?? null,
+                    mediaFilename: mb.kind === "document" ? filename : null,
                   }
                 : {}),
-              mediaMimeType: mb.mime,
-              mediaCaption: withCaption ?? null,
-              mediaFilename: mb.kind === "document" ? filename : null,
             }).catch((err): null => {
               this.logger.error(
                 `[forward] DB persist failed after Meta send (wamid=${send.externalId})`,
@@ -2464,17 +2501,38 @@ export class MessagesService {
     teamId: string,
     file: Express.Multer.File,
   ): Promise<{ link: string; kind: "image" | "video" | "document"; filename?: string }> {
-    const kind = templateHeaderKindFromMime(file.mimetype);
+    // Normalize the mime the same way sendMedia does (strip codec params,
+    // lowercase) before mapping to a kind — Meta keys header media strictly.
+    const mimeType = normalizeMimeType(file.mimetype);
+    const kind = templateHeaderKindFromMime(mimeType);
     if (!kind) {
       throw new BadRequestException({
         error: "unsupported_media_type",
         detail: "A template header accepts an image, video, or document.",
       });
     }
+    // Per-kind size cap + mime allowlist — parity with the sendMedia path
+    // (MEDIA_SIZE_CAPS + META_DOCUMENT_MIME_ALLOWED). Without these an
+    // oversized/unsupported header stages fine and only fails later at Meta
+    // fetch time, on every send and every broadcast recipient. Fail fast here
+    // so the agent gets an immediate, actionable error at staging time.
+    const cap = MEDIA_SIZE_CAPS[kind];
+    if (file.size > cap) {
+      throw new PayloadTooLargeException({
+        error: `file too large for ${kind} header: ${file.size} bytes > ${cap}`,
+        cap,
+      });
+    }
+    if (!TEMPLATE_HEADER_MIME_ALLOWED[kind].has(mimeType)) {
+      throw new BadRequestException({
+        error: "unsupported_media_type",
+        detail: TEMPLATE_HEADER_MIME_HINT[kind],
+      });
+    }
     const bytes = new Uint8Array(await readFile(file.path));
     const result = await blobStorage.upload({
       bytes,
-      mimeType: file.mimetype,
+      mimeType,
       kind,
       context: {
         teamId,

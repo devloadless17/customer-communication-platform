@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { Tag as TagIcon } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
@@ -1150,10 +1150,28 @@ export function AskQuestionEditor({
   const options = config.options ?? [];
   const maxOptions = answerKind === "buttons" ? 3 : 10;
   // Track the id an option had when its id field gained focus, so the wired
-  // edge rename commits ONCE on blur (oldId = focus-time id, newId = final id)
-  // rather than per keystroke. Per-keystroke renaming meant a value typed
-  // transiently through a sibling's id dropped/stole a wired edge.
+  // edge rename commits ONCE (oldId = focus-time id, newId = final id) rather
+  // than per keystroke. Per-keystroke renaming meant a value typed transiently
+  // through a sibling's id dropped/stole a wired edge. The commit fires on
+  // blur, on Enter (which would otherwise submit the builder <form>), AND on a
+  // short debounce after the last keystroke — a persist (autosave ~1.5s later
+  // then a tab close, or the Enter submit) can beat the blur, and a graph
+  // saved with the config id renamed but the edge label stale dangles the
+  // edge (L92).
   const optionIdEditRef = useRef<{ idx: number; originalId: string } | null>(null);
+  const optionIdCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirror the latest props so the debounced flush reads current values, not
+  // the stale closure captured when its timer was scheduled a keystroke ago.
+  const latestConfigRef = useRef(config);
+  latestConfigRef.current = config;
+  const onChangeWithEdgesRef = useRef(onChangeWithEdges);
+  onChangeWithEdgesRef.current = onChangeWithEdges;
+  useEffect(
+    () => () => {
+      if (optionIdCommitTimerRef.current) clearTimeout(optionIdCommitTimerRef.current);
+    },
+    [],
+  );
 
   function changeAnswerKind(next: AnswerKind) {
     // Leaving buttons/list for a kind with NO per-option handles strands every
@@ -1214,27 +1232,47 @@ export function AskQuestionEditor({
     }
     onChange({ ...config, options: next });
   }
+  function clearOptionIdCommitTimer() {
+    if (optionIdCommitTimerRef.current) {
+      clearTimeout(optionIdCommitTimerRef.current);
+      optionIdCommitTimerRef.current = null;
+    }
+  }
+  // Apply the pending wired-edge rename NOW (focus-time id -> current id) and
+  // advance the anchor so a later flush is a no-op. Reads the LATEST config +
+  // callback via refs so the debounced call (scheduled a keystroke ago) still
+  // renames to the final id and against the current graph. See optionIdEditRef.
+  function flushOptionIdRename() {
+    clearOptionIdCommitTimer();
+    const editing = optionIdEditRef.current;
+    if (!editing) return;
+    const finalId = latestConfigRef.current.options?.[editing.idx]?.id ?? "";
+    if (finalId === editing.originalId) return;
+    onChangeWithEdgesRef.current(
+      { ...latestConfigRef.current },
+      { kind: "rename", oldId: editing.originalId, newId: finalId },
+    );
+    optionIdEditRef.current = { idx: editing.idx, originalId: finalId };
+  }
   // Per-keystroke draft of an option id: update config only (NO edge op). The
-  // wired edge follows once on blur via commitOptionId — see optionIdEditRef.
+  // wired edge follows via flushOptionIdRename (blur / Enter / debounce).
   function setOptionIdDraft(idx: number, id: string) {
     const prev = options[idx];
     if (!prev) return;
     const next = [...options];
     next[idx] = { ...prev, id };
     onChange({ ...config, options: next });
+    // Backstop the blur commit (L92): flush shortly after the last keystroke so
+    // an autosave / tab-close that beats the blur persists an edge whose label
+    // already matches the committed id.
+    clearOptionIdCommitTimer();
+    optionIdCommitTimerRef.current = setTimeout(flushOptionIdRename, 700);
   }
   function commitOptionId(idx: number) {
     const editing = optionIdEditRef.current;
+    if (editing && editing.idx === idx) flushOptionIdRename();
     optionIdEditRef.current = null;
-    if (!editing || editing.idx !== idx) return;
-    const finalId = options[idx]?.id ?? "";
-    if (finalId === editing.originalId) return;
-    // Apply the wired-edge rename once (focus-time id -> final id). config
-    // already carries finalId from the draft path, so pass it through unchanged.
-    onChangeWithEdges(
-      { ...config },
-      { kind: "rename", oldId: editing.originalId, newId: finalId },
-    );
+    clearOptionIdCommitTimer();
   }
   function addOption() {
     if (options.length >= maxOptions) return;
@@ -1318,6 +1356,17 @@ export function AskQuestionEditor({
                     optionIdEditRef.current = { idx, originalId: opt.id };
                   }}
                   onChange={(e) => setOptionIdDraft(idx, e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      // The builder root is a <form>; Enter here would submit
+                      // (persist) before the blur commits the edge rename,
+                      // saving a dangling edge (L92). Commit it and swallow the
+                      // submit — autosave / exit-flush persists the reconciled
+                      // graph.
+                      e.preventDefault();
+                      flushOptionIdRename();
+                    }
+                  }}
                   onBlur={() => commitOptionId(idx)}
                   placeholder="id"
                   className="max-w-25 font-mono text-xs"

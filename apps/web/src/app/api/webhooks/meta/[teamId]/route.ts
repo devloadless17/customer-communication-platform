@@ -18,7 +18,15 @@ import { NextResponse } from "next/server";
  *
  * ---
  *
- * DELETION DEADLINE: 2026-06-19
+ * DELETION DEADLINE: 2026-08-03  (extended 2026-07-03 from 2026-06-19)
+ *
+ * Extension note (2026-07-03): the original 2026-06-19 deadline lapsed
+ * without the deletion checklist being run — prod Caddy access logs could
+ * not be confirmed clear of `/api/webhooks/meta/` hits, so this proxy is
+ * kept alive rather than risk breaking any Meta subscription still pointing
+ * at the legacy URL. A tracking issue is owed to chase the un-flipped
+ * subscription (see policy note at the bottom of this block); do NOT extend
+ * again silently.
  *
  * (Originally added during the NestJS migration cutover on 2026-05-17.
  * One pilot tenant + a 30-day window to confirm every Meta subscription

@@ -291,17 +291,29 @@ async function retryDownload(row: ParkedRow): Promise<void> {
     return;
   }
 
-  const saved = await blobStorage.upload({
-    bytes: fetched.bytes,
-    mimeType: fetched.mimeType,
-    kind: mediaKind,
-    context: {
-      teamId: row.teamId,
-      direction: "in",
-      externalId: row.externalId,
-      originalFilename: row.mediaFilename ?? null,
-    },
-  });
+  let saved;
+  try {
+    saved = await blobStorage.upload({
+      bytes: fetched.bytes,
+      mimeType: fetched.mimeType,
+      kind: mediaKind,
+      context: {
+        teamId: row.teamId,
+        direction: "in",
+        externalId: row.externalId,
+        originalFilename: row.mediaFilename ?? null,
+      },
+    });
+  } catch (err) {
+    if (isDeterministicMediaRejection(err)) {
+      // Mime allowlist / magic-byte mismatch — re-downloading yields the same
+      // bytes that fail the same gate, so clear now rather than re-fetching
+      // hourly for the full 24h horizon. Mirrors the MediaTooLargeError branch.
+      await clearOne(row);
+      return;
+    }
+    throw err;
+  }
 
   // Video-only: mirror the live ingest path (meta.controller.ts) and generate a
   // poster frame so a sweeper-recovered video doesn't render as a black box.
@@ -377,6 +389,20 @@ async function retryDownload(row: ParkedRow): Promise<void> {
       ...(thumbKey ? { thumbnailUrl: `/api/media/${row.id}/thumb` } : {}),
     },
   });
+}
+
+/**
+ * The blob-storage mime allowlist + magic-byte guard throw a plain Error whose
+ * message is prefixed `blob-storage:` (mime-guard.ts). Unlike a Meta-CDN / R2
+ * blip these are DETERMINISTIC — the same bytes fail the same gate on every
+ * re-download — so a parked row must be CLEARED to text-only rather than
+ * re-fetched hourly for the full 24h horizon. The guard runs synchronously
+ * BEFORE any network I/O inside `upload()`, so this only ever matches the mime
+ * gate, never a transient upload failure. (A typed `MediaValidationError` in
+ * mime-guard would be cleaner than matching the message — see needsCoordination.)
+ */
+function isDeterministicMediaRejection(err: unknown): boolean {
+  return err instanceof Error && err.message.startsWith("blob-storage:");
 }
 
 /** Clear a single parked row to text-only + emit the empty ready frame. */

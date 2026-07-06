@@ -8,6 +8,7 @@ import {
   workflowConversationSnapshotAfterAssign,
   workflowConversationSnapshotAfterStatusChange,
 } from "@/lib/workflows/events";
+import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 
 /**
  * Single source of truth for the two conversation mutations whose business
@@ -23,20 +24,29 @@ import {
  * a workflow `assign_to` on a closed chat left it closed. Both now route
  * through these functions, so the rule lives in ONE place and can't drift.
  *
- * Framework-agnostic by design (lib/): `db` and `publish` are INJECTED, not
- * imported, so the NestJS service passes `this.db` + `this.bus.publish` and a
- * workflow step passes the lib `db` Proxy + the lib `publish` — both resolve to
- * the same pool + same bus (see lib/db.ts setSharedDb + EventBus wrapping
- * lib/events/bus.publish), so an event published here reaches every subscriber
- * identically. No NestJS exceptions thrown from here — callers map the typed
- * result/outcome to their own error surface (HTTP exception vs. step result).
+ * Framework-agnostic by design (lib/): `db` is INJECTED, not imported, so the
+ * NestJS service passes `this.db` and a workflow step passes the lib `db`
+ * Proxy — both resolve to the same pool (see lib/db.ts setSharedDb). Each
+ * mutation co-commits its CAS write and its domain event(s) in ONE
+ * `db.$transaction` via `publishInTx`, then calls `kickOutbox()` after commit,
+ * so a crash between the state write and the emit can't lose the realtime
+ * frame, audit row, workflow trigger, or outbound webhook (same durability
+ * posture as MessagesService.autoAssignOnAgentSend + NotesService). The outbox
+ * drainer dispatches to every subscriber ~1ms after the kick — realtime
+ * latency is unchanged. No NestJS exceptions thrown from here — callers map the
+ * typed result/outcome to their own error surface (HTTP exception vs. step
+ * result).
  */
 
 /** Minimal Prisma surface these helpers touch — satisfied by both DbService
- *  (NestJS) and the lib `db` Proxy. */
-type Db = Pick<PrismaClient, "conversation" | "user">;
+ *  (NestJS) and the lib `db` Proxy. `$transaction` co-commits the CAS write and
+ *  the outbox row (publishInTx). */
+type Db = Pick<PrismaClient, "conversation" | "user" | "$transaction">;
 
-/** Injected publish — `EventBus.publish` and lib `publish` share this shape. */
+/** Injected publish — `EventBus.publish` and lib `publish` share this shape.
+ *  RETAINED for caller signature compatibility only: events now co-commit via
+ *  `publishInTx` inside each helper's transaction, so this is no longer the
+ *  delivery path. Drop it from the args + callers in a follow-up. */
 type Publish = <K extends DomainEventType>(event: DomainEventOf<K>) => Promise<void>;
 
 type Contact = Parameters<typeof workflowContactSnapshot>[0];
@@ -124,7 +134,6 @@ export async function assignConversation(args: {
 > {
   const {
     db,
-    publish,
     teamId,
     conversationId,
     targetUserId,
@@ -181,80 +190,90 @@ export async function assignConversation(args: {
     };
   }
 
+  const contact = workflowContactSnapshot(conversation.contact as Contact);
+
   let updated;
   try {
-    updated = await db.conversation.update({
-      // CAS pins BOTH assignedUserId and status, so a concurrent close/assign
-      // by someone else surfaces as a conflict instead of a silent clobber.
-      where: {
-        id: conversationId,
-        teamId,
-        assignedUserId: previousAssignedUserId,
-        status: previousStatus,
-      },
-      data: statusChanged
-        ? { assignedUserId: targetUserId, status: nextStatus }
-        : { assignedUserId: targetUserId },
-      include: { assignedUser: true },
+    // CAS update + event publish co-commit in ONE transaction via publishInTx
+    // so a crash between the assignment write and the emit can't lose the
+    // realtime frame + audit row + outbound webhook. kickOutbox() after commit
+    // dispatches the outbox rows in ~1ms (same shape as autoAssignOnAgentSend).
+    updated = await db.$transaction(async (tx) => {
+      const row = await tx.conversation.update({
+        // CAS pins BOTH assignedUserId and status, so a concurrent close/assign
+        // by someone else surfaces as a conflict instead of a silent clobber.
+        where: {
+          id: conversationId,
+          teamId,
+          assignedUserId: previousAssignedUserId,
+          status: previousStatus,
+        },
+        data: statusChanged
+          ? { assignedUserId: targetUserId, status: nextStatus }
+          : { assignedUserId: targetUserId },
+        include: { assignedUser: true },
+      });
+
+      if (assigneeChanged) {
+        // Build the conversation snapshot AT PUBLISH TIME (post-CAS, with the
+        // predicted analytics writes baked in) so workflow-dispatch reads from
+        // the event payload — not a fresh DB read that could include a
+        // concurrent unrelated mutation. See ConversationAssignedEvent.conversation.
+        const assignedSnapshot = workflowConversationSnapshotAfterAssign(
+          { ...row, assignedUser: row.assignedUser },
+          previousAssignedUserId,
+        );
+        await publishInTx(tx, {
+          type: "conversation.assigned",
+          teamId,
+          conversationId,
+          assignedUser: toWireUser(row.assignedUser),
+          previousAssignedUserId,
+          newAssignedUserId: targetUserId,
+          changedByUserId,
+          ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+          ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
+          contact,
+          conversation: assignedSnapshot,
+          silent: silent === true,
+        });
+      }
+
+      if (statusChanged) {
+        // After assigned → cause-then-effect ordering for consumers watching
+        // both. The status snapshot reflects the row state AFTER the CAS —
+        // status already flipped. The assignment-driven status flip path is
+        // closed→pending or open→pending, never close, so the closeOverrides in
+        // `workflowConversationSnapshotAfterStatusChange` are a no-op here; we
+        // still route through it for one source of truth.
+        const statusSnapshot = workflowConversationSnapshotAfterStatusChange(
+          { ...row, assignedUser: row.assignedUser },
+          { previousStatus, changedByUserId, changedByApiKeyId },
+        );
+        await publishInTx(tx, {
+          type: "conversation.status_changed",
+          teamId,
+          conversationId,
+          previousStatus,
+          newStatus: nextStatus,
+          changedByUserId,
+          ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+          ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
+          contact,
+          conversation: statusSnapshot,
+          silent: silent === true,
+        });
+      }
+
+      return row;
     });
   } catch (err) {
     if (isP2025(err)) return { ok: false, reason: "conflict" };
     throw err;
   }
+  kickOutbox();
 
   const assignedUser = toWireUser(updated.assignedUser);
-  const contact = workflowContactSnapshot(conversation.contact as Contact);
-
-  if (assigneeChanged) {
-    // Build the conversation snapshot AT PUBLISH TIME (post-CAS, with the
-    // predicted analytics writes baked in) so workflow-dispatch reads from
-    // the event payload — not a fresh DB read that could include a concurrent
-    // unrelated mutation. See ConversationAssignedEvent.conversation jsdoc.
-    const assignedSnapshot = workflowConversationSnapshotAfterAssign(
-      { ...updated, assignedUser: updated.assignedUser },
-      previousAssignedUserId,
-    );
-    await publish({
-      type: "conversation.assigned",
-      teamId,
-      conversationId,
-      assignedUser,
-      previousAssignedUserId,
-      newAssignedUserId: targetUserId,
-      changedByUserId,
-      ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
-      ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
-      contact,
-      conversation: assignedSnapshot,
-      silent: silent === true,
-    });
-  }
-
-  if (statusChanged) {
-    // After assigned → cause-then-effect ordering for consumers watching both.
-    // The status snapshot reflects the row state AFTER the CAS — status
-    // already flipped. The assignment-driven status flip path is
-    // closed→pending or open→pending, never close, so the closeOverrides in
-    // `workflowConversationSnapshotAfterStatusChange` are a no-op here; we
-    // still route through it for one source of truth.
-    const statusSnapshot = workflowConversationSnapshotAfterStatusChange(
-      { ...updated, assignedUser: updated.assignedUser },
-      { previousStatus, changedByUserId, changedByApiKeyId },
-    );
-    await publish({
-      type: "conversation.status_changed",
-      teamId,
-      conversationId,
-      previousStatus,
-      newStatus: nextStatus,
-      changedByUserId,
-      ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
-      ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
-      contact,
-      conversation: statusSnapshot,
-      silent: silent === true,
-    });
-  }
 
   return {
     ok: true,
@@ -277,10 +296,17 @@ export async function assignConversation(args: {
  *   - CAS on previous status → `reason: "conflict"`.
  *   - Idempotent no-op (already in target status, no closed metadata to set)
  *     returns `{ ok: true, changed: false }` without writing/emitting.
- *   - Publishes `conversation.status_changed` then (only when closing cleared
- *     an assignee) `conversation.assigned` with `assignedUser: null`.
- *   - `closedCategory` / `closedSummary` ride on the status event (the
- *     analytics subscriber persists them).
+ *   - Publishes `conversation.status_changed` (only when the status actually
+ *     flipped) then (only when closing cleared an assignee) `conversation.assigned`
+ *     with `assignedUser: null`.
+ *   - `closedCategory` / `closedSummary` are persisted in the CAS write itself
+ *     (and still ride the status event on a fresh close, where the analytics
+ *     subscriber double-writes the same values). This is what makes a RE-close
+ *     that only (re)annotates an already-closed thread — e.g. a workflow
+ *     close_conversation step against a chat an agent already closed — actually
+ *     record its category/summary: that path writes the metadata but publishes
+ *     NO status_changed (previousStatus === newStatus), so the analytics
+ *     subscriber (which early-returns on an unchanged status) never runs.
  */
 export async function setConversationStatus(args: {
   db: Db;
@@ -306,7 +332,6 @@ export async function setConversationStatus(args: {
 > {
   const {
     db,
-    publish,
     teamId,
     conversationId,
     status,
@@ -338,6 +363,10 @@ export async function setConversationStatus(args: {
     };
   }
 
+  // Whether the status actually transitions. A re-close (already-closed thread
+  // re-annotated with category/summary) passes the idempotency carve-out above
+  // but does NOT flip status — so no status_changed event is published for it.
+  const statusFlipped = previousStatus !== status;
   const unassignOnClose = status === "closed" && previousAssignedUserId !== null;
   // Auto-resume AI Autopilot on close (product decision): closing hands the
   // thread back to the AI so the next time the customer writes the AI handles
@@ -347,93 +376,114 @@ export async function setConversationStatus(args: {
   const updateData: Prisma.ConversationUncheckedUpdateInput = { status };
   if (unassignOnClose) updateData.assignedUserId = null;
   if (resumeAiOnClose) updateData.aiEnabled = true;
+  // Persist close context in the CAS write itself. On a FRESH close the
+  // analytics subscriber also writes these (harmless same-value double-write);
+  // on a RE-close (metadata-only rewrite, no status_changed emitted below) this
+  // is the ONLY writer — otherwise a workflow close_conversation step's
+  // category/summary on an already-closed thread would be silently dropped.
+  if (status === "closed") {
+    if (closedCategory !== undefined) updateData.closedCategory = closedCategory;
+    if (closedSummary !== undefined) updateData.closedSummary = closedSummary;
+  }
+
+  const contact = workflowContactSnapshot(conversation.contact as Contact);
 
   try {
-    await db.conversation.update({
-      where: { id: conversationId, teamId, status: previousStatus },
-      data: updateData,
+    // CAS update + event publish co-commit in ONE transaction via publishInTx
+    // so a crash between the close write and the emit can't lose the realtime
+    // frame + audit row + workflow trigger + outbound webhook. kickOutbox()
+    // after commit dispatches the outbox rows in ~1ms.
+    await db.$transaction(async (tx) => {
+      await tx.conversation.update({
+        where: { id: conversationId, teamId, status: previousStatus },
+        data: updateData,
+      });
+
+      if (statusFlipped) {
+        // Build the post-CAS conversation snapshot with predicted analytics
+        // writes. `conversation` is the pre-update row; spread the new status
+        // (and cleared assignee on unassign-on-close) on top so the snapshot
+        // reflects what the CAS just committed. See
+        // ConversationStatusChangedEvent.conversation jsdoc.
+        const statusSnapshot = workflowConversationSnapshotAfterStatusChange(
+          {
+            ...conversation,
+            status,
+            assignedUserId: unassignOnClose ? null : previousAssignedUserId,
+          },
+          { previousStatus, changedByUserId, changedByApiKeyId, closedCategory, closedSummary },
+        );
+
+        await publishInTx(tx, {
+          type: "conversation.status_changed",
+          teamId,
+          conversationId,
+          previousStatus,
+          newStatus: status,
+          changedByUserId,
+          ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+          ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
+          contact,
+          conversation: statusSnapshot,
+          ...(closedCategory !== undefined ? { closedCategory } : {}),
+          ...(closedSummary !== undefined ? { closedSummary } : {}),
+          silent: silent === true,
+        });
+      }
+
+      if (unassignOnClose) {
+        // After status_changed: the unassign is a side-effect of the close.
+        // Snapshot mirrors the assignmentSnapshot rules — but the unassign here
+        // doesn't count as a "new assignment" (assignmentsCount not bumped),
+        // since the new value is null.
+        const assignedSnapshot = workflowConversationSnapshotAfterAssign(
+          {
+            ...conversation,
+            status,
+            assignedUserId: null,
+          },
+          previousAssignedUserId,
+        );
+        await publishInTx(tx, {
+          type: "conversation.assigned",
+          teamId,
+          conversationId,
+          assignedUser: null,
+          previousAssignedUserId,
+          newAssignedUserId: null,
+          changedByUserId,
+          ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+          ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
+          contact,
+          conversation: assignedSnapshot,
+          silent: silent === true,
+        });
+      }
+
+      if (resumeAiOnClose) {
+        // The close handed the thread back to the AI — surface it like any
+        // other ai toggle so the inbox pill, socket, and outbound webhook stay
+        // in sync.
+        await publishInTx(tx, {
+          type: "conversation.ai_changed",
+          teamId,
+          conversationId,
+          previousAiEnabled: false,
+          newAiEnabled: true,
+          changedByUserId,
+          ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+          ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
+          contact,
+          occurredAt: new Date().toISOString(),
+          silent: silent === true,
+        });
+      }
     });
   } catch (err) {
     if (isP2025(err)) return { ok: false, reason: "conflict" };
     throw err;
   }
-
-  const contact = workflowContactSnapshot(conversation.contact as Contact);
-  // Build the post-CAS conversation snapshot with predicted analytics writes.
-  // `conversation` is the pre-update row; spread the new status (and cleared
-  // assignee on unassign-on-close) on top so the snapshot reflects what the
-  // CAS just committed. See ConversationStatusChangedEvent.conversation jsdoc.
-  const statusSnapshot = workflowConversationSnapshotAfterStatusChange(
-    {
-      ...conversation,
-      status,
-      assignedUserId: unassignOnClose ? null : previousAssignedUserId,
-    },
-    { previousStatus, changedByUserId, changedByApiKeyId, closedCategory, closedSummary },
-  );
-
-  await publish({
-    type: "conversation.status_changed",
-    teamId,
-    conversationId,
-    previousStatus,
-    newStatus: status,
-    changedByUserId,
-    ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
-    ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
-    contact,
-    conversation: statusSnapshot,
-    ...(closedCategory !== undefined ? { closedCategory } : {}),
-    ...(closedSummary !== undefined ? { closedSummary } : {}),
-    silent: silent === true,
-  });
-
-  if (unassignOnClose) {
-    // After status_changed: the unassign is a side-effect of the close.
-    // Snapshot mirrors the assignmentSnapshot rules — but the unassign here
-    // doesn't count as a "new assignment" (assignmentsCount not bumped),
-    // since the new value is null.
-    const assignedSnapshot = workflowConversationSnapshotAfterAssign(
-      {
-        ...conversation,
-        status,
-        assignedUserId: null,
-      },
-      previousAssignedUserId,
-    );
-    await publish({
-      type: "conversation.assigned",
-      teamId,
-      conversationId,
-      assignedUser: null,
-      previousAssignedUserId,
-      newAssignedUserId: null,
-      changedByUserId,
-      ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
-      ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
-      contact,
-      conversation: assignedSnapshot,
-      silent: silent === true,
-    });
-  }
-
-  if (resumeAiOnClose) {
-    // The close handed the thread back to the AI — surface it like any other
-    // ai toggle so the inbox pill, socket, and outbound webhook stay in sync.
-    await publish({
-      type: "conversation.ai_changed",
-      teamId,
-      conversationId,
-      previousAiEnabled: false,
-      newAiEnabled: true,
-      changedByUserId,
-      ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
-      ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
-      contact,
-      occurredAt: new Date().toISOString(),
-      silent: silent === true,
-    });
-  }
+  kickOutbox();
 
   return {
     ok: true,
@@ -474,7 +524,6 @@ export async function setConversationAiEnabled(args: {
 > {
   const {
     db,
-    publish,
     teamId,
     conversationId,
     aiEnabled,
@@ -496,30 +545,35 @@ export async function setConversationAiEnabled(args: {
     return { ok: true, changed: false, previousAiEnabled };
   }
 
+  const contact = workflowContactSnapshot(conversation.contact as Contact);
   try {
-    await db.conversation.update({
-      where: { id: conversationId, teamId, aiEnabled: previousAiEnabled },
-      data: { aiEnabled },
+    // CAS update + event publish co-commit in ONE transaction via publishInTx
+    // so a crash between the toggle write and the emit can't lose the realtime
+    // frame + audit row + outbound webhook. kickOutbox() dispatches in ~1ms.
+    await db.$transaction(async (tx) => {
+      await tx.conversation.update({
+        where: { id: conversationId, teamId, aiEnabled: previousAiEnabled },
+        data: { aiEnabled },
+      });
+      await publishInTx(tx, {
+        type: "conversation.ai_changed",
+        teamId,
+        conversationId,
+        previousAiEnabled,
+        newAiEnabled: aiEnabled,
+        changedByUserId,
+        ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+        ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
+        contact,
+        occurredAt: occurredAt ?? new Date().toISOString(),
+        silent: silent === true,
+      });
     });
   } catch (err) {
     if (isP2025(err)) return { ok: false, reason: "conflict" };
     throw err;
   }
-
-  const contact = workflowContactSnapshot(conversation.contact as Contact);
-  await publish({
-    type: "conversation.ai_changed",
-    teamId,
-    conversationId,
-    previousAiEnabled,
-    newAiEnabled: aiEnabled,
-    changedByUserId,
-    ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
-    ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
-    contact,
-    occurredAt: occurredAt ?? new Date().toISOString(),
-    silent: silent === true,
-  });
+  kickOutbox();
 
   return { ok: true, changed: true, previousAiEnabled };
 }

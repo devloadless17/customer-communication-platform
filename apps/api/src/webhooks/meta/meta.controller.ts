@@ -305,7 +305,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     // turns the per-event loop into pure CPU + a single later updateMany.
     const externalIds = candidates.map((e) => e.externalId);
     const rows = await this.db.message.findMany({
-      where: { teamId, externalId: { in: externalIds } },
+      where: { teamId, channel: "whatsapp", externalId: { in: externalIds } },
       select: {
         id: true,
         externalId: true,
@@ -485,7 +485,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     // P2002 and we save the Meta fetch + blob upload entirely.
     const externalIds = mediaEvents.map((e) => e.externalId);
     const existing = await this.db.message.findMany({
-      where: { teamId, externalId: { in: externalIds } },
+      where: { teamId, channel: "whatsapp", externalId: { in: externalIds } },
       select: {
         externalId: true,
         mediaKey: true,

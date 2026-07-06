@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   CheckCircle2,
   Copy,
@@ -53,6 +53,14 @@ export function ApiKeysManager({ initialKeys }: Props) {
   const [keys, setKeys] = useState<ApiKeyListItem[]>(
     initialKeys.filter((k) => !k.revokedAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
   );
+  // Sync from SSR re-runs (router.refresh after a create/rotate/revoke) so the
+  // list reflects the fresh server snapshot without a manual reload. Same
+  // pattern as the tags/stages/snippets catalog managers.
+  useEffect(() => {
+    setKeys(
+      initialKeys.filter((k) => !k.revokedAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    );
+  }, [initialKeys]);
   const [name, setName] = useState("Organization");
   const [fullAccess, setFullAccess] = useState(true);
   const [scopes, setScopes] = useState<Set<string>>(

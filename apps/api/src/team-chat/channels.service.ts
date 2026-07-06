@@ -504,6 +504,7 @@ export class ChannelsService {
       lastMessageAt: isReply ? null : existing.createdAt.toISOString(),
       threadReplyCount,
       clientTempId,
+      redelivery: true,
     });
     return { messageId: existing.id, message: dto };
   }
@@ -749,9 +750,16 @@ export class ChannelsService {
       // back the delete too (the user retries) rather than stranding drift.
       const rootId = existing.threadRootId;
       threadReplyUpdate = await this.db.$transaction(async (tx) => {
-        await tx.teamChannelMessage.deleteMany({
+        const del = await tx.teamChannelMessage.deleteMany({
           where: { id: messageId, teamId },
         });
+        // Lost a concurrent-delete race: we blocked on the row lock, then the
+        // committing tx had already removed it, so deleteMany matched 0. Bail
+        // (rolls the tx back cleanly) BEFORE the decrement — otherwise the root
+        // counter would be double-decremented and drift negative with no sweeper.
+        if (del.count === 0) {
+          throw new NotFoundException({ error: "message not found" });
+        }
         const updated = await tx.teamChannelMessage.update({
           where: { id: rootId },
           data: { threadReplyCount: { decrement: 1 } },
@@ -906,36 +914,50 @@ export class ChannelsService {
     if (!message) throw new NotFoundException({ error: "message not found" });
 
     const { emoji } = input;
-    const existing = await this.db.teamChannelReaction.findUnique({
-      where: { messageId_userId_emoji: { messageId, userId, emoji } },
-      select: { id: true },
-    });
 
-    if (existing) {
-      await this.db.teamChannelReaction.delete({ where: { id: existing.id } });
-    } else {
-      try {
-        await this.db.teamChannelReaction.create({
-          data: { messageId, userId, emoji },
-        });
-      } catch (err) {
-        // Raced with another of my tabs — already exists. Treat as success.
-        if (!isP2002(err)) throw err;
+    // Serialize concurrent toggles on the same message via a row lock so the
+    // find/create-or-delete, the snapshot read, and the version stamp are all
+    // ordered against each other. Without this, two toggles in the same tick
+    // interleave read-then-publish: the earlier-committing one can ship the
+    // OLDER snapshot under the HIGHER `Date.now()` (stamped at publish time),
+    // so a client applying authoritative frames drops a reaction from live view
+    // until a refetch. Stamping the version INSIDE the locked section (below)
+    // makes it monotonic with the snapshot it describes. The lock also turns
+    // the same-user un-react double-fire into a no-op instead of a P2025, the
+    // mirror of the create branch treating a P2002 as success. Cheap —
+    // reactions are low-rate.
+    const { userIds, version } = await this.db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT id FROM "TeamChannelMessage" WHERE id = ${messageId} FOR UPDATE`;
+
+      const existing = await tx.teamChannelReaction.findUnique({
+        where: { messageId_userId_emoji: { messageId, userId, emoji } },
+        select: { id: true },
+      });
+
+      if (existing) {
+        // deleteMany (not delete) so a lost un-react race is a 0-row no-op
+        // rather than a P2025.
+        await tx.teamChannelReaction.deleteMany({ where: { id: existing.id } });
+      } else {
+        try {
+          await tx.teamChannelReaction.create({
+            data: { messageId, userId, emoji },
+          });
+        } catch (err) {
+          // Raced with another of my tabs — already exists. Treat as success.
+          if (!isP2002(err)) throw err;
+        }
       }
-    }
 
-    // Full snapshot per emoji — receivers don't need a delta reducer.
-    // The version stamp is `Date.now()` at publish time, monotonic per
-    // process. Clients discard older versions so a fast toggle pair
-    // can't produce a stale-snapshot-wins race when events land out of
-    // order. `createdAt` on individual rows would also work but doesn't
-    // cover the "all removed" case (zero rows = no max).
-    const reactions = await this.db.teamChannelReaction.findMany({
-      where: { messageId, emoji },
-      select: { userId: true },
+      // Full snapshot per emoji — receivers don't need a delta reducer.
+      // `createdAt` on individual rows would also work but doesn't cover the
+      // "all removed" case (zero rows = no max), hence the process-clock stamp.
+      const rows = await tx.teamChannelReaction.findMany({
+        where: { messageId, emoji },
+        select: { userId: true },
+      });
+      return { userIds: rows.map((r) => r.userId), version: Date.now() };
     });
-    const userIds = reactions.map((r) => r.userId);
-    const version = Date.now();
 
     await this.bus.publish({
       type: "team_channel.reaction_changed",

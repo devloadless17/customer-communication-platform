@@ -169,6 +169,12 @@ jobs:
               - 'prisma.config.ts'
               - 'docker-compose.yml'
               - 'deploy/**'
+              # scripts/ is a build input of the api image (Dockerfile
+              # `COPY scripts ./scripts` — envelope key-rotation runbook) AND
+              # a payload of the deploy bundle (smoke bundles pg-backup.sh).
+              # A scripts-only push must rebuild+ship, else the VPS keeps the
+              # stale backup/rotation script until an unrelated app change.
+              - 'scripts/**'
               - '.github/workflows/deploy.yml'
             api:
               - 'apps/api/**'
@@ -181,6 +187,9 @@ jobs:
               - 'prisma.config.ts'
               - 'docker-compose.yml'
               - 'deploy/**'
+              # See the web filter above — scripts/ is a COPY'd api build
+              # input and part of the deploy bundle.
+              - 'scripts/**'
               - '.github/workflows/deploy.yml'
 
       # workflow_dispatch should force full rebuild — operator explicitly
@@ -331,6 +340,39 @@ jobs:
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Re-scan the EXACT :latest-{web,api} images this deploy will ship —
+      # not just the ones rebuilt on this push. The per-app Trivy scans in
+      # build-web/build-api are pushed-image gates, but images land at
+      # :latest-* BEFORE that gate and a Trivy/smoke/health failure never
+      # un-pushes them. So a push that rebuilds only ONE app pulls the OTHER
+      # app's :latest-* straight from the registry — which a PRIOR failed
+      # deploy could have left holding a fixable HIGH/CRITICAL CVE — and
+      # ships it with the gate never re-running on it. Smoke is the single
+      # choke point every shipping deploy passes through (`docker compose
+      # pull` below fetches both tags regardless of which was rebuilt), so
+      # scanning both tags here closes that bypass. Same policy as the build
+      # jobs: only fixable HIGH/CRITICAL block; unfixed + .trivyignore honored.
+      - name: Trivy re-scan — shipping web image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest-web
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          trivyignores: .trivyignore
+      - name: Trivy re-scan — shipping api image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest-api
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          trivyignores: .trivyignore
 
       - name: Render config bundle (NO SECRETS — artifact is repo-readable)
         env:

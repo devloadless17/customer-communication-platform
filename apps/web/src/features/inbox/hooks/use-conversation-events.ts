@@ -779,7 +779,12 @@ export function useConversationEvents(
       // that deferred run should be a full refetch or a delta.
       if (typeof document !== "undefined" && document.visibilityState !== "visible") {
         backfillNeededRef.current = true;
-        reconnectRecoveryRef.current = isReconnect;
+        // Carry the stale-cache bit too (not just isReconnect): a cache-hit
+        // thread whose first connect lands while hidden still needs the FULL
+        // reconcile the visible branch would run — the delta can't carry
+        // message:status ticks / note edits / contact changes for messages
+        // already in the stale snapshot.
+        reconnectRecoveryRef.current = isReconnect || initialMayBeStaleRef.current;
         return;
       }
       // Skip while the browser reports offline. The Socket.io `connect` can
@@ -790,7 +795,9 @@ export function useConversationEvents(
       // and the visibility/online listener below picks it back up.
       if (typeof navigator !== "undefined" && navigator.onLine === false) {
         backfillNeededRef.current = true;
-        reconnectRecoveryRef.current = isReconnect;
+        // Same reasoning as the hidden branch above — preserve the stale-cache
+        // bit so the deferred recovery makes the full-vs-delta call correctly.
+        reconnectRecoveryRef.current = isReconnect || initialMayBeStaleRef.current;
         return;
       }
 
@@ -833,10 +840,12 @@ export function useConversationEvents(
       // a window in the future and miss real inbound that happened earlier.
       const known = dataRef.current.messages;
       let cursor: string | null = null;
+      let cursorId: string | null = null;
       for (let i = known.length - 1; i >= 0; i--) {
         const m = known[i];
         if (m && !m.pending && !m.failed) {
           cursor = m.timestamp;
+          cursorId = m.id;
           break;
         }
       }
@@ -844,13 +853,22 @@ export function useConversationEvents(
 
       backfillNeededRef.current = false;
 
+      // Send the tail row's id alongside its timestamp so the server can run a
+      // STRICT (timestamp, id) tuple delta — excludes exactly the boundary rows
+      // we already hold, so its `hasMore` flag is an honest "there was more than
+      // one page of new messages" signal (the old `gte` + count heuristic could
+      // never detect that when we held ≥2 same-second boundary rows).
+      const afterParam = `after=${encodeURIComponent(cursor)}${
+        cursorId ? `&afterId=${encodeURIComponent(cursorId)}` : ""
+      }`;
       void fetchWithSessionGuard(
-        `/api/conversations/${conversationId}/messages?after=${encodeURIComponent(cursor)}`,
+        `/api/conversations/${conversationId}/messages?${afterParam}`,
       )
         .then((r) =>
           r.ok
             ? (r.json() as Promise<{
                 items: Message[];
+                hasMore?: boolean;
                 state?: {
                   status: ConversationWithRefs["conversation"]["status"];
                   assignedUserId: string | null;
@@ -867,6 +885,24 @@ export function useConversationEvents(
           const freshState = res.state;
           const freshItems = res.items ?? [];
           if (!freshState && freshItems.length === 0) return;
+          // Too far behind: the server returns `hasMore` when the delta was
+          // TRUNCATED at its page cap (it fetched take+1 and saw more), meaning
+          // the offline gap likely exceeded one page — the NEWEST messages were
+          // dropped from this window. Merging it would splice the oldest slice on
+          // and silently lose the newest (a mid-thread hole loadOlder can never
+          // reach). Escalate to a full head-page refetch — the server's
+          // documented "too far behind → force a thread re-fetch" contract.
+          //
+          // `hasMore` is authoritative because the strict-tuple delta (we send
+          // afterId) excludes the boundary rows we already hold, so it can't be
+          // fooled by same-second re-inclusions the way the old
+          // `newCount >= RECOVERY_PAGE` heuristic was. Only when tail-anchored: a
+          // search-context window (headerOnly) runs runBackfill purely to top off
+          // new tail messages and must not recurse into runFullRefetch.
+          if (tailAnchoredRef.current && res.hasMore) {
+            runFullRefetch();
+            return;
+          }
           setData((prev) => {
             // Re-sync the conversation header alongside any new messages.
             // Without this, an assignment/status/read flip that fired while
@@ -922,15 +958,27 @@ export function useConversationEvents(
             };
           });
 
-          // runBackfill only runs while the tab is visible (see onConnect /
-          // onVisibility), so reaching here means the user is actively viewing
-          // this thread. Clear any unread that accumulated during the socket
-          // gap / hydration window — mirrors the live onMessageNew markRead.
+          // Clear any unread that accumulated during the socket gap /
+          // hydration window — mirrors the live onMessageNew markRead.
           // Without this, an inbound that lands during a reconnect blip (wifi
           // hop, laptop sleep) leaves the team-wide badge stuck at >0 until a
           // new message arrives or the user navigates away and back.
+          //
+          // Gate on visibility (rule 1): runFullRefetch(headerOnly) now calls
+          // runBackfill, and the async GET can also resolve after the tab was
+          // hidden mid-flight — a hidden background tab must NOT clear
+          // team-wide unread for a message nobody viewed (silently drops the
+          // customer message from triage). If hidden, defer via
+          // sawInboundWhileHiddenRef so onVisibility fires the read on return.
           if (freshState && freshState.unreadCount > 0) {
-            void markRead();
+            if (
+              typeof document === "undefined" ||
+              document.visibilityState === "visible"
+            ) {
+              void markRead();
+            } else {
+              sawInboundWhileHiddenRef.current = true;
+            }
           }
         })
         .catch(() => {
@@ -977,7 +1025,88 @@ export function useConversationEvents(
         .then((res) => {
           if (!res) return;
           const fresh = res.data;
+          // Gap guard (tail-anchored only): when the offline period pushed more
+          // than a full page, the fresh head page (latest page) can start ABOVE
+          // our pre-gap tail. Merging then leaves a silent hole between our slice
+          // and the fresh head that loadOlder can never reach (its cursor anchors
+          // BELOW our slice). Decide from the CURRENT slice (dataRef, so the
+          // setOlderCursor side-effect stays out of the reducer below); on a
+          // full, non-overlapping page adopt the fresh head page + its olderCursor
+          // wholesale — the server's "too far behind → force re-fetch" contract.
+          const gapReplace = (() => {
+            if (headerOnly) return false;
+            // A null older-cursor means the head page reaches the FIRST message
+            // of the thread, so it subsumes our slice — no unreachable hole is
+            // possible. This is the server's authoritative "full page?" signal
+            // (nextOlderCursor is non-null iff more older rows exist), replacing
+            // the old `fresh.messages.length >= RECOVERY_PAGE` length heuristic.
+            if (res.nextOlderCursor === null) return false;
+            const slice = dataRef.current.messages;
+            const known = new Set(slice.map((m) => m.externalId));
+            // Any overlap → fresh's window touches our slice, safe to merge.
+            if (fresh.messages.some((m) => known.has(m.externalId))) return false;
+            let newestConfirmed: string | null = null;
+            for (let i = slice.length - 1; i >= 0; i--) {
+              const m = slice[i];
+              if (m && !m.pending && !m.failed) {
+                newestConfirmed = m.timestamp;
+                break;
+              }
+            }
+            const oldestFresh = fresh.messages[0];
+            return (
+              newestConfirmed != null &&
+              oldestFresh != null &&
+              oldestFresh.timestamp > newestConfirmed
+            );
+          })();
+          if (gapReplace) {
+            // Adopt the fresh head page's "load older" anchor so the next
+            // scroll-back pages down THROUGH the hole instead of below our
+            // stale slice.
+            setOlderCursor(res.nextOlderCursor);
+          }
           setData((prev) => {
+            // Adopt the server's authoritative call history on every full
+            // refetch (the delta / live frames can't carry a call that ended
+            // during a socket gap) and reconcile a now-stale activeCall: if the
+            // in-flight call we were tracking no longer has a non-terminal row
+            // in the fresh history, clear it. Applied to BOTH branches below.
+            const freshCalls = fresh.calls;
+            let activeCall = prev.activeCall ?? null;
+            if (activeCall && freshCalls) {
+              const active = activeCall;
+              const stillLive = freshCalls.some(
+                (c) =>
+                  c.id === active.callId &&
+                  (c.status === "ringing" || c.status === "in_progress"),
+              );
+              if (!stillLive) activeCall = null;
+            }
+            const callFields = {
+              activeCall,
+              ...(freshCalls !== undefined ? { calls: freshCalls } : {}),
+            };
+            // Server-owned fields every branch adopts identically. The three
+            // return shapes below differ ONLY by which message slice they
+            // intentionally set (headerOnly keeps prev.messages; gapReplace and
+            // the normal merge each set their own). `events` is folded through
+            // mergeAuthoritativeEvents so an activity change that happened while
+            // offline lands while any not-yet-persisted optimistic stub is kept
+            // (the delta backfill can't carry either). messageCount / noteCount
+            // are spread conditionally so an older server that omits them doesn't
+            // clobber the client tally with undefined.
+            const authoritativeFields = {
+              conversation: fresh.conversation,
+              contact: fresh.contact,
+              assignedUser: fresh.assignedUser,
+              notes: fresh.notes,
+              events: mergeAuthoritativeEvents(prev.events, fresh.events),
+              lastInboundAt: fresh.lastInboundAt,
+              ...(fresh.messageCount !== undefined ? { messageCount: fresh.messageCount } : {}),
+              ...(fresh.noteCount !== undefined ? { noteCount: fresh.noteCount } : {}),
+              ...callFields,
+            };
             // Header-only branch: agent is anchored to a search-context window,
             // not the live tail. Adopting fresh.messages would either splice
             // tail messages onto an unrelated slice or unmount their context.
@@ -986,17 +1115,20 @@ export function useConversationEvents(
             // messages that arrived after the user's slice (cursor = last
             // server-confirmed in the slice), so no gap on next scroll-back.
             if (headerOnly) {
-              return {
-                ...prev,
-                conversation: fresh.conversation,
-                contact: fresh.contact,
-                assignedUser: fresh.assignedUser,
-                notes: fresh.notes,
-                events: mergeAuthoritativeEvents(prev.events, fresh.events),
-                lastInboundAt: fresh.lastInboundAt,
-                ...(fresh.messageCount !== undefined ? { messageCount: fresh.messageCount } : {}),
-                ...(fresh.noteCount !== undefined ? { noteCount: fresh.noteCount } : {}),
-              };
+              // Keep prev.messages untouched (the user's context window).
+              return { ...prev, ...authoritativeFields };
+            }
+            if (gapReplace) {
+              // Too far behind — adopt the fresh head page wholesale (older
+              // pages sit below the hole and aren't reachable without re-paging
+              // anyway). Preserve only in-flight optimistic rows so a send made
+              // mid-recovery isn't wiped; olderCursor was adopted above.
+              const optimistic = prev.messages.filter((m) => m.pending || m.failed);
+              const deduped = reconcileOptimisticAgainst(optimistic, fresh.messages);
+              const messages = deduped.length
+                ? sortByTimestamp([...deduped, ...fresh.messages])
+                : fresh.messages;
+              return { ...prev, ...authoritativeFields, messages };
             }
             // Keep the user's loaded message slice (incl. older pages they
             // scrolled to → preserves scroll position). Reconcile server-owned
@@ -1029,31 +1161,24 @@ export function useConversationEvents(
             const messages = appended.length
               ? sortByTimestamp([...deduped, ...appended])
               : deduped;
-            return {
-              ...prev,
-              conversation: fresh.conversation,
-              contact: fresh.contact,
-              assignedUser: fresh.assignedUser,
-              notes: fresh.notes,
-              // Authoritative refetch — adopt the server's activity log (it can
-              // carry changes that happened while we were offline, which the
-              // delta backfill can't). Keep any not-yet-persisted optimistic
-              // stub so an in-flight local change isn't wiped mid-flight.
-              events: mergeAuthoritativeEvents(prev.events, fresh.events),
-              messages,
-              lastInboundAt: fresh.lastInboundAt,
-              ...(fresh.messageCount !== undefined ? { messageCount: fresh.messageCount } : {}),
-              ...(fresh.noteCount !== undefined ? { noteCount: fresh.noteCount } : {}),
-            };
+            return { ...prev, ...authoritativeFields, messages };
           });
-          // Same visibility guarantee as runBackfill (only reached while the
-          // tab is visible) — clear any unread the gap left behind.
-          if (
-            (typeof document === "undefined" ||
-              document.visibilityState === "visible") &&
-            fresh.conversation.unreadCount > 0
-          ) {
-            void markRead();
+          // Clear any unread the gap left behind — but only while actually
+          // viewing. A refetch can be driven while hidden (e.g. a
+          // contacts:bulk_updated frame on a backgrounded tab): DON'T clear
+          // team-wide unread for a message nobody saw, but arm the deferred read
+          // so onVisibility fires markRead on return — otherwise the flags are
+          // already consumed, runDeferredRecoveryIfReady finds nothing to do,
+          // and the badge stays stuck >0 on a thread that's open on-screen.
+          if (fresh.conversation.unreadCount > 0) {
+            const viewing =
+              typeof document === "undefined" ||
+              document.visibilityState === "visible";
+            if (viewing) {
+              void markRead();
+            } else {
+              sawInboundWhileHiddenRef.current = true;
+            }
           }
         })
         .catch(() => {

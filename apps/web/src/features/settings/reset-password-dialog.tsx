@@ -100,19 +100,26 @@ export function ResetPasswordDialog({
     }
     setSaving(true);
     setError(null);
-    const res = await apiFetch(target.endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ newPassword: password }),
-    });
-    if (!res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(data.error ?? "Failed to reset password");
+    try {
+      const res = await apiFetch(target.endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ newPassword: password }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(data.error ?? "Failed to reset password");
+        return;
+      }
+      setSavedPassword(password);
+    } catch {
+      // A network-level rejection (api restart, WiFi blip) must NOT leave
+      // saving=true forever — that disables Cancel and blocks close(), hard-
+      // locking the dialog until a page reload. finally always clears it.
+      setError("Network error — try again.");
+    } finally {
       setSaving(false);
-      return;
     }
-    setSavedPassword(password);
-    setSaving(false);
   }
 
   async function copy() {

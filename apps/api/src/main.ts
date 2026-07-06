@@ -500,4 +500,12 @@ async function bootstrap(): Promise<void> {
   );
 }
 
-void bootstrap();
+bootstrap().catch((err) => {
+  // A boot failure (env validation, DbService.$connect, app.listen) must exit
+  // non-zero so `restart: unless-stopped` retries — NOT fall through to the
+  // log-and-continue unhandledRejection handler, which would idle a zombie
+  // process (IORedis/BullMQ reconnect timers keep the loop alive) with nothing
+  // bound to the port.
+  console.error("[bootstrap] fatal:", err);
+  process.exit(1);
+});

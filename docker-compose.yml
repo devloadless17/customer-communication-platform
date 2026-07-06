@@ -363,6 +363,10 @@ services:
       # ConversationEvent (audit timeline) retention. Older rows pruned by
       # the daily sweeper.
       CONVERSATION_EVENT_RETENTION_DAYS: ${CONVERSATION_EVENT_RETENTION_DAYS:-90}
+      # Message.raw_payload (original Meta webhook body) retention. Empty =
+      # sweeper disabled (payloads kept forever); set a day count to prune.
+      # Passed through so it's actually tunable in prod, not just in code.
+      MESSAGE_RAWPAYLOAD_RETENTION_DAYS: ${MESSAGE_RAWPAYLOAD_RETENTION_DAYS:-}
       # Outbound-webhook delivery worker concurrency + retention + orphan-
       # recovery sweeper grace (each one HTTP POST, idempotent retry on 5xx).
       WEBHOOK_WORKER_CONCURRENCY: ${WEBHOOK_WORKER_CONCURRENCY:-10}
@@ -380,6 +384,10 @@ services:
       INTERNAL_BUS_SECRET: ${INTERNAL_BUS_SECRET}
       # Optional: tunable Meta Graph fetch timeout. Default 15s.
       META_FETCH_TIMEOUT_MS: ${META_FETCH_TIMEOUT_MS:-}
+      # Optional: Anthropic API key for the composer Translate feature
+      # (/api/messages/translate). Empty = feature returns a clean 503
+      # "Translation isn't configured" instead of silently 500ing.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # Orphan-blob sweeper cadence (R2 objects referenced by no live
       # Message row). Default 6h — bumps to hourly on high-churn deploys.
       BLOB_ORPHAN_SWEEP_INTERVAL_MS: ${BLOB_ORPHAN_SWEEP_INTERVAL_MS:-21600000}

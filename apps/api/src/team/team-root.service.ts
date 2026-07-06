@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, InternalServerErrorException, Logger, 
 import type { AiHandoffAction, FirstTouchGreeter, Prisma } from "@prisma/client";
 
 import { blobStorage } from "@/lib/blob-storage";
+import { avatarObjectKey } from "@/lib/blob-storage/avatar";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 
 import { SessionInvalidationService } from "../auth/session-invalidation.service";
@@ -171,11 +172,16 @@ export class TeamRootService {
         },
         select: { mediaKey: true, mediaThumbnailKey: true },
       }),
-      this.db.user.findMany({ where: { teamId }, select: { id: true } }),
+      this.db.user.findMany({ where: { teamId }, select: { id: true, avatarUrl: true } }),
     ]);
     const blobKeys = blobKeyRows
       .flatMap((r) => [r.mediaKey, r.mediaThumbnailKey])
-      .filter((k): k is string => Boolean(k));
+      .filter((k): k is string => Boolean(k))
+      // Each member's avatar is an independent R2 blob under the `avatars/`
+      // prefix (deterministic `avatars/{userId}` key) — the cascade drops the
+      // User rows but not the objects, so collect them too (F48). Only members
+      // with a stored avatar have an object to delete.
+      .concat(teamMembers.filter((m) => m.avatarUrl).map((m) => avatarObjectKey(m.id)));
 
     try {
       // DB-2: pre-drain the Message table in bounded batches BEFORE the cascade.

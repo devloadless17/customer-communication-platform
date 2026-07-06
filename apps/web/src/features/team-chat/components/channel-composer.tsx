@@ -44,6 +44,7 @@ export function ChannelComposer({
   teamMembers,
   onOptimisticAdd,
   onOptimisticFail,
+  onOptimisticConfirm,
 }: {
   channelId: string;
   channelName: string;
@@ -52,6 +53,15 @@ export function ChannelComposer({
   teamMembers: User[];
   onOptimisticAdd: (m: TeamChannelMessageDto) => void;
   onOptimisticFail: (clientTempId: string) => void;
+  /**
+   * Reconcile the optimistic row from the send's OWN POST response DTO —
+   * swaps the tmp id for the server id so a lost `team:channel:message` echo
+   * (a send that lands while the socket is dropped past the 30s recovery
+   * window) can't leave the bubble pending forever, nor duplicate it on the
+   * next reconnect converge. Optional: the thread panel's composer relies on
+   * the socket echo alone for now.
+   */
+  onOptimisticConfirm?: (message: TeamChannelMessageDto, clientTempId: string) => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -145,10 +155,15 @@ export function ChannelComposer({
       isTypingRef.current = false;
     }
   };
+  // Runs on unmount AND on every thread switch (threadRootId change), so the
+  // OLD render's closure emits stop for the root we're leaving and resets
+  // isTypingRef — otherwise the next keystroke in the new thread sees
+  // isTypingRef=true and never emits start, and the server keeps the user
+  // parked in the old thread's typing set until the socket disconnects.
   useEffect(() => {
     return () => emitTypingStop();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channelId]);
+  }, [channelId, threadRootId]);
 
   const handleMentionPick = (u: User) => {
     if (!trigger) return;
@@ -223,8 +238,17 @@ export function ChannelComposer({
       });
       if (!res.ok) {
         onOptimisticFail(clientTempId);
+      } else {
+        // Confirm from the POST response instead of relying solely on the
+        // `team:channel:message` echo — if the socket dropped after the send,
+        // the echo never arrives and the bubble would stay pending forever
+        // (then double-render on the next reconnect converge). Idempotent with
+        // the echo: whichever lands first reconciles, the other dedupes.
+        const { message } = (await res.json()) as {
+          message: TeamChannelMessageDto;
+        };
+        onOptimisticConfirm?.(message, clientTempId);
       }
-      // success path: the matching socket event swaps the optimistic.
     } catch {
       onOptimisticFail(clientTempId);
     } finally {

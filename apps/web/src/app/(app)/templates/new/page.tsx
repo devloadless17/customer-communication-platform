@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/current-user";
-import { getTeamWhatsappConfig, listContactFieldDefinitions } from "@/lib/api/queries";
+import { listWhatsappTemplates, listContactFieldDefinitions } from "@/lib/api/queries";
 
 import { TemplateForm } from "./template-form";
 
@@ -12,22 +12,25 @@ export default async function NewTemplatePage() {
   const { permissions } = await getSession();
   if (!permissions["templates:manage"]) redirect("/templates");
 
-  const [config, fieldDefinitions] = await Promise.all([
-    getTeamWhatsappConfig(),
+  // Use the templates endpoint (open to any member) rather than the admin-only
+  // GET /api/team/whatsapp — templates:manage grants access to non-admins too,
+  // and it already returns the connected/hasWabaId/hasAppId flags we need here.
+  const [{ connected, hasWabaId, hasAppId }, fieldDefinitions] = await Promise.all([
+    listWhatsappTemplates(),
     listContactFieldDefinitions(),
   ]);
 
-  if (!config.phoneNumberId) {
+  if (!connected) {
     redirect("/settings/whatsapp?from=templates");
   }
-  if (!config.wabaId) {
+  if (!hasWabaId) {
     redirect("/settings/whatsapp?from=templates&missing=waba");
   }
 
   return (
     <TemplateForm
       fieldDefinitions={fieldDefinitions}
-      hasAppId={Boolean(config.appId)}
+      hasAppId={hasAppId}
     />
   );
 }

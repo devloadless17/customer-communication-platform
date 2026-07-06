@@ -71,6 +71,19 @@ export class RealtimeGateway
   // shutdown so the interval doesn't keep the process alive / leak on HMR).
   private writeBufferReaper: NodeJS.Timeout | null = null;
 
+  // Per-team monotonic presence-broadcast sequencing. Both the connect
+  // (came-online) and disconnect (went-offline) paths build their team-wide
+  // `presence:update` frame from an INDEPENDENT async DB read, so a rapid
+  // connect→disconnect can resolve out of order and let an earlier
+  // transition's frame overwrite a later one — leaving a departed agent
+  // showing a stale green dot until the next presence event. Each transition
+  // is stamped with a seq at mutation time (synchronous, before the await);
+  // `broadcastPresence` drops any frame a newer transition already superseded.
+  // Grow-only per team by design (team count is small — same posture as the
+  // other in-process Maps).
+  private readonly presenceSeq = new Map<string, number>();
+  private readonly presenceEmittedSeq = new Map<string, number>();
+
   constructor(
     private readonly db: DbService,
     private readonly auth: SocketAuthService,
@@ -315,6 +328,11 @@ export class RealtimeGateway
       identity.userId,
       client.id,
     );
+    // Stamp the transition synchronously (before the async snapshot build) so
+    // ordering is preserved against a racing disconnect — see `presenceSeq`.
+    const presenceSeq = cameOnline
+      ? this.nextPresenceSeq(identity.teamId)
+      : null;
     // Visibly-online snapshot — connected users intersected with "not marked
     // offline" so an agent who picked "Appear offline" doesn't show up on
     // teammates' green dots even though their socket is connected. The async
@@ -340,11 +358,8 @@ export class RealtimeGateway
     // connect transitioned the user from 0→1 sockets. Without the gate
     // every additional tab / Caddy bounce reconnect spammed a team-wide
     // emit even though the onlineUserIds list didn't change.
-    if (cameOnline) {
-      this.server.to(teamRoom(identity.teamId)).emit("presence:update", {
-        teamId: identity.teamId,
-        onlineUserIds,
-      });
+    if (presenceSeq !== null) {
+      this.broadcastPresence(identity.teamId, presenceSeq, onlineUserIds);
     }
   }
 
@@ -355,6 +370,35 @@ export class RealtimeGateway
    * path we'd cache it, but presence snapshots are rare events (connect /
    * status flip), not per-message.
    */
+  /**
+   * Stamp a presence transition with the next per-team seq (synchronous — must
+   * be called at the same tick as the presence add/remove so it captures true
+   * temporal order before any async snapshot build).
+   */
+  private nextPresenceSeq(teamId: string): number {
+    const next = (this.presenceSeq.get(teamId) ?? 0) + 1;
+    this.presenceSeq.set(teamId, next);
+    return next;
+  }
+
+  /**
+   * Emit a team-wide `presence:update`, but only if a newer transition hasn't
+   * already reached the wire. Guards against the connect/disconnect DB reads
+   * resolving out of order (see `presenceSeq` above).
+   */
+  private broadcastPresence(
+    teamId: string,
+    seq: number,
+    onlineUserIds: string[],
+  ): void {
+    if (seq < (this.presenceEmittedSeq.get(teamId) ?? 0)) return;
+    this.presenceEmittedSeq.set(teamId, seq);
+    this.server.to(teamRoom(teamId)).emit("presence:update", {
+      teamId,
+      onlineUserIds,
+    });
+  }
+
   private async buildVisibleOnlineSnapshot(teamId: string): Promise<string[]> {
     const connected = this.presence.snapshot(teamId);
     if (connected.length === 0) return [];
@@ -564,15 +608,15 @@ export class RealtimeGateway
 
     const wentOffline = this.presence.remove(teamId, userId, client.id);
     if (wentOffline) {
+      // Stamp the transition synchronously so a racing connect can't overtake
+      // this went-offline frame with a stale user-online one (see presenceSeq).
+      const seq = this.nextPresenceSeq(teamId);
       // Async fire-and-forget — the DB read inside the snapshot helper isn't
       // worth blocking teardown on. A late frame on disconnect lands at most
       // a handful of ms behind, which is invisible to the team.
       void this.buildVisibleOnlineSnapshot(teamId)
         .then((onlineUserIds) => {
-          this.server.to(teamRoom(teamId)).emit("presence:update", {
-            teamId,
-            onlineUserIds,
-          });
+          this.broadcastPresence(teamId, seq, onlineUserIds);
         })
         .catch((err) =>
           // The helper itself is now fail-soft (falls back to the raw connected

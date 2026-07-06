@@ -33,10 +33,13 @@ import { withSweeperMutex } from "@/lib/sweepers/_mutex";
  * Override via BLOB_ORPHAN_SWEEP_INTERVAL_MS if a customer needs faster
  * reclaim.
  *
- * Per-tick budget: scan at most 4 pages × 500 keys = 2000 keys. Provider
- * pagination tokens aren't durable across ticks; if the provider has more
- * than this we walk further next week. At pilot scale (1 tenant, low media
- * volume) the whole bucket fits in one page.
+ * Per-tick budget: scan at most 4 pages × 500 keys = 2000 keys. When a tick
+ * exhausts that budget with the listing still truncated, we persist the
+ * provider cursor in `resumeCursor` (module-level) and the next tick continues
+ * where this one stopped, wrapping back to the start once the listing is fully
+ * walked. Without this each weekly tick would rescan the same first 2000
+ * lexicographic keys and never reclaim a leak sorting after them. At pilot
+ * scale (1 tenant, low media volume) the whole bucket fits in one page.
  *
  * Safety: if `blobStorage.listKeys` is undefined (provider doesn't expose
  * enumeration), the sweeper logs once and stays disabled. No false-positive
@@ -57,6 +60,15 @@ const MAX_PAGES_PER_TICK = 4;
 // they'd be deleted as false orphans. Avatars (lib/blob-storage/avatar.ts) live
 // under `avatars/`.
 const URL_ONLY_KEY_PREFIXES = ["avatars/"] as const;
+// URL-only categories that DON'T have a distinguishing key prefix. Template
+// header media (messages.service.ts `uploadTemplateHeaderMedia`) lives under the
+// shared `media/` prefix, but its stable URL is the only persisted reference —
+// it's stored in workflow `send_template` step config, Broadcast variables, and
+// Message.rawPayload, never in a `mediaKey` column — so the cross-check below
+// would classify every one as an orphan and permanently delete it, silently
+// breaking all media-header automations. Its key segment is
+// `sanitizeSeg('tpl-hdr-<uuid>')`, so the `/tpl-hdr-` marker is stable.
+const URL_ONLY_KEY_MARKERS = ["/tpl-hdr-"] as const;
 // NOTE: video poster thumbnails (key `...-video.jpg` under `media/`, stored on
 // Message.mediaThumbnailKey) are NOT excluded here — they ARE db-keyed, so the
 // exact `mediaThumbnailKey` cross-check below folds every REFERENCED poster
@@ -64,13 +76,20 @@ const URL_ONLY_KEY_PREFIXES = ["avatars/"] as const;
 // genuinely-orphaned poster (parent row gone) be reclaimed — a blanket
 // exclusion would leak those forever.
 function isUrlOnlyBlob(key: string): boolean {
-  return URL_ONLY_KEY_PREFIXES.some((p) => key.startsWith(p));
+  return (
+    URL_ONLY_KEY_PREFIXES.some((p) => key.startsWith(p)) ||
+    URL_ONLY_KEY_MARKERS.some((m) => key.includes(m))
+  );
 }
 
 let timer: NodeJS.Timeout | null = null;
 let initialTimer: NodeJS.Timeout | null = null;
 let inFlight = false;
 let listKeysUnsupportedLogged = false;
+// Provider cursor carried across ticks so a bucket larger than the per-tick
+// page budget is walked incrementally instead of rescanning the first 2000
+// keys every week. `undefined` = start from the beginning of the listing.
+let resumeCursor: string | undefined;
 
 async function runTick(label: string): Promise<void> {
   if (inFlight) return;
@@ -124,7 +143,9 @@ async function sweepOnce(): Promise<void> {
 
   const ageCutoffMs = Date.now() - GRACE_MS;
   const orphanKeys: string[] = [];
-  let cursor: string | undefined;
+  // Resume where the previous tick stopped; wrap to the start once exhausted.
+  let cursor: string | undefined = resumeCursor;
+  let nextResumeCursor: string | undefined;
   let scannedCount = 0;
 
   for (let page = 0; page < MAX_PAGES_PER_TICK; page++) {
@@ -132,8 +153,15 @@ async function sweepOnce(): Promise<void> {
       limit: PAGE_SIZE,
       cursor,
     });
-    if (keys.length === 0) break;
+    // Empty page = listing exhausted (or a stale cursor past the end); wrap.
+    if (keys.length === 0) {
+      nextResumeCursor = undefined;
+      break;
+    }
     scannedCount += keys.length;
+    // Track the cursor to persist: if we exit the loop with this still set the
+    // listing was truncated at the budget and the next tick continues from here.
+    nextResumeCursor = nextCursor;
 
     // Only consider blobs older than the grace window. Recent uploads might
     // still be racing the DB row write. Also exclude URL-only blob categories
@@ -176,6 +204,10 @@ async function sweepOnce(): Promise<void> {
     if (!nextCursor) break;
     cursor = nextCursor;
   }
+
+  // Persist for the next tick: a set cursor continues the walk, `undefined`
+  // (listing exhausted this tick) wraps back to the start of the bucket.
+  resumeCursor = nextResumeCursor;
 
   if (orphanKeys.length === 0) {
     // Quiet on no-finds — daily noise from a healthy system isn't useful.

@@ -3,6 +3,8 @@ import {
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
 
+import { normalizeMimeType } from "@/lib/media-storage";
+
 import { r2Internal } from "./r2";
 
 /**
@@ -51,7 +53,7 @@ export interface AvatarUploadResult {
 }
 
 export async function uploadAvatar(input: AvatarUploadInput): Promise<AvatarUploadResult> {
-  const mime = (input.mimeType.split(";")[0] ?? "").trim().toLowerCase();
+  const mime = normalizeMimeType(input.mimeType);
   if (!ALLOWED_AVATAR_MIME.has(mime)) {
     throw new AvatarUploadError(
       "unsupported_mime",

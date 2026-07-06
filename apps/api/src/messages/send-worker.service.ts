@@ -16,6 +16,7 @@ import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta";
 import { createWorkerConnection } from "@/lib/workflows/queue";
 
 import { MessagesService } from "./messages.service";
+import { invalidateSendIdempotency } from "./send-idempotency";
 import {
   MESSAGE_SEND_QUEUE_NAME,
   closeMessageSendQueue,
@@ -177,6 +178,14 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
           `failed to publish exhausted send_failed event: ${pubErr instanceof Error ? pubErr.message : pubErr}`,
         ),
       );
+      // Drop the cached HTTP-POST success so a same-clientTempId Retry within
+      // the idempotency window re-enqueues instead of short-circuiting.
+      invalidateSendIdempotency({
+        teamId: job.data.teamId,
+        userId: job.data.userId,
+        conversationId: job.data.conversationId,
+        clientTempId: job.data.clientTempId,
+      });
     });
   }
 
@@ -254,6 +263,14 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
             `failed to publish send_failed event: ${pubErr instanceof Error ? pubErr.message : pubErr}`,
           ),
         );
+        // Drop the cached HTTP-POST success so a same-clientTempId Retry within
+        // the idempotency window re-enqueues instead of short-circuiting.
+        invalidateSendIdempotency({
+          teamId: data.teamId,
+          userId: data.userId,
+          conversationId: data.conversationId,
+          clientTempId: data.clientTempId,
+        });
         throw new UnrecoverableError(reason);
       }
 

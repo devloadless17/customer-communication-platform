@@ -5,10 +5,16 @@
  * 50-slot Prisma pool. Under unlucky alignment (daily ones aligning at boot
  * + delay, blob-orphan paging while drift is running, retention scans during
  * peak traffic) the pool can starve HTTP requests. A single in-process mutex
- * serializes the heavy sweepers without queueing — if held, the contender
- * SKIPS this tick. Skipping is correct: each sweeper's interval is its own
- * desired cadence, missing one tick costs at most one cadence cycle, and
- * coalescing prevents tail-of-ticks pileup (which would defeat the point).
+ * serializes the heavy sweepers without a real queue — if held, the contender
+ * waits ONE short RANDOM backoff and retries; if still held it SKIPS this
+ * tick. The jittered single retry (not a skip-forever) is load-bearing:
+ * timers armed in the same synchronous onModuleInit get identical libuv
+ * expiries and fire back-to-back in creation order EVERY cadence, so a plain
+ * skip lets the later sweeper of a colliding pair lose the race forever and
+ * starve (stale-calls behind inbound-media; the daily retention pairs). A
+ * random backoff breaks that lockstep without queueing: missing at most one
+ * cadence cycle is fine, and capping at a single retry prevents tail-of-ticks
+ * pileup (which would defeat the point).
  *
  * Hot-path sweepers (workflow-waiting at 5s, workflow-awaiting-reply at 1h
  * but trivial) are EXEMPT — they have their own per-sweeper in-flight guard
@@ -72,10 +78,26 @@ const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
 const firstAttempt = new Map<SweeperName, number>();
 const NEVER_COMPLETED_GRACE_MS = 60 * 60 * 1000;
 
+// When the mutex is held, wait a RANDOM 1–10s before retrying once. Random is
+// the point: it breaks the deterministic same-tick lockstep (see module doc)
+// where colliding timers fire in a fixed creation order every cadence and the
+// loser would otherwise starve forever. A same-tick collision clears well
+// within this window (the holder is mid-await on a fast query); a genuinely
+// long scan is still running after it, so the retry skips as before.
+const RETRY_BACKOFF_MIN_MS = 1_000;
+const RETRY_BACKOFF_JITTER_MS = 9_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * Run `fn` under the global sweeper mutex. If the mutex is held, SKIP — do
- * not queue. The contending sweeper's next setInterval tick will retry,
- * which is exactly the right backoff shape for "the pool is busy right now".
+ * Run `fn` under the global sweeper mutex. If the mutex is held, wait one
+ * short RANDOM backoff and retry; if it's STILL held, SKIP — do not queue.
+ * The single jittered retry breaks the same-tick lockstep that would
+ * otherwise permanently starve the later sweeper of a colliding pair, while
+ * the skip-on-second-check keeps the anti-pileup property for genuinely long
+ * scans.
  *
  * Always emits the stale-completion WARN if applicable, even when skipping
  * — operators care about "did this sweeper actually run recently?" not
@@ -94,11 +116,22 @@ export async function withSweeperMutex<T>(
   emitStaleWarnIfDue(name);
 
   if (mutexHeld) {
-    // Skipped because another sweeper is already running. Quiet — emitting
-    // a log per skip would be noisy when daily sweepers cluster on boot.
-    // Callers that read the return value treat `undefined` as "skipped".
-    return undefined;
+    // Another sweeper is running. Wait a short RANDOM backoff and retry once
+    // rather than skipping the whole cadence — otherwise same-tick timer
+    // collisions starve the loser forever (see module doc). Random jitter is
+    // what breaks the deterministic ordering; a fixed delay would re-collide.
+    await sleep(RETRY_BACKOFF_MIN_MS + Math.random() * RETRY_BACKOFF_JITTER_MS);
+    if (mutexHeld) {
+      // Still held after the backoff — a genuinely long scan is in flight, not
+      // a same-tick collision. Skip (no queue). Quiet: a log per skip would be
+      // noisy when daily sweepers cluster on boot. Callers that read the return
+      // value treat `undefined` as "skipped".
+      return undefined;
+    }
   }
+  // Acquire is synchronous from here (no await between the check and the set),
+  // so two sweepers waking from backoff can't both acquire: the first sets the
+  // flag before yielding into fn(), the second re-checks and skips.
   mutexHeld = true;
   try {
     const result = await fn();

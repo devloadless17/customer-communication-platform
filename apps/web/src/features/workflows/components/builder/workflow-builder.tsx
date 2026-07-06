@@ -156,6 +156,11 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   // the awaited persist; the debounce below skips while it's true.
   const explicitPersistRef = useRef(false);
 
+  // Latest wire payload, refreshed on every edit so the keepalive flush (below)
+  // can PATCH the final debounce window from a cleanup / beforeunload closure —
+  // both are pinned to mount-time state and can't read the live values.
+  const latestBodyRef = useRef<ReturnType<typeof buildBody> | null>(null);
+
   // Auto-save in edit mode. Cheap (~one PATCH per couple seconds of
   // idle); the alternative — manual save button only — leads to "I lost
   // my changes" frustration when the tab crashes. We skip the auto-save
@@ -163,6 +168,12 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   useEffect(() => {
     if (mode !== "edit" || !workflow) return;
     const handle = setTimeout(() => {
+      // Skip the mount render's no-op save AND any window without a real edit:
+      // dirtyRef is set only by the dirty tracker below (which skips the mount
+      // render), so merely opening a workflow to read it never PATCHes the row,
+      // bumps updatedAt, fans out a catalog-change, or opens a stale-overwrite
+      // window against a concurrent editor.
+      if (!dirtyRef.current) return;
       // Don't let the debounce restart a save that would abort an in-flight
       // explicit persist's controller — Exit flush (exitingRef) OR Save / Test
       // / Live-toggle (explicitPersistRef). Aborting any of them makes their
@@ -174,14 +185,60 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, trigger, triggerConfig, triggerConditions, triggerOncePerContact, graph]);
 
+  // Keep the keepalive payload snapshot current on every edit (edit mode only —
+  // create mode has no row to PATCH). Same deps as the auto-save debounce.
+  useEffect(() => {
+    if (mode !== "edit") return;
+    latestBodyRef.current = buildBody();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, trigger, triggerConfig, triggerConditions, triggerOncePerContact, graph]);
+
+  // Best-effort save for the paths that bypass the Exit flush: a plain
+  // client-side <Link> nav (unmount) and a tab close / refresh (beforeunload).
+  // `keepalive: true` lets the PATCH outlive the unloading document. Only fires
+  // with real unsaved edits; body is the last-rendered snapshot. Reads only
+  // refs + stable props so a mount-pinned closure still sees live values.
+  function flushKeepaliveSave() {
+    if (
+      mode !== "edit" ||
+      !workflow ||
+      !dirtyRef.current ||
+      !latestBodyRef.current
+    ) {
+      return;
+    }
+    void apiFetch(`/api/team/workflows/${workflow.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(latestBodyRef.current),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
   // Unmount: cancel any in-flight save so its .then() / setState calls
-  // don't run after the builder is gone (navigated to /workflows list).
+  // don't run after the builder is gone (navigated to /workflows list), then
+  // flush the last debounce window — a plain <Link> nav unmounts without ever
+  // firing beforeunload, so without this the final keystrokes are dropped.
   useEffect(
     () => () => {
       persistCtlRef.current?.abort();
+      flushKeepaliveSave();
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
+
+  // Edit mode autosaves, but a hard unload (tab close / refresh) inside the
+  // ~1.5s debounce window would drop the pending edit. beforeunload can't await
+  // an async save, so fire the keepalive PATCH instead of a disruptive prompt —
+  // a "you have unsaved changes" dialog would contradict the silent-autosave UX.
+  useEffect(() => {
+    if (mode !== "edit") return;
+    const onBeforeUnload = () => flushKeepaliveSave();
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
 
   // Create-mode unsaved-work guard. Edit mode auto-saves (above); create mode
   // has no row to PATCH yet, so a full trigger+graph built on /workflows/new is
@@ -221,17 +278,12 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, trigger, triggerConfig, triggerConditions, triggerOncePerContact, graph]);
 
-  async function persist(opts: { silent?: boolean } = {}): Promise<boolean> {
-    // Supersede any in-flight save — freshest input wins, prior
-    // response is ignored on its way back.
-    persistCtlRef.current?.abort();
-    const ctl = new AbortController();
-    persistCtlRef.current = ctl;
-
-    // Strip client-only `_id` from BOTH condition surfaces before sending —
-    // trigger-level conditions AND every branch step's config.conditions — so
-    // the non-wire keys never reach the DB JSON. This is the single
-    // serialization choke point for create(POST) + edit(PATCH).
+  // Serialize the on-screen workflow into the create/update wire shape.
+  // Strip client-only `_id` from BOTH condition surfaces — trigger-level
+  // conditions AND every branch step's config.conditions — so the non-wire
+  // keys never reach the DB JSON. Single serialization choke point for
+  // persist() (POST/PATCH) AND the keepalive flush on unmount / beforeunload.
+  function buildBody() {
     const cleanGraph: WorkflowGraph = {
       ...graph,
       nodes: graph.nodes.map((n) => {
@@ -244,7 +296,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
         };
       }),
     };
-    const body = {
+    return {
       name,
       trigger,
       triggerConfig,
@@ -252,6 +304,16 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
       triggerOncePerContact,
       graph: cleanGraph,
     };
+  }
+
+  async function persist(opts: { silent?: boolean } = {}): Promise<boolean> {
+    // Supersede any in-flight save — freshest input wins, prior
+    // response is ignored on its way back.
+    persistCtlRef.current?.abort();
+    const ctl = new AbortController();
+    persistCtlRef.current = ctl;
+
+    const body = buildBody();
     const path =
       mode === "create"
         ? "/api/team/workflows"
@@ -265,11 +327,15 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
         body: JSON.stringify(body),
         signal: ctl.signal,
       });
-    } catch (err) {
+    } catch {
       // Aborted (next save kicked in / unmount) → bail silently; the
       // newer save (or no save) is the authoritative outcome.
       if (ctl.signal.aborted) return false;
-      throw err;
+      // Network-level failure (offline / WiFi hop). Surface a banner instead of
+      // rethrowing into an unhandled rejection — no caller catches persist().
+      // dirtyRef stays set so the next edit (or Save click) retries.
+      setTopErrors(["Couldn't save — check your connection."]);
+      return false;
     }
     if (ctl.signal.aborted) return false;
     const json = (await res.json().catch(() => ({}))) as {
@@ -304,6 +370,22 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   // (no row to PATCH; it has its own beforeunload guard).
   async function handleExit() {
     if (exiting) return;
+    if (mode === "create") {
+      // No row to flush; a draft lives only in memory. Warn before discarding
+      // unsaved work (mirrors the create-mode beforeunload guard for client nav).
+      if (createDirtyRef.current) {
+        const ok = await confirm({
+          title: "Discard this workflow?",
+          description:
+            "This workflow hasn't been saved yet. Leaving now discards it.",
+          confirmLabel: "Discard",
+          destructive: true,
+        });
+        if (!ok) return;
+      }
+      router.push("/workflows");
+      return;
+    }
     if (mode === "edit" && workflow && dirtyRef.current) {
       setExiting(true);
       exitingRef.current = true;

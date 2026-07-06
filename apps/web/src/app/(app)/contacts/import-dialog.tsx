@@ -433,6 +433,9 @@ function ChooseFileStep({
         className="hidden"
         onChange={(e) => {
           const f = e.target.files?.[0] ?? null;
+          // Clear the input value so re-picking the same file (the natural
+          // retry after a parse error) still fires a change event.
+          e.target.value = "";
           setFileName(f?.name ?? null);
           onPick(f);
         }}

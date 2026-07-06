@@ -256,7 +256,12 @@ async function ingestStatusUpdate(
   // it drains the parked status and applies it. After TTL we drop — at that
   // point either the create failed permanently or Meta's clock is way off.
   if (!existing) {
-    await parkUnknownWamidStatus(teamId, channel, evt.externalId, evt.status);
+    await parkUnknownWamidStatus(teamId, channel, evt.externalId, {
+      status: evt.status,
+      errorCode: evt.errorCode,
+      errorTitle: evt.errorTitle,
+      errorDetail: evt.errorDetail,
+    });
     return;
   }
 
@@ -409,27 +414,71 @@ function parkKey(
   return `ccp:parked-status:${teamId}|${channel}|${externalId}`;
 }
 
+/**
+ * What we stash in Redis for an unknown-wamid status. A bare status string used
+ * to be enough, but a parked `failed` must carry its `errors[0]` diagnostics —
+ * Meta sends `failed` exactly once, so if the row didn't exist yet the drain is
+ * the ONLY place those fields can be persisted. Stored as JSON now; the parser
+ * still accepts a bare string for anything parked by an older process.
+ */
+type ParkedStatus = {
+  status: Message["status"];
+  errorCode?: number;
+  errorTitle?: string;
+  errorDetail?: string;
+};
+
+function serializeParkedStatus(parked: ParkedStatus): string {
+  // JSON.stringify drops undefined error fields, so a non-failed park stays
+  // compact ({"status":"delivered"}).
+  return JSON.stringify(parked);
+}
+
+function parseParkedStatus(raw: string): ParkedStatus {
+  // Backward-compat: an older process parked the bare status string.
+  if (raw.startsWith("{")) {
+    try {
+      const obj = JSON.parse(raw) as ParkedStatus;
+      if (obj && typeof obj.status === "string") return obj;
+    } catch {
+      // Fall through to bare-string handling.
+    }
+  }
+  return { status: raw as Message["status"] };
+}
+
 async function parkUnknownWamidStatus(
   teamId: string,
   channel: Channel,
   externalId: string,
-  status: Message["status"],
+  parked: ParkedStatus,
 ): Promise<void> {
   const key = parkKey(teamId, channel, externalId);
   const redis = getRedisConnection();
+  const { status } = parked;
   try {
     if (status === "failed") {
       // Terminal — overwrite anything already parked.
-      await redis.set(key, status, "PX", UNKNOWN_WAMID_TTL_MS);
-      return;
+      await redis.set(key, serializeParkedStatus(parked), "PX", UNKNOWN_WAMID_TTL_MS);
+    } else {
+      const existing = await redis.get(key);
+      if (existing) {
+        // Don't downgrade — `failed` stays put, lower ranks lose to higher.
+        const existingStatus = parseParkedStatus(existing).status;
+        if (existingStatus === "failed") return;
+        if (statusRank(status) <= statusRank(existingStatus)) return;
+      }
+      await redis.set(key, serializeParkedStatus(parked), "PX", UNKNOWN_WAMID_TTL_MS);
     }
-    const existing = await redis.get(key);
-    if (existing) {
-      // Don't downgrade — `failed` stays put, lower ranks lose to higher.
-      if (existing === "failed") return;
-      if (statusRank(status) <= statusRank(existing as Message["status"])) return;
-    }
-    await redis.set(key, status, "PX", UNKNOWN_WAMID_TTL_MS);
+    // Close the park-vs-drain race: the outbound Message row may have committed
+    // (and already run drainParkedStatus against an empty key) in the window
+    // between the findUnique miss in ingestStatusUpdate and this SET landing,
+    // stranding the status we just parked until its 15-min TTL. For
+    // delivered/read the next-rank webhook would heal it, but Meta sends
+    // `failed` exactly once — without this the message stays 'sent' forever.
+    // Re-read the row; if it now exists, drain immediately through the shared
+    // CAS path (GETDEL makes the double-drain-with-create-path safe).
+    await drainParkIfRowCommitted(teamId, channel, externalId);
   } catch (err) {
     // Redis hiccup must not abort the webhook 200. Losing one parked status
     // is recoverable — Meta typically resends the next-rank event soon after.
@@ -437,6 +486,40 @@ async function parkUnknownWamidStatus(
       `[ingest] parkUnknownWamidStatus failed for ${key}: ${err instanceof Error ? err.message : err}`,
     );
   }
+}
+
+/**
+ * Park-side half of the park-vs-drain race guard (called from
+ * `parkUnknownWamidStatus` right after the SET lands). If the outbound Message
+ * row has committed since ingestStatusUpdate's findUnique missed, its
+ * `drainParkedStatus` may have run against an empty key already — so re-read
+ * the row and, if present, drain now. GETDEL inside `drainParkedStatus` makes
+ * this safe against a concurrent create-path drain (only one wins the key).
+ */
+async function drainParkIfRowCommitted(
+  teamId: string,
+  channel: Channel,
+  externalId: string,
+): Promise<void> {
+  const row = await db.message.findUnique({
+    where: {
+      teamId_channel_externalId: { teamId, channel, externalId },
+    },
+    select: {
+      id: true,
+      conversationId: true,
+      conversation: { select: { contactId: true } },
+    },
+  });
+  if (!row) return;
+  await drainParkedStatus(
+    teamId,
+    channel,
+    externalId,
+    row.id,
+    row.conversationId,
+    row.conversation.contactId,
+  );
 }
 
 /**
@@ -456,10 +539,10 @@ export async function drainParkedStatus(
 ): Promise<void> {
   const key = parkKey(teamId, channel, externalId);
   const redis = getRedisConnection();
-  let parked: Message["status"] | null = null;
+  let parked: ParkedStatus | null = null;
   try {
     const raw = await redis.getdel(key);
-    parked = raw as Message["status"] | null;
+    parked = raw ? parseParkedStatus(raw) : null;
   } catch (err) {
     console.error(
       `[ingest] drainParkedStatus(${key}) failed: ${err instanceof Error ? err.message : err}`,
@@ -482,10 +565,21 @@ export async function drainParkedStatus(
   let pinnedStatus = existing.status as Message["status"];
   let written = { count: 0 };
   for (let attempt = 0; attempt < 4; attempt++) {
-    if (!statusWinsOver(parked, pinnedStatus)) return; // parked lost — discard it
+    if (!statusWinsOver(parked.status, pinnedStatus)) return; // parked lost — discard it
     written = await db.message.updateMany({
       where: { id: messageId, status: pinnedStatus },
-      data: { status: parked },
+      data: {
+        status: parked.status,
+        // Persist failure diagnostics on the drained `failed` transition —
+        // same guarded write as the live path (ingestStatusUpdate above).
+        ...(parked.status === "failed"
+          ? {
+              statusErrorCode: parked.errorCode ?? null,
+              statusErrorTitle: parked.errorTitle ?? null,
+              statusErrorDetail: parked.errorDetail ?? null,
+            }
+          : {}),
+      },
     });
     if (written.count > 0) break;
     const current = await db.message.findUnique({
@@ -502,10 +596,19 @@ export async function drainParkedStatus(
     conversationId,
     contactId,
     messageId,
-    status: parked,
+    status: parked.status,
     // Stamped at drain (when the parked status is actually applied) — same
     // role as the live-status publish above.
     occurredAt: new Date().toISOString(),
+    ...(parked.status === "failed" && parked.errorCode !== undefined
+      ? { errorCode: parked.errorCode }
+      : {}),
+    ...(parked.status === "failed" && parked.errorTitle !== undefined
+      ? { errorTitle: parked.errorTitle }
+      : {}),
+    ...(parked.status === "failed" && parked.errorDetail !== undefined
+      ? { errorDetail: parked.errorDetail }
+      : {}),
   });
 }
 
@@ -845,50 +948,51 @@ async function ingestInboundMessage(
       // while DB ended up at `snapshot+2`, drifting every client's unread
       // badge low by 1. The atomic `{ increment }` handles the DB write
       // correctly; we just need to broadcast the truth.
-      // Monotonicity guard. Meta delivers at-least-once with NO ordering
-      // guarantee — retries and webhook replay can land an OLDER message
-      // after a newer one. Read the current summary inside the tx and only
-      // ADVANCE lastMessageAt/lastMessagePreview when this message is the
-      // newest the conversation has seen; otherwise leave the summary alone
-      // so a late older inbound can't clobber the list preview (the bug that
-      // left "Cont" pinned after "A"/"P" arrived). unreadCount +
-      // incomingMessagesCount still increment for EVERY inbound regardless of
-      // order — they're counts, not a "latest" pointer. Mirrors the outbound
-      // guard in commitOutboundEvent / send-text-internal, which the inbound
-      // path was missing. `>=` (not `>`) so a brand-new conversation, whose
-      // create set lastMessageAt = this same evt.timestamp, still writes its
-      // first preview.
-      const summaryBefore = await tx.conversation.findUnique({
-        where: { id: conversation.id },
-        select: { lastMessageAt: true, lastMessagePreview: true },
+      // Monotonicity guard as a real CAS (not read-then-write). Meta delivers
+      // at-least-once with NO ordering guarantee — retries, webhook replay, or a
+      // single batch fanned across ingest lanes can land an OLDER message after
+      // a newer one. A prior read-then-write (findUnique the summary, decide in
+      // JS, then update) let two concurrent inbounds for the SAME conversation
+      // both read the stale pre-batch lastMessageAt, both decide "advance", and
+      // let whichever UPDATE committed LAST win — regressing the list preview +
+      // sort to the older message (the bug that left "Cont" pinned after
+      // "A"/"P" arrived). The WHERE-guarded updateMany makes the advance atomic:
+      // only a message at-or-after the row's CURRENT lastMessageAt writes the
+      // summary, so a late older inbound matches 0 rows and can't clobber it.
+      // Mirrors the WHERE-guarded `contact.lastInboundAt` bump just below and
+      // the outbound guard in commitOutboundEvent / send-text-internal. `lte`
+      // (not `lt`) so a brand-new conversation, whose create set lastMessageAt
+      // to this same evt.timestamp, still writes its first preview.
+      await tx.conversation.updateMany({
+        where: { id: conversation.id, lastMessageAt: { lte: evt.timestamp } },
+        data: {
+          lastMessageAt: evt.timestamp,
+          lastMessagePreview: preview,
+          lastMessageDirection: "in" as const,
+        },
       });
-      const advancesSummary =
-        !summaryBefore || evt.timestamp >= summaryBefore.lastMessageAt;
+      // unreadCount + incomingMessagesCount increment for EVERY inbound
+      // regardless of order — they're counts, not a "latest" pointer. Read the
+      // EFFECTIVE summary back from the same UPDATE so the realtime frame +
+      // workflow snapshot carry the newest values that actually committed (this
+      // message's, or a concurrent newer inbound's that won the CAS above) — an
+      // out-of-order inbound never pushes a stale preview to the inbox list. The
+      // absolute post-increment `unreadCount` likewise comes from the DB, not a
+      // `snapshot+1` (which drifted low when two webhooks raced pre-commit).
       const bumped = await tx.conversation.update({
         where: { id: conversation.id },
         data: {
-          ...(advancesSummary
-            ? {
-                lastMessageAt: evt.timestamp,
-                lastMessagePreview: preview,
-                lastMessageDirection: "in" as const,
-              }
-            : {}),
           unreadCount: { increment: 1 },
           incomingMessagesCount: { increment: 1 },
         },
-        select: { unreadCount: true },
+        select: {
+          unreadCount: true,
+          lastMessageAt: true,
+          lastMessagePreview: true,
+        },
       });
-
-      // The realtime frame + workflow snapshot must carry the EFFECTIVE newest
-      // summary, not this (possibly older) message's, so an out-of-order
-      // inbound never pushes a stale preview to the inbox list.
-      const effectiveLastMessageAt =
-        advancesSummary || !summaryBefore
-          ? evt.timestamp
-          : summaryBefore.lastMessageAt;
-      const effectivePreview =
-        advancesSummary || !summaryBefore ? preview : summaryBefore.lastMessagePreview;
+      const effectiveLastMessageAt = bumped.lastMessageAt;
+      const effectivePreview = bumped.lastMessagePreview;
       await tx.contact.updateMany({
         where: {
           id: contact.id,

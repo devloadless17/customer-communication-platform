@@ -444,6 +444,12 @@ async function deliverOnce(
       },
       body,
       timeoutMs: DEFAULT_TIMEOUT_MS,
+      // Cap what safe-fetch buffers just above readLimitedBody's ceiling below —
+      // we only keep MAX_RESPONSE_BODY_BYTES for the log row, so buffering the
+      // provider default (16 MB) per delivery × worker concurrency is wasted
+      // heap. A misconfigured/hostile receiver streaming a multi-MB 200 body
+      // can't balloon transient allocation.
+      maxResponseBytes: MAX_RESPONSE_BODY_BYTES + 1024,
       // No redirects on outbound webhooks. A 307 hop to a different host
       // would re-send the same HMAC signature + auth headers, which a
       // malicious receiver could log and replay. Webhook receivers are

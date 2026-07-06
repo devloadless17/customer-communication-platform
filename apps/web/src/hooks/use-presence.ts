@@ -10,6 +10,36 @@ export interface TeammateAvailability {
   message?: string | null;
 }
 
+// Module-scoped dedup of the reconnect presence:request. Every usePresence
+// instance (inbox sub-sidebar, assignment dropdown, team-channel sidebar, …)
+// would otherwise register its own `connect` listener, so a single reconnect
+// fires N duplicate presence:request emits — each costing 2 Postgres reads + 2
+// redundant snapshot frames server-side, and burning N of the per-socket
+// presence-request tokens. The server broadcasts the response to the whole
+// socket, so one request seeds every mounted consumer. Refcount a single
+// shared connect-listener so N consumers produce exactly one presence:request
+// per reconnect. (The per-instance immediate seed below is kept: a consumer
+// mounting mid-session must request its own snapshot after its own data
+// listeners are attached.)
+let presenceConnectRefCount = 0;
+let sharedConnectListener: (() => void) | null = null;
+
+function acquireSharedConnectListener(): void {
+  presenceConnectRefCount += 1;
+  if (sharedConnectListener) return;
+  sharedConnectListener = () => {
+    getClientSocket().emit("presence:request");
+  };
+  getClientSocket().on("connect", sharedConnectListener);
+}
+
+function releaseSharedConnectListener(): void {
+  presenceConnectRefCount -= 1;
+  if (presenceConnectRefCount > 0 || !sharedConnectListener) return;
+  getClientSocket().off("connect", sharedConnectListener);
+  sharedConnectListener = null;
+}
+
 /**
  * Realtime online-teammate + availability state for a team.
  *
@@ -132,21 +162,20 @@ export function usePresence(
         return { ...prev, [payload.userId]: nextEntry };
       });
     };
-    const requestSnapshot = (): void => {
-      socket.emit("presence:request");
-    };
-
     socket.on("presence:update", onUpdate);
     socket.on("user:availability:snapshot", onAvailabilitySnapshot);
     socket.on("user:availability:updated", onAvailabilityUpdate);
-    socket.on("connect", requestSnapshot);
-    if (socket.connected) requestSnapshot();
+    acquireSharedConnectListener();
+    // Immediate per-instance seed for a mid-session mount: the shared connect
+    // listener won't re-fire while already connected, and this instance's data
+    // listeners just attached, so it needs one request to seed itself.
+    if (socket.connected) socket.emit("presence:request");
 
     return () => {
       socket.off("presence:update", onUpdate);
       socket.off("user:availability:snapshot", onAvailabilitySnapshot);
       socket.off("user:availability:updated", onAvailabilityUpdate);
-      socket.off("connect", requestSnapshot);
+      releaseSharedConnectListener();
     };
   }, [teamId]);
 

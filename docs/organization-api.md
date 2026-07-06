@@ -225,8 +225,9 @@ curl -s -X POST "$CCP_BASE_URL/api/external/v1/messages" \
     "text": "Hi! Thanks for reaching out."
   }'
 ```
-Media instead of text:
+Media instead of text — **ROADMAP, not yet supported.** URL-based media send via `/v1/messages` currently returns `400 media_not_yet_supported`; the URL → upload → send pipeline is on the roadmap. Send media via the inbox UI for now.
 ```bash
+# NOT YET SUPPORTED — returns 400 media_not_yet_supported
   -d '{ "contact": { "phone": "+96170123456" },
         "media": { "url": "https://example.com/file.jpg", "mime_type": "image/jpeg", "caption": "optional" } }'
 ```
@@ -260,11 +261,12 @@ curl -s "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/messages?li
 ```
 
 **Add an internal note** (never sent to WhatsApp) — `POST /conversations/:id/notes` · `write:notes`
+`authorUserId` is **required** — it must be the id of a team member (from `GET /users`). Create a dedicated service-account user for your integration if no human author applies.
 ```bash
 curl -s -X POST "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/notes" \
   -H "Authorization: Bearer $CCP_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{ "body": "Customer prefers WhatsApp over email." }'
+  -d '{ "body": "Customer prefers WhatsApp over email.", "authorUserId": "USER_ID" }'
 ```
 
 ---

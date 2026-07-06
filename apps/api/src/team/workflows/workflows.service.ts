@@ -868,10 +868,20 @@ export class WorkflowsService {
       parsedBody = { raw: rawBody };
     }
 
-    // Strip the signature header — the step handler shouldn't proxy it onward.
+    // Strip the signature header + any partner-sent credentials — the step
+    // handler shouldn't proxy them onward AND they must never be persisted into
+    // eventPayload (JSONB, retained + disclosed on the runs detail page). Mirrors
+    // safe-fetch's SENSITIVE_HEADERS set; custom business headers pass through.
+    const STRIP_HEADERS = new Set([
+      "x-workflow-signature",
+      "authorization",
+      "cookie",
+      "proxy-authorization",
+      "x-api-key",
+    ]);
     const passthroughHeaders: Record<string, string> = {};
     for (const [k, v] of Object.entries(headers)) {
-      if (k.toLowerCase() === "x-workflow-signature") continue;
+      if (STRIP_HEADERS.has(k.toLowerCase())) continue;
       passthroughHeaders[k] = v;
     }
 
@@ -883,20 +893,40 @@ export class WorkflowsService {
       _depth: inboundDepth,
     };
 
-    const run = await this.db.workflowRun.create({
-      data: {
-        workflowId: wf.id,
-        teamId: wf.teamId,
-        trigger: "incoming_webhook",
-        contactId: null,
-        conversationId: null,
-        eventPayload: eventPayload as Prisma.InputJsonValue,
-        graphSnapshot: wf.graph as Prisma.InputJsonValue,
-        status: "queued",
-      },
-      select: { id: true },
-    });
-    await enqueueWorkflowRun(run.id);
+    let run: { id: string };
+    try {
+      run = await this.db.workflowRun.create({
+        data: {
+          workflowId: wf.id,
+          teamId: wf.teamId,
+          trigger: "incoming_webhook",
+          contactId: null,
+          conversationId: null,
+          eventPayload: eventPayload as Prisma.InputJsonValue,
+          graphSnapshot: wf.graph as Prisma.InputJsonValue,
+          status: "queued",
+        },
+        select: { id: true },
+      });
+      await enqueueWorkflowRun(run.id);
+    } catch (err) {
+      // The idempotency key was claimed as "pending" BEFORE this point. If the
+      // create/enqueue fails we must release it, otherwise the sentinel lingers
+      // for the full TTL and every legitimate partner retry is swallowed as a
+      // duplicate with no run ever created. Best-effort DEL only while it's
+      // still "pending" (don't clobber a concurrent claimant's real runId).
+      if (redisKey) {
+        try {
+          const redis = getRedisConnection();
+          if ((await redis.get(redisKey)) === "pending") {
+            await redis.del(redisKey);
+          }
+        } catch {
+          /* best-effort — the partner retry will re-attempt regardless */
+        }
+      }
+      throw err;
+    }
     // Record the runId against the idempotency key so a later duplicate returns
     // it (overwrites the "pending" sentinel, keeps the TTL window).
     if (redisKey) {

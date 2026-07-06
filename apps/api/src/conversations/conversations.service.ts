@@ -261,12 +261,15 @@ export class ConversationsService {
     opts: {
       before?: string | null;
       after?: string | null;
+      /** Tail row id paired with `after` — enables the strict-tuple delta. */
+      afterId?: string | null;
       take?: number;
     },
   ) {
     if (opts.after) {
       return listNewerMessages(teamId, conversationId, {
         after: opts.after,
+        afterId: opts.afterId ?? undefined,
         take: opts.take,
       });
     }

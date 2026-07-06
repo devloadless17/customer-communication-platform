@@ -28,8 +28,16 @@ import { createTokenBucket } from "../common/token-bucket";
  * Response: HTTP 429 + Retry-After in seconds. Meta respects Retry-After
  * on webhook responses — better than 5xx because 5xx puts the team on
  * Meta's "your webhook is broken" health board.
+ *
+ * Per-IP bucket second (mirrors WorkflowWebhookRateLimitGuard): the
+ * per-team key is an attacker-chosen path param, so spraying random
+ * teamIds mints a fresh bucket per request and bypasses the per-team
+ * throttle entirely. Meta's webhook egress is a bounded IP set, so a
+ * generous 1200/min ceiling bounds a single-IP storm without tripping on
+ * legitimate multi-team burst traffic from Meta's shared infrastructure.
  */
 const metaWebhookBucket = createTokenBucket({ perMin: 600, maxKeys: 5_000 });
+const metaWebhookIpBucket = createTokenBucket({ perMin: 1_200, maxKeys: 5_000 });
 
 @Injectable()
 export class WebhookRateLimitGuard implements CanActivate {
@@ -42,21 +50,38 @@ export class WebhookRateLimitGuard implements CanActivate {
     // proxy-resolved IP so a future un-parameterized webhook route still
     // gets bucket-scoped throttling instead of one global bucket.
     const teamId = (req.params as { teamId?: string }).teamId;
-    const key = teamId ? `team:${teamId}` : `ip:${req.ip ?? "unknown"}`;
+    const ip = req.ip ?? "unknown";
+    const key = teamId ? `team:${teamId}` : `ip:${ip}`;
 
     const result = metaWebhookBucket.consume(key);
-    if (result.ok) return true;
+    if (!result.ok) {
+      res.setHeader("Retry-After", String(result.retryAfter));
+      throw new HttpException(
+        {
+          error: "rate_limited",
+          detail:
+            "Too many webhooks for this team in the last minute. " +
+            "Retry-After header indicates when to try again.",
+        },
+        429,
+      );
+    }
 
-    res.setHeader("Retry-After", String(result.retryAfter));
-    throw new HttpException(
-      {
-        error: "rate_limited",
-        detail:
-          "Too many webhooks for this team in the last minute. " +
-          "Retry-After header indicates when to try again.",
-      },
-      429,
-    );
+    // Per-IP bucket second — the per-team key is an attacker-chosen path
+    // param, so this is the ceiling that actually bounds a random-teamId
+    // spray from a single source.
+    const ipResult = metaWebhookIpBucket.consume(`ip:${ip}`);
+    if (!ipResult.ok) {
+      res.setHeader("Retry-After", String(ipResult.retryAfter));
+      throw new HttpException(
+        {
+          error: "rate_limited",
+          detail: "Too many webhook requests from this source.",
+        },
+        429,
+      );
+    }
+    return true;
   }
 }
 

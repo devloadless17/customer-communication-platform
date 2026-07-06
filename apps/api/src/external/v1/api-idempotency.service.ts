@@ -220,11 +220,39 @@ export class ApiIdempotencyService {
         markIdempotentReplay();
         return { kind: "replay", result: cached.responseBody as unknown as T };
       }
-      // Expired completed row — delete + re-claim, then proceed.
-      await this.db.apiIdempotencyKey.deleteMany({
-        where: { teamId, apiKeyId, key },
+      // Expired completed row — atomically flip it into a FRESH pending claim
+      // via a CAS guarded on the stale expiresAt, so exactly one racer wins.
+      // A non-atomic deleteMany+create leaves a delete-AFTER-create hole: racer
+      // B's deleteMany could drop racer A's just-created fresh pending row,
+      // letting BOTH proceed and double-fire a billed Meta send. The updateMany
+      // takes a row lock and re-checks `expiresAt < now`, so the loser matches 0
+      // rows (the winner already pushed expiresAt into the future).
+      const now = Date.now();
+      const reclaimed = await this.db.apiIdempotencyKey.updateMany({
+        where: { teamId, apiKeyId, key, expiresAt: { lt: new Date(now) } },
+        data: {
+          requestHash,
+          responseBody: (ambiguityProtected
+            ? { _pending: true, _inflightUntil: now + IDEMPOTENCY_PENDING_TTL_MS }
+            : { _pending: true }) as Prisma.InputJsonValue,
+          responseStatus: IDEMPOTENCY_PENDING_STATUS,
+          expiresAt: new Date(
+            now +
+              (ambiguityProtected
+                ? IDEMPOTENCY_COMPLETED_TTL_MS
+                : IDEMPOTENCY_PENDING_TTL_MS),
+          ),
+        },
       });
-      await claimPending();
+      if (reclaimed.count === 0) {
+        // Lost the reclaim race (another retry already flipped the row into its
+        // own fresh pending claim, or the row was swept). Same 409 every other
+        // contention path returns instead of leaking a 500.
+        throw new ConflictException({
+          error: "idempotency_in_progress",
+          detail: "Concurrent retry race — try again in a moment.",
+        });
+      }
       return { kind: "claimed" };
     }
   }

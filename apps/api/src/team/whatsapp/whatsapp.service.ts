@@ -298,6 +298,17 @@ export class WhatsappService {
 
     invalidateProviderConfig(teamId);
 
+    // A reconnect can mint a brand-new ChannelConnection row (new id/createdAt).
+    // Publish catalog_changed so the outbound-webhooks subscriber flushes its
+    // per-team channelCache — otherwise webhook payloads keep stamping the old
+    // connection's id. Scope-agnostic on the server side; the client's template
+    // view (whose availability tracks the connection) refreshes too.
+    await this.bus.publish({
+      type: "team.catalog_changed",
+      teamId,
+      scope: "whatsapp-templates",
+    });
+
     // Reconnecting WhatsApp resumes any broadcasts parked `paused` because creds
     // were missing/expired at fire time — so the detail page's "fix the
     // connection and it will auto-resume" is true on a stable box, not just
@@ -333,6 +344,15 @@ export class WhatsappService {
       where: { teamId, channel: META_PROVIDER },
     });
     invalidateProviderConfig(teamId);
+
+    // Deleting the row leaves a stale id in the outbound-webhooks subscriber's
+    // channelCache; catalog_changed flushes it (see updateConfig for the same
+    // reasoning) so post-disconnect webhook payloads don't carry a dangling id.
+    await this.bus.publish({
+      type: "team.catalog_changed",
+      teamId,
+      scope: "whatsapp-templates",
+    });
   }
 
   // -------------------------------------------------------------------------

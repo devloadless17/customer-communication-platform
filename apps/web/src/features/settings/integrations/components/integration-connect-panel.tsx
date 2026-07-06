@@ -384,7 +384,10 @@ function buildCurl(example: CurlExample, origin: string, token: string | null): 
   // generated (only moment we have the plaintext).
   const url = `${origin}${example.path}`;
   const auth = token ?? "$CCP_TOKEN";
-  const lines = [`curl -X ${example.method} '${url}' \\`, `  -H 'Authorization: Bearer ${auth}'`];
+  // Double-quote the Authorization line so the exported `$CCP_TOKEN` shell var
+  // expands when the placeholder is used; other lines stay single-quoted since
+  // their values are literal.
+  const lines = [`curl -X ${example.method} '${url}' \\`, `  -H "Authorization: Bearer ${auth}"`];
   if (example.body) {
     lines[lines.length - 1] += " \\";
     lines.push(`  -H 'Content-Type: application/json' \\`);

@@ -818,6 +818,10 @@ export function ReplyBox({
     // Reuse a retried message's clientTempId (set by the retry prefill) so the
     // server dedupes this against the original send; otherwise mint a fresh
     // one. Consumed once — a subsequent fresh compose gets a new id.
+    // `isRetry` is captured BEFORE the ref is cleared: only a retry can collide
+    // with a lingering failed job, so it tells the server to run its failed-job
+    // cleanup probe (skipped on the common first-send path).
+    const isRetry = retryClientTempIdRef.current !== null;
     const clientTempId = retryClientTempIdRef.current ?? newClientTempId();
     retryClientTempIdRef.current = null;
     const snapshotValue = value;
@@ -1113,7 +1117,9 @@ export function ReplyBox({
             });
           }
         } else if (trimmed) {
-          const url = isNote ? "/api/notes" : "/api/messages";
+          const url = isNote
+            ? "/api/notes"
+            : `/api/messages${isRetry ? "?retry=1" : ""}`;
           // apiFetch (not bare fetch) so the two highest-frequency sends route
           // through fetchWithSessionGuard like every sibling call — a 401 mid-
           // session cleanly re-auths instead of surfacing a generic send error.
@@ -1252,7 +1258,15 @@ export function ReplyBox({
           cleanup();
           onOptimisticFail?.(clientTempId);
         }, STUCK_WATCHDOG_MS);
-        const onConfirmed = () => cleanup();
+        const onConfirmed = () => {
+          cleanup();
+          // The send is confirmed by message:new — no Retry will ever need this
+          // cached File again, so drop it. Successful media sends would
+          // otherwise leak their File for the ReplyBox mount lifetime (pasted /
+          // dropped screenshots are memory-backed Blobs). Failed sends keep
+          // their entry — the catch path left the bubble's Retry actionable.
+          pendingFilesRef.current.delete(clientTempId);
+        };
         cleanup = () => {
           window.clearTimeout(watchdogId);
           window.removeEventListener(ev, onConfirmed);

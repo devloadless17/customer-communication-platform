@@ -24,7 +24,7 @@ export function CopyCurlButton({ method, path, body, headers }: Props) {
     const origin = typeof window !== "undefined" ? window.location.origin : "";
     const lines = [
       `curl -X ${method} '${origin}${path}' \\`,
-      `  -H 'Authorization: Bearer $CCP_TOKEN'`,
+      `  -H "Authorization: Bearer $CCP_TOKEN"`,
     ];
     if (headers) {
       for (const [k, v] of Object.entries(headers)) {

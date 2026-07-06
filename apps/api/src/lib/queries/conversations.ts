@@ -590,16 +590,36 @@ export async function listOlderMessages(
  * until the agent navigates away and back. Tracked as Finding #7 in the
  * assignment audit.
  *
- * No cursor — the delta is bounded by how long the tab was hydrating or
- * disconnected. We cap at MESSAGES_PAGE; on the rare case it's hit, the
- * client should treat it as "too far behind" and force a thread re-fetch.
+ * Cursor is the `(after, afterId)` TUPLE of the newest server-confirmed row
+ * the client already holds. When `afterId` is present the WHERE is a STRICT
+ * tuple comparison — `timestamp > after OR (timestamp = after AND id > afterId)`
+ * — so every returned row is genuinely new (no boundary re-inclusion), which
+ * lets the returned `hasMore` truncation flag be authoritative. `afterId` is
+ * optional for backward-compat: an old client (or a caller without the tail id)
+ * falls back to the second-granularity `gte` behaviour, which re-includes the
+ * exact-boundary row the client dedupes by externalId.
+ *
+ * We fetch `take + 1` and cap the page at MESSAGES_PAGE, returning
+ * `hasMore: rows.length > take`. A truncated delta means the gap likely exceeds
+ * one page, so the client should treat it as "too far behind" and force a full
+ * thread re-fetch.
  */
 export async function listNewerMessages(
   teamId: string,
   conversationId: string,
-  opts: { after: string; take?: number },
+  opts: { after: string; afterId?: string; take?: number },
 ): Promise<{
   items: Message[];
+  /**
+   * True when the delta was truncated at the page cap (`rows.length > take`) —
+   * the client escalates to a full refetch. Replaces the client's old
+   * hardcoded `newCount >= RECOVERY_PAGE` heuristic, which could never fire
+   * when the client held ≥2 same-second boundary rows (the `gte` re-inclusions
+   * ate the count). Only authoritative on the strict-tuple (`afterId`) path;
+   * on the legacy `gte` fallback it may over-count the boundary row, matching
+   * that path's older, best-effort semantics.
+   */
+  hasMore: boolean;
   state?: {
     status: import("@ccp/shared/types").ConversationStatus;
     assignedUserId: string | null;
@@ -620,7 +640,7 @@ export async function listNewerMessages(
   };
 }> {
   const afterDate = new Date(opts.after);
-  if (Number.isNaN(afterDate.getTime())) return { items: [] };
+  if (Number.isNaN(afterDate.getTime())) return { items: [], hasMore: false };
 
   // Same tenant gate as listOlderMessages — silent empty page so we don't
   // leak which conversation IDs exist in other teams. Pull the header
@@ -633,19 +653,48 @@ export async function listNewerMessages(
       contact: { select: { lastInboundAt: true } },
     },
   });
-  if (!owns) return { items: [] };
+  if (!owns) return { items: [], hasMore: false };
 
   const take = clampTake(opts.take, MESSAGES_PAGE);
+  // Strict-after when the client sends the boundary row's id: the tuple
+  // `timestamp > after OR (timestamp = after AND id > afterId)` excludes ONLY
+  // the exact rows the client already holds (its cursor row + any earlier
+  // same-second siblings it already merged), while still returning same-second
+  // siblings that sort AFTER the cursor id. Every returned row is genuinely new,
+  // so `hasMore` below is an honest truncation signal.
+  //
+  // Fallback (no `afterId`: old client / a caller without the tail id): keep the
+  // second-granularity `gte`. Meta's inbound timestamp is second-resolution, so
+  // `gt` would permanently skip a same-second sibling that landed in the
+  // SSR→socket-join gap; `gte` re-includes the boundary row, which the client
+  // dedupes by externalId for free (at the cost of a less-precise `hasMore`).
+  const where: Prisma.MessageWhereInput = opts.afterId
+    ? {
+        conversationId,
+        OR: [
+          { timestamp: { gt: afterDate } },
+          { timestamp: afterDate, id: { gt: opts.afterId } },
+        ],
+      }
+    : { conversationId, timestamp: { gte: afterDate } };
   const rows = await db.message.findMany({
     omit: { rawPayload: true },
     include: { replyTo: REPLY_TO_INCLUDE },
-    where: { conversationId, timestamp: { gt: afterDate } },
+    where,
     orderBy: [{ timestamp: "asc" }, { id: "asc" }],
-    take,
+    // `take + 1` so `rows.length > take` detects a truncated (over-a-page) delta
+    // without a separate COUNT. On the strict-tuple path every row is new, so
+    // the guard is exact; on the `gte` fallback the boundary re-inclusion can
+    // make it fire one row early — acceptable for that legacy path.
+    take: take + 1,
   });
 
+  const hasMore = rows.length > take;
+  const items = (hasMore ? rows.slice(0, take) : rows).map(mapMessage);
+
   return {
-    items: rows.map(mapMessage),
+    items,
+    hasMore,
     state: {
       status: owns.status,
       assignedUserId: owns.assignedUserId,

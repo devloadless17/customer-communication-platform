@@ -121,6 +121,16 @@ export function useCall(): {
     liveCallRef.current = liveCall;
   }, [liveCall]);
 
+  // Synchronous in-flight guard for call SETUP (getUserMedia → createOffer/
+  // createAnswer → POST). liveCallRef stays null through this whole async window
+  // (setLiveCall runs only AFTER setupPeer resolves, and liveCallRef then trails
+  // it by a tick via the effect above), so the liveCallRef check alone lets a
+  // double-click on the Phone button — or an inbound Answer click during an
+  // outbound dial — slip through twice: two real Meta calls, and the first
+  // getUserMedia stream orphaned (mic indicator stuck lit). busyRef closes that
+  // window: set true before the first await, cleared in a finally on every exit.
+  const busyRef = useRef(false);
+
   const fail = useCallback((msg: string) => {
     setError(msg);
     toast.error(msg);
@@ -596,7 +606,13 @@ export function useCall(): {
       // Single peer connection (1:1, see the contract note up top). Answering
       // a DIFFERENT call while one is live would tear down the live call's
       // media (setupPeer → releaseMedia) with no /end for it — refuse instead.
-      if (liveCallRef.current && liveCallRef.current.callId !== callId) {
+      // busyRef also refuses while an outbound dial (or another answer) is
+      // mid-setup — liveCallRef is still null then, so without it an Answer click
+      // would destroy that in-flight PC via setupPeer → releaseMedia.
+      if (
+        busyRef.current ||
+        (liveCallRef.current && liveCallRef.current.callId !== callId)
+      ) {
         toast.error("End your current call before answering another one.");
         return;
       }
@@ -609,6 +625,7 @@ export function useCall(): {
         return;
       }
 
+      busyRef.current = true;
       try {
         const pc = await setupPeer();
         await pc.setRemoteDescription({ type: "offer", sdp: offer.sdp });
@@ -667,6 +684,8 @@ export function useCall(): {
             : "Couldn't start the call. Check your microphone and try again.",
         );
         tearDown();
+      } finally {
+        busyRef.current = false;
       }
     },
     [setupPeer, tearDown, fail],
@@ -679,118 +698,126 @@ export function useCall(): {
     ): Promise<{ ok: true } | { ok: false; reason: string }> => {
       setError(null);
 
-      // Single peer connection (1:1). If a call is already live, refuse rather
-      // than silently dropping the in-flight call's media — setupPeer →
-      // releaseMedia closes the existing PC without POSTing /end for it. The
-      // entry-point buttons are also disabled while live; this is the backstop.
-      // (Check a local copy so this guard doesn't permanently narrow
-      // liveCallRef.current to null for the rebind logic further down.)
+      // Single peer connection (1:1). If a call is already live — or another
+      // call setup is mid-flight — refuse rather than silently dropping the
+      // in-flight call's media (setupPeer → releaseMedia closes the existing PC
+      // without POSTing /end for it). liveCallRef is null through the whole async
+      // setup window below, so busyRef is the synchronous guard that stops a
+      // double-click on the Phone button from placing TWO real Meta calls and
+      // orphaning the first mic stream. The entry-point buttons are also disabled
+      // while live; this is the backstop. (Check a local copy of liveCallRef so
+      // this guard doesn't permanently narrow liveCallRef.current to null for
+      // the rebind logic further down.)
       const alreadyLive = liveCallRef.current;
-      if (alreadyLive) {
+      if (busyRef.current || alreadyLive) {
         return { ok: false, reason: "call_in_progress" };
       }
-
-      // The browser doesn't know the real callId until placeCall returns
-      // (Meta assigns it). Use a temp id so onicecandidate / state handlers
-      // can wire up before the rebind; the panel rebinds on POST success.
-      // Prefer crypto.randomUUID for a guaranteed-unique id; Math.random
-      // is short-bit and could (very unlikely) collide with a real call id.
-      const tempCallId = `tmp_${
-        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-          ? crypto.randomUUID()
-          : Math.random().toString(36).slice(2)
-      }`;
-
-      let pc: RTCPeerConnection;
-      let sdpOffer: string;
+      busyRef.current = true;
       try {
-        pc = await setupPeer();
-        const offer = await pc.createOffer({ offerToReceiveAudio: true });
-        await pc.setLocalDescription(offer);
-        if (!offer.sdp) throw new Error("SDP generation failed");
-        sdpOffer = offer.sdp;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const reason = /permission|denied|notallowed/i.test(message)
-          ? "mic_permission_denied"
-          : "rtc_setup_failed";
-        tearDown();
-        return { ok: false, reason };
-      }
+        // The browser doesn't know the real callId until placeCall returns
+        // (Meta assigns it). Use a temp id so onicecandidate / state handlers
+        // can wire up before the rebind; the panel rebinds on POST success.
+        // Prefer crypto.randomUUID for a guaranteed-unique id; Math.random
+        // is short-bit and could (very unlikely) collide with a real call id.
+        const tempCallId = `tmp_${
+          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : Math.random().toString(36).slice(2)
+        }`;
 
-      // Optimistic ringing UI.
-      setLiveCall({
-        callId: tempCallId,
-        conversationId,
-        contactName,
-        direction: "out",
-        status: "ringing",
-        startedAt: Date.now(),
-        answeredAt: null,
-      });
+        let pc: RTCPeerConnection;
+        let sdpOffer: string;
+        try {
+          pc = await setupPeer();
+          const offer = await pc.createOffer({ offerToReceiveAudio: true });
+          await pc.setLocalDescription(offer);
+          if (!offer.sdp) throw new Error("SDP generation failed");
+          sdpOffer = offer.sdp;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          const reason = /permission|denied|notallowed/i.test(message)
+            ? "mic_permission_denied"
+            : "rtc_setup_failed";
+          tearDown();
+          return { ok: false, reason };
+        }
 
-      try {
-        const res = await fetchWithSessionGuard(
-          `/api/conversations/${conversationId}/call`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ sdp: sdpOffer }),
-          },
-        );
-        const body = (await res.json().catch(() => ({}))) as {
-          ok?: boolean;
-          callId?: string;
-          reason?: string;
-        };
-        if (!res.ok || body.ok === false) {
+        // Optimistic ringing UI.
+        setLiveCall({
+          callId: tempCallId,
+          conversationId,
+          contactName,
+          direction: "out",
+          status: "ringing",
+          startedAt: Date.now(),
+          answeredAt: null,
+        });
+
+        try {
+          const res = await fetchWithSessionGuard(
+            `/api/conversations/${conversationId}/call`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ sdp: sdpOffer }),
+            },
+          );
+          const body = (await res.json().catch(() => ({}))) as {
+            ok?: boolean;
+            callId?: string;
+            reason?: string;
+          };
+          if (!res.ok || body.ok === false) {
+            tearDown();
+            return { ok: false, reason: body.reason ?? `http_${res.status}` };
+          }
+          // Rebind to Meta's real callId so both the `call:ended` frame AND the
+          // answer frame (now matched by callId, not PC state) target this call.
+          const realCallId = body.callId ?? tempCallId;
+          // Agent already hit End during the tmp window → terminate the real Meta
+          // call now so the customer stops ringing. Our UI is already torn down;
+          // just fire /end and bail (don't rebind/drain a call we're killing).
+          if (cancelledTmpIdsRef.current.has(tempCallId)) {
+            cancelledTmpIdsRef.current.delete(tempCallId);
+            void fetchWithSessionGuard(`/api/calls/${realCallId}/end`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: "{}",
+            }).catch(() => undefined);
+            tearDown();
+            return { ok: false, reason: "cancelled" };
+          }
+          // Update liveCallRef SYNCHRONOUSLY (not just via setLiveCall, whose
+          // effect won't run until the next tick): the drain below + every
+          // applyOutboundAnswer match read liveCallRef.callId, so it must already
+          // be the real id when we drain, or the strict callId match would reject
+          // our own stashed answer.
+          if (liveCallRef.current && liveCallRef.current.callId === tempCallId) {
+            liveCallRef.current = { ...liveCallRef.current, callId: realCallId };
+          }
+          setLiveCall((prev) =>
+            prev && prev.callId === tempCallId
+              ? { ...prev, callId: realCallId }
+              : prev,
+          );
+          // Drain an answer SDP that arrived BEFORE this rebind (the team-room
+          // answer frame can beat the POST response). Matched by the REAL callId,
+          // so we apply ONLY our own call's answer — a foreign agent's answer
+          // stashed under a different id is left untouched. Without this drain a
+          // fast customer pickup would strand the stashed answer and the call
+          // would never connect.
+          const stashed = pendingAnswersRef.current.get(realCallId);
+          if (stashed) {
+            pendingAnswersRef.current.delete(realCallId);
+            void applyOutboundAnswer(realCallId, stashed);
+          }
+          return { ok: true };
+        } catch {
           tearDown();
-          return { ok: false, reason: body.reason ?? `http_${res.status}` };
+          return { ok: false, reason: "network_error" };
         }
-        // Rebind to Meta's real callId so both the `call:ended` frame AND the
-        // answer frame (now matched by callId, not PC state) target this call.
-        const realCallId = body.callId ?? tempCallId;
-        // Agent already hit End during the tmp window → terminate the real Meta
-        // call now so the customer stops ringing. Our UI is already torn down;
-        // just fire /end and bail (don't rebind/drain a call we're killing).
-        if (cancelledTmpIdsRef.current.has(tempCallId)) {
-          cancelledTmpIdsRef.current.delete(tempCallId);
-          void fetchWithSessionGuard(`/api/calls/${realCallId}/end`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: "{}",
-          }).catch(() => undefined);
-          tearDown();
-          return { ok: false, reason: "cancelled" };
-        }
-        // Update liveCallRef SYNCHRONOUSLY (not just via setLiveCall, whose
-        // effect won't run until the next tick): the drain below + every
-        // applyOutboundAnswer match read liveCallRef.callId, so it must already
-        // be the real id when we drain, or the strict callId match would reject
-        // our own stashed answer.
-        if (liveCallRef.current && liveCallRef.current.callId === tempCallId) {
-          liveCallRef.current = { ...liveCallRef.current, callId: realCallId };
-        }
-        setLiveCall((prev) =>
-          prev && prev.callId === tempCallId
-            ? { ...prev, callId: realCallId }
-            : prev,
-        );
-        // Drain an answer SDP that arrived BEFORE this rebind (the team-room
-        // answer frame can beat the POST response). Matched by the REAL callId,
-        // so we apply ONLY our own call's answer — a foreign agent's answer
-        // stashed under a different id is left untouched. Without this drain a
-        // fast customer pickup would strand the stashed answer and the call
-        // would never connect.
-        const stashed = pendingAnswersRef.current.get(realCallId);
-        if (stashed) {
-          pendingAnswersRef.current.delete(realCallId);
-          void applyOutboundAnswer(realCallId, stashed);
-        }
-        return { ok: true };
-      } catch {
-        tearDown();
-        return { ok: false, reason: "network_error" };
+      } finally {
+        busyRef.current = false;
       }
     },
     [setupPeer, tearDown, applyOutboundAnswer],

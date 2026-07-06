@@ -47,6 +47,14 @@ import {
 const MAX_BYTES = 1 * 1024 * 1024;
 const MAX_ROWS = 5000;
 const MAX_TEXT = 500;
+// File-level ceiling on DISTINCT new tag names a single import may auto-create.
+// The 25-per-ROW cap can't bound the aggregate: a bad column mapping (e.g. an
+// order id or campaign slug landing under a header named "tags") yields a
+// unique value per row, so a 5000-row file would spawn ~5000 one-contact tags
+// via serial tag.create round-trips — minutes of wall time AND a permanently
+// polluted tag catalog. Past this ceiling we reject the whole import so the
+// user fixes the mapping instead of poisoning the catalog.
+const MAX_NEW_TAGS_PER_IMPORT = 100;
 
 // Built-in (non-customField) Contact columns whose changes are surfaced as
 // ContactFieldChange entries on contact.updated (so the outbound webhook's
@@ -1165,7 +1173,12 @@ export class ContactsService {
         include: { tags: { select: { id: true } } },
       });
       revived += revivedRows.length;
-      for (const updated of revivedRows) {
+      // 16-lane fanout (same as the bulk-delete path at line 575) — each
+      // awaited publish blocks on an OutboundEvent INSERT, so a serial loop
+      // over a large revived batch added O(N) sequential round-trips to the
+      // synchronous request. Per-row events are self-contained (no cross-row
+      // ordering dependency); the coalesced socket frame still fires after.
+      await runWithConcurrency(revivedRows, 16, async (updated) => {
         await this.bus.publish({
           type: "contact.created",
           teamId,
@@ -1182,7 +1195,7 @@ export class ContactsService {
           // per-row event.
           suppressSocketFanout: true,
         });
-      }
+      });
     }
 
     if (toCreate.length > 0) {
@@ -1304,7 +1317,11 @@ export class ContactsService {
         where: { teamId, phoneNumber: { in: createdPhones }, deletedAt: null },
         include: { tags: { select: { id: true } } },
       });
-      for (const row of createdRows) {
+      // 16-lane fanout (see the revived-rows loop / bulk-delete at line 575) —
+      // a serial await-per-row publish added O(N) sequential OutboundEvent
+      // INSERTs to a max-size import. Events are self-contained; the coalesced
+      // socket frame below still publishes after all lanes drain.
+      await runWithConcurrency(createdRows, 16, async (row) => {
         await this.bus.publish({
           type: "contact.created",
           teamId,
@@ -1313,7 +1330,7 @@ export class ContactsService {
           createdByUserId: userId,
           suppressSocketFanout: true,
         });
-      }
+      });
     }
 
     // One coalesced socket frame so every open contact list refetches the new
@@ -1385,6 +1402,17 @@ export class ContactsService {
     if (!canManageTags) return byKey;
 
     const toCreate = names.filter((n) => !byKey.has(n.toLowerCase()));
+    // Guard the tag catalog against a mis-mapped "tags" column: a file that
+    // wants to create more than MAX_NEW_TAGS_PER_IMPORT distinct new tags is
+    // almost certainly a per-row value (order id / slug) mis-headered as tags,
+    // not a legitimate tag set. Reject before creating any so the catalog stays
+    // clean and the user re-maps the column.
+    if (toCreate.length > MAX_NEW_TAGS_PER_IMPORT) {
+      throw new BadRequestException({
+        error: "too_many_new_tags",
+        detail: `import would create ${toCreate.length} new tags (max ${MAX_NEW_TAGS_PER_IMPORT}); check the column mapped to "tags"`,
+      });
+    }
     let createdAny = false;
     for (const name of toCreate) {
       // Per-name create (not createMany) so a P2002 from a concurrent create
@@ -1568,22 +1596,6 @@ export class ContactsService {
     ]);
     const stageNameById = new Map(stages.map((s) => [s.id, s.name]));
 
-    // Collect per-contact one-off keys we encounter. Render after team-wide
-    // columns so the schema-defined fields stay in stable order.
-    const teamKeys = new Set(fieldDefs.map((d) => d.key));
-    const oneOffKeys = new Set<string>();
-    for (const c of contacts) {
-      if (
-        c.customFields &&
-        typeof c.customFields === "object" &&
-        !Array.isArray(c.customFields)
-      ) {
-        for (const k of Object.keys(c.customFields as Record<string, unknown>)) {
-          if (!teamKeys.has(k)) oneOffKeys.add(k);
-        }
-      }
-    }
-
     const baseColumns = [
       "phone_number",
       "name",
@@ -1598,6 +1610,35 @@ export class ContactsService {
       "source",
     ];
     const teamColumns = fieldDefs.map((d) => d.label);
+
+    // Collect per-contact one-off keys we encounter. Render after team-wide
+    // columns so the schema-defined fields stay in stable order.
+    const teamKeys = new Set(fieldDefs.map((d) => d.key));
+    // A one-off bag key that shadows a base column ("phone_number") or a team
+    // field label would emit a DUPLICATE header AND overwrite the built-in
+    // cell in the row-build loop below (last write wins), corrupting the export
+    // and breaking re-import. One-off keys are attacker-reachable (the /v1 +
+    // PATCH customFields bags accept arbitrary keys, unlike field labels which
+    // reject reserved names), so drop any that collide — the built-in column
+    // already carries the canonical value.
+    const reservedColumnSet = new Set(
+      [...baseColumns, ...teamColumns].map((c) => c.toLowerCase()),
+    );
+    const oneOffKeys = new Set<string>();
+    for (const c of contacts) {
+      if (
+        c.customFields &&
+        typeof c.customFields === "object" &&
+        !Array.isArray(c.customFields)
+      ) {
+        for (const k of Object.keys(c.customFields as Record<string, unknown>)) {
+          if (!teamKeys.has(k) && !reservedColumnSet.has(k.toLowerCase())) {
+            oneOffKeys.add(k);
+          }
+        }
+      }
+    }
+
     const oneOffColumns = Array.from(oneOffKeys).sort();
     const columns = [...baseColumns, ...teamColumns, ...oneOffColumns];
 
@@ -1708,8 +1749,8 @@ export class ContactsService {
 
     // One example row. phone_number is full international WITH country code and
     // NO "+" (a "+" works too — the importer strips it — but showing it without
-    // is the safe Excel-friendly form). Tags are ","-separated (the cell gets
-    // quoted by `esc` below since it contains a comma); stage is a name.
+    // is the safe Excel-friendly form). Tags are ","-separated (serializeCsv
+    // quotes the cell since it contains a comma); stage is a name.
     const example: Record<string, string> = {
       phone_number: "15551234567",
       name: "John Example",
@@ -1722,13 +1763,14 @@ export class ContactsService {
       tags: "VIP, Lead",
       stage: "Stage 1",
     };
-    const exampleRow = columns.map((c) => example[c] ?? "");
 
-    const esc = (c: string) =>
-      /[",\n\r]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c;
-    // CRLF line endings — Excel-friendly, matches the export path.
-    const csv =
-      columns.map(esc).join(",") + "\r\n" + exampleRow.map(esc).join(",") + "\r\n";
+    // Reuse serializeCsv (not a local escaper) so the template picks up the
+    // formula-injection defuse + UTF-8 BOM everywhere else uses. Team-defined
+    // custom-field labels flow into the header row and are user-controlled
+    // (checked only against reserved names, not formula triggers), so a label
+    // like `=HYPERLINK(...)` must be defused before it reaches a downloader's
+    // spreadsheet. Custom columns absent from `example` render empty.
+    const csv = serializeCsv(columns, [example]);
     return { csv, filename: "contacts-template.csv" };
   }
 }

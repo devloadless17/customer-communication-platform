@@ -231,9 +231,18 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
       : moreCursor !== null;
 
   // Recipients to render: inline-500 + appended in `all` mode; only the
-  // server-filtered page in a specific-status mode.
+  // server-filtered page in a specific-status mode. While a broadcast runs,
+  // the status-grouped inline top-500 re-shuffles on each debounced refresh,
+  // so a previously appended "Load more" row can flip status and re-enter the
+  // inline set — dedupe by id (prefer the fresher inline row) to avoid
+  // duplicate React keys and doubled rows.
   const visibleRecipients =
-    statusFilter === "all" ? [...data.recipients, ...extraRecipients] : extraRecipients;
+    statusFilter === "all"
+      ? (() => {
+          const inlineIds = new Set(data.recipients.map((r) => r.id));
+          return [...data.recipients, ...extraRecipients.filter((r) => !inlineIds.has(r.id))];
+        })()
+      : extraRecipients;
 
   // Shared refresher so both the socket listeners and the poll go through
   // the same code path. Inside a ref so the socket effect can call it

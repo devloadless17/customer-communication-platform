@@ -381,11 +381,13 @@ export default function ApiDocsPage() {
         >
           Top-level send — resolves contact by <code>{`{ id }`}</code> or{" "}
           <code>{`{ phone }`}</code>, finds-or-opens a conversation, then sends.
-          Provide exactly one of <code>text</code>,{" "}
-          <code>media</code> ({" "}
-          <code>{`{ url, mime_type, caption? }`}</code>), or <code>template</code> ({" "}
+          Provide exactly one of <code>text</code> or <code>template</code> ({" "}
           <code>{`{ name, language, variables }`}</code>). Only{" "}
-          <code>template</code> sends outside the 24-hour customer-service window.
+          <code>template</code> sends outside the 24-hour customer-service window.{" "}
+          URL-based <code>media</code> ({" "}
+          <code>{`{ url, mime_type, caption? }`}</code>) is <strong>roadmap, not yet
+          supported</strong> — it currently returns{" "}
+          <code>400 media_not_yet_supported</code>; send media via the inbox UI for now.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/messages/:id">
           Find a single message by id.
@@ -393,11 +395,14 @@ export default function ApiDocsPage() {
         <Endpoint
           method="POST"
           path="/api/external/v1/conversations/:id/notes"
-          body={{ body: "Customer prefers SMS" }}
+          body={{ body: "Customer prefers SMS", authorUserId: "<user-id>" }}
         >
           Add an internal note (never sent to WhatsApp). Body:{" "}
-          <code>{`{ body: string, authorUserId?: string }`}</code> —{" "}
-          <code>authorUserId</code> is optional (attributes the note to a teammate).
+          <code>{`{ body: string, authorUserId: string }`}</code> —{" "}
+          <code>authorUserId</code> is <strong>required</strong> (omitting it
+          returns <code>400 authorUserId_required</code>) and must be a team
+          member id from <code>GET /users</code>; create a dedicated
+          service-account user for your integration if no human author applies.
         </Endpoint>
       </Section>
 
@@ -453,14 +458,20 @@ export default function ApiDocsPage() {
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 function verify(rawBody, header, secret) {
-  const [tPart, sigPart] = header.split(",");
-  const t = tPart.slice(2);             // "t=…"
-  const sig = sigPart.slice(3);         // "v1=…"
-  if (Date.now() / 1000 - Number(t) > 300) return false;
+  if (!header) return false;
+  const parts = Object.fromEntries(
+    header.split(",").map((p) => p.trim().split("=")),
+  );                                    // { t: "…", v1: "…" }
+  if (!parts.t || !parts.v1) return false;
+  const t = Number.parseInt(parts.t, 10);
+  if (!Number.isFinite(t)) return false;
+  if (Math.abs(Date.now() / 1000 - t) > 300) return false;
   const expected = createHmac("sha256", secret)
     .update(t + "." + rawBody)
     .digest("hex");
-  return timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+  const a = Buffer.from(parts.v1, "hex");
+  const b = Buffer.from(expected, "hex");
+  return a.length === b.length && timingSafeEqual(a, b);
 }`}</pre>
       </div>
 

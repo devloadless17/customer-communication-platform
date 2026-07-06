@@ -18,7 +18,7 @@ import {
   UnknownStepTypeError,
   getStepHandler,
 } from "@/lib/workflows/steps";
-import { StepConfigError, type StepResult } from "@/lib/workflows/steps/types";
+import { StepConfigError, type StepHandler, type StepResult } from "@/lib/workflows/steps/types";
 
 /**
  * The DAG runner. Picks up a WorkflowRun by id, walks the graph one step at
@@ -378,6 +378,43 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
       return { runId: run.id, status: "failed" };
     }
 
+    // Resolve the handler ONCE up front, inside a try so an UNKNOWN step type
+    // (a draft saved with a bogus node type + run via POST /:id/test, which
+    // bypasses the publish gate) fails PERMANENTLY here — the same clean
+    // per-step failure the catch below produces — instead of throwing UNCAUGHT
+    // out of the loop from a downstream `hasSideEffect()` / `getStepHandler()`
+    // call. That uncaught throw burned the full BullMQ retry budget and marked
+    // the run failed with a generic "retry exhausted" message. Once this
+    // passes, every later `hasSideEffect(node.type)` / handler lookup for this
+    // node is guaranteed not to throw.
+    let handler: StepHandler<unknown>;
+    try {
+      handler = getStepHandler(node.type);
+    } catch (err) {
+      if (err instanceof UnknownStepTypeError) {
+        stepLog.push({
+          stepId: node.id,
+          type: node.type,
+          status: "failed",
+          errorMessage: err.message,
+          startedAt: new Date().toISOString(),
+          finishedAt: new Date().toISOString(),
+        });
+        await db.workflowRun.update({
+          where: { id: run.id },
+          data: {
+            status: "failed",
+            currentStepId: null,
+            stepLog: stepLog as unknown as Prisma.InputJsonValue,
+            errorMessage: err.message,
+            finishedAt: new Date(),
+          },
+        });
+        return { runId: run.id, status: "failed" };
+      }
+      throw err;
+    }
+
     const startedAt = new Date();
 
     // Orphan-detect: if a PRIOR attempt left an `in_progress` entry for
@@ -541,9 +578,31 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
     // true when ANY prior log entry for this step was status=waiting.
     // `pendingAnswer` is the inbound message the ingest hook dropped onto
     // run.pendingAnswer; null on first call and on the timeout path.
-    const isResume = stepLog.some(
-      (e) => e.stepId === node.id && e.status === "waiting",
-    );
+    // `isResume` is true only when the step is CURRENTLY parked on an
+    // await_reply pause — its NEWEST stepLog entry (skipping the transient
+    // `in_progress` sentinel just pushed above for side-effect steps) is
+    // `waiting`. Reading the NEWEST entry — NOT "any prior waiting entry" — is
+    // load-bearing: a step re-entered via jump_to_step AFTER it already resumed
+    // to a terminal entry (the natural "re-ask on invalid answer" clarifier
+    // loop: ask → timeout edge → send clarifier → jump back to ask) must re-run
+    // as a fresh first call — re-send the question and await a genuinely new
+    // reply — instead of being misread as a resume that never re-sends and
+    // instantly re-consumes the now-stale pendingAnswer, spinning the loop into
+    // duplicate WhatsApp sends until the execution ceiling fails the run. This
+    // matches isParkedOnAskQuestionAwaitingReply's newest-entry signature.
+    let isResume = false;
+    for (let i = stepLog.length - 1; i >= 0; i--) {
+      const entry = stepLog[i];
+      if (entry?.stepId === node.id && entry.status !== "in_progress") {
+        isResume = entry.status === "waiting";
+        break;
+      }
+    }
+    // An await_reply step (ask_question) resuming here CONSUMES run.pendingAnswer
+    // when it advances; flag it so the post-step update clears the answer (both
+    // in the DB and the in-memory snapshot) — otherwise a later re-entry
+    // re-consumes the stale value. Mirrors the await_reply pause path's clear.
+    const isAwaitReplyResume = isResume && producesAwaitReply(node.type);
     const pendingAnswer = (run.pendingAnswer ?? null) as
       | {
           body: string;
@@ -556,7 +615,6 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
 
     let result: StepResult;
     try {
-      const handler = getStepHandler(node.type);
       const config = handler.parseConfig(node.config);
       result = await handler.run(envelope, config, {
         teamId: wf.teamId,
@@ -823,8 +881,16 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
         stepLog: stepLog as unknown as Prisma.InputJsonValue,
         stepOutputs: stepOutputs as unknown as Prisma.InputJsonValue,
         jumpsUsed,
+        // An ask_question resume just consumed run.pendingAnswer as it advanced
+        // down an edge — null it so a later re-entry (e.g. a jump_to_step
+        // clarifier loop) re-asks and waits for a genuinely NEW reply instead
+        // of instantly re-consuming this stale answer.
+        ...(isAwaitReplyResume ? { pendingAnswer: Prisma.DbNull } : {}),
       },
     });
+    // Keep the in-memory snapshot in sync so a same-pickup re-entry (jump back
+    // to the ask node within this loop) reads a cleared pendingAnswer too.
+    if (isAwaitReplyResume) run.pendingAnswer = null;
 
     previousStepId = node.id;
     currentStepId = nextId;

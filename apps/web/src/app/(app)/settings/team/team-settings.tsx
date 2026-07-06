@@ -262,18 +262,26 @@ export function TeamSettings({
     // browser tears down in parallel, not after their own next 401.
     broadcastSignout();
     closeClientSocket();
-    const res = await apiFetch("/api/team", { method: "DELETE" });
-    if (!res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(data.error ?? "Failed to delete organization");
+    try {
+      const res = await apiFetch("/api/team", { method: "DELETE" });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(data.error ?? "Failed to delete organization");
+        setDeletingOrg(false);
+        return;
+      }
+      // Cascade nuked our Session row already; force a hard navigation to
+      // /logout so the cookie is cleared and we land on /login cleanly. Keep
+      // the overlay up — the navigation takes a beat and we don't want the
+      // page to look interactive again in the meantime.
+      window.location.assign("/logout");
+    } catch {
+      // A network-level rejection (api restart, WiFi blip) must NOT leave the
+      // full-screen "Deleting organization…" overlay up forever — clear it and
+      // surface the error so the admin can retry.
+      setError("Network error — try again.");
       setDeletingOrg(false);
-      return;
     }
-    // Cascade nuked our Session row already; force a hard navigation to
-    // /logout so the cookie is cleared and we land on /login cleanly. Keep
-    // the overlay up — the navigation takes a beat and we don't want the
-    // page to look interactive again in the meantime.
-    window.location.assign("/logout");
   }
 
   return (

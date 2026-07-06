@@ -65,6 +65,16 @@ export interface TeamChannelEventsState {
   /** Count of new messages arrived via socket while anchored. */
   pendingLiveCount: number;
   addOptimistic: (m: TeamChannelMessageDto) => void;
+  /**
+   * Reconcile an optimistic row against the send's OWN POST response DTO —
+   * swaps the tmp id for the server id (and dedupes if the socket echo already
+   * landed). Call this on POST 200 so a lost `team:channel:message` echo (a send
+   * that lands while the socket is dropped past the 30s recovery window) can't
+   * leave the bubble pending forever, nor duplicate it on the next
+   * recoverOnReconnect — once the tmp id is the server id, the reconnect page
+   * dedupes it instead of keeping it as a stray optimistic row.
+   */
+  confirmOptimistic: (message: TeamChannelMessageDto, clientTempId: string) => void;
   markOptimisticFailed: (clientTempId: string) => void;
   removeOptimistic: (clientTempId: string) => void;
   /**
@@ -693,6 +703,27 @@ export function useTeamChannelEvents(
     setMessages((prev) => prev.filter((m) => m.clientTempId !== clientTempId));
   }, []);
 
+  // Reconcile from the send's own POST response — same swap `onMessage` does
+  // for the socket echo, but driven by the HTTP 200 so it doesn't depend on the
+  // (possibly lost) `team:channel:message` frame. Idempotent with the echo: if
+  // the echo already reconciled (server id present), bail; otherwise replace the
+  // matching pending/failed optimistic row with the confirmed DTO, appending if
+  // the optimistic row was already gone (e.g. removeOptimistic raced).
+  const confirmOptimistic = useCallback(
+    (message: TeamChannelMessageDto, clientTempId: string) => {
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === message.id)) return prev;
+        const next = prev.map((m) =>
+          m.clientTempId === clientTempId && (m.pending || m.failed)
+            ? { ...message, clientTempId }
+            : m,
+        );
+        return next.some((m) => m.id === message.id) ? next : [...next, message];
+      });
+    },
+    [],
+  );
+
   // Re-send a failed optimistic message. Flip it back to pending immediately,
   // then re-POST the same body + clientTempId so the eventual server echo
   // reconciles the SAME row (matching `onMessage`'s clientTempId swap). The
@@ -720,13 +751,23 @@ export function useTeamChannelEvents(
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ body: target.body, clientTempId }),
       })
-        .then((res) => {
-          if (!res.ok) markOptimisticFailed(clientTempId);
-          // success: the matching socket event swaps the optimistic row.
+        .then(async (res) => {
+          if (!res.ok) {
+            markOptimisticFailed(clientTempId);
+            return;
+          }
+          // Confirm from the POST response rather than relying on the socket
+          // echo — if the connection dropped after we sent, the echo never
+          // arrives and the bubble would otherwise stay pending forever (and
+          // duplicate on the next reconnect converge).
+          const { message } = (await res.json()) as {
+            message: TeamChannelMessageDto;
+          };
+          confirmOptimistic(message, clientTempId);
         })
         .catch(() => markOptimisticFailed(clientTempId));
     },
-    [channelId, markOptimisticFailed],
+    [channelId, markOptimisticFailed, confirmOptimistic],
   );
 
   return {
@@ -743,6 +784,7 @@ export function useTeamChannelEvents(
     goToLive,
     pendingLiveCount,
     addOptimistic,
+    confirmOptimistic,
     markOptimisticFailed,
     removeOptimistic,
     retryOptimistic,

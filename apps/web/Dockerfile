@@ -183,7 +183,21 @@ RUN echo "apt cache bust: ${APT_CACHE_BUST}" \
 # though the project never executes any of them. Removing it eliminates
 # a whole class of false-positives.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
-RUN corepack enable && corepack prepare pnpm@10.34.4 --activate
+# COREPACK_HOME points the pnpm shim's cache at a SHARED, world-readable path
+# instead of root's private ~/.cache/node/corepack (mode 700). The runtime
+# stage switches to `USER node` and the deploy job runs `docker exec app pnpm
+# run db:seed:superadmin` as that user — with root's private cache, the pnpm
+# shim finds an empty cache under /home/node and re-downloads pnpm@10.34.4 from
+# registry.npmjs.org BEFORE the seed can run, putting an external network
+# dependency (npmjs/DNS availability, corepack signature-key rotation) in the
+# path of the post-deploy Bootstrap-superadmin step. A world-readable cache
+# means the build-time `corepack prepare` download is reused by the node user
+# at runtime — zero network fetch. Mirrors apps/api/Dockerfile's base stage.
+ENV COREPACK_HOME=/opt/corepack
+RUN corepack enable \
+ && mkdir -p /opt/corepack \
+ && corepack prepare pnpm@10.34.4 --activate \
+ && chmod -R a+rX /opt/corepack
 
 # Standalone bundle: server.js + minimal traced node_modules.
 COPY --from=build --chown=node:node /app/apps/web/.next/standalone ./
@@ -234,6 +248,11 @@ ENV NODE_ENV=production \
     # api container owns `prisma migrate deploy` (see docker-compose.yml api CMD).
     NODE_PATH="/opt/cli-tools/node_modules"
 USER node
+# Verify the runtime (node) user resolves pnpm from the shared COREPACK_HOME
+# WITHOUT a network fetch — if this fails the build, the boot-path corepack
+# download regression (see above) has returned. Build-time, so it never costs
+# a runtime fetch during the deploy job's `db:seed:superadmin` step.
+RUN pnpm --version
 EXPOSE 3000
 # wget instead of `node --eval` — Node startup costs ~50-100 MB allocated-
 # then-freed RSS plus ~200ms every 10s for the whole container lifetime;

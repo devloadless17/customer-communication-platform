@@ -121,7 +121,15 @@ async function sweepOnce(): Promise<void> {
               -- filter the daily reconcile re-added broadcast rows and the counter
               -- drifted upward every sweep relative to the incremental source of
               -- truth. Broadcast rows are stamped rawPayload.sentVia = broadcast by
-              -- the runner (createOutboundMessageIdempotent).
+              -- the runner (createOutboundMessageIdempotent), and the
+              -- rawPayload-retention sweeper (message-rawpayload-retention.ts)
+              -- PRESERVES that discriminator (collapsing aged broadcast payloads to
+              -- the {'sentVia':'broadcast'} stub rather than NULLing them). So a
+              -- broadcast row stays classifiable forever, and a NULL rawPayload now
+              -- provably means a NORMAL send that merely shed its (bulky) body —
+              -- which IS DISTINCT FROM 'broadcast' evaluates TRUE for, so it's
+              -- correctly counted. That's why there is no longer an
+              -- "unclassifiable" escape hatch: aged conversations recount cleanly.
               COUNT(*) FILTER (
                 WHERE m.direction = 'out'
                   AND (m."rawPayload"->>'sentVia') IS DISTINCT FROM 'broadcast'

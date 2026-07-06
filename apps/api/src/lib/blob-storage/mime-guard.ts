@@ -1,3 +1,5 @@
+import { normalizeMimeType } from "@/lib/media-storage";
+
 /**
  * Provider-agnostic media validation, shared by every blob-storage impl.
  *
@@ -61,8 +63,8 @@ export const ALLOWED_MIME_BY_KIND: Record<string, ReadonlySet<string>> = {
 export function assertAllowedMime(kind: string, mimeType: string): void {
   const allowed = ALLOWED_MIME_BY_KIND[kind];
   if (!allowed) return; // unknown kind — caller already enforces
-  // Normalize: strip ;charset=… and trim
-  const normalized = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+  // Normalize via the one canonical parser (strip ;charset=…, trim, lowercase).
+  const normalized = normalizeMimeType(mimeType);
   if (!allowed.has(normalized)) {
     throw new Error(
       `blob-storage: mime type "${normalized}" not allowed for kind "${kind}"`,
@@ -171,7 +173,7 @@ const MP4_FAMILY: ReadonlySet<string> = new Set([
 export function assertSignatureMatches(bytes: Uint8Array, claimedMime: string): void {
   const sniffed = sniffMime(bytes);
   if (!sniffed) return; // unknown signature (or text format) — claimed-mime gate stands
-  const claimed = claimedMime.split(";")[0]?.trim().toLowerCase() ?? "";
+  const claimed = normalizeMimeType(claimedMime);
   if (sniffed === claimed) return;
   // Same kind-family is acceptable (mp4 ftyp can be claimed as 3gpp/mov/mp4).
   if (kindOfMime(sniffed) === kindOfMime(claimed)) return;

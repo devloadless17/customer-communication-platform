@@ -74,12 +74,19 @@ function useInboxUnread(): number {
     socket.on("message:new", debounced);
     socket.on("conversation:read", debounced);
     socket.on("conversation:status", debounced);
+    // Reconnect convergence: after an offline gap longer than the 30s socket
+    // recovery window, the missed unread-affecting frames are gone, so the
+    // badge would stay stale until the next live event. Re-seed from the
+    // authoritative server count on every reconnect (the 400ms debounce
+    // absorbs the overlap with the mount fetch).
+    socket.on("connect", debounced);
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
       socket.off("message:new", debounced);
       socket.off("conversation:read", debounced);
       socket.off("conversation:status", debounced);
+      socket.off("connect", debounced);
     };
   }, []);
   return unread;

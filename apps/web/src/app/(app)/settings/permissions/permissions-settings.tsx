@@ -41,6 +41,11 @@ export function PermissionsSettings() {
   // must win). Each PATCH sends the FULL matrix, so ordered application is
   // enough — no per-field merge needed.
   const persistChain = useRef<Promise<void>>(Promise.resolve());
+  // Monotonic id stamped on each enqueued persist. A failed PATCH's
+  // authoritative re-fetch only reconciles when it's still the newest persist —
+  // otherwise it would clobber a newer optimistic toggle already queued on the
+  // chain (and desync matrixRef), silently reverting a committed permission.
+  const persistGen = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -61,7 +66,7 @@ export function PermissionsSettings() {
     };
   }, []);
 
-  const runPersist = useCallback(async (next: EditableMatrix) => {
+  const runPersist = useCallback(async (next: EditableMatrix, gen: number) => {
     // Send only the editable roles; the server validates + ignores anything
     // else. Sending the full resolved map (incl. defaulted keys) is fine —
     // it's still a valid sparse override.
@@ -80,11 +85,17 @@ export function PermissionsSettings() {
       toast("Permissions updated");
     } catch {
       toast("Couldn't save — reverted");
-      // Re-fetch authoritative state so the UI doesn't drift from the server.
+      // Re-fetch authoritative state so the UI doesn't drift from the server —
+      // but ONLY if no newer toggle has been queued since this persist started.
+      // Otherwise the re-fetch clobbers a newer optimistic matrix still on the
+      // chain (and desyncs matrixRef), and the queued PATCH would later revert
+      // permissions the admin already committed.
+      if (gen !== persistGen.current) return;
       try {
         const res = await apiFetch("/api/team/permissions");
-        if (res.ok) {
+        if (res.ok && gen === persistGen.current) {
           const json = (await res.json()) as { permissions: EditableMatrix };
+          matrixRef.current = json.permissions;
           setMatrix(json.permissions);
         }
       } catch {
@@ -100,9 +111,10 @@ export function PermissionsSettings() {
       // Serialize onto the chain so concurrent rapid toggles apply IN ORDER on
       // the server (`.then(run, run)` keeps the chain alive even if a prior run
       // rejected — runPersist catches internally, so it won't).
+      const gen = ++persistGen.current;
       persistChain.current = persistChain.current.then(
-        () => runPersist(next),
-        () => runPersist(next),
+        () => runPersist(next, gen),
+        () => runPersist(next, gen),
       );
       return persistChain.current;
     },

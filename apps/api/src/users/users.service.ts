@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 
 import { assignableRoles, canModifyUser } from "@ccp/shared/auth/permissions";
 import type { Role, User, UserAvailabilityStatus } from "@ccp/shared/types";
@@ -264,7 +265,7 @@ export class UsersService {
   ): Promise<MemberStat[]> {
     const atWindow = since ? { gte: since } : undefined;
 
-    const [users, activeAssigned, sent, assignedEvents, closed] =
+    const [users, activeAssigned, sent, assignedCounts, closed] =
       await Promise.all([
         this.db.user.findMany({
           where: { teamId },
@@ -301,11 +302,17 @@ export class UsersService {
           _count: { _all: true },
         }),
         // Assignment actions in window — assignee lives in `after` JSON, which
-        // groupBy can't key on, so fetch + tally in memory.
-        this.db.conversationEvent.findMany({
-          where: { teamId, kind: "assigned", ...(atWindow ? { at: atWindow } : {}) },
-          select: { after: true },
-        }),
+        // Prisma groupBy can't key on. Aggregate DB-side on the JSON path
+        // instead of fetching every row into memory (the `all` default window
+        // is unbounded and grows forever otherwise).
+        this.db.$queryRaw<{ uid: string | null; count: bigint }[]>`
+          SELECT "after"->>'assignedUserId' AS uid, COUNT(*) AS count
+          FROM "ConversationEvent"
+          WHERE "teamId" = ${teamId}
+            AND kind = 'assigned'::"ConversationEventKind"
+            ${since ? Prisma.sql`AND "at" >= ${since}` : Prisma.empty}
+          GROUP BY 1
+        `,
         // Close actions in window — group by the acting user.
         this.db.conversationEvent.groupBy({
           by: ["userId"],
@@ -327,14 +334,8 @@ export class UsersService {
     const closedBy = new Map(closed.map((r) => [r.userId, r._count._all]));
 
     const assignedBy = new Map<string, number>();
-    for (const e of assignedEvents) {
-      const after = e.after;
-      if (after && typeof after === "object" && !Array.isArray(after)) {
-        const a = (after as Record<string, unknown>).assignedUserId;
-        if (typeof a === "string") {
-          assignedBy.set(a, (assignedBy.get(a) ?? 0) + 1);
-        }
-      }
+    for (const r of assignedCounts) {
+      if (r.uid) assignedBy.set(r.uid, Number(r.count));
     }
 
     return users.map((u) => ({
@@ -427,32 +428,40 @@ export class UsersService {
     const targetCurrentlyManages =
       (target.role === "admin" || target.role === "superAdmin") &&
       !target.deactivatedAt;
-    if (willLoseManagerPowers && targetCurrentlyManages) {
-      const otherManagers = await this.db.user.count({
-        where: {
-          teamId,
-          role: { in: ["admin", "superAdmin"] },
-          deactivatedAt: null,
-          NOT: { id: targetId },
-        },
-      });
-      if (otherManagers === 0) {
-        throw new BadRequestException({ error: "cannot remove the last active admin" });
-      }
-    }
 
-    const updated = await this.db.user.update({
-      where: { id: targetId },
-      data,
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        deactivatedAt: true,
-        createdAt: true,
-      },
-    });
+    const userSelect = {
+      id: true,
+      name: true,
+      email: true,
+      role: true,
+      deactivatedAt: true,
+      createdAt: true,
+    } satisfies Prisma.UserSelect;
+
+    // When the write could strip the last manager, the re-count + update must
+    // be serialized per team — otherwise two concurrent demote/deactivate
+    // mutations each see the OTHER admin still active and both commit, leaving
+    // zero managers (check-then-write TOCTOU). A `SELECT ... FOR UPDATE` on the
+    // team row serializes them so the second waits and re-reads. Same pattern
+    // as invites.accept()'s member-cap enforcement.
+    const updated =
+      willLoseManagerPowers && targetCurrentlyManages
+        ? await this.db.$transaction(async (tx) => {
+            await tx.$queryRaw`SELECT id FROM "Team" WHERE id = ${teamId} FOR UPDATE`;
+            const otherManagers = await tx.user.count({
+              where: {
+                teamId,
+                role: { in: ["admin", "superAdmin"] },
+                deactivatedAt: null,
+                NOT: { id: targetId },
+              },
+            });
+            if (otherManagers === 0) {
+              throw new BadRequestException({ error: "cannot remove the last active admin" });
+            }
+            return tx.user.update({ where: { id: targetId }, data, select: userSelect });
+          })
+        : await this.db.user.update({ where: { id: targetId }, data, select: userSelect });
 
     // Privilege-altering changes — delete every Session row + revoke so
     // the user has to re-authenticate on every device with the new role
@@ -467,7 +476,7 @@ export class UsersService {
     // bust the cache so the next render shows the new value without a 15s
     // lag — sockets stay alive so the user isn't logged out on a profile
     // edit.
-    const roleChanged = data.role !== undefined;
+    const roleChanged = data.role !== undefined && data.role !== (target.role as Role);
     const deactivated = Boolean(data.deactivatedAt);
     if (roleChanged || deactivated) {
       await this.db.session.deleteMany({ where: { userId: targetId } });
@@ -579,21 +588,34 @@ export class UsersService {
     const targetCurrentlyManages =
       (target.role === "admin" || target.role === "superAdmin") &&
       !target.deactivatedAt;
-    if (targetCurrentlyManages) {
-      const otherManagers = await this.db.user.count({
-        where: {
-          teamId,
-          role: { in: ["admin", "superAdmin"] },
-          deactivatedAt: null,
-          NOT: { id: targetId },
-        },
-      });
-      if (otherManagers === 0) {
-        throw new BadRequestException({ error: "cannot delete the last active admin" });
-      }
-    }
 
-    await this.db.user.delete({ where: { id: targetId } });
+    // Serialize the last-active-manager re-check + delete under a per-team lock
+    // (SELECT ... FOR UPDATE) so two concurrent deletes/demotes can't each see
+    // the other admin still active and both commit → zero managers (TOCTOU).
+    // Same pattern as update() and invites.accept().
+    if (targetCurrentlyManages) {
+      await this.db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "Team" WHERE id = ${teamId} FOR UPDATE`;
+        const otherManagers = await tx.user.count({
+          where: {
+            teamId,
+            role: { in: ["admin", "superAdmin"] },
+            deactivatedAt: null,
+            NOT: { id: targetId },
+          },
+        });
+        if (otherManagers === 0) {
+          throw new BadRequestException({ error: "cannot delete the last active admin" });
+        }
+        await tx.user.delete({ where: { id: targetId } });
+      });
+    } else {
+      await this.db.user.delete({ where: { id: targetId } });
+    }
+    // GC the R2 avatar object — the orphan sweeper skips the `avatars/` prefix,
+    // so a hard-deleted user's blob would otherwise leak forever. Best-effort
+    // (never throws), same as the clear-avatar path in updateMyProfile.
+    await deleteAvatar(targetId);
     // Cascade-deletes Session + Account rows via FK; this call drops the
     // per-process session cache + any live Socket.io connections so the
     // user is kicked instantly rather than waiting for the 15s TTL.

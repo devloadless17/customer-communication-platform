@@ -82,6 +82,11 @@ interface BaseSendJob {
   /** Stamped at HTTP arrival so the message timestamp reflects intent, not
    *  worker pickup latency. ISO string for BullMQ JSON compatibility. */
   receivedAt: string;
+  /** True only when the client is RE-sending a previously-failed bubble (it
+   *  reuses that send's clientTempId). A terminally-failed job can linger under
+   *  the same jobId, so only a retry needs the getJob→remove-if-failed probe
+   *  below. First sends skip the Redis round-trip entirely (jobId is fresh). */
+  isRetry?: boolean;
 }
 
 export interface SendTextJobData extends BaseSendJob {
@@ -130,15 +135,40 @@ export function getMessageSendQueue(): Queue<MessageSendJobData> {
  * queue layer (a second adversarial-retry doesn't re-Meta-send). Without a
  * clientTempId we let BullMQ generate one — pure server-driven sends (none
  * today) wouldn't have a stable browser key anyway.
+ *
+ * One carve-out: a prior send under this clientTempId may have FAILED
+ * terminally. BullMQ retains the failed job 7 days (removeOnFail age) and
+ * dedupes `add` on jobId, so a same-jobId re-add would be a SILENT no-op —
+ * stranding the Retry (reply-box deliberately reuses the clientTempId). So we
+ * first drop a terminally-failed record under the same jobId, letting the
+ * re-add actually enqueue. The worker's OutboundSendAttempt guard still
+ * arbitrates double-send safety on the fresh run (provably-not-sent rows were
+ * deleted → clean re-send; ambiguous rows surface a visible error). Only a
+ * FAILED job is removed — an in-flight / completed job keeps the dedupe.
+ *
+ * The probe only runs on a RETRY (`data.isRetry`): a fresh clientTempId can't
+ * collide with a lingering failed job, so a first send skips the getJob/getState
+ * Redis round-trip and just adds. Only a retry reuses a clientTempId that may
+ * have a terminally-failed record parked under its jobId.
  */
 export async function enqueueMessageSend(data: MessageSendJobData): Promise<void> {
   const q = getMessageSendQueue();
+  const jobId = data.clientTempId ? `msg-send-${data.clientTempId}` : undefined;
   try {
+    if (jobId && data.isRetry) {
+      const existing = await withTimeout(q.getJob(jobId), ENQUEUE_TIMEOUT_MS);
+      if (
+        existing &&
+        (await withTimeout(existing.getState(), ENQUEUE_TIMEOUT_MS)) === "failed"
+      ) {
+        await withTimeout(existing.remove(), ENQUEUE_TIMEOUT_MS);
+      }
+    }
     await withTimeout(
       q.add(
         `${data.kind}:${data.conversationId}`,
         data,
-        data.clientTempId ? { jobId: `msg-send-${data.clientTempId}` } : undefined,
+        jobId ? { jobId } : undefined,
       ),
       ENQUEUE_TIMEOUT_MS,
     );

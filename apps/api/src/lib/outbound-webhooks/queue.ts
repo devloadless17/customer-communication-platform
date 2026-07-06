@@ -82,17 +82,32 @@ export function createWebhookWorkerConnection(label: string): IORedis {
 }
 
 /**
- * Retry profile: 4 attempts with exponential backoff starting at 30s
- * (30s → ~2m → ~8m → ~30m). After the final attempt the worker stamps
- * `lastErrorAt` on the webhook row + bumps `consecutiveFailures`; the
- * circuit breaker auto-disables once that crosses the threshold.
+ * Retry profile: front-loaded exponential backoff starting at 30s so a brief
+ * receiver blip recovers on the first retry, while the full ladder spans
+ * ~31 min so a routine partner deploy (a few minutes of 5xx / connection
+ * refused) doesn't permanently lose every delivery generated in that window.
+ *
+ * BullMQ's builtin `exponential` is base-2 (`2^(attemptsMade-1) * delay`), so
+ * with delay=30s the per-retry delays are 30s → 1m → 2m → 4m → 8m → 16m; 7
+ * attempts total put the last retry ~31 min after the first failure (cumulative
+ * ~31.5 min). This is the correction for the old `attempts: 4` profile, whose
+ * comment claimed a 30s→2m→8m→30m / ~40min spread but — because base-2 isn't
+ * base-4 — actually exhausted all retries in ~3.5 min, so a 10-min receiver
+ * outage lost every delivery permanently. (The exact 30s→2m→8m→30m ladder is
+ * base-4 and would need a custom Worker `settings.backoffStrategy`; deferred —
+ * extending the base-2 ladder covers the same intent with a one-line change and
+ * no cross-file coupling.)
+ *
+ * After the final attempt the worker stamps `lastErrorAt` on the webhook row +
+ * bumps `consecutiveFailures`; the circuit breaker auto-disables once that
+ * crosses the threshold.
  */
 export function getWebhookDeliverQueue(): Queue<WebhookDeliverJobData> {
   if (state.queue) return state.queue;
   state.queue = new Queue<WebhookDeliverJobData>(WEBHOOK_DELIVER_QUEUE_NAME, {
     connection: webhookConnectionOptions(),
     defaultJobOptions: {
-      attempts: 4,
+      attempts: 7,
       backoff: { type: "exponential", delay: 30_000 },
       removeOnComplete: { age: 24 * 3600, count: 5000 },
       removeOnFail: { age: 7 * 24 * 3600, count: 5000 },

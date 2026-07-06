@@ -3,7 +3,6 @@
 import { useEffect } from "react";
 
 import { subscribeAuthBroadcast } from "@/lib/auth/auth-broadcast";
-import { closeClientSocket } from "@/lib/socket-client";
 
 /**
  * Mounted once at the root layout. When another tab in the same browser
@@ -28,8 +27,13 @@ export function AuthBroadcastListener(): null {
       ) {
         return;
       }
-      closeClientSocket();
-      window.location.replace("/logout");
+      // Lazy-load socket-client so unauthenticated pages (/login, /register,
+      // …) — where this handler always early-returns above — don't ship the
+      // socket.io-client chunk. Hard-navigate in finally so a failed chunk
+      // fetch still logs the tab out.
+      import("@/lib/socket-client")
+        .then((m) => m.closeClientSocket())
+        .finally(() => window.location.replace("/logout"));
     });
   }, []);
   return null;

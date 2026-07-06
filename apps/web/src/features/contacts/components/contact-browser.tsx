@@ -232,6 +232,12 @@ export function useContactList(opts?: {
   const [nextCursor, setNextCursor] = useState<string | null>(
     opts?.initialNextCursor ?? null,
   );
+  // Latest cursor mirrored in a ref so an in-flight loadMore can tell when a
+  // page-1 fetch (effect / refetch / reconcile) replaced the cursor out from
+  // under it — those share loadMore's reqId, so the reqId check alone can't
+  // catch them (see loadMore). Kept current in the render body below.
+  const nextCursorRef = useRef(nextCursor);
+  nextCursorRef.current = nextCursor;
   const [totalCount, setTotalCount] = useState<number | null>(
     opts?.initialTotalCount ?? null,
   );
@@ -297,23 +303,32 @@ export function useContactList(opts?: {
   function loadMore() {
     if (!nextCursor || loadingMore) return;
     setLoadingMore(true);
-    // Capture the current request generation. The filter-change effect above
-    // bumps `reqId` on every filter change; if one lands while this page is in
-    // flight, discard the result so we don't APPEND stale-filter rows onto the
-    // fresh result set the effect just installed (the confirmed bug). loadMore
-    // previously had no such guard, unlike the effect's page-1 fetch.
+    // Capture the request generation AND the cursor we're paging from. The
+    // filter-change effect bumps `reqId` on every filter change; if one lands
+    // while this page is in flight, discard the result so we don't APPEND
+    // stale-filter rows onto the fresh set it just installed. But a page-1
+    // refetch/reconcile that STARTED BEFORE this loadMore already bumped
+    // `reqId` before we captured it, so it shares our `my` value — the reqId
+    // check can't catch it. After it installs a fresh page-1 + new cursor,
+    // appending our stale-cursor page duplicates rows. Guard on the cursor
+    // too: if the live cursor no longer matches the one we paged from, a
+    // page-1 fetch superseded us — discard.
     const my = reqId.current;
+    const fromCursor = nextCursor;
     void (async () => {
       try {
         const page = await fetchContactsPage(
           { search, fieldFilter, sourceFilter, windowFilter, tagIds, stageFilter },
-          nextCursor,
+          fromCursor,
         );
-        if (reqId.current !== my) return; // superseded by a filter change
+        // superseded by a filter change (reqId) or a page-1 refetch (cursor)
+        if (reqId.current !== my || nextCursorRef.current !== fromCursor) return;
         setItems((prev) => [...prev, ...page.items]);
         setNextCursor(page.nextCursor);
       } catch {
-        if (reqId.current === my) setError("Couldn't load more");
+        if (reqId.current === my && nextCursorRef.current === fromCursor) {
+          setError("Couldn't load more");
+        }
       } finally {
         // Always clear so the new filter's loadMore isn't wedged behind a
         // superseded in-flight page.

@@ -205,9 +205,21 @@ export function TemplateForm({
     (headerKind !== "TEXT" && headerHandle !== null);
   const footerValid = footer.length <= 60 && !/\{\{\d+\}\}/.test(footer);
   const buttonsValid = buttons.every(buttonRowValid);
+  // Only the bindings the body/header actually still need. Removing every
+  // {{n}} unmounts Section 6 (line ~590) but leaves the old entries in
+  // `bindings.body`; validating/submitting the raw state would keep Submit
+  // disabled on stale empty-label rows with no visible error, and would
+  // persist orphaned bindings. Slice to the effective count instead.
+  const effBindings = useMemo<VariableBindings>(
+    () => ({
+      body: bindings.body.slice(0, bodyVarCount),
+      ...(headerHasVar && bindings.header ? { header: bindings.header } : {}),
+    }),
+    [bindings, bodyVarCount, headerHasVar],
+  );
   const labelsValid =
-    bindings.body.every((b) => b.label.trim().length > 0) &&
-    (!bindings.header || bindings.header.label.trim().length > 0);
+    effBindings.body.every((b) => b.label.trim().length > 0) &&
+    (!effBindings.header || effBindings.header.label.trim().length > 0);
 
   const canSubmit =
     nameValid && bodyValid && headerValid && footerValid && buttonsValid && labelsValid;
@@ -323,7 +335,7 @@ export function TemplateForm({
           language,
           category,
           components,
-          variableBindings: bindings,
+          variableBindings: effBindings,
         }),
       });
       const data = (await res.json()) as {
@@ -342,7 +354,7 @@ export function TemplateForm({
       setSubmitError(err instanceof Error ? err.message : "Submit failed");
       setSubmitting(false);
     }
-  }, [canSubmit, name, language, category, components, bindings, router, softRefresh]);
+  }, [canSubmit, name, language, category, components, effBindings, router, softRefresh]);
 
   // -------------------------------------------------------------------------
   // Render

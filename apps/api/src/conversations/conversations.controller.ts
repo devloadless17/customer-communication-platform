@@ -133,10 +133,17 @@ export class ConversationsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
     @Query(zQuery(ListMessagesQuerySchema)) query: ListMessagesQuery,
+    // Read raw (not via ListMessagesQuerySchema — that schema lives in a
+    // sibling file). Optional tail-row id paired with `?after=` to enable the
+    // strict-tuple delta (excludes the boundary rows the client already holds,
+    // so `hasMore` is an honest truncation flag). Absent → server falls back to
+    // the legacy `gte` delta, so old clients keep working mid-deploy.
+    @Query("afterId") afterId?: string,
   ) {
     return this.conversations.listMessages(session.teamId, id, {
       before: query.before ?? null,
       after: query.after ?? null,
+      afterId: afterId ?? null,
       take: query.take,
     });
   }

@@ -311,6 +311,34 @@ export class ExternalV1MessagingService {
     }
   }
 
+  /**
+   * Deferred post-send reopen — flip a still-closed thread back to pending via
+   * the shared status CAS. Re-reads the CURRENT status right before reopening so
+   * an agent who reopened (closed->open) mid-send isn't downgraded back to
+   * pending (setConversationStatus's CAS re-reads fresh too, so it can't guard
+   * this on its own — it would flip open->pending). Best-effort: the billed send
+   * already succeeded, so a reopen failure degrades to "sent into a still-closed
+   * thread" and never errors the partner.
+   */
+  private async reopenIfStillClosed(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+  ): Promise<void> {
+    const current = await this.db.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      select: { status: true },
+    });
+    if (current?.status !== "closed") return;
+    await this.setStatus(teamId, apiKeyId, conversationId, { status: "pending" }).catch((err) => {
+      this.logger.warn(
+        `reopen after top-level send failed for conversation ${conversationId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    });
+  }
+
   private async setStatusInternal(
     teamId: string,
     apiKeyId: string,
@@ -580,6 +608,15 @@ export class ExternalV1MessagingService {
      * the ceiling (MAX_CHAIN_DEPTH) with the incoming_webhook trigger.
      */
     chainDepth?: number,
+    /**
+     * Reopen the conversation (closed → pending) ONLY after a fresh send lands.
+     * Set by the top-level POST /v1/messages flow so the reopen happens inside
+     * the claimed section (past the replay short-circuit) and after the Meta
+     * send succeeds — never before the claim, where a replayed retry or a
+     * validation failure would churn an agent-closed thread. The direct
+     * conversation-scoped route leaves this false (unchanged behavior).
+     */
+    reopenIfClosed = false,
   ) {
     if (chainDepth !== undefined && chainDepth >= MAX_CHAIN_DEPTH) {
       throw new HttpException(
@@ -637,6 +674,8 @@ export class ExternalV1MessagingService {
         contactId: true,
         // Channel is conversation-owned — bind + stamp from here.
         channel: true,
+        // Status drives the deferred reopen below (reopenIfClosed path only).
+        status: true,
         aiEnabled: true,
         contact: {
           select: {
@@ -871,6 +910,19 @@ export class ExternalV1MessagingService {
       await this.completeIdempotency(teamId, apiKeyId, idempotencyKey, result);
     }
 
+    // Deferred reopen — the send landed (fresh, past the replay short-circuit),
+    // so now flip a closed thread back to pending via the shared status CAS. Doing
+    // it here (not before the claim) means a replayed retry or a pre-send failure
+    // can't churn an agent-closed thread. Best-effort: the billed send already
+    // succeeded, so a reopen failure degrades to "sent into a still-closed thread",
+    // never an error back to the partner.
+    if (reopenIfClosed) {
+      // `conversation` was snapshotted (line 642) before the Meta send, so
+      // reopenIfStillClosed re-reads fresh to avoid downgrading a thread an
+      // agent reopened (closed->open) mid-send.
+      await this.reopenIfStillClosed(teamId, apiKeyId, conversationId);
+    }
+
     return result;
   }
 
@@ -901,8 +953,10 @@ export class ExternalV1MessagingService {
     contact: { id: string } | { phone: string },
   ): Promise<string> {
     if ("id" in contact) {
+      // deletedAt:null — a tombstoned contact 404s on GET/PATCH; it must also be
+      // unreachable on the highest-side-effect route (a billed WhatsApp send).
       const row = await this.db.contact.findFirst({
-        where: { id: contact.id, teamId },
+        where: { id: contact.id, teamId, deletedAt: null },
         select: { id: true },
       });
       if (!row) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
@@ -916,7 +970,7 @@ export class ExternalV1MessagingService {
       });
     }
     const row = await this.db.contact.findFirst({
-      where: { teamId, phoneNumber: phone },
+      where: { teamId, phoneNumber: phone, deletedAt: null },
       select: { id: true },
     });
     if (!row) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
@@ -931,7 +985,9 @@ export class ExternalV1MessagingService {
     idempotencyKey?: string,
   ) {
     const contactRow = await this.db.contact.findFirst({
-      where: { id: contactId, teamId },
+      // deletedAt:null — consistent with getContact + resolveContactIdentifier;
+      // a tombstoned contact must not be mutable through the by-contact routes.
+      where: { id: contactId, teamId, deletedAt: null },
       select: { id: true },
     });
     if (!contactRow) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
@@ -961,7 +1017,8 @@ export class ExternalV1MessagingService {
     idempotencyKey?: string,
   ) {
     const contactRow = await this.db.contact.findFirst({
-      where: { id: contactId, teamId },
+      // deletedAt:null — see assignByContact; tombstoned contacts stay 404 here.
+      where: { id: contactId, teamId, deletedAt: null },
       select: { id: true },
     });
     if (!contactRow) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
@@ -1038,6 +1095,13 @@ export class ExternalV1MessagingService {
       orderBy: { lastMessageAt: "desc" },
       select: { id: true, status: true },
     });
+    // A closed thread is reopened ONLY after a fresh send actually lands (the
+    // template branch below, and the text branch via sendMessage's
+    // reopenIfClosed) — never here, before the idempotency claim. Reopening
+    // up front let a replayed retry (which sends nothing) or a send that then
+    // failed validation flip an agent-closed thread to pending and re-fire
+    // conversation.status_changed + reopen workflows/webhooks.
+    const wasClosed = conv?.status === "closed";
     if (!conv) {
       // Stamp the new thread's channel from the contact's identity — the
       // source of truth at creation (contacts are siloed + immutable-identity).
@@ -1081,9 +1145,6 @@ export class ExternalV1MessagingService {
           });
         } else throw err;
       }
-    } else if (conv.status === "closed") {
-      // Reopen via setStatus so the audit + analytics counters fire correctly.
-      await this.setStatus(teamId, apiKeyId, conv.id, { status: "pending" });
     }
 
     // ---- Template send ---------------------------------------------------
@@ -1205,6 +1266,15 @@ export class ExternalV1MessagingService {
       if (idempotencyKey) {
         await this.completeIdempotency(teamId, apiKeyId, idempotencyKey, out);
       }
+      // Deferred reopen — only now that a fresh template send has landed (past
+      // the replay short-circuit + successful send). Best-effort: the billed
+      // send already succeeded, so a reopen failure never errors the partner.
+      if (wasClosed) {
+        // `wasClosed` was snapshotted (line 1081) before the idempotency claim +
+        // the entire sendTemplateInternal Meta round-trip, so reopenIfStillClosed
+        // re-reads fresh to avoid downgrading a thread an agent reopened mid-send.
+        await this.reopenIfStillClosed(teamId, apiKeyId, conv.id);
+      }
       return out;
     }
 
@@ -1222,6 +1292,11 @@ export class ExternalV1MessagingService {
         ...(input.reply_to_message_id ? { replyToMessageId: input.reply_to_message_id } : {}),
       },
       idempotencyKey,
+      // No inbound X-CCP-Depth to forward here (already gated at the top of this
+      // method); pass the top-level reopen intent so a closed thread reopens
+      // only after this send lands, inside the claimed section.
+      undefined,
+      wasClosed,
     );
     // The top-level send never sets `onlyIfAiEnabled`, so the no-interrupt skip
     // can't fire here — `message` is always present. Guard keeps the types honest.

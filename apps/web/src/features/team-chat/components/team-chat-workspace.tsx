@@ -21,7 +21,7 @@ import { ChannelComposer } from "./channel-composer";
 import { ChannelHeader } from "./channel-header";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import { ChannelSearch } from "./channel-search";
-import { ChannelThread } from "./channel-thread";
+import { ChannelThread, type ChannelThreadScrollControls } from "./channel-thread";
 import { EditChannelDialog, useDeleteChannel } from "./channel-dialogs";
 
 import { PinnedBar } from "./pinned-bar";
@@ -222,6 +222,18 @@ export function TeamChatWorkspace({
    * `messages` state change triggers a re-render and a second rAF locates
    * the now-mounted row.
    */
+  // useChatScroll controls published by the feed. jumpToMessage releases
+  // stick-to-bottom (and flags the loadAround slice swap benign) BEFORE the
+  // slice replaces — otherwise the hook snaps to the anchored window's bottom
+  // and cascade-paginates back to live, defeating the jump.
+  const scrollControlsRef = useRef<ChannelThreadScrollControls | null>(null);
+  const handleScrollControlsReady = useCallback(
+    (controls: ChannelThreadScrollControls) => {
+      scrollControlsRef.current = controls;
+    },
+    [],
+  );
+
   // Ref-tracked so a rapid jump-to-message sequence can cancel the prior
   // flash timer instead of stomping classNames mid-fade.
   const flashTimerRef = useRef<number | null>(null);
@@ -254,9 +266,14 @@ export function TeamChatWorkspace({
         flashHighlight(direct);
         return;
       }
-      // Slow path — off-slice. Pull a context window then wait for the row
+      // Slow path — off-slice. Release stick-to-bottom + flag the loadAround
+      // slice swap benign BEFORE it runs, so the hook doesn't snap the new
+      // anchored window to its bottom (which cascade-paginates back to live
+      // and defeats the jump). Then pull a context window and wait for the row
       // to render. The virtualizer renders in two frames typically; we poll
       // a few rAFs to give it room before giving up.
+      scrollControlsRef.current?.releaseStickToBottom();
+      scrollControlsRef.current?.markBenignTailUpdate();
       const ok = await channelState.loadAround(id);
       if (!ok) return;
       const tryScroll = (attempts: number) => {
@@ -338,6 +355,7 @@ export function TeamChatWorkspace({
           memberCount={memberCountOverride ?? initialChannel.memberCount}
           typingUserIds={channelState.typingUserIds}
           teamMemberNameById={namesById}
+          viewerUserId={currentUser.id}
           onEdit={() => setShowEdit(true)}
           onDelete={() => {
             void deleteChannel(initialChannel.id, "/team");
@@ -388,6 +406,7 @@ export function TeamChatWorkspace({
           onOpenThread={handleOpenThread}
           onRetry={channelState.retryOptimistic}
           onDismiss={channelState.removeOptimistic}
+          onScrollControlsReady={handleScrollControlsReady}
         />
         <div className="border-t border-border">
           <TypingIndicator
@@ -403,6 +422,7 @@ export function TeamChatWorkspace({
           teamMembers={teamMembers}
           onOptimisticAdd={channelState.addOptimistic}
           onOptimisticFail={channelState.markOptimisticFailed}
+          onOptimisticConfirm={channelState.confirmOptimistic}
         />
       </div>
 

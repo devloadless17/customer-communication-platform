@@ -1188,7 +1188,6 @@ model OutboundSendAttempt {
   // Sweeper picks rows by (completedAt || failedAt) older than the
   // retention window — index on attemptStartedAt for the scan.
   @@index([attemptStartedAt])
-  @@index([teamId, completedAt])
 }
 
 // Pending team invite. Admin POSTs to /api/invites; the link contains a

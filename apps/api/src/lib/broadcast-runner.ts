@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 
+import { blobStorage } from "@/lib/blob-storage";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { createOutboundMessageIdempotent, isTransient } from "@/lib/messages/idempotent-create";
@@ -23,6 +24,22 @@ import type { Channel } from "@ccp/shared/types";
  * provider/config indirection is uniform with the per-contact send paths.
  */
 const BROADCAST_CHANNEL: Channel = "whatsapp";
+
+/**
+ * errorMessage stamped on recipients finalized by `BroadcastsService.cancel()`
+ * (queued → failed for recipients that never sent). Also the marker
+ * `retryFailed()` filters OUT so a deliberately-canceled audience is never
+ * re-sent (billed Meta template sends are irreversible), AND the signal the
+ * post-send reconcile below keys on: a lane that had pulled a recipient but not
+ * yet created its `bc-recipient-<id>` attempt row is invisible to cancel()'s
+ * in-flight snapshot, so cancel() can flip a recipient this runner is mid-send
+ * to failed+marker; the queued→sent CAS then matches 0 rows even though Meta
+ * accepted. This constant lets that path detect its own send landed and reconcile.
+ * Owned here (not in broadcasts.service.ts) because the service already imports
+ * from this module — the reverse edge would be circular. Keep the string stable.
+ */
+export const CANCEL_RECIPIENT_MARKER =
+  "Broadcast canceled before this recipient was sent.";
 import {
   parseVariableBindings,
   resolveBinding,
@@ -742,6 +759,18 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     queue.push(...page);
   }
 
+  // Serialize refill across lanes. When several lanes drain the queue to 0 at a
+  // page boundary they'd otherwise each call refill() concurrently with the
+  // SAME cursorId (only reassigned after the awaited findMany resolves), fetch
+  // the identical page, and push it twice — duplicate recipient processing.
+  // Sharing one in-flight promise keeps the cursorId read strictly ordered so
+  // duplicate pages are impossible.
+  let refillInFlight: Promise<void> | null = null;
+  const refillOnce = (): Promise<void> =>
+    (refillInFlight ??= refill().finally(() => {
+      refillInFlight = null;
+    }));
+
   await refill();
   const lanes = Math.min(SEND_CONCURRENCY, queue.length);
 
@@ -805,7 +834,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         const pauseMs = lanePauseRemaining(broadcast.id);
         if (pauseMs > 0) await sleep(pauseMs);
         if (queue.length === 0) {
-          await refill();
+          await refillOnce();
           if (queue.length === 0) return;
         }
         const recipient = queue.shift();
@@ -1188,6 +1217,45 @@ async function processOneRecipient(
       // stored externalId (createOutboundMessageIdempotent dedupes on it).
       send = { externalId: attemptClaim.externalId, timestamp: attemptClaim.timestamp };
     } else {
+      // Meta FETCHES the header-media link and our R2 bucket is private, so a
+      // stored own (stable, non-fetchable) URL must be presigned per send —
+      // mirror send-template-internal's choke-point behaviour. A foreign link
+      // (not ours) passes through untouched. Minted per-recipient so the
+      // rate-limit retry below (bounded well under the 1h presign TTL) reuses a
+      // still-valid signature.
+      let headerMedia: typeof variables.headerMedia;
+      try {
+        headerMedia = variables.headerMedia
+          ? {
+              ...variables.headerMedia,
+              link: blobStorage.isOwnUrl(variables.headerMedia.link)
+                ? await blobStorage.presignGetUrl(variables.headerMedia.link)
+                : variables.headerMedia.link,
+            }
+          : undefined;
+      } catch (err) {
+        // Presigning the private-bucket header link can throw (R2 config /
+        // network fault, malformed stored URL). No Meta call has happened yet,
+        // so this is a PER-RECIPIENT failure — it must fail ONLY this recipient
+        // via the same markRecipientFailed + bump + return every sibling error
+        // path uses. If it escaped here it would propagate out of
+        // processOneRecipient (no top-level catch) into `Promise.all(lanes)` →
+        // runBroadcast's catch, parking the WHOLE broadcast `paused`; a
+        // deterministically-bad header URL would then loop pause→resume→pause.
+        // Deliberately NOT routed through maybeTripPermanentBreaker: this isn't
+        // a dead Meta credential, it's the same class as the missing-phone /
+        // empty-variable guards above (fail one recipient, keep the run going).
+        // Release the claimed attempt so a manual retry can re-claim cleanly.
+        await releaseBroadcastSendAttempt(recipient.id);
+        await markRecipientFailed(recipient.id, errorDetail(err));
+        bumpCountersFireAndForget(
+          broadcast.id,
+          broadcast.teamId,
+          { failed: 1 },
+          pendingBumps,
+        );
+        return;
+      }
       try {
         send = await sendTemplate(
           {
@@ -1197,7 +1265,7 @@ async function processOneRecipient(
             variables: {
               body: perRecipientVars.body,
               ...(perRecipientVars.header ? { header: perRecipientVars.header } : {}),
-              ...(variables.headerMedia ? { headerMedia: variables.headerMedia } : {}),
+              ...(headerMedia ? { headerMedia } : {}),
             },
           },
           config,
@@ -1243,9 +1311,7 @@ async function processOneRecipient(
                   ...(perRecipientVars.header
                     ? { header: perRecipientVars.header }
                     : {}),
-                  ...(variables.headerMedia
-                    ? { headerMedia: variables.headerMedia }
-                    : {}),
+                  ...(headerMedia ? { headerMedia } : {}),
                 },
               },
               config,
@@ -1313,14 +1379,60 @@ async function processOneRecipient(
       },
     });
     if (recipientLocked.count === 0) {
-      // Another process beat us to it — their recipient row is the source of
-      // truth. Skip the bookkeeping below to avoid duplicate Message rows.
-      console.warn(
-        `[broadcast ${broadcast.id}] recipient ${recipient.id} was already claimed; skipping post-send bookkeeping`,
-      );
-      return;
+      // The queued→sent CAS missed. Two causes: (a) a genuine concurrent claim —
+      // their row is the source of truth, skip; (b) a cancel() that raced this
+      // in-flight send. cancel() snapshots in-flight recipients (their
+      // `bc-recipient-<id>` OutboundSendAttempt with failedAt=null) and excludes
+      // them from the queued→failed finalize, but a lane that had pulled this
+      // recipient yet not YET created its attempt row is invisible to that
+      // snapshot — so cancel flipped it to failed+CANCEL_RECIPIENT_MARKER and
+      // over-counted it as failed. Meta already accepted our send, so the row
+      // must end up `sent`, not silently-failed with no inbox Message row (and
+      // retryFailed excludes the marker, so it would otherwise never reconcile).
+      // Reconcile: CAS the failed+marker state → sent. The marker gate makes this
+      // idempotent (a second pass finds it already `sent` and no-ops).
+      const reconciled = await db.broadcastRecipient.updateMany({
+        where: {
+          id: recipient.id,
+          status: "failed",
+          errorMessage: CANCEL_RECIPIENT_MARKER,
+        },
+        data: {
+          status: "sent",
+          externalId: send.externalId,
+          conversationId,
+          sentAt: send.timestamp,
+        },
+      });
+      if (reconciled.count === 0) {
+        // Case (a): not the cancel race (or already reconciled) — leave the
+        // winning row as the source of truth and skip duplicate bookkeeping.
+        console.warn(
+          `[broadcast ${broadcast.id}] recipient ${recipient.id} was already claimed; skipping post-send bookkeeping`,
+        );
+        return;
+      }
+      // cancel() incremented failedCount for this recipient; undo that AND count
+      // the send in one clamped write (GREATEST(0, …) guards a lost earlier bump)
+      // so the terminal counters stay honest. This branch is the ONLY way past
+      // the reconcile CAS with work done (the reconciled.count===0 sub-branch
+      // returned early), so the failed→sent move fully accounts for the send —
+      // no separate {sent:1} bump (that lives only in the normal-lock `else`).
+      // Swallow-and-log: a counter miss must never abort the (already-delivered)
+      // recipient.
+      await reconcileCancelRaceCounters(broadcast.id, broadcast.teamId).catch((err) => {
+        console.error(
+          `[broadcast ${broadcast.id}] cancel-race counter reconcile failed for recipient ${recipient.id}`,
+          err,
+        );
+      });
+    } else {
+      // Normal queued→sent lock won — count this send. Kept in an `else`
+      // (not a trailing flagged bump) so it's structurally impossible to
+      // double-count with the cancel-race reconcile above, even if a future
+      // early-return is added to that branch.
+      bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { sent: 1 }, pendingBumps);
     }
-    bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { sent: 1 }, pendingBumps);
 
     // I-3: the send DEFINITIVELY succeeded (recipient locked `sent`) — NOW
     // perform the deferred closed→pending reopen + publish. CAS-guarded on
@@ -1701,6 +1813,40 @@ async function bumpCounters(
 }
 
 /**
+ * Counter fix for the cancel-race reconcile (see the queued→sent CAS miss path):
+ * cancel() over-counted this recipient as failed, but our send actually landed
+ * and we just flipped it to `sent`. Move one unit from failed → sent in a single
+ * clamped write — `GREATEST(0, …)` guards the degenerate case where an earlier
+ * failed-bump was lost to a transient blip, so we never persist a negative
+ * counter. Raw because Prisma's typed update can't express GREATEST; RETURNING
+ * feeds the same throttled progress emit every other counter write uses.
+ */
+async function reconcileCancelRaceCounters(
+  broadcastId: string,
+  teamId: string,
+): Promise<void> {
+  const rows = await withTransientRetry(() =>
+    db.$queryRaw<
+      { sentCount: number; failedCount: number; totalCount: number }[]
+    >`
+      UPDATE "Broadcast"
+      SET "sentCount" = "sentCount" + 1,
+          "failedCount" = GREATEST(0, "failedCount" - 1)
+      WHERE "id" = ${broadcastId}
+      RETURNING "sentCount", "failedCount", "totalCount"
+    `,
+  );
+  const updated = rows[0];
+  if (!updated) return;
+  scheduleProgress(broadcastId, {
+    teamId,
+    sentCount: Number(updated.sentCount),
+    failedCount: Number(updated.failedCount),
+    totalCount: Number(updated.totalCount),
+  });
+}
+
+/**
  * Fire-and-forget counter bump. Used inside the per-recipient send path so
  * the DB roundtrip + socket emit don't block the next send. Increments are
  * atomic at the DB level, so out-of-order completion still yields correct
@@ -1877,6 +2023,194 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
       `[broadcast-reconciler] resuming orphaned queued broadcast ${row.id}`,
     );
     void startBroadcast(row.id);
+  }
+
+  // 4) Crash-window closer for the cancel-race reconcile. The live reconcile
+  // (failed+CANCEL_RECIPIENT_MARKER → sent, inside processOneRecipient) only
+  // runs if the process survives to the queued→sent CAS miss. A crash between
+  // completeBroadcastSendAttempt and that CAS strands a Meta-accepted+billed
+  // recipient at failed+marker forever — steps 1–3 never scan `canceled`, and
+  // retryFailed excludes the marker. Recover those here. Awaited (not
+  // fire-and-forget): the scan is bounded to canceled broadcasts' marker rows
+  // (usually empty) and must finish before boot proceeds so counters/inbox are
+  // consistent.
+  await reconcileCanceledMarkerRecipients();
+}
+
+/**
+ * Boot-time recovery for the doubly-conditional cancel-race gap (fix, audit
+ * 2026-07): a recipient whose Meta send was ACCEPTED (its `bc-recipient-<id>`
+ * OutboundSendAttempt is `completed` with a wamid) but whose live queued→sent
+ * reconcile never ran because the process crashed first. cancel() had flipped
+ * it to failed+CANCEL_RECIPIENT_MARKER (its attempt row wasn't visible to the
+ * in-flight snapshot yet), so it's stuck: the running/paused/queued reconcilers
+ * never touch `canceled`, and retryFailed filters the marker out. Meta billed
+ * us and the customer received the template, so the row MUST end up `sent` with
+ * an inbox Message — exactly what the live cancel-race reconcile produces.
+ *
+ * Bounded: only `canceled` broadcasts, only failed+marker recipients, only ones
+ * with a completed attempt. Idempotent: the marker-gated CAS no-ops on a second
+ * pass (already `sent`), and createOutboundMessageIdempotent dedupes on the
+ * wamid, so re-running (or racing the live path) writes nothing twice.
+ */
+async function reconcileCanceledMarkerRecipients(): Promise<void> {
+  // Query ONLY the recoverable set in ONE shot: a marker recipient in a
+  // `canceled` broadcast whose OutboundSendAttempt DEFINITIVELY reached Meta
+  // (completedAt + externalId set). This set is normally EMPTY — a genuine
+  // never-sent cancel has NO completed attempt and is excluded by the join, so
+  // we never scan cancel history or do a per-recipient lookup. Cost tracks the
+  // rare crash-window set, not the number of canceled broadcasts/recipients
+  // (the old per-broadcast findMany + per-recipient findUnique was O(cancel
+  // history) on every boot).
+  const recoverable = await db.$queryRaw<
+    {
+      recipientId: string;
+      contactId: string;
+      broadcastId: string;
+      conversationId: string;
+      externalId: string;
+      completedAt: Date;
+    }[]
+  >`
+    SELECT br."id"          AS "recipientId",
+           br."contactId"   AS "contactId",
+           br."broadcastId" AS "broadcastId",
+           COALESCE(br."conversationId", osa."conversationId") AS "conversationId",
+           osa."externalId" AS "externalId",
+           osa."completedAt" AS "completedAt"
+    FROM "BroadcastRecipient" br
+    JOIN "Broadcast" b
+      ON b."id" = br."broadcastId" AND b."status" = 'canceled'::"BroadcastStatus"
+    JOIN "OutboundSendAttempt" osa
+      ON osa."jobId" = 'bc-recipient-' || br."id"
+    WHERE br."status" = 'failed'::"BroadcastRecipientStatus"
+      AND br."errorMessage" = ${CANCEL_RECIPIENT_MARKER}
+      AND osa."completedAt" IS NOT NULL
+      AND osa."externalId" IS NOT NULL
+  `;
+  if (recoverable.length === 0) return;
+
+  // Memoize per-broadcast render context (template + bindings + variables) so
+  // multiple recoverable recipients of the same broadcast load it once. `null`
+  // memoizes a broadcast whose row/template vanished so we don't re-query it.
+  type RenderCtx = {
+    broadcast: NonNullable<Awaited<ReturnType<typeof db.broadcast.findUnique>>>;
+    variables: ReturnType<typeof parseVariables>;
+    template: Awaited<ReturnType<typeof loadTemplate>>;
+    bindings: ReturnType<typeof parseVariableBindings>;
+  };
+  const ctxByBroadcast = new Map<string, RenderCtx | null>();
+  const loadCtx = async (broadcastId: string): Promise<RenderCtx | null> => {
+    if (ctxByBroadcast.has(broadcastId)) return ctxByBroadcast.get(broadcastId) ?? null;
+    const broadcast = await db.broadcast.findUnique({ where: { id: broadcastId } });
+    if (!broadcast) {
+      ctxByBroadcast.set(broadcastId, null);
+      return null;
+    }
+    const template = await loadTemplate(broadcast.teamId, broadcast.templateId);
+    const ctx: RenderCtx = {
+      broadcast,
+      variables: parseVariables(broadcast.variables),
+      template,
+      bindings: parseVariableBindings(template.variableBindings),
+    };
+    ctxByBroadcast.set(broadcastId, ctx);
+    return ctx;
+  };
+
+  for (const row of recoverable) {
+    const ctx = await loadCtx(row.broadcastId);
+    if (!ctx) continue;
+    const { broadcast, variables, template, bindings } = ctx;
+    const attempt = {
+      completedAt: row.completedAt,
+      externalId: row.externalId,
+      conversationId: row.conversationId,
+    };
+    const recipient = { id: row.recipientId, contactId: row.contactId };
+    const conversationId = row.conversationId;
+
+    {
+      // Marker-gated CAS: failed+marker → sent. A prior boot pass (or a live
+      // reconcile that DID run) leaves it already `sent`, so count===0 → skip.
+      const reconciled = await db.broadcastRecipient.updateMany({
+        where: {
+          id: recipient.id,
+          status: "failed",
+          errorMessage: CANCEL_RECIPIENT_MARKER,
+        },
+        data: {
+          status: "sent",
+          externalId: attempt.externalId,
+          conversationId,
+          sentAt: attempt.completedAt,
+        },
+      });
+      if (reconciled.count === 0) continue;
+
+      // Write the inbox Message idempotently (same helper + shape as the live
+      // post-send path). Best-effort: the send already happened, so a render/DB
+      // wobble here must not revert the now-`sent` recipient — worst case the
+      // bubble is missing until a manual refetch (same tolerance the live path
+      // documents). Counters are still reconciled below regardless.
+      try {
+        const contact = await db.contact.findUnique({
+          where: { id: recipient.contactId },
+          select: {
+            name: true,
+            phoneNumber: true,
+            email: true,
+            location: true,
+            customFields: true,
+          },
+        });
+        if (contact) {
+          const perRecipientVars = resolvePerRecipientVariables(
+            bindings,
+            variables,
+            contact,
+          );
+          const renderedBody = renderTemplateBody(
+            template.bodyText,
+            perRecipientVars.body,
+          );
+          await createOutboundMessageIdempotent({
+            teamId: broadcast.teamId,
+            conversationId,
+            externalId: attempt.externalId,
+            senderUserId: broadcast.createdById,
+            body: renderedBody,
+            direction: "out",
+            channel: BROADCAST_CHANNEL,
+            status: "sent",
+            rawPayload: {
+              sentVia: "broadcast",
+              broadcastId: broadcast.id,
+              templateId: broadcast.templateId,
+              templateName: broadcast.templateName,
+              templateLanguage: broadcast.templateLanguage,
+              variables,
+              reconciledFrom: "cancel-race-boot",
+            } as unknown as Prisma.InputJsonValue,
+            timestamp: attempt.completedAt,
+          });
+        }
+      } catch (err) {
+        console.error(
+          `[broadcast-reconciler] cancel-race Message write failed for recipient ${recipient.id} (message was sent, externalId=${attempt.externalId})`,
+          err,
+        );
+      }
+
+      // Move one unit failed→sent so the terminal counters stay honest — the
+      // same clamped write the live cancel-race path uses.
+      await reconcileCancelRaceCounters(broadcast.id, broadcast.teamId).catch((err) => {
+        console.error(
+          `[broadcast-reconciler] cancel-race counter reconcile failed for recipient ${recipient.id}`,
+          err,
+        );
+      });
+    }
   }
 }
 
