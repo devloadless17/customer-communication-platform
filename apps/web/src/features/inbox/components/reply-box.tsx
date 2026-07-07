@@ -1608,8 +1608,10 @@ function ReplyBoxImpl({
                 // (A send already in flight no longer blocks this — sends run
                 // concurrently now — so only the window check remains.)
                 if (!isNote && windowClosed) {
-                  toast.error("Can't send: the 24-hour window has closed.", {
-                    description: "Send a template to re-open the conversation.",
+                  toast.error("Can't send: the messaging window has closed.", {
+                    description: caps.templates
+                      ? "Send a template to re-open the conversation."
+                      : "Wait for the customer to message again to re-open it.",
                   });
                   return;
                 }
@@ -1693,7 +1695,7 @@ function ReplyBoxImpl({
                   isNote
                     ? "Buttons can only be sent in Reply mode"
                     : windowClosed
-                      ? "Window closed — buttons require the 24h window to be open"
+                      ? "Window closed — buttons require the messaging window to be open"
                       : "Send a question with buttons"
                 }
                 onClick={() => setInteractiveOpen(true)}

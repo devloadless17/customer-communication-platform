@@ -253,10 +253,19 @@ export class OutboundWebhooksService {
     // Resolve the team's channel into the same `WireChannelBase` the real
     // subscriber passes to `toWirePayload`, so the channel block on the test
     // matches production (name = medium, source = "<medium>_business").
-    const conn = await this.db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId, channel: "whatsapp" } },
-      select: { id: true, channel: true, createdAt: true },
-    });
+    // Reflect a real connected channel in the test ping — prefer WhatsApp for
+    // continuity, but fall back to any active connection so a Messenger /
+    // Instagram-only workspace's test body still carries a real channel block.
+    const conn =
+      (await this.db.channelConnection.findFirst({
+        where: { teamId, channel: "whatsapp", isActive: true },
+        select: { id: true, channel: true, createdAt: true },
+      })) ??
+      (await this.db.channelConnection.findFirst({
+        where: { teamId, isActive: true },
+        orderBy: { createdAt: "asc" },
+        select: { id: true, channel: true, createdAt: true },
+      }));
     const channelBase: WireChannelBase | null = conn
       ? {
           id: conn.id,

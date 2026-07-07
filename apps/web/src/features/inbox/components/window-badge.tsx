@@ -12,8 +12,9 @@ import {
 import { useNow } from "@/hooks/use-now";
 
 /**
- * Visual status of the WhatsApp 24h customer-service window. Used in two
- * places: above the reply composer and as a chip on contact-list rows.
+ * Visual status of a channel's free-form messaging window (WhatsApp 24h; Meta
+ * social 24h + a 7-day human-agent window). Used in two places: above the reply
+ * composer and as a chip on contact-list rows.
  *
  *   - `lastInboundAt` is the source of truth; the badge re-derives state
  *     every minute via a tick so the "8h left" countdown moves without a
@@ -73,12 +74,15 @@ export function WindowBadgeFromStatus({
   const sizing =
     size === "xs" ? "h-5 px-1.5 text-3xs" : "h-6 px-2 text-2xs";
 
+  // Channel-neutral copy: WhatsApp is a 24h window, Meta social is 24h + a
+  // 7-day human-agent window — the badge derives the countdown from the
+  // channel's capability, so the wording stays generic ("messaging window").
   const title =
     state === "never"
-      ? "This contact hasn't messaged you yet — only templates can be sent."
+      ? "This contact hasn't messaged you yet."
       : state === "closed"
-        ? `Free-form replies require a customer message in the last 24h. ${formatWindowRemaining(status)}.`
-        : `The 24h customer service window is ${state === "open" ? "open" : "closing soon"}. ${formatWindowRemaining(status)}.`;
+        ? `The messaging window has closed — a new customer message reopens it. ${formatWindowRemaining(status)}.`
+        : `The messaging window is ${state === "open" ? "open" : "closing soon"}. ${formatWindowRemaining(status)}.`;
 
   return (
     <span
