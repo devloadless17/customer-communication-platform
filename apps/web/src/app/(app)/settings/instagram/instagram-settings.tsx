@@ -41,6 +41,18 @@ export function InstagramSettings({
     !current.connected || Boolean(current.credentialsUndecryptable),
   );
   const [copied, setCopied] = useState<string | null>(null);
+  // CONTROLLED fields — React 19 `<form action>` auto-resets the DOM form after
+  // the action runs (even on failure), which would wipe the inputs. Holding the
+  // values in state keeps them across a rejected submit so the admin can fix one
+  // wrong key without re-typing all of them.
+  const [form, setForm] = useState({
+    igId: current.igId ?? "",
+    igAccessToken: current.igAccessToken ?? "",
+    appSecret: current.appSecret ?? "",
+    appId: current.appId ?? "",
+  });
+  const setField = (k: keyof typeof form) => (v: string) =>
+    setForm((f) => ({ ...f, [k]: v }));
 
   const webhookUrl = `${webhookBaseUrl}/webhooks/meta/${teamId}`;
 
@@ -51,18 +63,12 @@ export function InstagramSettings({
     });
   }
 
-  async function save(form: FormData) {
+  async function save() {
     setError(null);
-    const body = {
-      igId: form.get("igId"),
-      igAccessToken: form.get("igAccessToken"),
-      appSecret: form.get("appSecret"),
-      appId: form.get("appId") ?? "",
-    };
     const res = await apiFetch("/api/team/instagram", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(form),
     });
     if (!res.ok) {
       const data = (await res.json().catch(() => ({}))) as {
@@ -166,15 +172,16 @@ export function InstagramSettings({
       {canManage && showForm && (
         <form
           className="flex flex-col gap-4 rounded-xl border bg-card p-5"
-          action={(fd) =>
+          onSubmit={(e) => {
+            e.preventDefault();
             startTransition(async () => {
-              if (await save(fd)) {
+              if (await save()) {
                 toast.success("Instagram connected");
                 setShowForm(false);
                 softRefresh();
               }
-            })
-          }
+            });
+          }}
         >
           <h3 className="text-sm font-medium">Account credentials</h3>
           {current.credentialsUndecryptable && (
@@ -183,32 +190,32 @@ export function InstagramSettings({
             </p>
           )}
           <LabeledInput
-            name="igId"
             label="Instagram account ID"
-            defaultValue={current.igId ?? ""}
+            value={form.igId}
+            onChange={setField("igId")}
             placeholder="17841400000000000"
             required
           />
           <LabeledInput
-            name="igAccessToken"
             label="Instagram access token"
-            defaultValue={current.igAccessToken ?? ""}
+            value={form.igAccessToken}
+            onChange={setField("igAccessToken")}
             placeholder="IGAA..."
             required
             secret
           />
           <LabeledInput
-            name="appSecret"
             label="App secret"
-            defaultValue={current.appSecret ?? ""}
+            value={form.appSecret}
+            onChange={setField("appSecret")}
             placeholder="Verifies inbound webhooks"
             required
             secret
           />
           <LabeledInput
-            name="appId"
             label="App ID (optional)"
-            defaultValue={current.appId ?? ""}
+            value={form.appId}
+            onChange={setField("appId")}
             placeholder="Informational"
           />
           {error && <p className="text-xs text-destructive">{error}</p>}
@@ -251,16 +258,16 @@ function Field({
 }
 
 function LabeledInput({
-  name,
   label,
-  defaultValue,
+  value,
+  onChange,
   placeholder,
   required,
   secret,
 }: {
-  name: string;
   label: string;
-  defaultValue: string;
+  value: string;
+  onChange: (v: string) => void;
   placeholder?: string;
   required?: boolean;
   secret?: boolean;
@@ -269,8 +276,8 @@ function LabeledInput({
     <label className="flex flex-col gap-1.5">
       <span className="text-xs font-medium text-muted-foreground">{label}</span>
       <Input
-        name={name}
-        defaultValue={defaultValue}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         required={required}
         type={secret ? "password" : "text"}
