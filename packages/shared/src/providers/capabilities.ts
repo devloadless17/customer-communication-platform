@@ -28,25 +28,24 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     calling: true,
   },
   // Facebook Messenger: 24h free-form window + a 7-day Human Agent extension for
-  // support replies. No approved-template catalog, no calling. read-receipt /
-  // typing marks use a by-thread (PSID) API that doesn't fit the by-message
-  // provider signature yet, so they're off until implemented (a later increment).
+  // support replies. No approved-template catalog, no calling. Read receipts
+  // (mark_seen) + typing (typing_on) are by-thread sender_actions on the PSID.
   messenger: {
     freeFormWindowMs: DAY_MS,
     humanAgentWindowMs: 7 * DAY_MS,
     templates: false,
-    readReceipts: false,
-    typingIndicators: false,
+    readReceipts: true,
+    typingIndicators: true,
     calling: false,
   },
   // Instagram DM: same 24h + 7-day human-agent window as Messenger. No templates,
-  // no calling, and (like Messenger this increment) no read/typing marks yet.
+  // no calling; read receipts + typing via the same by-thread sender_actions.
   instagram: {
     freeFormWindowMs: DAY_MS,
     humanAgentWindowMs: 7 * DAY_MS,
     templates: false,
-    readReceipts: false,
-    typingIndicators: false,
+    readReceipts: true,
+    typingIndicators: true,
     calling: false,
   },
 

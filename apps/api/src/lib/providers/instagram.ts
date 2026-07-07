@@ -23,6 +23,7 @@ import {
   fetchSocialProfileName,
   parseSocialMessaging,
   sendSocialMedia,
+  sendSocialSenderAction,
   sendSocialText,
   uploadSocialMedia,
 } from "@/lib/providers/meta-social";
@@ -65,6 +66,24 @@ export const instagramProvider: MessagingProvider<InstagramSendConfig> = {
     config: InstagramSendConfig,
   ): Promise<SendTextResult> {
     return sendSocialMedia(args, target(config));
+  },
+
+  async markIncomingRead(
+    _externalId: string,
+    config: InstagramSendConfig,
+    recipientId?: string,
+  ): Promise<void> {
+    if (!recipientId) return;
+    await sendSocialSenderAction("mark_seen", recipientId, target(config));
+  },
+
+  async sendTypingIndicator(
+    _externalId: string,
+    config: InstagramSendConfig,
+    recipientId?: string,
+  ): Promise<void> {
+    if (!recipientId) return;
+    await sendSocialSenderAction("typing_on", recipientId, target(config));
   },
 
   async fetchContactProfile(

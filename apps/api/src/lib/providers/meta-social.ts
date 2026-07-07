@@ -315,6 +315,24 @@ export async function sendSocialMedia(
 }
 
 /**
+ * Send a `sender_action` (mark_seen / typing_on / typing_off) to a recipient on
+ * a Meta social channel. Read receipts + typing are by-THREAD (keyed on the
+ * recipient's PSID / IGSID), not by-message. Best-effort — the caller swallows
+ * errors, but we throw here so a caller that wants to log can.
+ */
+export async function sendSocialSenderAction(
+  action: "mark_seen" | "typing_on" | "typing_off",
+  recipientId: string,
+  opts: SocialSendTarget,
+): Promise<void> {
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
+  await graphPostJson(url, opts.accessToken, {
+    recipient: { id: recipientId },
+    sender_action: action,
+  });
+}
+
+/**
  * Best-effort display name for a social contact — the messaging webhook carries
  * no name, so we read the profile node (`/{id}?fields=…`). `fields` differs per
  * channel (Messenger: `name`; Instagram: `name,username`). Returns the first

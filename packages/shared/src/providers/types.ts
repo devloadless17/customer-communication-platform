@@ -687,18 +687,33 @@ export interface MessagingProvider<SendConfig = unknown> {
    * sees blue ticks. Optional — providers that don't support read receipts
    * (or don't expose them via API) leave this off. Best-effort: a failure
    * here must not break the agent's view, so callers should swallow errors.
-   */
-  markIncomingRead?(externalId: string, config: SendConfig): Promise<void>;
-  /**
-   * Show the customer a "typing…" bubble on their device. Anchored to a
-   * recent inbound message id (Meta requires the indicator to be sent as
-   * part of marking an inbound as read). Auto-dismisses on the provider
-   * side after a short window (Meta: 25s) or when an outbound is sent.
    *
-   * Best-effort like markIncomingRead — callers swallow errors so a Meta
+   * `recipientId` is the customer's opaque per-account id (PSID / IGSID) — the
+   * social channels mark the whole THREAD seen by recipient (`sender_action:
+   * mark_seen`) rather than a specific message, so they use `recipientId` and
+   * ignore `externalId`. WhatsApp marks the specific `externalId` and ignores
+   * `recipientId`. Callers pass both.
+   */
+  markIncomingRead?(
+    externalId: string,
+    config: SendConfig,
+    recipientId?: string,
+  ): Promise<void>;
+  /**
+   * Show the customer a "typing…" bubble on their device. WhatsApp anchors it
+   * to a recent inbound message id (the indicator rides along with marking the
+   * inbound read); the social channels send `sender_action: typing_on` to the
+   * `recipientId` (PSID / IGSID). Auto-dismisses provider-side after a short
+   * window (~25s) or when an outbound is sent.
+   *
+   * Best-effort like markIncomingRead — callers swallow errors so a provider
    * hiccup doesn't degrade the local typing UX.
    */
-  sendTypingIndicator?(externalId: string, config: SendConfig): Promise<void>;
+  sendTypingIndicator?(
+    externalId: string,
+    config: SendConfig,
+    recipientId?: string,
+  ): Promise<void>;
 
   // ---- WhatsApp Business Calling ---------------------------------------
   // All optional so future SMS-only providers can leave them off;

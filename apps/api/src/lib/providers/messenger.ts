@@ -23,6 +23,7 @@ import {
   fetchSocialProfileName,
   parseSocialMessaging,
   sendSocialMedia,
+  sendSocialSenderAction,
   sendSocialText,
   uploadSocialMedia,
 } from "@/lib/providers/meta-social";
@@ -65,6 +66,27 @@ export const messengerProvider: MessagingProvider<MessengerSendConfig> = {
     config: MessengerSendConfig,
   ): Promise<SendTextResult> {
     return sendSocialMedia(args, target(config));
+  },
+
+  // Read receipt: mark the whole thread seen by the recipient (PSID). Meta
+  // social has no per-message read state, so `externalId` is unused.
+  async markIncomingRead(
+    _externalId: string,
+    config: MessengerSendConfig,
+    recipientId?: string,
+  ): Promise<void> {
+    if (!recipientId) return;
+    await sendSocialSenderAction("mark_seen", recipientId, target(config));
+  },
+
+  // "typing…" bubble to the recipient (PSID). Auto-dismisses provider-side.
+  async sendTypingIndicator(
+    _externalId: string,
+    config: MessengerSendConfig,
+    recipientId?: string,
+  ): Promise<void> {
+    if (!recipientId) return;
+    await sendSocialSenderAction("typing_on", recipientId, target(config));
   },
 
   async fetchContactProfile(

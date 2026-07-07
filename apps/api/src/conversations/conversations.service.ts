@@ -738,13 +738,27 @@ export class ConversationsService {
     const latestInbound = await this.db.message.findFirst({
       where: { conversationId, direction: "in" },
       orderBy: { timestamp: "desc" },
-      select: { externalId: true, channel: true },
+      select: {
+        externalId: true,
+        channel: true,
+        // The customer's identity — social channels mark the thread seen by
+        // recipient id (PSID / IGSID); WhatsApp ignores it. Loaded off the same
+        // query so no extra round-trip on the read hot path.
+        conversation: {
+          select: { contact: { select: { externalContactId: true, phoneNumber: true } } },
+        },
+      },
     });
     if (latestInbound) {
+      const recipientId =
+        latestInbound.conversation.contact.externalContactId ??
+        latestInbound.conversation.contact.phoneNumber ??
+        undefined;
       void this.markIncomingReadBestEffort(
         teamId,
         latestInbound.externalId,
         latestInbound.channel,
+        recipientId,
       );
     }
   }
@@ -761,7 +775,12 @@ export class ConversationsService {
   ): Promise<{ ok: true; skipped?: string }> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
-      select: { id: true },
+      select: {
+        id: true,
+        // Recipient identity for the social typing sender_action (PSID / IGSID);
+        // WhatsApp ignores it and anchors on the inbound message id.
+        contact: { select: { externalContactId: true, phoneNumber: true } },
+      },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
@@ -779,7 +798,15 @@ export class ConversationsService {
       // no-ops via the optional `?.`.
       const binding = getProviderBinding(latestInbound.channel);
       const config = await binding.getSendConfig(teamId);
-      await binding.provider.sendTypingIndicator?.(latestInbound.externalId, config);
+      const recipientId =
+        conversation.contact.externalContactId ??
+        conversation.contact.phoneNumber ??
+        undefined;
+      await binding.provider.sendTypingIndicator?.(
+        latestInbound.externalId,
+        config,
+        recipientId,
+      );
     } catch (err) {
       if (err instanceof ProviderNotConfiguredError) {
         return { ok: true, skipped: "provider-not-configured" };
@@ -793,11 +820,12 @@ export class ConversationsService {
     teamId: string,
     externalId: string,
     channel: Channel,
+    recipientId?: string,
   ): Promise<void> {
     try {
       const binding = getProviderBinding(channel);
       const config = await binding.getSendConfig(teamId);
-      await binding.provider.markIncomingRead?.(externalId, config);
+      await binding.provider.markIncomingRead?.(externalId, config, recipientId);
     } catch (err) {
       if (err instanceof ProviderNotConfiguredError) return;
       this.logger.warn(`markIncomingRead failed: ${err instanceof Error ? err.message : err}`);
