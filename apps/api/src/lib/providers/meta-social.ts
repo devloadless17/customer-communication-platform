@@ -21,11 +21,55 @@ import type {
   NormalizedInboundMessage,
   NormalizedMediaRef,
   NormalizedStatusUpdate,
+  SendMediaArgs,
   SendTextArgs,
   SendTextResult,
+  UploadMediaArgs,
+  UploadMediaResult,
 } from "@ccp/shared/providers/types";
 import type { MediaKind } from "@ccp/shared/types";
-import { GRAPH_BASE, graphGetJson, graphPostJson } from "@/lib/providers/meta-graph";
+import {
+  GRAPH_BASE,
+  graphGetJson,
+  graphPostForm,
+  graphPostJson,
+} from "@/lib/providers/meta-graph";
+
+/** Shared identity of the Meta account addressing a send (Page id / IG id). */
+export interface SocialSendTarget {
+  accountId: string;
+  accessToken: string;
+  graphVersion: string;
+  /** Provider name for error messages ("messenger" / "instagram"). */
+  label: string;
+}
+
+/**
+ * Map our channel-agnostic MediaKind (and, for uploads, a mime type) to Meta's
+ * social attachment `type`. Meta uses `file` for documents and folds stickers
+ * into `image`. Both the upload and the send must agree on the type, so both
+ * derive it deterministically.
+ */
+function attachmentTypeFromKind(kind: MediaKind): "image" | "video" | "audio" | "file" {
+  switch (kind) {
+    case "video":
+      return "video";
+    case "audio":
+      return "audio";
+    case "document":
+      return "file";
+    case "image":
+    case "sticker":
+    default:
+      return "image";
+  }
+}
+function attachmentTypeFromMime(mime: string): "image" | "video" | "audio" | "file" {
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+  return "file";
+}
 
 interface SocialEnvelope {
   object?: string;
@@ -185,7 +229,7 @@ export function parseSocialMessaging(
  */
 export async function sendSocialText(
   args: SendTextArgs,
-  opts: { accountId: string; accessToken: string; graphVersion: string; label: string },
+  opts: SocialSendTarget,
 ): Promise<SendTextResult> {
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
   const res = await graphPostJson(url, opts.accessToken, {
@@ -197,6 +241,75 @@ export async function sendSocialText(
   const messageId = typeof res.message_id === "string" ? res.message_id : "";
   if (!messageId) {
     throw new Error(`${opts.label} sendText: response missing message_id`);
+  }
+  return { externalId: messageId, timestamp: new Date() };
+}
+
+/**
+ * Upload a media binary to the social Attachment Upload API
+ * (`/{accountId}/message_attachments`) and return a reusable attachment id.
+ * Works for image / video / audio / file on BOTH Messenger and Instagram. The
+ * attachment `type` is derived from the mime type and must match the `type` the
+ * later send uses (both derive it deterministically). Mirrors WhatsApp's
+ * `uploadMedia` (bytes → provider id), so the generic send path is unchanged.
+ */
+export async function uploadSocialMedia(
+  args: UploadMediaArgs,
+  opts: SocialSendTarget,
+): Promise<UploadMediaResult> {
+  const type = attachmentTypeFromMime(args.mimeType);
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/message_attachments`;
+  const form = new FormData();
+  form.append(
+    "message",
+    JSON.stringify({ attachment: { type, payload: { is_reusable: true } } }),
+  );
+  // Meta reads the bytes from the `filedata` part. Blob carries the mime type;
+  // the filename helps Meta render document names on the recipient side.
+  form.append(
+    "filedata",
+    new Blob([args.bytes], { type: args.mimeType }),
+    args.filename,
+  );
+  const res = await graphPostForm(url, opts.accessToken, form);
+  const attachmentId = typeof res.attachment_id === "string" ? res.attachment_id : "";
+  if (!attachmentId) {
+    throw new Error(`${opts.label} uploadMedia: response missing attachment_id`);
+  }
+  return { mediaId: attachmentId };
+}
+
+/**
+ * Send a previously-uploaded media attachment on a social channel. Meta social
+ * messages can't carry BOTH an attachment and text in one call, so a caption is
+ * delivered as a best-effort follow-up text message (the media row still stores
+ * the caption for the agent's view). Returns the ATTACHMENT message's id — the
+ * one the app persists. Human Agent tag, same as text.
+ */
+export async function sendSocialMedia(
+  args: SendMediaArgs,
+  opts: SocialSendTarget,
+): Promise<SendTextResult> {
+  const type = attachmentTypeFromKind(args.kind);
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
+  const res = await graphPostJson(url, opts.accessToken, {
+    recipient: { id: args.to },
+    messaging_type: "MESSAGE_TAG",
+    tag: "HUMAN_AGENT",
+    message: { attachment: { type, payload: { attachment_id: args.mediaId } } },
+  });
+  const messageId = typeof res.message_id === "string" ? res.message_id : "";
+  if (!messageId) {
+    throw new Error(`${opts.label} sendMedia: response missing message_id`);
+  }
+  // Caption → follow-up text. Best-effort: a failed caption must not fail the
+  // media send (which already went out and bills nothing extra to retry).
+  if (args.caption && args.caption.trim().length > 0) {
+    try {
+      await sendSocialText({ to: args.to, body: args.caption }, opts);
+    } catch {
+      // Swallow — the media landed; the caption is a nice-to-have.
+    }
   }
   return { externalId: messageId, timestamp: new Date() };
 }

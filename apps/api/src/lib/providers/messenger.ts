@@ -13,15 +13,30 @@ import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import type {
   MessagingProvider,
   NormalizedEvent,
+  SendMediaArgs,
   SendTextArgs,
   SendTextResult,
+  UploadMediaArgs,
+  UploadMediaResult,
 } from "@ccp/shared/providers/types";
 import {
   fetchSocialProfileName,
   parseSocialMessaging,
+  sendSocialMedia,
   sendSocialText,
+  uploadSocialMedia,
 } from "@/lib/providers/meta-social";
 import type { MessengerSendConfig } from "@/lib/providers/messenger-config";
+
+/** The Page id + token that address a Messenger send. */
+function target(config: MessengerSendConfig) {
+  return {
+    accountId: config.pageId,
+    accessToken: config.pageAccessToken,
+    graphVersion: config.graphVersion,
+    label: "messenger",
+  };
+}
 
 export const messengerProvider: MessagingProvider<MessengerSendConfig> = {
   name: "messenger",
@@ -35,12 +50,21 @@ export const messengerProvider: MessagingProvider<MessengerSendConfig> = {
     args: SendTextArgs,
     config: MessengerSendConfig,
   ): Promise<SendTextResult> {
-    return sendSocialText(args, {
-      accountId: config.pageId,
-      accessToken: config.pageAccessToken,
-      graphVersion: config.graphVersion,
-      label: "messenger",
-    });
+    return sendSocialText(args, target(config));
+  },
+
+  async uploadMedia(
+    args: UploadMediaArgs,
+    config: MessengerSendConfig,
+  ): Promise<UploadMediaResult> {
+    return uploadSocialMedia(args, target(config));
+  },
+
+  async sendMedia(
+    args: SendMediaArgs,
+    config: MessengerSendConfig,
+  ): Promise<SendTextResult> {
+    return sendSocialMedia(args, target(config));
   },
 
   async fetchContactProfile(

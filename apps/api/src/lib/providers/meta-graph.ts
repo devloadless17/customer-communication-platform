@@ -16,6 +16,8 @@
 
 export const GRAPH_BASE = "https://graph.facebook.com";
 const GRAPH_TIMEOUT_MS = 15_000;
+/** Media uploads (video up to 16 MB) need a longer ceiling than a JSON call. */
+const GRAPH_UPLOAD_TIMEOUT_MS = 60_000;
 
 /** Redact any query string so a future signed-URL param can't leak into logs. */
 function redactUrl(url: string): string {
@@ -62,6 +64,42 @@ export async function graphGetJson(
     }
   }
   throw lastErr ?? new Error("graphGetJson: no attempts ran");
+}
+
+/**
+ * POST multipart/form-data to a Graph endpoint with a Bearer token — used for
+ * the social Attachment Upload API (`/{id}/message_attachments`). `fetch` sets
+ * the multipart boundary from the FormData, so we must NOT set content-type.
+ * Longer timeout than JSON calls (media can be large). No auto-retry (an upload
+ * that half-succeeded shouldn't be blindly replayed).
+ */
+export async function graphPostForm(
+  url: string,
+  accessToken: string,
+  form: FormData,
+): Promise<Record<string, unknown>> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), GRAPH_UPLOAD_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${accessToken}` },
+      body: form,
+      signal: ac.signal,
+    });
+    const text = await res.text().catch(() => "");
+    if (!res.ok) {
+      throw new Error(`graph POST(form) ${res.status} ${redactUrl(url)}: ${text.slice(0, 500)}`);
+    }
+    return text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(`graph upload timed out after ${GRAPH_UPLOAD_TIMEOUT_MS}ms: ${redactUrl(url)}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

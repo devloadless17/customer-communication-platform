@@ -13,15 +13,30 @@ import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import type {
   MessagingProvider,
   NormalizedEvent,
+  SendMediaArgs,
   SendTextArgs,
   SendTextResult,
+  UploadMediaArgs,
+  UploadMediaResult,
 } from "@ccp/shared/providers/types";
 import {
   fetchSocialProfileName,
   parseSocialMessaging,
+  sendSocialMedia,
   sendSocialText,
+  uploadSocialMedia,
 } from "@/lib/providers/meta-social";
 import type { InstagramSendConfig } from "@/lib/providers/instagram-config";
+
+/** The IG business id + token that address an Instagram send. */
+function target(config: InstagramSendConfig) {
+  return {
+    accountId: config.igId,
+    accessToken: config.igAccessToken,
+    graphVersion: config.graphVersion,
+    label: "instagram",
+  };
+}
 
 export const instagramProvider: MessagingProvider<InstagramSendConfig> = {
   name: "instagram",
@@ -35,12 +50,21 @@ export const instagramProvider: MessagingProvider<InstagramSendConfig> = {
     args: SendTextArgs,
     config: InstagramSendConfig,
   ): Promise<SendTextResult> {
-    return sendSocialText(args, {
-      accountId: config.igId,
-      accessToken: config.igAccessToken,
-      graphVersion: config.graphVersion,
-      label: "instagram",
-    });
+    return sendSocialText(args, target(config));
+  },
+
+  async uploadMedia(
+    args: UploadMediaArgs,
+    config: InstagramSendConfig,
+  ): Promise<UploadMediaResult> {
+    return uploadSocialMedia(args, target(config));
+  },
+
+  async sendMedia(
+    args: SendMediaArgs,
+    config: InstagramSendConfig,
+  ): Promise<SendTextResult> {
+    return sendSocialMedia(args, target(config));
   },
 
   async fetchContactProfile(
