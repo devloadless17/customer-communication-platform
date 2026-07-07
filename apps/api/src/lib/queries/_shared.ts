@@ -210,6 +210,9 @@ type PrismaContactListItem = Omit<
   | "deletedAt"
   | "callPermissionRevokedUntil"
   | "consecutiveUnansweredOutCalls"
+  // customerId isn't part of the narrow list row — the unified profile is loaded
+  // separately when a thread is opened, so the contact-list select omits it.
+  | "customerId"
 >;
 export function mapContactListItem(c: PrismaContactListItem): Contact {
   return {

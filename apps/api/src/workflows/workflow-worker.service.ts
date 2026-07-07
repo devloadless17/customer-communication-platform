@@ -26,6 +26,10 @@ import {
   stopContactDriftSweeper,
 } from "@/lib/sweepers/contact-last-inbound-drift";
 import {
+  startCustomerLinkSweeper,
+  stopCustomerLinkSweeper,
+} from "@/lib/sweepers/customer-link-drift";
+import {
   startConversationAnalyticsDriftSweeper,
   stopConversationAnalyticsDriftSweeper,
 } from "@/lib/sweepers/conversation-analytics-drift";
@@ -106,6 +110,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private waitingSweeperStarted = false;
   private awaitingReplySweeperStarted = false;
   private contactDriftSweeperStarted = false;
+  private customerLinkSweeperStarted = false;
   private analyticsDriftSweeperStarted = false;
   private authCleanupSweeperStarted = false;
   private webhookDeliveryCleanupStarted = false;
@@ -177,6 +182,12 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       startContactDriftSweeper();
       this.contactDriftSweeperStarted = true;
       this.logger.log("Contact lastInboundAt drift sweeper started");
+
+      // Links any contact with no Customer yet (unified identity, §6) — 60s
+      // reconciler covering every non-inline create path.
+      startCustomerLinkSweeper();
+      this.customerLinkSweeperStarted = true;
+      this.logger.log("Customer link sweeper started");
     } catch (err) {
       this.logger.error("Failed to start contact-drift sweeper", err);
     }
@@ -364,6 +375,11 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       if (this.contactDriftSweeperStarted) stopContactDriftSweeper();
     } catch (err) {
       this.logger.warn(`stopContactDriftSweeper threw: ${err instanceof Error ? err.message : err}`);
+    }
+    try {
+      if (this.customerLinkSweeperStarted) stopCustomerLinkSweeper();
+    } catch (err) {
+      this.logger.warn(`stopCustomerLinkSweeper threw: ${err instanceof Error ? err.message : err}`);
     }
     try {
       if (this.analyticsDriftSweeperStarted) stopConversationAnalyticsDriftSweeper();

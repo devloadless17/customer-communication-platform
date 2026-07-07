@@ -423,6 +423,7 @@ model Team {
 
   users                   User[]
   contacts                Contact[]
+  customers               Customer[]
   conversations           Conversation[]
   messages                Message[]
   invites                 Invite[]
@@ -694,6 +695,12 @@ model Contact {
   // removing a stage doesn't take its contacts with it; the bulk-move flow
   // in /api/team/stages/[id] DELETE empties this manually first.
   stageId           String?
+  // UNIFIED CUSTOMER (§6 / docs/identity.md). A Contact is one channel identity;
+  // the Customer it rolls up to is the PERSON, so an agent sees one profile
+  // across all a person's channels. Nullable during rollout; the IdentityService
+  // (called from ingest + manual create) ensures every contact gets one. Merge
+  // re-points this FK (never deletes a contact); SetNull on customer delete.
+  customerId        String?
   // How this row got into the DB. Defaulted to inbound because the webhook
   // ingest path uses the bare default; the manual create + CSV import paths
   // explicitly set 'manual'.
@@ -738,6 +745,7 @@ model Contact {
 
   team                Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
   stage               ContactStage?        @relation(fields: [stageId], references: [id], onDelete: SetNull)
+  customer            Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
   conversations       Conversation[]
   broadcastRecipients BroadcastRecipient[]
   workflowAwaitingReplies WorkflowAwaitingReply[]
@@ -784,6 +792,9 @@ model Contact {
   // Dropped as write overhead — migration 20260611130000.
   @@index([teamId, source])
   @@index([teamId, stageId])
+  // Customer → its channel-contacts (the profile's channel switcher loads by
+  // customerId); also serves the merge/split re-point.
+  @@index([customerId])
   // Directory reads filter `deletedAt IS NULL`; index it so the common
   // "active contacts" scan stays cheap as tombstones accumulate.
   @@index([teamId, deletedAt])
@@ -809,6 +820,31 @@ model Contact {
   // dropped in 20260611130200 because no query shape could use a jsonb_path_ops
   // GIN — all customFields reads are `::text ILIKE` / `->> key ILIKE`. That
   // also removed the drift workaround its hand-written status existed for.)
+}
+
+// The unified CUSTOMER (a person) — the profile layer above channel-scoped
+// Contacts (§6 / docs/identity.md). One Customer owns many Contacts (one per
+// channel the person uses); the agent sees a single profile + a channel
+// switcher over the person's separate per-channel threads. Message histories
+// are NEVER merged — the Customer only re-points `Contact.customerId`.
+//
+// Population: the IdentityService creates one on first contact and AUTO-MERGES
+// only on deterministic strong keys (verified exact phone / exact email — never
+// fuzzy/name). Everything else is a manual, reversible merge/split with an
+// audit trail. Deleting a Customer SetNulls its contacts (they never vanish).
+model Customer {
+  id        String   @id @default(cuid())
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  // Person-level display name. Seeded from the first contact; an agent can edit
+  // it without touching the underlying per-channel contact names.
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  contacts Contact[]
+
+  @@index([teamId])
 }
 
 // Customer-lifecycle stage. A team configures an ordered list ("New",

@@ -823,6 +823,18 @@ async function ingestInboundMessage(
             lastName,
             countryCode: isPhone ? getCountryFromPhone(evt.contactPhone!) : null,
             stageId: defaultStageId,
+            // Unified Customer (§6): a brand-new inbound contact is a brand-new
+            // identity — its phone is unique per team (WhatsApp) and social ids
+            // carry no phone/email to merge on — so it always gets its OWN
+            // Customer, created here in the same tx. Cross-channel MERGE happens
+            // later (manual, or the customer-link sweeper when a shared verified
+            // phone/email appears). Scalar customerId (unchecked-create path).
+            customerId: (
+              await tx.customer.create({
+                data: { teamId, name: evt.contactName ?? identityLabel },
+                select: { id: true },
+              })
+            ).id,
           },
           // Same `{ id }` tags shape as the returning-contact path so the
           // snapshot mapper reads the relation uniformly (a brand-new contact

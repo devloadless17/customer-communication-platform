@@ -30,6 +30,7 @@
 
 type SweeperName =
   | "contact-drift"
+  | "customer-link"
   | "blob-orphan"
   | "outbound-event-retention"
   | "outbound-send-attempt-retention"
@@ -56,6 +57,7 @@ const lastCompletion = new Map<SweeperName, number>();
 // runway because a skipped tick can take a full week to retry.
 const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
   "contact-drift": 25 * 60 * 60 * 1000, // 24h cadence
+  "customer-link": 5 * 60 * 1000, // 60s cadence
   "blob-orphan": 8 * 24 * 60 * 60 * 1000, // weekly cadence
   "outbound-event-retention": 25 * 60 * 60 * 1000,
   "outbound-send-attempt-retention": 25 * 60 * 60 * 1000,
