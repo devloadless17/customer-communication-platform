@@ -104,6 +104,8 @@ enum MessageOrigin {
 // `instagram` — they are DISTINCT channels even though one API delivers them.
 enum Channel {
   whatsapp
+  messenger
+  instagram
 }
 
 // Mirrors Meta's template review states. We cache every status so admins can

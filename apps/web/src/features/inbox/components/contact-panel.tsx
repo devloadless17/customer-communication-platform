@@ -34,6 +34,7 @@ import { STATUS_META } from "@/features/inbox/lib/status-meta";
 import { assertReducerCoverage } from "@/features/inbox/lib/thread-reducers";
 import { usePanelResize } from "@/features/inbox/hooks/use-panel-resize";
 import { INBOX_DETAILS_WIDTH_COOKIE } from "@/features/inbox/lib/panel-cookies";
+import { CHANNEL_LABEL } from "./channel-badge";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
@@ -377,6 +378,9 @@ function ContactPanelImpl({
     contact.customFields ?? {},
   );
   const [tagIds, setTagIds] = useState<string[]>(contact.tagIds ?? []);
+  // The conversation's channel drives the header identity line + channel badge
+  // (phone for WhatsApp; the channel label for non-phone Messenger/Instagram).
+  const panelChannel = conversation.channel ?? "whatsapp";
   // Local mirror of the team catalog so newly-created tags appear immediately
   // without waiting for a router.refresh round-trip.
   const [tags, setTags] = useState<Tag[]>(tagCatalog);
@@ -1015,12 +1019,14 @@ function ContactPanelImpl({
               }}
             />
             <div className="mt-0.5 font-mono text-xs text-muted-foreground">
-              {formatPhone(contact.phoneNumber)}
+              {contact.phoneNumber
+                ? formatPhone(contact.phoneNumber)
+                : CHANNEL_LABEL[panelChannel]}
             </div>
           </div>
         </div>
         <div className="flex flex-wrap gap-1.5 px-5 pb-4">
-          <Badge variant="muted">WhatsApp</Badge>
+          <Badge variant="muted">{CHANNEL_LABEL[panelChannel]}</Badge>
           {/* Distinguishes contacts an agent created (e.g. via the New
               Contact dialog or CSV import) from contacts we got because a
               customer messaged us. The list page filters by this too. Kept
@@ -1038,17 +1044,20 @@ function ContactPanelImpl({
             saving ? <Loader2 className="size-3 animate-spin text-muted-foreground" /> : null
           }
         >
-          {/* Phone is read-only: it's the WhatsApp identity used to dedupe
-              inbound webhooks and route conversations. Editing it would
-              silently break the link to the customer's WhatsApp account, so
-              we don't allow it from the UI. */}
-          {/* Phone is always shown — WhatsApp identity, not hideable. */}
-          <ReadOnlyRow
-            icon={Phone}
-            label="Phone"
-            mono
-            value={formatPhone(contact.phoneNumber)}
-          />
+          {/* Phone is read-only: on phone channels (WhatsApp) it's the identity
+              used to dedupe inbound webhooks and route conversations. Editing it
+              would break the link to the customer's account, so it's not
+              editable. Non-phone channels (Messenger/Instagram) have no phone —
+              their identity is the opaque provider id, shown as the channel
+              label above, so the Phone row is omitted. */}
+          {contact.phoneNumber && (
+            <ReadOnlyRow
+              icon={Phone}
+              label="Phone"
+              mono
+              value={formatPhone(contact.phoneNumber)}
+            />
+          )}
           {builtins.firstName && (
             <EditableField
               icon={UserIcon}

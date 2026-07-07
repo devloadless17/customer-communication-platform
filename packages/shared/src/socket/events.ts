@@ -451,7 +451,10 @@ export interface ServerToClientEvents {
       | "workflows"
       // Team chat channels. Fires on channel create / rename / delete so
       // every agent's sidebar refreshes without a page reload.
-      | "team-channels";
+      | "team-channels"
+      // Channel connections (Messenger / Instagram / …). Fires on connect /
+      // update / disconnect so the settings Channels list refreshes live.
+      | "channels";
   }) => void;
 
   /**

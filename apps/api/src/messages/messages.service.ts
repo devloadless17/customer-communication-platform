@@ -59,7 +59,7 @@ import type {
   Message,
   User,
 } from "@ccp/shared/types";
-import { computeWindowStatus } from "@ccp/shared/utils/window";
+import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
 import {
   workflowContactSnapshot,
   workflowConversationSnapshotAfterAssign,
@@ -787,7 +787,7 @@ export class MessagesService {
     }
 
     // Free-form send window — driven by the provider capability; `null` skips.
-    const windowMs = binding.provider.capabilities.freeFormWindowMs;
+    const windowMs = effectiveSendWindowMs(binding.provider.capabilities);
     if (windowMs !== null) {
       const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
       const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);
@@ -1446,7 +1446,7 @@ export class MessagesService {
 
     // Free-form send window — media (like free-form text) is template-only
     // outside it. Driven by the provider capability; `null` skips the check.
-    const windowMs = binding.provider.capabilities.freeFormWindowMs;
+    const windowMs = effectiveSendWindowMs(binding.provider.capabilities);
     if (windowMs !== null) {
       const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
       const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);

@@ -10,6 +10,8 @@ import { StagesModule } from "./stages/stages.module";
 import { TagsModule } from "./tags/tags.module";
 import { TeamRootController } from "./team-root.controller";
 import { TeamRootService } from "./team-root.service";
+import { InstagramModule } from "./instagram/instagram.module";
+import { MessengerModule } from "./messenger/messenger.module";
 import { WhatsappModule } from "./whatsapp/whatsapp.module";
 import { WorkflowsModule as TeamWorkflowsModule } from "./workflows/workflows.module";
 
@@ -32,6 +34,8 @@ import { WorkflowsModule as TeamWorkflowsModule } from "./workflows/workflows.mo
     ApiKeysModule,
     OutboundWebhooksAdminModule,
     WhatsappModule,
+    MessengerModule,
+    InstagramModule,
     TeamWorkflowsModule,
     PermissionsModule,
   ],

@@ -48,6 +48,7 @@ import { Button } from "@/components/ui/button";
 import { CallsHistory } from "@/app/(app)/calls/calls-history";
 import { useCallApi } from "@/features/calls/call-provider";
 import { isBicAllowed } from "@ccp/shared/providers/calling-regions";
+import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import { toast } from "@/lib/toast";
 
 /**
@@ -1293,14 +1294,18 @@ export function InboxShell({
                 canMakeCalls={
                   // Per-thread gate: capability + WhatsApp channel + region
                   // (BIC blocklist via contact country) + no fresh revocation.
-                  // channel may be absent on legacy wire payloads; treat
-                  // unknown as whatsapp (the only channel today). The revocation
-                  // check mirrors the backend initiateCall gate so the button is
-                  // hidden up-front instead of surfacing a permission_revoked
-                  // 4xx after the agent clicks.
+                  // Calling is gated on the channel's declared capability
+                  // (WhatsApp: true; Messenger/Instagram: false) rather than a
+                  // hardcoded channel check — a future calling-capable channel
+                  // lights the button up with no edit here. channel may be
+                  // absent on legacy wire payloads; treat unknown as whatsapp.
+                  // The revocation check mirrors the backend initiateCall gate so
+                  // the button is hidden up-front instead of surfacing a
+                  // permission_revoked 4xx after the agent clicks.
                   canMakeCalls &&
-                  (displayedThread.data.conversation.channel ?? "whatsapp") ===
-                    "whatsapp" &&
+                  CHANNEL_CAPABILITIES[
+                    displayedThread.data.conversation.channel ?? "whatsapp"
+                  ].calling &&
                   isBicAllowed(displayedThread.data.contact.countryCode ?? null) &&
                   !isCallPermissionRevoked(
                     displayedThread.data.contact.callPermissionRevokedUntil,

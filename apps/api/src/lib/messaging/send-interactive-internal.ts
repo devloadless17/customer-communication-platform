@@ -15,7 +15,7 @@ import {
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Message } from "@ccp/shared/types";
 import type { InteractiveOption } from "@ccp/shared/providers/types";
-import { computeWindowStatus } from "@ccp/shared/utils/window";
+import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
 
 import { SendTextValidationError } from "./send-text-internal";
 
@@ -98,7 +98,7 @@ export async function sendInteractiveInternal(
 
   // Free-form send window — same gate as plain text. Driven by the provider's
   // declared window; `null` skips the check (channel has no window).
-  const windowMs = binding.provider.capabilities.freeFormWindowMs;
+  const windowMs = effectiveSendWindowMs(binding.provider.capabilities);
   if (windowMs !== null) {
     const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
     const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);

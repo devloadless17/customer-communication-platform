@@ -70,7 +70,9 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
       let landed = 0;
       for (const evt of events) {
         // The history parser only ever emits inbound messages + business echoes.
-        if (evt.kind === "message") {
+        // Coexistence history is WhatsApp-only, so contactPhone is always set;
+        // the guard just satisfies the now-optional identity type.
+        if (evt.kind === "message" && evt.contactPhone) {
           await ingestHistoricalMessage(teamId, "whatsapp", {
             externalId: evt.externalId,
             contactPhone: evt.contactPhone,

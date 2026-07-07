@@ -1,0 +1,171 @@
+import { decryptSecret } from "@/lib/crypto/envelope";
+import { db } from "@/lib/db";
+import { ProviderNotConfiguredError } from "@/lib/providers/config";
+
+/**
+ * Per-team Instagram DM config. Same credential model as WhatsApp / Messenger
+ * (a `ChannelConnection` row keyed (teamId, "instagram"); `config` non-secret,
+ * `secrets` envelope-encrypted). Identity is the Instagram business account id
+ * (`igId`) + an Instagram access token; no phone / no Page / no WABA. The Meta
+ * app secret verifies the inbound webhook HMAC. "cache ciphertext, decrypt on
+ * demand" posture — decrypted tokens never outlive the request.
+ */
+
+interface InstagramChannelConfig {
+  igId?: string;
+  igUsername?: string;
+  appId?: string;
+  verifyToken?: string;
+}
+interface InstagramChannelSecrets {
+  igAccessToken?: string;
+  appSecret?: string;
+}
+
+export interface InstagramSendConfig {
+  igId: string;
+  igAccessToken: string;
+  graphVersion: string;
+}
+
+export interface InstagramWebhookConfig {
+  appSecret: string;
+  verifyToken: string;
+  igId: string | null;
+}
+
+const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
+const CONFIG_TTL_MS = 60_000;
+const CONFIG_CACHE_MAX = 10_000;
+const CONFIG_SWEEP_INTERVAL_MS = 5 * 60_000;
+
+interface SendCipher {
+  igId: string;
+  igAccessTokenCipher: string;
+}
+interface WebhookCipher {
+  appSecretCipher: string;
+  verifyToken: string;
+  igId: string | null;
+}
+
+type CachedSend =
+  | { kind: "ok"; cipher: SendCipher }
+  | { kind: "err"; missing: readonly string[] };
+
+const sendCache = new Map<string, { entry: CachedSend; exp: number }>();
+const webhookCache = new Map<string, { value: WebhookCipher | null; exp: number }>();
+
+function evictExpired<V extends { exp: number }>(map: Map<string, V>): void {
+  const now = Date.now();
+  for (const [k, v] of map) if (v.exp <= now) map.delete(k);
+}
+function evictOldestIfOverCap<V>(map: Map<string, V>, max: number): void {
+  if (map.size < max) return;
+  const oldest = map.keys().next().value;
+  if (oldest !== undefined) map.delete(oldest);
+}
+
+const sweeper = setInterval(() => {
+  evictExpired(sendCache);
+  evictExpired(webhookCache);
+}, CONFIG_SWEEP_INTERVAL_MS);
+sweeper.unref?.();
+
+/** Drop cached Instagram credentials for a team. Call after the settings save. */
+export function invalidateInstagramConfig(teamId: string): void {
+  sendCache.delete(teamId);
+  webhookCache.delete(teamId);
+}
+
+async function loadSendCipher(teamId: string): Promise<CachedSend> {
+  const conn = await db.channelConnection.findUnique({
+    where: { teamId_channel: { teamId, channel: "instagram" } },
+    select: { config: true, secrets: true, isActive: true },
+  });
+  if (!conn || !conn.isActive) return { kind: "err", missing: ["not-connected"] };
+  const config = (conn.config ?? {}) as InstagramChannelConfig;
+  const secrets = (conn.secrets ?? {}) as InstagramChannelSecrets;
+  const missing: string[] = [];
+  if (!config.igId) missing.push("igId");
+  if (!secrets.igAccessToken) missing.push("igAccessToken");
+  if (missing.length > 0) return { kind: "err", missing };
+  return {
+    kind: "ok",
+    cipher: { igId: config.igId!, igAccessTokenCipher: secrets.igAccessToken! },
+  };
+}
+
+function materialize(teamId: string, cipher: SendCipher): InstagramSendConfig {
+  let igAccessToken: string;
+  try {
+    igAccessToken = decryptSecret(cipher.igAccessTokenCipher);
+  } catch (err) {
+    console.error(
+      `[instagram-config] failed to decrypt send secrets for team=${teamId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    throw new ProviderNotConfiguredError(teamId, ["igAccessToken (decrypt failed)"]);
+  }
+  return { igId: cipher.igId, igAccessToken, graphVersion: DEFAULT_GRAPH_VERSION };
+}
+
+/** Send-side Instagram config. Throws ProviderNotConfigured when unconnected. */
+export async function getInstagramSendConfig(teamId: string): Promise<InstagramSendConfig> {
+  const hit = sendCache.get(teamId);
+  if (hit && hit.exp > Date.now()) {
+    if (hit.entry.kind === "err") {
+      throw new ProviderNotConfiguredError(teamId, [...hit.entry.missing]);
+    }
+    return materialize(teamId, hit.entry.cipher);
+  }
+  const entry = await loadSendCipher(teamId);
+  evictOldestIfOverCap(sendCache, CONFIG_CACHE_MAX);
+  sendCache.set(teamId, { entry, exp: Date.now() + CONFIG_TTL_MS });
+  if (entry.kind === "err") throw new ProviderNotConfiguredError(teamId, [...entry.missing]);
+  return materialize(teamId, entry.cipher);
+}
+
+/** Webhook-side Instagram config (GET verify + POST HMAC). Null when unconfigured. */
+export async function getInstagramWebhookConfig(
+  teamId: string,
+): Promise<InstagramWebhookConfig | null> {
+  const hit = webhookCache.get(teamId);
+  let cipher: WebhookCipher | null;
+  if (hit && hit.exp > Date.now()) {
+    cipher = hit.value;
+  } else {
+    const conn = await db.channelConnection.findUnique({
+      where: { teamId_channel: { teamId, channel: "instagram" } },
+      select: { config: true, secrets: true, isActive: true },
+    });
+    const config = (conn?.config ?? {}) as InstagramChannelConfig;
+    const secrets = (conn?.secrets ?? {}) as InstagramChannelSecrets;
+    cipher =
+      conn && conn.isActive && secrets.appSecret && config.verifyToken
+        ? {
+            appSecretCipher: secrets.appSecret,
+            verifyToken: config.verifyToken,
+            igId: config.igId ?? null,
+          }
+        : null;
+    evictOldestIfOverCap(webhookCache, CONFIG_CACHE_MAX);
+    webhookCache.set(teamId, { value: cipher, exp: Date.now() + CONFIG_TTL_MS });
+  }
+  if (!cipher) return null;
+  try {
+    return {
+      appSecret: decryptSecret(cipher.appSecretCipher),
+      verifyToken: cipher.verifyToken,
+      igId: cipher.igId,
+    };
+  } catch (err) {
+    console.error(
+      `[instagram-config] failed to decrypt webhook secrets for team=${teamId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
+  }
+}

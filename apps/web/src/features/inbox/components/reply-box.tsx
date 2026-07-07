@@ -44,7 +44,9 @@ import {
 } from "@/features/inbox/lib/optimistic-activity";
 import { dispatchLocalSocketEvents } from "@/lib/socket-client";
 import { apiFetch } from "@/lib/api/client-fetch";
-import { computeWindowStatus } from "@ccp/shared/utils/window";
+import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
+import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
+import type { Channel } from "@ccp/shared/types";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 import { useNow } from "@/hooks/use-now";
 
@@ -141,6 +143,7 @@ function ReplyBoxImpl({
   conversationId,
   currentUser,
   contact,
+  channel = "whatsapp",
   stageCatalog,
   tags,
   fieldDefinitions,
@@ -165,6 +168,14 @@ function ReplyBoxImpl({
    * `$var.contact.*` tokens when an agent inserts a snippet (`/<name>`).
    */
   contact: Contact;
+  /**
+   * The conversation's channel. Drives capability-derived composer behavior —
+   * the free-form send window (WhatsApp 24h vs Messenger/Instagram 24h+7d) and
+   * whether the template picker is offered at all. Optional + defaults to
+   * `whatsapp` so the WhatsApp path is byte-identical (its capabilities
+   * reproduce the previous hardcoded 24h + templates-on constants).
+   */
+  channel?: Channel;
   /** Team stage + tag catalogs — used to resolve the derived
    *  `$var.contact.stage_name` / `$var.contact.tag_names` tokens when an
    *  agent inserts a snippet (the contact carries only ids). */
@@ -241,7 +252,16 @@ function ReplyBoxImpl({
   // dropping the prior null-then-fill posture that caused a "Window closed"
   // flash on refresh.
   const now = useNow();
-  const windowStatus = computeWindowStatus(lastInboundAt, now);
+  // Capability-driven window: WhatsApp = 24h; Messenger/Instagram = 24h + a
+  // 7-day human-agent extension. `effectiveSendWindowMs` collapses that to the
+  // widest window an agent may send in. WhatsApp's capability values reproduce
+  // the previous hardcoded 24h, so this is behavior-identical there.
+  const caps = CHANNEL_CAPABILITIES[channel];
+  const windowStatus = computeWindowStatus(
+    lastInboundAt,
+    now,
+    effectiveSendWindowMs(caps) ?? undefined,
+  );
   const windowClosed =
     windowStatus.state === "closed" || windowStatus.state === "never";
   const [mode, setMode] = useState<Mode>("reply");
@@ -1362,7 +1382,7 @@ function ReplyBoxImpl({
             <ToggleButton active={mode === "note"} onClick={() => switchMode("note")} icon={StickyNote} label="Note" />
           </div>
           {!isNote && <WindowBadgeFromStatus status={windowStatus} size="sm" />}
-          {!isNote && windowClosed && (
+          {!isNote && windowClosed && caps.templates && (
             <Button
               type="button"
               size="sm"
@@ -1643,22 +1663,24 @@ function ReplyBoxImpl({
             >
               <Paperclip className="size-4" />
             </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 pointer-coarse:size-9 text-muted-foreground disabled:text-muted-foreground/40"
-              type="button"
-              disabled={isNote}
-              aria-label="Send a template"
-              title={
-                isNote
-                  ? "Templates can only be sent in Reply mode"
-                  : "Send a pre-approved template"
-              }
-              onClick={() => setPickerOpen(true)}
-            >
-              <Sparkles className="size-4" />
-            </Button>
+            {caps.templates && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-8 pointer-coarse:size-9 text-muted-foreground disabled:text-muted-foreground/40"
+                type="button"
+                disabled={isNote}
+                aria-label="Send a template"
+                title={
+                  isNote
+                    ? "Templates can only be sent in Reply mode"
+                    : "Send a pre-approved template"
+                }
+                onClick={() => setPickerOpen(true)}
+              >
+                <Sparkles className="size-4" />
+              </Button>
+            )}
             <div className="relative">
               <Button
                 variant="ghost"

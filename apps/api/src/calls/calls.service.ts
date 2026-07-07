@@ -22,6 +22,7 @@ import {
 } from "@ccp/shared/providers/calling-regions";
 import type { Capability } from "@ccp/shared/auth/permissions";
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
+import type { Channel } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
 import { EventBus } from "../events/event-bus.module";
@@ -576,8 +577,12 @@ export class CallsService {
     teamId: string,
     contactId: string,
     phoneNumber: string,
-    channel: "whatsapp" = "whatsapp",
+    channel: Channel = "whatsapp",
   ): Promise<{ permissionRequestId: string; expiresAt: Date }> {
+    // Calling is phone-channel-only today; a non-calling channel resolves to a
+    // provider without sendCallPermissionRequest and throws
+    // UnsupportedProviderOperationError below (defensive — the call button is
+    // already gated on capabilities.calling in the UI).
     const binding = getProviderBinding(channel);
     const sendPerm = requireProviderMethod(
       binding.provider,

@@ -1,0 +1,45 @@
+import { Body, Controller, Delete, Get, Post } from "@nestjs/common";
+
+import { CurrentSession } from "../../auth/current-session.decorator";
+import { RequireRole } from "../../auth/role.guard";
+import type { ApiSession } from "../../auth/session.guard";
+import { zBody } from "../../common/zod-validation.pipe";
+import {
+  UpdateMessengerConfigSchema,
+  type UpdateMessengerConfigInput,
+} from "./messenger.schemas";
+import { MessengerService } from "./messenger.service";
+
+/**
+ * Facebook Messenger connection settings — admin-only.
+ *
+ *   GET    /api/team/messenger  — current config + decrypted display values
+ *   POST   /api/team/messenger  — set/update credentials (validates Page first)
+ *   DELETE /api/team/messenger  — disconnect (wipes secrets, keeps history)
+ */
+@Controller("api/team/messenger")
+@RequireRole("admin")
+export class MessengerController {
+  constructor(private readonly messenger: MessengerService) {}
+
+  @Get()
+  async get(@CurrentSession() session: ApiSession) {
+    const config = await this.messenger.getConfig(session.teamId);
+    return { config };
+  }
+
+  @Post()
+  async update(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(UpdateMessengerConfigSchema)) body: UpdateMessengerConfigInput,
+  ) {
+    const out = await this.messenger.updateConfig(session.teamId, body);
+    return { ok: true, ...out };
+  }
+
+  @Delete()
+  async disconnect(@CurrentSession() session: ApiSession) {
+    await this.messenger.disconnect(session.teamId);
+    return { ok: true };
+  }
+}

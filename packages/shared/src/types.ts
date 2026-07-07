@@ -17,7 +17,11 @@ export type TeamStatus = "pending" | "active" | "suspended";
 export type ConversationStatus = "open" | "pending" | "closed";
 export type MessageDirection = "in" | "out";
 export type MessageStatus = "sent" | "delivered" | "read" | "failed";
-export type Channel = "whatsapp";
+// The messaging channel a conversation lives on — the single discriminator for
+// "where is this from". Mirrors the Prisma `Channel` enum. `whatsapp` is
+// phone-based; `messenger`/`instagram` are Meta social channels keyed by an
+// opaque page-scoped id (PSID / IGSID), not a phone number.
+export type Channel = "whatsapp" | "messenger" | "instagram";
 // Provenance of an outbound message. `api` = sent through this platform;
 // `business_app` = sent from the WhatsApp Business App on the owner's phone and
 // mirrored to us via WhatsApp Coexistence. Mirrors the Prisma `MessageOrigin`

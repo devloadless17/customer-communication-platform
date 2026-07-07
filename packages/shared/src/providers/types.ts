@@ -62,13 +62,31 @@ export interface InteractiveReply {
   title: string;
 }
 
-export interface NormalizedInboundMessage {
+/**
+ * Channel-agnostic contact identity carried by every inbound-bearing normalized
+ * event. Exactly one field is set, decided by whether the channel is phone-based:
+ *
+ *   - Phone channels (WhatsApp): `contactPhone` = E.164 digits, no '+'.
+ *   - Non-phone channels (Messenger, Instagram, Telegram, …): `externalContactId`
+ *     = the provider's opaque per-account id (Messenger PSID, Instagram IGSID,
+ *     Telegram chat id). NEVER digit-stripped — these are not phone numbers.
+ *
+ * Ingest resolves the Contact from whichever is present (phone → `phoneNumber`
+ * lookup; externalContactId → the `(teamId, identityChannel, externalContactId)`
+ * compound-unique lookup). See `apps/api/src/lib/providers/ingest.ts`.
+ */
+export interface NormalizedContactIdentity {
+  /** Set by phone-based channels. E.164 digits, no '+'. e.g. "5511999999999". */
+  contactPhone?: string;
+  /** Set by non-phone channels. Provider's opaque per-account id (PSID/IGSID). */
+  externalContactId?: string;
+}
+
+export interface NormalizedInboundMessage extends NormalizedContactIdentity {
   kind: "message";
   /** Provider-assigned id; the dedupe key. */
   externalId: string;
-  /** E.164 digits, no '+'. e.g. "5511999999999". */
-  contactPhone: string;
-  /** Display name from the provider, if any. We fall back to the phone number. */
+  /** Display name from the provider, if any. We fall back to the identity. */
   contactName: string | null;
   /**
    * Body text. For text messages this is the message itself; for media it's
@@ -125,7 +143,7 @@ export interface NormalizedCallEvent {
   kind: "call";
   /** Meta-assigned call id; dedup key half. */
   externalCallId: string;
-  /** E.164 digits, no '+'. Same shape as messages. */
+  /** E.164 digits, no '+'. Calling is phone-channel-only today (WhatsApp). */
   contactPhone: string;
   contactName: string | null;
   direction: "in" | "out";
@@ -220,7 +238,7 @@ export interface NormalizedReaction {
   targetExternalId: string;
   /** The emoji, or null when the customer REMOVED their reaction. */
   emoji: string | null;
-  /** E.164 digits, no '+'. Same shape as messages. */
+  /** E.164 digits, no '+'. Reactions are phone-channel-only today (WhatsApp). */
   contactPhone: string;
   timestamp: Date;
   rawPayload: Record<string, unknown>;
@@ -557,6 +575,16 @@ export interface UploadHeaderMediaResult {
  */
 export interface ProviderCapabilities {
   freeFormWindowMs: number | null;
+  /**
+   * Extended outbound window (ms) for channels that allow agent replies past
+   * the standard free-form window under a support-only policy. Meta social
+   * (Messenger/Instagram) permit sends up to 7 days since the last inbound via
+   * the Human Agent tag — attached automatically by the provider when a send
+   * lands in the `freeFormWindowMs..humanAgentWindowMs` band. `null` when the
+   * channel has no such extension (WhatsApp: only templates reopen a closed
+   * window, so `null`).
+   */
+  humanAgentWindowMs?: number | null;
   templates: boolean;
   readReceipts: boolean;
   typingIndicators: boolean;

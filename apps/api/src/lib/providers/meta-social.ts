@@ -1,0 +1,156 @@
+/**
+ * Shared inbound-parse + outbound-send for the Meta SOCIAL channels (Facebook
+ * Messenger, Instagram DM). Both are the same wire shape — the only real
+ * differences are the webhook `object` discriminator and which business-account
+ * id addresses the send — so the logic lives here once and each provider is a
+ * thin wrapper (`messenger.ts`, `instagram.ts`). Two live channels make this a
+ * real seam, not speculative abstraction.
+ *
+ *   - Inbound: `{ object, entry[].messaging[] }`. Identity = the opaque sender
+ *     id (Messenger PSID / Instagram IGSID), NEVER a phone (never digit-stripped).
+ *   - Outbound: `POST /{ACCOUNT_ID}/messages` with `recipient:{id}` and the
+ *     Human Agent tag (valid across the 7-day support window; every send in an
+ *     agent-operated shared inbox is a human agent reply).
+ *
+ * Scope (first increment): inbound TEXT + delivery status, outbound TEXT.
+ * Attachments become a `[kind]` placeholder body; media in/out is a follow-up.
+ */
+
+import type {
+  NormalizedEvent,
+  NormalizedInboundMessage,
+  NormalizedStatusUpdate,
+  SendTextArgs,
+  SendTextResult,
+} from "@ccp/shared/providers/types";
+import { GRAPH_BASE, graphPostJson } from "@/lib/providers/meta-graph";
+
+interface SocialEnvelope {
+  object?: string;
+  entry?: SocialEntry[];
+}
+interface SocialEntry {
+  id?: string;
+  time?: number;
+  messaging?: MessagingEvent[];
+}
+interface MessagingEvent {
+  sender?: { id?: string };
+  recipient?: { id?: string };
+  timestamp?: number;
+  message?: {
+    mid?: string;
+    text?: string;
+    is_echo?: boolean;
+    attachments?: { type?: string; payload?: { url?: string } }[];
+  };
+  delivery?: { mids?: string[]; watermark?: number };
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+/** Label an attachment-only message so the agent sees that something arrived. */
+function attachmentPlaceholder(atts: { type?: string }[] | undefined): string {
+  const kind = atts?.[0]?.type;
+  switch (kind) {
+    case "image":
+      return "[image]";
+    case "video":
+      return "[video]";
+    case "audio":
+      return "[audio]";
+    case "file":
+      return "[file]";
+    default:
+      return kind ? `[${kind}]` : "[attachment]";
+  }
+}
+
+/**
+ * Parse a Messenger/Instagram webhook into normalized events. `expectedObject`
+ * gates the envelope (`"page"` for Messenger, `"instagram"` for Instagram) so a
+ * misrouted product silently yields `[]` rather than mis-ingesting.
+ */
+export function parseSocialMessaging(
+  payload: unknown,
+  expectedObject: string,
+): NormalizedEvent[] {
+  if (!isObject(payload)) return [];
+  const env = payload as SocialEnvelope;
+  if (env.object !== expectedObject || !Array.isArray(env.entry)) return [];
+
+  const events: NormalizedEvent[] = [];
+  for (const entry of env.entry) {
+    if (!Array.isArray(entry.messaging)) continue;
+    for (const m of entry.messaging) {
+      // Inbound customer message. Skip echoes (our own sends mirrored back) —
+      // the send path owns persistence; ingesting the echo would double-post.
+      if (m.message && !m.message.is_echo) {
+        const senderId = m.sender?.id;
+        const mid = m.message.mid;
+        if (!senderId || !mid) continue;
+        const text = m.message.text;
+        const body =
+          text && text.length > 0 ? text : attachmentPlaceholder(m.message.attachments);
+        const msg: NormalizedInboundMessage = {
+          kind: "message",
+          externalId: mid,
+          externalContactId: senderId,
+          // No display name in the messaging event; ingest falls back to the id.
+          // Name enrichment (Graph `/{id}?fields=name`) + attachment→media are
+          // follow-ups.
+          contactName: null,
+          body,
+          timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
+          rawPayload: m as unknown as Record<string, unknown>,
+        };
+        events.push(msg);
+        continue;
+      }
+      // Delivery receipts carry the mids Meta delivered.
+      if (m.delivery && Array.isArray(m.delivery.mids)) {
+        const ts = new Date(m.delivery.watermark ?? m.timestamp ?? Date.now());
+        for (const mid of m.delivery.mids) {
+          if (!mid) continue;
+          const status: NormalizedStatusUpdate = {
+            kind: "status",
+            externalId: mid,
+            status: "delivered",
+            timestamp: ts,
+            rawPayload: m as unknown as Record<string, unknown>,
+          };
+          events.push(status);
+        }
+      }
+      // `read` watermarks (no per-message id) + reactions/postbacks: not this
+      // increment.
+    }
+  }
+  return events;
+}
+
+/**
+ * Send a text message on a Meta social channel. `accountId` is the Page id
+ * (Messenger) or IG business id (Instagram); `accessToken` is that account's
+ * token. Human Agent tag = valid for the 7-day support window. Quoted replies
+ * aren't supported by these Send APIs, so `replyToExternalId` is ignored.
+ */
+export async function sendSocialText(
+  args: SendTextArgs,
+  opts: { accountId: string; accessToken: string; graphVersion: string; label: string },
+): Promise<SendTextResult> {
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
+  const res = await graphPostJson(url, opts.accessToken, {
+    recipient: { id: args.to },
+    messaging_type: "MESSAGE_TAG",
+    tag: "HUMAN_AGENT",
+    message: { text: args.body },
+  });
+  const messageId = typeof res.message_id === "string" ? res.message_id : "";
+  if (!messageId) {
+    throw new Error(`${opts.label} sendText: response missing message_id`);
+  }
+  return { externalId: messageId, timestamp: new Date() };
+}

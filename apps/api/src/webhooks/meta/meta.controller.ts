@@ -27,9 +27,43 @@ import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
 import { getMetaProvider } from "@/lib/providers";
 import { MediaTooLargeError } from "@/lib/providers/meta";
 import { getMetaSendConfig, getMetaWebhookConfig } from "@/lib/providers/config";
+import { messengerProvider } from "@/lib/providers/messenger";
+import { getMessengerWebhookConfig } from "@/lib/providers/messenger-config";
+import { instagramProvider } from "@/lib/providers/instagram";
+import { getInstagramWebhookConfig } from "@/lib/providers/instagram-config";
 import { ingestEvents, isTransientDbError } from "@/lib/providers/ingest";
 import { enqueueHistoryChunk } from "@/lib/coexistence/history-queue";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
+
+/**
+ * Which channel a Meta webhook envelope belongs to, from its `object` field.
+ * Meta delivers all products to the same callback, so one endpoint fans out by
+ * `object`. Reading this from the (untrusted) body to select which channel's
+ * app-secret verifies the HMAC is safe: an attacker can flip `object` but still
+ * can't forge a valid signature without the secret. `instagram` is added when
+ * its provider ships.
+ */
+function channelForMetaObject(
+  payload: unknown,
+): "whatsapp" | "messenger" | "instagram" | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  switch ((payload as { object?: unknown }).object) {
+    case "whatsapp_business_account":
+      return "whatsapp";
+    case "page":
+      return "messenger";
+    case "instagram":
+      return "instagram";
+    default:
+      return null;
+  }
+}
+
+/** The provider + webhook-config loader for a social (non-WhatsApp) channel. */
+const SOCIAL = {
+  messenger: { provider: messengerProvider, getWebhookConfig: getMessengerWebhookConfig },
+  instagram: { provider: instagramProvider, getWebhookConfig: getInstagramWebhookConfig },
+} as const;
 
 /**
  * Per-event outcome of the inbound-media download. Kept OUT of the event
@@ -113,8 +147,21 @@ export class MetaWebhookController implements OnModuleDestroy {
     @Query("hub.challenge") challenge: string | undefined,
     @Res() res: Response,
   ): Promise<void> {
-    const config = await getMetaWebhookConfig(teamId);
-    if (!config) {
+    // The one callback verifies every Meta product the team connected, so
+    // accept the challenge if the token matches ANY connected channel's verify
+    // token (WhatsApp or Messenger). We can't know the channel from a verify
+    // GET (it carries only mode/token/challenge), so check each.
+    const [waConfig, msgrConfig, igConfig] = await Promise.all([
+      getMetaWebhookConfig(teamId),
+      getMessengerWebhookConfig(teamId),
+      getInstagramWebhookConfig(teamId),
+    ]);
+    const verifyTokens = [
+      waConfig?.verifyToken,
+      msgrConfig?.verifyToken,
+      igConfig?.verifyToken,
+    ].filter((t): t is string => typeof t === "string" && t.length > 0);
+    if (verifyTokens.length === 0) {
       // Silent 403 — leaking "team unconfigured" vs "team not found" gives
       // attackers a teamId enumeration oracle on a public endpoint.
       res.status(403).type("text/plain").send("forbidden");
@@ -130,7 +177,7 @@ export class MetaWebhookController implements OnModuleDestroy {
       typeof challenge === "string" &&
       challenge.length > 0 &&
       challenge.length <= 255 &&
-      timingSafeEqualString(token, config.verifyToken)
+      verifyTokens.some((vt) => timingSafeEqualString(token, vt))
     ) {
       res.status(200).type("text/plain").send(challenge);
       return;
@@ -145,6 +192,19 @@ export class MetaWebhookController implements OnModuleDestroy {
     @Headers("x-hub-signature-256") signature: string | undefined,
     @Req() req: Request,
   ): Promise<{ ok: boolean; ingested?: number; dropped?: string }> {
+    // Fan out by the webhook `object` (Meta delivers all products to one
+    // callback). Messenger has its own isolated path; anything unsupported
+    // (e.g. a future `instagram` object before its provider ships) is dropped
+    // softly so Meta doesn't retry-storm. WhatsApp falls through to the
+    // existing, byte-identical path below.
+    const channel = channelForMetaObject(req.body);
+    if (channel === "messenger" || channel === "instagram") {
+      return this.receiveSocial(teamId, signature, req, channel);
+    }
+    if (channel !== "whatsapp") {
+      return { ok: true, ingested: 0, dropped: "unsupported_object" };
+    }
+
     const config = await getMetaWebhookConfig(teamId);
     if (!config) throw new HttpException("forbidden", 403);
 
@@ -298,6 +358,64 @@ export class MetaWebhookController implements OnModuleDestroy {
     this.inFlightMedia.add(completion);
     void completion.finally(() => this.inFlightMedia.delete(completion));
 
+    return { ok: true, ingested: events.length };
+  }
+
+  /**
+   * Meta SOCIAL inbound path (Messenger `object:"page"` / Instagram
+   * `object:"instagram"`). Same HMAC + fail-soft posture as the WhatsApp path,
+   * but simpler: no phone-number mismatch guard, no Coexistence history, and
+   * (this increment) no inbound media download — text + delivery status only.
+   * Everything below the parser (`ingestEvents`) is channel-generic, so a
+   * social contact/conversation/message flows through the exact same pipeline
+   * as WhatsApp.
+   */
+  private async receiveSocial(
+    teamId: string,
+    signature: string | undefined,
+    req: Request,
+    channel: "messenger" | "instagram",
+  ): Promise<{ ok: boolean; ingested?: number; dropped?: string }> {
+    const { provider, getWebhookConfig } = SOCIAL[channel];
+    const config = await getWebhookConfig(teamId);
+    if (!config) throw new HttpException("forbidden", 403);
+
+    const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
+    if (!rawBody) {
+      this.logger.error(
+        `[${teamId}] ${channel} webhook missing rawBody — returning 200 to avoid retry storm`,
+      );
+      return { ok: true, ingested: 0, dropped: "missing_raw_body" };
+    }
+    if (!verifySignature(rawBody, signature, config.appSecret)) {
+      throw new HttpException("forbidden", 403);
+    }
+
+    const payload = req.body as unknown;
+    let events: NormalizedEvent[];
+    try {
+      events = provider.parseWebhook(payload);
+    } catch (err) {
+      this.logger.error(`[${teamId}] ${channel} webhook parse failed; dropping batch`, err);
+      return { ok: true, ingested: 0, dropped: "parse_failed" };
+    }
+    if (events.length === 0) return { ok: true, ingested: 0 };
+
+    try {
+      await ingestEvents(teamId, channel, events);
+    } catch (err) {
+      // Same transient-vs-permanent split as WhatsApp: 503 → Meta retries the
+      // (deduped) batch on transient DB pressure; 200-dropped otherwise so a
+      // permanently-bad payload doesn't retry-storm.
+      if (isTransientDbError(err)) {
+        throw new ServiceUnavailableException("transient ingest failure");
+      }
+      this.logger.error(
+        `[${teamId}] permanent ${channel} ingest failure; dropping batch of ${events.length}`,
+        err,
+      );
+      return { ok: true, ingested: 0, dropped: "ingest_failed" };
+    }
     return { ok: true, ingested: events.length };
   }
 

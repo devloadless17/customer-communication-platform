@@ -1,5 +1,6 @@
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 import type {
+  Channel,
   Contact as DbContact,
   Conversation as DbConversation,
   Message as DbMessage,
@@ -60,7 +61,7 @@ export interface ExternalContact {
    * the row.
    */
   phoneNumber: string | null;
-  identityChannel: "whatsapp" | null;
+  identityChannel: Channel | null;
   externalContactId: string | null;
   /** Canonical display name. Derived from firstName + lastName when both set. */
   name: string;

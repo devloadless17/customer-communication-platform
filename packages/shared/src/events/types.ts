@@ -901,7 +901,11 @@ export interface TeamCatalogChangedEvent {
     | "whatsapp-templates"
     | "invites"
     | "api-keys"
-    | "team-channels";
+    | "team-channels"
+    // A channel connection (Messenger / Instagram / …) was connected, updated,
+    // or disconnected. Flushes the outbound-webhooks per-team channelCache the
+    // same way "whatsapp-templates" does for a WhatsApp reconnect.
+    | "channels";
 }
 
 /**

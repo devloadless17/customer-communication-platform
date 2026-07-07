@@ -23,6 +23,25 @@ export const WINDOW_CLOSING_SOON_MS = 4 * 60 * 60 * 1000;
 
 export type WindowState = "never" | "closed" | "closing-soon" | "open";
 
+/**
+ * The widest window (ms) in which an agent may send free-form outbound on a
+ * channel — the human-agent extension when the channel has one (Meta social:
+ * 7 days), else the standard free-form window (WhatsApp: 24h). `null` means the
+ * channel has no window restriction at all (e.g. Telegram), so no gate applies.
+ *
+ * This is the window the SEND gate uses ("can I send at all"). The narrower
+ * `freeFormWindowMs` still decides whether the provider must attach a
+ * support-policy tag (Meta Human Agent) for sends past the standard window.
+ * Structural param so this stays in @ccp/shared/utils with no providers import.
+ */
+export function effectiveSendWindowMs(caps: {
+  freeFormWindowMs: number | null;
+  humanAgentWindowMs?: number | null;
+}): number | null {
+  if (caps.freeFormWindowMs === null) return null;
+  return caps.humanAgentWindowMs ?? caps.freeFormWindowMs;
+}
+
 export interface WindowStatus {
   state: WindowState;
   /** ISO timestamp of the last inbound, or null if there's never been one. */

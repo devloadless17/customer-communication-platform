@@ -57,7 +57,7 @@ import { encodeConvoCursor, parseConvoCursor } from "@/lib/queries/_cursors";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
 import type { Message, Channel } from "@ccp/shared/types";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
-import { computeWindowStatus } from "@ccp/shared/utils/window";
+import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
 import {
   assignConversation,
   setConversationStatus,
@@ -726,7 +726,7 @@ export class ExternalV1MessagingService {
 
     // Free-form send window — driven by the provider capability; `null` skips
     // it (channel with no window restriction).
-    const windowMs = binding.provider.capabilities.freeFormWindowMs;
+    const windowMs = effectiveSendWindowMs(binding.provider.capabilities);
     if (windowMs !== null) {
       const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
       const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);

@@ -45,6 +45,7 @@ import type {
 } from "@ccp/shared/types";
 import { mediaPreviewLabel } from "@ccp/shared/types";
 import { getCountryFromPhone } from "@ccp/shared/utils";
+import { isPhoneChannel } from "@ccp/shared/providers/capabilities";
 
 /**
  * Provider-agnostic ingest pipeline.
@@ -741,25 +742,31 @@ async function ingestInboundMessage(
       // become Read Committed and the duplicate-Conversation race the
       // wrapper exists to prevent would still bite.
       //
-      // findFirst (not findUnique) because the WhatsApp phone unique moved
-      // to a partial index — no Prisma key to look up by. We still see both
-      // active AND soft-deleted rows so the revive path works, since the
-      // partial unique constrains across deletedAt too (the tombstone holds
-      // the slot; see schema comment on Contact phoneNumber).
+      // Channel-aware contact identity (multi-channel / F4). Phone channels
+      // (WhatsApp) resolve by `phoneNumber`; non-phone channels (Messenger,
+      // Instagram, …) resolve by the compound unique
+      // `(teamId, identityChannel, externalContactId)`, where the id is the
+      // provider's opaque per-account id (PSID / IGSID) — NEVER a phone. This
+      // keeps a Messenger contact that happens to share digits with a WhatsApp
+      // number from resolving to the wrong row.
       //
-      // TODO(multi-channel / F4 in docs/audit-guide.md):
-      // This lookup keys on `phoneNumber` ONLY and does NOT filter by channel.
-      // Correct today because WhatsApp is the only channel. BEFORE shipping a
-      // second channel (Telegram/Instagram), this MUST switch to the
-      // channel-aware identity: for phone channels keep `phoneNumber`, for
-      // non-phone channels look up by the compound unique
-      // `(teamId, identityChannel, externalContactId)`. Otherwise a Telegram
-      // contact sharing a phone with a WhatsApp contact resolves to the wrong
-      // row. The SCHEMA is already correct (partial phone unique + compound
-      // unique) — only THIS query needs the switch. Don't ship channel #2
-      // without it.
+      // findFirst (not findUnique) so we also see soft-deleted rows and can
+      // revive them: for phone the partial unique holds the slot across
+      // deletedAt; for external the full compound unique does the same.
+      const isPhone = isPhoneChannel(channel);
+      const identityLabel = isPhone ? evt.contactPhone : evt.externalContactId;
+      if (!identityLabel) {
+        // Defensive: a message with neither identity is unroutable. Drop it
+        // (the outer per-event handler logs + continues) rather than creating a
+        // bogus contact.
+        throw new Error(
+          `ingest: inbound ${channel} message ${evt.externalId} has no contact identity`,
+        );
+      }
       const existingContact = await tx.contact.findFirst({
-        where: { teamId, phoneNumber: evt.contactPhone },
+        where: isPhone
+          ? { teamId, phoneNumber: evt.contactPhone }
+          : { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
         select: { id: true, deletedAt: true },
       });
       const isNewContact = !existingContact;
@@ -771,7 +778,7 @@ async function ingestInboundMessage(
       // workflows / audit / partners until their next manual edit.
       const wasRevived = !!existingContact?.deletedAt;
 
-      const { firstName, lastName } = splitContactName(evt.contactName ?? evt.contactPhone);
+      const { firstName, lastName } = splitContactName(evt.contactName ?? identityLabel);
       let contact;
       if (existingContact) {
         // Revive a soft-deleted contact: they're messaging again, so they
@@ -799,15 +806,20 @@ async function ingestInboundMessage(
             teamId,
             // Explicit channel stamp — every new contact carries its channel.
             identityChannel: channel,
-            phoneNumber: evt.contactPhone,
-            name: evt.contactName ?? evt.contactPhone,
+            // Exactly one identity is set, keyed on the channel kind: phone
+            // channels store `phoneNumber` (+ derived country code); non-phone
+            // channels store the opaque `externalContactId` (PSID / IGSID) and
+            // leave phone/country null.
+            phoneNumber: isPhone ? evt.contactPhone : null,
+            externalContactId: isPhone ? null : evt.externalContactId,
+            name: evt.contactName ?? identityLabel,
             // Populate the new webhook-facing fields on create. Splitting the
             // name + deriving the country code on first contact matches what
             // the migration does for backfill — both paths converge on the
             // same shape so webhook receivers don't see partial rows.
             firstName,
             lastName,
-            countryCode: getCountryFromPhone(evt.contactPhone),
+            countryCode: isPhone ? getCountryFromPhone(evt.contactPhone!) : null,
             stageId: defaultStageId,
           },
           // Same `{ id }` tags shape as the returning-contact path so the

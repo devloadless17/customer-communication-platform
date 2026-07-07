@@ -388,6 +388,38 @@ export async function getTeamWhatsappConfig(): Promise<WhatsappConfigView> {
   return config;
 }
 
+/** Server→browser view for the Messenger connect form (mirrors the API shape). */
+export interface MessengerConfigView {
+  pageId: string | null;
+  pageName: string | null;
+  appId: string | null;
+  verifyToken: string | null;
+  pageAccessToken: string | null;
+  appSecret: string | null;
+  credentialsUndecryptable: boolean;
+}
+
+export async function getTeamMessengerConfig(): Promise<MessengerConfigView> {
+  const { config } = await api<{ config: MessengerConfigView }>("/api/team/messenger");
+  return config;
+}
+
+/** Server→browser view for the Instagram connect form (mirrors the API shape). */
+export interface InstagramConfigView {
+  igId: string | null;
+  igUsername: string | null;
+  appId: string | null;
+  verifyToken: string | null;
+  igAccessToken: string | null;
+  appSecret: string | null;
+  credentialsUndecryptable: boolean;
+}
+
+export async function getTeamInstagramConfig(): Promise<InstagramConfigView> {
+  const { config } = await api<{ config: InstagramConfigView }>("/api/team/instagram");
+  return config;
+}
+
 export async function listWhatsappTemplates(): Promise<{
   templates: TemplateDto[];
   hasWabaId: boolean;

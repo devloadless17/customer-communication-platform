@@ -4,6 +4,7 @@ import { memo } from "react";
 import { CornerUpLeft, Loader2 } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { ChannelBadge } from "./channel-badge";
 import { LocalTime } from "@/components/local-time";
 import { useTimezone } from "@/providers/tz-provider";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
@@ -145,7 +146,7 @@ function ConversationListItemImpl({
         <div className="flex items-center gap-1.5">
           <span
             className={cn(
-              "flex-1 truncate text-sm leading-snug",
+              "min-w-0 flex-1 truncate text-sm leading-snug",
               unread
                 ? "font-semibold text-foreground"
                 : "font-medium text-foreground/90",
@@ -153,6 +154,8 @@ function ConversationListItemImpl({
           >
             {contact.name}
           </span>
+          {/* Channel mark — renders only for non-WhatsApp channels. */}
+          <ChannelBadge channel={conversation.channel ?? "whatsapp"} />
           <span title={fullDateTime} className="shrink-0">
             <LocalTime
               iso={conversation.lastMessageAt}

@@ -44,6 +44,7 @@ import type {
   UploadMediaArgs,
   UploadMediaResult,
 } from "@ccp/shared/providers/types";
+import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import type { MediaKind, MessageStatus } from "@ccp/shared/types";
 
 /**
@@ -688,17 +689,10 @@ function parseTemplateStatusUpdate(
 export const metaProvider: MessagingProvider<MetaSendConfig> = {
   name: "whatsapp",
 
-  capabilities: {
-    // WhatsApp's customer-service window: 24h since last inbound. Outside
-    // it, only pre-approved templates can be sent.
-    freeFormWindowMs: 24 * 60 * 60 * 1000,
-    templates: true,
-    readReceipts: true,
-    typingIndicators: true,
-    // WhatsApp Business Calling (GA July 2025): WebRTC mode, audio peers
-    // directly between Meta and the agent's browser.
-    calling: true,
-  },
+  // Static per-channel capabilities live in @ccp/shared so the frontend reads
+  // the exact same values (no endpoint/plumbing). WhatsApp: 24h window, no
+  // human-agent extension, templates + calling.
+  capabilities: CHANNEL_CAPABILITIES.whatsapp,
 
   parseWebhook(payload: unknown): NormalizedEvent[] {
     if (!isObject(payload)) return [];

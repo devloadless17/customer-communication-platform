@@ -16,6 +16,7 @@
     "./contacts/reserved-fields": "./src/contacts/reserved-fields.ts",
     "./presence": "./src/presence.ts",
     "./providers/types": "./src/providers/types.ts",
+    "./providers/capabilities": "./src/providers/capabilities.ts",
     "./providers/calling-regions": "./src/providers/calling-regions.ts",
     "./team-chat/types": "./src/team-chat/types.ts",
     "./team-chat/permissions": "./src/team-chat/permissions.ts",

@@ -4,9 +4,11 @@ import { usePathname } from "next/navigation";
 import {
   BarChart3,
   Bell,
+  Camera,
   Layers,
   ListChecks,
   MessageSquare,
+  MessagesSquare,
   Plug,
   ShieldCheck,
   Sparkles,
@@ -105,6 +107,18 @@ export function SettingsSubSidebar({
             label="WhatsApp"
             leading={<MessageSquare className="size-4" />}
             active={isActive("/settings/whatsapp")}
+          />
+          <SubSidebarItem
+            href="/settings/messenger"
+            label="Messenger"
+            leading={<MessagesSquare className="size-4" />}
+            active={isActive("/settings/messenger")}
+          />
+          <SubSidebarItem
+            href="/settings/instagram"
+            label="Instagram"
+            leading={<Camera className="size-4" />}
+            active={isActive("/settings/instagram")}
           />
           <SubSidebarItem
             href="/settings/integrations"

@@ -1974,6 +1974,7 @@ function MessageThreadImpl({
             conversationId={conversation.id}
             currentUser={currentUser}
             contact={contact}
+            channel={conversation.channel ?? "whatsapp"}
             stageCatalog={stageCatalog}
             tags={tags}
             fieldDefinitions={fieldDefinitions}

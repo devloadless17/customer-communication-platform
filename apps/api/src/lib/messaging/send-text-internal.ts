@@ -14,7 +14,7 @@ import {
 } from "@/lib/providers/channel";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Message } from "@ccp/shared/types";
-import { computeWindowStatus } from "@ccp/shared/utils/window";
+import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
 
 /**
  * Slim "send a free-form text to this conversation" helper used by the
@@ -126,7 +126,7 @@ export async function sendTextInternal(
   // code instead of letting the provider reject with a cryptic body. Driven by
   // the provider's declared window; `null` means the channel has no free-form
   // window restriction (e.g. Telegram), so the check is skipped entirely.
-  const windowMs = binding.provider.capabilities.freeFormWindowMs;
+  const windowMs = effectiveSendWindowMs(binding.provider.capabilities);
   if (windowMs !== null) {
     const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
     const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);

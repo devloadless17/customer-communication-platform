@@ -1,5 +1,9 @@
 import { getMetaSendConfig, type MetaSendConfig } from "@/lib/providers/config";
 import { metaProvider } from "@/lib/providers/meta";
+import { messengerProvider } from "@/lib/providers/messenger";
+import { getMessengerSendConfig } from "@/lib/providers/messenger-config";
+import { instagramProvider } from "@/lib/providers/instagram";
+import { getInstagramSendConfig } from "@/lib/providers/instagram-config";
 import type { Channel } from "@ccp/shared/types";
 import type { MessagingProvider } from "@ccp/shared/providers/types";
 
@@ -59,10 +63,21 @@ export class UnsupportedProviderOperationError extends Error {
   }
 }
 
-const REGISTRY: Record<Channel, ProviderBinding> = {
+// Partial: a Channel enum value can exist before its provider ships (e.g. a
+// migration widens the enum ahead of the provider impl). getProviderBinding
+// throws UnsupportedProviderError for any channel not registered here.
+const REGISTRY: Partial<Record<Channel, ProviderBinding>> = {
   whatsapp: {
     provider: metaProvider,
     getSendConfig: getMetaSendConfig,
+  } as ProviderBinding,
+  messenger: {
+    provider: messengerProvider,
+    getSendConfig: getMessengerSendConfig,
+  } as ProviderBinding,
+  instagram: {
+    provider: instagramProvider,
+    getSendConfig: getInstagramSendConfig,
   } as ProviderBinding,
 };
 
