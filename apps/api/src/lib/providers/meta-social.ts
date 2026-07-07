@@ -22,6 +22,7 @@ import type {
   NormalizedMediaRef,
   NormalizedReaction,
   NormalizedStatusUpdate,
+  SendInteractiveArgs,
   SendMediaArgs,
   SendTextArgs,
   SendTextResult,
@@ -90,6 +91,7 @@ interface MessagingEvent {
     text?: string;
     is_echo?: boolean;
     attachments?: { type?: string; payload?: { url?: string } }[];
+    quick_reply?: { payload?: string };
   };
   delivery?: { mids?: string[]; watermark?: number };
   reaction?: { mid?: string; action?: string; emoji?: string; reaction?: string };
@@ -195,6 +197,18 @@ export function parseSocialMessaging(
           contactName: null,
           body,
           ...(media ? { media } : {}),
+          // A tapped quick-reply carries its stable payload (the outbound
+          // option's id) + the title as `text` — surface it for workflow
+          // routing (ask_question), same as WhatsApp button replies.
+          ...(m.message.quick_reply?.payload
+            ? {
+                interactiveReply: {
+                  kind: "button_reply" as const,
+                  id: m.message.quick_reply.payload,
+                  title: text ?? "",
+                },
+              }
+            : {}),
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
           rawPayload: m as unknown as Record<string, unknown>,
         };
@@ -260,6 +274,36 @@ export async function sendSocialText(
   const messageId = typeof res.message_id === "string" ? res.message_id : "";
   if (!messageId) {
     throw new Error(`${opts.label} sendText: response missing message_id`);
+  }
+  return { externalId: messageId, timestamp: new Date() };
+}
+
+/**
+ * Send an interactive question with tappable options on a social channel, as
+ * Meta QUICK REPLIES (up to 13; title ≤20 chars; the option id rides in the
+ * `payload` and comes back on the tapped reply). Both "buttons" and "list"
+ * kinds collapse to quick replies — the social platforms have no native list
+ * sheet, and quick replies are the closest tap-to-choose UX. Human Agent tag.
+ */
+export async function sendSocialInteractive(
+  args: SendInteractiveArgs,
+  opts: SocialSendTarget,
+): Promise<SendTextResult> {
+  const quick_replies = args.options.slice(0, 13).map((o) => ({
+    content_type: "text",
+    title: o.title.slice(0, 20),
+    payload: o.id,
+  }));
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
+  const res = await graphPostJson(url, opts.accessToken, {
+    recipient: { id: args.to },
+    messaging_type: "MESSAGE_TAG",
+    tag: "HUMAN_AGENT",
+    message: { text: args.bodyText, quick_replies },
+  });
+  const messageId = typeof res.message_id === "string" ? res.message_id : "";
+  if (!messageId) {
+    throw new Error(`${opts.label} sendInteractive: response missing message_id`);
   }
   return { externalId: messageId, timestamp: new Date() };
 }

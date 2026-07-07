@@ -37,7 +37,7 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     templates: false,
     readReceipts: true,
     typingIndicators: true,
-    interactive: false,
+    interactive: true,
     calling: false,
   },
   // Instagram DM: same 24h + 7-day human-agent window as Messenger. No templates,
@@ -48,7 +48,7 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     templates: false,
     readReceipts: true,
     typingIndicators: true,
-    interactive: false,
+    interactive: true,
     calling: false,
   },
 

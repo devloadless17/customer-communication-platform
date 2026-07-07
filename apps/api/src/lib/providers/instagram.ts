@@ -13,6 +13,7 @@ import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import type {
   MessagingProvider,
   NormalizedEvent,
+  SendInteractiveArgs,
   SendMediaArgs,
   SendTextArgs,
   SendTextResult,
@@ -22,6 +23,7 @@ import type {
 import {
   fetchSocialProfileName,
   parseSocialMessaging,
+  sendSocialInteractive,
   sendSocialMedia,
   sendSocialSenderAction,
   sendSocialText,
@@ -66,6 +68,13 @@ export const instagramProvider: MessagingProvider<InstagramSendConfig> = {
     config: InstagramSendConfig,
   ): Promise<SendTextResult> {
     return sendSocialMedia(args, target(config));
+  },
+
+  async sendInteractive(
+    args: SendInteractiveArgs,
+    config: InstagramSendConfig,
+  ): Promise<SendTextResult> {
+    return sendSocialInteractive(args, target(config));
   },
 
   async markIncomingRead(
