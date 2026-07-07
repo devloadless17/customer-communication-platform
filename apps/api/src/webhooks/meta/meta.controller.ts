@@ -38,6 +38,7 @@ import {
 } from "@/lib/providers/ingest";
 import { enqueueHistoryChunk } from "@/lib/coexistence/history-queue";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
+import type { Channel } from "@ccp/shared/types";
 
 /**
  * Which channel a Meta webhook envelope belongs to, from its `object` field.
@@ -405,6 +406,21 @@ export class MetaWebhookController implements OnModuleDestroy {
     }
     if (events.length === 0) return { ok: true, ingested: 0 };
 
+    // Kick off social media downloads (direct CDN URL → R2) concurrently with
+    // ingest, which commits the rows as media-pending. Non-consuming catch so
+    // an orphaned rejection can't float if ingest below fails and returns early;
+    // completePendingMedia awaits the same promise on the success path.
+    const downloadOutcomes = new Map<string, DownloadOutcome>();
+    const downloadPromise = this.downloadSocialMedia(
+      teamId,
+      channel,
+      events,
+      downloadOutcomes,
+    );
+    downloadPromise.catch((err) =>
+      this.logger.error(`[${teamId}] ${channel} media download failed`, err),
+    );
+
     try {
       await ingestEvents(teamId, channel, events);
     } catch (err) {
@@ -433,6 +449,22 @@ export class MetaWebhookController implements OnModuleDestroy {
       );
     }
 
+    // Background: await the media downloads, then patch the rows + emit
+    // message:media:ready (or collapse the shimmer to a labeled bubble on
+    // failure). Tracked in inFlightMedia so onModuleDestroy drains it on
+    // shutdown rather than abandoning a half-written patch.
+    const completion = this.completePendingMedia(
+      teamId,
+      events,
+      downloadPromise,
+      downloadOutcomes,
+      channel,
+    ).catch((err) =>
+      this.logger.error(`[${teamId}] ${channel} media completion failed`, err),
+    );
+    this.inFlightMedia.add(completion);
+    void completion.finally(() => this.inFlightMedia.delete(completion));
+
     return { ok: true, ingested: events.length };
   }
 
@@ -448,6 +480,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     events: NormalizedEvent[],
     downloadPromise: Promise<void>,
     outcomes: Map<string, DownloadOutcome>,
+    channel: Channel = "whatsapp",
   ): Promise<void> {
     await downloadPromise;
     const candidates = events
@@ -465,7 +498,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     // turns the per-event loop into pure CPU + a single later updateMany.
     const externalIds = candidates.map((e) => e.externalId);
     const rows = await this.db.message.findMany({
-      where: { teamId, channel: "whatsapp", externalId: { in: externalIds } },
+      where: { teamId, channel, externalId: { in: externalIds } },
       select: {
         id: true,
         externalId: true,
@@ -613,6 +646,155 @@ export class MetaWebhookController implements OnModuleDestroy {
     }).entry?.[0]?.changes?.[0]?.value?.messages;
     const meta = m?.find((x) => x.id === evt.externalId);
     return !!meta && meta.type !== "text";
+  }
+
+  /**
+   * Download inbound SOCIAL media (Messenger / Instagram). Unlike WhatsApp —
+   * which fetches by media-id using the send config — social attachments arrive
+   * as a direct, expiring CDN URL (`evt.media.sourceUrl`), so we GET the URL,
+   * size-cap it, and stream it to R2. Same outcomes-Map contract as
+   * `downloadInboundMedia` (never mutates `evt.media`; records `{ok:false}` on
+   * failure so the row commits as a labeled bubble, not a stuck shimmer). No
+   * WhatsApp send-config needed, so a social-only team downloads media fine.
+   */
+  private async downloadSocialMedia(
+    teamId: string,
+    channel: Channel,
+    events: NormalizedEvent[],
+    outcomes: Map<string, DownloadOutcome>,
+  ): Promise<void> {
+    const mediaEvents = events.filter(
+      (e): e is Extract<NormalizedEvent, { kind: "message" }> =>
+        e.kind === "message" && !!e.media?.sourceUrl && !e.media.storageKey,
+    );
+    if (mediaEvents.length === 0) return;
+
+    // Idempotency: a Meta retry of an already-ingested batch shouldn't
+    // re-download. An existing row with a mediaUrl → record success + skip.
+    const externalIds = mediaEvents.map((e) => e.externalId);
+    const existing = await this.db.message.findMany({
+      where: { teamId, channel, externalId: { in: externalIds } },
+      select: {
+        externalId: true,
+        mediaKey: true,
+        mediaUrl: true,
+        mediaSizeBytes: true,
+        mediaMimeType: true,
+      },
+    });
+    const existingByExtId = new Map(existing.map((r) => [r.externalId, r]));
+    const todo = mediaEvents.filter((evt) => {
+      const row = existingByExtId.get(evt.externalId);
+      if (row?.mediaUrl && evt.media) {
+        outcomes.set(evt.externalId, {
+          ok: true,
+          storageKey: row.mediaKey ?? "",
+          storageUrl: row.mediaUrl,
+          sizeBytes: row.mediaSizeBytes ?? 0,
+          mimeType: row.mediaMimeType ?? evt.media.mimeType,
+        });
+        return false;
+      }
+      return true;
+    });
+    if (todo.length === 0) return;
+
+    const team = await this.db.team.findUnique({
+      where: { id: teamId },
+      select: { name: true },
+    });
+
+    await runWithConcurrency(todo, 4, async (evt) => {
+      const media = evt.media;
+      if (!media?.sourceUrl) return;
+      const mediaKind = media.kind;
+      const cap = MEDIA_SIZE_CAPS[mediaKind];
+      try {
+        const fetched = await retry(() => fetchUrlBytes(media.sourceUrl!, cap), {
+          attempts: 3,
+          baseMs: 250,
+        });
+        if (fetched.bytes.length > cap) {
+          this.logger.warn(
+            `[${teamId}] dropping social ${mediaKind} over cap (${fetched.bytes.length} > ${cap})`,
+          );
+          outcomes.set(evt.externalId, { ok: false, retriable: false });
+          return;
+        }
+        const saved = await retry(
+          () =>
+            blobStorage.upload({
+              bytes: fetched.bytes,
+              mimeType: fetched.mimeType,
+              kind: mediaKind,
+              context: {
+                teamId,
+                teamSlug: team?.name,
+                direction: "in",
+                // Social has no phone; use the opaque id for the dashboard name.
+                contactPhone: evt.externalContactId,
+                contactName: evt.contactName ?? undefined,
+                externalId: evt.externalId,
+                originalFilename: media.filename ?? null,
+              },
+            }),
+          { attempts: 3, baseMs: 250 },
+        );
+
+        let thumbnailStorageKey: string | undefined;
+        let thumbnailStorageUrl: string | undefined;
+        if (mediaKind === "video") {
+          try {
+            const poster = await extractVideoPosterFrame(fetched.bytes);
+            if (poster && poster.length > 0) {
+              const thumb = await retry(
+                () =>
+                  blobStorage.upload({
+                    bytes: poster,
+                    mimeType: "image/jpeg",
+                    kind: "image",
+                    context: {
+                      teamId,
+                      teamSlug: team?.name,
+                      direction: "in",
+                      contactPhone: evt.externalContactId,
+                      contactName: evt.contactName ?? undefined,
+                      externalId: `${evt.externalId}_thumb`,
+                      originalFilename: null,
+                    },
+                  }),
+                { attempts: 2, baseMs: 250 },
+              );
+              thumbnailStorageKey = thumb.key;
+              thumbnailStorageUrl = thumb.url;
+            }
+          } catch (err) {
+            this.logger.warn(
+              `[${teamId}] social video poster failed for ${evt.externalId}: ${err instanceof Error ? err.message : err}`,
+            );
+          }
+        }
+
+        outcomes.set(evt.externalId, {
+          ok: true,
+          storageKey: saved.key,
+          storageUrl: saved.url,
+          sizeBytes: saved.sizeBytes,
+          mimeType: fetched.mimeType,
+          ...(thumbnailStorageKey && thumbnailStorageUrl
+            ? { thumbnailStorageKey, thumbnailStorageUrl }
+            : {}),
+        });
+      } catch (err) {
+        this.logger.warn(
+          `[${teamId}] social media download failed for ${evt.externalId}: ${err instanceof Error ? err.message : err}`,
+        );
+        // The inbound-media sweeper re-fetches by WhatsApp media-id, which social
+        // has none of (and the CDN URL expires), so mark non-retriable — the row
+        // commits as a labeled bubble rather than a shimmer the sweeper can't fix.
+        outcomes.set(evt.externalId, { ok: false, retriable: false });
+      }
+    });
   }
 
   /**
@@ -852,6 +1034,37 @@ async function retry<T>(
     }
   }
   throw lastErr;
+}
+
+/**
+ * Fetch a direct media URL (Messenger / Instagram attachment) into memory,
+ * capping by Content-Length before buffering when the CDN sends it. The
+ * authoritative post-buffer cap lives in the caller (`downloadSocialMedia`) for
+ * CDNs that omit/understate the header. Reads the real mime type from the
+ * response. 20s hard timeout so a hung CDN can't pin a connection.
+ */
+async function fetchUrlBytes(
+  url: string,
+  capBytes: number,
+): Promise<{ bytes: Uint8Array; mimeType: string }> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 20_000);
+  try {
+    const res = await fetch(url, { signal: ac.signal, redirect: "follow" });
+    if (!res.ok) throw new Error(`social media fetch ${res.status}`);
+    const cl = Number(res.headers.get("content-length") ?? "0");
+    if (Number.isFinite(cl) && cl > capBytes) {
+      throw new Error(`social media over cap (content-length ${cl} > ${capBytes})`);
+    }
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const mimeType =
+      (res.headers.get("content-type") ?? "application/octet-stream")
+        .split(";")[0]
+        ?.trim() || "application/octet-stream";
+    return { bytes, mimeType };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

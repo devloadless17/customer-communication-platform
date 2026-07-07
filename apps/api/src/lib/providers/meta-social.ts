@@ -19,10 +19,12 @@
 import type {
   NormalizedEvent,
   NormalizedInboundMessage,
+  NormalizedMediaRef,
   NormalizedStatusUpdate,
   SendTextArgs,
   SendTextResult,
 } from "@ccp/shared/providers/types";
+import type { MediaKind } from "@ccp/shared/types";
 import { GRAPH_BASE, graphGetJson, graphPostJson } from "@/lib/providers/meta-graph";
 
 interface SocialEnvelope {
@@ -51,21 +53,55 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
 
-/** Label an attachment-only message so the agent sees that something arrived. */
-function attachmentPlaceholder(atts: { type?: string }[] | undefined): string {
-  const kind = atts?.[0]?.type;
+/** Map a Meta social attachment `type` to our channel-agnostic MediaKind. */
+function attachmentKind(type: string | undefined): MediaKind | null {
+  switch (type) {
+    case "image":
+      return "image";
+    case "video":
+      return "video";
+    case "audio":
+      return "audio";
+    case "file":
+      return "document";
+    // "location" | "template" | "fallback" carry no downloadable binary.
+    default:
+      return null;
+  }
+}
+
+/** Provisional mime type before the download reads the real Content-Type. */
+function provisionalMime(kind: MediaKind): string {
   switch (kind) {
     case "image":
-      return "[image]";
+      return "image/jpeg";
     case "video":
-      return "[video]";
+      return "video/mp4";
     case "audio":
-      return "[audio]";
-    case "file":
-      return "[file]";
+      return "audio/mpeg";
     default:
-      return kind ? `[${kind}]` : "[attachment]";
+      return "application/octet-stream";
   }
+}
+
+/**
+ * Build a NormalizedMediaRef for the first downloadable attachment on a message,
+ * or null if there is none (text-only, or a non-binary attachment). Social
+ * channels deliver a direct CDN URL (`payload.url`), so we set `sourceUrl` and
+ * leave `externalMediaId` empty — the inbound-media path fetches the URL.
+ */
+function attachmentMedia(
+  atts: { type?: string; payload?: { url?: string } }[] | undefined,
+): NormalizedMediaRef | null {
+  const att = atts?.find((a) => attachmentKind(a.type) && a.payload?.url);
+  if (!att) return null;
+  const kind = attachmentKind(att.type)!;
+  return {
+    kind,
+    externalMediaId: "",
+    sourceUrl: att.payload!.url!,
+    mimeType: provisionalMime(kind),
+  };
 }
 
 /**
@@ -91,18 +127,28 @@ export function parseSocialMessaging(
         const senderId = m.sender?.id;
         const mid = m.message.mid;
         if (!senderId || !mid) continue;
+        const media = attachmentMedia(m.message.attachments);
         const text = m.message.text;
+        // Body is the text (media caption if any); empty for media-only. When a
+        // message has neither text nor a downloadable attachment, fall back to a
+        // short label so the row isn't blank (e.g. a location/sticker/fallback).
         const body =
-          text && text.length > 0 ? text : attachmentPlaceholder(m.message.attachments);
+          text && text.length > 0
+            ? text
+            : media
+              ? ""
+              : m.message.attachments?.[0]?.type
+                ? `[${m.message.attachments[0].type}]`
+                : "";
         const msg: NormalizedInboundMessage = {
           kind: "message",
           externalId: mid,
           externalContactId: senderId,
-          // No display name in the messaging event; ingest falls back to the id.
-          // Name enrichment (Graph `/{id}?fields=name`) + attachment→media are
-          // follow-ups.
+          // No display name in the messaging event; ingest falls back to the id
+          // (a later Graph name-enrichment pass fills it in).
           contactName: null,
           body,
+          ...(media ? { media } : {}),
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
           rawPayload: m as unknown as Record<string, unknown>,
         };

@@ -19,8 +19,20 @@ import type { MediaKind, MessageStatus, Channel } from "../types";
  */
 export interface NormalizedMediaRef {
   kind: MediaKind;
-  /** Provider-side id used to fetch the binary. */
+  /**
+   * Provider-side id used to fetch the binary (WhatsApp: a media id passed to
+   * `fetchMedia`). Empty string for channels that deliver a direct URL instead
+   * (see `sourceUrl`).
+   */
   externalMediaId: string;
+  /**
+   * Direct download URL for channels that ship the binary as a (temporary,
+   * often-expiring) CDN URL in the webhook rather than a fetch-by-id handle —
+   * Messenger / Instagram attachments. When set, the inbound-media path fetches
+   * this URL directly (no `fetchMedia` / send-config needed) and streams it to
+   * R2. Undefined for WhatsApp (which uses `externalMediaId`).
+   */
+  sourceUrl?: string;
   mimeType: string;
   /** Filename (documents) — Meta only sends this for type=document. */
   filename?: string;
