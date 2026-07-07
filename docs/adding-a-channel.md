@@ -17,15 +17,18 @@ The platform is **channel-agnostic by design**. Nothing outside the provider lay
 
 The only implementation today is the `metaProvider` **object** (not a class) in `apps/api/src/lib/providers/meta.ts`.
 
-## The recipe (add a channel in 5 steps)
+**Current state.** Live channels: **WhatsApp, Messenger, Instagram** (each has a provider + onboarding). Designed-for / disabled: **Telegram, Email, SMS** — the enum value + `CHANNEL_CAPABILITIES` / `CHANNEL_IDENTITY_KIND` / `CHANNEL_LABEL` entries + badge already exist (`@ccp/shared/providers/capabilities`, `channel-badge.tsx`), but there's no provider/webhook/onboarding, so they're absent from `LIVE_CHANNELS` and the provider `REGISTRY`. Because of that, no row can carry them — the architecture is ready, the implementation is a focused follow-up. The Meta social channels (`messenger.ts`/`instagram.ts`) are thin wrappers over `meta-social.ts`; a genuinely different vendor (Telegram Bot API, etc.) is a full sibling provider.
 
-1. **Add the `Channel` enum value** (`prisma/schema.prisma`) + migration. Non-destructive.
-2. **Implement `MessagingProvider`** for the vendor in `apps/api/src/lib/providers/<vendor>.ts` — set `capabilities`, write `parseWebhook` (wire → `NormalizedEvent[]`), implement `sendText` + whatever the channel supports. No business logic here; just translation.
-3. **Register it** in `apps/api/src/lib/providers/index.ts`: add a `REGISTRY[<channel>] = { provider, getSendConfig }` entry, and a `get<Vendor>SendConfig(teamId)` that reads the `ChannelConnection` row.
-4. **Add a fanout rule** for any *new* event types you introduce (`apps/api/src/realtime/fanout-rules.ts`) — the `FanoutRuleMap` `Record` makes this a compile error until handled. Most channels reuse the existing `message.*` / `conversation.*` events and need nothing here.
-5. **Wire onboarding**: a settings page to create the `ChannelConnection` (paste credentials → encrypted `secrets`), plus a webhook route if inbound differs from `/webhooks/meta/:teamId`.
+## The recipe (add a channel)
 
-Ingest, dedup (`@@unique([teamId, channel, externalId])`), realtime, workflows, broadcasts, and the `/v1` API all work unchanged because they operate on `NormalizedEvent` + `Channel`, never the vendor.
+1. **Enum value** — already present for telegram/email/sms (`prisma/schema.prisma` + `@ccp/shared/types` + migration). For a brand-new channel, add it here (additive migration) and fill its `CHANNEL_CAPABILITIES` / `CHANNEL_IDENTITY_KIND` / `CHANNEL_LABEL` entries (the `Record<Channel, …>` maps make omissions a compile error).
+2. **Implement `MessagingProvider`** in `apps/api/src/lib/providers/<vendor>.ts` — `capabilities` (reference the shared map), `parseWebhook` (wire → `NormalizedEvent[]`; use `externalContactId` for non-phone identity), `sendText` + whatever the channel supports (`uploadMedia`/`sendMedia`, `fetchContactProfile`, …). No business logic — just translation.
+3. **Config loader** `apps/api/src/lib/providers/<vendor>-config.ts` reading the `(teamId, channel)` `ChannelConnection` (ciphertext cache, decrypt-on-demand — mirror `messenger-config.ts`).
+4. **Register** in `apps/api/src/lib/providers/index.ts` (`REGISTRY[<channel>]`) **and add the channel to `LIVE_CHANNELS`** in `@ccp/shared/providers/capabilities` so the UI stops treating it as "coming soon".
+5. **Fanout rule** for any *new* event types (`apps/api/src/realtime/fanout-rules.ts`) — the `FanoutRuleMap` `Record` compile-errors until handled. Most channels reuse `message.*` / `conversation.*` and need nothing.
+6. **Webhook + onboarding** — a webhook route (Meta products share `/webhooks/meta/:teamId` via object-dispatch; a non-Meta vendor like Telegram gets its own `/webhooks/<vendor>/:teamId` with its own auth, e.g. a secret token instead of HMAC) + a `team/<vendor>/` admin module and a `/settings/<vendor>` connect page (mirror `team/messenger/` + `settings/messenger/`).
+
+Ingest, dedup (`@@unique([teamId, channel, externalId])` — note a channel whose message ids aren't globally unique, like Telegram's per-chat `message_id`, must compose a unique `externalId` such as `chatId_messageId`), realtime, workflows, broadcasts, and the `/v1` API all work unchanged because they operate on `NormalizedEvent` + `Channel`, never the vendor.
 
 ## Per-channel constraints (design targets)
 

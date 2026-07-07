@@ -102,10 +102,19 @@ enum MessageOrigin {
 // channel = a new value here + a registered MessagingProvider + a
 // ChannelConnection row. Meta Cloud serves both `whatsapp` and (future)
 // `instagram` — they are DISTINCT channels even though one API delivers them.
+// Live channels: whatsapp, messenger, instagram (each has a registered
+// MessagingProvider + onboarding). telegram / email / sms are DESIGNED-FOR but
+// NOT yet implemented — the enum value + capability/identity maps exist so the
+// architecture is ready, but there is no provider/webhook/onboarding, so no row
+// can ever carry these channels until a focused session ships them (see
+// @ccp/shared LIVE_CHANNELS + docs/adding-a-channel.md).
 enum Channel {
   whatsapp
   messenger
   instagram
+  telegram
+  email
+  sms
 }
 
 // Mirrors Meta's template review states. We cache every status so admins can

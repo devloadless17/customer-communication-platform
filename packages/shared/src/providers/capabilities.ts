@@ -49,7 +49,58 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     typingIndicators: false,
     calling: false,
   },
+
+  // ---- DESIGNED-FOR, NOT YET IMPLEMENTED (see LIVE_CHANNELS) ----------------
+  // Sensible target capabilities so the architecture is complete; a focused
+  // session ships the provider/webhook/onboarding and adds them to LIVE_CHANNELS.
+  //
+  // Telegram Bot API: no session window (a bot may message any user who started
+  // the chat, anytime), no templates, typing via sendChatAction, no calling.
+  telegram: {
+    freeFormWindowMs: null,
+    humanAgentWindowMs: null,
+    templates: false,
+    readReceipts: false,
+    typingIndicators: true,
+    calling: false,
+  },
+  // Email: no window, "templates" in the newsletter sense (modeled false until
+  // built), no read receipts (open-tracking is separate), no typing/calling.
+  email: {
+    freeFormWindowMs: null,
+    humanAgentWindowMs: null,
+    templates: false,
+    readReceipts: false,
+    typingIndicators: false,
+    calling: false,
+  },
+  // SMS: no window, no templates (plain text), no receipts/typing/calling.
+  sms: {
+    freeFormWindowMs: null,
+    humanAgentWindowMs: null,
+    templates: false,
+    readReceipts: false,
+    typingIndicators: false,
+    calling: false,
+  },
 };
+
+/**
+ * Channels with a registered MessagingProvider + onboarding — i.e. actually
+ * usable today. The others are enum values with capability maps in place
+ * (architecture-ready) but no implementation. Keep this in sync with the
+ * server-side provider REGISTRY: shipping a channel = add its provider/webhook/
+ * onboarding AND add it here so the UI stops treating it as "coming soon".
+ */
+export const LIVE_CHANNELS: ReadonlySet<Channel> = new Set<Channel>([
+  "whatsapp",
+  "messenger",
+  "instagram",
+]);
+
+export function isChannelLive(channel: Channel): boolean {
+  return LIVE_CHANNELS.has(channel);
+}
 
 /**
  * How a channel identifies a contact. `phone` channels resolve/create contacts
@@ -64,6 +115,11 @@ export const CHANNEL_IDENTITY_KIND: Record<Channel, ChannelIdentityKind> = {
   whatsapp: "phone",
   messenger: "external",
   instagram: "external",
+  // Designed-for: Telegram chat id + email address are opaque external ids; SMS
+  // is phone-based like WhatsApp.
+  telegram: "external",
+  email: "external",
+  sms: "phone",
 };
 
 /** True when the channel keys contacts by phone number (WhatsApp today). */

@@ -18,10 +18,19 @@ export type ConversationStatus = "open" | "pending" | "closed";
 export type MessageDirection = "in" | "out";
 export type MessageStatus = "sent" | "delivered" | "read" | "failed";
 // The messaging channel a conversation lives on — the single discriminator for
-// "where is this from". Mirrors the Prisma `Channel` enum. `whatsapp` is
-// phone-based; `messenger`/`instagram` are Meta social channels keyed by an
-// opaque page-scoped id (PSID / IGSID), not a phone number.
-export type Channel = "whatsapp" | "messenger" | "instagram";
+// "where is this from". Mirrors the Prisma `Channel` enum.
+//   LIVE:      whatsapp (phone), messenger + instagram (Meta social, keyed by an
+//              opaque PSID / IGSID).
+//   DESIGNED-FOR (disabled): telegram / email / sms — enum value + capability
+//              maps exist so the architecture is ready, but there's no provider
+//              yet, so no row can carry them. See LIVE_CHANNELS.
+export type Channel =
+  | "whatsapp"
+  | "messenger"
+  | "instagram"
+  | "telegram"
+  | "email"
+  | "sms";
 // Provenance of an outbound message. `api` = sent through this platform;
 // `business_app` = sent from the WhatsApp Business App on the owner's phone and
 // mirrored to us via WhatsApp Coexistence. Mirrors the Prisma `MessageOrigin`
