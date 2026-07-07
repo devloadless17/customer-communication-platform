@@ -1,324 +1,310 @@
-# Project: WhatsApp Multi-Agent Shared Inbox
+# Engineering Handbook — Omnichannel Shared Inbox
 
-## What I'm building
-A web platform where multiple internal agents collaborate on WhatsApp conversations through a shared inbox. Think Front, Intercom, or Missive but for WhatsApp. Core value is collaboration: assignments, attribution, internal notes, real-time updates. Target customer: SaaS for small/medium businesses. I have one pilot customer lined up.
+This is the single source of truth for how this repository is designed and how future code must be written. Read it before making changes. Deep operational detail lives in [`docs/`](docs/) (linked throughout) so this file stays scannable.
 
-## My situation
-- Solo developer who likes modern designs (shadcn + framer-motion).
-- Comfortable with JavaScript/Node and Next.js.
-- New to realtime systems and message queues.
-- 4-week MVP timeline.
-- Building on the **official Meta WhatsApp Cloud API**. Evolution / Baileys / unofficial bridges have been removed from this project on purpose — the ban risk for self-hosted bridges isn't acceptable for a SaaS.
+> **Prime directive.** Build a world-class, realtime, collaborative shared-inbox platform that is **simple, layered, predictable, and fast**. Every part must be clean, solid, and wired to the next through clear seams, so any one part can change or fail without breaking the rest. When in doubt, choose the simpler design.
 
-## Stack
-- **Frontend:** Next.js (App Router, RSC) — **owns rendering + auth pages only** post-migration. Client state is plain React (`useState` + pure reducers in `thread-reducers.ts` + a few small contexts) driven by Socket.io frames; **no Zustand, no React Query** (both were considered, neither is installed — don't reach for them).
-- **Backend:** **NestJS** (HTTP + Socket.io gateway + webhook ingest + BullMQ workers + workflow engine). Currently mid-migration from Next.js API routes. Until migration completes both processes run side-by-side behind Caddy.
-- **Database:** PostgreSQL (via Prisma). One `PrismaService` shared between Next.js (auth + RSC reads) and NestJS (everything else).
-- **Realtime:** Socket.io. Browser connects via Caddy → NestJS gateway (single-process with the event sources = zero cross-process emit latency).
-- **Auth:** Better Auth — **stays in Next.js** (login/logout/signup pages, session cookie issuance). NestJS validates the session cookie via a guard that hits the Better Auth session table directly through Prisma.
-- **WhatsApp provider:** Meta WhatsApp Cloud API (only)
-- **Infra:** Docker Compose, single VPS. Two app containers: `web` (Next.js, 3000) + `api` (NestJS, 4000). Caddy routes `/`, `/_next/*`, `/api/auth/*` → web; `/api/*`, `/socket.io/*`, `/webhooks/*` → api.
+---
 
-## Architecture (target — post NestJS migration)
+## 1. What this is
+
+A web platform where an organization's team members collaborate on customer conversations across many channels from one shared inbox — the class of product defined by **Respond.io, Trengo, Front, Intercom, Missive**. Agents receive customer messages, reply, assign each other, change status / stage / tags / custom fields, leave internal notes, run automations, place calls, and send broadcasts — with **every state change reflected live to everyone on the team**.
+
+It is **channel-agnostic**. WhatsApp is live today; Facebook Messenger, Instagram DMs, Telegram, TikTok, SMS, Email, and Voice/Calling are designed-for and plug in through one abstraction. **Never design anything around WhatsApp only.**
+
+The whole thing runs on **one Hostinger KVM2 VPS (8 GB)** serving ~30 organizations. This is a deliberate constraint, not a limitation to engineer around: the architecture is tuned to be excellent at this scale and to grow only when a *named* scaling cliff is hit (see §16). Do not add infrastructure (Kafka, Kubernetes, multi-region, a second datastore) speculatively.
+
+---
+
+## 2. Product model
 
 ```
-                           ┌──────────────────────────────────────┐
-                           │   Caddy (HTTPS + WS upgrade)         │
-                           └──┬───────────────────┬───────────────┘
-                              │ /, /_next/*       │ /api/*
-                              │ /api/auth/*       │ /socket.io/*
-                              │                   │ /webhooks/*
-                       ┌──────┴────────┐   ┌──────┴──────────────┐
-                       │ Next.js :3000 │   │ NestJS :4000        │
-                       │ - RSC pages   │   │ - HTTP controllers  │
-                       │ - Better Auth │   │ - Socket.io gateway │
-                       │   pages       │   │ - Webhook ingest    │
-                       │ - Frontend    │   │ - Workflow engine   │
-                       │   bundles     │   │ - BullMQ workers    │
-                       └──────┬────────┘   └──────┬──────────────┘
-                              │                   │
-                              └───────┬───────────┘
-                                      │
-                              ┌───────┴───────┐
-                              │ Postgres │ Redis │
-                              └───────────────┘
-
-Inbound: Meta → Caddy → NestJS WebhooksController → HMAC verify (guard) →
-         MetaProvider.parse → dedupe (compound unique on teamId+provider+externalId) →
-         Prisma upsert → publish DomainEvent → in-process Socket.io fanout → browser.
-
-Outbound: Browser → NestJS REST → MessagingService.sendText → Meta API →
-          publish message.sent → in-process Socket.io fanout → browser.
+Organization (Team) → Users → Connected Channels → Customers/Contacts → Conversations → Messages
 ```
 
-NestJS owns every backend concern that isn't auth pages. Socket.io lives in the same process as REST + workflows + webhooks, so domain-event → emit is in-process with zero pub/sub hop. Meta NEVER talks to browsers directly. Provider details hidden behind `MessagingProvider` interface so a future channel (SMS / IG DM) plugs in without touching ingest or controllers.
+- **Team** — the tenant. Every row in the database belongs to one (`teamId` everywhere).
+- **User** — a team member (roles: superAdmin / admin / manager / agent).
+- **Channel connection** — a team's credentials for one channel (`ChannelConnection`, one per `(team, channel)`).
+- **Contact** — a *channel identity* (a WhatsApp number, an Instagram handle). Adopted target: many contacts roll up to one **Customer** (a person) for a unified profile — see §6.
+- **Conversation** — one thread per contact per channel. Closed threads **reopen**, they never fragment.
+- **Message** — one inbound/outbound message on a conversation.
 
-## Critical architectural rules (don't violate these)
+Collaboration primitives on a conversation: **assignment**, **status** (open/pending/closed), **stage** (pipeline), **tags**, **custom fields**, **internal notes**. Around them: **triggers → workflows → actions** (automation), **outbound webhooks** (notify external systems), **broadcasts** (bulk templated outbound), the external **`/v1` API** (n8n/Zapier/partners), and **calling** (WhatsApp Business Calling over WebRTC).
 
-1. **Provider abstraction, even with one provider.** Define a `MessagingProvider` interface. Implement `MetaProvider` only for now. App code only ever talks to the interface, never directly to Meta's API shape. New channels plug in here.
+Everything in the app revolves around the conversation. The inbox is the heart of the product and must always be the highest-quality, most realtime surface.
 
-2. **Multi-tenancy from day one.** Every table has a `team_id` column, defaulting to 1. I'm single-tenant for MVP but I will not pay for that migration later.
+---
 
-3. **Deduplication is critical.** Meta sometimes delivers the same `wamid` twice (at-least-once semantics) and retries on non-200. Unique index on `external_id` in the messages table. Use `upsert` / `findUnique` gate, not bare `create`.
+## 3. Stack
 
-4. **Keep raw payloads.** Every message row has a `raw_payload` JSONB column with the original Meta webhook body. Critical for debugging.
+- **Monorepo**: pnpm workspaces + Turborepo. Node 24. **There is no root `lib/`** — shared code is the `@ccp/shared` package + each app's own `src/lib`.
+  - `apps/api` (`@ccp/api`) — **NestJS**: HTTP controllers, Socket.io gateway, webhook ingest, BullMQ workers, workflow engine, event bus. Owns every backend concern except auth pages.
+  - `apps/web` (`@ccp/web`) — **Next.js** (App Router, RSC): rendering + Better Auth pages only.
+  - `packages/shared` (`@ccp/shared`) — framework-agnostic types/contracts (events, providers, socket events, auth permissions, workflow shapes).
+  - `packages/config` (`@ccp/config`).
+- **Database**: PostgreSQL 16 via **Prisma 7.8** (pg driver adapter). Schema at repo root: `prisma/schema.prisma`. One `PrismaService` per process.
+- **Realtime**: **Socket.io**, hosted **inside NestJS** (same process as the event sources = zero cross-process emit latency).
+- **Queues / cache**: **Redis 7.4** + **BullMQ** (workers run in-process by default).
+- **Auth**: **Better Auth**, **in Next.js** (login/logout/signup, cookie issuance). NestJS only *validates* the session cookie via Prisma.
+- **Media**: **Cloudflare R2** (private bucket, team-prefixed keys, presigned GETs streamed same-origin).
+- **Edge**: **Caddy** (auto-HTTPS, WebSocket upgrade, routes `/`, `/_next/*`, `/api/auth/*` → web; `/api/*`, `/webhooks/*` → api).
+- **Two processes, one `docker-compose`, one VPS.** No microservices.
 
-5. **Webhook security.** Meta webhook authenticity is proven by HMAC-SHA256 of the raw body using the app secret (header `X-Hub-Signature-256`). Verify on every POST; reject malformed signatures with 403. The verify-token flow is only used at subscription setup.
+Stack guardrails (don't suggest these — they were considered and rejected for this project): Pusher/Ably/Supabase Realtime, tRPC, GraphQL, Zustand, React Query, Kafka, Kubernetes, Evolution/Baileys, any rewrite.
 
-6. **Per-team secrets when we go multi-tenant.** Today `META_*` secrets live in `process.env`. When customer #2 onboards, those move to nullable columns on the `Team` table — read by the provider via a `getProviderConfig(teamId)` helper. This is the migration alluded to in rule #2; flagging now so it's not a surprise.
+---
 
-7. **`Contact` = a channel identity, NOT a human; a `Conversation` is one-per-contact; the discriminator is `channel` (NO `provider`).** A WhatsApp account and a Telegram account are independent `Contact`s with independent `Conversation`s even for the same human — accounts differ, so records differ. NEVER add a `Person`/`Customer` super-entity or cross-channel merge (locked decision, re-ratified 2026-05-22). Because a Contact is already channel-scoped, "one conversation per channel per contact" = **one conversation per contact** (closed threads REOPEN, never fragment) — **DB-enforced** via `@@unique([teamId, contactId])` on Conversation (done 2026-05-22). **There is NO "provider"/"vendor" concept in the data model** (removed 2026-05-22): the one discriminator is `Channel { whatsapp }` (the MEDIUM), on `Conversation.channel` / `Message.channel` / `Contact.identityChannel` / `ChannelConnection.channel` (keyed `@@unique([teamId, channel])`). `meta_cloud` served BOTH WhatsApp and Instagram, so a vendor field couldn't tell them apart — the channel does. The `MessagingProvider` interface + `getProviderBinding(channel)` are the impl layer (one impl per vendor, registered per channel) — keep those names; just never store a "provider" on a row. Adding a channel = a new `Channel` value + a registered `MessagingProvider` + a `ChannelConnection` row.
+## 4. Layered architecture
 
-## Things to know about Meta Cloud API specifically
-
-- **No history sync.** From the moment you subscribe to webhooks, you receive new events. Anything that happened before that point is not retrievable. There is no "list past chats" endpoint.
-- **24-hour customer service window.** Outbound free-form messages only work to numbers that messaged you within the last 24h. Outside the window: pre-approved templates only. Plan UX around this from the start.
-- **Pre-approved templates.** Required for cold outbound (re-engagement, marketing, notifications, post-24h). Submitted via WhatsApp Manager, reviewed by Meta. Adding template send is its own work item, deferred.
-- **Test numbers vs real business numbers.** While the Meta app is unpublished, only numbers explicitly added as test recipients in the dashboard will receive your sends. Once published + verified, any number works.
-- **Onboarding.** No QR scan. Customers either (a) paste their `META_*` credentials into a settings page, or (b) we build WhatsApp Embedded Signup, which requires Meta Tech Provider review. (b) is the right answer for SaaS scale and is post-MVP. Future onboarding (Embedded Signup) playbook — see [docs/onboarding-future.md](docs/onboarding-future.md).
-
-## Database schema (initial)
-
-- `users` — id, team_id, role (admin/agent), name, email
-- `teams` — id, name
-- `contacts` — id, team_id, phone_number, name
-- `conversations` — id, team_id, contact_id, assigned_user_id, status (open/pending/closed)
-- `messages` — id, team_id, conversation_id, external_id (UNIQUE), sender_user_id (nullable for inbound), body, direction (in/out), provider, status (sent/delivered/read/failed), raw_payload (JSONB), timestamp
-- `internal_notes` — id, conversation_id, author_user_id, body, timestamp
-
-`provider` is currently a single-value enum (`meta_cloud`). Kept as an enum so adding a second channel is a non-destructive migration.
-
-## Docker Compose layout
-
-Two services on one internal network: `postgres` and `app`. Only `app` publishes a port. Postgres is reachable from `app` at `postgres:5432` and from the host (for migrations / Prisma Studio) at `127.0.0.1:5433`. Meta is reached over the public internet, so no other local services are needed.
-
-## Week-by-week MVP plan
-
-**Week 1 — Foundations**
-- Docker Compose: Postgres + Next.js
-- Next.js project with Better Auth, Prisma schema with team_id everywhere
-- Meta app set up, webhook verified, test recipient added
-- Webhook endpoint: receive → verify signature → normalize → dedupe → save (raw_payload kept)
-- `MessagingProvider` interface + `MetaProvider` implementation (parse + sendText)
-- Test full round trip: receive a Meta message, send a reply, both rows in DB
-
-**Week 2 — Inbox UI + Socket.io realtime**
-- Conversation list, message thread, reply box (Tailwind, simple and clean)
-- Socket.io server (custom Next.js server), rooms per conversation + per team
-- Frontend subscribes to active conversation + team-wide list
-- Two-browser test: agent A sends, agent B sees instantly
-- Agent attribution: every outbound message records sender_user_id
-- Assignment dropdown + filtered views (All / Mine / Unassigned)
-
-**Week 3 — Collaboration + polish**
-- Internal notes (Reply vs Note toggle, never sent to WhatsApp) — DO NOT SKIP
-- Conversation status (open/pending/closed)
-- Team-wide unread counters (per-agent unread is harder, defer)
-- Contact search
-- 24h-window awareness in the reply box (greyed when expired, hint about templates)
-- Self-use, fix real bugs
-
-**Week 4 — Deploy + pilot**
-- Deploy to a VPS, single Socket.io instance (sticky sessions later)
-- Public HTTPS for the app (Caddy reverse proxy — chosen over nginx/Traefik for auto-HTTPS and zero-config WebSocket upgrade for Socket.io)
-- Basic logging
-- Onboard pilot customer: either they hand us their `META_*` credentials, or we walk them through the Meta app setup. Embedded Signup is post-MVP.
-
-## Explicitly deferred (don't build, don't suggest)
-
-**Current focus is WhatsApp depth, not breadth.** Perfecting WhatsApp chatting + the three active workstreams (automations, AI agents, external API) comes first. Everything below stays off the table until that's done — *especially* don't suggest these as shortcuts when one of the active workstreams hits friction.
-
-**Deferred until WhatsApp + automations + AI agents are solid:**
-- **WhatsApp Embedded Signup.** Right answer for SaaS-scale onboarding (no more manual `META_*` credential pasting), needs Meta Tech Provider review. Comes *after* the product itself is worth onboarding into.
-- **Multi-channel (Instagram / FB Messenger / SMS / Email / etc.).** Provider interface is ready, don't add one until a pilot actively asks and WhatsApp depth is done. Resisting this is the single biggest scope discipline call on the project.
-
-**Deferred indefinitely (no clear trigger yet):**
-- Analytics dashboards, per-agent unread, advanced permissions, audit log UI, billing, Redis pub/sub for Socket.io scaling, voice/calling, native CRM integrations (Salesforce/HubSpot — n8n via the external API covers this).
-
-> Note: tags, labels, template send/manage, bulk send, BullMQ, and media send/receive were on this list at MVP-start but are now shipped — see [audit on 2026-05-16]. The three "depth pass" workstreams above are the active expansion; treat them as in-flight, not deferred.
-
-## Operations & deployment notes (don't forget)
-
-### Node heap — must fit UNDER the container mem_limit (corrected 2026-06-01)
-**Prod heap is set in each Dockerfile's `ENV NODE_OPTIONS`: api `--max-old-space-size=2048` (container `mem_limit: 3g`), web `1536` (container `mem_limit: 2g`).** These were `4096` until 2026-06-01, which was a latent bug: the VPS is an **8 GB KVM2** and the mem_limits already commit ~6.75 GB (postgres 1.5g + redis 0.25g + api 3g + web 2g), so the limits can't be raised — and a 4 GB V8 heap can never be backed when the cgroup caps the process at 2–3 GB RSS. V8 would grow toward 4 GB while the cgroup **OOM-kills at the mem_limit BEFORE GC engaged** (`exited (137)`), the exact cascading-flakiness failure described in the dev section below. The heap MUST stay under mem_limit with RSS headroom (heap + native/buffers/Socket.io ≈ heap + 0.5–1 GB). **Rule: `--max-old-space-size` ≤ ~75% of the service's compose `mem_limit`.** Don't bump it back to 4096; if a service genuinely needs more heap, raise its `mem_limit` first — which the 8 GB box can't currently afford without shrinking postgres/redis.
-
-**Dev is lower on purpose** (2026-05-21): web `dev` = 3072, api `dev` = 2048. Reason: the dev box is a 15.4 GB Windows host giving WSL ~9.7 GB. Running BOTH dev servers at a 4 GB heap (8 GB combined) overcommitted during a webpack compile spike and the Linux OOM-killer killed the api (`exited (137)` — SIGKILL), which manifested as cascading flakiness (proxy `ECONNRESET`, socket dropping `message:new` → optimistic send bubbles hitting the 30s watchdog and going red). 3 GB + 2 GB fits in 9.7 GB with headroom. A big `.wslconfig` `memory=` bump is NOT the fix here — the host is too small to give WSL more without starving Windows (browser + VS Code + Docker Desktop). If a dev server ever throws a *V8* "JavaScript heap out of memory" (distinct from 137), bump that one's dev cap back up a notch.
-
-### Before pilot launch (must-do)
-1. **No process supervisor — `docker compose` drives the stack directly** (NOT pm2, NOT systemd). The `ccp` systemd unit was REMOVED 2026-05-26: it ran `docker compose up` with `Restart=always`, which fought every manual `docker stop`/`down` (the unit's `up` recreated whatever you stopped) and never pruned old images, so the VPS disk filled. The deploy job now SSHes in and runs `docker compose --env-file .env up -d --remove-orphans` + `docker image prune -f` directly, and auto-removes the legacy unit if found. **Restart policy is `restart: unless-stopped` on every prod service** (was `"no"` until 2026-05-26): Docker auto-restarts on **crash** and on **VPS reboot**, but a manual `docker compose down` / `docker stop` STICKS — Docker's own policy tracks desired state, so it doesn't have the bounce-back pathology the removed systemd wrapper had. The earlier `"no"` posture was over-conservative and meant an OOM-killed api stayed dark until someone noticed. Graceful-shutdown drain is bounded by compose's **`stop_grace_period`** (100s on api, 30s on web — see [docker-compose.yml](docker-compose.yml)), NOT systemd `TimeoutStopSec`; the 100s on api still exceeds the 90s BullMQ `lockDuration` plus tail. Each Dockerfile's `ENV NODE_OPTIONS=--max-old-space-size=<cap>` carries the heap (api 2048, web 1536 — sized under each service's mem_limit; env-on-host never propagated through compose anyway). See "Graceful shutdown" below and [deploy/README.md](deploy/README.md) "Starting / stopping the stack".
-2. **Caddy reverse proxy** in front for HTTPS (not nginx — Caddy handles Let's Encrypt automatically and forwards WebSocket upgrade headers by default, which Socket.io needs). Caddy still runs as a host service (`systemctl reload caddy`); only the *app* stack moved off systemd. Bonus: during the rare app restart, the proxy returns 502 for ~3s instead of a hard "connection refused."
-3. **VPS sizing**: ≥4GB RAM for the app, +2GB for Postgres, +headroom. 8GB total is the floor.
-
-### Graceful shutdown — load-bearing for workers
-`apps/api/src/main.ts` installs its OWN `SIGTERM`/`SIGINT` handlers (NOT `app.enableShutdownHooks()` — that was replaced because the bundled hook fires `OnModuleDestroy` BEFORE the HTTP server closes, leaving a window where the api still accepts requests that get SIGKILL'd when the shutdown drain budget expires). The manual handler inverts that order: stop accepting connections first, then drain. `app.close()` fires the full NestJS lifecycle (`OnModuleDestroy` etc.) on its own — `enableShutdownHooks()` only wires the signal listeners, which we now do ourselves — so the `WorkflowWorkerService` hook still stops the BullMQ worker via `worker.close()` (BullMQ awaits the in-flight job, then releases the Redis lock cleanly), stops the sweepers, and closes the queue. The chain is:
+Strict layering. Each layer has one responsibility and never leaks another's implementation details.
 
 ```
-SIGTERM → main.ts shutdown() →
-  server.close() + closeIdleConnections()   (stop accepting; Caddy sees us down fast)
-  → ~3s flush budget for in-flight responses
-  → app.close() → OnModuleDestroy hooks fire in reverse-init order →
-       stopContactDriftSweeper → stopWorkflowWaitingSweeper → stopInboundMediaSweeper →
-       stopWorkflowWorker (awaits in-flight job; bounded by BullMQ lockDuration=90s) →
-       closeWorkflowQueue
-  → process.exit(0)
+Presentation      Next.js RSC + client components (apps/web/src)
+      ↓
+Application        NestJS controllers + Socket.io gateway (apps/api/src/<domain>)  — THIN
+      ↓
+Domain             business logic: apps/api/src/lib/** + @ccp/shared
+      ↓
+Infrastructure     Prisma, Redis/BullMQ, Socket.io emitter, R2
+      ↓
+Providers          MessagingProvider adapters (Meta today) — apps/api/src/lib/providers
 ```
 
-If you remove the manual handlers (or the drain budget is too low — now compose's `stop_grace_period: 100s` on the api service, formerly systemd's `TimeoutStopSec=120`), the worker dies mid-job, Redis releases the lock after 90s, the new process picks the same job up and re-executes — irreversible Meta sends, tag changes, etc. double-fire. Don't strip the handlers, don't drop `stop_grace_period` below ~100s on api, and keep `server.close()` ordered BEFORE `app.close()`.
+**The rule: business logic never lives in a controller, a websocket gateway, a repository, a queue processor, or a provider.** Controllers validate input, call a domain service, and shape the response. Gateways route socket frames. Providers translate wire shapes. All decisions, rules, and orchestration live in domain services (`apps/api/src/lib/**`) that are framework-agnostic and independently testable.
 
-### Per-user rate limiting
-`RateLimitGuard` (in CommonModule, applied globally via `APP_GUARD`) buckets every session-authenticated mutation at **300 req/min per user** by default, with `@RateLimit({ perMinute: 60 })` overriding `MessagesController` (text/media/template/forward share the same bucket so a single user can't multiply quota by hitting different routes). API-key routes have their own per-key limit upstream (`ApiKeyGuard`); guard no-ops on requests without `req.session`. Tune by adding the `@RateLimit` decorator at the controller or handler level. In-memory only — moves to Redis on the same trigger as everything else (second app instance).
+This is what lets one layer change without breaking the rest. Swap a provider, move a controller, retune the socket layer — the domain doesn't notice. Preserve these seams.
 
-### Request correlation IDs
-`apps/api/src/common/correlation.ts` exposes `getCorrelationId()` and `withCorrelation(msg)`. Correlation middleware runs FIRST in main.ts (before bodyParser) so the ALS scope covers the whole request. Echoed back via `X-Request-Id`. For framework-agnostic `lib/` code that doesn't use NestJS's `Logger`, wrap log messages with `withCorrelation(...)` — see `lib/events/bus.ts` for the pattern. NestJS Logger calls inside HTTP handlers carry the ID via the controller's module context plus the surrounding ALS scope.
+---
 
-### Contact.lastInboundAt drift sweeper
-`apps/api/src/lib/sweepers/contact-last-inbound-drift.ts` runs once daily and reconciles `Contact.lastInboundAt` against `MAX(Message.timestamp)` per contact for inbound messages. Self-disables after 7 days of zero drift (re-enables on process restart). The denorm is steady-state correct; this is defense-in-depth against a crash between the Message insert and the Contact bump.
+## 5. Channels are pluggable
 
-### Realtime cache patch matrix
-When adding a socket event that mutates per-thread state (status, assignment, custom field, tag, note, etc.), wire it in BOTH places:
-1. `apps/web/src/features/inbox/lib/thread-reducers.ts` — pure reducer
-2. `useConversationEvents` AND `inbox-shell.tsx` — both call the same reducer
+Full recipe + per-channel constraint table: **[docs/adding-a-channel.md](docs/adding-a-channel.md)**.
 
-See the comment block at the top of `thread-reducers.ts` for the full event → reducer → consumer table. Skipping the cached-shell side means a chat-switch + back reverts the field to a stale snapshot.
+- One discriminator: `enum Channel { whatsapp }` (more values come as channels ship). **No `provider`/`vendor` column anywhere** — which vendor implements a channel is an impl detail, never stored. Meta Cloud serves both WhatsApp and (future) Instagram; they are distinct *channels* because the channel is the medium, not the vendor.
+- `MessagingProvider<C>` interface (`packages/shared/src/providers/types.ts`): declarative `capabilities`, a pure `parseWebhook(payload) → NormalizedEvent[]`, `sendText`, and optional media/template/calling methods. The only impl today is the `metaProvider` object in `apps/api/src/lib/providers/meta.ts`.
+- Registry `getProviderBinding(channel)` (`apps/api/src/lib/providers/index.ts`) → `{ provider, getSendConfig(teamId) }`. Per-(team,channel) credentials live on `ChannelConnection` (`config` + envelope-encrypted `secrets`), loaded/cached by `apps/api/src/lib/providers/config.ts`.
 
-### Read-state + reconnect convergence (read before touching unread)
-Inbox unread is **team-wide only** (`Conversation.unreadCount`) — there is NO per-agent inbox read state (team chat has its own, `TeamChannelReadReceipt`). Two load-bearing rules; breaking either is the recurring "stuck / wrong unread" bug class (all fixed 2026-05-21: stuck-after-reconnect, hidden-tab-clears-team-unread, stale-notes-after-sleep):
+**Adding a channel** = new `Channel` value + a `MessagingProvider` impl + a registry entry + a `ChannelConnection` row (+ a fanout rule only if it introduces new event types). Ingest, dedup, realtime, workflows, and the `/v1` API are untouched because they operate on `NormalizedEvent` + `Channel`, never a vendor shape.
 
-1. **`markRead` fires ONLY when the agent is actually viewing — visible AND on the thread.** Triggers in `use-conversation-events.ts`: mount (on EVERY visible mount — it does NOT gate on the cached `initialUnread` snapshot, which can be stale-low on a client-side chat-switch and leave the DB counter stuck-high until a later authoritative frame surfaces it; the server `markRead` short-circuits the already-read case with one cheap SELECT and sends no redundant Meta read-receipt, so the over-call is negligible), live `onMessageNew` (gated on `document.visibilityState === "visible"`, else deferred via `sawInboundWhileHiddenRef`), and `onVisibility` (fires the deferred read on return). A human-agent SEND also marks read server-side (`MessagesService.markReadOnAgentSend` on sendText/Media/Template/Interactive, reusing the `conversation.read` event) — replying is proof of viewing. A hidden background tab parked on a thread must NOT clear team-wide unread for a message nobody saw — that silently drops customer messages from triage.
-2. **Every recovery path must converge to server state.** The displayed thread has three: live socket reducers, the SSR/open `?after=` **delta** backfill (`runBackfill`), and a **full** refetch (`runFullRefetch` → `GET /api/inbox/conversation/:id`) on a real RECONNECT. First connect = delta (SSR is fresh); reconnect-after-drop = full refetch (the delta can't carry notes / contact / message-status that changed while offline). Both clear unread when `unreadCount > 0`. Wire any new unread-clear or thread-state trigger into ALL paths — a fix on the live path alone leaves a stuck-after-reconnect bug.
-3. **The list badge clears via a LOCAL `conversation:read` dispatch, NOT the server frame.** `markRead`'s server-side CAS publishes `conversation.read` ONLY on the `1→0` transition — it's one-shot. Once the DB unread is zeroed, no future frame ever fires, so a single missed delivery (socket not yet joined to the team room on a fresh open, a throttled/background tab, a transient drop) would leave the LIST badge stuck at >0 forever even though the DB says read (reappearing on every chat-switch / nav). Fix: `inbox-shell.tsx`'s `handleMarkRead` (the `onMarkRead` callback) fires `dispatchLocalSocketEvent("conversation:read", …)` on POST success. That one frame drives all three consumers via their already-wired reducers — `useTeamEvents.onRead` (list badge), the inbox-shell reducer (LRU cache snapshot), and the `useConversationEvents` reducer (live thread `data.unreadCount`, so snapshot-on-leave can't write a stale 1 back). Don't make the list badge depend on the server round-trip frame again — it's the same "optimistic socket dispatch" rule every other inbox mutation (status / assignment / contact) follows.
+Model each channel's rules (24h window, templates vs free-form, rate limit) as `capabilities` flags so the reply box and broadcast logic derive behavior from the capability — never a hardcoded `if (channel === "whatsapp")`.
 
-### Coalesced bulk fanout
-Bulk paths (`/api/contacts/bulk` tag-add/tag-remove today) publish per-contact `contact.updated` events with `suppressSocketFanout: true` (workflow + audit subscribers still fire — they don't read the flag), AND publish one `contact.bulk_updated` event for socket fanout. Clients listening to `contacts:bulk_updated` should invalidate / refetch the affected ids in one query. Bounds a 500-contact × 25-agent bulk operation from ~12,500 socket frames to 25.
+---
 
-### Time rendering — one source of truth, no split-paint
-Every "now"-dependent UI MUST read from `useTzNow()` (or `useNow()` which re-exports it). The provider initializes `now` to the server's `Date.now()` so SSR and the first client paint render identical strings — no "Window closed" → "Window closed · 42h ago" flash on refresh, no `hideRemaining` workaround, no `?? Date.now()` fallback. Splitting `tz` (stable) from `now` (60s tick) on separate contexts means absolute timestamps don't re-render every minute. DON'T add a fresh `useState(null) + useEffect(setNow(Date.now()))` pattern in a new component — that's exactly the source of the bug class fixed 2026-05-29. `LocalTime` is the canonical example: absolute formats subscribe only to `useTimezone()`; relative formats read `useTzNow()`. The same rule applies to anything not time-related: don't gate render on a `useEffect`-set boolean to "wait until hydration" — render the right thing on first paint or wrap the region in a Suspense boundary with a tight skeleton.
+## 6. Customer identity (adopted target)
 
-### Dev-environment OOM (`next dev` / `node --watch` chewing memory)
-Symptom: `FATAL ERROR: Ineffective mark-compacts near heap limit` after a long edit session. Cause: `next dev` (Turbopack) + `node --watch -r @swc-node/register` (api) accumulate bundler/AST state across hot-reloads. (The earlier `tsx watch` posture was retired when the api switched to `@swc-node/register` for decorator metadata.) Fix order:
-1. `rm -rf .next` (the dev cache bloats past 500MB after heavy days)
-2. Restart `pnpm dev`
-3. Re-bump heap to 6GB if even 4GB isn't enough during a particularly heavy session
-4. As a habit, restart dev once an hour during heavy work
+Full design + migration: **[docs/identity.md](docs/identity.md)**.
 
-This is a dev-watcher artifact, NOT a memory leak in our code. Don't chase phantom leaks in app code based on the dev-mode OOM alone.
+The platform adopts a **unified customer identity**: a `Customer` (person) owns many channel-scoped `Contact` rows, so an agent sees one profile across all a person's channels. Threads stay **per-contact/per-channel** (we never merge message histories) — the customer is a profile-and-switcher layer over separate threads.
 
-### Skip until forced to revisit (with trigger conditions)
-- **pm2** — only if we move beyond a single VPS or want clustered Node workers.
-- **Datadog / New Relic** — only when `process.memoryUsage()` logging stops being enough.
-- **Redis pub/sub for Socket.io** — only when a second app instance shows up.
-- **Cache eviction on `lib/providers/config.ts`** — only past ~5 tenants (current `Map` is grow-only by design).
-- **Move broadcast runner to a separate worker / BullMQ** — only when a single broadcast crosses ~10k recipients OR a broadcast crashes the app mid-flight.
-- **Per-tenant UploadThing isolation** — single `UPLOADTHING_TOKEN` shared across all teams today; compromise of the token exposes everyone's media. Trigger: ~10 customers OR a partner explicitly asks for per-tenant blob scoping. Fix: either per-team UploadThing apps (operational + cost overhead) or move to S3/R2 with a `<teamId>/` prefix policy on signed URLs.
-- **Encryption-at-rest for customer data (`Message.body`, `Contact.phoneNumber`, etc.)** — today only credentials (`Team.metaAppSecret`, `TeamApiKey.secret`) are encrypted via the envelope crypto. Trigger: enterprise customer compliance requirement. Fix: Postgres TDE at the disk level, OR per-team data keys with explicit encrypt/decrypt at every read site — much wider change than the credential pattern. Don't selectively encrypt one column ("just `OutboundWebhookDelivery.payload`") — the payload duplicates data already plaintext on `Message.body`, so partial encryption is security theater.
+Discipline that keeps this simple and safe:
+- **Auto-merge only on deterministic strong keys** (verified exact phone / exact email). **No fuzzy/name matching, ever.**
+- Everything else is **manual, reversible merge/split with an audit trail**. Merge never deletes a contact or its messages — it only re-points `Contact.customerId`.
+- Identity resolution runs in **exactly one place** (an `IdentityService` in the domain layer, called from ingest), tenant-scoped.
 
-### Behaviors that look fixable but are correct as-is
-- **Socket.io connection-state-recovery is bounded at 30 seconds** (`maxDisconnectionDuration`, [apps/api/src/realtime/ws-adapter.ts](apps/api/src/realtime/ws-adapter.ts)). After a longer offline (laptop sleep, WiFi hop), non-displayed cached threads in the LRU are evicted on the next reconnect; clicking back to one triggers a refetch. The DISPLAYED thread isn't evicted — instead `useConversationEvents` full-refetches it on reconnect (`runFullRefetch`, see "Read-state + reconnect convergence"). Both are the same simple answer: refetch, don't build a custom replay layer. Don't extend the recovery window.
-- **The bulk DELETE endpoint at `/api/contacts/bulk` fires per-contact `contact.deleted` events** rather than coalescing through a `contact.bulk_deleted` frame. Looks like the symmetric of `contact.bulk_updated` (tag bulk), but the audit pattern doesn't apply: bulk delete is rare in practice, and the per-contact events drive workflow + audit subscribers that need granular triggers. Adding a coalesced socket frame would require either a parallel suppress-then-emit pattern (cost: new event type + new fanout rule + new client handler for a rare path) or losing workflow trigger granularity. Skip unless a customer reports lag from a 500+ bulk-delete.
+**Current state**: `Contact`-only (per-channel); no `Customer` table yet. Treat "contact" and "customer" as the same thing in code until the second channel makes unification real, then follow the migration in the doc. Do not build speculative `Customer` plumbing early.
 
-### Scaling cliffs to anticipate (don't pre-build)
-- **50-200 tenants**: in-process credential cache + grow-only Maps start to leak. Fix when seen.
-- **10k+ recipient broadcasts**: in-process loop holds too much state. Move to a worker.
-- **Multi-region or HA**: requires Redis Socket.io adapter, sticky sessions, shared media storage. Not pilot scope.
+---
 
-## How I want you to work with me
+## 7. Data model spine
 
-- **Match the stack above.** Don't suggest Pusher, Ably, Supabase Realtime, tRPC, GraphQL, Evolution / Baileys, or any rewrites.
-- **Code first, explanation second.** I'm a working developer. Show me the code, then a short note on what's non-obvious.
-- **Surface tradeoffs, don't hide them.** When you make a design choice, tell me what you rejected and why in 1-2 sentences.
-- **Flag Meta-specific gotchas.** If I ask for something that runs into the 24h window, requires a template, or requires a permission I don't have yet, say so before writing code.
-- **Ask before scaffolding huge things.** If a request implies generating 10+ files, propose a file list first and let me approve it.
-- **Prisma over raw SQL** for schema and queries. Migrations via `prisma migrate dev`.
-- **TypeScript everywhere.** Strict mode.
-- **Don't write tests yet** unless I ask. I'll add them after the MVP works end-to-end.
+Real entities (`prisma/schema.prisma`; ERD in [docs/schema-erd.md](docs/schema-erd.md)):
 
-## What I'm working on right now
+`Team → User → ChannelConnection`; `Contact → Conversation → Message`; plus `ContactStage`, `ContactFieldDefinition`, `Tag`, `AudienceGroup`, `Broadcast`/`BroadcastRecipient`, `InternalNote`, `Workflow`/`WorkflowRun`/`WorkflowContactState`, `TeamApiKey`, `OutboundWebhook`/`OutboundWebhookDelivery`, `OutboundEvent` (outbox), `ConversationEvent` (audit timeline), the team-chat models (a deliberately separate message graph), `Call`/`CallPermissionRequest`, `OutboundSendAttempt` (send-idempotency ledger).
 
-**Active and only workstream: NestJS migration — code-complete, smoke-booted, awaiting dev soak + deploy sign-off.** Everything else (AI agents, outbound webhooks, scoped API keys, round-robin assignment) is paused until the deploy lands.
+**Non-negotiable data invariants:**
+- **`teamId` on every table**, and in the `where` of every query — sourced from `req.session.teamId` or `req.apiKey.teamId`, **never** from client input. There is no Prisma middleware / RLS; tenant isolation is manual and load-bearing.
+- **One conversation per contact**: `@@unique([teamId, contactId])` on `Conversation`. Closed threads reopen; they never fragment.
+- **Dedup**: `@@unique([teamId, channel, externalId])` on `Message` and on `Call`. Meta delivers at-least-once — always `upsert` / `findUnique`-gate, never a bare `create` on inbound.
+- **`Contact` is channel-scoped** (`identityChannel`, phone *or* `externalContactId`), carries a `version` CAS token and a soft-delete tombstone.
+- **Keep raw payloads**: `Message.rawPayload` holds the original webhook body — critical for debugging every channel.
+- Credentials: `ChannelConnection.secrets` is **envelope-encrypted** (AES-256-GCM, `ENCRYPTION_KEY`); `TeamApiKey` tokens are **SHA-256 hashed** (irreversible). Never store a secret in plaintext.
 
-The 4-week MVP plus the workflow / external API / team-chat depth passes are all already shipped — inbox, realtime, templates, broadcasts, contacts (tags / stages / custom fields / audience groups), media send+receive, snippets, internal notes, forwarding, external API, workflow engine + React Flow canvas, team chat with channels / mentions / reactions / pins / threads.
+Database philosophy: normalize by default; denormalize only for a measured performance win (e.g. `Conversation.lastMessagePreview`, `unreadCount`, `Contact.lastInboundAt` — each backed by a drift sweeper). Add an index only when a real query needs it. Use a transaction where consistency matters; use the `version` CAS for optimistic concurrency where it does. Keep it simple.
 
-### Migration state — complete
+---
 
-Phases 1–5 all landed. Both typechecks green; both processes (Next.js + NestJS) boot cleanly in dev with `/api/health` returning healthy.
+## 8. Message lifecycle
 
-| Phase | Deliverable | Status |
-|---|---|---|
-| 1 | NestJS scaffold (`apps/api/`) — guards, pipes, Prisma module, BullMQ, Socket.io gateway, health endpoint | ✅ |
-| 2 | Realtime + ingest — full Socket.io gateway port, `RealtimeFanoutService` bus subscriber, Meta webhook controller (HMAC verify + 2-phase inbound media), frontend `NEXT_PUBLIC_API_URL` flag | ✅ |
-| 3a | Catalog REST: tags / snippets / stages / contact-fields / audience-groups / api-keys / team-chat channels / WhatsApp settings + templates | ✅ |
-| 3b | Inbox REST: conversations (full) + notes + contacts (full CRUD + bulk + import + lookup/count/preview/export/tags) + messages (text + template + **media + forward**) | ✅ |
-| 3c | Admin REST: invites + users + admin/teams + team root + change-password + workflows (all 8 routes incl. public HMAC incoming-webhook) | ✅ |
-| 3d | Broadcasts: create + list + get + delete + media/[messageId]. Runner stays in [lib/broadcast-runner.ts](lib/broadcast-runner.ts) (framework-agnostic). | ✅ |
-| 3e | External `/v1` API: all 6 endpoints | ✅ |
-| 4 | Workflow engine in NestJS: `WorkflowWorkerService`, `WorkflowSubscribersService`, `WorkflowDispatcherService`. Engine in [lib/workflows/](lib/workflows/). | ✅ |
-| 5 | Cleanup: ~82 files deleted (server.ts, worker.ts, lib/socket/server.ts, lib/events/redis-bridge.ts, lib/api/*, lib/events/subscribers/{socket-fanout,index}.ts, every migrated `app/api/**/route.ts`). New `instrumentation.ts` runs fail-fast env validation on Next.js boot (cross-process cache-revalidate is the `/api/internal/revalidate` bridge, not instrumentation). Dev tool ported to NestJS as `DevEmitController`. | ✅ |
+**Inbound** (one clear owner per step):
+```
+Meta → Caddy → NestJS webhook controller → HMAC verify (raw body)
+  → provider.parseWebhook → NormalizedEvent[] → dedupe (teamId+channel+externalId)
+  → Prisma upsert → publish DomainEvent
+  → [realtime fanout] · [audit] · [analytics] · [workflow dispatch] · [outbound webhooks]
+```
+Media is downloaded async (row commits `mediaPending`, then `message.media_ready` publishes once bytes land in R2). Fail-soft: Meta retries any non-2xx, so parse/ingest failures return `200 {dropped}`; only transient DB errors throw `503` for redelivery. Detail in [docs/events.md](docs/events.md).
 
-**Runtime stack** — `@swc-node/register` powers `api:dev` / `api:start` (NOT `tsx`; see lessons below). Next.js dev/start use `next dev` / `next start` — no more custom `server.ts`.
+**Outbound**:
+```
+Browser REST / v1 API → idempotency gate (OutboundSendAttempt) → message-sends queue
+  → provider.sendText/Media/Template → Meta → persist status → publish message.sent
+  → realtime fanout → workflows → outbound webhooks → analytics
+```
+A send is non-idempotent and bills the team, so `/v1` sends **require** an `Idempotency-Key`, and the `OutboundSendAttempt` ledger (keyed by BullMQ jobId) prevents a double Meta send across a worker restart.
 
-### Bus events introduced for the cleanup
+---
 
-Direct `emitToTeam` calls in lib/ couldn't survive Phase 5 because the Socket.io singleton moved to NestJS. Two new event types added to keep emit-from-lib working from any process WITHOUT triggering audit/analytics/workflows when that's not the intent:
+## 9. Event model
 
-- `broadcast.recipient_message_sent` + `broadcast.conversation_reopened` — broadcast runner uses these instead of `message.sent` / `conversation.status_changed`. Only socket-fanout subscribes; analytics + audit are structurally excluded (a 1k-recipient broadcast must not bump counters or write 1k timeline rows).
-- The conversation audit timeline is DB-only: `recordConversationEvent` (`lib/inbox/events.ts`, called from the audit subscriber) writes the `ConversationEvent` row and does NOT emit a socket frame — the timeline is fetched on demand. (No `conversation.event_recorded` bus event exists; an earlier draft of this section described one that was never wired.)
+Full detail: **[docs/events.md](docs/events.md)**.
 
-### Remaining non-migrated routes (intentional, post-Phase-5)
+**Events are notifications, not business logic.** They announce a change that already committed. Rules:
+- Every event has **one owner** (the publisher) and **one purpose**. A subscriber reacts; it never owns the mutation.
+- **No recursive event chains.** A subscriber must not emit an event that re-triggers itself. Workflow-driven events carry `silent`/`skipOutboundWebhook` for exactly this loop safety.
+- **Naming**: `<entity>.<past_tense_change>` (e.g. `message.received`, `conversation.status_changed`). Additive only — a name is a contract.
+- **Payloads** carry `teamId` + enough context for subscribers to react **without a DB re-read**.
+- **Idempotency & ordering**: consumers tolerate at-least-once redelivery; assume ordering only within a single publish's priority tiers, never across events.
 
-| Route | Reason |
+The bus (`apps/api/src/lib/events/bus.ts`) is a **two-tier priority dispatch**: the realtime frame goes out first (CRITICAL tier), then background subscribers run detached from the HTTP response in a fixed order (`AUDIT 10 → ANALYTICS 20 → WORKFLOW_DISPATCH 30 → OUTBOUND_WEBHOOKS 50`) — the order is load-bearing because dispatch/webhooks re-read state analytics writes. A durable transactional **outbox** + drainer covers crash-safety. **Invariant: never subscribe audit or workflow to `broadcast.*`** (a 1k-recipient broadcast must not write 1k audit rows or fire 1k workflows).
+
+---
+
+## 10. Realtime model
+
+Full detail: **[docs/realtime.md](docs/realtime.md)**. This is the app's highest-quality bar.
+
+- **Emit only after a successful state change. Frames are small, scoped, idempotent — never speculative, never duplicate, never unchanged.**
+- **Rooms** (`apps/api/src/realtime/rooms.ts`): `team:` / `conv:` / `chan:` / `user:`. Fanout scope is deliberate (`fanout-rules.ts`): team-wide frames only for what every agent needs; thread frames (`message:status`, typing, broadcast recipient frames) scoped to the conversation room to avoid team-room storms.
+- **Frontend**: pure reducers (`apps/web/src/features/inbox/lib/thread-reducers.ts`) shared by three consumers (live hook, LRU cache shell, contact panel) via a table-driven wiring, with a dev-time `assertReducerCoverage` invariant and a monotonic message-status guard. Wire a new per-thread event into **all three** or a chat-switch reverts to a stale snapshot.
+- **Unread is team-wide only.** `markRead` fires only when the agent is actually viewing (visible + on-thread); a hidden tab never clears unread for a message nobody saw. Every recovery path (live / delta backfill on open / full refetch on reconnect) converges to server state, and the list badge clears via a local `conversation:read` dispatch, not the one-shot server frame.
+
+Minimize socket traffic and re-renders: coalesce bursts, return the same reference when nothing changed, subscribe only to data a view actually needs.
+
+---
+
+## 11. Workflow model
+
+Engine internals: [apps/api/src/lib/workflows/README.md](apps/api/src/lib/workflows/README.md). AI-autopilot design: [docs/n8n-ai-autopilot.md](docs/n8n-ai-autopilot.md).
+
+```
+Trigger (domain event) → Conditions → Step actions → Completion
+```
+- Engine in `apps/api/src/lib/workflows/` (DAG runner, dispatcher, conditions, ~18 step types incl. `send_message`, `assign_to`, `set_status`, `add_tag`, `branch`, `wait`, `ask_question`, `http_request`, `trigger_workflow`); NestJS seam in `apps/api/src/workflows/`.
+- **Deterministic and loop-safe.** Guards: `MAX_STEPS_PER_RUN = 200` (= the `MAX_WORKFLOW_NODES` publish-time node cap) + dual pickup ceilings, `jump_to_step` caps, cross-system chain depth (`X-CCP-Depth`), `trigger_workflow` chain depth, and an immutable trigger-time snapshot pinned on the run. `triggerOncePerContact` uses a race-safe ledger.
+- Runs on the `workflows` BullMQ queue with a per-team concurrency cap and `lockDuration = 90s` (boot-asserted to exceed the max step timeout, so a slow `http_request` can't outlive its lock and double-fire).
+
+Protected against recursion, infinite loops, duplicate execution, and retry-induced duplicate actions — keep it that way.
+
+---
+
+## 12. Integrations, webhooks & the external API
+
+- **Providers are adapters.** They translate a vendor wire shape ↔ `NormalizedEvent` and nothing else. Business logic never depends on a provider. Every external system (Meta, future Telegram/SMS/Email, n8n/Zapier/Make) is just another adapter or a webhook consumer.
+- **Inbound webhooks**: HMAC-verify the raw body on every POST (`X-Hub-Signature-256`), reject malformed signatures, dedupe, keep the raw payload, fail-soft on non-2xx.
+- **Outbound webhooks** (implemented): only meaningful business events; signed (`X-CCP-Signature`, HMAC-SHA256); idempotent (delivery id header); bounded retries (7 attempts, exp backoff) with auto-disable after repeated failure; a stable, versioned payload that carries enough context to avoid extra API calls. Managed under `apps/api/src/team/outbound-webhooks/`.
+- **External `/v1` API** (`apps/api/src/external/v1/`): full parity with the internal UI actions is a **locked rule** — every capability the UI has, the API has, and every endpoint is documented in both [docs/organization-api.md](docs/organization-api.md) and the in-app `/docs/api` page. Bearer API keys + scopes, mandatory `Idempotency-Key` on sends, chain-depth guard. `/v1` writes publish the same domain events as internal routes.
+
+---
+
+## 13. API & queue conventions
+
+**REST**: one folder per domain (`*.controller.ts` + `*.service.ts` + `*.module.ts` + `*.schemas.ts`); controllers thin over `lib/**`.
+- **Validation**: Zod everywhere via `zBody(schema)` / `zQuery(schema)` pipes (`apps/api/src/common/zod-validation.pipe.ts`). **There is no `zParam`** — params are read with `@Param` and checked inline. Reuse existing schemas; no class-validator.
+- **Guards**: `SessionGuard` (Better Auth cookie via Prisma, cached), `ApiKeyGuard` + `ScopeGuard` (`@RequireScope`), role/capability guards for RBAC.
+- **Rate limiting**: `@RateLimit({ perMinute })` interceptor, 300/min/user default (details + rationale in [docs/operations.md](docs/operations.md)).
+- **Errors**: structured `{ error: "<snake_case_key>", … }`; Zod adds `issues`; `PrismaExceptionFilter` maps leaked Prisma errors (P2025→404, P2002→409, …). PII/`.meta` logged server-side with the correlation id, never in the body.
+- **Correlation**: `X-Request-Id` via AsyncLocalStorage, minted at the edge and propagated through all fan-out fetches.
+- No hidden side effects: a GET never mutates; a mutation publishes exactly the events it should.
+
+**Queues**: async work only; bounded retries + dead-letter retention; idempotent enqueue (stable `jobId`); never a recursive or storming job. Workers run in-process (`RUN_WORKER_INLINE`, default on; prod refuses `0`). Graceful shutdown drains them cleanly — see [docs/operations.md](docs/operations.md).
+
+---
+
+## 14. Frontend state
+
+Client state is **plain React**: `useState` + pure reducers (`thread-reducers.ts`) + a few small scoped contexts, driven by Socket.io frames. **No Zustand, no React Query, no Redux** (the only `@tanstack/*` dep is `react-virtual` for list virtualization). Don't reach for a global store.
+
+Every piece of state has a single owner:
+- **Server state** — fetched from NestJS (RSC pages over `INTERNAL_API_URL`; client components over `NEXT_PUBLIC_API_URL`, empty in prod = same-origin via Caddy).
+- **Realtime state** — socket frames applied through the shared reducers.
+- **Cached state** — the inbox LRU `ThreadCache`, converged on reconnect.
+- **Client / UI / derived state** — local `useState` and computed values; never duplicated into a store.
+
+Avoid duplicated state, unnecessary global stores, unnecessary fetching, and unnecessary cache invalidation. **Time rendering**: read "now" only from `useTzNow()`/`useNow()` and render via `<LocalTime iso format>` (string format keys) — split `tz` (stable) and `now` (60s tick) contexts so absolute timestamps don't re-render every minute and SSR/first-paint match (no flicker). Don't add a `useEffect`-set "wait for hydration" boolean.
+
+---
+
+## 15. Performance & UI/UX
+
+**Performance is a feature.** Everything should feel instant. Concrete rules:
+- Query shape: select only needed columns; **keyset pagination** (not offset) for lists; batch N+1s.
+- Rendering: virtualize long lists; memoize; return the same reference from reducers on no-change; RAF-coalesce socket bursts; debounce/throttle input-driven work.
+- Traffic: minimize socket frames (scope + coalesce) and DB round-trips; never invalidate/refetch what a socket frame already updated.
+- Favor the simpler approach first; optimize against a measured cost, not a guess.
+
+**UI/UX** must feel premium — minimal, clean, modern, fast, responsive, accessible (shadcn + Tailwind + subtle framer-motion). No layout shift, no flicker, no visual instability. Every interaction is intentional. Users must never get lost: everything findable, comfortable, and fast. **The inbox is the highest-quality surface in the app** — hold it to that bar.
+
+---
+
+## 16. Scalability & security
+
+**Scale**: assume many orgs, users, conversations, messages, sockets, workflows, webhook deliveries. The current single-VPS, in-process design is correct for today; grow only at a **named cliff** (full list in [docs/operations.md](docs/operations.md)):
+- second app instance → Redis Socket.io adapter + sticky sessions + move in-memory buckets/caches to Redis;
+- 10k+ recipient broadcasts → move the runner to a dedicated worker;
+- 50–200 tenants → add eviction to the grow-only caches.
+Don't pre-build any of it.
+
+**Security**: authentication (Better Auth), authorization (roles + scopes), **tenant isolation** (`teamId` in every query), input validation (Zod on every route), secrets (envelope-encrypted channel creds; hashed API keys), webhook signatures (HMAC in + out), rate limiting, an audit timeline (`ConversationEvent`), least privilege. Posture summary and controls that must not regress: see the security memory/audit docs. CSRF via `sameSite: lax`; SSRF-safe fetch for provider/webhook calls; prod env gates.
+
+---
+
+## 17. Coding philosophy & AI-contributor guidelines
+
+Write code that reads like the surrounding code — match its naming, idioms, and comment density.
+
+- **Readable over clever. Explicit over implicit. Simple over abstract.**
+- Small, single-purpose functions; shallow nesting; meaningful names; consistent folder structure.
+- No duplicated logic, no magic constants, no hidden coupling, **no circular dependencies, no recursive event chains, no heavy state management**.
+- **Discourage overengineering.** Do not introduce an abstraction unless it *clearly reduces* complexity. One provider is enough reason to have the provider interface (it's a real seam); a speculative "manager" wrapper around one call site is not.
+- **Preserve architectural consistency.** New code fits the existing layers and conventions; don't invent a parallel pattern for something the codebase already does.
+- **Don't rewrite stable code** without a measurable improvement. Prefer the minimal change that fits the architecture.
+- Prioritize, in order: correctness & realtime integrity → simplicity → performance → features. Stability beats a new feature.
+- TypeScript strict everywhere. Prisma over raw SQL; migrations via Prisma. Don't write tests unless asked (add them after a flow works end-to-end).
+
+When a task hits friction, do not reach for a deferred shortcut (a second channel, a new datastore, a background rewrite). Solve it within the current architecture or flag the tradeoff.
+
+**Working with the maintainer**: code first, short note on what's non-obvious second. Surface tradeoffs (what you rejected and why, in a sentence). Flag channel-specific gotchas (24h window, template requirement, missing permission) *before* writing code. Propose a file list before scaffolding anything large.
+
+---
+
+## 18. Non-negotiable invariants (don't regress)
+
+Each links to the reasoning:
+- **`teamId` in every query**; secrets encrypted (channel creds) / hashed (API keys). — §7
+- **Dedup unique keys** on `Message`/`Call`; `upsert`, never bare `create` on inbound. — §7
+- **One conversation per contact** (`@@unique([teamId, contactId])`); reopen, don't fragment. — §7
+- **No persisted `provider`/`vendor`** — the `Channel` enum is the only discriminator. — §5
+- **Providers hold no business logic**; app code only sees `NormalizedEvent`. — §5, §12
+- **Event tier order** (realtime → audit → analytics → workflow → webhooks); **never subscribe audit/workflow to `broadcast.*`**. — [docs/events.md](docs/events.md)
+- **Realtime read-state convergence** (mark-read only when viewing; all recovery paths converge; local `conversation:read` drives the badge); **team-wide unread only**. — [docs/realtime.md](docs/realtime.md)
+- **Graceful shutdown**: `server.close()` before `app.close()`; keep the manual SIGTERM handler; `stop_grace_period ≥ ~100s` on api. — [docs/operations.md](docs/operations.md)
+- **Heap ≤ ~75% of the service's `mem_limit`** (api 2048/3g, web 1536/2g). — [docs/operations.md](docs/operations.md)
+- **`RUN_WORKER_INLINE` stays on in prod** (no external worker entrypoint exists). — [docs/operations.md](docs/operations.md)
+- **`/v1` API keeps full parity with the UI**, documented in both places. — §12
+
+---
+
+## 19. Deferred / not now (with triggers)
+
+- **Multi-channel providers** (Messenger, Instagram, Telegram, TikTok, SMS, Email) — the interface is ready; build one when WhatsApp depth is solid and a pilot asks. Recipe: [docs/adding-a-channel.md](docs/adding-a-channel.md).
+- **WhatsApp Embedded Signup** (no more manual credential paste) — needs Meta Tech-Provider review; after the product is worth onboarding into. [docs/onboarding-future.md](docs/onboarding-future.md).
+- **Unified `Customer` implementation** — adopted as target (§6); build at the second channel.
+- **Redis Socket.io adapter, standalone worker container, per-tenant media isolation, encryption-at-rest for message bodies, analytics dashboards, per-agent unread** — each has a named trigger in [docs/operations.md](docs/operations.md) / the security docs. Don't pre-build.
+
+---
+
+## 20. Docs index
+
+| Topic | File |
 |---|---|
-| `apps/web/src/app/api/auth/[...all]` | Better Auth catch-all — must stay on Next.js (Caddy routes `/api/auth/*` here, EXCEPT `/api/auth/change-password` which lives on NestJS — see Cutover step 2 below) |
-| `apps/web/src/app/api/health` | Different URL space (`/api/health` vs NestJS `/health`); kept for backwards-compat probes |
-| `apps/web/src/app/api/webhooks/meta/[teamId]` | Server-side proxy to `/webhooks/meta/{teamId}` on NestJS. Forwards raw bytes verbatim so HMAC verification still passes. Insurance for Meta subscriptions still pointing at the old URL. **DELETION DEADLINE: 2026-06-19** (30 days post NestJS cutover; checklist + extension policy in the file's header doc-comment). |
-
-The generic `app/api/webhooks/[provider]/[teamId]` dispatcher shim was removed in Phase 5 and not re-added — there's only one provider (Meta) today, so a generic dispatcher buys nothing.
-
-### Cutover playbook (dev → prod)
-
-The pre-cutover env-flag dance is gone. The Next.js-side flags (`SKIP_SOCKET_FANOUT`, `BUS_REDIS_BRIDGE`, `SKIP_WORKFLOW_DISPATCH`, `RUN_WORKER_INLINE` on the `app` service) no longer exist in [docker-compose.yml](docker-compose.yml) — ownership is now structural (Next.js: pages + auth; NestJS: everything else). One flag survives by design: `RUN_WORKER_INLINE=1` on the `api` service, which keeps BullMQ processors inside the NestJS process. Set to `0` only if you re-introduce a standalone worker container; the default is correct for single-VPS pilot.
-
-Remaining steps for the actual deploy:
-
-1. **Dev smoke** (one-time before each deploy):
-   ```bash
-   pnpm install      # NEVER `npm install` — workspace:* deps + pnpm-lock; npm errors out
-   pnpm typecheck    # turbo runs web + api typecheck together
-   pnpm web:dev      # Next.js on :3000  (terminal 1; the script symlinks apps/web/.env -> ../../.env)
-   pnpm api:dev      # NestJS on :4000   (terminal 2)
-   ```
-   This repo is **pnpm-only** (corepack-pinned `pnpm@10.33.3`). `pnpm dev` runs both
-   at once; the per-app scripts above are for separate-terminal logs. `.env` should set
-   `NEXT_PUBLIC_API_URL=http://localhost:4000` so the browser Socket.io client points at
-   NestJS. Run Prisma (`pnpm db:migrate`, `pnpm db:studio`) only from the repo root —
-   Prisma 7's `prisma.config.ts` loads `.env` relative to cwd. Full matrix:
-   [docs/local-setup.md](docs/local-setup.md).
-
-2. **Caddy routing**: see [deploy/Caddyfile.template](deploy/Caddyfile.template) — commit-controlled config so the rule ordering doesn't live only in this prose. The non-obvious lines:
-   - `/api/auth/change-password` → NestJS (moved off Better Auth). Must come BEFORE the `/api/auth/*` → Next.js wildcard or change-password 404s.
-   - `/api/webhooks/meta/*` → Next.js (the legacy URL is handled by the proxy at [apps/web/src/app/api/webhooks/meta/[teamId]/route.ts](apps/web/src/app/api/webhooks/meta/[teamId]/route.ts) which forwards bytes verbatim to NestJS so HMAC integrity is preserved).
-   - Default for everything else: `/`, `/_next/*`, `/api/auth/*` → Next.js; `/api/*`, `/webhooks/*` → NestJS. (The Socket.io client connects on `/api/socket/*` and is caught by the `/api/*` matcher; no separate `/socket.io/*` rule is needed.)
-
-3. **Meta webhook URL flip (pre-deploy)**: update the Meta App Dashboard to point at the canonical `https://<host>/webhooks/meta/{teamId}` path (NestJS). The legacy proxy at `/api/webhooks/meta/{teamId}` keeps existing subscriptions alive during cutover, but it's insurance — not a permanent design. Once every subscription is on the new URL, delete `apps/web/src/app/api/webhooks/meta/[teamId]/route.ts`.
-
-### Architectural calls (locked, do not re-litigate)
-
-- **Socket.io lives in NestJS, not Next.js.** Same process as REST + webhooks + workflows = in-process emit, zero pub/sub hop.
-- **Better Auth stays in Next.js.** Moving it costs ~2 weeks of risk for zero functional benefit. NestJS guard reads `better-auth.session_token` cookie + hits the session table via Prisma. ~1ms overhead per request.
-- **Existing service modules** ([lib/messaging/](lib/messaging/), [lib/conversations/](lib/conversations/), [lib/contacts/](lib/contacts/), [lib/workflows/](lib/workflows/), [lib/providers/](lib/providers/)) stay where they are — framework-agnostic; NestJS wraps them as Nest providers.
-- **Zod everywhere.** `zBody / zQuery / zParam` pipes at [apps/api/src/common/zod-validation.pipe.ts](apps/api/src/common/zod-validation.pipe.ts) reuse the schemas already written for Next.js routes. No class-validator / class-transformer.
-- **Prisma stays.** One `PrismaModule` in NestJS (the `PrismaService` instance is the canonical client; `apps/api/src/lib/db.ts` is a Proxy that delegates to it so framework-agnostic helpers + module-load Better Auth + worker callbacks all share the same pool — see the `setSharedDb` wiring). The existing `lib/db.ts` singleton lives in Next.js. Same `DATABASE_URL`, one pool per process.
-- **Workers run in-process by default.** `RUN_WORKER_INLINE=1` (default on the api container) keeps BullMQ processors inside the NestJS app. The standalone `worker` docker service was removed post-Phase-5; add it back only if scaling forces a split.
-- **Two processes total**, single VPS, single docker-compose. No microservices.
-
-### Runtime + DI lessons (load-bearing)
-
-- **NestJS DI requires `emitDecoratorMetadata`. `tsx` (esbuild backend) does NOT emit it.** This was a pre-existing latent bug — typecheck stayed green forever but `OnModuleInit` hooks crashed on first injection. We switched the api scripts + docker `command` to `@swc-node/register` with `SWC_NODE_PROJECT=apps/api/tsconfig.json` so SWC picks up `experimentalDecorators` + `emitDecoratorMetadata` from the right tsconfig.
-- **`--conditions=react-server` is required** on the NestJS node invocation. Many shared `lib/` files do `import "server-only"` which throws unless that condition picks `server-only`'s `empty.js` no-op variant. Both `api:dev` and `api:start` already set this; the Next.js side gets it automatically.
-- **Next.js needs [instrumentation.ts](instrumentation.ts) for boot-time wiring.** The old `server.ts` called `registerAllSubscribers` directly; with `next start` replacing it, the standard Next.js `register()` hook handles cache-revalidate registration. `NEXT_RUNTIME === "nodejs"` guard is there because instrumentation also fires in edge — where Prisma + bus would crash.
-
-### Paused workstreams (resume after deploy sign-off)
-
-- **AI agents** (suggested replies → auto-reply → lead qualification). Plugs in as new step types in the workflow registry + an `AiModule` in NestJS.
-- **Outbound webhooks**. A subscriber on the event bus + a `webhook:deliver` BullMQ queue. Natural fit for NestJS now that the bus lives inside it.
-- **Scoped API keys, IP allowlists, OpenAPI spec.** Pair naturally with the external-v1 controller migration.
-- **Workflow Round 2c**: Ask-a-Question step, business-hours branch, round-robin assignment, platform integrations as steps.
+| Operations, deploy, heap, shutdown, queues, sweepers, Caddy | [docs/operations.md](docs/operations.md) |
+| Realtime: rooms, fanout scoping, reducers, read-state convergence | [docs/realtime.md](docs/realtime.md) |
+| Event bus: tiers, taxonomy, subscribers, outbox | [docs/events.md](docs/events.md) |
+| Customer identity: unified model, auto-merge rules, migration | [docs/identity.md](docs/identity.md) |
+| Adding a channel: recipe + per-channel constraints | [docs/adding-a-channel.md](docs/adding-a-channel.md) |
+| Data model ERD | [docs/schema-erd.md](docs/schema-erd.md) |
+| External API reference | [docs/organization-api.md](docs/organization-api.md) |
+| Local setup & dev matrix | [docs/local-setup.md](docs/local-setup.md) |
+| WhatsApp onboarding (today) | [docs/customer-onboarding-whatsapp.md](docs/customer-onboarding-whatsapp.md) · [docs/whatsapp-coexistence.md](docs/whatsapp-coexistence.md) |
+| Provider engine internals | [apps/api/src/lib/providers/README.md](apps/api/src/lib/providers/README.md) |
+| Workflow engine internals | [apps/api/src/lib/workflows/README.md](apps/api/src/lib/workflows/README.md) |
