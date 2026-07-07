@@ -35,6 +35,7 @@ import { assertReducerCoverage } from "@/features/inbox/lib/thread-reducers";
 import { usePanelResize } from "@/features/inbox/hooks/use-panel-resize";
 import { INBOX_DETAILS_WIDTH_COOKIE } from "@/features/inbox/lib/panel-cookies";
 import { CHANNEL_LABEL } from "./channel-badge";
+import { LinkedChannels } from "./linked-channels";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
@@ -1036,6 +1037,11 @@ function ContactPanelImpl({
           <Badge variant="muted">
             {contact.source === "manual" ? "Added by you" : "Messaged you"}
           </Badge>
+        </div>
+
+        {/* Unified customer: the same person's other channel-contacts + link/split. */}
+        <div className="border-t">
+          <LinkedChannels contactId={contact.id} />
         </div>
 
         <Section

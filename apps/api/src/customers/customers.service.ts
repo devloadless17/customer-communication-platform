@@ -76,6 +76,25 @@ export class CustomersService {
   }
 
   /**
+   * The unified profile for whichever customer a contact belongs to — the
+   * contact panel calls this with the contact id it already holds. Returns null
+   * for a not-yet-linked contact (the UI then treats it as its own person until
+   * the customer-link sweeper links it, moments later).
+   */
+  async getProfileByContact(
+    teamId: string,
+    contactId: string,
+  ): Promise<CustomerProfile | null> {
+    const contact = await this.db.contact.findFirst({
+      where: { id: contactId, teamId, deletedAt: null },
+      select: { customerId: true },
+    });
+    if (!contact) throw new NotFoundException({ error: "contact_not_found" });
+    if (!contact.customerId) return null;
+    return this.loadProfile(teamId, contact.customerId);
+  }
+
+  /**
    * Join `contactId` to this customer (they're the same person). Re-points the
    * contact's `customerId`; if its previous customer is left with no contacts,
    * that empty customer is dropped. Reversible via `unlink`.

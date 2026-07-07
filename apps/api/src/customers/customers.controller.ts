@@ -27,6 +27,16 @@ import {
 export class CustomersController {
   constructor(private readonly customers: CustomersService) {}
 
+  // Literal segment declared BEFORE `:id` so it isn't captured as an id.
+  @Get("by-contact/:contactId")
+  async byContact(
+    @CurrentSession() session: ApiSession,
+    @Param("contactId") contactId: string,
+  ) {
+    const customer = await this.customers.getProfileByContact(session.teamId, contactId);
+    return { customer };
+  }
+
   @Get(":id")
   async get(@CurrentSession() session: ApiSession, @Param("id") id: string) {
     const customer = await this.customers.getProfile(session.teamId, id);
