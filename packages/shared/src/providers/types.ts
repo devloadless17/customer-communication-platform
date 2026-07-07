@@ -250,8 +250,12 @@ export interface NormalizedReaction {
   targetExternalId: string;
   /** The emoji, or null when the customer REMOVED their reaction. */
   emoji: string | null;
-  /** E.164 digits, no '+'. Reactions are phone-channel-only today (WhatsApp). */
-  contactPhone: string;
+  /**
+   * E.164 digits (WhatsApp). Optional — ingest resolves the target message by
+   * `targetExternalId` and never needs the reactor's identity, so the Meta
+   * social channels emit reactions without it.
+   */
+  contactPhone?: string;
   timestamp: Date;
   rawPayload: Record<string, unknown>;
 }
@@ -600,6 +604,13 @@ export interface ProviderCapabilities {
   templates: boolean;
   readReceipts: boolean;
   typingIndicators: boolean;
+  /**
+   * Interactive replies (quick-reply buttons / list). True if the provider
+   * implements `sendInteractive`. Gates the composer's "buttons" / "list"
+   * affordances — WhatsApp has them; the Meta social channels don't (yet), so
+   * the button is hidden on their threads instead of erroring on send.
+   */
+  interactive: boolean;
   /**
    * Voice calling. True if the provider implements placeCall / acceptCall /
    * etc. Gates the inbox "Call" button at the channel level — a future

@@ -20,6 +20,7 @@ import type {
   NormalizedEvent,
   NormalizedInboundMessage,
   NormalizedMediaRef,
+  NormalizedReaction,
   NormalizedStatusUpdate,
   SendMediaArgs,
   SendTextArgs,
@@ -91,6 +92,7 @@ interface MessagingEvent {
     attachments?: { type?: string; payload?: { url?: string } }[];
   };
   delivery?: { mids?: string[]; watermark?: number };
+  reaction?: { mid?: string; action?: string; emoji?: string; reaction?: string };
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -197,6 +199,23 @@ export function parseSocialMessaging(
           rawPayload: m as unknown as Record<string, unknown>,
         };
         events.push(msg);
+        continue;
+      }
+      // Reaction to one of our messages (Messenger/IG `reaction`). `action`
+      // is "react" | "unreact"; on unreact the emoji is cleared. Ingest matches
+      // the target message by mid and sets its reaction column.
+      if (m.reaction && m.reaction.mid) {
+        const emoji =
+          m.reaction.action === "unreact" ? null : m.reaction.emoji ?? null;
+        const reaction: NormalizedReaction = {
+          kind: "reaction",
+          externalId: `${m.reaction.mid}:reaction`,
+          targetExternalId: m.reaction.mid,
+          emoji,
+          timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
+          rawPayload: m as unknown as Record<string, unknown>,
+        };
+        events.push(reaction);
         continue;
       }
       // Delivery receipts carry the mids Meta delivered.

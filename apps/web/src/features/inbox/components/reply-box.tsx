@@ -1683,6 +1683,7 @@ function ReplyBoxImpl({
                 <Sparkles className="size-4" />
               </Button>
             )}
+            {caps.interactive && (
             <div className="relative">
               <Button
                 variant="ghost"
@@ -1722,6 +1723,7 @@ function ReplyBoxImpl({
                 }}
               />
             </div>
+            )}
             <div className="relative">
               <Button
                 variant="ghost"

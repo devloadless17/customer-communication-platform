@@ -25,6 +25,7 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     templates: true,
     readReceipts: true,
     typingIndicators: true,
+    interactive: true,
     calling: true,
   },
   // Facebook Messenger: 24h free-form window + a 7-day Human Agent extension for
@@ -36,6 +37,7 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     templates: false,
     readReceipts: true,
     typingIndicators: true,
+    interactive: false,
     calling: false,
   },
   // Instagram DM: same 24h + 7-day human-agent window as Messenger. No templates,
@@ -46,6 +48,7 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     templates: false,
     readReceipts: true,
     typingIndicators: true,
+    interactive: false,
     calling: false,
   },
 
@@ -61,6 +64,7 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     templates: false,
     readReceipts: false,
     typingIndicators: true,
+    interactive: false,
     calling: false,
   },
   // Email: no window, "templates" in the newsletter sense (modeled false until
@@ -71,6 +75,7 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     templates: false,
     readReceipts: false,
     typingIndicators: false,
+    interactive: false,
     calling: false,
   },
   // SMS: no window, no templates (plain text), no receipts/typing/calling.
@@ -80,6 +85,7 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     templates: false,
     readReceipts: false,
     typingIndicators: false,
+    interactive: false,
     calling: false,
   },
 };
