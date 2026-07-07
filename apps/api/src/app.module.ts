@@ -7,6 +7,7 @@ import { CallsModule } from "./calls/calls.module";
 import { CommonModule } from "./common/common.module";
 import { ContactsModule } from "./contacts/contacts.module";
 import { ConversationsModule } from "./conversations/conversations.module";
+import { CustomersModule } from "./customers/customers.module";
 import { DevModule } from "./dev/dev.module";
 import { EventBusModule } from "./events/event-bus.module";
 import { ExternalV1Module } from "./external/v1/external-v1.module";
@@ -51,6 +52,7 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     ConversationsModule,
     NotesModule,
     ContactsModule,
+    CustomersModule,
     BroadcastsModule,
     CallsModule,
     TeamChatModule,
