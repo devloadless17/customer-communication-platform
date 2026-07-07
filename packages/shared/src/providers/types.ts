@@ -609,6 +609,17 @@ export interface MessagingProvider<SendConfig = unknown> {
   /** Outbound text. */
   sendText(args: SendTextArgs, config: SendConfig): Promise<SendTextResult>;
   /**
+   * Best-effort display name for an external contact id. Optional — only the
+   * social channels (Messenger / Instagram) need it, because their inbound
+   * webhooks carry no profile name (unlike WhatsApp's `contacts[].profile.name`).
+   * Ingest calls it opportunistically to replace the id-as-name fallback; it
+   * must fail soft (return `{ name: null }`), never throw.
+   */
+  fetchContactProfile?(
+    externalId: string,
+    config: SendConfig,
+  ): Promise<{ name: string | null }>;
+  /**
    * Outbound interactive question (buttons / list). Optional — providers
    * without interactive support fall back to plain text (the caller decides
    * how to degrade). Same 24h-window rule applies as plain text sends.

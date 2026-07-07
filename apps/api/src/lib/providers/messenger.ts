@@ -16,7 +16,11 @@ import type {
   SendTextArgs,
   SendTextResult,
 } from "@ccp/shared/providers/types";
-import { parseSocialMessaging, sendSocialText } from "@/lib/providers/meta-social";
+import {
+  fetchSocialProfileName,
+  parseSocialMessaging,
+  sendSocialText,
+} from "@/lib/providers/meta-social";
 import type { MessengerSendConfig } from "@/lib/providers/messenger-config";
 
 export const messengerProvider: MessagingProvider<MessengerSendConfig> = {
@@ -37,5 +41,17 @@ export const messengerProvider: MessagingProvider<MessengerSendConfig> = {
       graphVersion: config.graphVersion,
       label: "messenger",
     });
+  },
+
+  async fetchContactProfile(
+    externalId: string,
+    config: MessengerSendConfig,
+  ): Promise<{ name: string | null }> {
+    const name = await fetchSocialProfileName(externalId, {
+      accessToken: config.pageAccessToken,
+      graphVersion: config.graphVersion,
+      fields: "name",
+    });
+    return { name };
   },
 };

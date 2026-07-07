@@ -23,7 +23,7 @@ import type {
   SendTextArgs,
   SendTextResult,
 } from "@ccp/shared/providers/types";
-import { GRAPH_BASE, graphPostJson } from "@/lib/providers/meta-graph";
+import { GRAPH_BASE, graphGetJson, graphPostJson } from "@/lib/providers/meta-graph";
 
 interface SocialEnvelope {
   object?: string;
@@ -153,4 +153,26 @@ export async function sendSocialText(
     throw new Error(`${opts.label} sendText: response missing message_id`);
   }
   return { externalId: messageId, timestamp: new Date() };
+}
+
+/**
+ * Best-effort display name for a social contact — the messaging webhook carries
+ * no name, so we read the profile node (`/{id}?fields=…`). `fields` differs per
+ * channel (Messenger: `name`; Instagram: `name,username`). Returns the first
+ * non-empty of the requested fields, else null. Never throws — the caller
+ * enriches opportunistically and keeps the id-as-name fallback on any failure.
+ */
+export async function fetchSocialProfileName(
+  externalId: string,
+  opts: { accessToken: string; graphVersion: string; fields: string },
+): Promise<string | null> {
+  try {
+    const url = `${GRAPH_BASE}/${opts.graphVersion}/${encodeURIComponent(externalId)}?fields=${encodeURIComponent(opts.fields)}`;
+    const res = await graphGetJson(url, opts.accessToken, { retry: true });
+    const name = typeof res.name === "string" ? res.name.trim() : "";
+    const username = typeof res.username === "string" ? res.username.trim() : "";
+    return name || username || null;
+  } catch {
+    return null;
+  }
 }

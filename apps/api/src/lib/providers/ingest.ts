@@ -1,6 +1,8 @@
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { runWithConcurrency } from "@/common/concurrency";
+import { getProviderBinding } from "@/lib/providers";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { publish } from "@/lib/events/bus";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
@@ -1602,6 +1604,83 @@ async function ingestContactSync(
       err instanceof Error ? err.message : err,
     );
   }
+}
+
+/**
+ * Give social contacts (Messenger / Instagram) a real display name. Their
+ * inbound webhooks carry NO name, so a fresh contact is created with its opaque
+ * id (PSID / IGSID) as the name. This runs DETACHED after the webhook 200s: for
+ * each still-id-named contact in the batch, fetch the profile name via the
+ * provider and update it — same conservative policy as the WhatsApp phone-book
+ * sync (`ingestContactSync`): never CREATE (the contact already exists from
+ * ingest), never CLOBBER an agent-set name, publish `silent` (a display refresh,
+ * not a business event). Fail-soft throughout — any provider/DB/creds error
+ * leaves the id-as-name fallback untouched. No-op for phone channels (they get
+ * the name from the webhook) or providers without `fetchContactProfile`.
+ */
+export async function enrichSocialContactNames(
+  teamId: string,
+  channel: Channel,
+  externalContactIds: string[],
+): Promise<void> {
+  if (isPhoneChannel(channel)) return;
+  const unique = [...new Set(externalContactIds.filter((id) => !!id))];
+  if (unique.length === 0) return;
+
+  let binding;
+  try {
+    binding = getProviderBinding(channel);
+  } catch {
+    return;
+  }
+  const fetchProfile = binding.provider.fetchContactProfile;
+  if (!fetchProfile) return;
+
+  let config;
+  try {
+    config = await binding.getSendConfig(teamId);
+  } catch {
+    return; // not connected / creds missing — skip, keep the id fallback
+  }
+
+  await runWithConcurrency(unique, 4, async (extId) => {
+    try {
+      const contact = await db.contact.findFirst({
+        where: { teamId, identityChannel: channel, externalContactId: extId },
+        include: { tags: { select: { id: true } } },
+      });
+      if (!contact) return;
+      // Only fill a name still equal to the id default; never overwrite a real
+      // one an agent (or a prior enrichment) set.
+      const current = contact.name?.trim() ?? "";
+      if (current !== "" && current !== extId) return;
+
+      const { name } = await fetchProfile(extId, config);
+      if (!name || name === extId) return;
+
+      const { firstName, lastName } = splitContactName(name);
+      const updated = await db.contact.update({
+        where: { id: contact.id },
+        data: { name, firstName, lastName },
+        include: { tags: { select: { id: true } } },
+      });
+      await publish({
+        type: "contact.updated",
+        teamId,
+        contact: toContactWire(updated),
+        previousStageId: updated.stageId,
+        fieldChanges: [],
+        changedByUserId: null,
+        workflowContact: toWorkflowContact(updated),
+        silent: true,
+      });
+    } catch (err) {
+      console.error(
+        `[ingest] social name enrichment failed team=${teamId} channel=${channel} id=${extId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  });
 }
 
 /**

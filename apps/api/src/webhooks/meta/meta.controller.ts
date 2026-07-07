@@ -31,7 +31,11 @@ import { messengerProvider } from "@/lib/providers/messenger";
 import { getMessengerWebhookConfig } from "@/lib/providers/messenger-config";
 import { instagramProvider } from "@/lib/providers/instagram";
 import { getInstagramWebhookConfig } from "@/lib/providers/instagram-config";
-import { ingestEvents, isTransientDbError } from "@/lib/providers/ingest";
+import {
+  enrichSocialContactNames,
+  ingestEvents,
+  isTransientDbError,
+} from "@/lib/providers/ingest";
 import { enqueueHistoryChunk } from "@/lib/coexistence/history-queue";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
 
@@ -416,6 +420,19 @@ export class MetaWebhookController implements OnModuleDestroy {
       );
       return { ok: true, ingested: 0, dropped: "ingest_failed" };
     }
+
+    // Detached: give brand-new social contacts a real display name (the webhook
+    // carries none, so ingest named them by their opaque id). Never blocks the
+    // 200; fail-soft. Non-consuming catch so the fire-and-forget can't float.
+    const senderIds = events.flatMap((e) =>
+      e.kind === "message" && e.externalContactId ? [e.externalContactId] : [],
+    );
+    if (senderIds.length > 0) {
+      void enrichSocialContactNames(teamId, channel, senderIds).catch((err) =>
+        this.logger.error(`[${teamId}] ${channel} name enrichment failed`, err),
+      );
+    }
+
     return { ok: true, ingested: events.length };
   }
 

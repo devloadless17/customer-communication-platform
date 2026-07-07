@@ -16,7 +16,11 @@ import type {
   SendTextArgs,
   SendTextResult,
 } from "@ccp/shared/providers/types";
-import { parseSocialMessaging, sendSocialText } from "@/lib/providers/meta-social";
+import {
+  fetchSocialProfileName,
+  parseSocialMessaging,
+  sendSocialText,
+} from "@/lib/providers/meta-social";
 import type { InstagramSendConfig } from "@/lib/providers/instagram-config";
 
 export const instagramProvider: MessagingProvider<InstagramSendConfig> = {
@@ -37,5 +41,19 @@ export const instagramProvider: MessagingProvider<InstagramSendConfig> = {
       graphVersion: config.graphVersion,
       label: "instagram",
     });
+  },
+
+  async fetchContactProfile(
+    externalId: string,
+    config: InstagramSendConfig,
+  ): Promise<{ name: string | null }> {
+    // Instagram exposes `name` and `username`; prefer the real name, fall back
+    // to @username (both are useful; the helper returns whichever is present).
+    const name = await fetchSocialProfileName(externalId, {
+      accessToken: config.igAccessToken,
+      graphVersion: config.graphVersion,
+      fields: "name,username",
+    });
+    return { name };
   },
 };
