@@ -227,6 +227,11 @@ export interface ListContactsOpts {
   tagIds?: string[];
   /** Filter to one channel identity (whatsapp / messenger / instagram). */
   channel?: Channel;
+  /** Roll the list up to one row per unified PERSON (a `Customer`, or a solo
+   *  contact as its own person) instead of one row per channel-contact — the
+   *  contacts-page "Group by person" view. Runs in offset/page mode; the
+   *  channel filter is ignored (a person spans channels). */
+  groupByPerson?: boolean;
   /** Filter by 24h customer-service window: "open" = messaged us in the last
    *  24h; "closed" = no inbound, or last inbound > 24h ago. */
   window?: "open" | "closed";

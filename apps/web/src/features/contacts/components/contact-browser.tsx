@@ -72,6 +72,8 @@ export interface ContactListFilters {
   tagIds: string[];
   /** Lifecycle stage filter. "any" disables the filter. */
   stageFilter: StageFilter;
+  /** "Group by person" — one row per unified Customer instead of per contact. */
+  groupByPerson: boolean;
 }
 
 export async function fetchContactsPage(
@@ -89,7 +91,10 @@ export async function fetchContactsPage(
     params.set("fieldValue", filters.fieldFilter.value);
   }
   if (filters.sourceFilter !== "all") params.set("source", filters.sourceFilter);
-  if (filters.channelFilter !== "any") params.set("channel", filters.channelFilter);
+  // Person mode rolls up across channels, so a single-channel filter is
+  // meaningless there — send groupByPerson and skip channel.
+  if (filters.groupByPerson) params.set("groupByPerson", "1");
+  else if (filters.channelFilter !== "any") params.set("channel", filters.channelFilter);
   if (filters.windowFilter !== "any") params.set("window", filters.windowFilter);
   if (filters.tagIds.length > 0) params.set("tagIds", filters.tagIds.join(","));
   if (filters.stageFilter !== "any") params.set("stageId", filters.stageFilter);
@@ -217,6 +222,8 @@ export interface UseContactListResult {
   setSourceFilter: (v: SourceFilter) => void;
   channelFilter: ChannelFilter;
   setChannelFilter: (v: ChannelFilter) => void;
+  groupByPerson: boolean;
+  setGroupByPerson: (v: boolean) => void;
   windowFilter: WindowFilter;
   setWindowFilter: (v: WindowFilter) => void;
   tagIds: string[];
@@ -297,6 +304,7 @@ export function useContactList(opts?: {
   const [fieldFilter, setFieldFilter] = useState<FieldFilter | null>(null);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [channelFilter, setChannelFilter] = useState<ChannelFilter>("any");
+  const [groupByPerson, setGroupByPerson] = useState(false);
   const [windowFilter, setWindowFilter] = useState<WindowFilter>("any");
   const [tagIds, setTagIds] = useState<string[]>([]);
   const [stageFilter, setStageFilter] = useState<StageFilter>(
@@ -332,7 +340,7 @@ export function useContactList(opts?: {
     const t = window.setTimeout(async () => {
       try {
         const page = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter },
+          { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter, groupByPerson },
           null,
         );
         if (reqId.current !== my) return;
@@ -347,7 +355,7 @@ export function useContactList(opts?: {
     }, 250);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagKey, stageFilter]);
+  }, [search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagKey, stageFilter, groupByPerson]);
 
   // ── Numbered (offset) pagination effects — `paged` mode only ──────────────
   // A filter change resets to page 1 (page N of the old filter set is
@@ -361,7 +369,7 @@ export function useContactList(opts?: {
     }
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagKey, stageFilter]);
+  }, [search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagKey, stageFilter, groupByPerson]);
 
   // Fetch the current page whenever filters or the page number change. Debounce
   // ONLY the typed search (so keystrokes don't flood the API); page navigation
@@ -387,7 +395,7 @@ export function useContactList(opts?: {
     const t = window.setTimeout(async () => {
       try {
         const data = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter },
+          { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter, groupByPerson },
           null,
           { page, take: pageSize },
         );
@@ -403,7 +411,7 @@ export function useContactList(opts?: {
     }, delay);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagKey, stageFilter, page]);
+  }, [search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagKey, stageFilter, groupByPerson, page]);
 
   function loadMore() {
     if (!nextCursor || loadingMore) return;
@@ -423,7 +431,7 @@ export function useContactList(opts?: {
     void (async () => {
       try {
         const page = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter },
+          { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter, groupByPerson },
           fromCursor,
         );
         // superseded by a filter change (reqId) or a page-1 refetch (cursor)
@@ -456,8 +464,9 @@ export function useContactList(opts?: {
     windowFilter,
     tagIds,
     stageFilter,
+    groupByPerson,
   });
-  filtersRef.current = { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter };
+  filtersRef.current = { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter, groupByPerson };
 
   // Public refetch — wired to the coalesced `contacts:bulk_updated` socket
   // event. Bulk paths (server-side bulk-tag etc.) don't send per-contact
@@ -588,6 +597,8 @@ export function useContactList(opts?: {
     setSourceFilter,
     channelFilter,
     setChannelFilter,
+    groupByPerson,
+    setGroupByPerson,
     windowFilter,
     setWindowFilter,
     tagIds,

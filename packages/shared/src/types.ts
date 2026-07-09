@@ -852,6 +852,12 @@ export interface ContactListItem {
    * outbound messages don't reset that clock.
    */
   lastInboundAt: string | null;
+  /**
+   * "Group by person" mode only: every channel the unified PERSON behind this
+   * row is reachable on (this contact is the representative). Drives the row's
+   * channel-badge cluster. Undefined in the default per-contact list. Length ≥ 1.
+   */
+  personChannels?: Channel[];
 }
 
 /**

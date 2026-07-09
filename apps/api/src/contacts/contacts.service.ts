@@ -15,6 +15,7 @@ import {
   countAudienceContacts,
   ensureDefaultStage,
   listContacts,
+  listPeople,
   lookupContacts,
   previewAudienceContacts,
   resolveContactIdsByFilter,
@@ -122,8 +123,11 @@ export class ContactsService {
       channel: query.channel,
       window: query.window,
       stageId: query.stageId,
+      groupByPerson: query.groupByPerson,
     };
-    return listContacts(teamId, opts);
+    // "Group by person" rolls the list up to one row per unified Customer;
+    // otherwise the default per-channel-contact list.
+    return query.groupByPerson ? listPeople(teamId, opts) : listContacts(teamId, opts);
   }
 
   /**

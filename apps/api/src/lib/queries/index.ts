@@ -20,6 +20,7 @@ export {
   countContacts,
   listContactFieldDefinitions,
   listContacts,
+  listPeople,
   lookupContacts,
   resolveContactIdsByFilter,
 } from "./contacts";

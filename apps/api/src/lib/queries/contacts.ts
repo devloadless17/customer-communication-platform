@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import type { ListContactsOpts } from "@ccp/shared/dtos";
 import type {
+  Channel,
   ContactFieldDefinition,
   ContactListItem,
   CursorPage,
@@ -330,6 +331,158 @@ export async function listContacts(
   }));
 
   return { items, nextCursor, totalCount };
+}
+
+/**
+ * "Group by person" page for /contacts: ONE row per unified PERSON instead of
+ * per channel-contact. A person is `COALESCE(customerId, id)` — a linked
+ * `Customer`, or a solo contact as its own person. The representative row is
+ * the person's most-recently-active contact; `personChannels` lists every
+ * channel that person is reachable on (for the row's badge cluster).
+ *
+ * Offset/page mode only — a DISTINCT-ON rollup doesn't keyset cleanly, and the
+ * contacts page already drives numbered pages. Reuses `buildContactFilterWhere`
+ * so every filter (search / source / window / stage / tag / customField)
+ * matches the flat list exactly; the CHANNEL filter is dropped (a person spans
+ * channels). `totalCount` counts distinct persons.
+ */
+export async function listPeople(
+  teamId: string,
+  opts: ListContactsOpts = {},
+): Promise<CursorPage<ContactListItem>> {
+  const take = clampTake(opts.take, CONTACTS_PAGE);
+  const page = opts.page != null && opts.page >= 1 ? opts.page : 1;
+  const offset = (page - 1) * take;
+  const filterWhere = buildContactFilterWhere(teamId, { ...opts, channel: undefined });
+
+  // DISTINCT ON must lead ORDER BY with the person key, so pick the
+  // representative contact per person in the inner query, then order the OUTER
+  // result by recency for the page.
+  const rows = await db.$queryRaw<
+    Array<{
+      id: string;
+      teamId: string;
+      phoneNumber: string | null;
+      identityChannel: Channel;
+      externalContactId: string | null;
+      name: string;
+      avatarUrl: string | null;
+      email: string | null;
+      location: string | null;
+      customFields: unknown;
+      source: "inbound" | "manual";
+      stageId: string | null;
+      createdAt: Date;
+      lastMessageAt: Date | null;
+      activeConversationId: string | null;
+      lastInboundAt: Date | null;
+      customerId: string | null;
+    }>
+  >`
+    SELECT sub.* FROM (
+      SELECT DISTINCT ON (COALESCE(c."customerId", c.id))
+        c.id,
+        c."teamId",
+        c."phoneNumber",
+        c."identityChannel",
+        c."externalContactId",
+        c.name,
+        c."avatarUrl",
+        c.email,
+        c.location,
+        c."customFields",
+        c.source,
+        c."stageId",
+        c."createdAt",
+        conv."lastMessageAt"          AS "lastMessageAt",
+        conv.id                       AS "activeConversationId",
+        c."lastInboundAt"             AS "lastInboundAt",
+        c."customerId"                AS "customerId"
+      FROM "Contact" c
+      LEFT JOIN LATERAL (
+        SELECT id, "lastMessageAt"
+        FROM "Conversation" co
+        WHERE co."teamId" = c."teamId"
+          AND co."contactId" = c.id
+          AND co.status <> 'closed'
+        ORDER BY co."lastMessageAt" DESC, co.id DESC
+        LIMIT 1
+      ) conv ON TRUE
+      WHERE ${filterWhere}
+      ORDER BY COALESCE(c."customerId", c.id),
+               COALESCE(conv."lastMessageAt", c."createdAt") DESC,
+               c.id DESC
+    ) sub
+    ORDER BY COALESCE(sub."lastMessageAt", sub."createdAt") DESC, sub.id DESC
+    LIMIT ${take} OFFSET ${offset}
+  `;
+
+  const countRows = await db.$queryRaw<Array<{ count: bigint }>>`
+    SELECT COUNT(DISTINCT COALESCE(c."customerId", c.id))::bigint AS count
+    FROM "Contact" c
+    WHERE ${filterWhere}
+  `;
+  const totalCount = Number(countRows[0]?.count ?? 0);
+
+  // Channel cluster per person: for the page's LINKED persons, gather every
+  // channel their contacts span. Solo persons (no customerId) have just their
+  // own channel.
+  const customerIds = [
+    ...new Set(rows.map((r) => r.customerId).filter((v): v is string => !!v)),
+  ];
+  const channelsByCustomer = new Map<string, Channel[]>();
+  if (customerIds.length > 0) {
+    const siblings = await db.contact.findMany({
+      where: { teamId, deletedAt: null, customerId: { in: customerIds } },
+      select: { customerId: true, identityChannel: true },
+    });
+    for (const s of siblings) {
+      if (!s.customerId) continue;
+      const list = channelsByCustomer.get(s.customerId) ?? [];
+      const ch = s.identityChannel as Channel;
+      if (!list.includes(ch)) list.push(ch);
+      channelsByCustomer.set(s.customerId, list);
+    }
+  }
+
+  const tagIdsByContact = new Map<string, string[]>();
+  if (rows.length > 0) {
+    const ids = rows.map((r) => r.id);
+    const links = await db.contact.findMany({
+      where: { teamId, id: { in: ids } },
+      select: { id: true, tags: { select: { id: true } } },
+    });
+    for (const c of links) {
+      tagIdsByContact.set(c.id, c.tags.map((t) => t.id));
+    }
+  }
+
+  const items: ContactListItem[] = rows.map((r) => ({
+    contact: {
+      id: r.id,
+      teamId: r.teamId,
+      phoneNumber: r.phoneNumber,
+      identityChannel: r.identityChannel,
+      externalContactId: r.externalContactId,
+      name: r.name,
+      avatarUrl: r.avatarUrl ?? undefined,
+      email: r.email ?? undefined,
+      location: r.location ?? undefined,
+      customFields: normalizeCustomFields(r.customFields),
+      source: r.source,
+      stageId: r.stageId,
+      tagIds: tagIdsByContact.get(r.id) ?? [],
+    },
+    activeConversationId: r.activeConversationId,
+    lastMessageAt: r.lastMessageAt ? r.lastMessageAt.toISOString() : null,
+    lastInboundAt: r.lastInboundAt ? r.lastInboundAt.toISOString() : null,
+    personChannels: r.customerId
+      ? channelsByCustomer.get(r.customerId) ?? [r.identityChannel]
+      : [r.identityChannel],
+  }));
+
+  // Offset mode → page numbers from totalCount, no cursor.
+  return { items, nextCursor: null, totalCount };
 }
 
 /**

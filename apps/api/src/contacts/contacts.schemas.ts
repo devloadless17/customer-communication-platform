@@ -48,6 +48,8 @@ export const ListContactsQuerySchema = z.object({
   tagIds: z.string().optional(),
   /** Filter to one channel (whatsapp / messenger / instagram). */
   channel: z.enum(["whatsapp", "messenger", "instagram"]).optional().catch(undefined),
+  /** "Group by person" view — one row per unified Customer (offset mode). */
+  groupByPerson: z.coerce.boolean().optional().catch(undefined),
   window: z.enum(["open", "closed"]).optional().catch(undefined),
   /** Either a stage cuid OR the literal "none" (filter to no-stage). Empty
    *  strings are dropped (`min(1)` enforces non-empty). */

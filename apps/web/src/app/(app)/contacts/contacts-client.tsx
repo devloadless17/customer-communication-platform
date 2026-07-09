@@ -605,6 +605,24 @@ export function ContactsClient({
           stageFilter={list.stageFilter}
           onStageFilterChange={list.setStageFilter}
         />
+        {/* Roll the list up to ONE row per unified person (a Customer + their
+            channels) instead of one row per channel-contact. Opt-in — the
+            default flat directory shows every channel identity explicitly. */}
+        <button
+          type="button"
+          onClick={() => list.setGroupByPerson(!list.groupByPerson)}
+          aria-pressed={list.groupByPerson}
+          title="Show one row per person instead of per channel-contact"
+          className={cn(
+            "mt-2 inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition",
+            list.groupByPerson
+              ? "border-primary bg-primary/10 text-foreground"
+              : "border-border text-muted-foreground hover:text-foreground",
+          )}
+        >
+          <Users className="size-3.5" />
+          Group by person
+        </button>
       </div>
 
       {list.error && (
@@ -674,8 +692,17 @@ export function ContactsClient({
                 // <Pagination> summary below, so two differently-phrased
                 // "Showing…" labels don't sit on the same screen.
                 <span className="tabular-nums">
-                  {(list.totalCount ?? items.length).toLocaleString()} contact
-                  {(list.totalCount ?? items.length) === 1 ? "" : "s"}
+                  {(() => {
+                    const n = list.totalCount ?? items.length;
+                    const label = list.groupByPerson
+                      ? n === 1
+                        ? "person"
+                        : "people"
+                      : n === 1
+                        ? "contact"
+                        : "contacts";
+                    return `${n.toLocaleString()} ${label}`;
+                  })()}
                 </span>
               }
             />
@@ -1003,7 +1030,7 @@ const ContactRow = memo(function ContactRow({
   /** Open the detail drawer for this contact. */
   onOpen: (id: string) => void;
 }) {
-  const { contact, activeConversationId, lastMessageAt, lastInboundAt } = item;
+  const { contact, activeConversationId, lastMessageAt, lastInboundAt, personChannels } = item;
   const [tagPickerOpen, setTagPickerOpen] = useState(false);
   const [tagSaveError, setTagSaveError] = useState<string | null>(null);
   const tagBoxRef = useRef<HTMLDivElement>(null);
@@ -1110,11 +1137,21 @@ const ContactRow = memo(function ContactRow({
           <span className="truncate text-sm font-medium leading-tight">
             {contact.name || formatPhone(contact.phoneNumber)}
           </span>
-          {contact.identityChannel && (
-            <ChannelBadge
-              channel={contact.identityChannel}
-              className="size-3.5 shrink-0"
-            />
+          {/* Person mode: the cluster of every channel this person is reachable
+              on. Default (per-contact) mode: the single channel badge. */}
+          {personChannels && personChannels.length > 0 ? (
+            <span className="flex shrink-0 items-center gap-0.5">
+              {personChannels.map((ch) => (
+                <ChannelBadge key={ch} channel={ch} className="size-3.5 shrink-0" />
+              ))}
+            </span>
+          ) : (
+            contact.identityChannel && (
+              <ChannelBadge
+                channel={contact.identityChannel}
+                className="size-3.5 shrink-0"
+              />
+            )
           )}
         </span>
         {contact.name && (
