@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Check, Loader2, Pencil, Plus, Search, Users, X } from "lucide-react";
+import { AtSign, Check, Loader2, Mail, Pencil, Phone, Plus, Search, Users, X } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -31,6 +31,12 @@ interface Profile {
   name: string | null;
   contacts: CustomerContact[];
   unreadTotal: number;
+  /** Identity fields lifted + de-duped across all the person's channels. */
+  details: {
+    phones: string[];
+    emails: string[];
+    usernames: string[];
+  };
 }
 interface SearchHit {
   id: string;
@@ -258,6 +264,37 @@ export function LinkedChannels({ contactId }: { contactId: string }) {
           )}
         </div>
       )}
+
+      {/* Person-level identity — phone / email / @username lifted + de-duped
+          across ALL the person's channels, so you see who they are regardless
+          of which channel each fact arrived on. Only for multi-channel people;
+          a solo contact's fields are already in the contact panel above. */}
+      {profile &&
+        hasOthers &&
+        (profile.details.phones.length > 0 ||
+          profile.details.emails.length > 0 ||
+          profile.details.usernames.length > 0) && (
+          <div className="flex flex-col gap-1 border-t border-border/40 pt-2 text-2xs text-muted-foreground">
+            {profile.details.phones.map((p) => (
+              <div key={`p-${p}`} className="flex items-center gap-1.5">
+                <Phone className="size-3 shrink-0" />
+                <span className="truncate font-mono">{formatPhone(p)}</span>
+              </div>
+            ))}
+            {profile.details.emails.map((e) => (
+              <div key={`e-${e}`} className="flex items-center gap-1.5">
+                <Mail className="size-3 shrink-0" />
+                <span className="truncate">{e}</span>
+              </div>
+            ))}
+            {profile.details.usernames.map((u) => (
+              <div key={`u-${u}`} className="flex items-center gap-1.5">
+                <AtSign className="size-3 shrink-0" />
+                <span className="truncate">@{u}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
       {!hasOthers && !picking && (
         <p className="text-xs text-muted-foreground">

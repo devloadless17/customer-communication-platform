@@ -27,6 +27,14 @@ export interface CustomerProfile {
   contacts: CustomerContactView[];
   /** Person-level unread = sum across the person's channel threads. */
   unreadTotal: number;
+  /** Identity fields lifted + de-duped across all the person's channel-contacts
+   *  — so the profile shows the whole person, not one channel's slice. */
+  details: {
+    phones: string[];
+    emails: string[];
+    /** Instagram @usernames (no leading @). */
+    usernames: string[];
+  };
 }
 
 /**
@@ -55,6 +63,12 @@ export class CustomersService {
             phoneNumber: true,
             externalContactId: true,
             avatarUrl: true,
+            // Person-level identity fields — aggregated (distinct) across the
+            // person's channel-contacts into `details` below, so the profile
+            // shows the FULL picture (a phone from WhatsApp + an email an agent
+            // added on another channel + the IG @handle) in one place.
+            email: true,
+            username: true,
             lastInboundAt: true,
             conversations: {
               select: {
@@ -95,11 +109,33 @@ export class CustomersService {
       const bt = b.lastMessageAt ?? b.lastInboundAt ?? "";
       return bt.localeCompare(at);
     });
+    // Lift person-level identity fields: distinct phones / emails / @usernames
+    // across every channel-contact, so the profile shows who this person is
+    // regardless of which channel each fact came in on. Order-stable (first
+    // seen wins), trimmed, de-duped case-insensitively for emails.
+    const distinct = (values: Array<string | null | undefined>, lower = false) => {
+      const seen = new Set<string>();
+      const out: string[] = [];
+      for (const raw of values) {
+        const v = raw?.trim();
+        if (!v) continue;
+        const key = lower ? v.toLowerCase() : v;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(v);
+      }
+      return out;
+    };
     return {
       id: customer.id,
       name: customer.name,
       contacts,
       unreadTotal: contacts.reduce((sum, c) => sum + c.unreadCount, 0),
+      details: {
+        phones: distinct(customer.contacts.map((c) => c.phoneNumber)),
+        emails: distinct(customer.contacts.map((c) => c.email), true),
+        usernames: distinct(customer.contacts.map((c) => c.username)),
+      },
     };
   }
 
