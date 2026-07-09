@@ -21,7 +21,8 @@ import type {
   UploadMediaResult,
 } from "@ccp/shared/providers/types";
 import {
-  fetchSocialProfileName,
+  fetchSocialProfile,
+  type SocialContactProfile,
   parseSocialMessaging,
   sendSocialInteractive,
   sendSocialMedia,
@@ -104,14 +105,17 @@ export const instagramProvider: MessagingProvider<InstagramSendConfig> = {
   async fetchContactProfile(
     externalId: string,
     config: InstagramSendConfig,
-  ): Promise<{ name: string | null }> {
-    // Instagram exposes `name` and `username`; prefer the real name, fall back
-    // to @username (both are useful; the helper returns whichever is present).
-    const name = await fetchSocialProfileName(externalId, {
+  ): Promise<SocialContactProfile> {
+    // Instagram exposes the richest identity of the three Meta channels: name,
+    // @username, profile_pic PLUS follower_count / verified / follow-relationship
+    // signals. We pull them all so ingest can persist the @handle, avatar, and
+    // the richer `socialProfile` context shown in the contact panel.
+    return fetchSocialProfile(externalId, {
       accessToken: config.igAccessToken,
       graphVersion: config.graphVersion,
-      fields: "name,username",
+      fields:
+        "name,username,profile_pic,follower_count,is_verified_user,is_user_follow_business,is_business_follow_user",
+      label: "instagram",
     });
-    return { name };
   },
 };

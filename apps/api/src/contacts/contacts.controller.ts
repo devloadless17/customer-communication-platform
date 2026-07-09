@@ -6,6 +6,7 @@ import {
   ForbiddenException,
   Get,
   HttpCode,
+  NotFoundException,
   Param,
   Patch,
   Post,
@@ -21,6 +22,8 @@ import type { Response } from "express";
 
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
 
+import { contactAvatarObjectKey } from "../lib/blob-storage/avatar";
+import { streamBlob } from "../media/stream-blob";
 import { RequireCapability } from "../auth/capability.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
@@ -200,6 +203,43 @@ export class ContactsController {
   async countAll(@CurrentSession() session: ApiSession) {
     const count = await this.contacts.countAll(session.teamId);
     return { count };
+  }
+
+  /**
+   * Contact avatar — authenticated SAME-ORIGIN stream of the captured social
+   * profile picture (Messenger/Instagram). The UI renders
+   * `<img src="/api/contacts/:id/avatar?v=…">` (the value stored in
+   * `avatarUrl`); WhatsApp contacts have none and never reach here. Same-team
+   * check first so one team can't stream another's avatar object; 404 when the
+   * contact has no captured avatar. `?v` (content hash) makes the bytes safely
+   * cacheable. Two-segment path can't shadow the single-segment static routes.
+   */
+  @Get(":contactId/avatar")
+  async avatar(
+    @CurrentSession() session: ApiSession,
+    @Param("contactId") contactId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const ok = await this.contacts.hasCapturedAvatar(session.teamId, contactId);
+    if (!ok) throw new NotFoundException({ error: "not_found" });
+    await streamBlob(res, contactAvatarObjectKey(contactId), undefined);
+  }
+
+  /**
+   * Refresh a social contact's profile from Meta on demand (name / @username /
+   * avatar / follower + verified signals). Backfills contacts created before
+   * enrichment captured them and re-pulls signals that drift over time. No-op
+   * for phone channels. Publishes `contact.updated`, so every open panel
+   * updates live; the response carries the fresh contact for the caller.
+   */
+  @Post(":contactId/sync-profile")
+  @HttpCode(200)
+  async syncProfile(
+    @CurrentSession() session: ApiSession,
+    @Param("contactId") contactId: string,
+  ) {
+    const contact = await this.contacts.syncSocialProfile(session.teamId, contactId);
+    return { contact };
   }
 
   @Post("count")

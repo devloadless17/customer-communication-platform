@@ -766,6 +766,9 @@ export function useCall(): {
             ok?: boolean;
             callId?: string;
             reason?: string;
+            // Messenger only — Meta returns the SDP answer synchronously from the
+            // `connect` call. WhatsApp omits it (its answer arrives via webhook).
+            sdpAnswer?: string;
           };
           if (!res.ok || body.ok === false) {
             tearDown();
@@ -810,6 +813,12 @@ export function useCall(): {
           if (stashed) {
             pendingAnswersRef.current.delete(realCallId);
             void applyOutboundAnswer(realCallId, stashed);
+          }
+          // Messenger: the answer came back in THIS response (not a webhook), so
+          // apply it directly. Reuses the same have-local-offer → setRemote path;
+          // WhatsApp responses carry no sdpAnswer, so this is a no-op there.
+          if (body.sdpAnswer) {
+            void applyOutboundAnswer(realCallId, body.sdpAnswer);
           }
           return { ok: true };
         } catch {

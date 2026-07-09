@@ -5,6 +5,8 @@ import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
+import { bestChannelForCustomer } from "@/lib/identity/best-channel";
+import { isPhoneChannel } from "@ccp/shared/providers/capabilities";
 
 import type { WorkflowEventEnvelope } from "@/lib/workflows/events";
 
@@ -23,13 +25,22 @@ import {
  *                     if it doesn't exist yet; for `send_message`, also
  *                     auto-creates an `open` Conversation.
  *
+ *   customer        — the unified PERSON (a `Customer` id). Resolves to that
+ *                     person's BEST channel (`bestChannelForCustomer`: in-window
+ *                     first, then most-recently-active) so an omnichannel
+ *                     automation reaches them on whatever channel is live —
+ *                     WhatsApp, Messenger, or Instagram — instead of being
+ *                     hardcoded to one. For `send_message`, reopens/creates the
+ *                     conversation ON THAT CHANNEL.
+ *
  * `kind: "contact"` (pick an existing contact by id) is intentionally NOT
  * here yet — would need a typeahead picker in the UI, which is a bigger
  * piece. Adding it later is a non-breaking extension.
  */
 export type StepTarget =
   | { kind: "trigger_contact" }
-  | { kind: "phone"; phoneNumber: string };
+  | { kind: "phone"; phoneNumber: string }
+  | { kind: "customer"; customerId: string };
 
 /**
  * Parser shared across step parseConfig functions. Returns undefined when
@@ -56,7 +67,15 @@ export function parseStepTarget(raw: unknown): StepTarget | undefined {
     }
     return { kind: "phone", phoneNumber: normalized };
   }
-  throw new StepConfigError(`target.kind must be 'trigger_contact' or 'phone'`);
+  if (t.kind === "customer") {
+    if (typeof t.customerId !== "string" || !t.customerId.trim()) {
+      throw new StepConfigError("target.customerId is required when target.kind is 'customer'");
+    }
+    return { kind: "customer", customerId: t.customerId.trim() };
+  }
+  throw new StepConfigError(
+    `target.kind must be 'trigger_contact', 'phone', or 'customer'`,
+  );
 }
 
 export interface ResolvedTarget {
@@ -113,6 +132,69 @@ export async function resolveStepTarget(
       phoneNumber: c.phoneNumber ?? null,
       contactCreated: false,
       conversationCreated: false,
+    };
+  }
+
+  // Customer target — resolve the person's BEST live channel, then reopen/create
+  // that channel's conversation. No contact auto-create (the person's contacts
+  // already exist — they've reached us); if none is reachable we surface a clean
+  // config error the run records and advances past.
+  if (target.kind === "customer") {
+    const best = await bestChannelForCustomer(teamId, target.customerId);
+    if (!best) {
+      throw new StepConfigError(
+        "target customer has no reachable channel (no live contact to message)",
+      );
+    }
+    const contactId = best.contactId;
+    const phoneNumber = isPhoneChannel(best.channel) ? best.to : null;
+    if (!opts.createConversation) {
+      return {
+        contactId,
+        conversationId: null,
+        phoneNumber,
+        contactCreated: false,
+        conversationCreated: false,
+      };
+    }
+    const existingConv = await db.conversation.findFirst({
+      where: { teamId, contactId },
+      orderBy: { lastMessageAt: "desc" },
+      select: { id: true },
+    });
+    if (existingConv) {
+      return {
+        contactId,
+        conversationId: existingConv.id,
+        phoneNumber,
+        contactCreated: false,
+        conversationCreated: false,
+      };
+    }
+    // Create ON THE BEST CHANNEL — Conversation.channel defaults to whatsapp, so
+    // a social best-channel MUST set it explicitly or the thread would be
+    // mis-stamped. Race-safe on the (teamId, contactId) unique.
+    let conv: { id: string };
+    try {
+      conv = await db.conversation.create({
+        data: { teamId, contactId, channel: best.channel, status: "open" },
+        select: { id: true },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        conv = await db.conversation.findFirstOrThrow({
+          where: { teamId, contactId },
+          orderBy: { lastMessageAt: "desc" },
+          select: { id: true },
+        });
+      } else throw err;
+    }
+    return {
+      contactId,
+      conversationId: conv.id,
+      phoneNumber,
+      contactCreated: false,
+      conversationCreated: true,
     };
   }
 

@@ -22,7 +22,7 @@ import {
   MinusCircle,
 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { toast } from "@/lib/toast";
@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { WindowBadge } from "@/features/inbox/components/window-badge";
+import { ChannelBadge } from "@/features/inbox/components/channel-badge";
 import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
@@ -590,6 +591,8 @@ export function ContactsClient({
           onSearchChange={list.setSearch}
           sourceFilter={list.sourceFilter}
           onSourceChange={list.setSourceFilter}
+          channelFilter={list.channelFilter}
+          onChannelChange={list.setChannelFilter}
           windowFilter={list.windowFilter}
           onWindowChange={list.setWindowFilter}
           fieldFilter={list.fieldFilter}
@@ -1081,6 +1084,7 @@ const ContactRow = memo(function ContactRow({
       </label>
 
       <Avatar className="size-8 shrink-0">
+        {contact.avatarUrl ? <AvatarImage src={contact.avatarUrl} alt="" /> : null}
         <AvatarFallback
           className="text-xs text-white"
           style={{ backgroundImage: avatarGradient(contact.id) }}
@@ -1102,8 +1106,16 @@ const ContactRow = memo(function ContactRow({
         }}
         className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
       >
-        <span className="w-full truncate text-sm font-medium leading-tight">
-          {contact.name || formatPhone(contact.phoneNumber)}
+        <span className="flex w-full items-center gap-1.5">
+          <span className="truncate text-sm font-medium leading-tight">
+            {contact.name || formatPhone(contact.phoneNumber)}
+          </span>
+          {contact.identityChannel && (
+            <ChannelBadge
+              channel={contact.identityChannel}
+              className="size-3.5 shrink-0"
+            />
+          )}
         </span>
         {contact.name && (
           <span className="w-full truncate font-mono text-2xs tabular-nums leading-tight text-muted-foreground">

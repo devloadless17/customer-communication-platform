@@ -15,6 +15,13 @@ import {
 } from "@prisma/client";
 
 import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
+import {
+  providerPlaceCall,
+  providerAnswerCall,
+  providerRejectCall,
+  providerEndCall,
+  usesUnifiedCalling,
+} from "@/lib/messaging/call-actions";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
 import {
   BIC_BLOCKED_COUNTRY_CODES,
@@ -61,6 +68,12 @@ export interface InitiateCallSuccess {
   callId: string;
   externalCallId: string;
   status: CallStatus;
+  /**
+   * Messenger returns the SDP answer synchronously from the `connect` call, so
+   * the browser applies it immediately. WhatsApp omits it (its answer arrives
+   * later via the `connecting` webhook), so this is undefined there.
+   */
+  sdpAnswer?: string;
 }
 
 @Injectable()
@@ -97,6 +110,7 @@ export class CallsService {
           select: {
             id: true,
             phoneNumber: true,
+            externalContactId: true,
             countryCode: true,
             callPermissionRevokedUntil: true,
             lastInboundAt: true,
@@ -106,13 +120,25 @@ export class CallsService {
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
     const contact = conversation.contact;
-    if (!contact?.phoneNumber) {
-      throw new BadRequestException({ error: "contact has no phone number" });
+    if (!contact) throw new BadRequestException({ error: "conversation has no contact" });
+
+    // Channel-aware calling. WhatsApp uses method-per-action + a phone number +
+    // our own permission-request ledger; Messenger uses the unified `callAction`
+    // + a PSID + Meta's own permission check. Branch the whole preflight on it.
+    const channelForCall = conversation.channel ?? "whatsapp";
+    const binding = getProviderBinding(channelForCall);
+    const isUnified = usesUnifiedCalling(binding.provider);
+    const to = isUnified ? contact.externalContactId : contact.phoneNumber;
+    if (!to) {
+      throw new BadRequestException({
+        error: isUnified ? "contact has no messaging id" : "contact has no phone number",
+      });
     }
 
-    // Region gate. The UI hides the Phone button when the country is on
-    // either list, but defense-in-depth catches a direct API call.
-    if (contact.countryCode) {
+    // Region gate (phone channels only — a PSID carries no country; Messenger's
+    // per-Page feature status is its region gate). Defense-in-depth for a direct
+    // API call; the UI already hides the button.
+    if (!isUnified && contact.countryCode) {
       const cc = contact.countryCode.toUpperCase();
       if (
         BIC_BLOCKED_COUNTRY_CODES.has(cc) ||
@@ -138,14 +164,38 @@ export class CallsService {
       );
     }
 
-    // Permission revocation gate. Meta strips calling permission after 4
-    // consecutive unanswered outbound calls; this column mirrors that.
+    // Permission revocation gate (WhatsApp). Meta strips calling permission
+    // after 4 consecutive unanswered outbound calls; this column mirrors that.
     if (
+      !isUnified &&
       !skipPreflight &&
       contact.callPermissionRevokedUntil &&
       contact.callPermissionRevokedUntil.getTime() > Date.now()
     ) {
       return { ok: false, reason: "permission_revoked" };
+    }
+
+    // Messenger permission: Meta owns the model (7-day opt-in), so we ask it
+    // directly rather than keeping our own request ledger. `canStartCall` also
+    // encodes Meta's per-thread call quota, so it doubles as the cap gate.
+    if (isUnified && !skipPreflight) {
+      const cfg = await binding.getSendConfig(session.teamId);
+      const perm = await binding.provider.checkCallPermission?.(to, cfg);
+      if (perm && !perm.canStartCall) {
+        if (perm.canRequestPermission) {
+          try {
+            await binding.provider.requestCallPermission?.(to, cfg);
+          } catch (err) {
+            this.logger.warn(
+              `messenger call-permission request failed for team=${session.teamId} contact=${contact.id}: ${
+                err instanceof Error ? err.message : err
+              }`,
+            );
+          }
+          return { ok: false, reason: "permission_required" };
+        }
+        return { ok: false, reason: "permission_pending" };
+      }
     }
 
     // 24h-window check. Inside the window → free-form calls OK. Outside →
@@ -155,7 +205,7 @@ export class CallsService {
       contact.lastInboundAt &&
         now - contact.lastInboundAt.getTime() < 24 * 60 * 60 * 1000,
     );
-    if (!skipPreflight && !insideWindow) {
+    if (!isUnified && !skipPreflight && !insideWindow) {
       // A call is only permitted out-of-window against a GRANTED permission
       // still inside its 72h validity. Sending a request is NOT a grant — the
       // permission_granted webhook stamps `granted` + `grantedAt`. expiresAt
@@ -219,7 +269,7 @@ export class CallsService {
           await this.requestPermissionInternal(
             session.teamId,
             contact.id,
-            contact.phoneNumber,
+            to,
           );
         } catch (err) {
           this.logger.warn(
@@ -272,20 +322,13 @@ export class CallsService {
     //     → terminate the orphaned Meta call + `provider_rejected` (see below)
     // The UI maps every reason to a human one-liner; the alternative (502 → "Bad
     // Gateway" in console) is the failure mode we just hit in prod.
-    const channelForCall = conversation.channel ?? "whatsapp";
-    let placed: { externalCallId: string };
+    let placed: { externalCallId: string; sdpAnswer?: string };
     try {
-      const binding = getProviderBinding(channelForCall);
-      const placeCall = requireProviderMethod(
-        binding.provider,
-        "placeCall",
-        channelForCall,
-      );
       const sendConfig = await binding.getSendConfig(session.teamId);
-      placed = await placeCall(
-        { to: contact.phoneNumber, sdpOffer },
-        sendConfig,
-      );
+      placed = await providerPlaceCall(binding.provider, channelForCall, sendConfig, {
+        to,
+        sdpOffer,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(
@@ -375,12 +418,10 @@ export class CallsService {
           } — terminating the orphaned Meta call`,
         );
         try {
-          const binding = getProviderBinding(channelForCall);
-          const end = binding.provider.endCall;
-          if (end) {
-            const cfg = await binding.getSendConfig(session.teamId);
-            await end({ externalCallId: placed.externalCallId }, cfg);
-          }
+          const cfg = await binding.getSendConfig(session.teamId);
+          await providerEndCall(binding.provider, channelForCall, cfg, {
+            externalCallId: placed.externalCallId,
+          });
         } catch (terminateErr) {
           this.logger.warn(
             `failed to terminate orphaned Meta call externalCallId=${placed.externalCallId}: ${
@@ -414,6 +455,8 @@ export class CallsService {
       callId: created.id,
       externalCallId: created.externalCallId,
       status: created.status,
+      // Messenger only — the browser applies this answer immediately.
+      ...(placed.sdpAnswer ? { sdpAnswer: placed.sdpAnswer } : {}),
     };
   }
 
@@ -455,8 +498,16 @@ export class CallsService {
    */
   async enableCallingForTeam(
     session: ApiSession,
-    channel: "whatsapp" = "whatsapp",
+    channel: Channel = "whatsapp",
   ): Promise<{ ok: true; raw: unknown }> {
+    // Only calling-capable channels expose enableCalling (WhatsApp: enable Cloud
+    // API Calling; Messenger: route inbound calls to us + show the call icon).
+    if (!getProviderBinding(channel).provider.capabilities.calling) {
+      throw new BadRequestException({
+        error: "channel does not support calling",
+        detail: `${channel} has no calling capability.`,
+      });
+    }
     const binding = getProviderBinding(channel);
     const fn = binding.provider.enableCalling;
     if (!fn) {
@@ -646,7 +697,12 @@ export class CallsService {
     session: ApiSession,
     callId: string,
     sdpAnswer: string,
-  ): Promise<{ ok: true; answeredByUserId: string }> {
+  ): Promise<{
+    ok: true;
+    answeredByUserId: string;
+    sdpAnswer?: string;
+    sdpRenegotiation?: string;
+  }> {
     const call = await this.db.call.findFirst({
       where: { id: callId, teamId: session.teamId },
       select: {
@@ -702,28 +758,17 @@ export class CallsService {
     // Roll back to `failed` (terminal) so the agent gets a clear UI state
     // and the row reflects the truth.
     const binding = getProviderBinding(call.channel);
-    const preAccept = requireProviderMethod(
-      binding.provider,
-      "preAcceptCall",
-      call.channel,
-    );
-    const accept = requireProviderMethod(
-      binding.provider,
-      "acceptCall",
-      call.channel,
-    );
     const config = await binding.getSendConfig(session.teamId);
+    // WhatsApp: pre_accept + accept, both carrying the browser's SDP ANSWER,
+    // no return. Messenger: a single accept carrying the browser's SDP OFFER,
+    // returning the answer (+ renegotiation) for the browser to apply. The
+    // adapter hides which; `sdpAnswer` here is the browser's SDP either way.
+    let answerResult: { sdpAnswer?: string; sdpRenegotiation?: string };
     try {
-      // Both pre_accept and accept carry the SAME SDP answer. Meta returns
-      // 131009 "Missing session parameter" on pre_accept without it.
-      await preAccept(
-        { externalCallId: call.externalCallId, sdpAnswer },
-        config,
-      );
-      await accept(
-        { externalCallId: call.externalCallId, sdpAnswer },
-        config,
-      );
+      answerResult = await providerAnswerCall(binding.provider, call.channel, config, {
+        externalCallId: call.externalCallId,
+        sdp: sdpAnswer,
+      });
     } catch (err) {
       this.logger.warn(
         `acceptCall provider error for call=${callId}: ${
@@ -780,7 +825,14 @@ export class CallsService {
       answeredByUserId: session.userId,
       answeredAt: answeredAt.toISOString(),
     });
-    return { ok: true, answeredByUserId: session.userId };
+    return {
+      ok: true,
+      answeredByUserId: session.userId,
+      // Messenger returns the SDP answer (+ optional renegotiation offer) from
+      // the accept call for the browser to apply; WhatsApp's arrive via webhook.
+      ...(answerResult.sdpAnswer ? { sdpAnswer: answerResult.sdpAnswer } : {}),
+      ...(answerResult.sdpRenegotiation ? { sdpRenegotiation: answerResult.sdpRenegotiation } : {}),
+    };
   }
 
   /**
@@ -825,20 +877,12 @@ export class CallsService {
     }
 
     const binding = getProviderBinding(call.channel);
-    const reject = requireProviderMethod(
-      binding.provider,
-      "rejectCall",
-      call.channel,
-    );
     const config = await binding.getSendConfig(session.teamId);
     try {
-      await reject(
-        {
-          externalCallId: call.externalCallId,
-          ...(reason ? { reason } : {}),
-        },
-        config,
-      );
+      await providerRejectCall(binding.provider, call.channel, config, {
+        externalCallId: call.externalCallId,
+        ...(reason ? { reason } : {}),
+      });
     } catch (err) {
       // Non-fatal — the row is already rejected locally.
       this.logger.warn(
@@ -1050,14 +1094,11 @@ export class CallsService {
     }
 
     const binding = getProviderBinding(call.channel);
-    const end = requireProviderMethod(
-      binding.provider,
-      "endCall",
-      call.channel,
-    );
     const config = await binding.getSendConfig(session.teamId);
     try {
-      await end({ externalCallId: call.externalCallId }, config);
+      await providerEndCall(binding.provider, call.channel, config, {
+        externalCallId: call.externalCallId,
+      });
     } catch (err) {
       this.logger.warn(
         `endCall provider error for call=${callId}: ${

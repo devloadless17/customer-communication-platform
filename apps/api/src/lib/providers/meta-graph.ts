@@ -14,7 +14,17 @@
  * own `*-config.ts` loader, exactly like WhatsApp's `getMetaSendConfig`.
  */
 
-export const GRAPH_BASE = "https://graph.facebook.com";
+/**
+ * Base origin for every Graph API call (WhatsApp send, social send, and all the
+ * connect-time validation fetches). Real Meta by default; overridable via
+ * `META_GRAPH_BASE_URL` so an e2e run can point the whole app at a local mock
+ * Graph server and assert the real outbound wire shape. Read once at module load
+ * — the value is fixed for a process's lifetime (set before boot, never at
+ * runtime), so a const is correct and cheapest. Prod never sets the override.
+ */
+import { MetaSendError } from "./meta-send-error";
+
+export const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
 const GRAPH_TIMEOUT_MS = 15_000;
 /** Media uploads (video up to 16 MB) need a longer ceiling than a JSON call. */
 const GRAPH_UPLOAD_TIMEOUT_MS = 60_000;
@@ -126,7 +136,16 @@ export async function graphPostJson(
     });
     const text = await res.text().catch(() => "");
     if (!res.ok) {
-      throw new Error(`graph POST ${res.status} ${redactUrl(url)}: ${text.slice(0, 500)}`);
+      // Throw the SAME error type WhatsApp sends throw so `normalizeMetaSendError`
+      // classifies social failures (rate-limit backoff, window-closed, blocked
+      // recipient, auth-expired) instead of treating every social send error as
+      // an ambiguous transport error. `body` carries Meta's JSON so the
+      // code/subcode extractor can read it.
+      throw new MetaSendError(
+        `graph POST ${res.status} ${redactUrl(url)}: ${text.slice(0, 500)}`,
+        res.status,
+        text,
+      );
     }
     return text ? (JSON.parse(text) as Record<string, unknown>) : {};
   } catch (err) {

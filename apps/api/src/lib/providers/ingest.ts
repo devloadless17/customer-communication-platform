@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { runWithConcurrency } from "@/common/concurrency";
+import { captureRemoteContactAvatar } from "@/lib/blob-storage/avatar";
 import { getProviderBinding } from "@/lib/providers";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { publish } from "@/lib/events/bus";
@@ -9,6 +10,7 @@ import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { ingestCallEvent } from "@/lib/providers/ingest-call";
+import { resolveCustomerId } from "@/lib/identity/identity-service";
 import { ensureDefaultStage } from "@/lib/queries";
 import {
   mapReplySnapshot,
@@ -31,6 +33,7 @@ import type {
   NormalizedContactSync,
   NormalizedEvent,
   NormalizedInboundMessage,
+  NormalizedMessageCorrection,
   NormalizedOutboundEcho,
   NormalizedReaction,
   NormalizedReadWatermark,
@@ -45,6 +48,7 @@ import type {
   Message,
   Channel,
   ReplySnapshot,
+  SocialProfile,
 } from "@ccp/shared/types";
 import { mediaPreviewLabel } from "@ccp/shared/types";
 import { getCountryFromPhone } from "@ccp/shared/utils";
@@ -95,18 +99,24 @@ export async function ingestEvents(
         await ingestContactSync(teamId, channel, evt);
       } else if (evt.kind === "reaction") {
         await ingestReaction(teamId, channel, evt);
+      } else if (evt.kind === "message_correction") {
+        await ingestMessageCorrection(teamId, channel, evt);
       } else if (evt.kind === "read_watermark") {
         await ingestReadWatermark(teamId, channel, evt);
       } else if (evt.kind === "template_status") {
         await ingestTemplateStatusUpdate(teamId, evt);
       } else if (evt.kind === "call") {
-        // Kill-switch: WhatsApp calling is in-flight and reaches browsers via
-        // realtime WebRTC signaling. DISABLE_WHATSAPP_CALLING=1 (wired in
-        // docker-compose api.environment) lets ops dark-stop call ingest WITHOUT
-        // a redeploy if a signaling bug surfaces — call webhooks become a no-op
-        // (logged) while message ingest keeps flowing. Default OFF (calling on),
-        // so this is a pure opt-out lever, no behavior change unless set.
-        if (process.env.DISABLE_WHATSAPP_CALLING === "1") {
+        // Kill-switch: calling (WhatsApp + Messenger) reaches browsers via
+        // realtime WebRTC signaling. DISABLE_CALLING=1 (wired in docker-compose
+        // api.environment) lets ops dark-stop call ingest for EVERY channel
+        // WITHOUT a redeploy if a signaling bug surfaces — call webhooks become a
+        // no-op (logged) while message ingest keeps flowing. Default OFF (calling
+        // on), a pure opt-out lever. `DISABLE_WHATSAPP_CALLING` is still honored
+        // for back-compat with an already-deployed env.
+        if (
+          process.env.DISABLE_CALLING === "1" ||
+          process.env.DISABLE_WHATSAPP_CALLING === "1"
+        ) {
           console.warn(
             JSON.stringify({
               event: "ingest.call_skipped_killswitch",
@@ -241,6 +251,67 @@ async function ingestReaction(
 }
 
 /**
+ * Apply a customer message unsend/edit (WhatsApp revoke·edit, Messenger/
+ * Instagram unsend). Finds the target Message by (teamId, channel,
+ * targetExternalId) and either tombstones it (`deletedAt`, body PRESERVED for
+ * the record) or updates its body (`editedAt` + new body), then fans out
+ * `message.updated` so viewers patch the bubble. Idempotent: a re-delivered
+ * delete/edit that matches the current state is a no-op (skips the socket
+ * churn). UI-only — no workflow/webhook fanout (a customer editing their own
+ * message isn't a business event).
+ */
+async function ingestMessageCorrection(
+  teamId: string,
+  channel: Channel,
+  evt: NormalizedMessageCorrection,
+): Promise<void> {
+  const target = await db.message.findUnique({
+    where: {
+      teamId_channel_externalId: { teamId, channel, externalId: evt.targetExternalId },
+    },
+    select: { id: true, conversationId: true, body: true, deletedAt: true },
+  });
+  // Correction for a message we never stored — nothing to patch.
+  if (!target) return;
+  // Already tombstoned (re-delivery) — skip write + fanout.
+  if (evt.action === "delete" && target.deletedAt) return;
+
+  const now = evt.timestamp;
+  if (evt.action === "delete") {
+    await db.message.update({
+      where: { id: target.id },
+      data: { deletedAt: now },
+    });
+    await publish({
+      type: "message.updated",
+      teamId,
+      conversationId: target.conversationId,
+      messageId: target.id,
+      deletedAt: now.toISOString(),
+      editedAt: null,
+      body: null,
+    });
+    return;
+  }
+  // Edit: replace the body (no-op if identical) + mark edited.
+  const newBody = evt.newBody ?? "";
+  if (target.body === newBody) return;
+  await db.message.update({
+    where: { id: target.id },
+    data: { body: newBody, editedAt: now },
+  });
+  await publish({
+    type: "message.updated",
+    teamId,
+    conversationId: target.conversationId,
+    messageId: target.id,
+    deletedAt: null,
+    editedAt: now.toISOString(),
+    body: newBody,
+  });
+}
+
+/**
  * Apply a social read watermark (Messenger / Instagram): mark every outbound
  * message to this customer at/before the watermark as `read` — the "Seen" state.
  * Reuses ingestStatusUpdate per matched message so the rank/CAS guard, the
@@ -309,6 +380,7 @@ async function ingestStatusUpdate(
       teamId: true,
       conversationId: true,
       status: true,
+      direction: true,
       conversation: { select: { contactId: true } },
     },
   });
@@ -327,6 +399,11 @@ async function ingestStatusUpdate(
     });
     return;
   }
+
+  // Delivery/read/failed status only ever concerns a message WE sent. Instagram
+  // read receipts target a specific `mid`; guard against a mid ever resolving to
+  // an inbound row so a status write can't corrupt a customer message.
+  if (existing.direction !== "out") return;
 
   // `statusWinsOver` (module-level, shared with drainParkedStatus) applies both
   // the terminal-`failed` rule and the monotonic rank guard (sent < delivered
@@ -422,7 +499,12 @@ async function ingestTemplateStatusUpdate(
   teamId: string,
   evt: NormalizedTemplateStatusUpdate,
 ): Promise<void> {
-  if (!evt.status) return; // unmappable event value — nothing to write
+  // A status update sets `status`; a category update sets `category`; both flip
+  // the local row. Nothing to write when neither mapped to a known enum value.
+  const data: Prisma.MessageTemplateUpdateManyMutationInput = {};
+  if (evt.status) data.status = evt.status;
+  if (evt.category) data.category = evt.category;
+  if (Object.keys(data).length === 0) return;
 
   // Prefer matching on Meta's template id (externalId); fall back to the
   // natural (name, language) key. Build the narrowest WHERE we can.
@@ -438,7 +520,7 @@ async function ingestTemplateStatusUpdate(
 
   const result = await db.messageTemplate.updateMany({
     where,
-    data: { status: evt.status },
+    data,
   });
   if (result.count === 0) return; // template not in our catalog yet — sync owns creation
 
@@ -806,7 +888,12 @@ async function ingestInboundMessage(
       // revive them: for phone the partial unique holds the slot across
       // deletedAt; for external the full compound unique does the same.
       const isPhone = isPhoneChannel(channel);
-      const identityLabel = isPhone ? evt.contactPhone : evt.externalContactId;
+      // Phone channels resolve by phone; BSUID forward-compat: when Meta omits
+      // the phone (2026), fall back to the business-scoped id. Exactly one is
+      // the resolve key.
+      const identityLabel = isPhone
+        ? evt.contactPhone ?? evt.bsuid
+        : evt.externalContactId;
       if (!identityLabel) {
         // Defensive: a message with neither identity is unroutable. Drop it
         // (the outer per-event handler logs + continues) rather than creating a
@@ -817,7 +904,9 @@ async function ingestInboundMessage(
       }
       const existingContact = await tx.contact.findFirst({
         where: isPhone
-          ? { teamId, phoneNumber: evt.contactPhone }
+          ? evt.contactPhone
+            ? { teamId, phoneNumber: evt.contactPhone }
+            : { teamId, identityChannel: channel, bsuid: evt.bsuid }
           : { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
         select: { id: true, deletedAt: true },
       });
@@ -862,8 +951,11 @@ async function ingestInboundMessage(
             // channels store `phoneNumber` (+ derived country code); non-phone
             // channels store the opaque `externalContactId` (PSID / IGSID) and
             // leave phone/country null.
-            phoneNumber: isPhone ? evt.contactPhone : null,
+            phoneNumber: isPhone ? evt.contactPhone ?? null : null,
             externalContactId: isPhone ? null : evt.externalContactId,
+            // BSUID forward-compat (phone channels only, null today).
+            bsuid: isPhone ? evt.bsuid ?? null : null,
+            username: isPhone ? evt.username ?? null : null,
             name: evt.contactName ?? identityLabel,
             // Populate the new webhook-facing fields on create. Splitting the
             // name + deriving the country code on first contact matches what
@@ -873,18 +965,22 @@ async function ingestInboundMessage(
             lastName,
             countryCode: isPhone ? getCountryFromPhone(evt.contactPhone!) : null,
             stageId: defaultStageId,
-            // Unified Customer (§6): a brand-new inbound contact is a brand-new
-            // identity — its phone is unique per team (WhatsApp) and social ids
-            // carry no phone/email to merge on — so it always gets its OWN
-            // Customer, created here in the same tx. Cross-channel MERGE happens
-            // later (manual, or the customer-link sweeper when a shared verified
-            // phone/email appears). Scalar customerId (unchecked-create path).
-            customerId: (
-              await tx.customer.create({
-                data: { teamId, name: evt.contactName ?? identityLabel },
-                select: { id: true },
-              })
-            ).id,
+            // Unified Customer (§6): resolve which person this contact belongs to
+            // through the single identity authority. On a deterministic strong
+            // key (exact phone/email already linked to a Customer) it adopts that
+            // person IMMEDIATELY — cross-channel merge at ingest, not sweeper-
+            // delayed; otherwise it mints a fresh Customer. Runs in `tx` so the
+            // Customer rolls back with the contact if the create aborts. The
+            // drift sweeper stays the backstop for keys that appear later.
+            customerId: await resolveCustomerId(
+              teamId,
+              {
+                phoneNumber: isPhone ? evt.contactPhone ?? null : null,
+                email: null,
+                name: evt.contactName ?? identityLabel,
+              },
+              tx,
+            ),
           },
           // Same `{ id }` tags shape as the returning-contact path so the
           // snapshot mapper reads the relation uniformly (a brand-new contact
@@ -972,6 +1068,14 @@ async function ingestInboundMessage(
           status: "delivered",
           rawPayload: evt.rawPayload as Prisma.InputJsonValue,
           timestamp: evt.timestamp,
+          // Structured non-media content (location pin / contact card) → rich bubble.
+          ...(evt.structured
+            ? { structured: evt.structured as unknown as Prisma.InputJsonValue }
+            : {}),
+          // Ad / deep-link attribution (Click-to-WhatsApp) → "from your ad" chip.
+          ...(evt.attribution
+            ? { attribution: evt.attribution as unknown as Prisma.InputJsonValue }
+            : {}),
           ...(replySnapshot ? { replyToMessageId: replySnapshot.id } : {}),
           ...(evt.media
             ? {
@@ -1122,6 +1226,7 @@ async function ingestInboundMessage(
                 // the Active filter and renders unassigned, regardless of
                 // whether `conversation` here predates the in-tx status update.
                 ...(reopened ? { status: "pending", assignedUserId: null } : {}),
+                channel,
                 lastMessageAt: evt.timestamp,
                 lastMessagePreview: preview,
                 lastMessageDirection: "in",
@@ -1390,19 +1495,30 @@ async function ingestOutboundEcho(
   if (existing) return;
 
   const defaultStageId = await ensureDefaultStage(teamId);
-  const { firstName, lastName } = splitContactName(evt.contactPhone);
+  // Channel-agnostic identity: WhatsApp Coexistence echoes carry `contactPhone`,
+  // social native-inbox echoes carry `externalContactId` (customer PSID/IGSID).
+  const isPhone = isPhoneChannel(channel);
+  const identityLabel = isPhone ? evt.contactPhone : evt.externalContactId;
+  if (!identityLabel) {
+    throw new Error(
+      `ingest: outbound echo ${evt.externalId} on ${channel} has no contact identity`,
+    );
+  }
+  const { firstName, lastName } = splitContactName(identityLabel);
 
   const { contact, conversation, isNewContact, wasRevived, isNewConversation } =
     await runWithSerializableRetry(async (tx) => {
       const found = await tx.contact.findFirst({
-        where: { teamId, phoneNumber: evt.contactPhone },
+        where: isPhone
+          ? { teamId, phoneNumber: evt.contactPhone }
+          : { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
         include: { tags: { select: { id: true } } },
       });
       const isNewContact = !found;
       const wasRevived = !!found?.deletedAt;
       let contact = found;
       if (found?.deletedAt) {
-        // The owner is chatting this number again → revive the tombstoned row
+        // The owner is chatting this contact again → revive the tombstoned row
         // (same as the inbound + manual revive paths). Name/stage untouched.
         contact = await tx.contact.update({
           where: { id: found.id },
@@ -1414,12 +1530,25 @@ async function ingestOutboundEcho(
           data: {
             teamId,
             identityChannel: channel,
-            phoneNumber: evt.contactPhone,
-            name: evt.contactPhone,
+            phoneNumber: isPhone ? evt.contactPhone : null,
+            externalContactId: isPhone ? null : evt.externalContactId,
+            name: identityLabel,
             firstName,
             lastName,
-            countryCode: getCountryFromPhone(evt.contactPhone),
+            countryCode: isPhone ? getCountryFromPhone(evt.contactPhone!) : null,
             stageId: defaultStageId,
+            // Same unified-Customer resolution as the inbound path — an echo can
+            // be the FIRST time we see a contact (owner messaged them natively
+            // before they replied). Runs in `tx` so it rolls back atomically.
+            customerId: await resolveCustomerId(
+              teamId,
+              {
+                phoneNumber: isPhone ? evt.contactPhone ?? null : null,
+                email: null,
+                name: identityLabel,
+              },
+              tx,
+            ),
           },
           include: { tags: { select: { id: true } } },
         });
@@ -1527,6 +1656,7 @@ async function ingestOutboundEcho(
     ? {
         conversation: toDomainConversation({
           ...conversation,
+          channel,
           lastMessageAt: messageTimestamp,
           lastMessagePreview: preview,
           lastMessageDirection: "out",
@@ -1684,6 +1814,7 @@ export async function enrichSocialContactNames(
   teamId: string,
   channel: Channel,
   externalContactIds: string[],
+  opts?: { forceAvatar?: boolean },
 ): Promise<void> {
   if (isPhoneChannel(channel)) return;
   const unique = [...new Set(externalContactIds.filter((id) => !!id))];
@@ -1712,18 +1843,60 @@ export async function enrichSocialContactNames(
         include: { tags: { select: { id: true } } },
       });
       if (!contact) return;
-      // Only fill a name still equal to the id default; never overwrite a real
-      // one an agent (or a prior enrichment) set.
+
+      const profile = await fetchProfile(extId, config);
+
+      // Build the patch: fill a name still equal to the id default (never
+      // overwrite a real one an agent/prior enrichment set); retain the IG
+      // @username; store a profile picture when the contact has none yet.
       const current = contact.name?.trim() ?? "";
-      if (current !== "" && current !== extId) return;
+      const data: Prisma.ContactUpdateInput = {};
+      if ((current === "" || current === extId) && profile.name && profile.name !== extId) {
+        data.name = profile.name;
+        const { firstName, lastName } = splitContactName(profile.name);
+        data.firstName = firstName;
+        data.lastName = lastName;
+      }
+      if (profile.username && contact.username !== profile.username) {
+        data.username = profile.username;
+      }
+      // Meta's `profile_pic` is a short-lived signed CDN URL that 403s once it
+      // expires — so download it into R2 and store the same-origin serve path,
+      // never the raw URL. On a normal inbound we capture only ONCE (cheap: no
+      // per-message re-download once we hold a `/api/contacts/…` avatar). A
+      // forced sync (the panel's Refresh button) re-downloads and, via the
+      // content-hash `?v`, updates only when the picture ACTUALLY changed —
+      // that's what lets a customer's new IG photo flow through.
+      const hasCapturedAvatar = contact.avatarUrl?.startsWith("/api/contacts/");
+      if (profile.avatarUrl && (opts?.forceAvatar || !hasCapturedAvatar)) {
+        const captured = await captureRemoteContactAvatar(
+          contact.id,
+          profile.avatarUrl,
+          contact.avatarUrl,
+        );
+        if (captured && captured !== contact.avatarUrl) data.avatarUrl = captured;
+      }
+      // Instagram richer signals (follower count / verified / follow-relationship).
+      // Change-gated like every other field so an unchanged profile doesn't
+      // republish a `contact.updated` frame on every inbound. Absent on
+      // Messenger, so this is a no-op there.
+      if (profile.socialProfile) {
+        const cur = (contact.socialProfile ?? {}) as SocialProfile;
+        const next = profile.socialProfile;
+        if (
+          cur.followerCount !== next.followerCount ||
+          cur.isVerified !== next.isVerified ||
+          cur.followsBusiness !== next.followsBusiness ||
+          cur.businessFollows !== next.businessFollows
+        ) {
+          data.socialProfile = next as Prisma.InputJsonValue;
+        }
+      }
+      if (Object.keys(data).length === 0) return; // nothing new to persist
 
-      const { name } = await fetchProfile(extId, config);
-      if (!name || name === extId) return;
-
-      const { firstName, lastName } = splitContactName(name);
       const updated = await db.contact.update({
         where: { id: contact.id },
-        data: { name, firstName, lastName },
+        data,
         include: { tags: { select: { id: true } } },
       });
       await publish({
@@ -2170,6 +2343,10 @@ function toDomainConversation(c: {
   lastMessageAt: Date;
   lastMessagePreview: string;
   lastMessageDirection?: "in" | "out" | null;
+  // Channel this thread lives on — drives the inbox row's channel badge. Must be
+  // carried on the realtime new-conversation frame or the spliced-in row renders
+  // as whatsapp (the type's absent-default) for messenger/instagram threads.
+  channel: Channel;
 }): Conversation {
   return {
     id: c.id,
@@ -2181,6 +2358,7 @@ function toDomainConversation(c: {
     lastMessageAt: c.lastMessageAt.toISOString(),
     lastMessagePreview: c.lastMessagePreview,
     lastMessageDirection: c.lastMessageDirection ?? null,
+    channel: c.channel,
   };
 }
 

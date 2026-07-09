@@ -25,6 +25,7 @@
     "db:seed:long": "tsx prisma/seeds/seed-long-thread.ts",
     "db:seed:closed": "tsx prisma/seeds/seed-closed-window-chats.ts",
     "test:e2e": "playwright test",
+    "test:e2e:meta": "playwright test --config playwright.meta.config.ts",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:ui": "playwright test --ui",
     "db:studio": "prisma studio",

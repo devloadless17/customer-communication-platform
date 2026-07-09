@@ -2,7 +2,8 @@
 
 import { memo } from "react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { ChannelBadge } from "@/features/inbox/components/channel-badge";
 import { WindowBadge } from "@/features/inbox/components/window-badge";
 import { TagChip } from "@/features/tags/components/tag-chip";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
@@ -54,6 +55,7 @@ export const BrowserRow = memo(function BrowserRow({
           aria-label={`Select ${label}`}
         />
         <Avatar className="size-8 shrink-0">
+          {contact.avatarUrl ? <AvatarImage src={contact.avatarUrl} alt="" /> : null}
           <AvatarFallback
             className="text-xs text-white"
             style={{ backgroundImage: avatarGradient(contact.id) }}
@@ -63,6 +65,12 @@ export const BrowserRow = memo(function BrowserRow({
         </Avatar>
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <span className="truncate text-sm font-medium">{label}</span>
+          {contact.identityChannel && (
+            <ChannelBadge
+              channel={contact.identityChannel}
+              className="size-3.5 shrink-0"
+            />
+          )}
           <span className="hidden shrink-0 whitespace-nowrap font-mono text-2xs tabular-nums text-muted-foreground sm:inline">
             {formatPhone(contact.phoneNumber)}
           </span>

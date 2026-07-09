@@ -4,11 +4,14 @@ import { useMemo } from "react";
 import { Check } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
+import { CHANNEL_LABEL, ChannelBadge } from "@/features/inbox/components/channel-badge";
+import { LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { cn } from "@ccp/shared/utils";
 import type { ContactStage, ContactFieldDefinition } from "@ccp/shared/types";
 
 import type {
+  ChannelFilter,
   FieldFilter,
   SourceFilter,
   StageFilter,
@@ -112,6 +115,8 @@ export function StageFilterMenu({
 export function MoreFilterMenu({
   sourceFilter,
   onSourceChange,
+  channelFilter = "any",
+  onChannelChange,
   windowFilter,
   onWindowChange,
   fieldFilter,
@@ -120,6 +125,9 @@ export function MoreFilterMenu({
 }: {
   sourceFilter: SourceFilter;
   onSourceChange: (v: SourceFilter) => void;
+  channelFilter?: ChannelFilter;
+  /** Omit to hide the channel section (e.g. surfaces scoped to one channel). */
+  onChannelChange?: (v: ChannelFilter) => void;
   windowFilter: WindowFilter;
   /** Omit to hide the 24h-window section (e.g. surfaces that don't filter on it). */
   onWindowChange?: (v: WindowFilter) => void;
@@ -145,6 +153,28 @@ export function MoreFilterMenu({
       >
         Added by me
       </RadioRow>
+
+      {onChannelChange && (
+        <>
+          <MenuLabel>Channel</MenuLabel>
+          <RadioRow
+            active={channelFilter === "any"}
+            onClick={() => onChannelChange("any")}
+          >
+            Any channel
+          </RadioRow>
+          {[...LIVE_CHANNELS].map((ch) => (
+            <RadioRow
+              key={ch}
+              active={channelFilter === ch}
+              onClick={() => onChannelChange(ch)}
+              leading={<ChannelBadge channel={ch} className="size-3.5 shrink-0" />}
+            >
+              {CHANNEL_LABEL[ch]}
+            </RadioRow>
+          ))}
+        </>
+      )}
 
       {onWindowChange && (
         <>

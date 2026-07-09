@@ -12,6 +12,7 @@ import { DbService } from "../../db/db.service";
 import type { UpdateInstagramConfigInput } from "./instagram.schemas";
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
+const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
 const CHANNEL = "instagram" as const;
 
 interface InstagramChannelConfig {
@@ -158,7 +159,7 @@ export class InstagramService {
     let derivedPageToken: string | undefined;
     try {
       const res = await fetch(
-        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(pageId)}` +
+        `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(pageId)}` +
           `?fields=name,access_token,instagram_business_account{id,username}`,
         {
           headers: { authorization: `Bearer ${sourceToken}` },
@@ -201,6 +202,16 @@ export class InstagramService {
       throw new BadGatewayException({
         error: "instagram_validation_unreachable",
         detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+    // Fail loudly if we couldn't get a Page token and none was pasted — storing
+    // the shared system-user token would mark the channel connected but leave it
+    // unsendable (New Pages Experience rejects it). See messenger.service.
+    if (!derivedPageToken && !input.igAccessToken?.trim()) {
+      throw new BadRequestException({
+        error: "page_token_derivation_failed",
+        detail:
+          "Couldn't get a Page access token for this Page from your Meta App system-user token. Assign the system user to this Page (Business Settings → Pages → Add People) with a messaging task, or paste a Page access token directly.",
       });
     }
     const tokenToStore = derivedPageToken ?? sourceToken;

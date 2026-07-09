@@ -3,11 +3,13 @@
 import { X } from "lucide-react";
 
 import { TagChip } from "@/features/tags/components/tag-chip";
+import { CHANNEL_LABEL, ChannelBadge } from "@/features/inbox/components/channel-badge";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { cn } from "@ccp/shared/utils";
 import type { ContactFieldDefinition, ContactStage, Tag } from "@ccp/shared/types";
 
 import type {
+  ChannelFilter,
   FieldFilter,
   SourceFilter,
   StageFilter,
@@ -53,6 +55,8 @@ const SOURCE_LABEL: Record<Exclude<SourceFilter, "all">, string> = {
 export function ActiveFilterChips({
   sourceFilter,
   onSourceChange,
+  channelFilter = "any",
+  onChannelChange,
   windowFilter,
   onWindowChange,
   stageFilter,
@@ -68,6 +72,8 @@ export function ActiveFilterChips({
 }: {
   sourceFilter: SourceFilter;
   onSourceChange: (v: SourceFilter) => void;
+  channelFilter?: ChannelFilter;
+  onChannelChange?: (v: ChannelFilter) => void;
   windowFilter: WindowFilter;
   onWindowChange?: (v: WindowFilter) => void;
   stageFilter: StageFilter;
@@ -94,6 +100,7 @@ export function ActiveFilterChips({
 
   const hasAny =
     sourceFilter !== "all" ||
+    channelFilter !== "any" ||
     windowFilter !== "any" ||
     stageFilter !== "any" ||
     tagIds.length > 0 ||
@@ -106,6 +113,15 @@ export function ActiveFilterChips({
       {sourceFilter !== "all" && (
         <FilterChip onRemove={() => onSourceChange("all")}>
           {SOURCE_LABEL[sourceFilter]}
+        </FilterChip>
+      )}
+
+      {channelFilter !== "any" && onChannelChange && (
+        <FilterChip
+          onRemove={() => onChannelChange("any")}
+          leading={<ChannelBadge channel={channelFilter} className="size-3 shrink-0" />}
+        >
+          {CHANNEL_LABEL[channelFilter]}
         </FilterChip>
       )}
 

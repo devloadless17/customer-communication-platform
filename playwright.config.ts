@@ -27,6 +27,9 @@ import { defineConfig, devices } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "./tests/e2e",
+  // The Meta backend suite (tests/e2e/meta-channels) needs its own mock-Graph
+  // stack + isolated api — it runs via playwright.meta.config.ts, never here.
+  testIgnore: "**/meta-channels/**",
   // Most paths are sequential because they share login state + a single
   // superadmin account. Sharding across workers would require a per-worker
   // user, not worth it at this scale.

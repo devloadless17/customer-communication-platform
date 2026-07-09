@@ -11,6 +11,7 @@
  */
 
 import type {
+  Channel,
   ContactFieldDefinition,
   MediaKind,
   MessageDirection,
@@ -135,6 +136,14 @@ export interface MessageSearchPage {
 export type InboxSearchScope = "contacts" | "messages" | "notes";
 
 /** A contact match — opens that contact's conversation (one-per-contact). */
+/** One channel a person is reachable on — for the search row's badge cluster. */
+export interface ContactSearchChannel {
+  contactId: string;
+  channel: Channel;
+  /** Null when that channel-contact has never had a conversation. */
+  conversationId: string | null;
+}
+
 export interface ContactSearchHit {
   contactId: string;
   /** Null when the contact has never had a conversation (manually added,
@@ -143,6 +152,16 @@ export interface ContactSearchHit {
   conversationId: string | null;
   name: string;
   phoneNumber: string | null;
+  /** The channel this contact identity lives on — drives the row's channel
+   *  badge so a WhatsApp vs Messenger vs Instagram result is distinguishable. */
+  channel: Channel;
+  /**
+   * Every channel the SAME PERSON (unified Customer) is reachable on, including
+   * the matched one — so a person who has chatted on WhatsApp + Messenger + IG
+   * appears ONCE with a badge cluster you can click to jump to any channel's
+   * thread, instead of as N duplicate rows. Length ≥ 1 (the matched contact).
+   */
+  channels: ContactSearchChannel[];
   avatarUrl?: string;
   /** Which field actually matched, so the row can show the matched value
    *  (e.g. an email hit shows the email, not just the name). */
@@ -206,6 +225,8 @@ export interface ListContactsOpts {
   source?: "inbound" | "manual";
   /** Keep only contacts carrying ANY of these tag ids (union, like audience groups). */
   tagIds?: string[];
+  /** Filter to one channel identity (whatsapp / messenger / instagram). */
+  channel?: Channel;
   /** Filter by 24h customer-service window: "open" = messaged us in the last
    *  24h; "closed" = no inbound, or last inbound > 24h ago. */
   window?: "open" | "closed";

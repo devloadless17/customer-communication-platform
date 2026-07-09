@@ -148,6 +148,21 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
+  // Customer unsent / edited a message. Conversation-room scoped, same
+  // reasoning as reactions — only thread viewers patch the bubble to the
+  // tombstone / edited body. (The list preview is refreshed separately when a
+  // deletion clears the last message; not modeled here to keep the frame small.)
+  "message.updated": (e, emitter) => {
+    emitter.emitToConversation(e.conversationId, "message:updated", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      messageId: e.messageId,
+      deletedAt: e.deletedAt,
+      editedAt: e.editedAt,
+      body: e.body,
+    });
+  },
+
   // Background send worker failed. Emit team-wide (same shape as message:new
   // for cache-eviction symmetry): the inbox shell evicts the conv's cached
   // snapshot if it's not the displayed thread, and the active thread's

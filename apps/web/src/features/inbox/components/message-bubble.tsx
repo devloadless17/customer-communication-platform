@@ -2,18 +2,68 @@
 
 import { memo } from "react";
 import { motion } from "framer-motion";
-import { Check, Paperclip } from "lucide-react";
+import { Ban, Check, Megaphone, Paperclip } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { cn, initials } from "@ccp/shared/utils";
-import type { Message } from "@ccp/shared/types";
+import type { Channel, Message, MessageAttribution } from "@ccp/shared/types";
 import { highlightQuery } from "./message-search";
+
+/**
+ * "From your ad" chip on the first inbound of an ad-sourced conversation
+ * (Click-to-WhatsApp / Click-to-Messenger `referral`). Shows the campaign
+ * headline and links to the ad, so an agent instantly knows the customer came
+ * from a campaign. Sits at the top of the bubble, above the message content.
+ */
+function AdAttributionChip({ attribution }: { attribution: MessageAttribution }) {
+  const label =
+    attribution.source === "post"
+      ? "From your post"
+      : attribution.source === "ref"
+        ? "From a link"
+        : "From your ad";
+  const title = attribution.headline?.trim() || attribution.body?.trim() || "";
+  const inner = (
+    <span className="flex items-center gap-1.5 rounded-t-[inherit] bg-primary/10 px-2.5 py-1 text-2xs font-medium text-primary">
+      <Megaphone className="size-3 shrink-0" />
+      <span className="truncate">
+        {label}
+        {title ? <span className="font-normal opacity-80"> · {title}</span> : null}
+      </span>
+    </span>
+  );
+  return attribution.sourceUrl ? (
+    <a href={attribution.sourceUrl} target="_blank" rel="noopener noreferrer" className="block hover:underline">
+      {inner}
+    </a>
+  ) : (
+    inner
+  );
+}
+
+/**
+ * "via <app>" label for a message the business sent from Meta's own native app
+ * (WhatsApp Business App / Messenger / Instagram inbox) rather than through us —
+ * `origin === "business_app"`. Channel-aware so a Messenger echo doesn't read
+ * "via WhatsApp app".
+ */
+function viaAppLabel(channel: Channel): string {
+  switch (channel) {
+    case "messenger":
+      return "Messenger app";
+    case "instagram":
+      return "Instagram app";
+    default:
+      return "WhatsApp app";
+  }
+}
 
 import { BubbleActions, FailedRecovery } from "./message-bubble/bubble-actions";
 import { BubbleMeta, SenderChip } from "./message-bubble/bubble-meta";
 import { MediaBlock, StickerImage } from "./message-bubble/media-blocks";
 import { QuotedReply } from "./message-bubble/quoted-reply";
+import { StructuredBlock } from "./message-bubble/structured-block";
 
 interface MessageBubbleProps {
   message: Message;
@@ -188,7 +238,7 @@ function BubbleContent({
         </span>
       ) : message.origin === "business_app" ? (
         <span className="px-1 pb-0.5 text-2xs font-medium text-muted-foreground">
-          via WhatsApp app
+          via {viaAppLabel(message.channel)}
         </span>
       ) : null
     ) : null;
@@ -308,54 +358,79 @@ function BubbleContent({
               "ring-2 ring-primary/50 ring-offset-2 ring-offset-background",
           )}
         >
-          {reply && (
-            <QuotedReply
-              reply={reply}
-              isOut={isOut}
-              contactName={contactName}
-              searchQuery={searchQuery}
-              onClick={
-                onJumpToOriginal ? () => onJumpToOriginal(reply.id) : undefined
-              }
-            />
+          {message.attribution && !message.deletedAt && (
+            <AdAttributionChip attribution={message.attribution} />
           )}
-          {media && (
-            <MediaBlock
-              media={media}
-              message={message}
-              isOut={isOut}
-              pending={message.mediaPending}
-            />
-          )}
-          {message.body && (
-            <p
-              // dir="auto" derives base direction from the first strong
-              // character so Arabic/Hebrew messages right-align with correct
-              // punctuation placement (WhatsApp Web behavior). Latin stays LTR.
-              dir="auto"
-              className={cn(
-                "whitespace-pre-wrap wrap-break-word",
-                media || reply ? "px-2.5 pb-1.5 pt-2" : "",
-              )}
-            >
-              {searchQuery && searchQuery.trim().length > 0
-                ? highlightQuery(message.body, searchQuery)
-                : message.body}
-            </p>
-          )}
-          {/* Failed inbound media. A photo/voice/doc whose download from Meta
-              failed after retries has its media columns stripped and (when there
-              was no caption) an EMPTY body — which rendered as a blank bubble.
-              The Meta parser never creates an empty-body, no-media INBOUND any
-              other way (text/interactive/reaction without content are skipped),
-              so this is unambiguously "an attachment we couldn't download".
-              Client-only + derived, so it's consistent live AND on reload with
-              no schema/event change. */}
-          {!isOut && !media && !message.mediaPending && !message.body && (
+          {message.deletedAt ? (
+            // Customer unsent this message (WhatsApp revoke / Messenger·IG
+            // unsend). The row is kept for the record; the content is replaced
+            // by a tombstone — mirrors WhatsApp/Respond.io behavior.
             <p className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm italic text-muted-foreground">
-              <Paperclip className="size-3.5 shrink-0" />
-              Attachment unavailable
+              <Ban className="size-3.5 shrink-0" />
+              This message was deleted
             </p>
+          ) : message.structured ? (
+            // Location pin / contact card — a dedicated bubble replacing the
+            // plain text placeholder (the placeholder body is still stored for
+            // search / list preview, just not rendered here).
+            <StructuredBlock structured={message.structured} isOut={isOut} />
+          ) : (
+            <>
+              {reply && (
+                <QuotedReply
+                  reply={reply}
+                  isOut={isOut}
+                  contactName={contactName}
+                  searchQuery={searchQuery}
+                  onClick={
+                    onJumpToOriginal ? () => onJumpToOriginal(reply.id) : undefined
+                  }
+                />
+              )}
+              {media && (
+                <MediaBlock
+                  media={media}
+                  message={message}
+                  isOut={isOut}
+                  pending={message.mediaPending}
+                />
+              )}
+              {message.body && (
+                <p
+                  // dir="auto" derives base direction from the first strong
+                  // character so Arabic/Hebrew messages right-align with correct
+                  // punctuation placement (WhatsApp Web behavior). Latin stays LTR.
+                  dir="auto"
+                  className={cn(
+                    "whitespace-pre-wrap wrap-break-word",
+                    media || reply ? "px-2.5 pb-1.5 pt-2" : "",
+                  )}
+                >
+                  {searchQuery && searchQuery.trim().length > 0
+                    ? highlightQuery(message.body, searchQuery)
+                    : message.body}
+                  {message.editedAt && (
+                    <span className="ml-1 align-baseline text-2xs italic text-muted-foreground/80">
+                      (edited)
+                    </span>
+                  )}
+                </p>
+              )}
+              {/* Failed inbound media. A photo/voice/doc whose download from Meta
+                  failed after retries has its media columns stripped and (when
+                  there was no caption) an EMPTY body — which rendered as a blank
+                  bubble. The Meta parser never creates an empty-body, no-media
+                  INBOUND any other way (text/interactive/reaction without content
+                  are skipped), so this is unambiguously "an attachment we couldn't
+                  download". Client-only + derived, so it's consistent live AND on
+                  reload with no schema/event change. */}
+              {!isOut && !media && !message.mediaPending && !message.body && (
+                <p className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm italic text-muted-foreground">
+                  <Paperclip className="size-3.5 shrink-0" />
+                  Attachment unavailable
+                </p>
+              )}
+            </>
           )}
         </div>
 

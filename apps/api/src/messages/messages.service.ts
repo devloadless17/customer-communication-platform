@@ -24,6 +24,7 @@ import type { DomainEventOf } from "@ccp/shared/events/types";
 import {
   MEDIA_SIZE_CAPS,
   META_DOCUMENT_MIME_ALLOWED,
+  mediaPolicyForChannel,
   kindFromMime,
   normalizeMimeType,
 } from "@/lib/media-storage";
@@ -77,20 +78,6 @@ import type {
 } from "./messages.schemas";
 import { runWithSendIdempotency } from "./send-idempotency";
 import { enqueueMessageSend } from "./send-queue";
-
-/**
- * Meta's accepted audio MIME types for `/messages` sends. Anything outside
- * this set comes back as a vague `provider_rejected`. Voice notes (the
- * waveform-rendering kind) additionally REQUIRE `audio/ogg` with opus —
- * setting `voice: true` on an audio/mp4 send is itself a Meta-side reject.
- */
-const META_AUDIO_ALLOWED = new Set([
-  "audio/aac",
-  "audio/mp4",
-  "audio/mpeg",
-  "audio/amr",
-  "audio/ogg",
-]);
 
 /**
  * Map a mime type to the template-header media kind. Templates only allow
@@ -785,6 +772,19 @@ export class MessagesService {
     }
     const provider = conversation.channel;
     const binding = getProviderBinding(provider);
+
+    // Channel text-length cap (WhatsApp 4096, Messenger 2000, Instagram 1000).
+    // Meta rejects an over-limit body with an opaque error deep in the worker;
+    // fail fast here with an actionable 4xx instead. Capability-driven so a new
+    // channel's limit is a data change, not a code branch.
+    const maxChars = binding.provider.capabilities.messageTextMaxChars;
+    if (input.body.length > maxChars) {
+      throw new UnprocessableEntityException({
+        error: "message_too_long",
+        detail: `Message is ${input.body.length} characters — ${provider} allows at most ${maxChars}.`,
+        max: maxChars,
+      });
+    }
 
     // Fail fast on a not-connected provider so the 4xx surfaces in the POST
     // response instead of as a queued job that fails in the worker. (The
@@ -1541,7 +1541,11 @@ export class MessagesService {
     // `let` so the voice-note transcode below can rewrite it to audio/ogg.
     let mimeType = normalizeMimeType(file.mimetype);
     const kind = kindFromMime(mimeType);
-    const cap = MEDIA_SIZE_CAPS[kind];
+    // Per-channel caps + allow-lists — Messenger/Instagram accept larger files
+    // (and a different audio set) than WhatsApp, so reusing WhatsApp's caps
+    // would wrongly reject valid social media.
+    const policy = mediaPolicyForChannel(provider);
+    const cap = policy.caps[kind];
     if (file.size > cap) {
       throw new PayloadTooLargeException({
         error: `file too large for ${kind}: ${file.size} bytes > ${cap}`,
@@ -1553,21 +1557,21 @@ export class MessagesService {
     if (kind === "sticker" && mimeType.toLowerCase() !== "image/webp") {
       throw new BadRequestException({
         error: "invalid_sticker_mime",
-        detail: `WhatsApp stickers must be image/webp (got ${mimeType}).`,
+        detail: `${policy.label} stickers must be image/webp (got ${mimeType}).`,
       });
     }
-    // Audio: Meta only accepts a specific mime set. `audio/webm` in particular
-    // is a frequent silent failure — Chrome's MediaRecorder defaults to it for
-    // voice notes, uploads succeed, then Meta returns a confusing
-    // `provider_rejected` at send time. Block it here with a clear error.
-    // The blob-storage allowlist still permits webm (so we can debug-replay),
-    // but we won't push it to Meta.
-    if (kind === "audio" && !META_AUDIO_ALLOWED.has(mimeType)) {
+    // Audio: Meta only accepts a specific mime set (per channel). `audio/webm`
+    // in particular is a frequent silent failure — Chrome's MediaRecorder
+    // defaults to it for voice notes, uploads succeed, then Meta returns a
+    // confusing `provider_rejected` at send time. Block it here with a clear
+    // error. The blob-storage allowlist still permits webm (so we can
+    // debug-replay), but we won't push it to Meta.
+    if (kind === "audio" && !policy.audioMime.has(mimeType)) {
       throw new BadRequestException({
         error: "invalid_audio_mime",
         detail:
-          `WhatsApp doesn't accept ${mimeType || "this audio format"}. ` +
-          "Supported: AAC, MP4 (m4a), MP3, AMR, OGG/Opus. " +
+          `${policy.label} doesn't accept ${mimeType || "this audio format"}. ` +
+          `Supported: ${[...policy.audioMime].join(", ")}. ` +
           "If this came from a voice recorder, try a different browser (Chrome 105+, Firefox, Safari).",
       });
     }
@@ -1575,11 +1579,11 @@ export class MessagesService {
     // lands here), so without an explicit allowlist arbitrary file types would
     // be accepted + stored before Meta rejects them on send. Gate to Meta's
     // supported document set.
-    if (kind === "document" && !META_DOCUMENT_MIME_ALLOWED.has(mimeType)) {
+    if (kind === "document" && !policy.documentMime.has(mimeType)) {
       throw new BadRequestException({
         error: "unsupported_file_type",
         detail:
-          `WhatsApp doesn't support ${mimeType || "this file type"} as a document. ` +
+          `${policy.label} doesn't support ${mimeType || "this file type"} as a document. ` +
           "Supported: PDF, Word, Excel, PowerPoint, plain text, CSV.",
       });
     }
@@ -1713,7 +1717,9 @@ export class MessagesService {
     if (byUrl) {
       try {
         const blob = await blobUploadPromise;
-        mediaUrl = await blobStorage.presignGetUrl(blob.key, { ttlSeconds: 600 });
+        // Meta fetches the URL asynchronously and may retry over minutes; give it
+        // a generous 1h window so a slow/retried fetch can't expire mid-flight.
+        mediaUrl = await blobStorage.presignGetUrl(blob.key, { ttlSeconds: 3600 });
       } catch (err) {
         throw new UnprocessableEntityException({
           error: "media_url_unavailable",
@@ -2162,6 +2168,14 @@ export class MessagesService {
       }
       const contactPhone = channel.to;
 
+      // Window band for this contact — drives the Meta social messaging_type
+      // (RESPONSE inside the free-form window, HUMAN_AGENT tag outside it). Same
+      // rule as sendText/sendMedia; ignored by channels with no window model.
+      const useHumanAgentTag = outsideFreeFormWindow(
+        binding.provider.capabilities.freeFormWindowMs,
+        contact.lastInboundAt?.toISOString() ?? null,
+      );
+
       // One-contact-one-conversation invariant. Closed → pending (same
       // semantics as webhook ingest + broadcast runner reopen-on-send).
       const existing = await this.db.conversation.findFirst({
@@ -2342,6 +2356,7 @@ export class MessagesService {
                 mediaId: uploaded.mediaId,
                 caption: withCaption,
                 filename: mb.kind === "document" ? filename : undefined,
+                useHumanAgentTag,
               },
               sendConfig,
             );
@@ -2444,7 +2459,7 @@ export class MessagesService {
 
             // Pre-send. sendText is a required provider method (always present).
             const send = await binding.provider.sendText(
-              { to: contactPhone, body },
+              { to: contactPhone, body, useHumanAgentTag },
               sendConfig,
             );
 

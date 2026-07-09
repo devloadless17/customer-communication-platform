@@ -22,6 +22,7 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
   whatsapp: {
     freeFormWindowMs: DAY_MS,
     humanAgentWindowMs: null,
+    messageTextMaxChars: 4096,
     templates: true,
     readReceipts: true,
     typingIndicators: true,
@@ -29,22 +30,27 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     calling: true,
   },
   // Facebook Messenger: 24h free-form window + a 7-day Human Agent extension for
-  // support replies. No approved-template catalog, no calling. Read receipts
-  // (mark_seen) + typing (typing_on) are by-thread sender_actions on the PSID.
+  // support replies. No approved-template catalog. Voice calling is GA (Messenger
+  // Calling API, WebRTC) — enabled. Read receipts (mark_seen) + typing (typing_on)
+  // are by-thread sender_actions on the PSID.
   messenger: {
     freeFormWindowMs: DAY_MS,
     humanAgentWindowMs: 7 * DAY_MS,
+    messageTextMaxChars: 2000,
     templates: false,
     readReceipts: true,
     typingIndicators: true,
     interactive: true,
-    calling: false,
+    calling: true,
   },
-  // Instagram DM: same 24h + 7-day human-agent window as Messenger. No templates,
-  // no calling; read receipts + typing via the same by-thread sender_actions.
+  // Instagram DM: same 24h + 7-day human-agent window as Messenger. No templates.
+  // Calling stays FALSE: Meta ships NO Instagram calling API (only Messenger
+  // Calling is GA as of 2026), so the button is hidden on IG threads. Read
+  // receipts + typing via the same by-thread sender_actions.
   instagram: {
     freeFormWindowMs: DAY_MS,
     humanAgentWindowMs: 7 * DAY_MS,
+    messageTextMaxChars: 1000,
     templates: false,
     readReceipts: true,
     typingIndicators: true,
@@ -63,6 +69,7 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
   telegram: {
     freeFormWindowMs: null,
     humanAgentWindowMs: null,
+    messageTextMaxChars: 4096,
     templates: false,
     readReceipts: false,
     typingIndicators: true,
@@ -74,6 +81,7 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
   email: {
     freeFormWindowMs: null,
     humanAgentWindowMs: null,
+    messageTextMaxChars: 100_000,
     templates: false,
     readReceipts: false,
     typingIndicators: false,
@@ -84,6 +92,7 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
   sms: {
     freeFormWindowMs: null,
     humanAgentWindowMs: null,
+    messageTextMaxChars: 1600,
     templates: false,
     readReceipts: false,
     typingIndicators: false,

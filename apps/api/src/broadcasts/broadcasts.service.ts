@@ -23,7 +23,12 @@ import {
   removeScheduledBroadcast,
 } from "@/lib/broadcasts/schedule-queue";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
+import { getProviderBinding } from "@/lib/providers";
+import { bestChannelForCustomer } from "@/lib/identity/best-channel";
+import { runWithConcurrency } from "@/common/concurrency";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
+import { LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
+import type { Channel } from "@ccp/shared/types";
 import { resolveAudienceGroupMembers } from "@/lib/queries";
 import {
   parseVariableBindings,
@@ -167,6 +172,78 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * response returns before any Meta sends happen. The runner publish()
    * events reach realtime-fanout in this same process with zero pub/sub hop.
    */
+  /**
+   * customer-mode recipient resolution: collapse a raw contact audience into
+   * PERSONS and pick each person's best live IN-WINDOW channel, so a person
+   * reachable on WhatsApp + Messenger + IG is sent to ONCE (not per channel).
+   *
+   *  - Contacts sharing a `customerId` are one person → `bestChannelForCustomer`
+   *    (ranked in-window-then-freshest) picks the single contact to send to;
+   *    a person with no in-window channel is dropped (a freeform send can't
+   *    reach them).
+   *  - A contact with no `customerId` is its own person (singleton) — sent
+   *    directly; the runner + Meta enforce its window.
+   *
+   * Resolution runs concurrency-bounded (the per-person best-channel query is
+   * indexed but there's one per person).
+   */
+  private async resolveCustomerRecipients(
+    teamId: string,
+    contactIds: string[],
+  ): Promise<Array<{ contactId: string; customerId: string | null }>> {
+    if (contactIds.length === 0) return [];
+    const contacts = await this.db.contact.findMany({
+      where: { teamId, deletedAt: null, id: { in: contactIds } },
+      select: { id: true, customerId: true, identityChannel: true },
+    });
+
+    // Which channels can this team actually SEND on right now? A channel with a
+    // registered provider but no/expired connection would otherwise be ranked
+    // "best" for a person and then dropped at send — reaching nobody. Load the
+    // send config for each live channel once and keep the ones that succeed.
+    const connected = new Set<Channel>();
+    await Promise.all(
+      [...LIVE_CHANNELS].map(async (ch) => {
+        try {
+          await getProviderBinding(ch).getSendConfig(teamId);
+          connected.add(ch);
+        } catch {
+          // Not connected / creds expired — exclude from best-channel resolution.
+        }
+      }),
+    );
+
+    // One entry per person: keyed by customerId, or the contact id for singletons.
+    const persons = new Map<
+      string,
+      { customerId: string | null; contactId: string; channel: Channel }
+    >();
+    for (const c of contacts) {
+      const key = c.customerId ?? `contact:${c.id}`;
+      if (!persons.has(key)) {
+        persons.set(key, { customerId: c.customerId, contactId: c.id, channel: c.identityChannel });
+      }
+    }
+
+    const rows: Array<{ contactId: string; customerId: string | null }> = [];
+    await runWithConcurrency([...persons.values()], 8, async (p) => {
+      if (!p.customerId) {
+        // Singleton contact — no unified person to resolve across. Include only
+        // if its own channel is connected (else it would fail at send anyway).
+        if (connected.has(p.channel)) rows.push({ contactId: p.contactId, customerId: null });
+        return;
+      }
+      // Rank only over the team's CONNECTED channels so we never drop a person
+      // reachable on a connected channel by picking an unconnected one.
+      const best = await bestChannelForCustomer(teamId, p.customerId, Date.now(), connected);
+      // Only in-window people are reachable by a freeform send; drop the rest.
+      if (best && best.inWindow) {
+        rows.push({ contactId: best.contactId, customerId: p.customerId });
+      }
+    });
+    return rows;
+  }
+
   async create(
     teamId: string,
     userId: string,
@@ -184,62 +261,82 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       scheduledAtDate.getTime() - Date.now() > SCHEDULE_LEAD_MS;
     const name = input.name && input.name.length > 0 ? input.name : null;
 
-    const template = await this.db.messageTemplate.findFirst({
-      where: { id: templateId, teamId },
-    });
-    if (!template) throw new NotFoundException({ error: "template not found" });
-    if (template.status !== "approved") {
-      throw new ConflictException({
-        error: "template not approved",
-        detail: `Template is ${template.status}. Only approved templates can be broadcast.`,
-      });
+    // `freeform` broadcasts (Messenger/Instagram) send a plain body to a target
+    // channel and skip the whole template gauntlet. `template` broadcasts load +
+    // validate the approved WhatsApp template exactly as before. The input
+    // schema's refine already guarantees the right fields per kind.
+    //
+    // customer-mode (omnichannel) is ALWAYS body-based — each person's channel
+    // is resolved per-recipient — so force freeform semantics and skip both the
+    // template gauntlet and the single-channel binding.
+    const effectiveKind = input.targetMode === "customer" ? "freeform" : input.kind;
+    const freeformChannel =
+      input.targetMode === "customer"
+        ? null
+        : input.kind === "freeform"
+          ? input.channel!
+          : null;
+    const template =
+      effectiveKind === "template"
+        ? await this.db.messageTemplate.findFirst({ where: { id: templateId, teamId } })
+        : null;
+    if (effectiveKind === "template" && !template) {
+      throw new NotFoundException({ error: "template not found" });
     }
-
-    // Variable count sanity check — fire BEFORE creating the row so the UI
-    // can correct without a broadcast row hanging around in `queued`.
-    const bodyVarCount = countTemplatePlaceholders(template.bodyText);
-    if (variables.body.length !== bodyVarCount) {
-      throw new BadRequestException({
-        error: "wrong variable count",
-        detail: `Template expects ${bodyVarCount} body variable(s), got ${variables.body.length}.`,
-      });
-    }
-    const components = Array.isArray(template.components)
-      ? (template.components as unknown as TemplateComponent[])
-      : [];
-    const headerComp = components.find((c) => c.type === "HEADER");
-    const headerVarCount =
-      headerComp?.format === "TEXT" && headerComp.text
-        ? countTemplatePlaceholders(headerComp.text)
-        : 0;
-    if (headerVarCount > 0 && (!variables.header || variables.header.length === 0)) {
-      throw new BadRequestException({
-        error: "header variable required",
-        detail: "This template's header has a placeholder — fill it in.",
-      });
-    }
-    // Media-header templates (IMAGE/VIDEO/DOCUMENT) need the campaign media
-    // supplied as a public link — one media reused across every recipient.
-    const HEADER_MEDIA_FORMATS: Record<string, "image" | "video" | "document"> = {
-      IMAGE: "image",
-      VIDEO: "video",
-      DOCUMENT: "document",
-    };
-    const headerMediaKind = headerComp?.format
-      ? HEADER_MEDIA_FORMATS[headerComp.format]
-      : undefined;
-    if (headerMediaKind) {
-      if (!variables.headerMedia?.link) {
-        throw new BadRequestException({
-          error: "header media required",
-          detail: `This template's header is a ${headerMediaKind} — attach one before scheduling.`,
+    if (template) {
+      if (template.status !== "approved") {
+        throw new ConflictException({
+          error: "template not approved",
+          detail: `Template is ${template.status}. Only approved templates can be broadcast.`,
         });
       }
-      if (variables.headerMedia.kind !== headerMediaKind) {
+
+      // Variable count sanity check — fire BEFORE creating the row so the UI
+      // can correct without a broadcast row hanging around in `queued`.
+      const bodyVarCount = countTemplatePlaceholders(template.bodyText);
+      if (variables.body.length !== bodyVarCount) {
         throw new BadRequestException({
-          error: "header media kind mismatch",
-          detail: `This template's header expects a ${headerMediaKind}.`,
+          error: "wrong variable count",
+          detail: `Template expects ${bodyVarCount} body variable(s), got ${variables.body.length}.`,
         });
+      }
+      const components = Array.isArray(template.components)
+        ? (template.components as unknown as TemplateComponent[])
+        : [];
+      const headerComp = components.find((c) => c.type === "HEADER");
+      const headerVarCount =
+        headerComp?.format === "TEXT" && headerComp.text
+          ? countTemplatePlaceholders(headerComp.text)
+          : 0;
+      if (headerVarCount > 0 && (!variables.header || variables.header.length === 0)) {
+        throw new BadRequestException({
+          error: "header variable required",
+          detail: "This template's header has a placeholder — fill it in.",
+        });
+      }
+      // Media-header templates (IMAGE/VIDEO/DOCUMENT) need the campaign media
+      // supplied as a public link — one media reused across every recipient.
+      const HEADER_MEDIA_FORMATS: Record<string, "image" | "video" | "document"> = {
+        IMAGE: "image",
+        VIDEO: "video",
+        DOCUMENT: "document",
+      };
+      const headerMediaKind = headerComp?.format
+        ? HEADER_MEDIA_FORMATS[headerComp.format]
+        : undefined;
+      if (headerMediaKind) {
+        if (!variables.headerMedia?.link) {
+          throw new BadRequestException({
+            error: "header media required",
+            detail: `This template's header is a ${headerMediaKind} — attach one before scheduling.`,
+          });
+        }
+        if (variables.headerMedia.kind !== headerMediaKind) {
+          throw new BadRequestException({
+            error: "header media kind mismatch",
+            detail: `This template's header expects a ${headerMediaKind}.`,
+          });
+        }
       }
     }
 
@@ -341,32 +438,46 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    // Broadcasts send WhatsApp templates today, so only WhatsApp contacts are
-    // valid recipients. Drop any social contacts (Messenger/Instagram) an
-    // audience / tag / group swept in — they carry no phone and can't receive a
-    // template, so leaving them in would just fail per-recipient with a cryptic
-    // Meta error. When a channel gains its own broadcast type, resolve the
-    // destination per-recipient here instead of pre-filtering.
+    // Resolve the recipient ROWS ({contactId, customerId}) per target mode:
+    //  - contact  (default): ONE channel. Drop contacts whose identity channel
+    //    doesn't match — a mixed audience/tag/group sweeps in others that can't
+    //    receive this single-channel send. (The runner + Meta enforce the
+    //    per-send window for freeform.)
+    //  - customer (omnichannel): collapse the audience to PERSONS and pick each
+    //    person's best live IN-WINDOW channel (`bestChannelForCustomer`) — one
+    //    send per person, deduped across channels. A person with no in-window
+    //    channel is dropped (unreachable by a freeform send).
+    const isCustomerMode = input.targetMode === "customer";
+    const filterChannel: Channel = template ? "whatsapp" : freeformChannel ?? "whatsapp";
     const hadAnyBeforeFilter = recipientIds.length > 0;
-    if (hadAnyBeforeFilter) {
-      const waRows = await this.db.contact.findMany({
-        where: {
-          teamId,
-          id: { in: recipientIds },
-          identityChannel: "whatsapp",
-          deletedAt: null,
-        },
-        select: { id: true },
-      });
-      recipientIds = waRows.map((c) => c.id);
+
+    let recipientRows: Array<{ contactId: string; customerId: string | null }>;
+    if (isCustomerMode) {
+      recipientRows = await this.resolveCustomerRecipients(teamId, recipientIds);
+    } else {
+      if (hadAnyBeforeFilter) {
+        const rows = await this.db.contact.findMany({
+          where: {
+            teamId,
+            id: { in: recipientIds },
+            identityChannel: filterChannel,
+            deletedAt: null,
+          },
+          select: { id: true },
+        });
+        recipientIds = rows.map((c) => c.id);
+      }
+      recipientRows = recipientIds.map((id) => ({ contactId: id, customerId: null }));
     }
 
-    if (recipientIds.length === 0) {
+    if (recipientRows.length === 0) {
       throw new BadRequestException({
         error: "empty audience",
-        detail: hadAnyBeforeFilter
-          ? "None of the selected contacts are on WhatsApp. Broadcasts currently send WhatsApp templates, so only WhatsApp contacts can be included."
-          : "Pick at least one contact (or 'All contacts') to broadcast to.",
+        detail: isCustomerMode
+          ? "None of the selected people are reachable on a live channel right now (no open messaging window)."
+          : hadAnyBeforeFilter
+            ? `None of the selected contacts are on ${filterChannel}.`
+            : "Pick at least one contact (or 'All contacts') to broadcast to.",
       });
     }
 
@@ -375,10 +486,10 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // so an "all contacts" send on a 50k-contact team would build a 50k-row
     // nested INSERT and a 50k-id array in memory just to be rejected. Refuse
     // early with an actionable message instead.
-    if (recipientIds.length > MAX_RECIPIENTS_IN_PROCESS) {
+    if (recipientRows.length > MAX_RECIPIENTS_IN_PROCESS) {
       throw new BadRequestException({
         error: "audience too large",
-        detail: `This audience has ${recipientIds.length} recipients; the limit is ${MAX_RECIPIENTS_IN_PROCESS}. Split it into smaller broadcasts.`,
+        detail: `This audience has ${recipientRows.length} recipients; the limit is ${MAX_RECIPIENTS_IN_PROCESS}. Split it into smaller broadcasts.`,
       });
     }
 
@@ -402,22 +513,32 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           status: isFutureSchedule ? "scheduled" : "queued",
           name,
           scheduledAt: scheduledAtDate,
-          templateId: template.id,
-          templateName: template.name,
-          templateLanguage: template.language,
+          kind: effectiveKind,
+          targetMode: input.targetMode,
+          // customer-mode routes per recipient, so the broadcast's own channel is
+          // unused — store whatsapp as an inert default.
+          channel: isCustomerMode ? "whatsapp" : filterChannel,
+          templateId: template?.id ?? null,
+          templateName: template?.name ?? null,
+          templateLanguage: template?.language ?? null,
+          bodyText: template ? null : input.bodyText,
           variables: variables as unknown as Prisma.InputJsonValue,
           audienceMode: audience.mode,
           audienceTagIds: validatedTagIds,
           audienceGroupId: resolvedGroupId,
           audienceGroupName: resolvedGroupName,
-          totalCount: recipientIds.length,
+          totalCount: recipientRows.length,
         },
         select: { id: true, totalCount: true },
       });
-      for (let i = 0; i < recipientIds.length; i += RECIPIENT_CHUNK) {
-        const slice = recipientIds.slice(i, i + RECIPIENT_CHUNK);
+      for (let i = 0; i < recipientRows.length; i += RECIPIENT_CHUNK) {
+        const slice = recipientRows.slice(i, i + RECIPIENT_CHUNK);
         await tx.broadcastRecipient.createMany({
-          data: slice.map((id) => ({ broadcastId: created.id, contactId: id })),
+          data: slice.map((r) => ({
+            broadcastId: created.id,
+            contactId: r.contactId,
+            customerId: r.customerId,
+          })),
           skipDuplicates: true,
         });
       }

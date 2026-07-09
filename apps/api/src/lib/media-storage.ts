@@ -1,4 +1,4 @@
-import type { MediaKind } from "@ccp/shared/types";
+import type { Channel, MediaKind } from "@ccp/shared/types";
 
 /**
  * Mime-type helpers + per-kind size caps. The actual byte storage lives behind
@@ -9,14 +9,24 @@ import type { MediaKind } from "@ccp/shared/types";
  * BEFORE we touch Meta so a 100MB payload doesn't waste a round trip.
  * Inbound is trusted but we cap defensively too — anything over the cap is
  * dropped at the webhook before being sent to the blob provider.
+ *
+ * The bare `MEDIA_SIZE_CAPS` below are WhatsApp's (the historical default kept
+ * for channel-agnostic callers — team-chat attachments, the inbound-media
+ * sweeper). Anything on a Meta customer channel should read the per-channel
+ * `mediaPolicyForChannel(channel)` instead: Messenger and Instagram accept
+ * larger files (and a different audio set) than WhatsApp, so reusing WhatsApp's
+ * caps wrongly rejects valid social media with a "WhatsApp doesn't accept…"
+ * error on a non-WhatsApp thread.
  */
 
+const MB = 1024 * 1024;
+
 export const MEDIA_SIZE_CAPS: Record<MediaKind, number> = {
-  image: 5 * 1024 * 1024,
-  video: 16 * 1024 * 1024,
-  audio: 16 * 1024 * 1024,
+  image: 5 * MB,
+  video: 16 * MB,
+  audio: 16 * MB,
   sticker: 500 * 1024,
-  document: 100 * 1024 * 1024,
+  document: 100 * MB,
 };
 
 /**
@@ -38,6 +48,104 @@ export const META_DOCUMENT_MIME_ALLOWED: ReadonlySet<string> = new Set([
   "text/plain",
   "text/csv",
 ]);
+
+/**
+ * Per-channel outbound audio allow-list. WhatsApp requires OGG/Opus to *deliver*
+ * voice notes and rejects `audio/webm`; Instagram is the inverse — it rejects
+ * OGG (`#100 attachment format is not supported`) and wants AAC/M4A. Messenger
+ * is the most permissive. Voice-recorder transcoding (messages.service) targets
+ * the right container per channel from `mediaSendByUrl`; this set is the final
+ * accept gate.
+ */
+const WHATSAPP_AUDIO_MIME: ReadonlySet<string> = new Set([
+  "audio/aac",
+  "audio/mp4",
+  "audio/mpeg",
+  "audio/amr",
+  "audio/ogg",
+]);
+const MESSENGER_AUDIO_MIME: ReadonlySet<string> = new Set([
+  "audio/aac",
+  "audio/mp4",
+  "audio/mpeg",
+  "audio/amr",
+  "audio/ogg",
+  "audio/wav",
+]);
+const INSTAGRAM_AUDIO_MIME: ReadonlySet<string> = new Set([
+  "audio/aac",
+  "audio/mp4",
+  "audio/mpeg",
+  "audio/wav",
+]);
+
+/**
+ * Per-channel outbound media policy — the single source of truth for size caps
+ * and mime allow-lists. Meta enforces different limits per surface, so callers
+ * on a Meta customer channel pass the conversation's channel here instead of
+ * reading the bare WhatsApp `MEDIA_SIZE_CAPS`.
+ *
+ * Sizes: WhatsApp per its Cloud-API media docs (5 MB image / 16 MB video·audio /
+ * 100 MB document); Messenger a flat 25 MB attachment ceiling; Instagram 8 MB
+ * image / 25 MB video·audio·document.
+ */
+export interface ChannelMediaPolicy {
+  /** Human-facing channel name for error copy. */
+  label: string;
+  caps: Record<MediaKind, number>;
+  /** Outbound audio mime allow-list. */
+  audioMime: ReadonlySet<string>;
+  /** Outbound document mime allow-list. */
+  documentMime: ReadonlySet<string>;
+}
+
+const WHATSAPP_MEDIA_POLICY: ChannelMediaPolicy = {
+  label: "WhatsApp",
+  caps: MEDIA_SIZE_CAPS,
+  audioMime: WHATSAPP_AUDIO_MIME,
+  documentMime: META_DOCUMENT_MIME_ALLOWED,
+};
+
+const MESSENGER_MEDIA_POLICY: ChannelMediaPolicy = {
+  label: "Messenger",
+  caps: {
+    image: 25 * MB,
+    video: 25 * MB,
+    audio: 25 * MB,
+    sticker: 25 * MB,
+    document: 25 * MB,
+  },
+  audioMime: MESSENGER_AUDIO_MIME,
+  documentMime: META_DOCUMENT_MIME_ALLOWED,
+};
+
+const INSTAGRAM_MEDIA_POLICY: ChannelMediaPolicy = {
+  label: "Instagram",
+  caps: {
+    image: 8 * MB,
+    video: 25 * MB,
+    audio: 25 * MB,
+    sticker: 8 * MB,
+    document: 25 * MB,
+  },
+  audioMime: INSTAGRAM_AUDIO_MIME,
+  documentMime: META_DOCUMENT_MIME_ALLOWED,
+};
+
+const CHANNEL_MEDIA_POLICY: Partial<Record<Channel, ChannelMediaPolicy>> = {
+  whatsapp: WHATSAPP_MEDIA_POLICY,
+  messenger: MESSENGER_MEDIA_POLICY,
+  instagram: INSTAGRAM_MEDIA_POLICY,
+};
+
+/**
+ * Outbound/inbound media policy for a channel. Falls back to the WhatsApp
+ * policy for channels without a specific one (keeps designed-for channels safe
+ * by using the strictest caps until they ship their own).
+ */
+export function mediaPolicyForChannel(channel: Channel): ChannelMediaPolicy {
+  return CHANNEL_MEDIA_POLICY[channel] ?? WHATSAPP_MEDIA_POLICY;
+}
 
 export const MEDIA_KIND_BY_MIME_PREFIX: Array<[string, MediaKind]> = [
   ["image/webp", "sticker"], // before image/* so .webp routes to sticker

@@ -4,6 +4,7 @@ import {
   CallDirection,
   CallPermissionStatus,
 } from "@prisma/client";
+import type { Contact, Conversation } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { publishInTx } from "@/lib/events/outbox";
@@ -14,6 +15,7 @@ import {
 } from "@/lib/providers/ingest";
 import { ensureDefaultStage } from "@/lib/queries";
 import { workflowConversationSnapshotAfterStatusChange } from "@/lib/workflows/events";
+import { isPhoneChannel } from "@ccp/shared/providers/capabilities";
 import type { NormalizedCallEvent } from "@ccp/shared/providers/types";
 import type { Channel } from "@ccp/shared/types";
 import { getCountryFromPhone } from "@ccp/shared/utils";
@@ -76,27 +78,55 @@ export async function ingestCallEvent(
 ): Promise<void> {
   // Permission events take a side-path: they mutate Contact, not Call.
   if (evt.phase === "permission_granted" || evt.phase === "permission_revoked") {
-    await handlePermissionEvent(teamId, evt);
+    await handlePermissionEvent(teamId, channel, evt);
     return;
   }
 
-  // Resolve contact + conversation (1:1 invariant). Reuses the same
-  // Serializable-with-retry pattern as message ingest so two concurrent
-  // first-time call webhooks for the same brand-new number can't race-
-  // create duplicate rows.
-  const defaultStageId = await ensureDefaultStage(teamId);
-  const { contact, conversation, needsReopen } = await runWithSerializableRetry(
-    async (tx) => {
-      // TODO(multi-channel / INB-5): by-phone lookup, no channel filter. Correct
-      // today (WhatsApp only); BEFORE channel #2 switch to the channel-aware
-      // identity — see the canonical note at providers/ingest.ts (existingContact).
+  // Channel-aware caller identity — mirrors the message-ingest resolution
+  // (providers/ingest.ts): phone channels (WhatsApp) resolve/create by
+  // `phoneNumber`; external-id channels (Messenger PSID / Instagram IGSID) by
+  // the compound `(teamId, identityChannel, externalContactId)`. Exactly one
+  // identity is set on the event, so a PSID is never digit-stripped into a
+  // phone nor collides with a WhatsApp contact sharing the same digits.
+  const isPhone = isPhoneChannel(channel);
+  const identityLabel = isPhone ? evt.contactPhone : evt.externalContactId;
+
+  let contact: Contact;
+  let conversation: Conversation;
+  let needsReopen = false;
+
+  if (!identityLabel) {
+    // A status webhook (Messenger `media_update` / `terminate`) that references
+    // an EXISTING call by id and carries no caller identity. Resolve the row's
+    // contact/conversation instead of creating one — you can't place a call
+    // without a caller, so an unknown call id here is dropped (Meta is
+    // at-least-once; a duplicate terminate for a purged row is a safe no-op).
+    const existingCall = await db.call.findUnique({
+      where: {
+        teamId_channel_externalCallId: { teamId, channel, externalCallId: evt.externalCallId },
+      },
+      select: { conversation: { include: { contact: true } } },
+    });
+    if (!existingCall) return;
+    const { contact: c, ...convo } = existingCall.conversation;
+    contact = c;
+    conversation = convo;
+  } else {
+    // Resolve contact + conversation (1:1 invariant). Reuses the same
+    // Serializable-with-retry pattern as message ingest so two concurrent
+    // first-time call webhooks for the same brand-new caller can't race-
+    // create duplicate rows.
+    const defaultStageId = await ensureDefaultStage(teamId);
+    const resolved = await runWithSerializableRetry(async (tx) => {
       const existingContact = await tx.contact.findFirst({
-        where: { teamId, phoneNumber: evt.contactPhone },
+        where: isPhone
+          ? { teamId, phoneNumber: evt.contactPhone }
+          : { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
         select: { id: true },
       });
 
       const { firstName, lastName } = splitContactName(
-        evt.contactName ?? evt.contactPhone,
+        evt.contactName ?? identityLabel,
       );
       let contact;
       if (existingContact) {
@@ -112,11 +142,12 @@ export async function ingestCallEvent(
           data: {
             teamId,
             identityChannel: channel,
-            phoneNumber: evt.contactPhone,
-            name: evt.contactName ?? evt.contactPhone,
+            phoneNumber: isPhone ? evt.contactPhone : null,
+            externalContactId: isPhone ? null : evt.externalContactId,
+            name: evt.contactName ?? identityLabel,
             firstName,
             lastName,
-            countryCode: getCountryFromPhone(evt.contactPhone),
+            countryCode: isPhone ? getCountryFromPhone(evt.contactPhone!) : null,
             stageId: defaultStageId,
           },
         });
@@ -139,7 +170,7 @@ export async function ingestCallEvent(
       // the error so Meta never retries. So we only DETECT the reopen here and
       // do the flip + publish together in tx2. Mirrors the message-ingest
       // invariant (ingest.ts co-commits reopen + publishInTx in one tx).
-      let needsReopen = false;
+      let reopen = false;
       if (!conversation) {
         conversation = await tx.conversation.create({
           data: {
@@ -155,11 +186,14 @@ export async function ingestCallEvent(
         // Only INBOUND calls reopen a closed thread. An outbound call to a
         // closed-thread contact stays closed at the conversation level (the
         // agent already chose to close it; reopening on every call is noisy).
-        needsReopen = true;
+        reopen = true;
       }
-      return { contact, conversation, needsReopen };
-    },
-  );
+      return { contact, conversation, needsReopen: reopen };
+    });
+    contact = resolved.contact;
+    conversation = resolved.conversation;
+    needsReopen = resolved.needsReopen;
+  }
 
   // Upsert the Call row in its own tx so the publishInTx outbox row commits
   // atomically with whatever Call mutation we make. Find-or-create by the
@@ -505,12 +539,19 @@ export async function ingestCallEvent(
  */
 async function handlePermissionEvent(
   teamId: string,
+  channel: Channel,
   evt: NormalizedCallEvent,
 ): Promise<void> {
-  // TODO(multi-channel / INB-5): by-phone lookup, no channel filter — see the
-  // canonical note at providers/ingest.ts. Switch to channel-aware before channel #2.
+  // Channel-aware caller lookup (see the main-path note above). Guard against a
+  // missing identity so an undefined `phoneNumber`/`externalContactId` filter
+  // can't match an arbitrary contact.
+  const isPhone = isPhoneChannel(channel);
+  const identityLabel = isPhone ? evt.contactPhone : evt.externalContactId;
+  if (!identityLabel) return;
   const contact = await db.contact.findFirst({
-    where: { teamId, phoneNumber: evt.contactPhone },
+    where: isPhone
+      ? { teamId, phoneNumber: evt.contactPhone }
+      : { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
     select: { id: true },
   });
   if (!contact) return;
@@ -533,7 +574,12 @@ async function handlePermissionEvent(
     // calling-validity window runs from the REAL grant time, so we re-stamp
     // expiresAt from now rather than the request-time +72h.
     const grantedAt = evt.timestamp;
-    const grantExpiresAt = new Date(grantedAt.getTime() + 72 * 60 * 60 * 1000);
+    // A PERMANENT grant (customer chose "always allow") never expires — store a
+    // far-future expiry so the out-of-window placeCall gate keeps authorizing.
+    // Otherwise the standard 72h calling-validity window from the real grant.
+    const grantExpiresAt = evt.permanentPermission
+      ? new Date(grantedAt.getTime() + 100 * 365 * 24 * 60 * 60 * 1000)
+      : new Date(grantedAt.getTime() + 72 * 60 * 60 * 1000);
     const pending = await db.callPermissionRequest.findFirst({
       where: {
         teamId,

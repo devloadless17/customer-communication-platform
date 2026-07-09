@@ -1712,6 +1712,7 @@ function MessageThreadImpl({
         conversationId={conversation.id}
         contactId={contact.id}
         contactName={contact.name}
+        contactAvatarUrl={contact.avatarUrl ?? null}
         phone={contact.phoneNumber}
         status={conversation.status}
         aiEnabled={conversation.aiEnabled ?? true}
@@ -1730,6 +1731,7 @@ function MessageThreadImpl({
         canManageStages={canManageStages}
         canDeleteConversations={canDeleteConversations}
         canMakeCalls={canMakeCalls}
+        callChannel={conversation.channel ?? undefined}
         onInitiateCall={onInitiateCall}
         onMobileBack={onMobileBack}
         onOpenContactDetails={onOpenContactDetails}

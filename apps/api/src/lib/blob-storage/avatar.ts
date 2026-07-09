@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   DeleteObjectCommand,
   PutObjectCommand,
@@ -112,5 +114,78 @@ export class AvatarUploadError extends Error {
   ) {
     super(message);
     this.name = "AvatarUploadError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Contact avatars — captured from a social provider's profile picture.
+//
+// Meta hands us the customer's `profile_pic` as a SHORT-LIVED signed CDN URL
+// (fbcdn / cdninstagram). Hotlinking it directly from the browser works for a
+// few days and then 403s — the avatar silently reverts to initials. So we
+// download the bytes ONCE at ingest, store them under a deterministic
+// `avatars/contact-…` key (the orphan sweeper skips the `avatars/` prefix, so
+// there's nothing to GC), and serve them same-origin through
+// `GET /api/contacts/:id/avatar` — identical to how user avatars work. The
+// stored `Contact.avatarUrl` is that same-origin path, never the Meta URL.
+// ---------------------------------------------------------------------------
+
+/** Deterministic object key for a contact's captured avatar. Distinct
+ *  `contact-` namespace so it never collides with a user's `avatars/{userId}`. */
+export function contactAvatarObjectKey(contactId: string): string {
+  return `avatars/contact-${contactId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
+/**
+ * Best-effort capture of a remote (Meta CDN) profile picture into R2. Returns
+ * the SAME-ORIGIN serving path to store in `Contact.avatarUrl` (with a content
+ * hash `?v` cache-buster so a later change busts the browser cache), or `null`
+ * on any failure — enrichment is opportunistic and must never throw or block
+ * inbound. Non-image responses and oversized payloads are rejected.
+ */
+export async function captureRemoteContactAvatar(
+  contactId: string,
+  sourceUrl: string,
+  currentAvatarUrl?: string | null,
+): Promise<string | null> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 20_000); // hung-CDN guard
+  try {
+    const res = await fetch(sourceUrl, { redirect: "follow", signal: ac.signal });
+    if (!res.ok) return null;
+
+    const declared = Number.parseInt(res.headers.get("content-length") ?? "", 10);
+    if (Number.isFinite(declared) && declared > MAX_AVATAR_BYTES) {
+      await res.body?.cancel().catch(() => undefined);
+      return null;
+    }
+
+    const mime = normalizeMimeType(res.headers.get("content-type") ?? "image/jpeg");
+    if (!ALLOWED_AVATAR_MIME.has(mime)) return null;
+
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.length === 0 || bytes.length > MAX_AVATAR_BYTES) return null;
+
+    // The `?v` is a content hash — so an unchanged picture yields the SAME
+    // serving path. Skip the R2 write (and let the caller skip the DB update)
+    // when the bytes match what we already hold: this is what makes re-capture
+    // cheap enough to run on demand AND correctly refresh a CHANGED picture.
+    const v = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
+    const path = `/api/contacts/${contactId}/avatar?v=${v}`;
+    if (currentAvatarUrl === path) return path;
+
+    await r2Internal.client().send(
+      new PutObjectCommand({
+        Bucket: r2Internal.bucket(),
+        Key: contactAvatarObjectKey(contactId),
+        Body: bytes,
+        ContentType: mime,
+      }),
+    );
+    return path;
+  } catch {
+    return null; // best-effort — keep the initials fallback on any failure
+  } finally {
+    clearTimeout(timer);
   }
 }

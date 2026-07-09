@@ -11,22 +11,31 @@
 
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import type {
+  CallActionArgs,
+  CallActionResult,
   MessagingProvider,
   NormalizedEvent,
   SendInteractiveArgs,
   SendMediaArgs,
   SendTextArgs,
   SendTextResult,
+  SocialCallPermission,
   UploadMediaArgs,
   UploadMediaResult,
 } from "@ccp/shared/providers/types";
 import {
-  fetchSocialProfileName,
+  checkSocialCallPermission,
+  enableSocialCalling,
+  fetchSocialProfile,
+  type SocialContactProfile,
   parseSocialMessaging,
+  requestSocialCallPermission,
+  sendSocialCallAction,
   sendSocialInteractive,
   sendSocialMedia,
   sendSocialSenderAction,
   sendSocialText,
+  socialCallFeatureEnabled,
   uploadSocialMedia,
 } from "@/lib/providers/meta-social";
 import type { MessengerSendConfig } from "@/lib/providers/messenger-config";
@@ -101,12 +110,34 @@ export const messengerProvider: MessagingProvider<MessengerSendConfig> = {
   async fetchContactProfile(
     externalId: string,
     config: MessengerSendConfig,
-  ): Promise<{ name: string | null }> {
-    const name = await fetchSocialProfileName(externalId, {
+  ): Promise<SocialContactProfile> {
+    // Messenger's user node only exposes name + profile_pic (no @username, no
+    // follower/verified signals — those are Instagram-only).
+    return fetchSocialProfile(externalId, {
       accessToken: config.pageAccessToken,
       graphVersion: config.graphVersion,
-      fields: "name",
+      fields: "name,profile_pic",
+      label: "messenger",
     });
-    return { name };
+  },
+
+  // ---- Messenger Calling (unified /calls) -----------------------------
+  async callAction(args: CallActionArgs, config: MessengerSendConfig): Promise<CallActionResult> {
+    return sendSocialCallAction(args, target(config));
+  },
+  async checkCallPermission(psid: string, config: MessengerSendConfig): Promise<SocialCallPermission> {
+    return checkSocialCallPermission(psid, target(config));
+  },
+  async requestCallPermission(psid: string, config: MessengerSendConfig): Promise<{ messageId: string }> {
+    return requestSocialCallPermission(psid, target(config));
+  },
+  async callFeatureEnabled(config: MessengerSendConfig): Promise<boolean> {
+    return socialCallFeatureEnabled(target(config));
+  },
+  // Admin one-shot: route inbound calls to us (PARTNERS) + show the call icon,
+  // then report Meta's feature status. Required before this inbox can RECEIVE
+  // Messenger calls. Idempotent — same shape as WhatsApp's enableCalling.
+  async enableCalling(config: MessengerSendConfig): Promise<{ ok: true; raw: unknown }> {
+    return enableSocialCalling(target(config));
   },
 };

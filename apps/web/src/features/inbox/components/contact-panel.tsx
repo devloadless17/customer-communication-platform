@@ -3,7 +3,7 @@
 import { memo, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
-import { ChevronLeft, Mail, Paperclip, Phone, MapPin, Clock, FileText, Loader2, PanelRightClose, User as UserIcon, Globe, Flag } from "lucide-react";
+import { AtSign, BadgeCheck, ChevronLeft, Mail, Paperclip, Phone, MapPin, Clock, FileText, Heart, Loader2, PanelRightClose, RefreshCw, User as UserIcon, Globe, Flag, Users } from "lucide-react";
 
 import {
   AddFieldRow,
@@ -30,7 +30,6 @@ import {
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
 import { toast } from "@/lib/toast";
-import { STATUS_META } from "@/features/inbox/lib/status-meta";
 import { assertReducerCoverage } from "@/features/inbox/lib/thread-reducers";
 import { usePanelResize } from "@/features/inbox/hooks/use-panel-resize";
 import { INBOX_DETAILS_WIDTH_COOKIE } from "@/features/inbox/lib/panel-cookies";
@@ -40,9 +39,9 @@ import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
   ContactPanelBuiltins,
-  ConversationStatus,
   ConversationWithRefs,
   InternalNote,
+  SocialProfile,
   Tag,
   User,
 } from "@ccp/shared/types";
@@ -52,6 +51,49 @@ import { EditableField } from "./contact-panel/editable-field";
 import { EditableHeading } from "./contact-panel/editable-heading";
 import { ReadOnlyRow } from "./contact-panel/read-only-row";
 import { Section } from "./contact-panel/section";
+
+/** True when a social profile carries at least one signal worth rendering. */
+function hasSocialSignals(p: SocialProfile): boolean {
+  return (
+    p.isVerified === true ||
+    typeof p.followerCount === "number" ||
+    p.followsBusiness === true
+  );
+}
+
+/** Compact follower count — 1.2k / 3.4M, like every social app. */
+function formatFollowerCount(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/** Inline row of Instagram profile signals (verified · followers · follow-back).
+ *  Rendered as the value of the "Instagram" ReadOnlyRow. */
+function SocialSignals({ profile }: { profile: SocialProfile }) {
+  return (
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+      {profile.isVerified && (
+        <span className="inline-flex items-center gap-0.5 text-sky-600 dark:text-sky-400">
+          <BadgeCheck className="size-3.5" />
+          Verified
+        </span>
+      )}
+      {typeof profile.followerCount === "number" && (
+        <span className="inline-flex items-center gap-0.5">
+          <Users className="size-3.5 text-muted-foreground" />
+          {formatFollowerCount(profile.followerCount)} followers
+        </span>
+      )}
+      {profile.followsBusiness && (
+        <span className="inline-flex items-center gap-0.5 text-muted-foreground">
+          <Heart className="size-3.5" />
+          Follows you
+        </span>
+      )}
+    </span>
+  );
+}
 
 /**
  * Shape of every editable contact field tracked by the panel. Used to type
@@ -73,8 +115,8 @@ type EditableState = {
 
 /** Shallow string-record equality used to compare customField maps. */
 function shallowJsonEqual(
-  a: Record<string, string>,
-  b: Record<string, string>,
+  a: Record<string, unknown>,
+  b: Record<string, unknown>,
 ): boolean {
   const ak = Object.keys(a);
   const bk = Object.keys(b);
@@ -248,12 +290,6 @@ function ContactPanelImpl({
   // a shared parent, which is a much larger refactor for this one
   // panel.
   // ------------------------------------------------------------------
-  const [liveStatus, setLiveStatus] = useState<ConversationStatus>(
-    conversation.status,
-  );
-  const [liveMessageCount, setLiveMessageCount] = useState<number>(
-    data.messageCount ?? messages.length,
-  );
   const [liveNoteCount, setLiveNoteCount] = useState<number>(
     data.noteCount ?? notes.length,
   );
@@ -269,7 +305,6 @@ function ContactPanelImpl({
   // un-guarded `n + 1` would over-count the panel's "Messages"/"Notes" totals
   // until the next thread switch. Seen-sets make each frame idempotent; reset
   // on conversation switch (below) so they don't grow across threads.
-  const seenMsgRef = useRef<Set<string>>(new Set());
   const seenNoteAddRef = useRef<Set<string>>(new Set());
   const seenNoteDelRef = useRef<Set<string>>(new Set());
 
@@ -278,14 +313,11 @@ function ContactPanelImpl({
   // this the panel would keep showing the previous thread's counts when
   // the prop changes.
   useEffect(() => {
-    setLiveStatus(conversation.status);
-    setLiveMessageCount(data.messageCount ?? messages.length);
     setLiveNoteCount(data.noteCount ?? notes.length);
-    seenMsgRef.current = new Set();
     seenNoteAddRef.current = new Set();
     seenNoteDelRef.current = new Set();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversation.id, conversation.status, data.messageCount, data.noteCount]);
+  }, [conversation.id, data.noteCount]);
 
   // Re-seed the live notes array from the authoritative prop whenever it
   // changes identity (conversation switch or a refetch/router.refresh) — the
@@ -306,28 +338,8 @@ function ContactPanelImpl({
     // thread is displayed), not MessageThread's live hook. Asserting coverage
     // here means a future field derived from an un-covered event fails loudly in
     // dev instead of silently diverging. All 4 are covered today (no-op).
-    assertReducerCoverage([
-      "conversation:status",
-      "message:new",
-      "note:new",
-      "note:deleted",
-    ]);
+    assertReducerCoverage(["note:new", "note:deleted"]);
 
-    const onStatus: Parameters<typeof socket.on<"conversation:status">>[1] = (
-      payload,
-    ) => {
-      if (payload.conversationId !== conversationId) return;
-      setLiveStatus(payload.status);
-    };
-    const onMessageNew: Parameters<typeof socket.on<"message:new">>[1] = (
-      payload,
-    ) => {
-      if (payload.conversationId !== conversationId) return;
-      const id = payload.message.externalId || payload.message.id;
-      if (seenMsgRef.current.has(id)) return; // replayed frame — already counted
-      seenMsgRef.current.add(id);
-      setLiveMessageCount((n) => n + 1);
-    };
     const onNoteNew: Parameters<typeof socket.on<"note:new">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
       if (seenNoteAddRef.current.has(payload.note.id)) return;
@@ -349,14 +361,10 @@ function ContactPanelImpl({
       setLiveNotes((prev) => prev.filter((n) => n.id !== payload.noteId));
     };
 
-    socket.on("conversation:status", onStatus);
-    socket.on("message:new", onMessageNew);
     socket.on("note:new", onNoteNew);
     socket.on("note:deleted", onNoteDeleted);
 
     return () => {
-      socket.off("conversation:status", onStatus);
-      socket.off("message:new", onMessageNew);
       socket.off("note:new", onNoteNew);
       socket.off("note:deleted", onNoteDeleted);
     };
@@ -665,6 +673,30 @@ function ContactPanelImpl({
 
   const [saving, startSaving] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
+  // Social channels expose a richer profile on Meta than the inbound webhook
+  // carries; this pulls it on demand (name / @username / avatar / follower +
+  // verified signals). Phone channels (WhatsApp) have nothing extra to sync.
+  const canSyncProfile = panelChannel !== "whatsapp";
+  async function syncProfile() {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      const res = await apiFetch(`/api/contacts/${contact.id}/sync-profile`, {
+        method: "POST",
+      });
+      // The server publishes contact.updated, so the panel refreshes over the
+      // socket — no local state merge needed. Just surface the outcome.
+      toast[res.ok ? "success" : "error"](
+        res.ok ? "Profile synced" : "Couldn't sync profile",
+      );
+    } catch {
+      toast.error("Couldn't sync profile");
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   /**
    * Single save path for every field. Takes a partial patch, applies it
@@ -1047,7 +1079,23 @@ function ContactPanelImpl({
         <Section
           title="Contact info"
           right={
-            saving ? <Loader2 className="size-3 animate-spin text-muted-foreground" /> : null
+            <div className="flex items-center gap-1.5">
+              {saving && (
+                <Loader2 className="size-3 animate-spin text-muted-foreground" />
+              )}
+              {canSyncProfile && (
+                <button
+                  type="button"
+                  onClick={syncProfile}
+                  disabled={syncing}
+                  title={`Refresh profile from ${CHANNEL_LABEL[panelChannel]}`}
+                  aria-label={`Refresh profile from ${CHANNEL_LABEL[panelChannel]}`}
+                  className="inline-flex size-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+                >
+                  <RefreshCw className={cn("size-3", syncing && "animate-spin")} />
+                </button>
+              )}
+            </div>
           }
         >
           {/* Phone is read-only: on phone channels (WhatsApp) it's the identity
@@ -1062,6 +1110,26 @@ function ContactPanelImpl({
               label="Phone"
               mono
               value={formatPhone(contact.phoneNumber)}
+            />
+          )}
+          {/* Instagram @username — the one extra identifier Meta exposes for a
+              social contact (Messenger/WhatsApp have none). Read-only; it's the
+              provider handle, not something the agent sets. */}
+          {contact.username && (
+            <ReadOnlyRow
+              icon={AtSign}
+              label="Username"
+              mono
+              value={`@${contact.username}`}
+            />
+          )}
+          {/* Instagram profile signals (verified / followers / follow-back) —
+              display-only context, rendered only when Meta returned them. */}
+          {contact.socialProfile && hasSocialSignals(contact.socialProfile) && (
+            <ReadOnlyRow
+              icon={BadgeCheck}
+              label="Instagram"
+              value={<SocialSignals profile={contact.socialProfile} />}
             />
           )}
           {builtins.firstName && (
@@ -1321,21 +1389,18 @@ function ContactPanelImpl({
           </div>
         </Section>
 
-        <Section title="Conversation">
-          <ReadOnlyRow
-            icon={FileText}
-            label="Messages"
-            // True server-side totals, kept in sync by the live listeners
-            // above. `messages.length` from props is just the paginated
-            // slice loaded into the thread and lies on long conversations.
-            value={`${liveMessageCount} message${liveMessageCount === 1 ? "" : "s"} · ${liveNoteCount} note${liveNoteCount === 1 ? "" : "s"}`}
-          />
-          <ReadOnlyRow
-            icon={Clock}
-            label="Status"
-            value={STATUS_META[liveStatus].label}
-          />
-        </Section>
+        {/* Status is already shown in the thread header, and a raw message count
+            isn't actionable — so this section now surfaces ONLY the internal-note
+            tally, and only when there are notes, as a "you have notes here" cue. */}
+        {liveNoteCount > 0 && (
+          <Section title="Conversation">
+            <ReadOnlyRow
+              icon={FileText}
+              label="Notes"
+              value={`${liveNoteCount} internal note${liveNoteCount === 1 ? "" : "s"}`}
+            />
+          </Section>
+        )}
 
       </ScrollArea>
       )}
@@ -1455,7 +1520,9 @@ export const ContactPanel = memo(ContactPanelImpl, (prev, next) => {
       ac.lastName !== bc.lastName ||
       ac.countryCode !== bc.countryCode ||
       ac.language !== bc.language ||
+      ac.username !== bc.username ||
       ac.avatarUrl !== bc.avatarUrl ||
+      !shallowJsonEqual({ ...ac.socialProfile }, { ...bc.socialProfile }) ||
       !arraysEqual(ac.tagIds ?? [], bc.tagIds ?? []) ||
       !shallowJsonEqual(ac.customFields ?? {}, bc.customFields ?? {})
     ) {

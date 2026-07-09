@@ -84,6 +84,9 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
           });
           landed++;
         } else if (evt.kind === "echo") {
+          // Coexistence echoes always carry a phone (WhatsApp); the field is now
+          // optional on the shared type (social echoes use externalContactId).
+          if (!evt.contactPhone) continue;
           await ingestHistoricalMessage(teamId, "whatsapp", {
             externalId: evt.externalId,
             contactPhone: evt.contactPhone,

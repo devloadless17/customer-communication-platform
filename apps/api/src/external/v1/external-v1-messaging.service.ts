@@ -724,11 +724,24 @@ export class ExternalV1MessagingService {
     const provider = conversation.channel;
     const binding = getProviderBinding(provider);
 
+    // Channel text-length cap — parity with the internal send path (WhatsApp
+    // 4096, Messenger 2000, Instagram 1000). Fail fast before Meta's opaque
+    // over-limit reject.
+    const maxChars = binding.provider.capabilities.messageTextMaxChars;
+    if (input.body.length > maxChars) {
+      if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+      throw new UnprocessableEntityException({
+        error: "message_too_long",
+        detail: `message is ${input.body.length} characters — ${provider} allows at most ${maxChars}.`,
+        max: maxChars,
+      });
+    }
+
     // Free-form send window — driven by the provider capability; `null` skips
     // it (channel with no window restriction).
+    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
     const windowMs = effectiveSendWindowMs(binding.provider.capabilities);
     if (windowMs !== null) {
-      const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
       const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);
       if (win.state === "closed" || win.state === "never") {
         if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
@@ -741,6 +754,13 @@ export class ExternalV1MessagingService {
         });
       }
     }
+    // Meta social: past the 24h free-form band (but inside the effective window)
+    // the send must carry the HUMAN_AGENT tag; RESPONSE otherwise. Same rule as
+    // the internal send paths — parity keeps /v1 sends policy-correct too.
+    const freeFormMs = binding.provider.capabilities.freeFormWindowMs;
+    const useHumanAgentTag =
+      freeFormMs !== null &&
+      ["closed", "never"].includes(computeWindowStatus(lastInboundAt, Date.now(), freeFormMs).state);
 
     let replyToMessageId: string | null = null;
     let replyToExternalId: string | undefined;
@@ -804,6 +824,7 @@ export class ExternalV1MessagingService {
         {
           to: channel.to,
           body: input.body,
+          useHumanAgentTag,
           ...(replyToExternalId ? { replyToExternalId } : {}),
         },
         config,

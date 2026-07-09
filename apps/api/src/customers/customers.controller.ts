@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Param, Patch, Post, UseGuards } from "@nestjs/common";
 
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
@@ -7,8 +7,10 @@ import { zBody } from "../common/zod-validation.pipe";
 import { CustomersService } from "./customers.service";
 import {
   LinkContactSchema,
+  RenameCustomerSchema,
   UnlinkContactSchema,
   type LinkContactInput,
+  type RenameCustomerInput,
   type UnlinkContactInput,
 } from "./customers.schemas";
 
@@ -43,13 +45,28 @@ export class CustomersController {
     return { customer };
   }
 
+  @Patch(":id")
+  async rename(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body(zBody(RenameCustomerSchema)) body: RenameCustomerInput,
+  ) {
+    const customer = await this.customers.rename(session.teamId, id, body.name);
+    return { ok: true, customer };
+  }
+
   @Post(":id/link")
   async link(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
     @Body(zBody(LinkContactSchema)) body: LinkContactInput,
   ) {
-    const customer = await this.customers.linkContact(session.teamId, id, body.contactId);
+    const customer = await this.customers.linkContact(
+      session.teamId,
+      id,
+      body.contactId,
+      session.userId,
+    );
     return { ok: true, customer };
   }
 
@@ -59,7 +76,12 @@ export class CustomersController {
     @Param("id") id: string,
     @Body(zBody(UnlinkContactSchema)) body: UnlinkContactInput,
   ) {
-    const out = await this.customers.unlinkContact(session.teamId, id, body.contactId);
+    const out = await this.customers.unlinkContact(
+      session.teamId,
+      id,
+      body.contactId,
+      session.userId,
+    );
     return { ok: true, ...out };
   }
 }

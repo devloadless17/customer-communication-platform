@@ -69,17 +69,44 @@ export const BroadcastVariablesSchema = z.object({
 });
 export type BroadcastVariablesInput = z.infer<typeof BroadcastVariablesSchema>;
 
-export const CreateBroadcastSchema = z.object({
-  templateId: z.string().min(1),
-  variables: BroadcastVariablesSchema.default({ body: [] }),
-  audience: AudienceSchema,
-  // Optional operator label (falls back to template name in the UI).
-  name: z.string().trim().max(120).optional(),
-  // ISO datetime to send later. Omit / null = send now. A past/near-now value
-  // is treated as "now" by the service (clamped delay), so no strict future
-  // validation here — the UI prevents past picks, the server is tolerant.
-  scheduledAt: z.string().datetime().nullable().optional(),
-});
+export const CreateBroadcastSchema = z
+  .object({
+    // `template` (WhatsApp, default — back-compat for existing callers) or
+    // `freeform` (plain text to in-window Messenger / Instagram contacts).
+    kind: z.enum(["template", "freeform"]).default("template"),
+    // Who to reach. `contact` (default) = channel-scoped contacts on ONE channel
+    // (today's behavior). `customer` = the PERSON, once, on their best live
+    // channel — omnichannel + deduped; freeform-body based (channel resolved
+    // per recipient, so `channel` is ignored).
+    targetMode: z.enum(["contact", "customer"]).default("contact"),
+    // template kind:
+    templateId: z.string().min(1).optional(),
+    variables: BroadcastVariablesSchema.default({ body: [] }),
+    // freeform kind:
+    channel: z.enum(["messenger", "instagram", "whatsapp"]).optional(),
+    bodyText: z.string().trim().min(1).max(2000).optional(),
+    audience: AudienceSchema,
+    // Optional operator label (falls back to template name in the UI).
+    name: z.string().trim().max(120).optional(),
+    // ISO datetime to send later. Omit / null = send now. A past/near-now value
+    // is treated as "now" by the service (clamped delay), so no strict future
+    // validation here — the UI prevents past picks, the server is tolerant.
+    scheduledAt: z.string().datetime().nullable().optional(),
+  })
+  .refine(
+    (v) => {
+      // customer-mode = per-person best-channel freeform; channel is resolved
+      // per recipient, so only bodyText is required.
+      if (v.targetMode === "customer") return Boolean(v.bodyText);
+      return v.kind === "freeform"
+        ? Boolean(v.channel && v.bodyText)
+        : Boolean(v.templateId);
+    },
+    {
+      message:
+        "customer-mode + freeform require bodyText; freeform requires channel + bodyText; template requires templateId",
+    },
+  );
 export type CreateBroadcastInput = z.infer<typeof CreateBroadcastSchema>;
 
 /**

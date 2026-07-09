@@ -9,6 +9,7 @@ import {
   UseGuards,
 } from "@nestjs/common";
 
+import type { Channel } from "@ccp/shared/types";
 import { RequireCapability } from "../auth/capability.guard";
 import { RequireRole } from "../auth/role.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
@@ -144,8 +145,15 @@ export class CallsController {
   @Post("api/calls/admin/enable")
   @HttpCode(200)
   @RequireRole("admin")
-  async enableCalling(@CurrentSession() session: ApiSession) {
-    return this.calls.enableCallingForTeam(session);
+  async enableCalling(
+    @CurrentSession() session: ApiSession,
+    @Query("channel") channel?: string,
+  ) {
+    // Channel-aware: WhatsApp (Cloud API Calling) or Messenger (route inbound
+    // calls to us + call icon). Default WhatsApp for back-compat with the
+    // no-arg call. Anything else is rejected by the service capability gate.
+    const ch: Channel = channel === "messenger" ? "messenger" : "whatsapp";
+    return this.calls.enableCallingForTeam(session, ch);
   }
 
   /**

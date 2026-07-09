@@ -1,7 +1,10 @@
-import type { ContactSource } from "@ccp/shared/types";
+import type { Channel, ContactSource } from "@ccp/shared/types";
 
 /** Source filter: "all" disables it. */
 export type SourceFilter = "all" | ContactSource;
+
+/** Channel filter: "any" disables it; else one channel identity. */
+export type ChannelFilter = "any" | Channel;
 
 /** 24h customer-service window filter. "any" = no filter. */
 export type WindowFilter = "any" | "open" | "closed";

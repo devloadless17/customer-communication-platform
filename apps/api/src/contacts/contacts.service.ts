@@ -22,6 +22,8 @@ import {
   type ListContactsOpts,
 } from "@/lib/queries";
 import type { Contact } from "@ccp/shared/types";
+import { isPhoneChannel } from "@ccp/shared/providers/capabilities";
+import { enrichSocialContactNames } from "@/lib/providers/ingest";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import { EventBus } from "../events/event-bus.module";
@@ -117,6 +119,7 @@ export class ContactsService {
           : undefined,
       source: query.source,
       tagIds,
+      channel: query.channel,
       window: query.window,
       stageId: query.stageId,
     };
@@ -1452,6 +1455,55 @@ export class ContactsService {
   /** Lightweight id→display lookup for picker chips. Cross-team ids dropped. */
   lookup(teamId: string, ids: string[]) {
     return lookupContacts(teamId, ids);
+  }
+
+  /** True when the contact exists in this team AND carries a captured
+   *  (same-origin) avatar. Gates the avatar serve route so one team can't
+   *  stream another team's contact avatar object. */
+  async hasCapturedAvatar(teamId: string, contactId: string): Promise<boolean> {
+    const row = await this.db.contact.findFirst({
+      where: { teamId, id: contactId },
+      select: { avatarUrl: true },
+    });
+    return Boolean(row?.avatarUrl && row.avatarUrl.startsWith("/api/contacts/"));
+  }
+
+  /**
+   * On-demand refresh of a social contact's profile from Meta (name if still
+   * the opaque id, @username, avatar, follower/verified signals). Enrichment
+   * normally runs only on a new inbound, so this backfills contacts that
+   * predate it and re-pulls signals (follower count) that drift over time.
+   * Reuses the exact inbound-enrichment path so there's a single source of
+   * truth; it publishes `contact.updated`, so the panel updates live too.
+   * No-op (returns the current contact) for phone channels / non-social.
+   */
+  async syncSocialProfile(teamId: string, contactId: string): Promise<Contact> {
+    const contact = await this.db.contact.findFirst({
+      where: { teamId, id: contactId, deletedAt: null },
+      include: { tags: { select: { id: true } } },
+    });
+    if (!contact) throw new NotFoundException({ error: "contact not found" });
+
+    if (
+      contact.identityChannel &&
+      !isPhoneChannel(contact.identityChannel) &&
+      contact.externalContactId
+    ) {
+      await enrichSocialContactNames(
+        teamId,
+        contact.identityChannel,
+        [contact.externalContactId],
+        { forceAvatar: true },
+      );
+    }
+
+    // Re-read so the response reflects whatever enrichment just persisted.
+    const fresh = await this.db.contact.findFirst({
+      where: { teamId, id: contactId },
+      include: { tags: { select: { id: true } } },
+    });
+    const row = fresh ?? contact;
+    return toContactWire(row, { tagIds: row.tags.map((t) => t.id) });
   }
 
   /** Live recipient count for an audience selection. */

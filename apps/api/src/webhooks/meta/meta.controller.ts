@@ -22,7 +22,7 @@ import type { Request, Response } from "express";
 import { runWithConcurrency } from "@/common/concurrency";
 import { blobStorage } from "@/lib/blob-storage";
 import { publish } from "@/lib/events/bus";
-import { MEDIA_SIZE_CAPS } from "@/lib/media-storage";
+import { MEDIA_SIZE_CAPS, mediaPolicyForChannel } from "@/lib/media-storage";
 import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
 import { getMetaProvider } from "@/lib/providers";
 import { MediaTooLargeError } from "@/lib/providers/meta";
@@ -396,6 +396,20 @@ export class MetaWebhookController implements OnModuleDestroy {
     }
 
     const payload = req.body as unknown;
+
+    // Defense-in-depth: the webhook's `entry[].id` must match the team's
+    // configured business account (Page id for Messenger, IG account id for
+    // Instagram). Parity with WhatsApp's phone_number_id mismatch guard.
+    const cfgIds = config as { pageId?: string | null; igId?: string | null };
+    const expectedEntryId =
+      (channel === "messenger" ? cfgIds.pageId : cfgIds.igId) ?? null;
+    if (socialEntryIdMismatch(expectedEntryId, payload)) {
+      this.logger.warn(
+        `[${teamId}] ${channel} webhook entry.id does not match team configuration — dropping`,
+      );
+      return { ok: true, ingested: 0, dropped: "entry_id_mismatch" };
+    }
+
     let events: NormalizedEvent[];
     try {
       events = provider.parseWebhook(payload);
@@ -663,8 +677,10 @@ export class MetaWebhookController implements OnModuleDestroy {
     outcomes: Map<string, DownloadOutcome>,
   ): Promise<void> {
     const mediaEvents = events.filter(
-      (e): e is Extract<NormalizedEvent, { kind: "message" }> =>
-        e.kind === "message" && !!e.media?.sourceUrl && !e.media.storageKey,
+      (e): e is Extract<NormalizedEvent, { kind: "message" | "echo" }> =>
+        (e.kind === "message" || e.kind === "echo") &&
+        !!e.media?.sourceUrl &&
+        !e.media.storageKey,
     );
     if (mediaEvents.length === 0) return;
 
@@ -707,7 +723,15 @@ export class MetaWebhookController implements OnModuleDestroy {
       const media = evt.media;
       if (!media?.sourceUrl) return;
       const mediaKind = media.kind;
-      const cap = MEDIA_SIZE_CAPS[mediaKind];
+      // A native-inbox echo (business sent it from Meta's app) is OUTBOUND and
+      // carries no contactName; an inbound message is the inverse.
+      const isEcho = evt.kind === "echo";
+      const blobDirection: "in" | "out" = isEcho ? "out" : "in";
+      const blobContactName =
+        evt.kind === "message" ? evt.contactName ?? undefined : undefined;
+      // Channel-aware cap — Messenger/Instagram deliver larger media than
+      // WhatsApp's caps allow, so use the per-channel policy here too.
+      const cap = mediaPolicyForChannel(channel).caps[mediaKind];
       try {
         const fetched = await retry(() => fetchUrlBytes(media.sourceUrl!, cap), {
           attempts: 3,
@@ -729,10 +753,10 @@ export class MetaWebhookController implements OnModuleDestroy {
               context: {
                 teamId,
                 teamSlug: team?.name,
-                direction: "in",
+                direction: blobDirection,
                 // Social has no phone; use the opaque id for the dashboard name.
                 contactPhone: evt.externalContactId,
-                contactName: evt.contactName ?? undefined,
+                contactName: blobContactName,
                 externalId: evt.externalId,
                 originalFilename: media.filename ?? null,
               },
@@ -755,9 +779,9 @@ export class MetaWebhookController implements OnModuleDestroy {
                     context: {
                       teamId,
                       teamSlug: team?.name,
-                      direction: "in",
+                      direction: blobDirection,
                       contactPhone: evt.externalContactId,
-                      contactName: evt.contactName ?? undefined,
+                      contactName: blobContactName,
                       externalId: `${evt.externalId}_thumb`,
                       originalFilename: null,
                     },
@@ -1100,6 +1124,27 @@ function phoneNumberMismatch(
       const incoming = change?.value?.metadata?.phone_number_id;
       if (incoming && incoming !== expected) return true;
     }
+  }
+  return false;
+}
+
+/**
+ * Defense-in-depth for the social webhook, parallel to `phoneNumberMismatch` on
+ * WhatsApp. Every legitimate Messenger/Instagram webhook carries the business
+ * account id in `entry[].id` — the Page id (Messenger) or the IG professional
+ * account id (Instagram). If the team has that id configured and an incoming
+ * entry names a DIFFERENT account, drop the batch rather than ingest messages
+ * attributed to the wrong tenant. Skipped when the id isn't configured yet
+ * (HMAC against the per-team appSecret remains the primary gate).
+ */
+function socialEntryIdMismatch(expected: string | null, payload: unknown): boolean {
+  if (!expected) return false;
+  const p = payload as { entry?: Array<{ id?: string }> };
+  const entries = p?.entry;
+  if (!Array.isArray(entries)) return false;
+  for (const entry of entries) {
+    const incoming = entry?.id;
+    if (incoming && incoming !== expected) return true;
   }
   return false;
 }

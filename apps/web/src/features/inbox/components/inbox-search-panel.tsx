@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { CHANNEL_LABEL, ChannelBadge } from "./channel-badge";
 import { EmptyState as EmptyStateCard } from "@/components/ui/empty-state";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { LocalTime } from "@/components/local-time";
@@ -179,6 +180,11 @@ export function InboxSearchPanel({
                         ? onOpenResult({ conversationId: hit.conversationId })
                         : onStartContactChat(hit.contactId)
                     }
+                    onOpenChannel={(ch) =>
+                      ch.conversationId
+                        ? onOpenResult({ conversationId: ch.conversationId })
+                        : onStartContactChat(ch.contactId)
+                    }
                   />
                 ))}
               {scope === "messages" &&
@@ -295,25 +301,54 @@ function ContactRow({
   hit,
   query,
   onOpen,
+  onOpenChannel,
 }: {
   hit: ContactSearchHit;
   query: string;
   onOpen: () => void;
+  onOpenChannel: (ch: ContactSearchHit["channels"][number]) => void;
 }) {
   // Secondary line: show the matched field's value (so an email/phone match
   // reads sensibly), falling back to phone.
   const secondary =
     hit.matchedField === "name" ? hit.phoneNumber ?? "" : hit.matchedValue;
+  // Unified person: when the same person is reachable on >1 channel, show a
+  // clickable badge CLUSTER (jump to each channel's thread) instead of a single
+  // badge — this is the person shown ONCE, not N duplicate rows. Nested buttons
+  // are invalid HTML, so the row is a div: the name area opens the matched
+  // channel, each badge opens its own.
+  //
+  // `channels` is a required field, but fall back to the single matched channel
+  // if an older/other producer omits it — a missing optional must never crash
+  // the whole inbox (error-boundary "Inbox failed to load").
+  const channels =
+    hit.channels?.length > 0
+      ? hit.channels
+      : [
+          {
+            contactId: hit.contactId,
+            channel: hit.channel,
+            conversationId: hit.conversationId,
+          },
+        ];
+  const multi = channels.length > 1;
   return (
-    <li>
-      <button type="button" onClick={onOpen} className={rowBase}>
+    <li className={cn(rowBase, "cursor-default")}>
+      <button
+        type="button"
+        onClick={onOpen}
+        className="flex min-w-0 flex-1 items-start gap-3 text-left"
+      >
         <HitAvatar name={hit.name} url={hit.avatarUrl} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <span className="truncate text-sm font-medium">
               {highlight(hit.name, query)}
             </span>
-            {!hit.conversationId && (
+            {!multi && (
+              <ChannelBadge channel={hit.channel} className="size-3.5 shrink-0" />
+            )}
+            {!multi && !hit.conversationId && (
               <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-3xs text-muted-foreground">
                 no chat
               </span>
@@ -329,6 +364,22 @@ function ContactRow({
           )}
         </div>
       </button>
+      {multi && (
+        <div className="flex shrink-0 items-center gap-1 self-center">
+          {channels.map((ch) => (
+            <button
+              key={ch.contactId}
+              type="button"
+              onClick={() => onOpenChannel(ch)}
+              title={`Open ${CHANNEL_LABEL[ch.channel]} chat`}
+              aria-label={`Open ${CHANNEL_LABEL[ch.channel]} chat`}
+              className="grid size-6 place-items-center rounded-md hover:bg-accent"
+            >
+              <ChannelBadge channel={ch.channel} className="size-3.5" />
+            </button>
+          ))}
+        </div>
+      )}
     </li>
   );
 }

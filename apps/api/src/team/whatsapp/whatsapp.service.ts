@@ -930,7 +930,14 @@ function parseComponents(v: unknown): TemplateComponent[] {
       obj.type !== "FOOTER" &&
       obj.type !== "BUTTONS"
     ) {
-      continue;
+      // Reject rather than silently drop — a component with an unrecognized
+      // `type` means the template the agent built won't match what Meta
+      // approves (the dropped component just vanishes, then the send fails with
+      // a mismatched-parameter error nobody can trace back here).
+      throw new BadRequestException({
+        error: "invalid_template_component",
+        detail: `Unknown template component type: ${JSON.stringify(obj.type)}. Expected HEADER, BODY, FOOTER, or BUTTONS.`,
+      });
     }
     out.push(obj as unknown as TemplateComponent);
   }

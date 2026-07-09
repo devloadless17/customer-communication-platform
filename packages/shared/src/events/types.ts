@@ -189,6 +189,25 @@ export interface MessageReactionChangedEvent {
 }
 
 /**
+ * The customer unsent (deleted) or edited a message (WhatsApp revoke/edit,
+ * Messenger/Instagram unsend). Only socket-fanout subscribes — it emits
+ * `message:updated` to the conversation room so viewers patch the bubble to the
+ * tombstone / edited body. No audit/workflow subscribers (a customer editing
+ * their own message isn't a business state change to automate on).
+ */
+export interface MessageUpdatedEvent {
+  teamId: string;
+  conversationId: string;
+  messageId: string;
+  /** ISO time when deleted, else null. */
+  deletedAt: string | null;
+  /** ISO time when edited, else null. */
+  editedAt: string | null;
+  /** The (possibly edited) body; null when unchanged/irrelevant. */
+  body: string | null;
+}
+
+/**
  * Outbound send failed inside the background `message-sends` queue worker
  * (introduced for S1 — moving Meta sends off the HTTP critical path).
  * Used by socket-fanout to emit `message:failed` to the originating client
@@ -1048,6 +1067,7 @@ export interface DomainEventMap {
   "message.send_failed": MessageSendFailedEvent;
   "message.status_changed": MessageStatusChangedEvent;
   "message.reaction_changed": MessageReactionChangedEvent;
+  "message.updated": MessageUpdatedEvent;
   "message.media_ready": MessageMediaReadyEvent;
   "conversation.assigned": ConversationAssignedEvent;
   "conversation.status_changed": ConversationStatusChangedEvent;

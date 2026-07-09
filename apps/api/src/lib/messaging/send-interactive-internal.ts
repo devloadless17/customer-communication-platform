@@ -99,9 +99,9 @@ export async function sendInteractiveInternal(
   // Free-form send window — same gate as plain text. Driven by the provider's
   // declared window; `null` skips the check (channel has no window).
   const windowMs = effectiveSendWindowMs(binding.provider.capabilities);
+  const lastInboundIso = conversation.contact.lastInboundAt?.toISOString() ?? null;
   if (windowMs !== null) {
-    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
-    const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);
+    const win = computeWindowStatus(lastInboundIso, Date.now(), windowMs);
     if (win.state === "closed" || win.state === "never") {
       throw new SendTextValidationError(
         "outside_24h_window",
@@ -110,6 +110,14 @@ export async function sendInteractiveInternal(
       );
     }
   }
+  // Meta social: inside the effective window but past the 24h free-form band we
+  // must attach the HUMAN_AGENT tag (RESPONSE otherwise). Same rule as sendText.
+  const freeFormMs = binding.provider.capabilities.freeFormWindowMs;
+  const useHumanAgentTag =
+    freeFormMs !== null &&
+    ["closed", "never"].includes(
+      computeWindowStatus(lastInboundIso, Date.now(), freeFormMs).state,
+    );
 
   let sendConfig;
   try {
@@ -148,6 +156,7 @@ export async function sendInteractiveInternal(
       bodyText,
       kind: args.kind,
       options: args.options,
+      useHumanAgentTag,
       ...(args.listCtaLabel ? { listCtaLabel: args.listCtaLabel } : {}),
       ...(args.listSectionTitle ? { listSectionTitle: args.listSectionTitle } : {}),
     },

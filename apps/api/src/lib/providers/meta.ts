@@ -1,5 +1,6 @@
 import { readLimitedBody } from "@/lib/http/safe-fetch";
 import type { MetaSendConfig } from "@/lib/providers/config";
+import { MetaSendError, normalizeMetaSendError } from "./meta-send-error";
 
 // Meta error responses are tiny in practice (JSON envelope, a few KB).
 // Cap reads so a future endpoint or a compromised upstream returning a
@@ -45,7 +46,7 @@ import type {
   UploadMediaResult,
 } from "@ccp/shared/providers/types";
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
-import type { MediaKind, MessageStatus } from "@ccp/shared/types";
+import type { MediaKind, MessageAttribution, MessageStatus, MessageStructured } from "@ccp/shared/types";
 
 /**
  * Meta WhatsApp Cloud API webhook parser.
@@ -75,6 +76,12 @@ import type { MediaKind, MessageStatus } from "@ccp/shared/types";
 // the fallback only fires via `||` on a falsy parse.
 const META_FETCH_TIMEOUT_MS = Number(process.env.META_FETCH_TIMEOUT_MS) || 20_000;
 const META_FETCH_MAX_ATTEMPTS = 2; // 1 retry on transient 5xx
+// Graph origin for every WhatsApp call. Real Meta by default; `META_GRAPH_BASE_URL`
+// overrides it so an e2e run can point the whole app at a local mock Graph server.
+// Read once at load (fixed for the process lifetime); duplicated locally rather
+// than imported from meta-graph.ts to keep this stable WhatsApp path decoupled
+// from the social helpers — same posture as DEFAULT_GRAPH_VERSION across configs.
+const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
 
 /**
  * Per-call fetch options layered on top of `RequestInit`.
@@ -209,6 +216,17 @@ interface MetaChangeValue {
   event?: string;
   /** Human reason Meta attaches on PAUSED/REJECTED (quality, policy, etc.). */
   reason?: string;
+  // `template_category_update` webhook fields — Meta auto-migrated a template's
+  // category. `correct_category` is the current spec field; `new_category` is the
+  // older alias. UPPERCASE (MARKETING | UTILITY | AUTHENTICATION).
+  correct_category?: string;
+  new_category?: string;
+  previous_category?: string;
+  // `message_template_quality_update` webhook fields — quality band changed
+  // (GREEN | YELLOW | RED | UNKNOWN). Informational; a RED band that triggers a
+  // pause arrives separately as a `message_template_status_update` (PAUSED).
+  new_quality_score?: string;
+  previous_quality_score?: string;
   // WhatsApp Coexistence webhook fields (one number on both the Business App +
   // Cloud API). Each arrives under its own `change.field`, keyed as its own
   // array on `value` — parallel to `messages[]`.
@@ -267,6 +285,9 @@ interface MetaCall {
   event?: string;
   /** UPPER_CASE in real payloads ("USER_INITIATED" / "BUSINESS_INITIATED"). */
   direction?: string;
+  /** On `permission_granted`: the customer granted PERMANENTLY (not the default
+   *  72h). We then store a far-future expiry instead of grantedAt + 72h. */
+  is_permanent?: boolean;
   /**
    * Top-level call status. On `event: "terminate"` Meta carries the
    * reason here as UPPERCASE: "COMPLETED" | "FAILED" | "MISSED" | etc.
@@ -347,6 +368,11 @@ interface MetaContactsPayload {
 
 interface MetaMessage {
   from?: string;
+  // BSUID forward-compat (Meta 2026): a webhook may identify the sender by a
+  // business-scoped id + @username instead of the phone. Field names are stamped
+  // conservatively; the exact wire keys are confirmed at rollout. Absent today.
+  bsuid?: string;
+  username?: string;
   // Present on Coexistence echo/history rows the BUSINESS sent: the CUSTOMER's
   // number. Absent on ordinary inbound `messages[]` (where `from` is already
   // the customer).
@@ -361,6 +387,22 @@ interface MetaMessage {
   document?: MetaMediaPayload;
   sticker?: MetaMediaPayload;
   interactive?: MetaInteractivePayload;
+  // A tap on a TEMPLATE quick-reply button. Distinct from `interactive` (which
+  // is a tap on a free-form interactive message): a quick-reply button inside an
+  // approved template arrives as `type:"button"` with `button:{ payload, text }`,
+  // where `payload` is the author-assigned id set at template-send time.
+  button?: { payload?: string; text?: string };
+  // Click-to-WhatsApp ad attribution — present on the FIRST inbound when the
+  // customer arrived by tapping a Facebook/Instagram ad (or a post CTA). Drives
+  // the "from your ad" chip. `source_type`: "ad" | "post".
+  referral?: {
+    source_url?: string;
+    source_id?: string;
+    source_type?: string;
+    headline?: string;
+    body?: string;
+    ctwa_clid?: string;
+  };
   reaction?: { message_id?: string; emoji?: string };
   context?: MetaContextRef;
   // Non-media customer content with no dedicated bubble yet — ingested as a
@@ -431,6 +473,58 @@ function placeholderForUnhandledType(m: MetaMessage): string | null {
       // visible + counts toward unread, rather than vanishing.
       return m.type ? `Unsupported message (${m.type})` : null;
   }
+}
+
+/**
+ * Build the structured (non-media) payload for a location pin or contact card so
+ * the bubble can render a map / vCard instead of the bare text placeholder.
+ * Returns undefined for types without structured rendering (order/unsupported
+ * stay text-only). The raw payload is always retained on the row regardless.
+ */
+function structuredForMessage(m: MetaMessage): MessageStructured | undefined {
+  if (m.type === "location" && m.location) {
+    const { latitude, longitude, name, address } = m.location;
+    if (latitude == null || longitude == null) return undefined;
+    return {
+      kind: "location",
+      latitude,
+      longitude,
+      ...(name?.trim() ? { name: name.trim() } : {}),
+      ...(address?.trim() ? { address: address.trim() } : {}),
+    };
+  }
+  if (m.type === "contacts" && Array.isArray(m.contacts)) {
+    const contacts = m.contacts
+      .map((c) => ({
+        name: c.name?.formatted_name?.trim() ?? "",
+        phones: (c.phones ?? [])
+          .map((p) => p.phone?.trim() ?? "")
+          .filter((p) => p.length > 0),
+      }))
+      .filter((c) => c.name.length > 0 || c.phones.length > 0);
+    if (contacts.length === 0) return undefined;
+    return { kind: "contacts", contacts };
+  }
+  return undefined;
+}
+
+/**
+ * Build ad / deep-link attribution from a WhatsApp inbound `referral` (Click-to-
+ * WhatsApp). Present only on the first message of an ad-sourced conversation;
+ * undefined otherwise. Surfaced as the "from your ad" chip.
+ */
+function attributionForMessage(m: MetaMessage): MessageAttribution | undefined {
+  const r = m.referral;
+  if (!r) return undefined;
+  const source: MessageAttribution["source"] =
+    r.source_type === "ad" ? "ad" : r.source_type === "post" ? "post" : "unknown";
+  return {
+    source,
+    ...(r.headline?.trim() ? { headline: r.headline.trim() } : {}),
+    ...(r.body?.trim() ? { body: r.body.trim() } : {}),
+    ...(r.source_url?.trim() ? { sourceUrl: r.source_url.trim() } : {}),
+    ...(r.ctwa_clid?.trim() ? { clickId: r.ctwa_clid.trim() } : {}),
+  };
 }
 
 /**
@@ -651,6 +745,9 @@ function parseMetaCall(
     ...(sdp ? { sdp } : {}),
     ...(connectedAt !== undefined ? { connectedAt } : {}),
     ...(durationSeconds !== undefined ? { durationSeconds } : {}),
+    ...(phase === "permission_granted" && c.is_permanent
+      ? { permanentPermission: true }
+      : {}),
     timestamp: ts,
     rawPayload,
   };
@@ -686,6 +783,37 @@ function parseTemplateStatusUpdate(
   };
 }
 
+/**
+ * Parse a `template_category_update` webhook into a normalized event carrying
+ * only the new `category` (status stays null — this webhook doesn't change
+ * review status). Returns null with no id/name to match on, or when the category
+ * doesn't map to a known enum value.
+ */
+function parseTemplateCategoryUpdate(
+  value: MetaChangeValue,
+  rawPayload: Record<string, unknown>,
+): NormalizedTemplateStatusUpdate | null {
+  const externalId =
+    value.message_template_id != null
+      ? String(value.message_template_id)
+      : undefined;
+  const name = value.message_template_name;
+  if (!externalId && !name) return null;
+  const category = mapTemplateCategory(value.correct_category ?? value.new_category);
+  if (!category) return null;
+  return {
+    kind: "template_status",
+    ...(externalId ? { externalId } : {}),
+    ...(name ? { name } : {}),
+    ...(value.message_template_language
+      ? { language: value.message_template_language }
+      : {}),
+    status: null,
+    category,
+    rawPayload,
+  };
+}
+
 export const metaProvider: MessagingProvider<MetaSendConfig> = {
   name: "whatsapp",
 
@@ -716,6 +844,34 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         if (change.field === "message_template_status_update") {
           const evt = parseTemplateStatusUpdate(value, payload as Record<string, unknown>);
           if (evt) events.push(evt);
+          continue;
+        }
+
+        // Template category migration: Meta auto-moved a template between
+        // categories (e.g. MARKETING→UTILITY). Category drives pricing + which
+        // window reopens the conversation, so keep the local row accurate rather
+        // than showing a stale category until the next manual Sync.
+        if (change.field === "template_category_update") {
+          const evt = parseTemplateCategoryUpdate(value, payload as Record<string, unknown>);
+          if (evt) events.push(evt);
+          continue;
+        }
+
+        // Template quality band change (GREEN/YELLOW/RED). Informational — a RED
+        // band that pauses the template arrives separately as a status update
+        // (PAUSED), which we already ingest. Log it for observability; there's no
+        // sendability decision to make here.
+        if (change.field === "message_template_quality_update") {
+          console.warn(
+            JSON.stringify({
+              event: "meta.template_quality_update",
+              severity: "info",
+              template: value.message_template_name,
+              language: value.message_template_language,
+              previous: value.previous_quality_score,
+              current: value.new_quality_score,
+            }),
+          );
           continue;
         }
 
@@ -846,7 +1002,21 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // We accept both; the per-array walkers below safely no-op on the
         // other type since `value.messages` / `value.calls` / `value.statuses`
         // are independently present.
-        if (change.field !== "messages" && change.field !== "calls") continue;
+        if (change.field !== "messages" && change.field !== "calls") {
+          // Everything above is handled; anything else Meta subscribed us to
+          // (account/phone-number quality alerts, flows, etc.) is dropped — but
+          // logged so a NEW field type Meta starts sending surfaces in ops
+          // instead of vanishing silently. Fail-soft: still a 200.
+          console.warn(
+            JSON.stringify({
+              event: "meta.webhook.unhandled_field",
+              severity: "info",
+              object: "whatsapp_business_account",
+              field: change.field,
+            }),
+          );
+          continue;
+        }
 
         // Build a quick wa_id → name lookup from the contacts array.
         const nameByWaId = new Map<string, string>();
@@ -860,7 +1030,26 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           // defensively. The DB stores digits-only too (lib/phone.ts) so the
           // contact lookup will hit on the inbound's first reply.
           const phone = m.from ? m.from.replace(/\D/g, "") : undefined;
-          if (!externalId || !phone) continue;
+          // BSUID forward-compat: accept a message identified by a business-
+          // scoped id / @username when Meta omits the phone (2026 rollout), so
+          // it isn't dropped. Phone stays primary today (bsuid/username null).
+          const bsuid = typeof m.bsuid === "string" && m.bsuid ? m.bsuid : undefined;
+          const username =
+            typeof m.username === "string" && m.username ? m.username : undefined;
+          if (!externalId || (!phone && !bsuid)) continue;
+          const contactName = (phone ? nameByWaId.get(phone) : undefined) ?? null;
+          // Shared identity fragment spread into every inbound-message emit
+          // below (exactly one of phone/bsuid is the resolve key at ingest).
+          const identity = {
+            ...(phone ? { contactPhone: phone } : {}),
+            ...(bsuid ? { bsuid } : {}),
+            ...(username ? { username } : {}),
+          };
+          // Click-to-WhatsApp ad attribution (only on the first ad-sourced
+          // inbound) — spread into the content emits so the "from your ad" chip
+          // renders on whichever message type carried the referral.
+          const attribution = attributionForMessage(m);
+          const attributionSpread = attribution ? { attribution } : {};
 
           const tsSecs = m.timestamp ? Number(m.timestamp) : NaN;
           const ts = Number.isFinite(tsSecs) ? new Date(tsSecs * 1000) : new Date();
@@ -876,9 +1065,10 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             events.push({
               kind: "message",
               externalId,
-              contactPhone: phone,
-              contactName: nameByWaId.get(phone) ?? null,
+              ...identity,
+              contactName,
               body,
+              ...attributionSpread,
               timestamp: ts,
               rawPayload: payload as Record<string, unknown>,
               ...(replyToExternalId ? { replyToExternalId } : {}),
@@ -901,8 +1091,8 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               events.push({
                 kind: "message",
                 externalId,
-                contactPhone: phone,
-                contactName: nameByWaId.get(phone) ?? null,
+                ...identity,
+                contactName,
                 body: title,
                 interactiveReply: { kind: "button_reply", id: optId, title },
                 timestamp: ts,
@@ -917,8 +1107,8 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               events.push({
                 kind: "message",
                 externalId,
-                contactPhone: phone,
-                contactName: nameByWaId.get(phone) ?? null,
+                ...identity,
+                contactName,
                 body: title,
                 interactiveReply: { kind: "list_reply", id: optId, title },
                 timestamp: ts,
@@ -929,6 +1119,30 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             }
             // Unknown interactive subtype — skip rather than fabricate a
             // body. Future Meta additions (e.g. nfm_reply) land here.
+            continue;
+          }
+
+          // Template quick-reply tap: a customer tapped a QUICK_REPLY button on
+          // an approved template we sent. Arrives as `type:"button"` with
+          // `button.payload` = the author-assigned id + `button.text` = the label.
+          // Without this branch it fell through to the "unsupported message"
+          // placeholder — losing the payload the ask_question step routes on.
+          // Emit a structured button_reply, parity with interactive replies.
+          if (m.type === "button") {
+            const payloadId = m.button?.payload;
+            const title = m.button?.text ?? "";
+            if (!payloadId) continue;
+            events.push({
+              kind: "message",
+              externalId,
+              ...identity,
+              contactName,
+              body: title,
+              interactiveReply: { kind: "button_reply", id: payloadId, title },
+              timestamp: ts,
+              rawPayload: payload as Record<string, unknown>,
+              ...(replyToExternalId ? { replyToExternalId } : {}),
+            } satisfies NormalizedInboundMessage);
             continue;
           }
 
@@ -965,12 +1179,18 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             // 200, so Meta never redelivers — dropping these loses them forever).
             const placeholder = placeholderForUnhandledType(m);
             if (!placeholder) continue;
+            // Location pins + contact cards additionally carry structured data
+            // for a dedicated bubble (map pin / vCard). The placeholder body
+            // stays for search / list preview / unread.
+            const structured = structuredForMessage(m);
             events.push({
               kind: "message",
               externalId,
-              contactPhone: phone,
-              contactName: nameByWaId.get(phone) ?? null,
+              ...identity,
+              contactName,
               body: placeholder,
+              ...(structured ? { structured } : {}),
+              ...attributionSpread,
               timestamp: ts,
               rawPayload: payload as Record<string, unknown>,
               ...(replyToExternalId ? { replyToExternalId } : {}),
@@ -997,11 +1217,12 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           events.push({
             kind: "message",
             externalId,
-            contactPhone: phone,
-            contactName: nameByWaId.get(phone) ?? null,
+            ...identity,
+            contactName,
             // Caption goes into body so search + previews stay uniform.
             body: mediaPayload.caption ?? "",
             media,
+            ...attributionSpread,
             timestamp: ts,
             rawPayload: payload as Record<string, unknown>,
             ...(replyToExternalId ? { replyToExternalId } : {}),
@@ -1061,7 +1282,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   },
 
   async sendText(args: SendTextArgs, config: MetaSendConfig): Promise<SendTextResult> {
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
     // No `retry:` — customer-visible /messages sends are NON-idempotent (Meta
     // assigns the wamid, there's no client idempotency key), so a metaFetch
     // 5xx/timeout retry could deliver the same message twice. The worker-level
@@ -1079,7 +1300,13 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         recipient_type: "individual",
         to: args.to,
         type: "text",
-        text: { body: args.body },
+        // `preview_url` renders a link-preview card for the first URL in the
+        // body. Auto-enabled when the body contains an http(s) link (caller can
+        // force it either way). Meta ignores it when there's no URL.
+        text: {
+          body: args.body,
+          preview_url: args.previewUrl ?? /https?:\/\//i.test(args.body),
+        },
         // When replying, include `context` so the customer's WhatsApp shows
         // the quote + jump-to-original behavior. Meta validates the wamid
         // is recent enough; a stale wamid returns error 131xxx.
@@ -1161,7 +1388,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                 {
                   title: (args.listSectionTitle ?? "Options").slice(0, 24),
                   rows: args.options.map((o) => ({
-                    id: o.id.slice(0, 200),
+                    // Meta caps a list-row id at 256 chars (same as buttons) —
+                    // NOT 200. Truncating at 200 silently corrupted a >200-char
+                    // id, so the `list_reply.id` didn't match on reply and
+                    // workflow routing (ask_question) fell through.
+                    id: o.id.slice(0, 256),
                     // List rows: title cap 24, description cap 72.
                     title: o.title.slice(0, 24),
                     ...(o.description
@@ -1173,7 +1404,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             },
           };
 
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
     const res = await metaFetch(url, {
       method: "POST",
       headers: {
@@ -1220,7 +1451,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // Constraint: requires a recent inbound to anchor on. Outside the 24h
     // window (no recent inbound), Meta rejects with policy errors — we
     // swallow them since the agent's local UX shouldn't degrade.
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
     // Idempotent best-effort — keep the transient-blip retry.
     const res = await metaFetch(url, {
       method: "POST",
@@ -1250,7 +1481,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // status: "read" — marking the latest wamid as read implicitly marks
     // every earlier inbound from that conversation as read on the customer's
     // device, so one call per agent-view is enough.
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
     // Idempotent read-receipt — marking a wamid read twice is a no-op, so the
     // transient-blip retry stays enabled.
     const res = await metaFetch(url, {
@@ -1288,7 +1519,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   ): Promise<FetchedMedia> {
     // Step 1: GET /{media-id} → { url, mime_type, ... }. The signed URL is
     // valid for ~5 minutes — we MUST hit it immediately. Don't store it.
-    const metaUrl = `https://graph.facebook.com/${config.graphVersion}/${encodeURIComponent(externalMediaId)}`;
+    const metaUrl = `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(externalMediaId)}`;
     // GET — idempotent; keep the transient-blip retry (this runs on the webhook
     // hot path where a Meta CDN hiccup shouldn't drop an inbound attachment).
     const metaRes = await metaFetch(metaUrl, {
@@ -1346,7 +1577,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   ): Promise<UploadMediaResult> {
     // Multipart upload to /{phone-number-id}/media. Meta returns an id valid
     // for ~30 days, single-use per outbound message.
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/media`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/media`;
     const fd = new FormData();
     fd.append("messaging_product", "whatsapp");
     // Meta requires the type field — using the mime type works. The wire
@@ -1392,7 +1623,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   },
 
   async sendMedia(args: SendMediaArgs, config: MetaSendConfig): Promise<SendTextResult> {
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
     // Build the type-specific subobject. Caption is only accepted on
     // image/video/document; sticker + audio reject it (Meta returns 100).
     const sub: Record<string, unknown> = { id: args.mediaId };
@@ -1461,7 +1692,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // up because most teams have <100 templates total and one round-trip is
     // strictly better than three.
     const url = new URL(
-      `https://graph.facebook.com/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`,
+      `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`,
     );
     url.searchParams.set("fields", "name,language,status,category,components,id");
     url.searchParams.set("limit", "200");
@@ -1507,7 +1738,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   ): Promise<CreateTemplateResult> {
     if (!config.wabaId) throw new MissingWabaIdError();
 
-    const url = `https://graph.facebook.com/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`;
     const res = await metaFetch(url, {
       method: "POST",
       headers: {
@@ -1549,7 +1780,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // Without `hsm_id`, Meta deletes ALL language variants under `name`.
     // We pass it when we have it so deleting one language leaves the others.
     const url = new URL(
-      `https://graph.facebook.com/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`,
+      `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`,
     );
     url.searchParams.set("name", args.name);
     if (args.externalId) url.searchParams.set("hsm_id", args.externalId);
@@ -1585,7 +1816,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // Step 1: create a resumable upload session. Endpoint is app-scoped, not
     // WABA-scoped — different from the per-message media upload.
     const startUrl = new URL(
-      `https://graph.facebook.com/${config.graphVersion}/${encodeURIComponent(config.appId)}/uploads`,
+      `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.appId)}/uploads`,
     );
     startUrl.searchParams.set("file_length", String(args.bytes.byteLength));
     startUrl.searchParams.set("file_type", args.mimeType);
@@ -1618,7 +1849,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // Step 2: POST the bytes to the session. The Authorization header uses
     // `OAuth <token>` (not Bearer) for this endpoint — undocumented for a
     // long time, called out only in the resumable-upload guide.
-    const uploadUrl = `https://graph.facebook.com/${config.graphVersion}/${sessionId}`;
+    const uploadUrl = `${GRAPH_BASE}/${config.graphVersion}/${sessionId}`;
     const ab = new ArrayBuffer(args.bytes.byteLength);
     new Uint8Array(ab).set(args.bytes);
     const uploadRes = await metaFetch(uploadUrl, {
@@ -1650,7 +1881,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     args: SendTemplateArgs,
     config: MetaSendConfig,
   ): Promise<SendTextResult> {
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
 
     // Build the `components` array Meta expects. Each parameterized component
     // becomes one entry with `type` ("header" | "body" | "button") and a
@@ -1675,10 +1906,39 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         parameters: [{ type: "text", text: args.variables.header }],
       });
     }
-    if (args.variables.body.length > 0) {
+    // Body params. Named format (`parameter_format: NAMED`, `{{order_id}}`)
+    // takes precedence when the caller supplied `bodyNamed`; otherwise the
+    // positional `{{1}}, {{2}}, …` array. Empty in both cases → no body entry.
+    if (args.variables.bodyNamed && args.variables.bodyNamed.length > 0) {
+      components.push({
+        type: "body",
+        parameters: args.variables.bodyNamed.map(({ name, text }) => ({
+          type: "text",
+          parameter_name: name,
+          text,
+        })),
+      });
+    } else if (args.variables.body.length > 0) {
       components.push({
         type: "body",
         parameters: args.variables.body.map((text) => ({ type: "text", text })),
+      });
+    }
+    // Dynamic buttons (URL suffix / copy-code / quick-reply payload). Each is
+    // its own `button` component keyed by `sub_type` + `index`. Static buttons
+    // carry no parameter and are simply not listed here.
+    for (const btn of args.variables.buttons ?? []) {
+      const parameter =
+        btn.subType === "copy_code"
+          ? { type: "coupon_code", coupon_code: btn.text }
+          : btn.subType === "quick_reply"
+            ? { type: "payload", payload: btn.text }
+            : { type: "text", text: btn.text };
+      components.push({
+        type: "button",
+        sub_type: btn.subType,
+        index: String(btn.index),
+        parameters: [parameter],
       });
     }
 
@@ -1735,7 +1995,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     args: { to: string },
     config: MetaSendConfig,
   ): Promise<{ permissionRequestId: string; expiresAt: Date }> {
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/call_permission_requests`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/call_permission_requests`;
     const res = await metaFetch(url, {
       method: "POST",
       headers: {
@@ -1772,7 +2032,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     args: { to: string; sdpOffer: string; from?: string },
     config: MetaSendConfig,
   ): Promise<{ externalCallId: string }> {
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/calls`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/calls`;
     const res = await metaFetch(url, {
       method: "POST",
       headers: {
@@ -1823,7 +2083,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // hops (pre_accept → accept) exist for media timing; both carry the
     // same SDP answer. Without this Meta rejects pre_accept with 400 and
     // the call never connects on the answering side.
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/calls`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/calls`;
     // Idempotent: a fixed (call_id, action) re-issued is a no-op on Meta's side.
     // Keep the transient-blip retry (this is NOT the non-idempotent placeCall).
     const res = await metaFetch(url, {
@@ -1854,7 +2114,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     args: { externalCallId: string; sdpAnswer: string },
     config: MetaSendConfig,
   ): Promise<void> {
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/calls`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/calls`;
     // Idempotent (fixed call_id + action); keep the transient-blip retry.
     const res = await metaFetch(url, {
       method: "POST",
@@ -1884,7 +2144,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     args: { externalCallId: string; reason?: "busy" | "declined" },
     config: MetaSendConfig,
   ): Promise<void> {
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/calls`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/calls`;
     // Idempotent (fixed call_id + action); keep the transient-blip retry.
     const res = await metaFetch(url, {
       method: "POST",
@@ -1914,7 +2174,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     args: { externalCallId: string },
     config: MetaSendConfig,
   ): Promise<void> {
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/calls`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/calls`;
     // Idempotent terminate — a repeat on an already-ended call is treated as
     // success below, so the transient-blip retry is safe to keep.
     const res = await metaFetch(url, {
@@ -1963,7 +2223,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   async getPhoneNumberSettings(
     config: MetaSendConfig,
   ): Promise<{ raw: unknown }> {
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/settings`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/settings`;
     // GET — idempotent diagnostic read, keep the retry.
     const res = await metaFetch(url, {
       retry: true,
@@ -1987,7 +2247,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   },
 
   async enableCalling(config: MetaSendConfig): Promise<{ ok: true; raw: unknown }> {
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/settings`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/settings`;
     // 24/7 calling hours. Meta REQUIRES both `timezone_id` and
     // `weekly_operating_hours` even when status is set — confirmed by
     // their schema-constraint error message. With `status: ENABLED` +
@@ -2049,16 +2309,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
 };
 
-export class MetaSendError extends Error {
-  readonly httpStatus: number;
-  readonly body: string;
-  constructor(message: string, httpStatus: number, body: string) {
-    super(message);
-    this.name = "MetaSendError";
-    this.httpStatus = httpStatus;
-    this.body = body;
-  }
-}
+// Send-error classification moved to `meta-send-error.ts` (shared with the
+// social providers). Re-exported here so every existing `@/lib/providers/meta`
+// import keeps working. Imported at the top for meta.ts's own `throw`s.
+export { MetaSendError, normalizeMetaSendError };
+export type { MetaErrorCode, NormalizedSendError } from "./meta-send-error";
 
 /**
  * minor#3: thrown by `fetchMedia` when the response Content-Length already
@@ -2075,148 +2330,6 @@ export class MediaTooLargeError extends Error {
     this.declaredBytes = declaredBytes;
     this.maxBytes = maxBytes;
   }
-}
-
-/**
- * Stable error code surfaced to the UI / external API consumers. Substring-
- * matching Meta's free-form `body` string in every callsite was both fragile
- * (one wording change from Meta breaks the match) and inconsistent (only the
- * forward route did it). One translator, used everywhere.
- *
- * `code` is the only thing UI / n8n flows should branch on. `message` is a
- * one-liner safe to show as the toast. `detail` is the raw Meta body for the
- * dev console.
- *
- * Meta error reference: https://developers.facebook.com/docs/whatsapp/cloud-api/support/error-codes
- */
-export type MetaErrorCode =
-  | "outside_24h_window"   // 131047 — recipient hasn't messaged in 24h; templates only
-  | "invalid_recipient"    // 131026/131051 — number invalid or not on WhatsApp
-  | "rate_limited"         // 4 / 80007 / 130429 / 131048 / 131056 — Meta rate/throughput/messaging limit hit
-  | "auth_expired"         // 190 — access token expired
-  | "unsupported_message"  // 131009 — content type not supported on this account
-  | "duplicate_button_title" // 131009 + "Duplicate button title" — interactive buttons reuse a title
-  | "provider_rejected";   // catch-all for anything else MetaSendError-shaped
-
-export interface NormalizedSendError {
-  code: MetaErrorCode;
-  /** UI-safe one-liner. */
-  message: string;
-  /** Raw Meta body (truncated). For logs / dev console. */
-  detail: string;
-  /** Original HTTP status from Meta. */
-  httpStatus: number;
-}
-
-/**
- * Translate a thrown `MetaSendError` into the normalized shape above. The
- * detection uses Meta's numeric error code first, then a few well-known
- * substring fallbacks for cases where the body shape varies. Order matters:
- * the first match wins.
- *
- * Returns `null` for non-Meta errors so callers can keep their own catch-all
- * 502 path.
- */
-export function normalizeMetaSendError(err: unknown): NormalizedSendError | null {
-  if (!(err instanceof MetaSendError)) return null;
-  const body = err.body;
-  const httpStatus = err.httpStatus;
-  const detail = body.slice(0, 500);
-
-  // Parse Meta's numeric error code if present. Body is usually JSON like
-  // `{"error":{"code":131047,"message":"...","error_subcode":...}}`. We try
-  // JSON first and fall back to a regex so a non-JSON body still hits.
-  const numericCode = extractMetaErrorCode(body);
-
-  if (numericCode === 131047 || /131047|re-engagement|24 hours/i.test(body)) {
-    return {
-      code: "outside_24h_window",
-      message: "24-hour window closed — send an approved template to re-engage.",
-      detail,
-      httpStatus,
-    };
-  }
-  if (numericCode === 131026 || numericCode === 131051) {
-    return {
-      code: "invalid_recipient",
-      message: "Recipient number isn't valid or isn't on WhatsApp.",
-      detail,
-      httpStatus,
-    };
-  }
-  // Rate / throughput / messaging-limit family. 4 + 80007 are the legacy
-  // app-level rate codes; the ones a REAL send actually hits under burst are:
-  //   130429 — "Rate limit hit" (per-second message throughput; the most common
-  //            pacing rejection during a broadcast + concurrent inbox sends)
-  //   131048 — "Spam rate limit hit" (quality/messaging-limit restriction on the
-  //            number — lasts hours, not seconds)
-  //   131056 — business↔consumer pair rate limit (too many messages to one number)
-  // All five normalize to `rate_limited` so the existing retry machinery engages
-  // automatically: BullMQ send-worker retry, the broadcast runner's 429 streak
-  // backoff + cross-lane pause, and the forward-loop break. (131048's spam limit
-  // genuinely outlasts the 60s lane pause; the broadcast still paces + retries
-  // rather than mass-failing every recipient on the first rejection.)
-  if (
-    numericCode === 4 ||
-    numericCode === 80007 ||
-    numericCode === 130429 ||
-    numericCode === 131048 ||
-    numericCode === 131056
-  ) {
-    return {
-      code: "rate_limited",
-      message: "WhatsApp is rate-limiting this number — slow down or wait.",
-      detail,
-      httpStatus,
-    };
-  }
-  if (numericCode === 190) {
-    return {
-      code: "auth_expired",
-      message: "WhatsApp access token expired — reconnect the number in Settings.",
-      detail,
-      httpStatus,
-    };
-  }
-  if (numericCode === 131009) {
-    // 131009 is a catch-all "Parameter value is not valid". Meta puts the
-    // specific reason in error_data.details. Interactive button sends with
-    // repeated titles surface as "Duplicate button title" — map that to an
-    // actionable message instead of the generic "unsupported" copy. The UI
-    // already blocks dupes, so reaching here means a non-browser caller
-    // (external API / workflow step) sent them.
-    if (/duplicate\s+button\s+title/i.test(body)) {
-      return {
-        code: "duplicate_button_title",
-        message: "Each button needs a unique title — WhatsApp rejects duplicates.",
-        detail,
-        httpStatus,
-      };
-    }
-    return {
-      code: "unsupported_message",
-      message: "This message type isn't supported on this WhatsApp number.",
-      detail,
-      httpStatus,
-    };
-  }
-  return {
-    code: "provider_rejected",
-    message: `WhatsApp rejected the send: ${detail.slice(0, 160)}`,
-    detail,
-    httpStatus,
-  };
-}
-
-function extractMetaErrorCode(body: string): number | null {
-  try {
-    const json = JSON.parse(body) as { error?: { code?: unknown } };
-    if (typeof json.error?.code === "number") return json.error.code;
-  } catch {
-    // Not JSON — fall through to regex.
-  }
-  const m = body.match(/"code"\s*:\s*(\d+)/);
-  return m ? Number(m[1]) : null;
 }
 
 /**

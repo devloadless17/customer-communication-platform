@@ -46,6 +46,8 @@ export const ListContactsQuerySchema = z.object({
   source: z.enum(["inbound", "manual"]).optional().catch(undefined),
   /** Comma-separated list of tag ids; ANY-match. Empty entries are dropped. */
   tagIds: z.string().optional(),
+  /** Filter to one channel (whatsapp / messenger / instagram). */
+  channel: z.enum(["whatsapp", "messenger", "instagram"]).optional().catch(undefined),
   window: z.enum(["open", "closed"]).optional().catch(undefined),
   /** Either a stage cuid OR the literal "none" (filter to no-stage). Empty
    *  strings are dropped (`min(1)` enforces non-empty). */

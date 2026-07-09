@@ -14,6 +14,10 @@ import {
 } from "@/lib/providers/meta";
 import type { MessagingProvider } from "@ccp/shared/providers/types";
 import type { Channel } from "@ccp/shared/types";
+import { LIVE_CHANNELS, isPhoneChannel } from "@ccp/shared/providers/capabilities";
+
+/** Resolved send binding for one channel — the provider + its per-team config. */
+type ChannelBinding = { provider: MessagingProvider; config: unknown };
 
 /**
  * Broadcasts send pre-approved WhatsApp templates, so they're bound to the
@@ -515,64 +519,97 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     return;
   }
 
-  const binding = getProviderBinding(BROADCAST_CHANNEL);
-  let config;
-  try {
-    config = await binding.getSendConfig(broadcast.teamId);
-  } catch (err) {
-    const msg =
-      err instanceof ProviderNotConfiguredError
-        ? `WhatsApp not connected: ${err.message}`
-        : err instanceof Error
-          ? err.message
-          : String(err);
-    // RECOVERABLE, not terminal: WhatsApp creds are missing/expired at run
-    // start — the exact dead-credential class the permanent-error breaker parks
-    // mid-run. Park the row `paused` (NOT `failed`) so the boot reconciler
-    // resumes it once creds are fixed, instead of forcing delete+recreate.
-    // CAS on status='queued' (NOT 'running' like the breaker — this fires
-    // BEFORE the queued→running claim below): every recipient is still
-    // `queued`, so the per-recipient queued→sent CAS on resume sends each
-    // exactly once. The guard also lets a concurrent cancel/delete win.
-    const parked = await db.broadcast.updateMany({
-      where: { id: broadcast.id, status: "queued" },
-      data: { status: "paused", lastError: msg.slice(0, 1000) },
-    });
-    if (parked.count === 0) return; // already canceled / claimed elsewhere
-    console.warn(
-      `[broadcast ${broadcast.id}] WhatsApp not connected at fire time — parked as paused (reconciler resumes on next restart once creds are fixed)`,
-    );
-    await publish({
-      type: "broadcast.status_changed",
-      teamId: broadcast.teamId,
-      broadcastId: broadcast.id,
-      status: "paused",
-      error: msg,
-    });
-    return;
-  }
+  // Resolve the send binding(s). Two modes:
+  //  - contact  (default): ONE channel (`broadcast.channel`) with the
+  //    park-on-missing-creds recovery below — byte-identical to before.
+  //  - customer (omnichannel): recipients span mixed channels, so load a
+  //    binding per LIVE channel; a recipient on an unconnected channel fails
+  //    individually rather than parking the whole broadcast.
+  // Both feed one `bindingByChannel` map; `processOneRecipient` resolves the
+  // right entry per recipient's send channel.
+  const isCustomerMode = broadcast.targetMode === "customer";
+  const bindingByChannel = new Map<Channel, ChannelBinding>();
 
-  const provider = binding.provider;
-  if (!provider.sendTemplate) {
-    await fail(broadcast.id, "provider does not support templates");
-    return;
+  if (isCustomerMode) {
+    for (const ch of LIVE_CHANNELS) {
+      try {
+        const b = getProviderBinding(ch);
+        bindingByChannel.set(ch, { provider: b.provider, config: await b.getSendConfig(broadcast.teamId) });
+      } catch {
+        // Not connected — recipients resolved onto this channel fail individually.
+      }
+    }
+    if (bindingByChannel.size === 0) {
+      await fail(broadcast.id, "No channel is connected to send this broadcast.");
+      return;
+    }
+  } else {
+    // Route to the broadcast's ACTUAL channel: template broadcasts are WhatsApp;
+    // freeform broadcasts carry their own channel (Messenger / Instagram).
+    const binding = getProviderBinding(broadcast.channel);
+    let config;
+    try {
+      config = await binding.getSendConfig(broadcast.teamId);
+    } catch (err) {
+      const msg =
+        err instanceof ProviderNotConfiguredError
+          ? `${broadcast.channel} not connected: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      // RECOVERABLE, not terminal: creds missing/expired at run start — the
+      // exact dead-credential class the permanent-error breaker parks mid-run.
+      // Park the row `paused` (NOT `failed`) so the boot reconciler resumes it
+      // once creds are fixed. CAS on status='queued' (fires BEFORE the
+      // queued→running claim below): every recipient is still `queued`, so the
+      // per-recipient queued→sent CAS on resume sends each exactly once.
+      const parked = await db.broadcast.updateMany({
+        where: { id: broadcast.id, status: "queued" },
+        data: { status: "paused", lastError: msg.slice(0, 1000) },
+      });
+      if (parked.count === 0) return; // already canceled / claimed elsewhere
+      console.warn(
+        `[broadcast ${broadcast.id}] ${broadcast.channel} not connected at fire time — parked as paused (reconciler resumes on next restart once creds are fixed)`,
+      );
+      await publish({
+        type: "broadcast.status_changed",
+        teamId: broadcast.teamId,
+        broadcastId: broadcast.id,
+        status: "paused",
+        error: msg,
+      });
+      return;
+    }
+
+    const provider = binding.provider;
+    // Only template broadcasts need the template send method; freeform broadcasts
+    // send via `sendText` (always present). A social provider has no `sendTemplate`.
+    if (broadcast.kind === "template" && !provider.sendTemplate) {
+      await fail(broadcast.id, "provider does not support templates");
+      return;
+    }
+    bindingByChannel.set(broadcast.channel, { provider, config });
   }
 
   const variables = parseVariables(broadcast.variables);
-  // Hoist what doesn't change between recipients: the template body (for the
-  // placeholder count + DB-side rendering preview) and its variable bindings.
-  // Bindings define WHICH variables are pulled per-recipient and which use
-  // the broadcast's literal value (the legacy "same for everyone" path).
-  const template = await loadTemplate(broadcast.teamId, broadcast.templateId);
-  const templateBody = template.bodyText;
-  const bindings = parseVariableBindings(template.variableBindings);
-  const bodyVarCount = countTemplatePlaceholders(templateBody);
-  if (variables.body.length !== bodyVarCount) {
-    await fail(
-      broadcast.id,
-      `Variable count mismatch: template expects ${bodyVarCount}, broadcast has ${variables.body.length}. Template may have changed since the broadcast was created.`,
-    );
-    return;
+  // Hoist what doesn't change between recipients. TEMPLATE broadcasts load the
+  // template body + bindings + run the variable-count guard. FREEFORM broadcasts
+  // (Messenger/Instagram) carry a plain `bodyText` and skip all of that.
+  const template =
+    broadcast.kind === "template"
+      ? await loadTemplate(broadcast.teamId, broadcast.templateId!)
+      : null;
+  const templateBody = template?.bodyText ?? "";
+  const bindings = parseVariableBindings(template?.variableBindings ?? null);
+  if (template) {
+    const bodyVarCount = countTemplatePlaceholders(templateBody);
+    if (variables.body.length !== bodyVarCount) {
+      await fail(
+        broadcast.id,
+        `Variable count mismatch: template expects ${bodyVarCount}, broadcast has ${variables.body.length}. Template may have changed since the broadcast was created.`,
+      );
+      return;
+    }
   }
 
   // Compare-and-swap: claim the broadcast atomically. If two POSTs raced (or
@@ -678,7 +715,12 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       select: {
         id: true,
         name: true,
+        // Drives per-recipient send-channel routing in customer-mode (and the
+        // conversation/message channel stamp in every mode).
+        identityChannel: true,
         phoneNumber: true,
+        // Freeform (social) broadcasts dial the PSID/IGSID, not a phone.
+        externalContactId: true,
         email: true,
         location: true,
         // Re-checked at SEND time (not just at audience-resolution time) so a
@@ -700,7 +742,9 @@ async function runBroadcast(broadcastId: string): Promise<void> {
           select: {
             id: true,
             name: true,
+            identityChannel: true,
             phoneNumber: true,
+            externalContactId: true,
             email: true,
             location: true,
             deletedAt: true,
@@ -858,8 +902,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
           await processOneRecipient(
             broadcast,
             recipient,
-            provider,
-            config,
+            bindingByChannel,
             bindings,
             variables,
             templateBody,
@@ -1022,9 +1065,13 @@ async function processOneRecipient(
   broadcast: {
     id: string;
     teamId: string;
-    templateId: string;
-    templateName: string;
-    templateLanguage: string;
+    kind: "template" | "freeform";
+    targetMode: "contact" | "customer";
+    channel: Channel;
+    templateId: string | null;
+    templateName: string | null;
+    templateLanguage: string | null;
+    bodyText: string | null;
     createdById: string | null;
   },
   recipient: {
@@ -1033,15 +1080,16 @@ async function processOneRecipient(
     contact: {
       id: string;
       name: string;
+      identityChannel: Channel;
       phoneNumber: string | null;
+      externalContactId: string | null;
       email: string | null;
       location: string | null;
       deletedAt: Date | null;
       customFields: Prisma.JsonValue;
     };
   },
-  provider: MessagingProvider,
-  config: unknown,
+  bindingByChannel: Map<Channel, ChannelBinding>,
   bindings: VariableBindings,
   variables: BroadcastVariables,
   templateBody: string,
@@ -1050,12 +1098,33 @@ async function processOneRecipient(
   // the same contact appears multiple times in a single broadcast.
   conversationCache: Map<string, { id: string; status: string; unreadCount: number }>,
 ): Promise<void> {
+  // Resolve the SEND channel + its provider binding for THIS recipient:
+  //  - contact-mode: the broadcast's single channel.
+  //  - customer-mode: the recipient's own identity channel (omnichannel).
+  // A recipient whose channel isn't connected fails individually (customer-mode
+  // can sweep in a channel the team never connected) — never poisons the run.
+  const sendChannel: Channel =
+    broadcast.targetMode === "customer"
+      ? recipient.contact.identityChannel
+      : broadcast.channel;
+  const activeBinding = bindingByChannel.get(sendChannel);
+  if (!activeBinding) {
+    await markRecipientFailed(recipient.id, `${sendChannel} is not connected.`);
+    bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
+    return;
+  }
+  const { provider, config } = activeBinding;
+
   // Capture the optional method once — providers without a template catalog
   // fail the recipient gracefully (vs throwing) so the rest of the broadcast
   // continues. Using the local const also keeps `sendTemplate` typed as
   // defined across the await points below.
+  // Template broadcasts need the template send method; freeform broadcasts use
+  // plain `sendText` (a required provider method, always present). customer-mode
+  // is always body-based, so it always takes the freeform path.
   const sendTemplate = provider.sendTemplate;
-  if (!sendTemplate) {
+  const isFreeform = broadcast.targetMode === "customer" || broadcast.kind === "freeform";
+  if (!isFreeform && !sendTemplate) {
     await markRecipientFailed(recipient.id, "provider does not support templates");
     bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
     return;
@@ -1117,9 +1186,10 @@ async function processOneRecipient(
             data: {
               teamId: broadcast.teamId,
               contactId: recipient.contactId,
-              // Broadcasts are WhatsApp-only by design; stamp the same channel
-              // the recipient messages carry so conv.channel == msg.channel.
-              channel: BROADCAST_CHANNEL,
+              // Stamp the broadcast's channel so conv.channel == msg.channel ==
+              // the contact's identity channel (WhatsApp for templates, the
+              // social channel for freeform) — never a hardcoded WhatsApp.
+              channel: sendChannel,
               status: "pending",
               lastMessagePreview: "",
             },
@@ -1169,18 +1239,25 @@ async function processOneRecipient(
       recipient.contact,
     );
 
-    // WhatsApp templates require a phone number. Skip non-phone recipients
-    // (Instagram/Telegram contacts that wandered into the audience) with a
-    // clear failure message rather than feeding `null` to Meta.
-    if (!recipient.contact.phoneNumber) {
+    // Destination address by the SEND channel: phone channels (WhatsApp) dial
+    // the phone; social channels dial the PSID/IGSID. Channel-based (not
+    // kind-based) so a customer-mode WhatsApp recipient correctly dials their
+    // phone even though the send is freeform. Skip a recipient missing the
+    // right identity with a clear failure rather than feeding `null` to Meta.
+    const dialsPhone = isPhoneChannel(sendChannel);
+    const toPhone = dialsPhone
+      ? recipient.contact.phoneNumber
+      : recipient.contact.externalContactId;
+    if (!toPhone) {
       await markRecipientFailed(
         recipient.id,
-        "Contact has no phone number — WhatsApp templates require one.",
+        dialsPhone
+          ? "Contact has no phone number for this channel."
+          : "Contact has no messaging id for this channel.",
       );
       bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
       return;
     }
-    const toPhone = recipient.contact.phoneNumber;
 
     // Empty-variable guard. WhatsApp REJECTS a template whose variable resolved
     // to an empty value ("parameter value is empty"), so firing the send would
@@ -1223,7 +1300,7 @@ async function processOneRecipient(
 
     // The send itself. Anything that throws here counts as a failed recipient
     // — Meta either rejected us or the network died, no message went out.
-    let send: Awaited<ReturnType<typeof sendTemplate>>;
+    let send: Awaited<ReturnType<NonNullable<typeof sendTemplate>>>;
     if (attemptClaim.kind === "reconcile") {
       // A prior (crashed) attempt already reached Meta — skip the Meta call and
       // fall through to the recipient-lock + idempotent bookkeeping using the
@@ -1270,19 +1347,21 @@ async function processOneRecipient(
         return;
       }
       try {
-        send = await sendTemplate(
-          {
-            to: toPhone,
-            name: broadcast.templateName,
-            language: broadcast.templateLanguage,
-            variables: {
-              body: perRecipientVars.body,
-              ...(perRecipientVars.header ? { header: perRecipientVars.header } : {}),
-              ...(headerMedia ? { headerMedia } : {}),
-            },
-          },
-          config,
-        );
+        send = isFreeform
+          ? await provider.sendText({ to: toPhone, body: broadcast.bodyText ?? "" }, config)
+          : await sendTemplate!(
+              {
+                to: toPhone,
+                name: broadcast.templateName!,
+                language: broadcast.templateLanguage!,
+                variables: {
+                  body: perRecipientVars.body,
+                  ...(perRecipientVars.header ? { header: perRecipientVars.header } : {}),
+                  ...(headerMedia ? { headerMedia } : {}),
+                },
+              },
+              config,
+            );
       } catch (err) {
         // Meta rate-limit handling: a flagged number / rapid burst can produce
         // a rate/throughput/messaging-limit response — 4 / 80007 (app-level) or,
@@ -1314,21 +1393,23 @@ async function processOneRecipient(
           }
           await sleep(3_000 + Math.floor(Math.random() * 1_000));
           try {
-            send = await sendTemplate(
-              {
-                to: toPhone,
-                name: broadcast.templateName,
-                language: broadcast.templateLanguage,
-                variables: {
-                  body: perRecipientVars.body,
-                  ...(perRecipientVars.header
-                    ? { header: perRecipientVars.header }
-                    : {}),
-                  ...(headerMedia ? { headerMedia } : {}),
-                },
-              },
-              config,
-            );
+            send = isFreeform
+              ? await provider.sendText({ to: toPhone, body: broadcast.bodyText ?? "" }, config)
+              : await sendTemplate!(
+                  {
+                    to: toPhone,
+                    name: broadcast.templateName!,
+                    language: broadcast.templateLanguage!,
+                    variables: {
+                      body: perRecipientVars.body,
+                      ...(perRecipientVars.header
+                        ? { header: perRecipientVars.header }
+                        : {}),
+                      ...(headerMedia ? { headerMedia } : {}),
+                    },
+                  },
+                  config,
+                );
           } catch (retryErr) {
             await releaseBroadcastSendAttempt(recipient.id);
             await markRecipientFailed(recipient.id, errorDetail(retryErr));
@@ -1489,7 +1570,9 @@ async function processOneRecipient(
       // Render with the same per-recipient values we just sent so the inbox
       // bubble matches what landed in the customer's WhatsApp — not the
       // unresolved literals the agent typed into the broadcast form.
-      const renderedBody = renderTemplateBody(templateBody, perRecipientVars.body);
+      const renderedBody = isFreeform
+        ? (broadcast.bodyText ?? "")
+        : renderTemplateBody(templateBody, perRecipientVars.body);
       const preview = renderedBody.slice(0, 200);
 
       const created = await createOutboundMessageIdempotent({
@@ -1499,7 +1582,7 @@ async function processOneRecipient(
         senderUserId: broadcast.createdById,
         body: renderedBody,
         direction: "out",
-        channel: BROADCAST_CHANNEL,
+        channel: sendChannel,
         status: "sent",
         rawPayload: {
           sentVia: "broadcast",
@@ -1548,7 +1631,7 @@ async function processOneRecipient(
         senderUserId: broadcast.createdById,
         body: renderedBody,
         direction: "out",
-        channel: BROADCAST_CHANNEL,
+        channel: sendChannel,
         status: "sent",
         rawPayload: { sentVia: "broadcast", broadcastId: broadcast.id },
         timestamp: send.timestamp.toISOString(),
@@ -2116,11 +2199,12 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
   const loadCtx = async (broadcastId: string): Promise<RenderCtx | null> => {
     if (ctxByBroadcast.has(broadcastId)) return ctxByBroadcast.get(broadcastId) ?? null;
     const broadcast = await db.broadcast.findUnique({ where: { id: broadcastId } });
-    if (!broadcast) {
+    if (!broadcast || broadcast.kind === "freeform") {
+      // Freeform broadcasts have no template variables to render/preview.
       ctxByBroadcast.set(broadcastId, null);
       return null;
     }
-    const template = await loadTemplate(broadcast.teamId, broadcast.templateId);
+    const template = await loadTemplate(broadcast.teamId, broadcast.templateId!);
     const ctx: RenderCtx = {
       broadcast,
       variables: parseVariables(broadcast.variables),

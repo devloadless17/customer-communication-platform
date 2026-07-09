@@ -11,3 +11,9 @@ export const UnlinkContactSchema = z.object({
   contactId: z.string().trim().min(1),
 });
 export type UnlinkContactInput = z.infer<typeof UnlinkContactSchema>;
+
+/** PATCH /api/customers/:id — rename the PERSON (max 200, empty clears). */
+export const RenameCustomerSchema = z.object({
+  name: z.string().trim().max(200),
+});
+export type RenameCustomerInput = z.infer<typeof RenameCustomerSchema>;

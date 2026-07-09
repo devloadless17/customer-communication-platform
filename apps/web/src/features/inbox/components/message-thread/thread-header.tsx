@@ -3,13 +3,25 @@
 import { memo } from "react";
 import { ChevronLeft, Info, Phone, Search as SearchIcon } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { useCallApi } from "@/features/calls/call-provider";
 import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { formatPhone, initials } from "@ccp/shared/utils";
-import type { ContactStage, ConversationStatus, User } from "@ccp/shared/types";
+import type { Channel, ContactStage, ConversationStatus, User } from "@ccp/shared/types";
+
+/** Display name for the call button's channel label. */
+function callChannelName(channel: Channel | undefined): string {
+  switch (channel) {
+    case "messenger":
+      return "Messenger";
+    case "instagram":
+      return "Instagram";
+    default:
+      return "WhatsApp";
+  }
+}
 
 import { AssignmentDropdown } from "./assignment-dropdown";
 import { ConversationMenu } from "./conversation-menu";
@@ -72,6 +84,7 @@ function ThreadHeaderImpl({
   conversationId,
   contactId,
   contactName,
+  contactAvatarUrl,
   phone,
   status,
   aiEnabled,
@@ -90,6 +103,7 @@ function ThreadHeaderImpl({
   canManageStages,
   canDeleteConversations,
   canMakeCalls,
+  callChannel,
   onInitiateCall,
   onMobileBack,
   onOpenContactDetails,
@@ -98,6 +112,7 @@ function ThreadHeaderImpl({
   conversationId: string;
   contactId: string;
   contactName: string;
+  contactAvatarUrl: string | null;
   phone: string | null;
   status: ConversationStatus;
   /** AI Autopilot state for the header toggle (per-conversation). */
@@ -129,10 +144,14 @@ function ThreadHeaderImpl({
   canDeleteConversations: boolean;
   /**
    * Whether to surface the Phone button. The parent has already filtered
-   * for: (a) capability `calls:make`, (b) channel === "whatsapp", and
-   * (c) contact country code NOT on the BIC blocklist. False = hide button.
+   * for: (a) capability `calls:make`, (b) the channel's `calling` capability
+   * (WhatsApp + Messenger), and (c) contact country NOT on the BIC blocklist.
+   * False = hide button.
    */
   canMakeCalls: boolean;
+  /** Channel of this thread — drives the call button's label ("Call on
+   *  WhatsApp" / "Call on Messenger"). Defaults to WhatsApp copy if absent. */
+  callChannel?: Channel;
   /** Click handler — kicks off the outbound-call flow + handles 4xx UI. */
   onInitiateCall: () => void | Promise<void>;
   /** Mobile back-to-list affordance. Only rendered when set + below md. */
@@ -159,6 +178,7 @@ function ThreadHeaderImpl({
         </button>
       )}
       <Avatar className="size-9">
+        {contactAvatarUrl ? <AvatarImage src={contactAvatarUrl} alt="" /> : null}
         <AvatarFallback
           className="text-xs text-white"
           style={{ backgroundImage: avatarGradient(contactId) }}
@@ -212,8 +232,8 @@ function ThreadHeaderImpl({
             size="icon"
             onClick={() => void onInitiateCall()}
             disabled={liveCall != null}
-            aria-label="Start a WhatsApp call with this contact"
-            title="Call on WhatsApp"
+            aria-label={`Start a ${callChannelName(callChannel)} call with this contact`}
+            title={`Call on ${callChannelName(callChannel)}`}
             className="size-8 pointer-coarse:size-9 text-muted-foreground hover:text-foreground"
           >
             <Phone className="size-4" />

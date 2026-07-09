@@ -12,6 +12,7 @@ import { DbService } from "../../db/db.service";
 import type { UpdateMessengerConfigInput } from "./messenger.schemas";
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
+const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
 const CHANNEL = "messenger" as const;
 
 /** Shape of `ChannelConnection.config` (non-secret) for Messenger. */
@@ -157,7 +158,7 @@ export class MessengerService {
     let derivedPageToken: string | undefined;
     try {
       const res = await fetch(
-        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(pageId)}?fields=name,access_token`,
+        `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(pageId)}?fields=name,access_token`,
         {
           headers: { authorization: `Bearer ${sourceToken}` },
           signal: AbortSignal.timeout(20_000),
@@ -183,8 +184,18 @@ export class MessengerService {
         detail: err instanceof Error ? err.message : String(err),
       });
     }
-    // Prefer the derived Page token; fall back to the source token (it may
-    // already be a Page token if `access_token` wasn't returned).
+    // Prefer the derived Page token. If Graph didn't return one AND the admin
+    // didn't paste a Page token, the only thing left is the shared system-user
+    // token — which the New Pages Experience rejects on every send. Storing it
+    // would mark the channel "connected" but leave it permanently unsendable, so
+    // fail loudly at connect instead of silently later.
+    if (!derivedPageToken && !input.pageAccessToken?.trim()) {
+      throw new BadRequestException({
+        error: "page_token_derivation_failed",
+        detail:
+          "Couldn't get a Page access token for this Page from your Meta App system-user token. Assign the system user to this Page (Business Settings → Pages → Add People) with a messaging task, or paste a Page access token directly.",
+      });
+    }
     const tokenToStore = derivedPageToken ?? sourceToken;
 
     // Verify token: prefer the shared Meta App token (one callback for all

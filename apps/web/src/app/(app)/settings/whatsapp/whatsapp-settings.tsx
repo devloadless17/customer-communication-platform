@@ -64,13 +64,13 @@ export function WhatsappSettings({
     setError(null);
     const body = {
       phoneNumberId: form.get("phoneNumberId"),
-      accessToken: form.get("accessToken"),
-      appSecret: form.get("appSecret"),
-      // verifyToken is owned by the server — pre-minted on first GET and
-      // surfaced in WebhookConfigCard. The form no longer claims ownership.
-      // Pass through wabaId/appId even when empty so the server can clear a stale id.
+      // Access token is an optional override (advanced field); the App secret,
+      // App ID, and verify token now come from the shared Meta App connection,
+      // so this form no longer submits them (sending appSecret:null from the
+      // deleted field would 400 against the string|undefined schema).
+      accessToken: form.get("accessToken") || undefined,
+      // Pass through wabaId even when empty so the server can clear a stale id.
       wabaId: form.get("wabaId") ?? "",
-      appId: form.get("appId") ?? "",
     };
     const res = await apiFetch("/api/team/whatsapp", {
       method: "POST",

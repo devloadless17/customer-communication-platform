@@ -99,8 +99,10 @@ export async function searchContacts(
       name: true,
       phoneNumber: true,
       email: true,
+      identityChannel: true,
       avatarUrl: true,
       createdAt: true,
+      customerId: true,
       conversations: { select: { id: true }, take: 1 },
     },
   });
@@ -113,8 +115,51 @@ export async function searchContacts(
       ? encodeContactCursor({ sortAt: last.createdAt, id: last.id })
       : null;
 
+  // Unified-identity rollup: collapse matched contacts that belong to the same
+  // person (`customerId`) into ONE hit, so a 3-channel person shows once with a
+  // channel-badge cluster instead of three duplicate rows. A contact with no
+  // customerId (not-yet-linked, ~seconds after create) is its own person keyed
+  // by its contactId. Order preserved by the first-matched contact per person.
+  const personKey = (c: { customerId: string | null; id: string }) =>
+    c.customerId ?? `contact:${c.id}`;
+
+  // Fetch the SIBLING channels for every matched person so the cluster shows all
+  // their channels, not only the ones that happened to match the query. Only for
+  // linked persons (customerId set); solo persons already have their one channel.
+  const customerIds = [
+    ...new Set(sliced.map((c) => c.customerId).filter((v): v is string => !!v)),
+  ];
+  const siblingsByCustomer = new Map<string, ContactSearchHit["channels"]>();
+  if (customerIds.length > 0) {
+    const siblings = await db.contact.findMany({
+      where: { teamId, deletedAt: null, customerId: { in: customerIds } },
+      select: {
+        id: true,
+        customerId: true,
+        identityChannel: true,
+        conversations: { select: { id: true }, take: 1 },
+      },
+    });
+    for (const s of siblings) {
+      if (!s.customerId) continue;
+      const list = siblingsByCustomer.get(s.customerId) ?? [];
+      list.push({
+        contactId: s.id,
+        channel: s.identityChannel,
+        conversationId: s.conversations[0]?.id ?? null,
+      });
+      siblingsByCustomer.set(s.customerId, list);
+    }
+  }
+
   const lowered = query.toLowerCase();
-  const items: ContactSearchHit[] = sliced.map((c) => {
+  const seen = new Set<string>();
+  const items: ContactSearchHit[] = [];
+  for (const c of sliced) {
+    const key = personKey(c);
+    if (seen.has(key)) continue; // person already represented by an earlier match
+    seen.add(key);
+
     // Pick which field actually matched, preferring name > email > phone for
     // the snippet (name is the most human-meaningful when several match).
     let matchedField: ContactSearchHit["matchedField"] = "name";
@@ -128,16 +173,28 @@ export async function searchContacts(
         matchedValue = c.phoneNumber;
       }
     }
-    return {
+
+    const channels: ContactSearchHit["channels"] =
+      (c.customerId && siblingsByCustomer.get(c.customerId)) || [
+        {
+          contactId: c.id,
+          channel: c.identityChannel,
+          conversationId: c.conversations[0]?.id ?? null,
+        },
+      ];
+
+    items.push({
       contactId: c.id,
       conversationId: c.conversations[0]?.id ?? null,
       name: c.name,
       phoneNumber: c.phoneNumber,
+      channel: c.identityChannel,
+      channels,
       matchedField,
       matchedValue,
       ...(c.avatarUrl ? { avatarUrl: c.avatarUrl } : {}),
-    };
-  });
+    });
+  }
 
   return { items, nextCursor };
 }

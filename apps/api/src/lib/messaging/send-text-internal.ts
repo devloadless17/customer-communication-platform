@@ -121,6 +121,7 @@ export async function sendTextInternal(
   }
   const provider = conversation.channel;
   const binding = getProviderBinding(provider);
+  const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
 
   // Free-form send window — pre-check on our side so we surface a clean error
   // code instead of letting the provider reject with a cryptic body. Driven by
@@ -128,7 +129,6 @@ export async function sendTextInternal(
   // window restriction (e.g. Telegram), so the check is skipped entirely.
   const windowMs = effectiveSendWindowMs(binding.provider.capabilities);
   if (windowMs !== null) {
-    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
     const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);
     if (win.state === "closed" || win.state === "never") {
       throw new SendTextValidationError(
@@ -138,6 +138,18 @@ export async function sendTextInternal(
       );
     }
   }
+
+  // Meta social: inside the 24h free-form window Meta wants `messaging_type:
+  // RESPONSE` (no tag); in the 24h–7d support band it needs the HUMAN_AGENT tag.
+  // The other three send paths (UI text/media, /v1) already derive this — without
+  // it here, every workflow-driven social send goes out HUMAN_AGENT even inside
+  // 24h, which Meta flags as tag misuse. Ignored by WhatsApp (window null).
+  const freeFormMs = binding.provider.capabilities.freeFormWindowMs;
+  const useHumanAgentTag =
+    freeFormMs !== null &&
+    ["closed", "never"].includes(
+      computeWindowStatus(lastInboundAt, Date.now(), freeFormMs).state,
+    );
 
   let sendConfig;
   try {
@@ -154,7 +166,7 @@ export async function sendTextInternal(
   }
 
   const send = await binding.provider.sendText(
-    { to: channel.to, body },
+    { to: channel.to, body, useHumanAgentTag },
     sendConfig,
   );
 

@@ -87,6 +87,22 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * The customer unsent (deleted) or edited a message. Scoped to the
+   * conversation room like `message:reaction`: agents viewing the thread patch
+   * the target bubble to the tombstone / edited body. Matched by `messageId`
+   * (our internal id). `deletedAt` set → render "deleted"; `editedAt` + `body`
+   * set → replace the text with an "edited" marker.
+   */
+  "message:updated": (payload: {
+    teamId: string;
+    conversationId: string;
+    messageId: string;
+    deletedAt: string | null;
+    editedAt: string | null;
+    body: string | null;
+  }) => void;
+
+  /**
    * Outbound send failed inside the background `message-sends` queue worker.
    * Frontend reducer flips the optimistic bubble (matched by clientTempId)
    * from `pending` to `failed` so the user sees the same error UX as the

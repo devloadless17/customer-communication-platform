@@ -21,14 +21,23 @@ import { db } from "@/lib/db";
  * customer-link sweeper (and reusable by any create path that wants inline
  * linking).
  */
+/**
+ * Prisma client accepted by `resolveCustomerId` — the global `db` (sweeper) or a
+ * transaction client (ingest, so the Customer create rolls back with the
+ * contact if the surrounding tx aborts). Both expose the `contact`/`customer`
+ * delegates this uses.
+ */
+type IdentityClient = Pick<typeof db, "contact" | "customer">;
+
 export async function resolveCustomerId(
   teamId: string,
   contact: {
-    id: string;
+    id?: string;
     phoneNumber: string | null;
     email: string | null;
     name: string;
   },
+  client: IdentityClient = db,
 ): Promise<string> {
   // Build the strong-key OR arms for whichever verified identifiers exist.
   const strongKeys: Prisma.ContactWhereInput[] = [];
@@ -38,11 +47,12 @@ export async function resolveCustomerId(
   if (strongKeys.length > 0) {
     // Another ALREADY-LINKED contact in the team sharing a strong key is the
     // same person — adopt its customer. Oldest wins so the canonical customer
-    // is stable regardless of sweep order.
-    const match = await db.contact.findFirst({
+    // is stable regardless of sweep order. `id` is optional: at ingest the
+    // contact row doesn't exist yet, so there's nothing to exclude.
+    const match = await client.contact.findFirst({
       where: {
         teamId,
-        id: { not: contact.id },
+        ...(contact.id ? { id: { not: contact.id } } : {}),
         customerId: { not: null },
         deletedAt: null,
         OR: strongKeys,
@@ -54,7 +64,7 @@ export async function resolveCustomerId(
   }
 
   // Distinct person → fresh Customer, seeded with the contact's display name.
-  const customer = await db.customer.create({
+  const customer = await client.customer.create({
     data: { teamId, name: contact.name },
     select: { id: true },
   });

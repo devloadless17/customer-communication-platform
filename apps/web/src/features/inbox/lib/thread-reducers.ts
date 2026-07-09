@@ -198,6 +198,35 @@ export function applyMessageReaction(
   return { ...prev, messages: nextMessages };
 }
 
+export function applyMessageUpdated(
+  prev: ConversationWithRefs,
+  payload: {
+    messageId: string;
+    deletedAt: string | null;
+    editedAt: string | null;
+    body: string | null;
+  },
+): ConversationWithRefs {
+  const idx = prev.messages.findIndex((m) => m.id === payload.messageId);
+  if (idx === -1) return prev;
+  const existing = prev.messages[idx]!;
+  // Idempotent: a re-delivered correction that matches current state is a no-op
+  // (return the SAME reference so the memoized consumers don't re-render).
+  const sameDeleted = (existing.deletedAt ?? null) === payload.deletedAt;
+  const sameEdited =
+    (existing.editedAt ?? null) === payload.editedAt &&
+    (payload.body === null || existing.body === payload.body);
+  if (sameDeleted && sameEdited) return prev;
+  const nextMessages = prev.messages.slice();
+  nextMessages[idx] = {
+    ...existing,
+    ...(payload.deletedAt ? { deletedAt: payload.deletedAt } : {}),
+    ...(payload.editedAt ? { editedAt: payload.editedAt } : {}),
+    ...(payload.body !== null ? { body: payload.body } : {}),
+  };
+  return { ...prev, messages: nextMessages };
+}
+
 export function applyMessageMediaReady(
   prev: ConversationWithRefs,
   payload: { messageId: string; media?: MediaAttachment },
@@ -402,6 +431,7 @@ export const THREAD_REDUCER_EVENTS = [
   reducerEntry({ event: "conversation:read", apply: applyConversationRead }),
   reducerEntry({ event: "message:status", apply: applyMessageStatus }),
   reducerEntry({ event: "message:reaction", apply: applyMessageReaction }),
+  reducerEntry({ event: "message:updated", apply: applyMessageUpdated }),
   reducerEntry({ event: "message:media:ready", apply: applyMessageMediaReady }),
   reducerEntry({ event: "note:deleted", apply: applyNoteDeleted }),
   reducerEntry({

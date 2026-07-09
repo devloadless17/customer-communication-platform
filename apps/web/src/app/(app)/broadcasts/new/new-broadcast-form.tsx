@@ -19,6 +19,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@ccp/shared/utils";
 import type { ContactFieldDefinition, ContactStage, Tag, TemplateDto } from "@ccp/shared/types";
@@ -159,6 +160,16 @@ export function NewBroadcastForm({
   );
   const [templatesSyncing, setTemplatesSyncing] = useState(false);
   const [templatesError, setTemplatesError] = useState<string | null>(null);
+  // Message type:
+  //  - template: approved WhatsApp template (reaches contacts any time).
+  //  - freeform: plain text to ONE social channel's in-window contacts.
+  //  - customer: plain text to unified PEOPLE — each reached ONCE on their best
+  //    live channel (omnichannel + deduped). Both non-template modes share the
+  //    free-form body input + skip the template/variables steps.
+  const [messageKind, setMessageKind] =
+    useState<"template" | "freeform" | "customer">("template");
+  const [freeformChannel, setFreeformChannel] = useState<"messenger" | "instagram">("messenger");
+  const [freeformBody, setFreeformBody] = useState("");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [templateQuery, setTemplateQuery] = useState("");
   const [bodyVars, setBodyVars] = useState<string[]>([]);
@@ -434,7 +445,10 @@ export function NewBroadcastForm({
     // otherwise it sends with a stale/empty link the moment a prior upload
     // populated `headerMedia` but the current pick hasn't finished.
     !headerMediaUploading;
-  const readyToSend = audienceDone && templateDone && variablesDone;
+  const freeformDone = freeformBody.trim().length > 0;
+  const readyToSend =
+    audienceDone &&
+    (messageKind === "template" ? templateDone && variablesDone : freeformDone);
 
   // ── Pre-send warning ──────────────────────────────────────────────────────
   // Ask the server (read-only) how many recipients would resolve a template
@@ -515,7 +529,18 @@ export function NewBroadcastForm({
   // Submit
   // -------------------------------------------------------------------------
   async function submit() {
-    if (!readyToSend || !selectedTemplate) return;
+    if (!readyToSend) return;
+    if (messageKind === "template" && !selectedTemplate) return;
+    const isFreeform = messageKind === "freeform";
+    const isCustomerMode = messageKind === "customer";
+    // Both non-template modes send the free-form body.
+    const usesBody = isFreeform || isCustomerMode;
+    // customer-mode dedupes the audience to PEOPLE and drops out-of-window ones,
+    // so the exact recipient count isn't known client-side — phrase it as an
+    // upper bound ("up to N people") rather than a misleading exact number.
+    const countLabel = isCustomerMode
+      ? `up to ${audienceCount} ${audienceCount === 1 ? "person" : "people"}`
+      : `${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`;
     // Re-entrancy lock. `sending` (the button-disable signal) isn't set until
     // AFTER the destructive confirm resolves, so a fast double-click / Enter
     // before the confirm modal mounts could fire submit() twice and create two
@@ -558,19 +583,35 @@ export function NewBroadcastForm({
         // PreviewBubble does (renderPlaceholders + resolveFieldTokens over the
         // sample contact) so the confirm shows exactly what the agent saw, then
         // truncate it to keep the dialog body one line.
-        const resolvedBody = renderPlaceholders(
-          selectedTemplate.bodyText,
-          bodyVars.map((v) => resolveFieldTokens(v, SAMPLE_CONTACT)),
-        )
-          .replace(/\s+/g, " ")
-          .trim();
+        const resolvedBody = usesBody
+          ? freeformBody.replace(/\s+/g, " ").trim()
+          : renderPlaceholders(
+              selectedTemplate!.bodyText,
+              bodyVars.map((v) => resolveFieldTokens(v, SAMPLE_CONTACT)),
+            )
+              .replace(/\s+/g, " ")
+              .trim();
         const bodyPreview = truncate(resolvedBody, 90);
+        const channelLabel = isCustomerMode
+          ? "each person's best channel"
+          : isFreeform
+            ? freeformChannel === "instagram"
+              ? "Instagram"
+              : "Messenger"
+            : "WhatsApp";
         const ok = await confirm({
-          title: `Send to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"} now?`,
+          title: `Send to ${countLabel} now?`,
           description:
-            `Sending «${selectedTemplate.name}» to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"}` +
+            (usesBody
+              ? `Sending a message to ${countLabel}`
+              : `Sending «${selectedTemplate!.name}» to ${countLabel}`) +
             (bodyPreview ? `: “${bodyPreview}”` : "") +
-            ". This sends the template immediately over WhatsApp and can't be undone once recipients start receiving it.",
+            `. This sends immediately over ${channelLabel} and can't be undone once recipients start receiving it.` +
+            (isCustomerMode
+              ? " Each person is reached once on their best live channel; people with no open window are skipped."
+              : isFreeform
+                ? " Only contacts inside their messaging window will receive it."
+                : ""),
           confirmLabel: "Send now",
           destructive: true,
         });
@@ -584,14 +625,24 @@ export function NewBroadcastForm({
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            templateId: selectedTemplate.id,
+            ...(isCustomerMode
+              ? {
+                  targetMode: "customer",
+                  kind: "freeform",
+                  bodyText: freeformBody.trim(),
+                }
+              : isFreeform
+              ? { kind: "freeform", channel: freeformChannel, bodyText: freeformBody.trim() }
+              : {
+                  templateId: selectedTemplate!.id,
+                  variables: {
+                    body: bodyVars,
+                    ...(headerVarCount > 0 ? { header: headerVar } : {}),
+                    ...(headerMedia ? { headerMedia } : {}),
+                  },
+                }),
             ...(name.trim() ? { name: name.trim() } : {}),
             ...(scheduledAtIso ? { scheduledAt: scheduledAtIso } : {}),
-            variables: {
-              body: bodyVars,
-              ...(headerVarCount > 0 ? { header: headerVar } : {}),
-              ...(headerMedia ? { headerMedia } : {}),
-            },
             audience:
               audience.mode === "all"
                 ? { mode: "all" }
@@ -611,8 +662,8 @@ export function NewBroadcastForm({
         if (!data.broadcastId) throw new Error("No broadcast id in response");
         toast.success(
           scheduledAtIso
-            ? `Broadcast scheduled for ${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`
-            : `Broadcast sending to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`,
+            ? `Broadcast scheduled for ${countLabel}`
+            : `Broadcast sending to ${countLabel}`,
         );
         navigating = true;
         router.push(`/broadcasts/${data.broadcastId}`);
@@ -680,29 +731,104 @@ export function NewBroadcastForm({
         />
       </StepCard>
 
-      <StepCard
-        index={2}
-        title="Template"
-        summary={
-          selectedTemplate
-            ? `${selectedTemplate.name} · ${selectedTemplate.language}`
-            : undefined
-        }
-        done={templateDone}
-      >
-        <TemplatePickerInline
-          templates={filteredTemplates}
-          query={templateQuery}
-          onQueryChange={setTemplateQuery}
-          loading={templatesLoading}
-          syncing={templatesSyncing}
-          error={templatesError}
-          hasWabaId={hasWabaId}
-          selectedId={selectedTemplateId}
-          onSelect={setSelectedTemplateId}
-          onRefresh={syncTemplates}
-        />
-      </StepCard>
+      {/* Message type. Templates reach WhatsApp any time; free-form text reaches
+          one social channel's in-window contacts; People reaches each unified
+          person once on their best live channel (omnichannel + deduped). */}
+      <div className="flex flex-wrap gap-2">
+        {(
+          [
+            { k: "template", label: "WhatsApp template" },
+            { k: "freeform", label: "Free-form (Messenger / Instagram)" },
+            { k: "customer", label: "People (best channel)" },
+          ] as const
+        ).map(({ k, label }) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => setMessageKind(k)}
+            className={
+              "flex-1 whitespace-nowrap rounded-md border px-3 py-2 text-sm font-medium transition " +
+              (messageKind === k
+                ? "border-primary bg-primary/10 text-foreground"
+                : "border-border bg-muted/20 text-muted-foreground hover:text-foreground")
+            }
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {messageKind !== "template" ? (
+        <StepCard
+          index={2}
+          title="Message"
+          summary={
+            freeformDone
+              ? `${messageKind === "customer" ? "People" : freeformChannel} · ${freeformBody.slice(0, 40)}`
+              : undefined
+          }
+          done={freeformDone}
+        >
+          <div className="flex flex-col gap-3">
+            {messageKind === "freeform" && (
+              <div className="flex gap-2">
+                {(["messenger", "instagram"] as const).map((ch) => (
+                  <button
+                    key={ch}
+                    type="button"
+                    onClick={() => setFreeformChannel(ch)}
+                    className={
+                      "rounded-md border px-3 py-1.5 text-sm capitalize transition " +
+                      (freeformChannel === ch
+                        ? "border-primary bg-primary/10 text-foreground"
+                        : "border-border text-muted-foreground hover:text-foreground")
+                    }
+                  >
+                    {ch}
+                  </button>
+                ))}
+              </div>
+            )}
+            <Textarea
+              value={freeformBody}
+              onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setFreeformBody(e.target.value)}
+              placeholder="Type your message… (sent only to contacts inside their window)"
+              rows={4}
+              maxLength={2000}
+            />
+            <p className="text-2xs text-muted-foreground">
+              {messageKind === "customer"
+                ? "Each person is reached ONCE on their best live channel (WhatsApp, Messenger, or Instagram). People with no open messaging window are skipped."
+                : "Free-form messages reach only contacts within their messaging window; others are skipped."}{" "}
+              {freeformBody.length}/2000
+            </p>
+          </div>
+        </StepCard>
+      ) : (
+        <StepCard
+          index={2}
+          title="Template"
+          summary={
+            selectedTemplate
+              ? `${selectedTemplate.name} · ${selectedTemplate.language}`
+              : undefined
+          }
+          done={templateDone}
+        >
+          <TemplatePickerInline
+            templates={filteredTemplates}
+            query={templateQuery}
+            onQueryChange={setTemplateQuery}
+            loading={templatesLoading}
+            syncing={templatesSyncing}
+            error={templatesError}
+            hasWabaId={hasWabaId}
+            selectedId={selectedTemplateId}
+            onSelect={setSelectedTemplateId}
+            onRefresh={syncTemplates}
+          />
+        </StepCard>
+      )}
 
       {selectedTemplate && (
         <StepCard

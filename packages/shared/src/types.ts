@@ -86,6 +86,24 @@ export interface User {
 /** How this contact got into the DB. See ContactSource enum on the schema. */
 export type ContactSource = "inbound" | "manual";
 
+/**
+ * Provider profile signals for a social contact. Instagram is the only channel
+ * that exposes these today (on its user node); Messenger/WhatsApp expose none,
+ * so every field is optional and the whole object is absent for them. Captured
+ * at ingest, display-only context in the contact panel — never a strong key
+ * (fuzzy identity matching is banned).
+ */
+export interface SocialProfile {
+  /** IG follower count at capture time (a rough audience-size signal). */
+  followerCount?: number | null;
+  /** IG "verified" badge — `is_verified_user`. */
+  isVerified?: boolean | null;
+  /** The customer follows the business's IG account — `is_user_follow_business`. */
+  followsBusiness?: boolean | null;
+  /** The business follows the customer back — `is_business_follow_user`. */
+  businessFollows?: boolean | null;
+}
+
 export interface Contact {
   id: string;
   teamId: string;
@@ -104,6 +122,13 @@ export interface Contact {
    */
   identityChannel?: Channel | null;
   externalContactId?: string | null;
+  /**
+   * Provider handle for social channels — the Instagram `@username`. Meta
+   * exposes it on the IG user-profile node (Messenger/WhatsApp have none), so
+   * it's captured at ingest and surfaced in the contact panel as an extra
+   * identity signal. Null on channels without a handle.
+   */
+  username?: string | null;
   /**
    * Canonical display name. Derived from `firstName + lastName` when both
    * are set; otherwise it's whatever the create path (inbound webhook,
@@ -130,6 +155,9 @@ export interface Contact {
    */
   callPermissionRevokedUntil?: string | null;
   avatarUrl?: string;
+  /** Social-channel profile signals (Instagram follower count / verified /
+   *  follow relationship). Absent on WhatsApp/Messenger. See {@link SocialProfile}. */
+  socialProfile?: SocialProfile | null;
   email?: string;
   location?: string;
   /** Bag of custom field values, keyed by field key. Always a string. */
@@ -367,6 +395,55 @@ export interface ReplySnapshot {
   thumbnailUrl?: string;
 }
 
+/**
+ * Structured (non-media) message content that gets a dedicated bubble instead of
+ * a plain text placeholder — a shared WhatsApp location pin or contact card. The
+ * `body` still carries a human-readable placeholder (for search / list preview /
+ * unread), and this drives the rich rendering. Discriminated by `kind`.
+ */
+export type MessageStructured =
+  | {
+      kind: "location";
+      latitude: number;
+      longitude: number;
+      name?: string;
+      address?: string;
+    }
+  | {
+      kind: "contacts";
+      contacts: Array<{ name: string; phones: string[] }>;
+    }
+  | {
+      // Instagram story interaction: the customer mentioned you in / replied to
+      // their story, or shared a post. `url` is the story/post media when Meta
+      // includes it (a preview thumbnail the agent can open for context).
+      kind: "story";
+      storyType: "mention" | "reply" | "share";
+      url?: string;
+    };
+
+/**
+ * Ad / deep-link attribution on the FIRST inbound message of an ad-sourced
+ * conversation — a Click-to-WhatsApp ad (WhatsApp `referral`) or a
+ * Click-to-Messenger ad / m.me `ref` (Messenger `referral`). Surfaced as a small
+ * "from your ad" chip so an agent instantly knows the customer came from a
+ * campaign (and the `sourceUrl`/`ctwaClid` tie it back to the ad platform).
+ */
+export interface MessageAttribution {
+  /** `ad` (paid), `post` (organic CTA), or the deep-link `ref` payload. */
+  source: "ad" | "post" | "ref" | "unknown";
+  /** Ad creative headline, when present. */
+  headline?: string;
+  /** Ad creative body/description, when present. */
+  body?: string;
+  /** The ad/post URL the customer clicked. */
+  sourceUrl?: string;
+  /** Click id (WhatsApp `ctwa_clid` / Messenger ad id) for ad-platform matching. */
+  clickId?: string;
+  /** Free-form deep-link ref payload (m.me `ref=...`), when that's the source. */
+  ref?: string;
+}
+
 export interface Message {
   id: string;
   teamId: string;
@@ -407,6 +484,31 @@ export interface Message {
    * the bubble. Inbound-only — agent-side reacting is deferred.
    */
   reaction?: string | null;
+  /**
+   * Structured non-media content (shared location pin / contact card). Drives a
+   * dedicated bubble; `body` still holds the text placeholder. Absent for normal
+   * text/media messages. See {@link MessageStructured}.
+   */
+  structured?: MessageStructured | null;
+  /**
+   * Ad / deep-link attribution on an ad-sourced conversation's first inbound
+   * message. Drives a "from your ad" chip on the bubble. Absent otherwise. See
+   * {@link MessageAttribution}.
+   */
+  attribution?: MessageAttribution | null;
+  /**
+   * ISO time the CUSTOMER unsent (deleted) this message (WhatsApp revoke /
+   * Messenger·Instagram unsend). When set, the bubble renders "This message was
+   * deleted" instead of the body (which is preserved in the DB for the record).
+   * null/absent = not deleted.
+   */
+  deletedAt?: string | null;
+  /**
+   * ISO time the customer edited this message's body (WhatsApp edit). The `body`
+   * already carries the new text; this just drives an "edited" marker on the
+   * bubble. null/absent = never edited.
+   */
+  editedAt?: string | null;
   /**
    * Original webhook payload, kept verbatim in the DB for debugging
    * (CLAUDE.md rule #4). NOT hydrated on read paths — the column is `omit`ed

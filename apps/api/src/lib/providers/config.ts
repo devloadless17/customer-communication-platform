@@ -308,10 +308,13 @@ export async function getMetaWebhookConfig(
   }
   if (!cipher) return null;
   try {
-    // App secret signs every inbound webhook (HMAC-SHA256). Stored
-    // encrypted; legacy plaintext rows decrypt through unchanged.
+    // App secret signs every inbound webhook (HMAC-SHA256). Prefer the shared
+    // Meta App connection (the single source — an app-secret rotation there
+    // takes effect on every channel immediately, no per-channel resync), and
+    // fall back to the per-channel cipher for legacy / pre-Meta-App rows.
+    const meta = await getMetaConnection(teamId);
     return {
-      appSecret: decryptSecret(cipher.appSecretCipher),
+      appSecret: meta?.appSecret ?? decryptSecret(cipher.appSecretCipher),
       verifyToken: cipher.verifyToken,
       phoneNumberId: cipher.phoneNumberId,
     };

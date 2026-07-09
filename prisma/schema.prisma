@@ -170,6 +170,26 @@ enum BroadcastRecipientStatus {
   failed
 }
 
+/// What a broadcast sends. `template` = a pre-approved WhatsApp template
+/// (reaches contacts any time). `freeform` = a plain text message, allowed
+/// only to contacts inside their free-form window — used for Messenger /
+/// Instagram re-engagement (social has no approved-template catalog).
+enum BroadcastKind {
+  template
+  freeform
+}
+
+/// Who a broadcast targets. `contact` (default, back-compat) = channel-scoped
+/// Contacts on ONE channel — today's behavior, byte-identical. `customer` =
+/// the unified PERSON: each Customer is reached ONCE on their best live channel
+/// (resolved per-recipient via `bestChannelForCustomer`), so a person on
+/// WhatsApp + Messenger + IG gets one message, not three. Customer-mode is
+/// freeform-body based (no template) and spans mixed channels in one broadcast.
+enum BroadcastTargetMode {
+  contact
+  customer
+}
+
 // Why a contact exists in our DB.
 //   - inbound: created by a webhook ingest (a customer messaged us).
 //   - manual: created by an agent — through the New Contact dialog or a CSV
@@ -450,6 +470,7 @@ model Team {
   metaConnection          MetaConnection?
   calls                   Call[]
   callPermissionRequests  CallPermissionRequest[]
+  customerIdentityEvents  CustomerIdentityEvent[]
   aiHandoffAssignee       User?                     @relation("AiHandoffAssignee", fields: [aiHandoffAssigneeId], references: [id], onDelete: SetNull)
 }
 
@@ -677,6 +698,17 @@ model Contact {
   // chat-id). NULL for WhatsApp where phone IS the identity. Combined with
   // `identityChannel` to form the compound unique below for non-phone dedup.
   externalContactId String?
+  // WhatsApp Business-Scoped User ID (BSUID) forward-compat (Meta 2026 privacy
+  // rollout). Meta is moving WhatsApp identity from the raw phone number to an
+  // opaque per-business id + an optional `@username`; a webhook may then omit
+  // the phone. These nullable columns let ingest persist + resolve on the BSUID
+  // when the phone is absent, so we don't drop those inbounds once Meta flips.
+  // NULL for every contact today (phone stays the identity). See docs/identity.md.
+  bsuid             String?
+  // The customer's public WhatsApp @username, when they've set one (2026). Kept
+  // for display + as a softer future match key; NEVER auto-merged on (name/
+  // username fuzzy matching is banned — strong keys only).
+  username          String?
   // Canonical display name. Derived from `firstName + lastName` when both
   // are populated; otherwise whatever the create path stored (inbound
   // webhook profile name, manual UI, /v1 POST). Source of truth for inbox
@@ -694,6 +726,14 @@ model Contact {
   // at inbound time. Optional — non-WhatsApp / unparseable numbers leave null.
   countryCode       String?
   avatarUrl         String?
+  // Provider profile signals for social channels — Instagram exposes
+  // follower_count / is_verified_user / is_user_follow_business /
+  // is_business_follow_user on its user node (Messenger/WhatsApp expose none).
+  // Captured at ingest, display-only context in the contact panel. JSON so any
+  // future channel can stash its own signals without a schema change; never
+  // queried/filtered. Null on channels without them. Shape: SocialProfile in
+  // @ccp/shared/types.
+  socialProfile     Json?
   // Optional profile fields surfaced in the right-rail contact panel.
   email             String?
   location          String?
@@ -813,6 +853,9 @@ model Contact {
   // Dropped as write overhead — migration 20260611130000.
   @@index([teamId, source])
   @@index([teamId, stageId])
+  // BSUID lookup (forward-compat): resolve a WhatsApp contact by its
+  // business-scoped id when a webhook omits the phone. Sparse — NULL today.
+  @@index([teamId, identityChannel, bsuid])
   // Customer → its channel-contacts (the profile's channel switcher loads by
   // customerId); also serves the merge/split re-point.
   @@index([customerId])
@@ -866,6 +909,37 @@ model Customer {
   contacts Contact[]
 
   @@index([teamId])
+}
+
+// Persisted audit trail for the manual, reversible merge/split of the unified
+// customer identity (§6 / docs/identity.md). Previously merge/split was only
+// logged to stdout; this makes it queryable + reversible-with-context (who
+// merged whom, and when). One row per `linkContact` / `unlinkContact` action.
+// Auto-merge at ingest (deterministic strong keys) is NOT recorded here — it's
+// derived from the contact's strong keys and reversible by the same unlink.
+model CustomerIdentityEvent {
+  id             String                 @id @default(cuid())
+  teamId         String
+  // The channel-contact that moved between customers.
+  contactId      String
+  action         CustomerIdentityAction
+  // Customer the contact belonged to before the action (null if it had none).
+  fromCustomerId String?
+  // Customer the contact belongs to after the action.
+  toCustomerId   String
+  // Who performed it — a human session (null for system/sweeper actions).
+  actorUserId    String?
+  createdAt      DateTime               @default(now())
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, createdAt(sort: Desc)])
+  @@index([teamId, contactId])
+}
+
+enum CustomerIdentityAction {
+  link
+  unlink
 }
 
 // Customer-lifecycle stage. A team configures an ordered list ("New",
@@ -1112,6 +1186,24 @@ model Message {
   // payload CLEARS it (null). Inbound-only for now — agent-side reacting is
   // deferred. Set by the ingest `reaction` path; null = no reaction.
   reaction       String?
+  // Structured non-media content (shared location pin / contact card) that gets
+  // a dedicated bubble. Shape = MessageStructured (discriminated by `kind`:
+  // location | contacts); `body` still holds the text placeholder for search /
+  // list preview. Null for normal text/media messages.
+  structured     Json?
+  // Ad / deep-link attribution (Click-to-WhatsApp / Click-to-Messenger) on the
+  // first inbound of an ad-sourced conversation. Shape = MessageAttribution
+  // (source + headline/body/sourceUrl/clickId/ref). Null otherwise.
+  attribution    Json?
+  // Message unsend / edit (WhatsApp revoke + Messenger/Instagram unsend, and
+  // WhatsApp edits). `deletedAt` tombstones a message the CUSTOMER removed — the
+  // row is KEPT (audit + dedup) but the bubble renders "message was deleted" and
+  // the body is preserved for the record. `editedAt` marks a body the customer
+  // edited (body already updated in place). Both null on a normal message. These
+  // are the inbound customer action — distinct from `Contact.deletedAt` (a
+  // contact tombstone) and from an agent deleting their own send (not built).
+  deletedAt      DateTime?
+  editedAt       DateTime?
   // Original webhook payload kept verbatim for debugging (CLAUDE.md rule #4).
   // Nullable so the opt-in rawPayload-retention sweeper (DB-1) can NULL ancient
   // payloads to bound table/dump bloat at scale; every WRITE still sets it.
@@ -1435,12 +1527,22 @@ model Broadcast {
   // in the future, the broadcast is created `scheduled` and a delayed BullMQ
   // job (jobId = broadcast id) fires it at this instant.
   scheduledAt       DateTime?
-  // Snapshot of the template at send time.
-  templateId        String
-  templateName      String
-  templateLanguage  String
+  // What this broadcast sends + which channel it targets. `template` broadcasts
+  // are WhatsApp-only (the historical default); `freeform` broadcasts send plain
+  // text to in-window Messenger/Instagram contacts.
+  kind              BroadcastKind   @default(template)
+  // contact-mode (default) = single-channel, today's behavior. customer-mode =
+  // omnichannel, one send per PERSON on their best channel. See BroadcastTargetMode.
+  targetMode        BroadcastTargetMode @default(contact)
+  channel           Channel         @default(whatsapp)
+  // Snapshot of the template at send time — NULL for `freeform` broadcasts.
+  templateId        String?
+  templateName      String?
+  templateLanguage  String?
+  // Free-form message body — set for `freeform` broadcasts, null for templates.
+  bodyText          String?
   // The values the agent filled into {{1}}, {{2}}, … (and optional header).
-  // Schema: { body: string[], header?: string }
+  // Schema: { body: string[], header?: string }. Empty for freeform.
   variables         Json
   // Audience picker mode the agent chose at creation.
   //   "all"       — every team contact at the moment of creation.
@@ -1484,6 +1586,10 @@ model BroadcastRecipient {
   id             String                   @id @default(cuid())
   broadcastId    String
   contactId      String
+  // The unified PERSON this recipient targets (customer-mode only). `contactId`
+  // is the channel-contact actually sent to — resolved from the person's best
+  // live channel at build time. Null in contact-mode. Soft pointer (no FK).
+  customerId     String?
   // Set after the runner picks/creates a conversation for this recipient so
   // the message lands in the existing thread (matches the inbox rules). Soft
   // reference (plain string, no FK) — survives conversation hard-delete by

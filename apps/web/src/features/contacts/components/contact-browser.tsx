@@ -26,13 +26,14 @@ import { StageFilterMenu, MoreFilterMenu } from "./contact-browser/filter-menus"
 import { ActiveFilterChips } from "./contact-browser/active-filter-chips";
 import { ContactRowsSkeleton } from "./contact-browser/row-skeleton";
 import type {
+  ChannelFilter,
   FieldFilter,
   SourceFilter,
   StageFilter,
   WindowFilter,
 } from "./contact-browser/filter-types";
 
-export type { FieldFilter, SourceFilter, StageFilter, WindowFilter };
+export type { ChannelFilter, FieldFilter, SourceFilter, StageFilter, WindowFilter };
 
 /**
  * The one and only contact-browsing surface.
@@ -64,6 +65,8 @@ export interface ContactListFilters {
   search: string;
   fieldFilter: FieldFilter | null;
   sourceFilter: SourceFilter;
+  /** Channel identity filter. "any" disables the filter. */
+  channelFilter: ChannelFilter;
   windowFilter: WindowFilter;
   /** Keep contacts carrying ANY of these tag ids. Empty = no tag filter. */
   tagIds: string[];
@@ -86,6 +89,7 @@ export async function fetchContactsPage(
     params.set("fieldValue", filters.fieldFilter.value);
   }
   if (filters.sourceFilter !== "all") params.set("source", filters.sourceFilter);
+  if (filters.channelFilter !== "any") params.set("channel", filters.channelFilter);
   if (filters.windowFilter !== "any") params.set("window", filters.windowFilter);
   if (filters.tagIds.length > 0) params.set("tagIds", filters.tagIds.join(","));
   if (filters.stageFilter !== "any") params.set("stageId", filters.stageFilter);
@@ -130,6 +134,12 @@ export function matchesContactFiltersExceptWindow(
     if (contact.stageId !== filters.stageFilter) return false;
   }
   if (filters.sourceFilter !== "all" && contact.source !== filters.sourceFilter) {
+    return false;
+  }
+  if (
+    filters.channelFilter !== "any" &&
+    contact.identityChannel !== filters.channelFilter
+  ) {
     return false;
   }
   if (filters.tagIds.length > 0) {
@@ -205,6 +215,8 @@ export interface UseContactListResult {
   setFieldFilter: (v: FieldFilter | null) => void;
   sourceFilter: SourceFilter;
   setSourceFilter: (v: SourceFilter) => void;
+  channelFilter: ChannelFilter;
+  setChannelFilter: (v: ChannelFilter) => void;
   windowFilter: WindowFilter;
   setWindowFilter: (v: WindowFilter) => void;
   tagIds: string[];
@@ -284,6 +296,7 @@ export function useContactList(opts?: {
   const [search, setSearch] = useState("");
   const [fieldFilter, setFieldFilter] = useState<FieldFilter | null>(null);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+  const [channelFilter, setChannelFilter] = useState<ChannelFilter>("any");
   const [windowFilter, setWindowFilter] = useState<WindowFilter>("any");
   const [tagIds, setTagIds] = useState<string[]>([]);
   const [stageFilter, setStageFilter] = useState<StageFilter>(
@@ -319,7 +332,7 @@ export function useContactList(opts?: {
     const t = window.setTimeout(async () => {
       try {
         const page = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, windowFilter, tagIds, stageFilter },
+          { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter },
           null,
         );
         if (reqId.current !== my) return;
@@ -334,7 +347,7 @@ export function useContactList(opts?: {
     }, 250);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, windowFilter, tagKey, stageFilter]);
+  }, [search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagKey, stageFilter]);
 
   // ── Numbered (offset) pagination effects — `paged` mode only ──────────────
   // A filter change resets to page 1 (page N of the old filter set is
@@ -348,7 +361,7 @@ export function useContactList(opts?: {
     }
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, windowFilter, tagKey, stageFilter]);
+  }, [search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagKey, stageFilter]);
 
   // Fetch the current page whenever filters or the page number change. Debounce
   // ONLY the typed search (so keystrokes don't flood the API); page navigation
@@ -374,7 +387,7 @@ export function useContactList(opts?: {
     const t = window.setTimeout(async () => {
       try {
         const data = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, windowFilter, tagIds, stageFilter },
+          { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter },
           null,
           { page, take: pageSize },
         );
@@ -390,7 +403,7 @@ export function useContactList(opts?: {
     }, delay);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, windowFilter, tagKey, stageFilter, page]);
+  }, [search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagKey, stageFilter, page]);
 
   function loadMore() {
     if (!nextCursor || loadingMore) return;
@@ -410,7 +423,7 @@ export function useContactList(opts?: {
     void (async () => {
       try {
         const page = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, windowFilter, tagIds, stageFilter },
+          { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter },
           fromCursor,
         );
         // superseded by a filter change (reqId) or a page-1 refetch (cursor)
@@ -439,11 +452,12 @@ export function useContactList(opts?: {
     search,
     fieldFilter,
     sourceFilter,
+    channelFilter,
     windowFilter,
     tagIds,
     stageFilter,
   });
-  filtersRef.current = { search, fieldFilter, sourceFilter, windowFilter, tagIds, stageFilter };
+  filtersRef.current = { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter };
 
   // Public refetch — wired to the coalesced `contacts:bulk_updated` socket
   // event. Bulk paths (server-side bulk-tag etc.) don't send per-contact
@@ -501,6 +515,7 @@ export function useContactList(opts?: {
           filters.search.trim() !== "" ||
           filters.fieldFilter !== null ||
           filters.sourceFilter !== "all" ||
+          filters.channelFilter !== "any" ||
           filters.windowFilter !== "any" ||
           filters.tagIds.length > 0 ||
           filters.stageFilter !== "any";
@@ -571,6 +586,8 @@ export function useContactList(opts?: {
     setFieldFilter,
     sourceFilter,
     setSourceFilter,
+    channelFilter,
+    setChannelFilter,
     windowFilter,
     setWindowFilter,
     tagIds,
@@ -596,6 +613,8 @@ export function ContactFilterBar({
   onSearchChange,
   sourceFilter,
   onSourceChange,
+  channelFilter = "any",
+  onChannelChange,
   windowFilter = "any",
   onWindowChange,
   fieldFilter,
@@ -613,6 +632,8 @@ export function ContactFilterBar({
   onSearchChange: (v: string) => void;
   sourceFilter: SourceFilter;
   onSourceChange: (v: SourceFilter) => void;
+  channelFilter?: ChannelFilter;
+  onChannelChange?: (v: ChannelFilter) => void;
   windowFilter?: WindowFilter;
   onWindowChange?: (v: WindowFilter) => void;
   fieldFilter: FieldFilter | null;
@@ -631,12 +652,14 @@ export function ContactFilterBar({
   const stageActive = stageFilter !== "any";
   const moreActive =
     sourceFilter !== "all" ||
+    (Boolean(onChannelChange) && channelFilter !== "any") ||
     (Boolean(onWindowChange) && windowFilter !== "any") ||
     fieldFilter !== null;
 
   function clearAll() {
     onSearchChange("");
     onSourceChange("all");
+    onChannelChange?.("any");
     onWindowChange?.("any");
     onStageFilterChange?.("any");
     onTagsChange?.([]);
@@ -736,6 +759,8 @@ export function ContactFilterBar({
               <MoreFilterMenu
                 sourceFilter={sourceFilter}
                 onSourceChange={onSourceChange}
+                channelFilter={channelFilter}
+                onChannelChange={onChannelChange}
                 windowFilter={windowFilter}
                 onWindowChange={onWindowChange}
                 fieldFilter={fieldFilter}
@@ -757,6 +782,8 @@ export function ContactFilterBar({
       <ActiveFilterChips
         sourceFilter={sourceFilter}
         onSourceChange={onSourceChange}
+        channelFilter={channelFilter}
+        onChannelChange={onChannelChange}
         windowFilter={windowFilter}
         onWindowChange={onWindowChange}
         stageFilter={stageFilter}

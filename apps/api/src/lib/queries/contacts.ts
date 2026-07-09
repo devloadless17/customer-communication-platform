@@ -35,6 +35,7 @@ export function buildContactFilterWhere(
   const search = opts.search?.trim() ?? "";
   const fieldFilter = opts.fieldFilter;
   const source = opts.source;
+  const channel = opts.channel;
   const windowFilter = opts.window;
   const stageFilter = opts.stageId;
   const tagIds = (opts.tagIds ?? []).filter((t) => t.length > 0);
@@ -60,6 +61,7 @@ export function buildContactFilterWhere(
         : Prisma.empty
     }
     ${source ? Prisma.sql`AND c.source = ${source}::"ContactSource"` : Prisma.empty}
+    ${channel ? Prisma.sql`AND c."identityChannel" = ${channel}::"Channel"` : Prisma.empty}
     ${
       windowFilter === "open"
         ? Prisma.sql`AND c."lastInboundAt" >= now() - interval '24 hours'`

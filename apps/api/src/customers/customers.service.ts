@@ -13,12 +13,20 @@ export interface CustomerContactView {
   lastInboundAt: string | null;
   /** The contact's conversation (one per contact) — for switching threads. */
   conversationId: string | null;
+  /** Denormalized thread activity, so the switcher shows each channel like a
+   *  mini conversation-list row (last message + time + unread + status). */
+  lastMessagePreview: string | null;
+  lastMessageAt: string | null;
+  unreadCount: number;
+  conversationStatus: string | null;
 }
 
 export interface CustomerProfile {
   id: string;
   name: string | null;
   contacts: CustomerContactView[];
+  /** Person-level unread = sum across the person's channel threads. */
+  unreadTotal: number;
 }
 
 /**
@@ -40,7 +48,6 @@ export class CustomersService {
         name: true,
         contacts: {
           where: { deletedAt: null },
-          orderBy: { createdAt: "asc" },
           select: {
             id: true,
             name: true,
@@ -49,16 +56,24 @@ export class CustomersService {
             externalContactId: true,
             avatarUrl: true,
             lastInboundAt: true,
-            conversations: { select: { id: true }, take: 1 },
+            conversations: {
+              select: {
+                id: true,
+                lastMessagePreview: true,
+                lastMessageAt: true,
+                unreadCount: true,
+                status: true,
+              },
+              take: 1,
+            },
           },
         },
       },
     });
     if (!customer) throw new NotFoundException({ error: "customer_not_found" });
-    return {
-      id: customer.id,
-      name: customer.name,
-      contacts: customer.contacts.map((c) => ({
+    const contacts: CustomerContactView[] = customer.contacts.map((c) => {
+      const convo = c.conversations[0] ?? null;
+      return {
         id: c.id,
         name: c.name,
         identityChannel: c.identityChannel,
@@ -66,9 +81,45 @@ export class CustomersService {
         externalContactId: c.externalContactId,
         avatarUrl: c.avatarUrl,
         lastInboundAt: c.lastInboundAt?.toISOString() ?? null,
-        conversationId: c.conversations[0]?.id ?? null,
-      })),
+        conversationId: convo?.id ?? null,
+        lastMessagePreview: convo?.lastMessagePreview ?? null,
+        lastMessageAt: convo?.lastMessageAt?.toISOString() ?? null,
+        unreadCount: convo?.unreadCount ?? 0,
+        conversationStatus: convo?.status ?? null,
+      };
+    });
+    // Most-active channel first (recent thread activity), falling back to last
+    // inbound, then create order — so the switcher leads with the live channel.
+    contacts.sort((a, b) => {
+      const at = a.lastMessageAt ?? a.lastInboundAt ?? "";
+      const bt = b.lastMessageAt ?? b.lastInboundAt ?? "";
+      return bt.localeCompare(at);
+    });
+    return {
+      id: customer.id,
+      name: customer.name,
+      contacts,
+      unreadTotal: contacts.reduce((sum, c) => sum + c.unreadCount, 0),
     };
+  }
+
+  /**
+   * Rename the PERSON (Customer). Distinct from renaming a channel-contact —
+   * this is the identity that spans channels. Tenant-scoped; 409-safe via the
+   * P2025 filter (no such customer). Returns the refreshed profile.
+   */
+  async rename(
+    teamId: string,
+    customerId: string,
+    name: string,
+  ): Promise<CustomerProfile> {
+    const trimmed = name.trim();
+    const res = await this.db.customer.updateMany({
+      where: { id: customerId, teamId },
+      data: { name: trimmed.length > 0 ? trimmed : null },
+    });
+    if (res.count === 0) throw new NotFoundException({ error: "customer_not_found" });
+    return this.loadProfile(teamId, customerId);
   }
 
   getProfile(teamId: string, customerId: string): Promise<CustomerProfile> {
@@ -103,6 +154,7 @@ export class CustomersService {
     teamId: string,
     customerId: string,
     contactId: string,
+    actorUserId: string | null = null,
   ): Promise<CustomerProfile> {
     await this.db.$transaction(async (tx) => {
       const [customer, contact] = await Promise.all([
@@ -118,6 +170,19 @@ export class CustomersService {
 
       const previousCustomerId = contact.customerId;
       await tx.contact.update({ where: { id: contactId }, data: { customerId } });
+
+      // Persisted audit (§6): who merged this contact into which customer, and
+      // from where. Co-committed so it can't drift from the actual re-point.
+      await tx.customerIdentityEvent.create({
+        data: {
+          teamId,
+          contactId,
+          action: "link",
+          fromCustomerId: previousCustomerId,
+          toCustomerId: customerId,
+          actorUserId,
+        },
+      });
 
       // Drop the previous customer if it's now empty (the contact was its only
       // member). Guarded so we never delete a customer that still has contacts.
@@ -143,6 +208,7 @@ export class CustomersService {
     teamId: string,
     fromCustomerId: string,
     contactId: string,
+    actorUserId: string | null = null,
   ): Promise<{ customerId: string }> {
     const newCustomerId = await this.db.$transaction(async (tx) => {
       const contact = await tx.contact.findFirst({
@@ -160,6 +226,18 @@ export class CustomersService {
         select: { id: true },
       });
       await tx.contact.update({ where: { id: contactId }, data: { customerId: fresh.id } });
+
+      // Persisted audit (§6): the split back to a distinct person.
+      await tx.customerIdentityEvent.create({
+        data: {
+          teamId,
+          contactId,
+          action: "unlink",
+          fromCustomerId: previousCustomerId,
+          toCustomerId: fresh.id,
+          actorUserId,
+        },
+      });
 
       if (previousCustomerId && previousCustomerId !== fresh.id) {
         const remaining = await tx.contact.count({ where: { customerId: previousCustomerId } });

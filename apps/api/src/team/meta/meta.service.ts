@@ -13,6 +13,7 @@ import { WhatsappService } from "../whatsapp/whatsapp.service";
 import type { UpdateMetaConnectionInput } from "./meta.schemas";
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
+const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
 
 interface MetaConnConfig {
   appId?: string;
@@ -131,6 +132,9 @@ export class MetaService {
           create: { teamId, config: mergedConfig as Prisma.InputJsonValue, secrets: {} },
           update: { config: mergedConfig as Prisma.InputJsonValue },
         });
+        // Drop the cached snapshot so the shared loader picks up the newly minted
+        // verify token immediately (its 60s TTL would otherwise serve stale null).
+        invalidateMetaConnection(teamId);
         verifyToken = minted;
       } catch (err) {
         this.logger.warn(
@@ -152,7 +156,7 @@ export class MetaService {
     // would silently break every Meta channel.
     try {
       const res = await fetch(
-        `https://graph.facebook.com/${GRAPH_VERSION}/me?fields=id&access_token=${encodeURIComponent(systemUserToken)}`,
+        `${GRAPH_BASE}/${GRAPH_VERSION}/me?fields=id&access_token=${encodeURIComponent(systemUserToken)}`,
         { signal: AbortSignal.timeout(20_000) },
       );
       if (!res.ok) {

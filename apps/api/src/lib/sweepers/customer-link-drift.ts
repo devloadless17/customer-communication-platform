@@ -36,13 +36,20 @@ async function sweepOnce(): Promise<void> {
   for (const c of orphans) {
     try {
       const customerId = await resolveCustomerId(c.teamId, c);
-      // CAS: only link if still unlinked. If inline linking (or a concurrent
-      // sweep) won, our just-created customer is orphaned — harmless (it owns
-      // no contacts) and cheap to leave.
-      await db.contact.updateMany({
+      // CAS: only link if still unlinked.
+      const linked = await db.contact.updateMany({
         where: { id: c.id, customerId: null },
         data: { customerId },
       });
+      // If inline linking (or a concurrent sweep) won the CAS, `resolveCustomerId`
+      // may have just minted a Customer that now owns no contacts. Reap it — the
+      // guard (`contacts: none`) makes this safe whether `customerId` was a fresh
+      // customer or an existing strong-key match (an in-use customer is skipped).
+      if (linked.count === 0) {
+        await db.customer.deleteMany({
+          where: { id: customerId, teamId: c.teamId, contacts: { none: {} } },
+        });
+      }
     } catch (err) {
       console.error(`[sweeper.customer-link] failed for contact ${c.id}`, err);
     }

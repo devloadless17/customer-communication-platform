@@ -149,7 +149,12 @@ function asFieldDefs(
  */
 export type StepTarget =
   | { kind: "trigger_contact" }
-  | { kind: "phone"; phoneNumber: string };
+  | { kind: "phone"; phoneNumber: string }
+  // Person's best channel (unified Customer). Settable via the workflow API /
+  // import today; a customer-picker radio is a follow-up (mirrors the deferred
+  // `kind:"contact"` picker). Listed so the type stays in sync with the server
+  // and the editor preserves an imported customer target on save.
+  | { kind: "customer"; customerId: string };
 
 /**
  * Target selector — radio between "trigger contact" (default) and "custom

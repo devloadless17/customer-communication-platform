@@ -1,4 +1,4 @@
-import type { MediaKind, MessageStatus, Channel } from "../types";
+import type { MediaKind, MessageAttribution, MessageStatus, MessageStructured, Channel, SocialProfile } from "../types";
 
 /**
  * Provider-agnostic shapes the ingest pipeline consumes.
@@ -92,6 +92,16 @@ export interface NormalizedContactIdentity {
   contactPhone?: string;
   /** Set by non-phone channels. Provider's opaque per-account id (PSID/IGSID). */
   externalContactId?: string;
+  /**
+   * WhatsApp Business-Scoped User ID (BSUID) — forward-compat for Meta's 2026
+   * privacy rollout, where a WhatsApp webhook may carry an opaque per-business
+   * id instead of (or alongside) the phone. Ingest persists it on the contact
+   * and resolves on it when `contactPhone` is absent, so those inbounds aren't
+   * dropped. Undefined for every channel today.
+   */
+  bsuid?: string;
+  /** WhatsApp public @username (2026), when present. Display + soft key only. */
+  username?: string;
 }
 
 export interface NormalizedInboundMessage extends NormalizedContactIdentity {
@@ -110,6 +120,18 @@ export interface NormalizedInboundMessage extends NormalizedContactIdentity {
   media?: NormalizedMediaRef;
   /** Set when the message is a contact's tap on a button / list row. */
   interactiveReply?: InteractiveReply;
+  /**
+   * Structured non-media content (shared location pin / contact card). `body`
+   * still carries the text placeholder; this drives the rich bubble. Persisted
+   * to `Message.structured` by ingest.
+   */
+  structured?: MessageStructured;
+  /**
+   * Ad / deep-link attribution (Click-to-WhatsApp / Click-to-Messenger). Set on
+   * the first inbound of an ad-sourced conversation; persisted to
+   * `Message.attribution` by ingest.
+   */
+  attribution?: MessageAttribution;
   /**
    * Provider id of the message this one is replying to (Meta `context.id`).
    * Ingest resolves it to our internal Message.id; the parser stays
@@ -172,8 +194,17 @@ export interface NormalizedCallEvent {
   kind: "call";
   /** Meta-assigned call id; dedup key half. */
   externalCallId: string;
-  /** E.164 digits, no '+'. Calling is phone-channel-only today (WhatsApp). */
-  contactPhone: string;
+  /**
+   * Channel-scoped caller identity — exactly ONE is set, mirroring
+   * `NormalizedInboundMessage`:
+   *   - phone channels (WhatsApp): `contactPhone` = E.164 digits, no '+'.
+   *   - external-id channels (Messenger PSID / Instagram IGSID): `externalContactId`.
+   * Ingest branches on the channel's identity kind to resolve/create the
+   * Contact, so a second calling channel never digit-strips a PSID or collides
+   * with a phone contact sharing the same digits.
+   */
+  contactPhone?: string;
+  externalContactId?: string;
   contactName: string | null;
   direction: "in" | "out";
   /**
@@ -197,6 +228,14 @@ export interface NormalizedCallEvent {
     | "failed"        // signaling/media error
     | "permission_granted"
     | "permission_revoked";
+  /**
+   * Set on a `permission_granted` event when Meta marked the grant PERMANENT
+   * (`is_permanent: true` — the customer chose "always allow" rather than the
+   * default 72h window). Ingest then stores a far-future expiry instead of
+   * `grantedAt + 72h`, so a permanent grant isn't wrongly treated as expired.
+   * Absent/false ⇒ the standard 72h validity.
+   */
+  permanentPermission?: boolean;
   /**
    * WebRTC SDP. For inbound calls: customer's `offer`. For outbound: the
    * provider's media-server `answer` (delivered at `connecting`, BEFORE the
@@ -224,6 +263,36 @@ export interface NormalizedCallEvent {
   rawPayload: Record<string, unknown>;
 }
 
+// ─── Meta social calling (Messenger) contract ──────────────────────────────
+// Meta social calling uses ONE endpoint (`POST /{page-id}/calls`) with an
+// `action` discriminator and returns SDP synchronously — structurally distinct
+// from WhatsApp's method-per-action + webhook-delivered answer, so it gets its
+// own provider methods below. Wire reference: docs/messenger-calling.md.
+
+export interface CallActionArgs {
+  action: "connect" | "accept" | "reject" | "terminate" | "media_update";
+  /** Required for accept/reject/terminate/media_update (from the connect webhook). */
+  callId?: string;
+  /** Required for `connect` (outbound) — the consumer PSID to dial. */
+  to?: string;
+  /** SDP offer for connect/accept; omitted for reject/terminate. */
+  sdp?: string;
+}
+export interface CallActionResult {
+  /** Present on `connect` — the new call id Meta assigned. */
+  callId?: string;
+  /** SDP answer to apply as the browser's remote description. */
+  sdpAnswer?: string;
+  /** Renegotiation offer (accept may return one) — apply, then re-answer. */
+  sdpRenegotiation?: string;
+}
+export interface SocialCallPermission {
+  hasPermission: boolean;
+  canStartCall: boolean;
+  canRequestPermission: boolean;
+  expiresAt: Date | null;
+}
+
 /**
  * A template's review/quality status changed on the provider side. Emitted from
  * the provider's `message_template_status_update` webhook (Meta sends one when a
@@ -246,6 +315,14 @@ export interface NormalizedTemplateStatusUpdate {
   language?: string;
   /** New status, already mapped to our enum; null when unmappable. */
   status: TemplateStatus | null;
+  /**
+   * New category, already mapped to our enum — set ONLY by the
+   * `template_category_update` webhook (Meta auto-migrates a template's category,
+   * e.g. MARKETING→UTILITY, which changes its pricing + which window reopens it).
+   * Absent on status/quality updates. Ingest updates the local row's category
+   * when present.
+   */
+  category?: TemplateCategory;
   /** Provider's human reason for the change (Meta `reason`), if any. */
   reason?: string;
   rawPayload: Record<string, unknown>;
@@ -294,12 +371,18 @@ export interface NormalizedReaction {
  * sent collides on the wamid unique and is a safe no-op (returns the existing
  * row) rather than creating a phantom.
  */
-export interface NormalizedOutboundEcho {
+export interface NormalizedOutboundEcho extends NormalizedContactIdentity {
   kind: "echo";
-  /** Provider-assigned id (wamid) — the dedupe key. */
+  /** Provider-assigned id (wamid / mid) — the dedupe key. */
   externalId: string;
-  /** E.164 digits, no '+'. The CUSTOMER (`to`), not the business (`from`). */
-  contactPhone: string;
+  /**
+   * The CUSTOMER this echo belongs to (the message `to`, NOT the business
+   * `from`). Exactly one identity is set, keyed on the channel kind — WhatsApp
+   * Coexistence echoes set `contactPhone`; Messenger/Instagram native-inbox
+   * echoes set `externalContactId` (the customer's PSID / IGSID). Ingest
+   * branches on the channel's identity kind.
+   */
+  contactPhone?: string;
   /** Body text (or media caption); empty for media-only. */
   body: string;
   /** Set when the echoed message carries an attachment that needs downloading. */
@@ -329,6 +412,26 @@ export interface NormalizedContactSync {
   rawPayload: Record<string, unknown>;
 }
 
+/**
+ * The customer edited or unsent (deleted) one of the messages in the thread.
+ * WhatsApp delivers a revoke/edit; Messenger/Instagram deliver an unsend
+ * (`message.is_deleted`). Ingest finds the target Message by `targetExternalId`
+ * (its mid/wamid) and either tombstones it (`action: "delete"` → sets
+ * `deletedAt`, body preserved) or updates its body (`action: "edit"` → sets
+ * `editedAt` + new body), then fans out `message.updated` to the thread.
+ * Inbound-only (the customer's action on their own message).
+ */
+export interface NormalizedMessageCorrection {
+  kind: "message_correction";
+  action: "edit" | "delete";
+  /** Provider id (mid/wamid) of the message being edited/deleted — the match key. */
+  targetExternalId: string;
+  /** New body text — set only for `action: "edit"`. */
+  newBody?: string;
+  timestamp: Date;
+  rawPayload: Record<string, unknown>;
+}
+
 export type NormalizedEvent =
   | NormalizedInboundMessage
   | NormalizedStatusUpdate
@@ -337,7 +440,8 @@ export type NormalizedEvent =
   | NormalizedReaction
   | NormalizedTemplateStatusUpdate
   | NormalizedOutboundEcho
-  | NormalizedContactSync;
+  | NormalizedContactSync
+  | NormalizedMessageCorrection;
 
 export interface SendTextArgs {
   /** E.164 digits, no '+'. */
@@ -356,6 +460,13 @@ export interface SendTextArgs {
    * path from the window band. Ignored by WhatsApp.
    */
   useHumanAgentTag?: boolean;
+  /**
+   * WhatsApp only: render a link preview card for the first URL in `body`
+   * (Meta's `text.preview_url`). When omitted, the provider auto-enables it if
+   * the body contains an http(s) URL. Ignored by channels that preview links
+   * natively (Messenger / Instagram).
+   */
+  previewUrl?: boolean;
 }
 
 export interface SendTextResult {
@@ -516,9 +627,9 @@ export interface ProviderTemplate {
  * `{ type: "text", text: <value> }` entries.
  *
  * Header parameters are positional too — Meta requires header values in their
- * own `header` component entry, separate from body. Buttons with URL/COPY_CODE
- * substitutions also have their own component entries; we don't support those
- * yet (TODO: dynamic button URLs).
+ * own `header` component entry, separate from body. Buttons with URL/COPY_CODE/
+ * quick-reply substitutions have their own component entries — see
+ * `TemplateVariableSet.buttons`.
  */
 /**
  * Media supplied for an IMAGE/VIDEO/DOCUMENT template header at SEND time.
@@ -540,14 +651,45 @@ export interface TemplateHeaderMedia {
   filename?: string;
 }
 
+/**
+ * A dynamic button parameter for a template send. Meta needs a `button`
+ * component entry (with `sub_type` + `index`) ONLY for buttons whose value is
+ * templated — a URL button with a `{{1}}` suffix, a copy-code/coupon button, or
+ * a quick-reply whose payload is set at send time. Static buttons (a fixed URL,
+ * a phone number) carry no parameter and are omitted.
+ *
+ *   - `url`         → `{ type: "text", text }`         (the dynamic URL suffix)
+ *   - `copy_code`   → `{ type: "coupon_code", coupon_code: text }`
+ *   - `quick_reply` → `{ type: "payload", payload: text }`
+ */
+export interface TemplateButtonParam {
+  /** 0-based position of the button in the template's BUTTONS component. */
+  index: number;
+  subType: "url" | "copy_code" | "quick_reply";
+  /** The dynamic value (URL suffix / coupon code / payload). */
+  text: string;
+}
+
 export interface TemplateVariableSet {
   /** Body `{{1}}, {{2}}, …` values in order. Empty array when body has no vars. */
   body: string[];
+  /**
+   * Named body parameters, for templates created with `parameter_format: NAMED`
+   * (`{{order_id}}` instead of `{{1}}`). When present, the provider sends the
+   * body params as `{ type: "text", parameter_name, text }` and IGNORES the
+   * positional `body` array. Absent for the common positional case.
+   */
+  bodyNamed?: Array<{ name: string; text: string }>;
   /** Header `{{1}}` value when the header is TEXT with a placeholder. */
   header?: string;
   /** Media for an IMAGE/VIDEO/DOCUMENT header. Required when the template's
    *  HEADER component format is one of those; ignored for TEXT headers. */
   headerMedia?: TemplateHeaderMedia;
+  /**
+   * Dynamic button parameters. Empty/absent for templates with only static
+   * buttons (or none) — the common case. See `TemplateButtonParam`.
+   */
+  buttons?: TemplateButtonParam[];
 }
 
 export interface SendTemplateArgs {
@@ -629,6 +771,14 @@ export interface UploadHeaderMediaResult {
 export interface ProviderCapabilities {
   freeFormWindowMs: number | null;
   /**
+   * Maximum characters in a single outbound text body. Meta enforces different
+   * limits per channel (WhatsApp 4096, Messenger 2000, Instagram 1000) and
+   * rejects an over-limit send with an opaque error — so the send path validates
+   * against this first, and the composer can render a live counter. Channels
+   * with no documented limit use a generous default.
+   */
+  messageTextMaxChars: number;
+  /**
    * Extended outbound window (ms) for channels that allow agent replies past
    * the standard free-form window under a support-only policy. Meta social
    * (Messenger/Instagram) permit sends up to 7 days since the last inbound via
@@ -686,7 +836,16 @@ export interface MessagingProvider<SendConfig = unknown> {
   fetchContactProfile?(
     externalId: string,
     config: SendConfig,
-  ): Promise<{ name: string | null }>;
+  ): Promise<{
+    name: string | null;
+    /** Instagram public @username, when the profile exposes one. */
+    username?: string | null;
+    /** Profile picture URL (Meta CDN), when available. Best-effort avatar. */
+    avatarUrl?: string | null;
+    /** Instagram richer profile signals (follower count / verified / follow
+     *  relationship); absent on Messenger. Ingest persists it on the contact. */
+    socialProfile?: SocialProfile | null;
+  }>;
   /**
    * Outbound interactive question (buttons / list). Optional — providers
    * without interactive support fall back to plain text (the caller decides
@@ -862,4 +1021,22 @@ export interface MessagingProvider<SendConfig = unknown> {
    * to debug why inbound calls aren't arriving at the webhook.
    */
   getPhoneNumberSettings?(config: SendConfig): Promise<{ raw: unknown }>;
+
+  // ---- Meta social calling (Messenger) --------------------------------
+  // Unified `POST /{page-id}/calls` action model — see CallActionArgs. A
+  // provider implements EITHER the WhatsApp calling methods above OR these,
+  // never both; CallsService dispatches on which the channel's provider
+  // supports. All optional + gated by ProviderCapabilities.calling.
+
+  /** Perform a call action (connect/accept/reject/terminate/media_update). */
+  callAction?(args: CallActionArgs, config: SendConfig): Promise<CallActionResult>;
+
+  /** Query a consumer's outbound-call permission + rate-limit state. */
+  checkCallPermission?(psid: string, config: SendConfig): Promise<SocialCallPermission>;
+
+  /** Send a permission opt-in request (`calling_optin` template). */
+  requestCallPermission?(psid: string, config: SendConfig): Promise<{ messageId: string }>;
+
+  /** True when the Page has the Messenger Calling feature enabled. */
+  callFeatureEnabled?(config: SendConfig): Promise<boolean>;
 }

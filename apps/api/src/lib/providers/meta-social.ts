@@ -17,6 +17,9 @@
  */
 
 import type {
+  CallActionArgs,
+  CallActionResult,
+  NormalizedCallEvent,
   NormalizedEvent,
   NormalizedInboundMessage,
   NormalizedMediaRef,
@@ -26,10 +29,11 @@ import type {
   SendMediaArgs,
   SendTextArgs,
   SendTextResult,
+  SocialCallPermission,
   UploadMediaArgs,
   UploadMediaResult,
 } from "@ccp/shared/providers/types";
-import type { MediaKind } from "@ccp/shared/types";
+import type { MediaKind, MessageAttribution, MessageStructured, SocialProfile } from "@ccp/shared/types";
 import {
   GRAPH_BASE,
   graphGetJson,
@@ -81,6 +85,33 @@ interface SocialEntry {
   id?: string;
   time?: number;
   messaging?: MessagingEvent[];
+  // Messenger Calling lifecycle events (connect / call_status / media_update /
+  // terminate) ride their own array on the entry — see docs/messenger-calling.md.
+  calls?: SocialCallWire[];
+  // Business-initiated call permission opt-in reply lands at the entry level.
+  sender?: { id?: string };
+  recipient?: { id?: string };
+  timestamp?: number;
+  call_permission_reply?: { response?: string; expiration_timestamp?: number | string };
+}
+/** One item of `entry.calls[]` — union of the four call lifecycle events. */
+interface SocialCallWire {
+  id?: string;
+  event?: string; // connect | call_status | media_update | terminate
+  to?: string;
+  from?: string;
+  recipient_id?: string;
+  call_direction?: string; // business_initiated | user_initiated
+  call_status?: string; // ringing | accepted
+  status?: string; // Completed | Failed (terminate)
+  start_time?: number;
+  end_time?: number;
+  duration?: number;
+  timestamp?: number;
+  session?: {
+    version?: number;
+    sdp_renegotiation?: { sdp_type?: string; sdp?: string };
+  };
 }
 interface MessagingEvent {
   sender?: { id?: string };
@@ -90,6 +121,9 @@ interface MessagingEvent {
     mid?: string;
     text?: string;
     is_echo?: boolean;
+    // The customer UNSENT this message (Messenger/Instagram). References an
+    // existing `mid`; carries no new content — we tombstone the stored row.
+    is_deleted?: boolean;
     attachments?: { type?: string; payload?: { url?: string } }[];
     quick_reply?: { payload?: string };
     // Set when the customer quoted a message — the mid they replied to.
@@ -100,6 +134,51 @@ interface MessagingEvent {
   // sends a per-message `mid` (the specific message the customer read).
   read?: { watermark?: number; mid?: string };
   reaction?: { mid?: string; action?: string; emoji?: string; reaction?: string };
+  // A postback: the customer tapped a Get-Started button, a persistent-menu
+  // item, or a structured-message button whose `payload` we authored. Parallel
+  // to `quick_reply` on a message, but a top-level messaging event. `mid` is
+  // present for button postbacks; Get-Started has none, so we synthesize a
+  // dedup id from sender+timestamp.
+  postback?: { mid?: string; title?: string; payload?: string; referral?: SocialReferral };
+  // Ad / deep-link attribution at the messaging-event level (sibling to
+  // `message`) — Click-to-Messenger ad or an m.me `ref` link. Drives the "from
+  // your ad" chip; attached to the inbound message it rides in on.
+  referral?: SocialReferral;
+}
+
+/**
+ * Ad / deep-link attribution attached to an inbound. Messenger delivers it as a
+ * top-level `referral` messaging event (m.me links, Click-to-Messenger ads,
+ * checkbox plugin) or nested under the first message / a Get-Started postback.
+ * Captured so an ad-sourced conversation shows its source. Wired into ingest in
+ * Phase 3 (receive enhancements).
+ */
+interface SocialReferral {
+  ref?: string;
+  source?: string;
+  type?: string;
+  ad_id?: string;
+  ads_context_data?: Record<string, unknown>;
+}
+
+/**
+ * Map a Messenger `referral` to the channel-agnostic `MessageAttribution` (the
+ * same shape WhatsApp Click-to-WhatsApp fills), so the "from your ad" chip works
+ * identically across channels. `ad_id` ⇒ a paid ad; otherwise the `ref` deep-link
+ * payload (m.me/checkbox plugin). `ads_context_data` sometimes carries the ad
+ * creative's title/photo — surface the title as the headline when present.
+ */
+function attributionFromSocialReferral(r: SocialReferral): MessageAttribution {
+  const ctx = (r.ads_context_data ?? {}) as { ad_title?: unknown };
+  const headline =
+    typeof ctx.ad_title === "string" && ctx.ad_title.trim() ? ctx.ad_title.trim() : undefined;
+  const source: MessageAttribution["source"] = r.ad_id ? "ad" : r.ref ? "ref" : "unknown";
+  return {
+    source,
+    ...(headline ? { headline } : {}),
+    ...(r.ad_id?.trim() ? { clickId: r.ad_id.trim() } : {}),
+    ...(r.ref?.trim() ? { ref: r.ref.trim() } : {}),
+  };
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -180,10 +259,96 @@ function socialAttachmentLabel(type: string): string {
 }
 
 /**
+ * Structured content for an Instagram story interaction (mention / reply / share)
+ * so the bubble renders a story card instead of a bare label. `url` is the story
+ * media when Meta includes it (a preview the agent can open). Returns undefined
+ * for non-story attachments (handled elsewhere).
+ */
+function socialStructuredFromAttachments(
+  atts: { type?: string; payload?: { url?: string } }[] | undefined,
+): MessageStructured | undefined {
+  const att = atts?.find(
+    (a) => a.type === "story_mention" || a.type === "story_reply" || a.type === "share",
+  );
+  if (!att) return undefined;
+  const storyType: "mention" | "reply" | "share" =
+    att.type === "story_reply" ? "reply" : att.type === "share" ? "share" : "mention";
+  return {
+    kind: "story",
+    storyType,
+    ...(att.payload?.url ? { url: att.payload.url } : {}),
+  };
+}
+
+/**
  * Parse a Messenger/Instagram webhook into normalized events. `expectedObject`
  * gates the envelope (`"page"` for Messenger, `"instagram"` for Instagram) so a
  * misrouted product silently yields `[]` rather than mis-ingesting.
  */
+/**
+ * Map one `entry.calls[]` item to a NormalizedCallEvent. Messenger's call
+ * webhooks carry the caller PSID only on `connect` (`from`) and `call_status`
+ * (`recipient_id`); `media_update` / `terminate` reference an existing call by
+ * id, so `externalContactId` is left undefined and ingest resolves the row by
+ * `externalCallId`. Full shape reference: docs/messenger-calling.md.
+ */
+function mapSocialCall(c: SocialCallWire): NormalizedCallEvent | null {
+  const externalCallId = c.id;
+  if (!externalCallId || !c.event) return null;
+  const timestamp = new Date((c.timestamp ?? Date.now()) * (c.timestamp ? 1000 : 1));
+  const base = { kind: "call" as const, externalCallId, contactName: null, timestamp, rawPayload: c as unknown as Record<string, unknown> };
+
+  switch (c.event) {
+    case "connect": {
+      const outbound = c.call_direction === "business_initiated";
+      return {
+        ...base,
+        direction: outbound ? "out" : "in",
+        phase: outbound ? "ringing_out" : "incoming",
+        ...(c.from ? { externalContactId: c.from } : {}),
+      };
+    }
+    case "call_status": {
+      // Outbound progress (ringing / accepted). Row stays ringing; the real
+      // pickup time is taken from the terminate's start_time (connectedAt).
+      return {
+        ...base,
+        direction: "out",
+        phase: "ringing_out",
+        ...(c.recipient_id ? { externalContactId: c.recipient_id } : {}),
+      };
+    }
+    case "media_update": {
+      // Carries Meta's SDP offer to answer (outbound media negotiation).
+      const sdp = c.session?.sdp_renegotiation?.sdp;
+      return {
+        ...base,
+        direction: "out",
+        phase: "connecting",
+        ...(sdp ? { sdp: { type: "offer" as const, sdp } } : {}),
+      };
+    }
+    case "terminate": {
+      // `duration` is present only when the business actually connected; Meta
+      // still sends `start_time` for a rang-but-unanswered call, so gate
+      // connectedAt on the duration — otherwise ingest's "answered but no
+      // duration" correction would flip a genuine miss into a completed call.
+      const connected = typeof c.duration === "number" && c.duration > 0;
+      const phase = c.status === "Failed" ? "failed" : connected ? "completed" : "missed";
+      return {
+        ...base,
+        // Terminate carries no caller id; ingest updates by externalCallId.
+        direction: "in",
+        phase,
+        ...(connected && c.start_time ? { connectedAt: new Date(c.start_time * 1000) } : {}),
+        ...(typeof c.duration === "number" ? { durationSeconds: c.duration } : {}),
+      };
+    }
+    default:
+      return null;
+  }
+}
+
 export function parseSocialMessaging(
   payload: unknown,
   expectedObject: string,
@@ -194,10 +359,69 @@ export function parseSocialMessaging(
 
   const events: NormalizedEvent[] = [];
   for (const entry of env.entry) {
+    // Call lifecycle events (Messenger Calling) ride entry.calls[], separate
+    // from messaging. An entry carries one or the other.
+    if (Array.isArray(entry.calls)) {
+      for (const c of entry.calls) {
+        const call = mapSocialCall(c);
+        if (call) events.push(call);
+      }
+    }
+    // Business-initiated call permission opt-in reply (entry-level).
+    if (entry.call_permission_reply?.response && entry.sender?.id) {
+      const approved = entry.call_permission_reply.response === "approve";
+      events.push({
+        kind: "call",
+        externalCallId: `perm:${entry.sender.id}:${entry.timestamp ?? ""}`,
+        externalContactId: entry.sender.id,
+        contactName: null,
+        direction: "out",
+        phase: approved ? "permission_granted" : "permission_revoked",
+        timestamp: new Date((entry.timestamp ?? Math.floor(Date.now() / 1000)) * 1000),
+        rawPayload: entry as unknown as Record<string, unknown>,
+      });
+    }
     if (!Array.isArray(entry.messaging)) continue;
     for (const m of entry.messaging) {
-      // Inbound customer message. Skip echoes (our own sends mirrored back) —
-      // the send path owns persistence; ingesting the echo would double-post.
+      // Unsend: the customer deleted a message. References an existing mid;
+      // tombstone the stored row (no new content). Checked before the echo/
+      // message branches since a deleted message carries `message.mid`.
+      if (m.message?.is_deleted && m.message.mid) {
+        events.push({
+          kind: "message_correction",
+          action: "delete",
+          targetExternalId: m.message.mid,
+          timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
+          rawPayload: m as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      // Native-inbox echo: a message the BUSINESS sent from Meta's own Page /
+      // Instagram inbox (not our API), mirrored back with `is_echo`. Ingest it
+      // as an OUTBOUND echo so the shared inbox stays in sync with replies typed
+      // outside our app — the social equivalent of WhatsApp Coexistence. `sender`
+      // is the business (page/IG id), `recipient` is the CUSTOMER whose thread
+      // this belongs in. Dedupe on the mid makes an echo of our OWN API send a
+      // safe no-op (idempotent-create returns the existing row).
+      if (m.message?.is_echo) {
+        const customerId = m.recipient?.id;
+        const mid = m.message.mid;
+        if (customerId && mid) {
+          const media = attachmentMedia(m.message.attachments);
+          const text = m.message.text;
+          events.push({
+            kind: "echo",
+            externalId: mid,
+            externalContactId: customerId,
+            body: text && text.length > 0 ? text : "",
+            ...(media ? { media } : {}),
+            timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
+            rawPayload: m as unknown as Record<string, unknown>,
+          });
+        }
+        continue;
+      }
+      // Inbound customer message.
       if (m.message && !m.message.is_echo) {
         const senderId = m.sender?.id;
         const mid = m.message.mid;
@@ -241,18 +465,57 @@ export function parseSocialMessaging(
                 },
               }
             : {}),
+          // Click-to-Messenger ad / m.me-ref attribution → "from your ad" chip.
+          ...(m.referral
+            ? { attribution: attributionFromSocialReferral(m.referral) }
+            : {}),
+          // Instagram story interaction (mention / reply / share) → story card.
+          ...(() => {
+            const structured = socialStructuredFromAttachments(m.message?.attachments);
+            return structured ? { structured } : {};
+          })(),
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
           rawPayload: m as unknown as Record<string, unknown>,
         };
         events.push(msg);
         continue;
       }
+      // Postback: Get-Started / persistent-menu / structured-button tap. Surface
+      // the author-assigned `payload` as an interactiveReply so ask_question +
+      // workflow routing recognise it — parity with a message's quick_reply.
+      if (m.postback && !m.message) {
+        const senderId = m.sender?.id;
+        const payload = m.postback.payload;
+        if (senderId && payload) {
+          const title = m.postback.title ?? "";
+          const externalId =
+            m.postback.mid ?? `${senderId}:${m.timestamp ?? entry.time ?? 0}:postback`;
+          // A Get-Started tapped from an ad carries the referral on the postback.
+          const referral = m.postback.referral ?? m.referral;
+          const msg: NormalizedInboundMessage = {
+            kind: "message",
+            externalId,
+            externalContactId: senderId,
+            contactName: null,
+            body: title,
+            interactiveReply: { kind: "button_reply", id: payload, title },
+            ...(referral ? { attribution: attributionFromSocialReferral(referral) } : {}),
+            timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
+            rawPayload: m as unknown as Record<string, unknown>,
+          };
+          events.push(msg);
+        }
+        continue;
+      }
       // Reaction to one of our messages (Messenger/IG `reaction`). `action`
       // is "react" | "unreact"; on unreact the emoji is cleared. Ingest matches
-      // the target message by mid and sets its reaction column.
+      // the target message by mid and sets its reaction column. Instagram puts
+      // the emoji in `reaction` on some payloads, Messenger in `emoji` — read both.
       if (m.reaction && m.reaction.mid) {
         const emoji =
-          m.reaction.action === "unreact" ? null : m.reaction.emoji ?? null;
+          m.reaction.action === "unreact"
+            ? null
+            : m.reaction.emoji ?? m.reaction.reaction ?? null;
         const reaction: NormalizedReaction = {
           kind: "reaction",
           externalId: `${m.reaction.mid}:reaction`,
@@ -303,6 +566,20 @@ export function parseSocialMessaging(
             });
           }
         }
+      }
+      // Observability: a messaging event we don't handle yet (referral, optin,
+      // account_linking, message_edits, …). Logged — not dropped silently — so a
+      // new Meta event type surfaces in ops instead of vanishing. Fail-soft
+      // (still a 200). `message` with an echo lands here too (Phase 3 wires it).
+      if (!m.message && !m.postback && !m.reaction && !m.delivery && !m.read) {
+        console.warn(
+          JSON.stringify({
+            event: "meta.webhook.unhandled_messaging",
+            severity: "info",
+            object: expectedObject,
+            keys: Object.keys(m),
+          }),
+        );
       }
     }
   }
@@ -446,12 +723,32 @@ export async function sendSocialMedia(
     throw new Error(`${opts.label} sendMedia: response missing message_id`);
   }
   // Caption → follow-up text. Best-effort: a failed caption must not fail the
-  // media send (which already went out and bills nothing extra to retry).
+  // media send (which already went out and bills nothing extra to retry). But a
+  // silent swallow means a caption can vanish with no trace — so retry once, and
+  // if it still fails, LOG (don't swallow blind) so the drop is diagnosable.
   if (args.caption && args.caption.trim().length > 0) {
+    const sendCaption = () =>
+      sendSocialText(
+        { to: args.to, body: args.caption!, useHumanAgentTag: args.useHumanAgentTag },
+        opts,
+      );
     try {
-      await sendSocialText({ to: args.to, body: args.caption }, opts);
-    } catch {
-      // Swallow — the media landed; the caption is a nice-to-have.
+      await sendCaption();
+    } catch (first) {
+      try {
+        await sendCaption();
+      } catch (second) {
+        console.warn(
+          JSON.stringify({
+            event: "social.caption_dropped",
+            severity: "warning",
+            channel: opts.label,
+            mediaMessageId: messageId,
+            error: second instanceof Error ? second.message : String(second),
+            firstError: first instanceof Error ? first.message : String(first),
+          }),
+        );
+      }
     }
   }
   return { externalId: messageId, timestamp: new Date() };
@@ -476,23 +773,189 @@ export async function sendSocialSenderAction(
 }
 
 /**
- * Best-effort display name for a social contact — the messaging webhook carries
- * no name, so we read the profile node (`/{id}?fields=…`). `fields` differs per
- * channel (Messenger: `name`; Instagram: `name,username`). Returns the first
- * non-empty of the requested fields, else null. Never throws — the caller
- * enriches opportunistically and keeps the id-as-name fallback on any failure.
+ * Best-effort profile for a social contact — the messaging webhook carries no
+ * name, so we read the profile node (`/{id}?fields=…`). `fields` differs per
+ * channel (Messenger: `name,profile_pic`; Instagram: `name,username,
+ * profile_pic`). Returns the resolved display name plus the Instagram @username
+ * and profile-picture URL when present. Never throws — the caller enriches
+ * opportunistically and keeps the id-as-name fallback on any failure — but a
+ * profile error is LOGGED (the common ones: 2018218 "no matching user",
+ * 2534014 "Instagram user not reachable") rather than swallowed blind, so a
+ * misconfigured page surfaces in ops.
  */
-export async function fetchSocialProfileName(
+export interface SocialContactProfile {
+  name: string | null;
+  username: string | null;
+  avatarUrl: string | null;
+  /** Instagram-only richer signals; null on Messenger / when the node omits them. */
+  socialProfile: SocialProfile | null;
+}
+
+export async function fetchSocialProfile(
   externalId: string,
-  opts: { accessToken: string; graphVersion: string; fields: string },
-): Promise<string | null> {
+  opts: { accessToken: string; graphVersion: string; fields: string; label: string },
+): Promise<SocialContactProfile> {
   try {
     const url = `${GRAPH_BASE}/${opts.graphVersion}/${encodeURIComponent(externalId)}?fields=${encodeURIComponent(opts.fields)}`;
     const res = await graphGetJson(url, opts.accessToken, { retry: true });
     const name = typeof res.name === "string" ? res.name.trim() : "";
     const username = typeof res.username === "string" ? res.username.trim() : "";
-    return name || username || null;
-  } catch {
-    return null;
+    const avatarUrl = typeof res.profile_pic === "string" ? res.profile_pic.trim() : "";
+    // Instagram-only richer signals — Messenger never requests them, so they're
+    // simply absent. Each field is copied only when present so a partial node
+    // response degrades cleanly to null.
+    const social: SocialProfile = {};
+    if (typeof res.follower_count === "number") social.followerCount = res.follower_count;
+    if (typeof res.is_verified_user === "boolean") social.isVerified = res.is_verified_user;
+    if (typeof res.is_user_follow_business === "boolean")
+      social.followsBusiness = res.is_user_follow_business;
+    if (typeof res.is_business_follow_user === "boolean")
+      social.businessFollows = res.is_business_follow_user;
+    return {
+      name: name || username || null,
+      username: username || null,
+      avatarUrl: avatarUrl || null,
+      socialProfile: Object.keys(social).length > 0 ? social : null,
+    };
+  } catch (err) {
+    console.warn(
+      JSON.stringify({
+        event: "social.profile_fetch_failed",
+        severity: "info",
+        channel: opts.label,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+    return { name: null, username: null, avatarUrl: null, socialProfile: null };
   }
+}
+
+// ─── Messenger Calling (unified POST /{page-id}/calls) ──────────────────────
+// Full wire reference: docs/messenger-calling.md. Meta uses ONE endpoint with
+// an `action` discriminator and returns SDP synchronously — unlike WhatsApp's
+// method-per-action + webhook-delivered answer, so these are their own funcs.
+
+/** Perform a Messenger call action against `POST /{page-id}/calls`. */
+export async function sendSocialCallAction(
+  args: CallActionArgs,
+  opts: SocialSendTarget,
+): Promise<CallActionResult> {
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/calls`;
+  // `platform` is the channel Meta routes the call on ("messenger"; Instagram
+  // has no calling API today, so only Messenger reaches here). Derived from the
+  // provider label rather than hardcoded, so it stays correct if Meta ships IG.
+  const body: Record<string, unknown> = { platform: opts.label, action: args.action };
+  if (args.callId) body.call_id = args.callId;
+  if (args.to) body.to = args.to;
+  if (args.sdp) body.session = { sdp_type: "offer", sdp: args.sdp };
+  const res = await graphPostJson(url, opts.accessToken, body);
+  const session = (res.session ?? {}) as {
+    sdp_response?: { sdp?: string } | string;
+    sdp_renegotiation?: { sdp?: string } | string;
+  };
+  const readSdp = (v: { sdp?: string } | string | undefined): string | undefined =>
+    typeof v === "string" ? v : v?.sdp;
+  return {
+    callId: typeof res.id === "string" ? res.id : undefined,
+    sdpAnswer: readSdp(session.sdp_response),
+    sdpRenegotiation: readSdp(session.sdp_renegotiation),
+  };
+}
+
+/** Query a consumer's outbound-call permission (`GET messenger_call_permissions`). */
+export async function checkSocialCallPermission(
+  psid: string,
+  opts: SocialSendTarget,
+): Promise<SocialCallPermission> {
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messenger_call_permissions?psid=${encodeURIComponent(psid)}`;
+  const res = await graphGetJson(url, opts.accessToken, { retry: true });
+  const permission = (res.permission ?? {}) as { status?: string; expiration_time?: number };
+  const actions = Array.isArray(res.actions) ? (res.actions as Array<{ action_name?: string; can_perform?: boolean }>) : [];
+  const can = (name: string) => actions.find((a) => a.action_name === name)?.can_perform === true;
+  return {
+    hasPermission: permission.status === "has_permission",
+    canStartCall: can("start_call"),
+    canRequestPermission: can("send_call_permission_request"),
+    expiresAt: typeof permission.expiration_time === "number" ? new Date(permission.expiration_time * 1000) : null,
+  };
+}
+
+/** Send a `calling_optin` permission request (≤2/thread/day, 7-day validity). */
+export async function requestSocialCallPermission(
+  psid: string,
+  opts: SocialSendTarget,
+): Promise<{ messageId: string }> {
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
+  const res = await graphPostJson(url, opts.accessToken, {
+    recipient: { id: psid },
+    message: { attachment: { type: "template", payload: { template_type: "calling_optin" } } },
+  });
+  return { messageId: typeof res.message_id === "string" ? res.message_id : "" };
+}
+
+/** True when the Page has the Messenger Calling feature enabled. */
+export async function socialCallFeatureEnabled(opts: SocialSendTarget): Promise<boolean> {
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/business_messaging_feature_status`;
+  const res = await graphPostJson(url, opts.accessToken, {
+    features: [{ feature: "messenger_api_calling" }],
+  });
+  const data = Array.isArray(res.data) ? (res.data as Array<{ feature?: string; status?: string }>) : [];
+  return data.some((d) => d.feature === "messenger_api_calling" && String(d.status).toLowerCase() === "enabled");
+}
+
+/**
+ * Route consumer-initiated calls to third-party apps (`PARTNERS`) — i.e. THIS
+ * inbox — vs Meta's own surfaces (`META`). The Page MUST be on `PARTNERS` (and
+ * subscribed to the `calls` webhook) to receive inbound calls here; without it
+ * inbound calls only ring Meta Business Inbox. Business-initiated calls work
+ * regardless. Idempotent. See docs/messenger-calling.md.
+ */
+export async function setSocialCallRouting(
+  ringTarget: "META" | "PARTNERS",
+  opts: SocialSendTarget,
+): Promise<void> {
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messenger_call_settings`;
+  await graphPostJson(url, opts.accessToken, { call_routing: { ring_target: ringTarget } });
+}
+
+/** Read the Page's current inbound-call routing target. */
+export async function getSocialCallRouting(
+  opts: SocialSendTarget,
+): Promise<"META" | "PARTNERS" | null> {
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messenger_call_settings?fields=call_routing`;
+  const res = await graphGetJson(url, opts.accessToken, { retry: true });
+  const routing = (res.call_routing ?? {}) as { ring_target?: string };
+  return routing.ring_target === "META" || routing.ring_target === "PARTNERS"
+    ? routing.ring_target
+    : null;
+}
+
+/** Show/hide the call icon in Messenger threads for this Page. */
+export async function setSocialCallIconEnabled(
+  enabled: boolean,
+  opts: SocialSendTarget,
+): Promise<void> {
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messenger_call_settings`;
+  await graphPostJson(url, opts.accessToken, { icon_enabled: enabled });
+}
+
+/**
+ * One-shot "make this Page ready to place AND receive calls in our inbox":
+ *   - route consumer-initiated calls to PARTNERS (us) — REQUIRED to receive
+ *     inbound calls here rather than only in Meta Business Inbox, and
+ *   - show the in-thread call icon.
+ * Then report the feature status so ops can see whether Meta has actually
+ * enabled Messenger Calling on the Page. Idempotent; mirrors the shape of
+ * WhatsApp's `enableCalling`.
+ */
+export async function enableSocialCalling(
+  opts: SocialSendTarget,
+): Promise<{ ok: true; raw: unknown }> {
+  await setSocialCallRouting("PARTNERS", opts);
+  await setSocialCallIconEnabled(true, opts).catch(() => {
+    // Icon toggle is cosmetic — a failure here must not fail the (load-bearing)
+    // routing change above.
+  });
+  const featureEnabled = await socialCallFeatureEnabled(opts).catch(() => false);
+  return { ok: true, raw: { ring_target: "PARTNERS", icon_enabled: true, featureEnabled } };
 }

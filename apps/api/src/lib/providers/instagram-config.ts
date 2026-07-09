@@ -1,6 +1,7 @@
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
+import { getMetaConnection } from "@/lib/providers/meta-connection";
 
 /**
  * Per-team Instagram DM config. Same credential model as WhatsApp / Messenger
@@ -177,8 +178,12 @@ export async function getInstagramWebhookConfig(
   }
   if (!cipher) return null;
   try {
+    // Prefer the shared Meta App secret (single source — rotation there applies
+    // to every channel at once); fall back to the per-channel cipher for legacy
+    // / pre-Meta-App rows. See getMetaWebhookConfig for the rationale.
+    const meta = await getMetaConnection(teamId);
     return {
-      appSecret: decryptSecret(cipher.appSecretCipher),
+      appSecret: meta?.appSecret ?? decryptSecret(cipher.appSecretCipher),
       verifyToken: cipher.verifyToken,
       igId: cipher.igId,
     };

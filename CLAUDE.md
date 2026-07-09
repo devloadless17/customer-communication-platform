@@ -90,18 +90,18 @@ Model each channel's rules (24h window, templates vs free-form, rate limit) as `
 
 ---
 
-## 6. Customer identity (adopted target)
+## 6. Customer identity
 
-Full design + migration: **[docs/identity.md](docs/identity.md)**.
+Full design + current state: **[docs/identity.md](docs/identity.md)**.
 
 The platform adopts a **unified customer identity**: a `Customer` (person) owns many channel-scoped `Contact` rows, so an agent sees one profile across all a person's channels. Threads stay **per-contact/per-channel** (we never merge message histories) — the customer is a profile-and-switcher layer over separate threads.
 
 Discipline that keeps this simple and safe:
 - **Auto-merge only on deterministic strong keys** (verified exact phone / exact email). **No fuzzy/name matching, ever.**
-- Everything else is **manual, reversible merge/split with an audit trail**. Merge never deletes a contact or its messages — it only re-points `Contact.customerId`.
-- Identity resolution runs in **exactly one place** (an `IdentityService` in the domain layer, called from ingest), tenant-scoped.
+- Everything else is **manual, reversible merge/split**. Merge never deletes a contact or its messages — it only re-points `Contact.customerId`. (A persisted audit record for merges is designed but **not yet built** — see gaps below.)
+- Identity resolution runs in **exactly one place** (`IdentityService.resolveCustomerId` in the domain layer, called from ingest + a drift sweeper), tenant-scoped.
 
-**Current state**: `Contact`-only (per-channel); no `Customer` table yet. Treat "contact" and "customer" as the same thing in code until the second channel makes unification real, then follow the migration in the doc. Do not build speculative `Customer` plumbing early.
+**Current state**: **shipped** (built alongside Messenger + Instagram). The `Customer` model + `Contact.customerId` exist; auto-merge on exact phone/email runs via `IdentityService` (inline at ingest + drift sweeper); manual reversible merge/split (`CustomersService.link`/`unlink`) + the "linked channels" switcher UI are live. Per-`Customer` **omnichannel broadcast targeting** is now built — a `targetMode:'customer'` broadcast reaches each person ONCE on their best live channel (`bestChannelForCustomer` + per-recipient runner routing; "People (best channel)" mode in the broadcast composer). **Not yet built**: lifting person-level fields onto `Customer` + a contacts-list page rollup by person (workflow actions still target channel-scoped `Contact`s outside the `customer` step target). Gaps tracked in [docs/identity.md](docs/identity.md).
 
 ---
 
@@ -286,9 +286,10 @@ Each links to the reasoning:
 
 ## 19. Deferred / not now (with triggers)
 
-- **Multi-channel providers** (Messenger, Instagram, Telegram, TikTok, SMS, Email) — the interface is ready; build one when WhatsApp depth is solid and a pilot asks. Recipe: [docs/adding-a-channel.md](docs/adding-a-channel.md).
+- **More channels** (Telegram, TikTok, SMS, Email) — the interface is ready; build one when a pilot asks. Recipe: [docs/adding-a-channel.md](docs/adding-a-channel.md). *(Messenger + Instagram are **live**, not deferred.)*
+- **Messenger calling · social opt-in/proactive messaging · capability-driven broadcasting · per-`Customer` omnichannel targeting** — designed, not yet built; each is a bounded add along an existing seam. See the Meta-parity roadmap.
 - **WhatsApp Embedded Signup** (no more manual credential paste) — needs Meta Tech-Provider review; after the product is worth onboarding into. [docs/onboarding-future.md](docs/onboarding-future.md).
-- **Unified `Customer` implementation** — adopted as target (§6); build at the second channel.
+- **Unified `Customer` implementation** — ✅ shipped (§6). Remaining: merge/split audit record + person-level field lift + omnichannel targeting.
 - **Redis Socket.io adapter, standalone worker container, per-tenant media isolation, encryption-at-rest for message bodies, analytics dashboards, per-agent unread** — each has a named trigger in [docs/operations.md](docs/operations.md) / the security docs. Don't pre-build.
 
 ---
@@ -302,6 +303,7 @@ Each links to the reasoning:
 | Event bus: tiers, taxonomy, subscribers, outbox | [docs/events.md](docs/events.md) |
 | Customer identity: unified model, auto-merge rules, migration | [docs/identity.md](docs/identity.md) |
 | Adding a channel: recipe + per-channel constraints | [docs/adding-a-channel.md](docs/adding-a-channel.md) |
+| Meta channels capability & gap matrix (WhatsApp/Messenger/Instagram) | [docs/meta-channels-capabilities.md](docs/meta-channels-capabilities.md) |
 | Data model ERD | [docs/schema-erd.md](docs/schema-erd.md) |
 | External API reference | [docs/organization-api.md](docs/organization-api.md) |
 | Local setup & dev matrix | [docs/local-setup.md](docs/local-setup.md) |

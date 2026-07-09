@@ -27,6 +27,13 @@ export interface ChannelResolvable {
   phoneNumber: string | null;
   identityChannel: Channel | null;
   externalContactId: string | null;
+  /**
+   * WhatsApp Business-Scoped User ID — forward-compat (Meta 2026). Optional so
+   * existing callers that don't select it are unaffected; when a phone-keyed
+   * contact has only a BSUID (Meta omitted the phone), it becomes the send
+   * destination. Absent/null today.
+   */
+  bsuid?: string | null;
 }
 
 export interface ResolvedChannel {
@@ -55,6 +62,12 @@ export function resolveContactChannel(contact: ChannelResolvable): ResolvedChann
   // WhatsApp (and any phone-keyed channel): the phone number is the identity.
   if (contact.phoneNumber) {
     return { channel: "whatsapp", to: contact.phoneNumber };
+  }
+  // BSUID forward-compat: a phone-keyed contact Meta identified only by its
+  // business-scoped id (2026 rollout) still sends — the BSUID rides the same
+  // `to` field. Null today, so this never fires yet.
+  if (contact.bsuid) {
+    return { channel: contact.identityChannel ?? "whatsapp", to: contact.bsuid };
   }
   throw new NoChannelDestinationError();
 }

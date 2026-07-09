@@ -135,6 +135,9 @@ function ConversationListItemImpl({
           world-class shared inbox — identifies the source channel at a glance). */}
       <div className="relative mt-0.5 shrink-0">
         <Avatar className="size-9">
+          {contact.avatarUrl ? (
+            <AvatarImage src={contact.avatarUrl} alt="" />
+          ) : null}
           <AvatarFallback
             className="text-xs font-semibold text-white"
             style={{ backgroundImage: avatarGradient(contact.id) }}

@@ -16,6 +16,7 @@ import type {
   Channel,
   ReplySnapshot,
   Role,
+  SocialProfile,
   User,
   UserAvailabilityStatus,
 } from "@ccp/shared/types";
@@ -144,6 +145,7 @@ export function mapContact(c: PrismaContact): Contact {
     name: c.name,
     firstName: c.firstName,
     lastName: c.lastName,
+    username: c.username,
     language: c.language,
     countryCode: c.countryCode,
     // Calling permission revocation — drives the inbox Phone-button gate so a
@@ -151,6 +153,7 @@ export function mapContact(c: PrismaContact): Contact {
     callPermissionRevokedUntil:
       c.callPermissionRevokedUntil?.toISOString() ?? null,
     avatarUrl: c.avatarUrl ?? undefined,
+    socialProfile: (c.socialProfile as SocialProfile | null) ?? undefined,
     email: c.email ?? undefined,
     location: c.location ?? undefined,
     customFields: normalizeStringMap(c.customFields),
@@ -213,6 +216,13 @@ type PrismaContactListItem = Omit<
   // customerId isn't part of the narrow list row — the unified profile is loaded
   // separately when a thread is opened, so the contact-list select omits it.
   | "customerId"
+  // BSUID/username are identity internals (forward-compat) — not rendered in the
+  // list row, so the narrow select omits them too.
+  | "bsuid"
+  | "username"
+  // socialProfile (IG follower/verified signals) is panel-only context — the
+  // list row never renders it, so the narrow select omits the JSONB column.
+  | "socialProfile"
 >;
 export function mapContactListItem(c: PrismaContactListItem): Contact {
   return {
@@ -300,6 +310,19 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
     // Customer's current emoji reaction (null/absent ⇒ none). Hydrated so a
     // refresh stays consistent with the live `message:reaction` socket frame.
     ...(m.reaction ? { reaction: m.reaction } : {}),
+    // Structured content (location pin / contact card) → dedicated bubble. The
+    // JSONB round-trips as the discriminated MessageStructured shape.
+    ...(m.structured
+      ? { structured: m.structured as unknown as Message["structured"] }
+      : {}),
+    // Ad / deep-link attribution — hydrated for the "from your ad" chip.
+    ...(m.attribution
+      ? { attribution: m.attribution as unknown as Message["attribution"] }
+      : {}),
+    // Unsend / edit — hydrated so a refresh matches the live `message:updated`
+    // frame (tombstone / "edited" marker).
+    ...(m.deletedAt ? { deletedAt: m.deletedAt.toISOString() } : {}),
+    ...(m.editedAt ? { editedAt: m.editedAt.toISOString() } : {}),
     ...(m.replyToMessageId
       ? {
           replyToMessageId: m.replyToMessageId,
