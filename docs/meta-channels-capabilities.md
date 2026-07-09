@@ -129,13 +129,14 @@ Consequence: **Phone/Email can never be auto-filled for Messenger/Instagram** �
 | Enhancement | Status | Notes |
 |---|---|---|
 | Native-inbox social echo (`is_echo`) | ✅ | Business replies typed in Meta's own Page/IG inbox mirror into the shared inbox as outbound `origin:"business_app"` with a channel-aware "via … app" chip — the social equivalent of WhatsApp Coexistence. `meta-social.ts` + `ingestOutboundEcho` (channel-agnostic). |
-| Message unsend / delete | ✅ | Customer unsend (Messenger/IG `is_deleted`) live-tombstones the bubble as "This message was deleted" (row kept, body preserved). Full pipeline: `Message.deletedAt`/`editedAt` → `NormalizedMessageCorrection` → `ingestMessageCorrection` → `message.updated` → `message:updated` socket frame → `applyMessageUpdated` reducer → `Ban` tombstone + "(edited)" marker on the bubble. WhatsApp inbound edit/revoke parse deferred (Cloud API doesn't reliably deliver it) — pipeline ready. |
+| Message edit / unsend (all 3 channels) | ✅ | Customer edit + unsend live-updates the bubble ("(edited)" marker / "This message was deleted" tombstone, row + body preserved). Parse per channel — Messenger/IG `message.is_deleted`; **WhatsApp `type:"edit"` / `type:"revoke"` with `edit.original_message_id` / `revoke.original_message_id`** (exact wamid match) — into one channel-agnostic pipeline: `NormalizedMessageCorrection` → `ingestMessageCorrection` → `Message.deletedAt`/`editedAt` → `message.updated` → `applyMessageUpdated` reducer. WhatsApp delivery is best-effort (Cloud API) — honoured when it arrives. |
 | Structured media rendering | ✅ WhatsApp + Instagram | Shared location → **map-pin card** ("Open in Maps"); contact card → **vCard card**. **Instagram story mention / reply / share → a story card** (`structuredFromStory` in `meta-social.ts`). `Message.structured` (`MessageStructured` discriminated union) set at ingest, rendered by `message-bubble/structured-block.tsx`. Placeholder body still stored for search/preview. |
 | Ad / deep-link attribution | ✅ WhatsApp + Messenger/Instagram | Click-to-WhatsApp/Messenger `referral` + m.me/`ref` deep-links → a **"From your ad · <headline>"** chip (links to the ad, `clickId` for ad-platform matching). `Message.attribution` (`MessageAttribution`); parse = `attributionForMessage` (WhatsApp) / `attributionFromSocialReferral` (social, message + postback level); `AdAttributionChip` bubble. |
 
-The only receive-enhancement tail left is **WhatsApp inbound edit/revoke parse**
-(Cloud API doesn't reliably deliver it — pipeline ready). Messenger/IG
-ad-attribution + IG story cards are **done**, not deferred.
+All receive-enhancements are shipped across the live channels — edit/unsend,
+structured media, ad-attribution, and IG story cards. WhatsApp edit/revoke
+delivery is best-effort on the Cloud API, but the parse now honours it whenever
+Meta sends it.
 
 ---
 

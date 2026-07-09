@@ -27,6 +27,7 @@ import type {
   NormalizedEvent,
   NormalizedInboundMessage,
   NormalizedMediaRef,
+  NormalizedMessageCorrection,
   NormalizedOutboundEcho,
   NormalizedReaction,
   NormalizedStatusUpdate,
@@ -404,6 +405,22 @@ interface MetaMessage {
     ctwa_clid?: string;
   };
   reaction?: { message_id?: string; emoji?: string };
+  // Customer EDITED (`type:"edit"`) or UNSENT/revoked (`type:"revoke"`) a prior
+  // message. Both reference the ORIGINAL by its wamid (`original_message_id`) —
+  // an exact match, so we correct precisely that message. `edit` carries the new
+  // content nested; a text edit is `edit.message.text.body`, a media caption
+  // edit is `edit.message.<kind>.caption`. Delivery is best-effort on the Cloud
+  // API — honoured when it arrives (mirrors the Messenger/IG `is_deleted` path).
+  edit?: {
+    original_message_id?: string;
+    message?: {
+      text?: { body?: string };
+      image?: { caption?: string };
+      video?: { caption?: string };
+      document?: { caption?: string };
+    };
+  };
+  revoke?: { original_message_id?: string };
   context?: MetaContextRef;
   // Non-media customer content with no dedicated bubble yet — ingested as a
   // typed text placeholder (see placeholderForUnhandledType) so unread / window
@@ -506,6 +523,20 @@ function structuredForMessage(m: MetaMessage): MessageStructured | undefined {
     return { kind: "contacts", contacts };
   }
   return undefined;
+}
+
+/** New body text carried by a WhatsApp `edit.message` — the text body, or a
+ *  media CAPTION (only the caption is editable on media). Undefined for an edit
+ *  whose new content we can't represent as text (ingest then just marks it
+ *  edited without rewriting the body). */
+function editBody(msg: NonNullable<MetaMessage["edit"]>["message"]): string | undefined {
+  return (
+    msg?.text?.body ??
+    msg?.image?.caption ??
+    msg?.video?.caption ??
+    msg?.document?.caption ??
+    undefined
+  );
 }
 
 /**
@@ -1053,6 +1084,34 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
           const tsSecs = m.timestamp ? Number(m.timestamp) : NaN;
           const ts = Number.isFinite(tsSecs) ? new Date(tsSecs * 1000) : new Date();
+
+          // Customer EDITED or UNSENT (revoked) a prior message — a correction,
+          // not a new message. Match is EXACT (`original_message_id` = the target
+          // wamid), so ingest rewrites/tombstones precisely that row. Checked
+          // BEFORE the content branches. (Best-effort on the Cloud API; honoured
+          // when delivered — mirrors the Messenger/IG `is_deleted` path.)
+          if (m.type === "edit" && m.edit?.original_message_id) {
+            const newBody = editBody(m.edit.message);
+            events.push({
+              kind: "message_correction",
+              action: "edit",
+              targetExternalId: m.edit.original_message_id,
+              ...(newBody ? { newBody } : {}),
+              timestamp: ts,
+              rawPayload: payload as Record<string, unknown>,
+            } satisfies NormalizedMessageCorrection);
+            continue;
+          }
+          if (m.type === "revoke" && m.revoke?.original_message_id) {
+            events.push({
+              kind: "message_correction",
+              action: "delete",
+              targetExternalId: m.revoke.original_message_id,
+              timestamp: ts,
+              rawPayload: payload as Record<string, unknown>,
+            } satisfies NormalizedMessageCorrection);
+            continue;
+          }
 
           // Pre-extract the optional reply context so both text + media branches
           // share the same shape. Meta sends `context.id` as the wamid of the
