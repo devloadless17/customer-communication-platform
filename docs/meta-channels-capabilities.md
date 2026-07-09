@@ -105,7 +105,7 @@ Messenger / Instagram have **no** approved-template catalog (`templates:false`).
 | **Editable person name** (`Customer.name`) | ✅ | `CustomersService.rename` + `PATCH /api/customers/:id` |
 | **Search dedup** — a multi-channel person shows ONCE with a clickable channel-badge cluster (not N duplicate rows) | ✅ (global search) | `searchContacts` rollup + `ContactSearchHit.channels` |
 | Orphan-`Customer` reaper (CAS-miss cleanup) | ✅ | `customer-link-drift.ts` |
-| Best-channel resolver wired into a workflow `customer` target (reach the person on their best live channel) | ✅ backend/API; builder picker deferred | `bestChannelForCustomer` + `steps/target.ts` |
+| Best-channel resolver wired into workflow targets — `customer` (static id) + **`trigger_customer`** (dynamic: the trigger's person, best channel) with a builder radio | ✅ | `bestChannelForCustomer` + `steps/target.ts` (`resolveCustomerBestChannel`) |
 | Per-`Customer` omnichannel **broadcast** targeting — reach each PERSON once on their best live channel (deduped across channels) | ✅ | `Broadcast.targetMode='customer'` → `resolveCustomerRecipients` (`bestChannelForCustomer` per person) + per-recipient channel routing in `broadcast-runner.ts`; "People (best channel)" mode in the new-broadcast form |
 | Contacts-list page rollup by `Customer` + person-level field lift | ✋ not yet — small follow-ups | — |
 
