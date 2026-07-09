@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
-import { Check, Copy, Loader2, PlugZap, Unplug } from "lucide-react";
+import { Loader2, PlugZap, Unplug } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -15,6 +15,8 @@ export interface InstagramCurrent {
   connected: boolean;
   igId: string | null;
   igUsername: string | null;
+  pageId: string | null;
+  pageName: string | null;
   appId: string | null;
   verifyToken: string | null;
   igAccessToken: string | null;
@@ -24,13 +26,9 @@ export interface InstagramCurrent {
 
 export function InstagramSettings({
   current,
-  webhookBaseUrl,
-  teamId,
   canManage,
 }: {
   current: InstagramCurrent;
-  webhookBaseUrl: string;
-  teamId: string;
   canManage: boolean;
 }) {
   const softRefresh = useSoftRefresh();
@@ -40,28 +38,15 @@ export function InstagramSettings({
   const [showForm, setShowForm] = useState(
     !current.connected || Boolean(current.credentialsUndecryptable),
   );
-  const [copied, setCopied] = useState<string | null>(null);
-  // CONTROLLED fields — React 19 `<form action>` auto-resets the DOM form after
-  // the action runs (even on failure), which would wipe the inputs. Holding the
-  // values in state keeps them across a rejected submit so the admin can fix one
-  // wrong key without re-typing all of them.
+  // Controlled fields — React 19 `<form action>` resets the DOM form after the
+  // action. Only the identity + an optional token override; App secret + verify
+  // token come from the shared Meta App connection.
   const [form, setForm] = useState({
-    igId: current.igId ?? "",
-    igAccessToken: current.igAccessToken ?? "",
-    appSecret: current.appSecret ?? "",
-    appId: current.appId ?? "",
+    pageId: current.pageId ?? "",
+    igAccessToken: "",
   });
   const setField = (k: keyof typeof form) => (v: string) =>
     setForm((f) => ({ ...f, [k]: v }));
-
-  const webhookUrl = `${webhookBaseUrl}/webhooks/meta/${teamId}`;
-
-  function copy(value: string, key: string) {
-    void navigator.clipboard.writeText(value).then(() => {
-      setCopied(key);
-      setTimeout(() => setCopied((k) => (k === key ? null : k)), 1500);
-    });
-  }
 
   async function save() {
     setError(null);
@@ -127,6 +112,7 @@ export function InstagramSettings({
               {current.connected && (
                 <p className="text-xs text-muted-foreground">
                   {current.igUsername ? `@${current.igUsername}` : "Account"} · {current.igId}
+                  {current.pageName ? ` · via ${current.pageName}` : ""}
                 </p>
               )}
             </div>
@@ -150,25 +136,6 @@ export function InstagramSettings({
         </div>
       </div>
 
-      {canManage && (
-        <div className="rounded-xl border bg-card p-5">
-          <h3 className="text-sm font-medium">Webhook</h3>
-          <p className="mt-1 text-xs text-muted-foreground">
-            In your Meta app → Instagram → Webhooks, paste this callback URL and
-            verify token, then subscribe to <code>messages</code>.
-          </p>
-          <div className="mt-3 space-y-2">
-            <Field label="Callback URL" value={webhookUrl} copied={copied === "url"} onCopy={() => copy(webhookUrl, "url")} />
-            <Field
-              label="Verify token"
-              value={current.verifyToken ?? "—"}
-              copied={copied === "vt"}
-              onCopy={() => current.verifyToken && copy(current.verifyToken, "vt")}
-            />
-          </div>
-        </div>
-      )}
-
       {canManage && showForm && (
         <form
           className="flex flex-col gap-4 rounded-xl border bg-card p-5"
@@ -183,40 +150,34 @@ export function InstagramSettings({
             });
           }}
         >
-          <h3 className="text-sm font-medium">Account credentials</h3>
+          <h3 className="text-sm font-medium">Account</h3>
+          <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+            Instagram DMs run through the Facebook Page your professional account
+            is linked to. Enter that <strong>Page ID</strong> — we read the
+            Instagram account from it, and the App secret + token come from your{" "}
+            <a href="/settings/meta" className="underline">
+              Meta App
+            </a>{" "}
+            connection.
+          </p>
           {current.credentialsUndecryptable && (
             <p className="rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-600">
               Stored credentials could not be decrypted. Re-paste them from Meta.
             </p>
           )}
           <LabeledInput
-            label="Instagram account ID"
-            value={form.igId}
-            onChange={setField("igId")}
-            placeholder="17841400000000000"
+            label="Facebook Page ID"
+            value={form.pageId}
+            onChange={setField("pageId")}
+            placeholder="1029384756..."
             required
           />
           <LabeledInput
-            label="Instagram access token"
+            label="Page access token (optional)"
             value={form.igAccessToken}
             onChange={setField("igAccessToken")}
-            placeholder="IGAA..."
-            required
+            placeholder="Leave blank to derive from your Meta App system-user token"
             secret
-          />
-          <LabeledInput
-            label="App secret"
-            value={form.appSecret}
-            onChange={setField("appSecret")}
-            placeholder="Verifies inbound webhooks"
-            required
-            secret
-          />
-          <LabeledInput
-            label="App ID (optional)"
-            value={form.appId}
-            onChange={setField("appId")}
-            placeholder="Informational"
           />
           {error && <p className="text-xs text-destructive">{error}</p>}
           <div className="flex justify-end">
@@ -231,28 +192,6 @@ export function InstagramSettings({
           </div>
         </form>
       )}
-    </div>
-  );
-}
-
-function Field({
-  label,
-  value,
-  copied,
-  onCopy,
-}: {
-  label: string;
-  value: string;
-  copied: boolean;
-  onCopy: () => void;
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="w-28 shrink-0 text-xs text-muted-foreground">{label}</span>
-      <code className="flex-1 truncate rounded-md bg-muted px-2 py-1.5 text-xs">{value}</code>
-      <Button variant="ghost" size="icon" className="size-8" onClick={onCopy} type="button">
-        {copied ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
-      </Button>
     </div>
   );
 }

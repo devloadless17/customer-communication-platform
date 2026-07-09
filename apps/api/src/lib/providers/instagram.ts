@@ -31,10 +31,16 @@ import {
 } from "@/lib/providers/meta-social";
 import type { InstagramSendConfig } from "@/lib/providers/instagram-config";
 
-/** The IG business id + token that address an Instagram send. */
+/**
+ * Address an Instagram send through the linked Facebook Page — NOT the IG id.
+ * Instagram-via-Facebook-Login sends over `POST /{pageId}/messages` (recipient
+ * = the IGSID) with a Page access token, exactly like Messenger; the recipient
+ * id routes it to Instagram. `/{igId}/messages` is the Instagram-Login
+ * (graph.instagram.com) pattern and returns `(#3)` on graph.facebook.com.
+ */
 function target(config: InstagramSendConfig) {
   return {
-    accountId: config.igId,
+    accountId: config.pageId,
     accessToken: config.igAccessToken,
     graphVersion: config.graphVersion,
     label: "instagram",

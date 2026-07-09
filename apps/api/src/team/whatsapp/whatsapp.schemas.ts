@@ -14,8 +14,11 @@ import { z } from "zod";
  */
 export const UpdateWhatsappConfigSchema = z.object({
   phoneNumberId: z.string().trim().min(1),
-  accessToken: z.string().trim().min(1),
-  appSecret: z.string().trim().min(1),
+  // Optional — the access token (system-user), App secret, and verify token
+  // default to the shared Meta App connection when omitted. A pasted value
+  // still overrides.
+  accessToken: z.string().trim().optional(),
+  appSecret: z.string().trim().optional(),
   verifyToken: z.string().trim().optional(),
   wabaId: z.string().trim().optional(),
   appId: z.string().trim().optional(),

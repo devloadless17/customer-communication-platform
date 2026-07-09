@@ -1,5 +1,3 @@
-import { headers } from "next/headers";
-
 import { getSession } from "@/lib/auth/current-user";
 import { getTeamInstagramConfig } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
@@ -13,7 +11,7 @@ export const metadata = {
 export const dynamic = "force-dynamic";
 
 export default async function InstagramSettingsPage() {
-  const { user, teamId } = await getSession();
+  const { user } = await getSession();
   const canManage = canManageUsers(user.role);
 
   let current: InstagramCurrent;
@@ -23,6 +21,8 @@ export default async function InstagramSettingsPage() {
       connected: Boolean(config.igId),
       igId: config.igId,
       igUsername: config.igUsername,
+      pageId: config.pageId,
+      pageName: config.pageName,
       appId: config.appId,
       verifyToken: config.verifyToken,
       igAccessToken: config.igAccessToken,
@@ -34,6 +34,8 @@ export default async function InstagramSettingsPage() {
       connected: false,
       igId: null,
       igUsername: null,
+      pageId: null,
+      pageName: null,
       appId: null,
       verifyToken: null,
       igAccessToken: null,
@@ -41,17 +43,5 @@ export default async function InstagramSettingsPage() {
     };
   }
 
-  const h = await headers();
-  const proto = h.get("x-forwarded-proto") ?? "http";
-  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
-  const webhookBaseUrl = `${proto}://${host}`;
-
-  return (
-    <InstagramSettings
-      current={current}
-      webhookBaseUrl={webhookBaseUrl}
-      teamId={teamId}
-      canManage={canManage}
-    />
-  );
+  return <InstagramSettings current={current} canManage={canManage} />;
 }

@@ -408,6 +408,8 @@ export async function getTeamMessengerConfig(): Promise<MessengerConfigView> {
 export interface InstagramConfigView {
   igId: string | null;
   igUsername: string | null;
+  pageId: string | null;
+  pageName: string | null;
   appId: string | null;
   verifyToken: string | null;
   igAccessToken: string | null;
@@ -417,6 +419,19 @@ export interface InstagramConfigView {
 
 export async function getTeamInstagramConfig(): Promise<InstagramConfigView> {
   const { config } = await api<{ config: InstagramConfigView }>("/api/team/instagram");
+  return config;
+}
+
+/** Server→browser view for the shared Meta App connection form. */
+export interface MetaConfigView {
+  appId: string | null;
+  verifyToken: string | null;
+  appSecret: string | null;
+  systemUserToken: string | null;
+  credentialsUndecryptable: boolean;
+}
+export async function getTeamMetaConfig(): Promise<MetaConfigView> {
+  const { config } = await api<{ config: MetaConfigView }>("/api/team/meta");
   return config;
 }
 

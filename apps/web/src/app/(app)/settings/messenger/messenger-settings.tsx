@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
-import { Check, Copy, Loader2, PlugZap, Unplug } from "lucide-react";
+import { Loader2, PlugZap, Unplug } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -24,13 +24,9 @@ export interface MessengerCurrent {
 
 export function MessengerSettings({
   current,
-  webhookBaseUrl,
-  teamId,
   canManage,
 }: {
   current: MessengerCurrent;
-  webhookBaseUrl: string;
-  teamId: string;
   canManage: boolean;
 }) {
   const softRefresh = useSoftRefresh();
@@ -40,30 +36,14 @@ export function MessengerSettings({
   const [showForm, setShowForm] = useState(
     !current.connected || Boolean(current.credentialsUndecryptable),
   );
-  const [copied, setCopied] = useState<string | null>(null);
-  // CONTROLLED fields — React 19 `<form action>` auto-resets the DOM form after
-  // the action runs (even on failure), which would wipe the inputs. Holding the
-  // values in state keeps them across a rejected submit so the admin can fix one
-  // wrong key without re-typing all of them.
+  // Controlled fields — only the Page id + an optional token override; the App
+  // secret + verify token come from the shared Meta App connection.
   const [form, setForm] = useState({
     pageId: current.pageId ?? "",
-    pageAccessToken: current.pageAccessToken ?? "",
-    appSecret: current.appSecret ?? "",
-    appId: current.appId ?? "",
+    pageAccessToken: "",
   });
   const setField = (k: keyof typeof form) => (v: string) =>
     setForm((f) => ({ ...f, [k]: v }));
-
-  // Meta delivers every product (WhatsApp / Messenger / Instagram) to the same
-  // per-team callback; the server fans out by the webhook `object`.
-  const webhookUrl = `${webhookBaseUrl}/webhooks/meta/${teamId}`;
-
-  function copy(value: string, key: string) {
-    void navigator.clipboard.writeText(value).then(() => {
-      setCopied(key);
-      setTimeout(() => setCopied((k) => (k === key ? null : k)), 1500);
-    });
-  }
 
   async function save() {
     setError(null);
@@ -114,7 +94,6 @@ export function MessengerSettings({
 
       {confirmDialog}
 
-      {/* Connection status */}
       <div className="rounded-xl border bg-card p-5">
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -153,28 +132,6 @@ export function MessengerSettings({
         </div>
       </div>
 
-      {/* Webhook setup — always visible so admins can wire Meta first */}
-      {canManage && (
-        <div className="rounded-xl border bg-card p-5">
-          <h3 className="text-sm font-medium">Webhook</h3>
-          <p className="mt-1 text-xs text-muted-foreground">
-            In your Meta app → Messenger → Webhooks, paste this callback URL and
-            verify token, then subscribe the Page to <code>messages</code> and{" "}
-            <code>message_deliveries</code>.
-          </p>
-          <div className="mt-3 space-y-2">
-            <Field label="Callback URL" value={webhookUrl} copied={copied === "url"} onCopy={() => copy(webhookUrl, "url")} />
-            <Field
-              label="Verify token"
-              value={current.verifyToken ?? "—"}
-              copied={copied === "vt"}
-              onCopy={() => current.verifyToken && copy(current.verifyToken, "vt")}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Credentials form */}
       {canManage && showForm && (
         <form
           className="flex flex-col gap-4 rounded-xl border bg-card p-5"
@@ -189,7 +146,16 @@ export function MessengerSettings({
             });
           }}
         >
-          <h3 className="text-sm font-medium">Page credentials</h3>
+          <h3 className="text-sm font-medium">Page</h3>
+          <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+            Enter the Facebook <strong>Page ID</strong> — the App secret + token
+            come from your{" "}
+            <a href="/settings/meta" className="underline">
+              Meta App
+            </a>{" "}
+            connection (the Page access token is derived from its system-user
+            token).
+          </p>
           {current.credentialsUndecryptable && (
             <p className="rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-600">
               Stored credentials could not be decrypted. Re-paste them from Meta.
@@ -203,26 +169,11 @@ export function MessengerSettings({
             required
           />
           <LabeledInput
-            label="Page access token"
+            label="Page access token (optional)"
             value={form.pageAccessToken}
             onChange={setField("pageAccessToken")}
-            placeholder="EAAG..."
-            required
+            placeholder="Leave blank to derive from your Meta App system-user token"
             secret
-          />
-          <LabeledInput
-            label="App secret"
-            value={form.appSecret}
-            onChange={setField("appSecret")}
-            placeholder="Verifies inbound webhooks"
-            required
-            secret
-          />
-          <LabeledInput
-            label="App ID (optional)"
-            value={form.appId}
-            onChange={setField("appId")}
-            placeholder="Informational"
           />
           {error && <p className="text-xs text-destructive">{error}</p>}
           <div className="flex justify-end">
@@ -237,28 +188,6 @@ export function MessengerSettings({
           </div>
         </form>
       )}
-    </div>
-  );
-}
-
-function Field({
-  label,
-  value,
-  copied,
-  onCopy,
-}: {
-  label: string;
-  value: string;
-  copied: boolean;
-  onCopy: () => void;
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="w-28 shrink-0 text-xs text-muted-foreground">{label}</span>
-      <code className="flex-1 truncate rounded-md bg-muted px-2 py-1.5 text-xs">{value}</code>
-      <Button variant="ghost" size="icon" className="size-8" onClick={onCopy} type="button">
-        {copied ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
-      </Button>
     </div>
   );
 }

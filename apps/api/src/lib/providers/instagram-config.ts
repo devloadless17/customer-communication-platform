@@ -14,6 +14,8 @@ import { ProviderNotConfiguredError } from "@/lib/providers/config";
 interface InstagramChannelConfig {
   igId?: string;
   igUsername?: string;
+  /** The Facebook Page the IG account is linked to — the SEND target host. */
+  pageId?: string;
   appId?: string;
   verifyToken?: string;
 }
@@ -24,6 +26,13 @@ interface InstagramChannelSecrets {
 
 export interface InstagramSendConfig {
   igId: string;
+  /**
+   * The linked Facebook Page id. Instagram-via-Facebook-Login sends through the
+   * PAGE (`POST /{pageId}/messages`, recipient = IGSID) with a Page access
+   * token — `/{igId}/messages` is the graph.instagram.com (Instagram-Login)
+   * pattern and returns `(#3)` here. So sends target the Page, like Messenger.
+   */
+  pageId: string;
   igAccessToken: string;
   graphVersion: string;
 }
@@ -41,6 +50,7 @@ const CONFIG_SWEEP_INTERVAL_MS = 5 * 60_000;
 
 interface SendCipher {
   igId: string;
+  pageId: string;
   igAccessTokenCipher: string;
 }
 interface WebhookCipher {
@@ -88,11 +98,18 @@ async function loadSendCipher(teamId: string): Promise<CachedSend> {
   const secrets = (conn.secrets ?? {}) as InstagramChannelSecrets;
   const missing: string[] = [];
   if (!config.igId) missing.push("igId");
+  // pageId is the send host now — a connection saved before Page-based
+  // onboarding won't have it and must reconnect (surfaces as not-configured).
+  if (!config.pageId) missing.push("pageId (reconnect Instagram)");
   if (!secrets.igAccessToken) missing.push("igAccessToken");
   if (missing.length > 0) return { kind: "err", missing };
   return {
     kind: "ok",
-    cipher: { igId: config.igId!, igAccessTokenCipher: secrets.igAccessToken! },
+    cipher: {
+      igId: config.igId!,
+      pageId: config.pageId!,
+      igAccessTokenCipher: secrets.igAccessToken!,
+    },
   };
 }
 
@@ -108,7 +125,12 @@ function materialize(teamId: string, cipher: SendCipher): InstagramSendConfig {
     );
     throw new ProviderNotConfiguredError(teamId, ["igAccessToken (decrypt failed)"]);
   }
-  return { igId: cipher.igId, igAccessToken, graphVersion: DEFAULT_GRAPH_VERSION };
+  return {
+    igId: cipher.igId,
+    pageId: cipher.pageId,
+    igAccessToken,
+    graphVersion: DEFAULT_GRAPH_VERSION,
+  };
 }
 
 /** Send-side Instagram config. Throws ProviderNotConfigured when unconnected. */

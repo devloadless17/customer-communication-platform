@@ -1,5 +1,3 @@
-import { headers } from "next/headers";
-
 import { getSession } from "@/lib/auth/current-user";
 import { getTeamMessengerConfig } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
@@ -13,7 +11,7 @@ export const metadata = {
 export const dynamic = "force-dynamic";
 
 export default async function MessengerSettingsPage() {
-  const { user, teamId } = await getSession();
+  const { user } = await getSession();
   const canManage = canManageUsers(user.role);
 
   // GET /api/team/messenger is @RequireRole("admin") — it decrypts secrets, so
@@ -44,17 +42,5 @@ export default async function MessengerSettingsPage() {
     };
   }
 
-  const h = await headers();
-  const proto = h.get("x-forwarded-proto") ?? "http";
-  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
-  const webhookBaseUrl = `${proto}://${host}`;
-
-  return (
-    <MessengerSettings
-      current={current}
-      webhookBaseUrl={webhookBaseUrl}
-      teamId={teamId}
-      canManage={canManage}
-    />
-  );
+  return <MessengerSettings current={current} canManage={canManage} />;
 }

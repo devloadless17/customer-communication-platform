@@ -44,6 +44,29 @@ Ingest, dedup (`@@unique([teamId, channel, externalId])` — note a channel whos
 
 Model each in the provider's `capabilities` (e.g. `freeFormWindowMs: 24*60*60*1000` for WhatsApp/Messenger/Instagram, `null` for Telegram/SMS/Email) so the reply box and broadcast rules derive their behavior from the capability, not from a hardcoded channel check.
 
+## The Meta host decision (WhatsApp + Messenger + Instagram) — locked
+
+**All three Meta channels run on `graph.facebook.com` via Facebook Login for Business — never `graph.instagram.com`.** Instagram has two mutually incompatible integration paths; we deliberately use the first:
+
+| | **Instagram via Facebook Login** ← *ours* | Instagram API with Instagram Login |
+|---|---|---|
+| Host | `graph.facebook.com` | `graph.instagram.com` |
+| Requires FB Page link | **Yes** (IG Business/Creator ↔ Page) | No (standalone IG) |
+| Onboarding | Business Manager, centralized, multi-account | per-IG-account, consumer-style |
+| Token namespace | same as WhatsApp + Messenger | separate |
+
+Why this is the right (and only) choice here:
+- **One rail for every Meta channel** — one Graph host, one token model, one webhook-signature model. `meta-graph.ts` / `meta-social.ts` assume this; `graph.instagram.com` would fork the provider layer for no gain.
+- **It's what Embedded Signup / Tech-Provider onboarding is built on** — Meta's Embedded Signup runs on Facebook Login for Business and returns Business-Manager-scoped tokens, so **one** flow onboards a client's WhatsApp + Page/Messenger + linked Instagram together. The Instagram-Login path sits outside that flow.
+- **It's what world-class inboxes (Respond.io, Trengo, Chatwoot) require** — IG Business linked to a Page, authenticated through Facebook.
+
+Consequences baked into the code (don't regress):
+- **Instagram onboarding takes the *Page id*, not a raw Instagram id.** `InstagramService.updateConfig` resolves `instagram_business_account{id,username}` from the Page — that derived id is the canonical `graph.facebook.com`-namespace id used by both inbound webhooks and outbound sends. Pasting a raw id (esp. a `graph.instagram.com`-namespace one) is impossible by construction. No linked IG account → hard reject (`instagram_not_linked_to_page`).
+- **One app secret across all three Meta channels** — the webhook GET verify honors any of the team's channel verify tokens (`getTeamVerifyTokens`), and each channel's POST HMAC uses the same Meta app's secret. Wiring a channel through a *separate* Meta app (e.g. the standalone "Instagram" app with its own secret) breaks inbound HMAC.
+- **The `messages` webhook field must be subscribed on that one app**, and in Development mode the *sender* must be an accepted app tester or Instagram withholds message content (delivering only empty `message_edit`/`read` companions).
+
+When to revisit: only if a real customer needs a **Page-less Instagram creator** — then *add* a second `graph.instagram.com` provider binding behind the same `MessagingProvider` interface; never replace the Facebook path.
+
 ## Onboarding references
 
 - WhatsApp today: [customer-onboarding-whatsapp.md](customer-onboarding-whatsapp.md), [whatsapp-coexistence.md](whatsapp-coexistence.md)

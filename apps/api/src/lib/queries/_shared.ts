@@ -253,6 +253,9 @@ export function mapConversation(c: PrismaConversation): Conversation {
     lastMessageAt: c.lastMessageAt.toISOString(),
     lastMessagePreview: c.lastMessagePreview,
     lastMessageDirection: c.lastMessageDirection,
+    // The channel discriminator drives the per-row channel badge and the
+    // channel-aware composer. Without it every thread reads as WhatsApp.
+    channel: c.channel as Channel,
   };
 }
 

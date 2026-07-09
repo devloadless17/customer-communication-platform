@@ -5,6 +5,7 @@ import { BadGatewayException, BadRequestException, Injectable, Logger } from "@n
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
 import { invalidateInstagramConfig } from "@/lib/providers/instagram-config";
+import { getMetaConnection } from "@/lib/providers/meta-connection";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -16,6 +17,9 @@ const CHANNEL = "instagram" as const;
 interface InstagramChannelConfig {
   igId?: string;
   igUsername?: string;
+  /** The Facebook Page the Instagram account is linked to (source of igId). */
+  pageId?: string;
+  pageName?: string;
   appId?: string;
   verifyToken?: string;
 }
@@ -28,6 +32,8 @@ interface InstagramChannelSecrets {
 export interface InstagramConfigView {
   igId: string | null;
   igUsername: string | null;
+  pageId: string | null;
+  pageName: string | null;
   appId: string | null;
   verifyToken: string | null;
   igAccessToken: string | null;
@@ -107,6 +113,8 @@ export class InstagramService {
     return {
       igId: config.igId ?? null,
       igUsername: config.igUsername ?? null,
+      pageId: config.pageId ?? null,
+      pageName: config.pageName ?? null,
       appId: config.appId ?? null,
       verifyToken,
       igAccessToken,
@@ -118,16 +126,42 @@ export class InstagramService {
   async updateConfig(
     teamId: string,
     input: UpdateInstagramConfigInput,
-  ): Promise<{ config: { igId: string; igUsername: string | null; verifyToken: string } }> {
-    const { igId, igAccessToken, appSecret, appId } = input;
+  ): Promise<{
+    config: { igId: string; igUsername: string | null; pageId: string; verifyToken: string };
+  }> {
+    const { pageId } = input;
 
-    // Validate the IG account + token against Graph before persisting.
+    // Source app-level credentials from the shared Meta App connection unless
+    // overridden on this form. The Page access token is derived below.
+    const meta = await getMetaConnection(teamId);
+    const appSecret = input.appSecret?.trim() || meta?.appSecret || null;
+    const sourceToken = input.igAccessToken?.trim() || meta?.systemUserToken || null;
+    const appId = input.appId?.trim() || meta?.appId || undefined;
+    if (!appSecret || !sourceToken) {
+      throw new BadRequestException({
+        error: "meta_not_configured",
+        detail:
+          "Set up your Meta App connection first (Settings → Meta App: App secret + system-user token), then connect the channel.",
+      });
+    }
+
+    // Resolve the Instagram business account FROM the Page. This is the whole
+    // point of taking a Page id: `instagram_business_account.id` is the
+    // canonical Instagram id in the graph.facebook.com namespace — the same one
+    // that arrives on inbound webhooks and that outbound sends must target — so
+    // a mismatched Instagram-Login id can't be entered by hand. If the Page has
+    // no linked Instagram account, we reject with an actionable error instead of
+    // silently connecting something that will never receive a DM.
+    let igId: string;
     let igUsername: string | undefined;
+    let pageName: string | undefined;
+    let derivedPageToken: string | undefined;
     try {
       const res = await fetch(
-        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(igId)}?fields=username`,
+        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(pageId)}` +
+          `?fields=name,access_token,instagram_business_account{id,username}`,
         {
-          headers: { authorization: `Bearer ${igAccessToken}` },
+          headers: { authorization: `Bearer ${sourceToken}` },
           signal: AbortSignal.timeout(20_000),
         },
       );
@@ -138,8 +172,30 @@ export class InstagramService {
           detail: body.slice(0, 300),
         });
       }
-      const data = (await res.json()) as { username?: string };
-      igUsername = typeof data.username === "string" ? data.username : undefined;
+      const data = (await res.json()) as {
+        name?: string;
+        access_token?: string;
+        instagram_business_account?: { id?: string; username?: string };
+      };
+      const iba = data.instagram_business_account;
+      if (!iba?.id) {
+        throw new BadRequestException({
+          error: "instagram_not_linked_to_page",
+          detail:
+            "This Facebook Page has no linked Instagram Business/Creator account. In the Instagram app or Page settings, link a professional Instagram account to this Page, then reconnect.",
+        });
+      }
+      igId = iba.id;
+      igUsername = typeof iba.username === "string" ? iba.username : undefined;
+      pageName = typeof data.name === "string" ? data.name : undefined;
+      // Instagram-via-Facebook-Login sends over graph.facebook.com/{igId}/messages,
+      // which — like Messenger — is a Page-scoped call that the New Pages
+      // Experience only accepts with a PAGE access token. Derive it from the
+      // Page and store THAT, so a pasted system-user token still sends.
+      derivedPageToken =
+        typeof data.access_token === "string" && data.access_token.length > 0
+          ? data.access_token
+          : undefined;
     } catch (err) {
       if (err instanceof BadRequestException) throw err;
       throw new BadGatewayException({
@@ -147,6 +203,7 @@ export class InstagramService {
         detail: err instanceof Error ? err.message : String(err),
       });
     }
+    const tokenToStore = derivedPageToken ?? sourceToken;
 
     const existing = await this.db.channelConnection.findUnique({
       where: { teamId_channel: { teamId, channel: CHANNEL } },
@@ -155,17 +212,20 @@ export class InstagramService {
     const existingConfig = (existing?.config ?? {}) as InstagramChannelConfig;
     const verifyToken =
       input.verifyToken?.trim() ||
+      meta?.verifyToken ||
       existingConfig.verifyToken ||
       randomBytes(24).toString("hex");
 
     const newConfig = pruneUndefined({
       igId,
       igUsername,
-      appId: appId?.trim() ? appId.trim() : undefined,
+      pageId,
+      pageName,
+      appId,
       verifyToken,
     });
     const newSecrets: InstagramChannelSecrets = {
-      igAccessToken: encryptSecret(igAccessToken),
+      igAccessToken: encryptSecret(tokenToStore),
       appSecret: encryptSecret(appSecret),
     };
 
@@ -188,7 +248,7 @@ export class InstagramService {
     invalidateInstagramConfig(teamId);
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "channels" });
 
-    return { config: { igId, igUsername: igUsername ?? null, verifyToken } };
+    return { config: { igId, igUsername: igUsername ?? null, pageId, verifyToken } };
   }
 
   async disconnect(teamId: string): Promise<void> {

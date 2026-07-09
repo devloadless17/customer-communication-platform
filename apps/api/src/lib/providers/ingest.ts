@@ -33,6 +33,7 @@ import type {
   NormalizedInboundMessage,
   NormalizedOutboundEcho,
   NormalizedReaction,
+  NormalizedReadWatermark,
   NormalizedStatusUpdate,
   NormalizedTemplateStatusUpdate,
 } from "@ccp/shared/providers/types";
@@ -94,6 +95,8 @@ export async function ingestEvents(
         await ingestContactSync(teamId, channel, evt);
       } else if (evt.kind === "reaction") {
         await ingestReaction(teamId, channel, evt);
+      } else if (evt.kind === "read_watermark") {
+        await ingestReadWatermark(teamId, channel, evt);
       } else if (evt.kind === "template_status") {
         await ingestTemplateStatusUpdate(teamId, evt);
       } else if (evt.kind === "call") {
@@ -235,6 +238,53 @@ async function ingestReaction(
     messageId: target.id,
     emoji: evt.emoji,
   });
+}
+
+/**
+ * Apply a social read watermark (Messenger / Instagram): mark every outbound
+ * message to this customer at/before the watermark as `read` — the "Seen" state.
+ * Reuses ingestStatusUpdate per matched message so the rank/CAS guard, the
+ * monotonic status guard, and the realtime `message:status` fanout all apply
+ * exactly as WhatsApp's per-message read path does.
+ */
+async function ingestReadWatermark(
+  teamId: string,
+  channel: Channel,
+  evt: NormalizedReadWatermark,
+): Promise<void> {
+  const extId = evt.externalContactId;
+  if (!extId) return;
+  const contact = await db.contact.findFirst({
+    where: { teamId, identityChannel: channel, externalContactId: extId, deletedAt: null },
+    select: { id: true },
+  });
+  if (!contact) return;
+  const conversation = await db.conversation.findFirst({
+    where: { teamId, contactId: contact.id },
+    select: { id: true },
+  });
+  if (!conversation) return;
+  // Outbound messages the customer just saw that aren't already `read`.
+  const msgs = await db.message.findMany({
+    where: {
+      teamId,
+      conversationId: conversation.id,
+      direction: "out",
+      timestamp: { lte: evt.watermark },
+      status: { in: ["sent", "delivered"] },
+    },
+    select: { externalId: true },
+  });
+  for (const m of msgs) {
+    if (!m.externalId) continue;
+    await ingestStatusUpdate(teamId, channel, {
+      kind: "status",
+      externalId: m.externalId,
+      status: "read",
+      timestamp: evt.watermark,
+      rawPayload: evt.rawPayload,
+    });
+  }
 }
 
 async function ingestStatusUpdate(

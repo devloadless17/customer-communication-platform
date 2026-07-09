@@ -50,6 +50,8 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     typingIndicators: true,
     interactive: true,
     calling: false,
+    // Instagram media send is URL-based (payload.url), not upload/attachment_id.
+    mediaSendByUrl: true,
   },
 
   // ---- DESIGNED-FOR, NOT YET IMPLEMENTED (see LIVE_CHANNELS) ----------------

@@ -341,11 +341,32 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
+    // Broadcasts send WhatsApp templates today, so only WhatsApp contacts are
+    // valid recipients. Drop any social contacts (Messenger/Instagram) an
+    // audience / tag / group swept in — they carry no phone and can't receive a
+    // template, so leaving them in would just fail per-recipient with a cryptic
+    // Meta error. When a channel gains its own broadcast type, resolve the
+    // destination per-recipient here instead of pre-filtering.
+    const hadAnyBeforeFilter = recipientIds.length > 0;
+    if (hadAnyBeforeFilter) {
+      const waRows = await this.db.contact.findMany({
+        where: {
+          teamId,
+          id: { in: recipientIds },
+          identityChannel: "whatsapp",
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      recipientIds = waRows.map((c) => c.id);
+    }
+
     if (recipientIds.length === 0) {
       throw new BadRequestException({
         error: "empty audience",
-        detail:
-          "Pick at least one contact (or 'All contacts') to broadcast to.",
+        detail: hadAnyBeforeFilter
+          ? "None of the selected contacts are on WhatsApp. Broadcasts currently send WhatsApp templates, so only WhatsApp contacts can be included."
+          : "Pick at least one contact (or 'All contacts') to broadcast to.",
       });
     }
 
@@ -568,6 +589,25 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * -radius send path stays untouched.
    */
   private async previewRecipientIds(
+    teamId: string,
+    audience: AudienceInput,
+    limit: number,
+  ): Promise<string[]> {
+    // Broadcasts send WhatsApp templates, so the preview counts only WhatsApp
+    // contacts — matching what `create` actually sends (it drops social
+    // contacts). Over-scan the raw resolver so the filter doesn't under-sample
+    // the cap, then keep the first `limit` WhatsApp ids.
+    const raw = await this.previewRecipientIdsRaw(teamId, audience, limit * 2);
+    if (raw.length === 0) return [];
+    const wa = await this.db.contact.findMany({
+      where: { teamId, id: { in: raw }, identityChannel: "whatsapp", deletedAt: null },
+      select: { id: true },
+      take: limit,
+    });
+    return wa.map((c) => c.id);
+  }
+
+  private async previewRecipientIdsRaw(
     teamId: string,
     audience: AudienceInput,
     limit: number,

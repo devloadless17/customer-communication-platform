@@ -6,7 +6,6 @@ import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
   AlertTriangle,
   Check,
-  Copy,
   Eye,
   EyeOff,
   ExternalLink,
@@ -20,7 +19,6 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
-import { toast } from "@/lib/toast";
 import { formatPhone } from "@ccp/shared/utils";
 
 export interface WhatsappCurrent {
@@ -42,13 +40,9 @@ export interface WhatsappCurrent {
 
 export function WhatsappSettings({
   current,
-  webhookBaseUrl,
-  teamId,
   canManage,
 }: {
   current: WhatsappCurrent;
-  webhookBaseUrl: string;
-  teamId: string;
   canManage: boolean;
 }) {
   const softRefresh = useSoftRefresh();
@@ -65,12 +59,6 @@ export function WhatsappSettings({
       Boolean(current.credentialsUndecryptable) ||
       expandAdvanced,
   );
-
-  // Canonical post-migration path. NestJS owns `/webhooks/*` directly; the
-  // legacy `/api/webhooks/meta/{teamId}` proxy stays in place as insurance
-  // for subscriptions Meta still has pointed at the old URL — but new
-  // installs should always paste this one into the Meta dashboard.
-  const webhookUrl = `${webhookBaseUrl}/webhooks/meta/${teamId}`;
 
   async function save(form: FormData) {
     setError(null);
@@ -175,20 +163,9 @@ export function WhatsappSettings({
         <ConnectionStatus current={current} />
 
         {canManage && (
-          <WebhookConfigCard
-            webhookUrl={webhookUrl}
-            verifyToken={current.verifyToken}
-            connected={false}
-            stepLabel="Step 1 of 3 · Configure Meta's webhook"
-            stepDescription="In Meta Business Suite → WhatsApp → Configuration → Webhook, paste the Callback URL and Verify token below. Subscribe to the messages field. Then come back here."
-          />
-        )}
-
-        {canManage && (
           <ManualForm
             pending={pending}
             current={current}
-            stepLabel="Step 2 of 3 · Paste credentials"
             defaultExpandAdvanced={expandAdvanced}
             onSubmit={(form) =>
               startTransition(async () => {
@@ -250,14 +227,6 @@ export function WhatsappSettings({
               }
             })
           }
-        />
-      )}
-
-      {canManage && (
-        <WebhookConfigCard
-          webhookUrl={webhookUrl}
-          verifyToken={current.verifyToken}
-          connected
         />
       )}
 
@@ -384,6 +353,14 @@ function ManualForm({
         </p>
       </div>
       <div className="flex flex-col gap-3">
+        <p className="rounded-md bg-muted px-3 py-2 text-2xs text-muted-foreground">
+          The App secret, App ID, access token, and webhook verify token come
+          from your{" "}
+          <a href="/settings/meta" className="underline">
+            Meta App
+          </a>{" "}
+          connection — WhatsApp just needs its own phone number.
+        </p>
         <Field
           name="phoneNumberId"
           label="Phone number ID"
@@ -391,26 +368,6 @@ function ManualForm({
           required
           defaultValue={current.phoneNumberId ?? ""}
           hint="Meta Business Suite → WhatsApp → API Setup → Phone numbers table → Phone number ID column. 15–16 digit number."
-        />
-        <Field
-          name="accessToken"
-          label="Access token"
-          placeholder="EAAOK… (long string)"
-          required
-          mono
-          secret
-          defaultValue={current.accessToken ?? ""}
-          hint="Meta Business Suite → WhatsApp → API Setup → Temporary access token (for testing) OR Business Settings → Users → System users to generate a permanent System User token."
-        />
-        <Field
-          name="appSecret"
-          label="App secret"
-          placeholder="32-character hex string"
-          required
-          mono
-          secret
-          defaultValue={current.appSecret ?? ""}
-          hint="Meta Developers → My Apps → [your app] → App Settings → Basic → App secret, click Show."
         />
         <details
           open={advancedOpen}
@@ -420,9 +377,8 @@ function ManualForm({
             Templates &amp; advanced (optional)
           </summary>
           <p className="mt-1 mb-3 text-2xs text-muted-foreground">
-            WhatsApp Business Account ID is required to load templates. Meta App ID is
-            required to upload template header media. Skip both unless you plan to
-            use templates.
+            The WhatsApp Business Account ID loads your message templates. Leave
+            the access token blank to use your Meta App system-user token.
           </p>
           <div className="flex flex-col gap-3">
             <Field
@@ -434,12 +390,13 @@ function ManualForm({
               hint="Meta Business Suite → WhatsApp → API Setup → WhatsApp Business Account section → ID under the account name."
             />
             <Field
-              name="appId"
-              label="Meta App ID"
-              placeholder="e.g. 1234567890123456"
+              name="accessToken"
+              label="Access token (override, optional)"
+              placeholder="Leave blank to use your Meta App token"
               mono
-              defaultValue={current.appId ?? ""}
-              hint="Meta Developers → My Apps → [your app] → top of the dashboard, under the app name."
+              secret
+              defaultValue=""
+              hint="Only to override the shared Meta App system-user token for WhatsApp."
             />
           </div>
         </details>
@@ -527,82 +484,6 @@ function Field({
           <p className="mt-1 text-2xs text-muted-foreground">{hint}</p>
         </details>
       )}
-    </div>
-  );
-}
-
-function WebhookConfigCard({
-  webhookUrl,
-  verifyToken,
-  connected,
-  stepLabel,
-  stepDescription,
-}: {
-  webhookUrl: string;
-  verifyToken: string | null;
-  connected: boolean;
-  stepLabel?: string;
-  stepDescription?: string;
-}) {
-  const description =
-    stepDescription ??
-    (connected
-      ? "Paste these values into Meta → WhatsApp → Configuration → Webhook. Then subscribe to the messages field."
-      : "After saving credentials, paste these values into Meta’s webhook configuration.");
-  return (
-    <div className="rounded-xl border border-border bg-card p-5">
-      <div className="mb-3">
-        {stepLabel && (
-          <div className="mb-1 text-3xs font-semibold uppercase tracking-wide text-primary">
-            {stepLabel}
-          </div>
-        )}
-        <div className="text-sm font-medium">Configure Meta&apos;s webhook</div>
-        <p className="mt-1 text-2xs text-muted-foreground">{description}</p>
-      </div>
-      <div className="flex flex-col gap-3">
-        <ReadonlyField label="Callback URL" value={webhookUrl} />
-        <ReadonlyField
-          label="Verify token"
-          value={verifyToken ?? "— reload to generate —"}
-          disabled={!verifyToken}
-        />
-      </div>
-    </div>
-  );
-}
-
-function ReadonlyField({
-  label,
-  value,
-  disabled,
-}: {
-  label: string;
-  value: string;
-  disabled?: boolean;
-}) {
-  async function copy() {
-    if (disabled) return;
-    try {
-      await navigator.clipboard.writeText(value);
-      toast.success(`Copied ${label.toLowerCase()}`);
-    } catch {
-      toast.error("Couldn't copy", { description: "Select the value above and copy it manually." });
-    }
-  }
-  return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-xs font-medium text-foreground">{label}</label>
-      <div className="flex gap-2">
-        <Input
-          readOnly
-          value={value}
-          className={`font-mono text-xs ${disabled ? "opacity-60" : ""}`}
-        />
-        <Button type="button" variant="outline" onClick={copy} disabled={disabled}>
-          <Copy className="size-3.5" />
-        </Button>
-      </div>
     </div>
   );
 }

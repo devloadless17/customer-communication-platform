@@ -22,6 +22,7 @@ import {
   invalidateProviderConfig,
   ProviderNotConfiguredError,
 } from "@/lib/providers/config";
+import { getMetaConnection } from "@/lib/providers/meta-connection";
 import {
   MetaSendError,
   MissingAppIdError,
@@ -194,7 +195,20 @@ export class WhatsappService {
       verifyToken: string;
     };
   }> {
-    const { phoneNumberId, accessToken, appSecret } = input;
+    const { phoneNumberId } = input;
+
+    // Source the access token (system-user) + App secret from the shared Meta
+    // App connection unless overridden on this form.
+    const meta = await getMetaConnection(teamId);
+    const accessToken = input.accessToken?.trim() || meta?.systemUserToken || null;
+    const appSecret = input.appSecret?.trim() || meta?.appSecret || null;
+    if (!accessToken || !appSecret) {
+      throw new BadRequestException({
+        error: "meta_not_configured",
+        detail:
+          "Set up your Meta App connection first (Settings → Meta App: App secret + system-user token), then connect WhatsApp.",
+      });
+    }
 
     let displayNumber: string | undefined;
     try {
@@ -244,7 +258,10 @@ export class WhatsappService {
     //   3. Fresh random (defensive — getConfig pre-mints, so this branch
     //      shouldn't fire in practice).
     const verifyToken =
-      input.verifyToken || existingConfig.verifyToken || randomBytes(24).toString("hex");
+      input.verifyToken ||
+      meta?.verifyToken ||
+      existingConfig.verifyToken ||
+      randomBytes(24).toString("hex");
 
     // Phone-number uniqueness across teams. The old `Team.metaPhoneNumberId
     // @unique` constraint can't live on a JSON field, so guard at the app
@@ -282,10 +299,11 @@ export class WhatsappService {
       phoneNumberId,
       verifyToken,
       displayPhoneNumber: displayNumber ?? undefined,
-      // wabaId / appId use optional-update semantics: undefined input preserves
-      // the existing value; empty string clears it.
+      // wabaId keeps optional-update semantics (WhatsApp-specific, for templates).
       wabaId: nextWabaId,
-      appId: input.appId === undefined ? existingConfig.appId : input.appId || undefined,
+      // appId is shared — source it from the Meta App connection (used for
+      // template header-media upload); a pasted value or existing one overrides.
+      appId: input.appId?.trim() || meta?.appId || existingConfig.appId || undefined,
     });
     // Encrypted at rest with the app-wide ENCRYPTION_KEY (lib/crypto/envelope.ts).
     // Read paths (getMetaSendConfig / getMetaWebhookConfig) decrypt transparently.

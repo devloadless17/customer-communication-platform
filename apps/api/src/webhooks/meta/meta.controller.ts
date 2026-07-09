@@ -26,7 +26,11 @@ import { MEDIA_SIZE_CAPS } from "@/lib/media-storage";
 import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
 import { getMetaProvider } from "@/lib/providers";
 import { MediaTooLargeError } from "@/lib/providers/meta";
-import { getMetaSendConfig, getMetaWebhookConfig } from "@/lib/providers/config";
+import {
+  getMetaSendConfig,
+  getMetaWebhookConfig,
+  getTeamVerifyTokens,
+} from "@/lib/providers/config";
 import { messengerProvider } from "@/lib/providers/messenger";
 import { getMessengerWebhookConfig } from "@/lib/providers/messenger-config";
 import { instagramProvider } from "@/lib/providers/instagram";
@@ -153,19 +157,14 @@ export class MetaWebhookController implements OnModuleDestroy {
     @Res() res: Response,
   ): Promise<void> {
     // The one callback verifies every Meta product the team connected, so
-    // accept the challenge if the token matches ANY connected channel's verify
-    // token (WhatsApp or Messenger). We can't know the channel from a verify
-    // GET (it carries only mode/token/challenge), so check each.
-    const [waConfig, msgrConfig, igConfig] = await Promise.all([
-      getMetaWebhookConfig(teamId),
-      getMessengerWebhookConfig(teamId),
-      getInstagramWebhookConfig(teamId),
-    ]);
-    const verifyTokens = [
-      waConfig?.verifyToken,
-      msgrConfig?.verifyToken,
-      igConfig?.verifyToken,
-    ].filter((t): t is string => typeof t === "string" && t.length > 0);
+    // accept the challenge if the token matches ANY of the team's channel
+    // verify tokens. We can't know the channel from a verify GET (it carries
+    // only mode/token/challenge), so check each. Read the raw tokens — NOT the
+    // full webhook config — so a callback can be verified in Meta before the
+    // connection is fully wired (Meta's natural setup order: verify first, add
+    // the app secret + send credentials after). The POST path independently
+    // requires the app secret, so honoring a token here grants no access.
+    const verifyTokens = await getTeamVerifyTokens(teamId);
     if (verifyTokens.length === 0) {
       // Silent 403 — leaking "team unconfigured" vs "team not found" gives
       // attackers a teamId enumeration oracle on a public endpoint.

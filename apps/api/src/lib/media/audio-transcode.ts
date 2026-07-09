@@ -69,43 +69,59 @@ export const VOICE_IOS_PROFILE =
 export async function transcodeToOggOpus(
   input: Uint8Array,
 ): Promise<Uint8Array<ArrayBuffer>> {
+  // Profile-dependent encode flags. DEFAULT now = iOS profile mono/voip
+  // (plays on iPhone; UNVERIFIED against Meta's upload validator — see
+  // VOICE_IOS_PROFILE doc above). WHATSAPP_VOICE_IOS_PROFILE=0 falls back to the
+  // proven stereo/audio-mode profile (the escape hatch).
+  const profileArgs = VOICE_IOS_PROFILE
+    ? ["-ac", "1", "-ar", "48000", "-c:a", "libopus", "-application", "voip", "-b:a", "32k"]
+    : ["-ac", "2", "-ar", "48000", "-c:a", "libopus", "-b:a", "32k"];
+  // Strip ALL source metadata (-map_metadata -1): ffmpeg otherwise copies the
+  // input mp4's brand tags into the ogg and Meta's processor rejects it as
+  // application/octet-stream (#131053).
+  return transcode(input, ["-map_metadata", "-1", "-vn", ...profileArgs, "-f", "ogg", "pipe:1"]);
+}
+
+/**
+ * Transcode any recording to ADTS AAC (audio/aac). Instagram DM REJECTS ogg /
+ * webm with `(#100) attachment format is not supported`, but accepts AAC. ADTS
+ * is a streamable AAC container (unlike mp4/m4a it needs no seekable output for
+ * a moov atom), so it pipes to stdout exactly like the ogg path. Stereo 44.1kHz,
+ * metadata stripped.
+ */
+export async function transcodeToAac(
+  input: Uint8Array,
+): Promise<Uint8Array<ArrayBuffer>> {
+  return transcode(input, [
+    "-map_metadata", "-1",
+    "-vn",
+    "-c:a", "aac",
+    "-b:a", "128k",
+    "-ar", "44100",
+    "-f", "adts",
+    "pipe:1",
+  ]);
+}
+
+async function transcode(
+  input: Uint8Array,
+  outputArgs: string[],
+): Promise<Uint8Array<ArrayBuffer>> {
   const dir = await mkdtemp(join(tmpdir(), "ccp-voice-"));
   const inPath = join(dir, "in");
   try {
     await writeFile(inPath, Buffer.from(input));
-    return await runFfmpeg(inPath);
+    return await runFfmpeg(inPath, outputArgs);
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
-function runFfmpeg(inPath: string): Promise<Uint8Array<ArrayBuffer>> {
+function runFfmpeg(inPath: string, outputArgs: string[]): Promise<Uint8Array<ArrayBuffer>> {
   return new Promise<Uint8Array<ArrayBuffer>>((resolve, reject) => {
-    // Profile-dependent encode flags. DEFAULT now = iOS profile mono/voip
-    // (plays on iPhone; UNVERIFIED against Meta's upload validator — see
-    // VOICE_IOS_PROFILE doc above). Setting WHATSAPP_VOICE_IOS_PROFILE=0 falls
-    // back to the proven stereo/audio-mode profile (the escape hatch).
-    const profileArgs = VOICE_IOS_PROFILE
-      ? ["-ac", "1", "-ar", "48000", "-c:a", "libopus", "-application", "voip", "-b:a", "32k"]
-      : ["-ac", "2", "-ar", "48000", "-c:a", "libopus", "-b:a", "32k"];
     const ff = spawn(
       "ffmpeg",
-      [
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", inPath,
-        // Strip ALL source metadata. ffmpeg otherwise copies the input mp4's
-        // container tags (major_brand=isom, compatible_brands=…mp41…,
-        // handler_name, creation_time) into the ogg — and Meta's media processor
-        // sniffs those mp4 brand strings inside an "ogg" file and rejects it as
-        // application/octet-stream (#131053). Firefox's native ogg has none of
-        // this; -map_metadata -1 makes our output match.
-        "-map_metadata", "-1",
-        "-vn", // drop any cover-art / video stream
-        ...profileArgs,
-        "-f", "ogg",
-        "pipe:1",
-      ],
+      ["-hide_banner", "-loglevel", "error", "-i", inPath, ...outputArgs],
       { stdio: ["ignore", "pipe", "pipe"] },
     );
 

@@ -27,7 +27,7 @@ import {
   kindFromMime,
   normalizeMimeType,
 } from "@/lib/media-storage";
-import { transcodeToOggOpus, VOICE_IOS_PROFILE } from "@/lib/media/audio-transcode";
+import { transcodeToAac, transcodeToOggOpus, VOICE_IOS_PROFILE } from "@/lib/media/audio-transcode";
 import {
   consumeConversationSendBudget,
   ConversationSendRateLimitedError,
@@ -132,6 +132,23 @@ const TEMPLATE_HEADER_MIME_HINT: Record<
   document:
     "A template document header must be a PDF, Word, Excel, PowerPoint, text, or CSV file.",
 };
+
+/**
+ * Meta social: is the send OUTSIDE the free-form (24h) window — i.e. in the
+ * 24h–7d support band where the Human Agent tag is required? Within 24h we send
+ * `messaging_type: RESPONSE` instead (no tag, no feature dependency). Returns
+ * false when the channel has no window model (`freeFormMs` null), so a non-social
+ * channel never forces the tag. Reuses `computeWindowStatus` for boundary parity
+ * with the preflight window check.
+ */
+function outsideFreeFormWindow(
+  freeFormMs: number | null,
+  lastInboundAt: string | null,
+): boolean {
+  if (freeFormMs === null) return false;
+  const { state } = computeWindowStatus(lastInboundAt, Date.now(), freeFormMs);
+  return state === "closed" || state === "never";
+}
 
 @Injectable()
 export class MessagesService {
@@ -900,7 +917,13 @@ export class MessagesService {
     const [exists, configOrErr] = await Promise.all([
       this.db.conversation.findFirst({
         where: { id: conversationId, teamId },
-        select: { id: true, lastMessageAt: true, contactId: true },
+        select: {
+          id: true,
+          lastMessageAt: true,
+          contactId: true,
+          // For the social RESPONSE-vs-Human-Agent-tag decision at send time.
+          contact: { select: { lastInboundAt: true } },
+        },
       }),
       binding.getSendConfig(teamId).catch((err: unknown) => {
         if (err instanceof ProviderNotConfiguredError) return err;
@@ -1068,12 +1091,18 @@ export class MessagesService {
       }
     }
 
+    const useHumanAgentTag = outsideFreeFormWindow(
+      binding.provider.capabilities.freeFormWindowMs,
+      exists.contact?.lastInboundAt?.toISOString() ?? null,
+    );
+
     let send;
     try {
       send = await binding.provider.sendText(
         {
           to: phoneNumber,
           body,
+          useHumanAgentTag,
           ...(replyToExternalId ? { replyToExternalId } : {}),
         },
         config,
@@ -1460,6 +1489,13 @@ export class MessagesService {
       }
     }
 
+    // Meta social: within the 24h free-form window → RESPONSE; in the 24h–7d
+    // support band → Human Agent tag. (WhatsApp ignores the flag.)
+    const useHumanAgentTag = outsideFreeFormWindow(
+      binding.provider.capabilities.freeFormWindowMs,
+      conversation.contact.lastInboundAt?.toISOString() ?? null,
+    );
+
     // Same per-conversation send ceiling as sendText. Catches partner-driven
     // hot-potato loops at the thread level (30/min/thread) before the per-key
     // bucket bites.
@@ -1572,7 +1608,25 @@ export class MessagesService {
     // (form.voice=false — a user picked an mp3/m4a) are left alone: they deliver
     // fine already. Best-effort: if ffmpeg is missing/fails we log + send original.
     const isRecording = kind === "audio" && form.voice === true;
-    if (isRecording && mimeType !== "audio/ogg") {
+    // Voice notes need a per-channel container. Instagram REJECTS ogg/webm
+    // (`#100 attachment format is not supported`) but accepts AAC; WhatsApp needs
+    // ogg/opus to DELIVER (Messenger accepts ogg too, via its upload path). So
+    // URL-based channels (Instagram) get AAC, everyone else gets ogg/opus.
+    const instagramAudio =
+      isRecording && binding.provider.capabilities.mediaSendByUrl === true;
+    if (instagramAudio && mimeType !== "audio/aac") {
+      try {
+        bytes = await transcodeToAac(bytes);
+        mimeType = "audio/aac";
+        filename = filename.replace(/\.[^./\\]+$/, "") + ".aac";
+      } catch (err) {
+        this.logger.warn(
+          `voice transcode to AAC failed; sending original ${mimeType}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    } else if (isRecording && mimeType !== "audio/ogg") {
       try {
         bytes = await transcodeToOggOpus(bytes);
         mimeType = "audio/ogg";
@@ -1649,37 +1703,52 @@ export class MessagesService {
       });
     })();
 
-    // 1) Upload to Meta. Pre-send: throwing is safe — nothing went out yet.
-    let mediaId: string;
-    try {
-      const uploaded = await uploadMedia(
-        { bytes, mimeType, filename },
-        sendConfig,
-      );
-      mediaId = uploaded.mediaId;
-    } catch (err) {
-      // Don't let the parallel blob upload leak as an unhandledRejection on
-      // the early-return path.
-      blobUploadPromise.catch(() => {});
-      // Audio is the format-fragile path (MediaRecorder containers, codec
-      // params, voice-note encoding rules). Log the raw Meta error verbatim
-      // so a failed voice note is diagnosable from journald instead of the
-      // generic normalized code the agent sees.
-      if (kind === "audio") {
-        this.logger.error(
-          `audio uploadMedia failed: mime=${mimeType} size=${file.size} voice=${form.voice} :: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      const normalized = normalizeMetaSendError(err);
-      if (normalized) {
+    // 1) Prepare the media reference for the send. Pre-send: throwing is safe.
+    //    URL-based channels (Instagram) presign the just-stored object so Meta
+    //    fetches it directly — the reusable attachment_id path errors on IG.
+    //    Upload-based channels (WhatsApp / Messenger) push the bytes to Meta.
+    const byUrl = binding.provider.capabilities.mediaSendByUrl === true;
+    let mediaId = "";
+    let mediaUrl: string | undefined;
+    if (byUrl) {
+      try {
+        const blob = await blobUploadPromise;
+        mediaUrl = await blobStorage.presignGetUrl(blob.key, { ttlSeconds: 600 });
+      } catch (err) {
         throw new UnprocessableEntityException({
-          error: normalized.code,
-          message: normalized.message,
-          status: normalized.httpStatus,
-          detail: normalized.detail,
+          error: "media_url_unavailable",
+          message: "Couldn't prepare the media for sending. Please retry.",
+          detail: err instanceof Error ? err.message : String(err),
         });
       }
-      throw err;
+    } else {
+      try {
+        const uploaded = await uploadMedia({ bytes, mimeType, filename }, sendConfig);
+        mediaId = uploaded.mediaId;
+      } catch (err) {
+        // Don't let the parallel blob upload leak as an unhandledRejection on
+        // the early-return path.
+        blobUploadPromise.catch(() => {});
+        // Audio is the format-fragile path (MediaRecorder containers, codec
+        // params, voice-note encoding rules). Log the raw Meta error verbatim
+        // so a failed voice note is diagnosable from journald instead of the
+        // generic normalized code the agent sees.
+        if (kind === "audio") {
+          this.logger.error(
+            `audio uploadMedia failed: mime=${mimeType} size=${file.size} voice=${form.voice} :: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        const normalized = normalizeMetaSendError(err);
+        if (normalized) {
+          throw new UnprocessableEntityException({
+            error: normalized.code,
+            message: normalized.message,
+            status: normalized.httpStatus,
+            detail: normalized.detail,
+          });
+        }
+        throw err;
+      }
     }
 
     // 2) Send the message referencing that mediaId. Same logic — throwing
@@ -1691,6 +1760,8 @@ export class MessagesService {
           to: toPhone,
           kind,
           mediaId,
+          ...(mediaUrl ? { mediaUrl } : {}),
+          useHumanAgentTag,
           caption: caption || undefined,
           filename: kind === "document" ? filename : undefined,
           ...(replyToExternalId ? { replyToExternalId } : {}),
@@ -1730,7 +1801,16 @@ export class MessagesService {
           detail: normalized.detail,
         });
       }
-      throw err;
+      // Un-normalized (e.g. a social Graph error) — surface Meta's actual
+      // message instead of a bare 500, so the agent sees WHY (and it's
+      // diagnosable). Pre-send: safe to throw, nothing went out.
+      this.logger.warn(
+        `media send failed (channel=${provider}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new UnprocessableEntityException({
+        error: "media_send_failed",
+        detail: (err instanceof Error ? err.message : String(err)).slice(0, 400),
+      });
     }
 
     // ── Post-send: Meta has accepted. From here NOTHING is allowed to throw

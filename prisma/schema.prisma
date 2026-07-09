@@ -447,6 +447,7 @@ model Team {
   outboundEvents          OutboundEvent[]
   outboundSendAttempts    OutboundSendAttempt[]
   channelConnections      ChannelConnection[]
+  metaConnection          MetaConnection?
   calls                   Call[]
   callPermissionRequests  CallPermissionRequest[]
   aiHandoffAssignee       User?                     @relation("AiHandoffAssignee", fields: [aiHandoffAssigneeId], references: [id], onDelete: SetNull)
@@ -470,6 +471,26 @@ model ChannelConnection {
   team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
   @@unique([teamId, channel])
+}
+
+// Shared Meta-app credentials for a team — the ONE App ID + App secret +
+// system-user token + verify token that power all Meta channels (WhatsApp,
+// Messenger, Instagram). Meta serves them from a single app behind a single
+// callback URL, so these are set once here and every ChannelConnection sources
+// them from this row (the per-channel `ChannelConnection.secrets` remain a
+// fallback for connections created before this table). Page access tokens for
+// Messenger/Instagram are derived from `systemUserToken` on demand. This is the
+// exact record Embedded Signup will later populate from one Facebook-Login grant.
+// `config` holds non-secret values (appId, verifyToken, graphVersion);
+// `secrets` holds envelope-encrypted ciphertext (appSecret, systemUserToken).
+model MetaConnection {
+  id        String   @id @default(cuid())
+  teamId    String   @unique
+  config    Json     @default("{}")
+  secrets   Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
 }
 
 model User {

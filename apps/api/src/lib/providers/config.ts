@@ -1,5 +1,6 @@
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
+import { getMetaConnection } from "@/lib/providers/meta-connection";
 
 /**
  * Per-team provider configuration. CLAUDE.md rule #6: secrets live in the DB,
@@ -254,6 +255,32 @@ export async function getMetaSendConfig(teamId: string): Promise<MetaSendConfig>
  * The decrypted app secret is produced fresh from the cached ciphertext on
  * every call — see the cache header comment for the security rationale.
  */
+/**
+ * Every connected Meta channel's verify token for a team, read straight from
+ * the ChannelConnection config — for ALL channels, regardless of whether the
+ * connection is active or has an app secret yet.
+ *
+ * Used ONLY by the GET subscription handshake. Meta's setup order is "verify
+ * the callback URL first, finish the connection after", and answering a verify
+ * challenge needs nothing but the token — the app secret is only for POST HMAC.
+ * So honoring a token here (even for a placeholder connection that only has a
+ * pre-minted verify token) grants NO message access: the POST path still
+ * independently requires the per-channel app secret to accept any payload.
+ */
+export async function getTeamVerifyTokens(teamId: string): Promise<string[]> {
+  const [conns, meta] = await Promise.all([
+    db.channelConnection.findMany({ where: { teamId }, select: { config: true } }),
+    getMetaConnection(teamId),
+  ]);
+  const tokens = conns
+    .map((c) => (c.config as { verifyToken?: unknown } | null)?.verifyToken)
+    .filter((t): t is string => typeof t === "string" && t.length > 0);
+  // The shared Meta-app verify token — lets a team verify its ONE callback URL
+  // right after setting up the Meta App, before any channel is connected.
+  if (meta?.verifyToken) tokens.push(meta.verifyToken);
+  return tokens;
+}
+
 export async function getMetaWebhookConfig(
   teamId: string,
 ): Promise<MetaWebhookConfig | null> {

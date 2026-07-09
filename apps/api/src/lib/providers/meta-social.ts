@@ -92,8 +92,13 @@ interface MessagingEvent {
     is_echo?: boolean;
     attachments?: { type?: string; payload?: { url?: string } }[];
     quick_reply?: { payload?: string };
+    // Set when the customer quoted a message — the mid they replied to.
+    reply_to?: { mid?: string };
   };
   delivery?: { mids?: string[]; watermark?: number };
+  // Messenger sends a `watermark` (all outbound up to it are read); Instagram
+  // sends a per-message `mid` (the specific message the customer read).
+  read?: { watermark?: number; mid?: string };
   reaction?: { mid?: string; action?: string; emoji?: string; reaction?: string };
 }
 
@@ -153,6 +158,28 @@ function attachmentMedia(
 }
 
 /**
+ * A human label for a non-downloadable social attachment (no `payload.url` we
+ * can store) so the row isn't blank. Meta withholds the content of ephemeral /
+ * vanish-mode messages, so those get a clear "disappearing message" note.
+ */
+function socialAttachmentLabel(type: string): string {
+  switch (type) {
+    case "ephemeral":
+      return "🕓 Disappearing message";
+    case "story_mention":
+      return "📖 Mentioned you in their story";
+    case "story_reply":
+      return "📖 Replied to your story";
+    case "share":
+      return "🔗 Shared a post";
+    case "location":
+      return "📍 Location";
+    default:
+      return `[${type}]`;
+  }
+}
+
+/**
  * Parse a Messenger/Instagram webhook into normalized events. `expectedObject`
  * gates the envelope (`"page"` for Messenger, `"instagram"` for Instagram) so a
  * misrouted product silently yields `[]` rather than mis-ingesting.
@@ -186,7 +213,7 @@ export function parseSocialMessaging(
             : media
               ? ""
               : m.message.attachments?.[0]?.type
-                ? `[${m.message.attachments[0].type}]`
+                ? socialAttachmentLabel(m.message.attachments[0].type)
                 : "";
         const msg: NormalizedInboundMessage = {
           kind: "message",
@@ -196,6 +223,11 @@ export function parseSocialMessaging(
           // (a later Graph name-enrichment pass fills it in).
           contactName: null,
           body,
+          // Quoted-reply context: the mid the customer replied to. Ingest links
+          // it to the local message (same path as WhatsApp `context.id`).
+          ...(m.message.reply_to?.mid
+            ? { replyToExternalId: m.message.reply_to.mid }
+            : {}),
           ...(media ? { media } : {}),
           // A tapped quick-reply carries its stable payload (the outbound
           // option's id) + the title as `text` — surface it for workflow
@@ -247,18 +279,62 @@ export function parseSocialMessaging(
           events.push(status);
         }
       }
-      // `read` watermarks (no per-message id) + reactions/postbacks: not this
-      // increment.
+      // Read receipt ("Seen"). Instagram sends a per-message `mid` — mark THAT
+      // outbound message read (same per-mid path WhatsApp uses). Messenger sends
+      // a `watermark` — mark every outbound to the sender at/before it read.
+      if (m.read) {
+        if (typeof m.read.mid === "string" && m.read.mid) {
+          const status: NormalizedStatusUpdate = {
+            kind: "status",
+            externalId: m.read.mid,
+            status: "read",
+            timestamp: new Date(m.timestamp ?? Date.now()),
+            rawPayload: m as unknown as Record<string, unknown>,
+          };
+          events.push(status);
+        } else if (typeof m.read.watermark === "number") {
+          const from = m.sender?.id;
+          if (from) {
+            events.push({
+              kind: "read_watermark",
+              externalContactId: from,
+              watermark: new Date(m.read.watermark),
+              rawPayload: m as unknown as Record<string, unknown>,
+            });
+          }
+        }
+      }
     }
   }
   return events;
 }
 
 /**
+ * A quoted-reply fragment for the send body — Meta social supports replying to a
+ * specific message via a top-level `reply_to: { mid }`. Empty when not a reply.
+ */
+function replyToFragment(replyToExternalId?: string): { reply_to: { mid: string } } | object {
+  return replyToExternalId ? { reply_to: { mid: replyToExternalId } } : {};
+}
+
+/**
+ * The messaging-type fields for a social send. Within the 24h window Meta wants
+ * `RESPONSE` (no tag, and it needs no special feature); only outside 24h (in the
+ * 24h–7d support band) do we attach the Human Agent tag. The caller passes
+ * `useHumanAgentTag` from the window band; when it's undefined we keep the tag
+ * (safe default — the tag is valid across the whole 7-day window).
+ */
+function messagingTypeFields(useHumanAgentTag?: boolean): object {
+  return useHumanAgentTag === false
+    ? { messaging_type: "RESPONSE" }
+    : { messaging_type: "MESSAGE_TAG", tag: "HUMAN_AGENT" };
+}
+
+/**
  * Send a text message on a Meta social channel. `accountId` is the Page id
- * (Messenger) or IG business id (Instagram); `accessToken` is that account's
+ * (Messenger / Instagram both send via the Page); `accessToken` is the Page
  * token. Human Agent tag = valid for the 7-day support window. Quoted replies
- * aren't supported by these Send APIs, so `replyToExternalId` is ignored.
+ * are supported via `reply_to.mid`.
  */
 export async function sendSocialText(
   args: SendTextArgs,
@@ -267,8 +343,8 @@ export async function sendSocialText(
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
   const res = await graphPostJson(url, opts.accessToken, {
     recipient: { id: args.to },
-    messaging_type: "MESSAGE_TAG",
-    tag: "HUMAN_AGENT",
+    ...messagingTypeFields(args.useHumanAgentTag),
+    ...replyToFragment(args.replyToExternalId),
     message: { text: args.body },
   });
   const messageId = typeof res.message_id === "string" ? res.message_id : "";
@@ -297,8 +373,8 @@ export async function sendSocialInteractive(
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
   const res = await graphPostJson(url, opts.accessToken, {
     recipient: { id: args.to },
-    messaging_type: "MESSAGE_TAG",
-    tag: "HUMAN_AGENT",
+    ...messagingTypeFields(args.useHumanAgentTag),
+    ...replyToFragment(args.replyToExternalId),
     message: { text: args.bodyText, quick_replies },
   });
   const messageId = typeof res.message_id === "string" ? res.message_id : "";
@@ -355,11 +431,15 @@ export async function sendSocialMedia(
 ): Promise<SendTextResult> {
   const type = attachmentTypeFromKind(args.kind);
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
+  // Instagram sends media by public URL; Messenger by reusable attachment_id.
+  const payload = args.mediaUrl
+    ? { url: args.mediaUrl, is_reusable: false }
+    : { attachment_id: args.mediaId };
   const res = await graphPostJson(url, opts.accessToken, {
     recipient: { id: args.to },
-    messaging_type: "MESSAGE_TAG",
-    tag: "HUMAN_AGENT",
-    message: { attachment: { type, payload: { attachment_id: args.mediaId } } },
+    ...messagingTypeFields(args.useHumanAgentTag),
+    ...replyToFragment(args.replyToExternalId),
+    message: { attachment: { type, payload } },
   });
   const messageId = typeof res.message_id === "string" ? res.message_id : "";
   if (!messageId) {

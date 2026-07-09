@@ -5,6 +5,7 @@ import { BadGatewayException, BadRequestException, Injectable, Logger } from "@n
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
 import { invalidateMessengerConfig } from "@/lib/providers/messenger-config";
+import { getMetaConnection } from "@/lib/providers/meta-connection";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -128,16 +129,37 @@ export class MessengerService {
     teamId: string,
     input: UpdateMessengerConfigInput,
   ): Promise<{ config: { pageId: string; pageName: string | null; verifyToken: string } }> {
-    const { pageId, pageAccessToken, appSecret, appId } = input;
+    const { pageId } = input;
+
+    // Source the app-level credentials from the shared Meta App connection,
+    // unless the admin overrode them on this form. The Page access token is
+    // derived below from whichever token we resolve here.
+    const meta = await getMetaConnection(teamId);
+    const appSecret = input.appSecret?.trim() || meta?.appSecret || null;
+    const sourceToken = input.pageAccessToken?.trim() || meta?.systemUserToken || null;
+    const appId = input.appId?.trim() || meta?.appId || undefined;
+    if (!appSecret || !sourceToken) {
+      throw new BadRequestException({
+        error: "meta_not_configured",
+        detail:
+          "Set up your Meta App connection first (Settings → Meta App: App secret + system-user token), then connect the channel.",
+      });
+    }
 
     // Validate the Page + token against Graph before persisting, so a typo
-    // surfaces here instead of silently failing every send later.
+    // surfaces here instead of silently failing every send later. We ALSO ask
+    // for `access_token`: Meta's "New Pages Experience" rejects user /
+    // system-user tokens on Page-scoped calls (send, subscribe, profile) with
+    // "A Page access token is required", so we derive the Page-scoped token
+    // here and store THAT — the shared system-user token is fine and outbound
+    // still works. This mirrors the Embedded-Signup user→Page token exchange.
     let pageName: string | undefined;
+    let derivedPageToken: string | undefined;
     try {
       const res = await fetch(
-        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(pageId)}?fields=name`,
+        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(pageId)}?fields=name,access_token`,
         {
-          headers: { authorization: `Bearer ${pageAccessToken}` },
+          headers: { authorization: `Bearer ${sourceToken}` },
           signal: AbortSignal.timeout(20_000),
         },
       );
@@ -148,8 +170,12 @@ export class MessengerService {
           detail: body.slice(0, 300),
         });
       }
-      const data = (await res.json()) as { name?: string };
+      const data = (await res.json()) as { name?: string; access_token?: string };
       pageName = typeof data.name === "string" ? data.name : undefined;
+      derivedPageToken =
+        typeof data.access_token === "string" && data.access_token.length > 0
+          ? data.access_token
+          : undefined;
     } catch (err) {
       if (err instanceof BadRequestException) throw err;
       throw new BadGatewayException({
@@ -157,9 +183,12 @@ export class MessengerService {
         detail: err instanceof Error ? err.message : String(err),
       });
     }
+    // Prefer the derived Page token; fall back to the source token (it may
+    // already be a Page token if `access_token` wasn't returned).
+    const tokenToStore = derivedPageToken ?? sourceToken;
 
-    // Preserve an existing verify token across a reconnect (Meta's webhook
-    // subscription already knows it); mint one only when none exists.
+    // Verify token: prefer the shared Meta App token (one callback for all
+    // channels), then the channel's existing one, else mint.
     const existing = await this.db.channelConnection.findUnique({
       where: { teamId_channel: { teamId, channel: CHANNEL } },
       select: { config: true },
@@ -167,17 +196,18 @@ export class MessengerService {
     const existingConfig = (existing?.config ?? {}) as MessengerChannelConfig;
     const verifyToken =
       input.verifyToken?.trim() ||
+      meta?.verifyToken ||
       existingConfig.verifyToken ||
       randomBytes(24).toString("hex");
 
     const newConfig = pruneUndefined({
       pageId,
       pageName,
-      appId: appId?.trim() ? appId.trim() : undefined,
+      appId,
       verifyToken,
     });
     const newSecrets: MessengerChannelSecrets = {
-      pageAccessToken: encryptSecret(pageAccessToken),
+      pageAccessToken: encryptSecret(tokenToStore),
       appSecret: encryptSecret(appSecret),
     };
 

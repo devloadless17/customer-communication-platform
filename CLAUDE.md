@@ -306,5 +306,6 @@ Each links to the reasoning:
 | External API reference | [docs/organization-api.md](docs/organization-api.md) |
 | Local setup & dev matrix | [docs/local-setup.md](docs/local-setup.md) |
 | WhatsApp onboarding (today) | [docs/customer-onboarding-whatsapp.md](docs/customer-onboarding-whatsapp.md) · [docs/whatsapp-coexistence.md](docs/whatsapp-coexistence.md) |
+| Meta manual onboarding: keys/IDs per channel + troubleshooting runbook | [docs/meta-manual-onboarding.md](docs/meta-manual-onboarding.md) |
 | Provider engine internals | [apps/api/src/lib/providers/README.md](apps/api/src/lib/providers/README.md) |
 | Workflow engine internals | [apps/api/src/lib/workflows/README.md](apps/api/src/lib/workflows/README.md) |

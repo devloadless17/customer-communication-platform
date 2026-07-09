@@ -12,6 +12,7 @@ import { TeamRootController } from "./team-root.controller";
 import { TeamRootService } from "./team-root.service";
 import { InstagramModule } from "./instagram/instagram.module";
 import { MessengerModule } from "./messenger/messenger.module";
+import { MetaModule } from "./meta/meta.module";
 import { WhatsappModule } from "./whatsapp/whatsapp.module";
 import { WorkflowsModule as TeamWorkflowsModule } from "./workflows/workflows.module";
 
@@ -33,6 +34,7 @@ import { WorkflowsModule as TeamWorkflowsModule } from "./workflows/workflows.mo
     AudienceGroupsModule,
     ApiKeysModule,
     OutboundWebhooksAdminModule,
+    MetaModule,
     WhatsappModule,
     MessengerModule,
     InstagramModule,

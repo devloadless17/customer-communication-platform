@@ -141,6 +141,23 @@ export interface NormalizedStatusUpdate {
 }
 
 /**
+ * A "read up to here" receipt. Meta social channels (Messenger / Instagram)
+ * report read state as a watermark keyed on the CUSTOMER — not per message id —
+ * so ingest marks every outbound message to that customer at or before
+ * `watermark` as read (that's the "Seen" / blue-tick state). WhatsApp uses the
+ * per-message `NormalizedStatusUpdate{status:"read"}` path instead.
+ */
+export interface NormalizedReadWatermark {
+  kind: "read_watermark";
+  /** The customer who read — PSID / IGSID (social) or phone (unused today). */
+  externalContactId?: string;
+  contactPhone?: string;
+  /** All outbound messages to this customer at/before this instant are read. */
+  watermark: Date;
+  rawPayload: Record<string, unknown>;
+}
+
+/**
  * One step of a WhatsApp call's lifecycle as it arrives via webhook. The
  * Meta provider emits one of these per call webhook (incoming offer,
  * outbound answer, terminal status). Ingest dedupes by
@@ -315,6 +332,7 @@ export interface NormalizedContactSync {
 export type NormalizedEvent =
   | NormalizedInboundMessage
   | NormalizedStatusUpdate
+  | NormalizedReadWatermark
   | NormalizedCallEvent
   | NormalizedReaction
   | NormalizedTemplateStatusUpdate
@@ -331,6 +349,13 @@ export interface SendTextArgs {
    * the local message id.
    */
   replyToExternalId?: string;
+  /**
+   * Meta SOCIAL only: `false` → send with `messaging_type: RESPONSE` (the right
+   * type inside the 24h window — no tag, no special feature). `true`/undefined →
+   * attach the Human Agent tag (for the 24h–7d support band). Set by the send
+   * path from the window band. Ignored by WhatsApp.
+   */
+  useHumanAgentTag?: boolean;
 }
 
 export interface SendTextResult {
@@ -379,6 +404,8 @@ export interface SendInteractiveArgs {
   listSectionTitle?: string;
   /** Quoted-reply context, same semantics as SendTextArgs. */
   replyToExternalId?: string;
+  /** Meta social only — see SendTextArgs.useHumanAgentTag. */
+  useHumanAgentTag?: boolean;
 }
 
 export interface UploadMediaArgs {
@@ -398,6 +425,14 @@ export interface SendMediaArgs {
   kind: MediaKind;
   /** Provider-side media id from a prior uploadMedia call. */
   mediaId: string;
+  /**
+   * Public (presigned) URL for the media, for channels whose media send is
+   * URL-based rather than upload-based — Instagram sends `attachment.payload.url`
+   * (the reusable Attachment-Upload/`attachment_id` path Messenger uses returns
+   * errors on Instagram). Set by the send orchestration when the provider's
+   * `mediaSendByUrl` capability is true; `mediaId` is empty in that case.
+   */
+  mediaUrl?: string;
   /** Optional caption — only image/video/document accept it on Meta. */
   caption?: string;
   /** Required for documents, ignored otherwise. */
@@ -411,6 +446,8 @@ export interface SendMediaArgs {
    * knows the upload came from a microphone recorder, not a file picker.
    */
   voice?: boolean;
+  /** Meta social only — see SendTextArgs.useHumanAgentTag. */
+  useHumanAgentTag?: boolean;
 }
 
 export interface FetchedMedia {
@@ -617,6 +654,14 @@ export interface ProviderCapabilities {
    * SMS provider with calling=false hides the button on its threads.
    */
   calling: boolean;
+  /**
+   * Outbound media is sent by public URL (`attachment.payload.url`) instead of
+   * uploading bytes for a reusable `attachment_id`. Instagram requires this;
+   * the send orchestration presigns the stored object and passes `mediaUrl`
+   * instead of calling `uploadMedia`. Absent/false → upload-then-send (WhatsApp,
+   * Messenger).
+   */
+  mediaSendByUrl?: boolean;
 }
 
 export interface MessagingProvider<SendConfig = unknown> {

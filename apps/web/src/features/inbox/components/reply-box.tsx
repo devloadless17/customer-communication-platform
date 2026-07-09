@@ -46,6 +46,7 @@ import { dispatchLocalSocketEvents } from "@/lib/socket-client";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
+import { CHANNEL_LABEL } from "./channel-badge";
 import type { Channel } from "@ccp/shared/types";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 import { useNow } from "@/hooks/use-now";
@@ -1524,7 +1525,7 @@ function ReplyBoxImpl({
                   ? "Free-form replies blocked — send a pre-approved template to re-engage."
                   : attachment
                     ? "Add a caption (optional)…"
-                    : "Reply on WhatsApp…"
+                    : `Reply on ${CHANNEL_LABEL[channel]}…`
             }
             className={cn(
               // field-sizing-content grows the box with the draft from the

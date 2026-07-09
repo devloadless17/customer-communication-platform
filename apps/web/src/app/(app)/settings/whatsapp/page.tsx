@@ -1,5 +1,3 @@
-import { headers } from "next/headers";
-
 import { getSession } from "@/lib/auth/current-user";
 import { getTeamWhatsappConfig, listWhatsappTemplates } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
@@ -13,7 +11,7 @@ export const metadata = {
 export const dynamic = "force-dynamic";
 
 export default async function WhatsappSettingsPage() {
-  const { user, teamId } = await getSession();
+  const { user } = await getSession();
   const canManage = canManageUsers(user.role);
 
   // GET /api/team/whatsapp is @RequireRole("admin") — it decrypts secrets, so a
@@ -54,20 +52,5 @@ export default async function WhatsappSettingsPage() {
     };
   }
 
-  // Build the public origin from the proxy headers so the webhook URL the
-  // admin sees matches what Meta will actually call (ngrok host in dev,
-  // real domain in prod). Falls back to the host header when behind no proxy.
-  const h = await headers();
-  const proto = h.get("x-forwarded-proto") ?? "http";
-  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
-  const webhookBaseUrl = `${proto}://${host}`;
-
-  return (
-    <WhatsappSettings
-      current={current}
-      webhookBaseUrl={webhookBaseUrl}
-      teamId={teamId}
-      canManage={canManage}
-    />
-  );
+  return <WhatsappSettings current={current} canManage={canManage} />;
 }

@@ -4,10 +4,8 @@ import { usePathname } from "next/navigation";
 import {
   BarChart3,
   Bell,
-  Camera,
   Layers,
   ListChecks,
-  MessageSquare,
   MessagesSquare,
   Plug,
   ShieldCheck,
@@ -103,22 +101,17 @@ export function SettingsSubSidebar({
       {isAdmin && (
         <SubSidebarSection label="Channels & integrations">
           <SubSidebarItem
-            href="/settings/whatsapp"
-            label="WhatsApp"
-            leading={<MessageSquare className="size-4" />}
-            active={isActive("/settings/whatsapp")}
-          />
-          <SubSidebarItem
-            href="/settings/messenger"
-            label="Messenger"
+            href="/settings/channels"
+            label="Channels"
             leading={<MessagesSquare className="size-4" />}
-            active={isActive("/settings/messenger")}
-          />
-          <SubSidebarItem
-            href="/settings/instagram"
-            label="Instagram"
-            leading={<Camera className="size-4" />}
-            active={isActive("/settings/instagram")}
+            // Lit for the catalog and every channel connect sub-page it links to.
+            active={
+              isActive("/settings/channels") ||
+              isActive("/settings/meta") ||
+              isActive("/settings/whatsapp") ||
+              isActive("/settings/messenger") ||
+              isActive("/settings/instagram")
+            }
           />
           <SubSidebarItem
             href="/settings/integrations"

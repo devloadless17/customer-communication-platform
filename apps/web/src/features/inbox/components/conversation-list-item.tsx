@@ -131,15 +131,22 @@ function ConversationListItemImpl({
         <span className="absolute inset-y-2 left-0 w-[3px] rounded-r-full bg-info-fg" />
       ) : null}
 
-      {/* Avatar */}
-      <Avatar className="mt-0.5 size-9 shrink-0">
-        <AvatarFallback
-          className="text-xs font-semibold text-white"
-          style={{ backgroundImage: avatarGradient(contact.id) }}
-        >
-          {initials(contact.name)}
-        </AvatarFallback>
-      </Avatar>
+      {/* Avatar + channel logo badge (overlaid on the corner, like a
+          world-class shared inbox — identifies the source channel at a glance). */}
+      <div className="relative mt-0.5 shrink-0">
+        <Avatar className="size-9">
+          <AvatarFallback
+            className="text-xs font-semibold text-white"
+            style={{ backgroundImage: avatarGradient(contact.id) }}
+          >
+            {initials(contact.name)}
+          </AvatarFallback>
+        </Avatar>
+        <ChannelBadge
+          channel={conversation.channel ?? "whatsapp"}
+          className="absolute -bottom-0.5 -right-0.5 size-[15px] ring-2 ring-background"
+        />
+      </div>
 
       <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
         {/* Row 1: name + timestamp */}
@@ -154,8 +161,6 @@ function ConversationListItemImpl({
           >
             {contact.name}
           </span>
-          {/* Channel mark — renders only for non-WhatsApp channels. */}
-          <ChannelBadge channel={conversation.channel ?? "whatsapp"} />
           <span title={fullDateTime} className="shrink-0">
             <LocalTime
               iso={conversation.lastMessageAt}
