@@ -33,6 +33,14 @@ import {
  *                     hardcoded to one. For `send_message`, reopens/creates the
  *                     conversation ON THAT CHANNEL.
  *
+ *   trigger_customer — the DYNAMIC omnichannel target: the PERSON behind the
+ *                     TRIGGER contact, reached on their best live channel. Same
+ *                     resolution as `customer` but the customerId comes from the
+ *                     trigger contact at run time (no id to configure) — so an
+ *                     automation "reach this person, best channel" needs no
+ *                     picker. A trigger contact with no linked person (solo)
+ *                     falls back to `trigger_contact` (their own channel).
+ *
  * `kind: "contact"` (pick an existing contact by id) is intentionally NOT
  * here yet — would need a typeahead picker in the UI, which is a bigger
  * piece. Adding it later is a non-breaking extension.
@@ -40,7 +48,8 @@ import {
 export type StepTarget =
   | { kind: "trigger_contact" }
   | { kind: "phone"; phoneNumber: string }
-  | { kind: "customer"; customerId: string };
+  | { kind: "customer"; customerId: string }
+  | { kind: "trigger_customer" };
 
 /**
  * Parser shared across step parseConfig functions. Returns undefined when
@@ -55,6 +64,7 @@ export function parseStepTarget(raw: unknown): StepTarget | undefined {
   }
   const t = raw as Record<string, unknown>;
   if (t.kind === "trigger_contact") return { kind: "trigger_contact" };
+  if (t.kind === "trigger_customer") return { kind: "trigger_customer" };
   if (t.kind === "phone") {
     if (typeof t.phoneNumber !== "string" || !t.phoneNumber.trim()) {
       throw new StepConfigError("target.phoneNumber is required when target.kind is 'phone'");
@@ -74,7 +84,7 @@ export function parseStepTarget(raw: unknown): StepTarget | undefined {
     return { kind: "customer", customerId: t.customerId.trim() };
   }
   throw new StepConfigError(
-    `target.kind must be 'trigger_contact', 'phone', or 'customer'`,
+    `target.kind must be 'trigger_contact', 'trigger_customer', 'phone', or 'customer'`,
   );
 }
 
@@ -108,6 +118,76 @@ export interface ResolvedTarget {
  * (teamId, phoneNumber), so concurrent workflow runs for the same target
  * phone collapse to one Contact row. Race-safe.
  */
+/**
+ * Resolve a PERSON (`Customer`) to their best live channel + that channel's
+ * conversation. Shared by the `customer` (static id) and `trigger_customer`
+ * (dynamic, from the trigger) targets. No contact auto-create — the person's
+ * contacts already exist; a person with no reachable channel throws a clean
+ * config error the run records and advances past.
+ */
+async function resolveCustomerBestChannel(
+  teamId: string,
+  customerId: string,
+  opts: { createConversation: boolean },
+): Promise<ResolvedTarget> {
+  const best = await bestChannelForCustomer(teamId, customerId);
+  if (!best) {
+    throw new StepConfigError(
+      "target customer has no reachable channel (no live contact to message)",
+    );
+  }
+  const contactId = best.contactId;
+  const phoneNumber = isPhoneChannel(best.channel) ? best.to : null;
+  if (!opts.createConversation) {
+    return {
+      contactId,
+      conversationId: null,
+      phoneNumber,
+      contactCreated: false,
+      conversationCreated: false,
+    };
+  }
+  const existingConv = await db.conversation.findFirst({
+    where: { teamId, contactId },
+    orderBy: { lastMessageAt: "desc" },
+    select: { id: true },
+  });
+  if (existingConv) {
+    return {
+      contactId,
+      conversationId: existingConv.id,
+      phoneNumber,
+      contactCreated: false,
+      conversationCreated: false,
+    };
+  }
+  // Create ON THE BEST CHANNEL — Conversation.channel defaults to whatsapp, so
+  // a social best-channel MUST set it explicitly or the thread would be
+  // mis-stamped. Race-safe on the (teamId, contactId) unique.
+  let conv: { id: string };
+  try {
+    conv = await db.conversation.create({
+      data: { teamId, contactId, channel: best.channel, status: "open" },
+      select: { id: true },
+    });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      conv = await db.conversation.findFirstOrThrow({
+        where: { teamId, contactId },
+        orderBy: { lastMessageAt: "desc" },
+        select: { id: true },
+      });
+    } else throw err;
+  }
+  return {
+    contactId,
+    conversationId: conv.id,
+    phoneNumber,
+    contactCreated: false,
+    conversationCreated: true,
+  };
+}
+
 export async function resolveStepTarget(
   target: StepTarget | undefined,
   envelope: WorkflowEventEnvelope,
@@ -135,66 +215,37 @@ export async function resolveStepTarget(
     };
   }
 
-  // Customer target — resolve the person's BEST live channel, then reopen/create
-  // that channel's conversation. No contact auto-create (the person's contacts
-  // already exist — they've reached us); if none is reachable we surface a clean
-  // config error the run records and advances past.
+  // Customer target — the person's BEST live channel (static id).
   if (target.kind === "customer") {
-    const best = await bestChannelForCustomer(teamId, target.customerId);
-    if (!best) {
+    return resolveCustomerBestChannel(teamId, target.customerId, opts);
+  }
+
+  // trigger_customer — the DYNAMIC omnichannel target: reach the PERSON behind
+  // the trigger contact on their best channel. Resolve the trigger contact's
+  // Customer id at run time; a solo (unlinked) trigger contact IS its own
+  // person, so fall back to trigger_contact behavior (their own channel).
+  if (target.kind === "trigger_customer") {
+    const c = envelopeContact(envelope);
+    if (!c) {
       throw new StepConfigError(
-        "target customer has no reachable channel (no live contact to message)",
+        "step targets the trigger person but the envelope has no contact",
       );
     }
-    const contactId = best.contactId;
-    const phoneNumber = isPhoneChannel(best.channel) ? best.to : null;
-    if (!opts.createConversation) {
-      return {
-        contactId,
-        conversationId: null,
-        phoneNumber,
-        contactCreated: false,
-        conversationCreated: false,
-      };
-    }
-    const existingConv = await db.conversation.findFirst({
-      where: { teamId, contactId },
-      orderBy: { lastMessageAt: "desc" },
-      select: { id: true },
+    const row = await db.contact.findFirst({
+      where: { teamId, id: c.id },
+      select: { customerId: true },
     });
-    if (existingConv) {
-      return {
-        contactId,
-        conversationId: existingConv.id,
-        phoneNumber,
-        contactCreated: false,
-        conversationCreated: false,
-      };
+    if (row?.customerId) {
+      return resolveCustomerBestChannel(teamId, row.customerId, opts);
     }
-    // Create ON THE BEST CHANNEL — Conversation.channel defaults to whatsapp, so
-    // a social best-channel MUST set it explicitly or the thread would be
-    // mis-stamped. Race-safe on the (teamId, contactId) unique.
-    let conv: { id: string };
-    try {
-      conv = await db.conversation.create({
-        data: { teamId, contactId, channel: best.channel, status: "open" },
-        select: { id: true },
-      });
-    } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-        conv = await db.conversation.findFirstOrThrow({
-          where: { teamId, contactId },
-          orderBy: { lastMessageAt: "desc" },
-          select: { id: true },
-        });
-      } else throw err;
-    }
+    // Solo person → their single channel (the trigger's own contact/conversation).
+    const conv = envelopeConversation(envelope);
     return {
-      contactId,
-      conversationId: conv.id,
-      phoneNumber,
+      contactId: c.id,
+      conversationId: conv?.id ?? null,
+      phoneNumber: c.phoneNumber ?? null,
       contactCreated: false,
-      conversationCreated: true,
+      conversationCreated: false,
     };
   }
 

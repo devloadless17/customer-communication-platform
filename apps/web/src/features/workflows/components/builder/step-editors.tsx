@@ -150,8 +150,11 @@ function asFieldDefs(
 export type StepTarget =
   | { kind: "trigger_contact" }
   | { kind: "phone"; phoneNumber: string }
-  // Person's best channel (unified Customer). Settable via the workflow API /
-  // import today; a customer-picker radio is a follow-up (mirrors the deferred
+  // DYNAMIC omnichannel: the PERSON behind the trigger contact, on their best
+  // live channel (no id to configure — resolved at run time).
+  | { kind: "trigger_customer" }
+  // Person's best channel by static `Customer` id. Settable via the workflow
+  // API / import; a customer-picker radio is a follow-up (mirrors the deferred
   // `kind:"contact"` picker). Listed so the type stays in sync with the server
   // and the editor preserves an imported customer target on save.
   | { kind: "customer"; customerId: string };
@@ -196,6 +199,22 @@ function TargetSelector({
         />
         <span>Contact from the trigger</span>
         <span className="text-2xs text-muted-foreground">(default)</span>
+      </label>
+      <label className="flex cursor-pointer items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name="target-mode"
+          checked={mode === "trigger_customer"}
+          onChange={() => onChange({ kind: "trigger_customer" })}
+          className="mt-0.5 size-3.5"
+        />
+        <span className="flex flex-col">
+          <span>The person&apos;s best channel</span>
+          <span className="text-2xs text-muted-foreground">
+            Reach the unified person behind the trigger on whichever channel is
+            live (WhatsApp / Messenger / Instagram), not just the one they used.
+          </span>
+        </span>
       </label>
       <label className="flex cursor-pointer items-center gap-2 text-sm">
         <input
