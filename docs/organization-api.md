@@ -238,7 +238,7 @@ Template (works **outside** the 24h window):
 ```
 
 **Reply inside a conversation** — `POST /conversations/:id/messages` · `write:messages`
-Free-form text; `replyToMessageId` to quote. Only inside the 24h window.
+Free-form text; `replyToMessageId` to quote. Only inside the 24h window. Sending into a **closed** thread reopens it (closed → pending) once the send lands — same as an inbox reply and the top-level `POST /messages` route.
 ```bash
 curl -s -X POST "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/messages" \
   -H "Authorization: Bearer $CCP_API_KEY" \

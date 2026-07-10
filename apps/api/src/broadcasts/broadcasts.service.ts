@@ -23,11 +23,9 @@ import {
   removeScheduledBroadcast,
 } from "@/lib/broadcasts/schedule-queue";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
-import { getProviderBinding } from "@/lib/providers";
-import { bestChannelForCustomer } from "@/lib/identity/best-channel";
-import { runWithConcurrency } from "@/common/concurrency";
+import { teamConnectedChannels } from "@/lib/providers";
+import { pickBestChannel, type RankableContact } from "@/lib/identity/best-channel";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
-import { LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
 import type { Channel } from "@ccp/shared/types";
 import { resolveAudienceGroupMembers } from "@/lib/queries";
 import {
@@ -199,19 +197,8 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
 
     // Which channels can this team actually SEND on right now? A channel with a
     // registered provider but no/expired connection would otherwise be ranked
-    // "best" for a person and then dropped at send — reaching nobody. Load the
-    // send config for each live channel once and keep the ones that succeed.
-    const connected = new Set<Channel>();
-    await Promise.all(
-      [...LIVE_CHANNELS].map(async (ch) => {
-        try {
-          await getProviderBinding(ch).getSendConfig(teamId);
-          connected.add(ch);
-        } catch {
-          // Not connected / creds expired — exclude from best-channel resolution.
-        }
-      }),
-    );
+    // "best" for a person and then dropped at send — reaching nobody.
+    const connected = await teamConnectedChannels(teamId);
 
     // One entry per person: keyed by customerId, or the contact id for singletons.
     const persons = new Map<
@@ -225,22 +212,50 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    // Bulk-load every LINKED person's sibling contacts in ONE query, then rank in
+    // memory — instead of a `bestChannelForCustomer` findMany per person (an N+1
+    // that scaled with audience size). Singletons need no siblings.
+    const linkedCustomerIds = [...persons.values()]
+      .map((p) => p.customerId)
+      .filter((id): id is string => id !== null);
+    const siblingsByCustomer = new Map<string, RankableContact[]>();
+    if (linkedCustomerIds.length > 0) {
+      const siblings = await this.db.contact.findMany({
+        where: { teamId, deletedAt: null, customerId: { in: linkedCustomerIds } },
+        select: {
+          id: true,
+          customerId: true,
+          identityChannel: true,
+          phoneNumber: true,
+          externalContactId: true,
+          lastInboundAt: true,
+        },
+      });
+      for (const s of siblings) {
+        if (!s.customerId) continue;
+        const arr = siblingsByCustomer.get(s.customerId) ?? [];
+        arr.push(s);
+        siblingsByCustomer.set(s.customerId, arr);
+      }
+    }
+
+    const now = Date.now();
     const rows: Array<{ contactId: string; customerId: string | null }> = [];
-    await runWithConcurrency([...persons.values()], 8, async (p) => {
+    for (const p of persons.values()) {
       if (!p.customerId) {
         // Singleton contact — no unified person to resolve across. Include only
         // if its own channel is connected (else it would fail at send anyway).
         if (connected.has(p.channel)) rows.push({ contactId: p.contactId, customerId: null });
-        return;
+        continue;
       }
       // Rank only over the team's CONNECTED channels so we never drop a person
       // reachable on a connected channel by picking an unconnected one.
-      const best = await bestChannelForCustomer(teamId, p.customerId, Date.now(), connected);
+      const best = pickBestChannel(siblingsByCustomer.get(p.customerId) ?? [], now, connected);
       // Only in-window people are reachable by a freeform send; drop the rest.
       if (best && best.inWindow) {
         rows.push({ contactId: best.contactId, customerId: p.customerId });
       }
-    });
+    }
     return rows;
   }
 

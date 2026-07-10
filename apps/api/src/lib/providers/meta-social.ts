@@ -847,7 +847,12 @@ export async function sendSocialCallAction(
   const body: Record<string, unknown> = { platform: opts.label, action: args.action };
   if (args.callId) body.call_id = args.callId;
   if (args.to) body.to = args.to;
-  if (args.sdp) body.session = { sdp_type: "offer", sdp: args.sdp };
+  if (args.sdp) {
+    // connect/accept carry the business-generated OFFER; a media_update relays
+    // our ANSWER to Meta's mid-call renegotiation offer, so its sdp_type differs.
+    const sdpType = args.action === "media_update" ? "answer" : "offer";
+    body.session = { sdp_type: sdpType, sdp: args.sdp };
+  }
   const res = await graphPostJson(url, opts.accessToken, body);
   const session = (res.session ?? {}) as {
     sdp_response?: { sdp?: string } | string;

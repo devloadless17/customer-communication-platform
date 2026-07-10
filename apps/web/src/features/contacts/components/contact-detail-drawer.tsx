@@ -300,7 +300,11 @@ export function ContactDetailDrawer({
             <Badge variant={contact.source === "manual" ? "muted" : "success"}>
               {contact.source === "manual" ? "Added by you" : "Messaged you"}
             </Badge>
-            <WindowBadge lastInboundAt={lastInboundAt} size="xs" />
+            <WindowBadge
+              lastInboundAt={lastInboundAt}
+              channel={contact.identityChannel ?? undefined}
+              size="xs"
+            />
           </div>
         </div>
 

@@ -24,6 +24,7 @@ import {
   InitiateCallSchema,
   ListCallsQuerySchema,
   ListTeamCallsQuerySchema,
+  MediaUpdateSchema,
   RejectCallSchema,
   RequestCallPermissionSchema,
   type AnswerCallInput,
@@ -31,6 +32,7 @@ import {
   type InitiateCallInput,
   type ListCallsQuery,
   type ListTeamCallsQuery,
+  type MediaUpdateInput,
   type RejectCallInput,
   type RequestCallPermissionInput,
 } from "./calls.schemas";
@@ -220,6 +222,23 @@ export class CallsController {
     @Body(zBody(EndCallSchema)) _body: EndCallInput,
   ) {
     return this.calls.endCall(session, callId);
+  }
+
+  /**
+   * Mid-call media renegotiation (Messenger). Meta sends a post-pickup
+   * `media_update` webhook carrying a new SDP offer; the agent's browser answers
+   * it and POSTs that answer here to relay to Meta. No capability decorator (an
+   * agent already on the live call must be able to keep its media alive — same
+   * posture as /end); the service scopes by teamId + `in_progress`.
+   */
+  @Post("api/calls/:callId/media-update")
+  @HttpCode(200)
+  async mediaUpdate(
+    @CurrentSession() session: ApiSession,
+    @Param("callId") callId: string,
+    @Body(zBody(MediaUpdateSchema)) body: MediaUpdateInput,
+  ) {
+    return this.calls.mediaUpdate(session, callId, body.sdp);
   }
 
 }

@@ -20,6 +20,7 @@ import {
   providerAnswerCall,
   providerRejectCall,
   providerEndCall,
+  providerMediaUpdate,
   usesUnifiedCalling,
 } from "@/lib/messaging/call-actions";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
@@ -832,6 +833,61 @@ export class CallsService {
       // the accept call for the browser to apply; WhatsApp's arrive via webhook.
       ...(answerResult.sdpAnswer ? { sdpAnswer: answerResult.sdpAnswer } : {}),
       ...(answerResult.sdpRenegotiation ? { sdpRenegotiation: answerResult.sdpRenegotiation } : {}),
+    };
+  }
+
+  /**
+   * Relay a mid-call media renegotiation to the provider. Meta (Messenger) can
+   * send a post-pickup `media_update` webhook carrying a new SDP OFFER; the
+   * agent's browser answers it and POSTs that answer here, and we forward it via
+   * the unified `media_update` action. Only meaningful on a LIVE call the team
+   * owns, so it's teamId-scoped and gated on `in_progress` (like endCall, no
+   * extra capability — an agent already on the call must be able to keep its
+   * media alive). Returns any SDP the provider hands back for the browser to
+   * apply. WhatsApp never reaches here (no live-renegotiation flow); the adapter
+   * throws for it and we surface a clean 400.
+   */
+  async mediaUpdate(
+    session: ApiSession,
+    callId: string,
+    sdp: string,
+  ): Promise<{ ok: true; sdpAnswer?: string; sdpRenegotiation?: string }> {
+    const call = await this.db.call.findFirst({
+      where: { id: callId, teamId: session.teamId },
+      select: {
+        id: true,
+        externalCallId: true,
+        channel: true,
+        status: true,
+      },
+    });
+    if (!call) throw new NotFoundException({ error: "call not found" });
+    if (call.status !== CallStatus.in_progress) {
+      throw new BadRequestException({ error: "call_not_in_progress" });
+    }
+    const binding = getProviderBinding(call.channel);
+    const config = await binding.getSendConfig(session.teamId);
+    let result: { sdpAnswer?: string; sdpRenegotiation?: string };
+    try {
+      result = await providerMediaUpdate(binding.provider, call.channel, config, {
+        externalCallId: call.externalCallId,
+        sdp,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `mediaUpdate provider error for call=${callId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+      // A renegotiation failure doesn't terminate the call — the existing media
+      // keeps flowing; surface a 400 so the browser can log/ignore without
+      // tearing down a working call.
+      throw new BadRequestException({ error: "media_update_failed" });
+    }
+    return {
+      ok: true,
+      ...(result.sdpAnswer ? { sdpAnswer: result.sdpAnswer } : {}),
+      ...(result.sdpRenegotiation ? { sdpRenegotiation: result.sdpRenegotiation } : {}),
     };
   }
 

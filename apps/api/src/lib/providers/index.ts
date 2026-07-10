@@ -4,6 +4,7 @@ import { messengerProvider } from "@/lib/providers/messenger";
 import { getMessengerSendConfig } from "@/lib/providers/messenger-config";
 import { instagramProvider } from "@/lib/providers/instagram";
 import { getInstagramSendConfig } from "@/lib/providers/instagram-config";
+import { LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
 import type { Channel } from "@ccp/shared/types";
 import type { MessagingProvider } from "@ccp/shared/providers/types";
 
@@ -119,6 +120,30 @@ export function requireProviderMethod<K extends keyof MessagingProvider>(
  */
 export function getMetaProvider(): MessagingProvider<MetaSendConfig> {
   return metaProvider;
+}
+
+/**
+ * The set of live channels this team can actually SEND on right now — a
+ * registered provider AND a loadable send config (a connected `ChannelConnection`
+ * with valid creds). A channel with a provider but no/expired connection would
+ * otherwise be ranked "best" for a person by `bestChannelForCustomer` and then
+ * dropped at send, reaching nobody. Shared by the person-targeting callers
+ * (broadcast customer-mode + workflow customer/trigger_customer targets) so the
+ * connected-set logic never drifts between them.
+ */
+export async function teamConnectedChannels(teamId: string): Promise<Set<Channel>> {
+  const connected = new Set<Channel>();
+  await Promise.all(
+    [...LIVE_CHANNELS].map(async (ch) => {
+      try {
+        await getProviderBinding(ch).getSendConfig(teamId);
+        connected.add(ch);
+      } catch {
+        // Not connected / creds expired — exclude from best-channel resolution.
+      }
+    }),
+  );
+  return connected;
 }
 
 export type { MessagingProvider } from "@ccp/shared/providers/types";

@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import { bestChannelForCustomer } from "@/lib/identity/best-channel";
+import { teamConnectedChannels } from "@/lib/providers";
 import { isPhoneChannel } from "@ccp/shared/providers/capabilities";
 
 import type { WorkflowEventEnvelope } from "@/lib/workflows/events";
@@ -130,7 +131,12 @@ async function resolveCustomerBestChannel(
   customerId: string,
   opts: { createConversation: boolean },
 ): Promise<ResolvedTarget> {
-  const best = await bestChannelForCustomer(teamId, customerId);
+  // Rank only over the channels the team can actually send on right now — else a
+  // person reachable on a connected channel could be picked onto an unconnected
+  // one (deleted connection / expired token) and then dropped at send, reaching
+  // nobody. Mirrors the broadcast customer-mode path.
+  const connected = await teamConnectedChannels(teamId);
+  const best = await bestChannelForCustomer(teamId, customerId, Date.now(), connected);
   if (!best) {
     throw new StepConfigError(
       "target customer has no reachable channel (no live contact to message)",

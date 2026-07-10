@@ -1233,7 +1233,11 @@ const ContactRow = memo(function ContactRow({
         {/* Window lane — wide enough for the longest one-line badge
             ("Window closed · closed 24m ago") so it never wraps or clips. */}
         <div className="hidden w-52.5 shrink-0 items-center justify-start @3xl:flex">
-          <WindowBadge lastInboundAt={lastInboundAt} size="xs" />
+          <WindowBadge
+            lastInboundAt={lastInboundAt}
+            channel={contact.identityChannel ?? undefined}
+            size="xs"
+          />
         </div>
 
         {/* Time lane */}

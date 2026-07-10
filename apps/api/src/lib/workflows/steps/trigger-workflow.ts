@@ -22,9 +22,9 @@ import {
  *
  * Loop guard: the dispatched workflow runs in its own WorkflowRun with its
  * own jumps + step counter. The parent's step counter still ticks, so
- * compound loops (A triggers B triggers A) are bounded by the 100-step
- * per-run global ceiling. A future cycle-detector could short-circuit
- * earlier; not needed for round 2.
+ * compound loops (A triggers B triggers A) are bounded by the
+ * MAX_WORKFLOW_NODES (200) per-run global ceiling. A future cycle-detector
+ * could short-circuit earlier; not needed for round 2.
  */
 export interface TriggerWorkflowStepConfig {
   workflowId: string;
@@ -34,9 +34,9 @@ export interface TriggerWorkflowStepConfig {
  * Hard cap on workflow-to-workflow dispatch chain length. Catches the
  * authoring footgun where A triggers B triggers A (or any longer cycle):
  * each child run carries `metadata.depth = parent.depth + 1`, and we
- * refuse to dispatch past TRIGGER_DEPTH_MAX. The 100-step-per-run cap
- * inside the runtime can't prevent this on its own — a chain of N tiny
- * workflows is N small step budgets, not one big one.
+ * refuse to dispatch past TRIGGER_DEPTH_MAX. The MAX_WORKFLOW_NODES (200)
+ * per-run cap inside the runtime can't prevent this on its own — a chain of N
+ * tiny workflows is N small step budgets, not one big one.
  */
 const TRIGGER_DEPTH_MAX = 8;
 

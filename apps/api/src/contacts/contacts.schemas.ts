@@ -18,6 +18,9 @@ export type SetContactTagsInput = z.infer<typeof SetContactTagsSchema>;
 export const AudienceCountSchema = z.object({
   tagIds: z.array(z.string().min(1)).max(MAX_IDS).default([]),
   contactIds: z.array(z.string().min(1)).max(MAX_IDS).default([]),
+  /** Scope the count to one channel — a broadcast sends on a single channel, so
+   *  the composer count must match what actually gets sent. Omit = all channels. */
+  channel: z.enum(["whatsapp", "messenger", "instagram"]).optional(),
 });
 export type AudienceCountInput = z.infer<typeof AudienceCountSchema>;
 

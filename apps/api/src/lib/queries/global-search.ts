@@ -93,7 +93,13 @@ export async function searchContacts(
         }
       : { teamId, deletedAt: null, OR: matchOr },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: take + 1,
+    // Over-fetch: we paginate CONTACTS but display PEOPLE, and a person can span
+    // several channel-contacts. Fetch enough contacts to still fill a full page
+    // of `take` PEOPLE after collapsing — the previous code deduped AFTER slicing
+    // `take` contacts, so a page returned fewer than `take` hits and a
+    // multi-channel person could straddle two pages. 4× covers the common 1–3
+    // channels/person; a person with more simply defers a sibling to the tail.
+    take: take * 4 + 1,
     select: {
       id: true,
       name: true,
@@ -107,14 +113,6 @@ export async function searchContacts(
     },
   });
 
-  const hasMore = rows.length > take;
-  const sliced = hasMore ? rows.slice(0, take) : rows;
-  const last = sliced.at(-1);
-  const nextCursor =
-    hasMore && last
-      ? encodeContactCursor({ sortAt: last.createdAt, id: last.id })
-      : null;
-
   // Unified-identity rollup: collapse matched contacts that belong to the same
   // person (`customerId`) into ONE hit, so a 3-channel person shows once with a
   // channel-badge cluster instead of three duplicate rows. A contact with no
@@ -123,11 +121,33 @@ export async function searchContacts(
   const personKey = (c: { customerId: string | null; id: string }) =>
     c.customerId ?? `contact:${c.id}`;
 
+  // Walk contacts in keyset order, keeping ONE representative per person, until
+  // we have `take + 1` people. The cursor advances by the LAST CONTACT consumed
+  // (not the last person), so the next page resumes scanning older contacts and
+  // pages stay full.
+  const seenPersons = new Set<string>();
+  const reps: typeof rows = [];
+  let lastConsumed: { createdAt: Date; id: string } | null = null;
+  for (const c of rows) {
+    lastConsumed = { createdAt: c.createdAt, id: c.id };
+    const key = personKey(c);
+    if (seenPersons.has(key)) continue;
+    seenPersons.add(key);
+    reps.push(c);
+    if (reps.length > take) break; // have take+1 → know there's a next page
+  }
+  const hasMore = reps.length > take;
+  const pageReps = hasMore ? reps.slice(0, take) : reps;
+  const nextCursor =
+    hasMore && lastConsumed
+      ? encodeContactCursor({ sortAt: lastConsumed.createdAt, id: lastConsumed.id })
+      : null;
+
   // Fetch the SIBLING channels for every matched person so the cluster shows all
   // their channels, not only the ones that happened to match the query. Only for
   // linked persons (customerId set); solo persons already have their one channel.
   const customerIds = [
-    ...new Set(sliced.map((c) => c.customerId).filter((v): v is string => !!v)),
+    ...new Set(pageReps.map((c) => c.customerId).filter((v): v is string => !!v)),
   ];
   const siblingsByCustomer = new Map<string, ContactSearchHit["channels"]>();
   if (customerIds.length > 0) {
@@ -153,13 +173,8 @@ export async function searchContacts(
   }
 
   const lowered = query.toLowerCase();
-  const seen = new Set<string>();
   const items: ContactSearchHit[] = [];
-  for (const c of sliced) {
-    const key = personKey(c);
-    if (seen.has(key)) continue; // person already represented by an earlier match
-    seen.add(key);
-
+  for (const c of pageReps) {
     // Pick which field actually matched, preferring name > email > phone for
     // the snippet (name is the most human-meaningful when several match).
     let matchedField: ContactSearchHit["matchedField"] = "name";

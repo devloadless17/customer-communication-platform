@@ -37,6 +37,18 @@ export const AnswerCallSchema = z
   .strict();
 export type AnswerCallInput = z.infer<typeof AnswerCallSchema>;
 
+/**
+ * Media-update body — the SDP ANSWER the browser generated in reply to Meta's
+ * mid-call renegotiation OFFER (Messenger `media_update`). Same bounded shape
+ * as the answer body.
+ */
+export const MediaUpdateSchema = z
+  .object({
+    sdp: z.string().min(1).max(64_000),
+  })
+  .strict();
+export type MediaUpdateInput = z.infer<typeof MediaUpdateSchema>;
+
 /** Reject body — optional reason ("busy" | "declined"). */
 export const RejectCallSchema = z
   .object({

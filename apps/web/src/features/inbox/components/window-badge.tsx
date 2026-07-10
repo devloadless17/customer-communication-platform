@@ -5,10 +5,13 @@ import { Clock, AlertTriangle, Lock, MessageSquareDashed } from "lucide-react";
 import { cn } from "@ccp/shared/utils";
 import {
   computeWindowStatus,
+  effectiveSendWindowMs,
   formatWindowRemaining,
   windowStateLabel,
   type WindowStatus,
 } from "@ccp/shared/utils/window";
+import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
+import type { Channel } from "@ccp/shared/types";
 import { useNow } from "@/hooks/use-now";
 
 /**
@@ -28,10 +31,16 @@ import { useNow } from "@/hooks/use-now";
 
 export function WindowBadge({
   lastInboundAt,
+  channel,
   size = "sm",
   className,
 }: {
   lastInboundAt: string | null;
+  /** The contact's channel — drives the window length: WhatsApp 24h, Meta social
+   *  24h + a 7-day human-agent band. Omit ⇒ the 24h default (back-compat). Without
+   *  this a social contact between 24h and 7d was wrongly shown "window closed"
+   *  while the composer (channel-aware) still sends. */
+  channel?: Channel;
   size?: "xs" | "sm";
   className?: string;
 }) {
@@ -39,7 +48,12 @@ export function WindowBadge({
   // TimezoneProvider) so the rendered string is identical on both sides of
   // hydration. No "Window closed" → "Window closed · 42h ago" flash.
   const now = useNow();
-  const status = computeWindowStatus(lastInboundAt, now);
+  // Match the reply composer: derive the window length from the channel's
+  // capability so social threads reflect the full 7-day human-agent window.
+  const windowMs = channel
+    ? effectiveSendWindowMs(CHANNEL_CAPABILITIES[channel]) ?? undefined
+    : undefined;
+  const status = computeWindowStatus(lastInboundAt, now, windowMs);
   return <WindowBadgeFromStatus status={status} size={size} className={className} />;
 }
 

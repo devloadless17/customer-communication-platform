@@ -198,6 +198,7 @@ export class ExternalV1Service {
     input: ExternalSendMessageInput,
     idempotencyKey?: string,
     chainDepth?: number,
+    reopenIfClosed?: boolean,
   ) {
     return this.messaging.sendMessage(
       teamId,
@@ -206,6 +207,7 @@ export class ExternalV1Service {
       input,
       idempotencyKey,
       chainDepth,
+      reopenIfClosed,
     );
   }
 

@@ -9,6 +9,7 @@
  */
 
 import type {
+  Channel,
   Contact,
   ConversationActivityEvent,
   ConversationStatus,
@@ -708,6 +709,9 @@ export interface ServerToClientEvents {
     conversationId: string;
     callId: string;
     externalCallId: string;
+    /** Drives the browser answer signaling (WhatsApp consumes the webhook SDP
+     *  offer; social generates the offer locally) + the toast copy. */
+    channel: Channel;
     contactId: string;
     contactName: string;
     ringingAt: string;

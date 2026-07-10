@@ -1075,11 +1075,16 @@ async function fetchUrlBytes(
   try {
     const res = await fetch(url, { signal: ac.signal, redirect: "follow" });
     if (!res.ok) throw new Error(`social media fetch ${res.status}`);
+    // Content-Length is an EARLY reject when present, but a CDN can omit or
+    // understate it — so we ALSO enforce the cap while STREAMING the body,
+    // aborting the moment accumulated bytes exceed `capBytes`. Never buffer an
+    // unbounded response into heap (`res.arrayBuffer()` would): a Content-Length-
+    // less multi-hundred-MB attachment must not spike RAM on the shared VPS.
     const cl = Number(res.headers.get("content-length") ?? "0");
     if (Number.isFinite(cl) && cl > capBytes) {
       throw new Error(`social media over cap (content-length ${cl} > ${capBytes})`);
     }
-    const bytes = new Uint8Array(await res.arrayBuffer());
+    const bytes = await readBodyCapped(res, capBytes);
     const mimeType =
       (res.headers.get("content-type") ?? "application/octet-stream")
         .split(";")[0]
@@ -1088,6 +1093,46 @@ async function fetchUrlBytes(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Read a fetch Response body into a Uint8Array, aborting as soon as the running
+ * total exceeds `capBytes` — so heap never holds more than ~`capBytes` + one
+ * chunk regardless of the (possibly absent/lying) Content-Length header.
+ */
+async function readBodyCapped(
+  res: Awaited<ReturnType<typeof fetch>>,
+  capBytes: number,
+): Promise<Uint8Array> {
+  const reader = res.body?.getReader();
+  if (!reader) {
+    // No readable stream — fall back to a full read but still enforce the cap.
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.length > capBytes) {
+      throw new Error(`social media over cap (${buf.length} > ${capBytes})`);
+    }
+    return buf;
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.length;
+    if (total > capBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error(`social media over cap (streamed ${total} > ${capBytes})`);
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
+  }
+  return out;
 }
 
 /**

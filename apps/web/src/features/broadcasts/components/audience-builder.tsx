@@ -44,6 +44,7 @@ export function AudienceBuilder({
   contactConfirmLabel = "Use these contacts",
   showPreview = true,
   onCountChange,
+  channel,
 }: {
   value: AudienceValue;
   onChange: (next: AudienceValue) => void;
@@ -63,10 +64,15 @@ export function AudienceBuilder({
   showPreview?: boolean;
   /** Mirror the resolved count to a parent (broadcast summary + send button). */
   onCountChange?: (count: number, loading: boolean) => void;
+  /** Scope the recipient count to a broadcast's target channel (so a freeform
+   *  Messenger broadcast counts only Messenger contacts). Omit = all channels
+   *  (the audience-group form, which is channel-agnostic). */
+  channel?: string;
 }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const { count, loading } = useAudienceCount(value.tagIds, value.contactIds, {
     initial: initialCount,
+    channel,
   });
 
   useEffect(() => {

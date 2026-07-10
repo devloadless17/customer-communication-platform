@@ -45,12 +45,20 @@ Subscribe to the `calls` field (and `call_permission_reply` for business-initiat
   "recipient_id": "{PSID}", "call_status": "ringing|accepted" }
 ```
 
-**media_update** — business-initiated only; carries Meta's SDP **offer** to answer.
+**media_update** — carries Meta's SDP **offer** to answer.
 ```json
 { "id": "c_...", "event": "media_update", "timestamp": 1671644824,
   "session": { "version": 1, "sdp_renegotiation": { "sdp_type": "offer", "sdp": "<RFC4566>" } } }
 ```
-Apply the highest `session.version`; generate an answer, apply to the local peer.
+Apply the highest `session.version`; generate an answer, apply to the local peer,
+and relay the answer back to Meta via the SAME endpoint (`action: "media_update"`,
+`session.sdp_type: "answer"`). Wired end-to-end: ingest publishes the offer as
+`call.sdp_offer`; the browser (`use-call.ts` onSdpOffer) answers a LIVE call
+in-place and POSTs `/api/calls/:id/media-update` → `providerMediaUpdate` →
+`sendSocialCallAction`. Best-effort — a renegotiation failure leaves the existing
+media flowing, never tears the call down. (The exact relay body — `sdp_type` and
+whether Meta chains a further `sdp_renegotiation` — is best-effort pending a live
+confirmation, same caveat as the reject body below.)
 
 **terminate** — both directions; call ended for any reason.
 ```json

@@ -115,6 +115,7 @@ export const BrowserRow = memo(function BrowserRow({
         )}
         <WindowBadge
           lastInboundAt={lastInboundAt}
+          channel={contact.identityChannel ?? undefined}
           size="xs"
           className="hidden shrink-0 lg:inline-flex"
         />

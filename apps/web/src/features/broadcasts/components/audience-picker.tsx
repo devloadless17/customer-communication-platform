@@ -59,6 +59,7 @@ export function AudiencePicker({
   onChange,
   onCustomCountChange,
   onGroupSaved,
+  channel,
 }: {
   tags: Tag[];
   fieldDefinitions?: ContactFieldDefinition[];
@@ -72,6 +73,9 @@ export function AudiencePicker({
   onCustomCountChange?: (count: number, loading: boolean) => void;
   /** Called after "Save as group" succeeds, so the parent can show it. */
   onGroupSaved?: (group: AudienceGroupDto) => void;
+  /** Broadcast's target channel — scopes the custom-audience recipient count so
+   *  it matches what actually gets sent (a broadcast sends on one channel). */
+  channel?: string;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -106,6 +110,7 @@ export function AudiencePicker({
               contactConfirmLabel="Use these recipients"
               showPreview={false}
               onCountChange={onCustomCountChange}
+              channel={channel}
             />
             <SaveAudienceAsGroup
               tagIds={value.selectedTagIds}

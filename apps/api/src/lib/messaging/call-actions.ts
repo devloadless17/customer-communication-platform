@@ -28,6 +28,11 @@ export interface AnswerCallResult {
   sdpAnswer?: string;
   sdpRenegotiation?: string;
 }
+export interface MediaUpdateResult {
+  /** Meta may answer our renegotiation (+ chain another renegotiation offer). */
+  sdpAnswer?: string;
+  sdpRenegotiation?: string;
+}
 
 /** True when this channel uses Meta's unified `callAction` (Messenger). */
 export function usesUnifiedCalling(provider: MessagingProvider): boolean {
@@ -90,6 +95,29 @@ export async function providerRejectCall(
   }
   const reject = requireProviderMethod(provider, "rejectCall", channel);
   await reject(args, config);
+}
+
+/**
+ * Answer a mid-call media renegotiation. Meta (Messenger) can send a post-pickup
+ * `media_update` webhook carrying a new SDP OFFER; the browser generates the
+ * answer and we relay it back via the unified `media_update` action. Unified
+ * calling only — WhatsApp has no such flow (it never delivers a live
+ * renegotiation offer on the call:sdp_offer path), so this throws for it.
+ */
+export async function providerMediaUpdate(
+  provider: MessagingProvider,
+  channel: Channel,
+  config: unknown,
+  args: { externalCallId: string; sdp: string },
+): Promise<MediaUpdateResult> {
+  if (provider.callAction) {
+    const r = await provider.callAction(
+      { action: "media_update", callId: args.externalCallId, sdp: args.sdp },
+      config,
+    );
+    return { sdpAnswer: r.sdpAnswer, sdpRenegotiation: r.sdpRenegotiation };
+  }
+  throw new Error(`${channel} does not support mid-call media renegotiation`);
 }
 
 /** Hang up / terminate a call from our side. */

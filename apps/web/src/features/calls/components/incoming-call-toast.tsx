@@ -7,9 +7,11 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { initials } from "@ccp/shared/utils";
+import type { Channel } from "@ccp/shared/types";
 import { getClientSocket } from "@/lib/socket-client";
 import { notificationSound } from "@/lib/notifications/notification-sound";
 import { useNotificationSounds } from "@/providers/notification-sound-provider";
+import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
 
 /**
  * Team-wide incoming-call toast. Subscribes to `call:incoming` (team-room)
@@ -23,6 +25,7 @@ import { useNotificationSounds } from "@/providers/notification-sound-provider";
 interface IncomingCall {
   callId: string;
   conversationId: string;
+  channel: Channel;
   contactName: string;
   ringingAt: string;
 }
@@ -36,8 +39,15 @@ export function IncomingCallToast({
    *  and never rings — a role scoped OUT of calling shouldn't be interrupted
    *  by inbound calls it can't answer (the API already 403s answer/reject). */
   canReceiveCalls: boolean;
-  /** Called when the user clicks Answer — wires up the peer connection. */
-  onAnswer: (callId: string, contactName: string, conversationId: string) => void;
+  /** Called when the user clicks Answer — wires up the peer connection. The
+   *  channel selects the answer signaling (WhatsApp consumes the webhook offer;
+   *  Messenger generates the offer locally). */
+  onAnswer: (
+    callId: string,
+    contactName: string,
+    conversationId: string,
+    channel: Channel,
+  ) => void;
   /** Called when the user clicks Decline. */
   onReject: (callId: string) => void;
 }) {
@@ -84,6 +94,7 @@ export function IncomingCallToast({
     const onIncoming = (payload: {
       callId: string;
       conversationId: string;
+      channel: Channel;
       contactName: string;
       ringingAt: string;
     }) => {
@@ -101,6 +112,7 @@ export function IncomingCallToast({
           {
             callId: payload.callId,
             conversationId: payload.conversationId,
+            channel: payload.channel,
             contactName: payload.contactName,
             ringingAt: payload.ringingAt,
           },
@@ -153,7 +165,7 @@ export function IncomingCallToast({
             // answer is idempotent server-side (CAS); a failed answer
             // (already_answered) re-emits the right state.
             drop(call.callId);
-            onAnswer(call.callId, call.contactName, call.conversationId);
+            onAnswer(call.callId, call.contactName, call.conversationId, call.channel);
           }}
           onReject={() => {
             drop(call.callId);
@@ -186,7 +198,9 @@ function IncomingCallCard({
       </Avatar>
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-semibold">{call.contactName}</div>
-        <div className="text-xs text-muted-foreground">is calling you on WhatsApp</div>
+        <div className="text-xs text-muted-foreground">
+          is calling you on {CHANNEL_LABEL[call.channel]}
+        </div>
       </div>
       <Button
         size="icon"

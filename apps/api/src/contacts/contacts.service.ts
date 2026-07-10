@@ -1510,9 +1510,14 @@ export class ContactsService {
     return toContactWire(row, { tagIds: row.tags.map((t) => t.id) });
   }
 
-  /** Live recipient count for an audience selection. */
+  /** Live recipient count for an audience selection, optionally scoped to the
+   *  broadcast's target channel so the composer count matches what gets sent. */
   countAudience(teamId: string, input: AudienceCountInput): Promise<number> {
-    return countAudienceContacts(teamId, input);
+    return countAudienceContacts(
+      teamId,
+      { tagIds: input.tagIds, contactIds: input.contactIds },
+      input.channel,
+    );
   }
 
   /** First N matches for an audience selection (for the preview list). */

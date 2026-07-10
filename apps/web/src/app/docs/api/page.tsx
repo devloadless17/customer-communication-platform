@@ -368,7 +368,8 @@ export default function ApiDocsPage() {
           headers={{ "Idempotency-Key": "<uuid>" }}
         >
           Send a WhatsApp text. 24h-window enforced. Idempotency via{" "}
-          <code>Idempotency-Key</code> header.
+          <code>Idempotency-Key</code> header. Sending into a closed thread
+          reopens it (closed → pending) once the send lands, like an inbox reply.
         </Endpoint>
         <Endpoint
           method="POST"

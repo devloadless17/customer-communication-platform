@@ -5,6 +5,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getClientSocket, dispatchLocalSocketEvent } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { toast } from "@/lib/toast";
+import { isPhoneChannel } from "@ccp/shared/providers/capabilities";
+import type { Channel } from "@ccp/shared/types";
 
 /**
  * Voice-call hook. Owns the browser side of the WhatsApp WebRTC peer
@@ -73,6 +75,7 @@ export function useCall(): {
     callId: string,
     contactName: string,
     conversationId: string,
+    channel: Channel,
   ) => Promise<void>;
   initiateOutbound: (
     conversationId: string,
@@ -382,6 +385,50 @@ export function useCall(): {
         }
         return;
       }
+      // Mid-call media renegotiation: Meta (Messenger) sends a post-pickup
+      // `media_update` OFFER on this same frame. If it targets our LIVE call and
+      // the PC is already negotiated (stable), answer it IN PLACE and relay the
+      // answer to Meta — without this the renegotiation is silently dropped and
+      // the post-pickup media may never establish. Distinct from the fresh
+      // inbound ring below: during a ring liveCall is null, so that path is
+      // untouched. Best-effort — a failure leaves the existing media flowing.
+      const live = liveCallRef.current;
+      const livePc = pcRef.current;
+      if (
+        live &&
+        livePc &&
+        live.callId === payload.callId &&
+        livePc.signalingState === "stable"
+      ) {
+        try {
+          await livePc.setRemoteDescription({ type: "offer", sdp: payload.sdp.sdp });
+          const answer = await livePc.createAnswer();
+          await livePc.setLocalDescription(answer);
+          const res = await fetchWithSessionGuard(
+            `/api/calls/${payload.callId}/media-update`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ sdp: answer.sdp }),
+            },
+          );
+          if (res.ok) {
+            const body = (await res.json().catch(() => ({}))) as {
+              sdpAnswer?: string;
+            };
+            // A chained answer from Meta, if any, completes the exchange.
+            if (body.sdpAnswer && pcRef.current?.signalingState === "have-local-offer") {
+              await pcRef.current.setRemoteDescription({
+                type: "answer",
+                sdp: body.sdpAnswer,
+              });
+            }
+          }
+        } catch (err) {
+          console.warn("[useCall] media renegotiation failed", err);
+        }
+        return;
+      }
       // Offer SDP: inbound call from the customer. Stash so answerIncoming
       // can consume it when the agent clicks Answer.
       pendingOffersRef.current.set(payload.callId, {
@@ -601,7 +648,12 @@ export function useCall(): {
   }, [tearDown, releaseMedia, clearDisconnectGrace]);
 
   const answerIncoming = useCallback(
-    async (callId: string, contactName: string, conversationId: string) => {
+    async (
+      callId: string,
+      contactName: string,
+      conversationId: string,
+      channel: Channel,
+    ) => {
       setError(null);
       // Single peer connection (1:1, see the contract note up top). Answering
       // a DIFFERENT call while one is live would tear down the live call's
@@ -616,8 +668,15 @@ export function useCall(): {
         toast.error("End your current call before answering another one.");
         return;
       }
+      // WhatsApp delivers the customer's SDP OFFER via webhook (call:sdp_offer →
+      // pendingOffersRef) and we answer it. A social (Messenger) call carries NO
+      // webhook offer — Meta expects the BUSINESS to generate the offer on
+      // accept and returns the answer synchronously from POST /answer. Branch on
+      // the channel: without this, a social answer waited forever for an offer
+      // that never arrives and failed with "still connecting".
+      const isSocialAnswer = !isPhoneChannel(channel);
       const offer = pendingOffersRef.current.get(callId);
-      if (!offer) {
+      if (!isSocialAnswer && !offer) {
         // Use fail() (which toasts) not bare setError(): the incoming card was
         // optimistically dismissed and CallPanel only renders when liveCall !=
         // null (still null here), so a setError message would never be seen.
@@ -628,9 +687,19 @@ export function useCall(): {
       busyRef.current = true;
       try {
         const pc = await setupPeer();
-        await pc.setRemoteDescription({ type: "offer", sdp: offer.sdp });
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+        // Build the local SDP: an OFFER for a social answer (Meta answers it), or
+        // an ANSWER to the customer's stashed offer for WhatsApp.
+        let localSdp: string;
+        if (isSocialAnswer) {
+          const localOffer = await pc.createOffer({ offerToReceiveAudio: true });
+          await pc.setLocalDescription(localOffer);
+          localSdp = localOffer.sdp ?? "";
+        } else {
+          await pc.setRemoteDescription({ type: "offer", sdp: offer!.sdp });
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          localSdp = answer.sdp ?? "";
+        }
 
         const startedAt = Date.now();
         setLiveCall({
@@ -646,7 +715,7 @@ export function useCall(): {
         const res = await fetchWithSessionGuard(`/api/calls/${callId}/answer`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sdp: answer.sdp }),
+          body: JSON.stringify({ sdp: localSdp }),
         });
         if (!res.ok) {
           fail(
@@ -658,6 +727,17 @@ export function useCall(): {
           );
           tearDown();
           return;
+        }
+        // Social: Meta returns the SDP answer synchronously from the accept
+        // (same as the outbound `connect` path) — apply it so media negotiates.
+        // WhatsApp completed its media locally above and returns no SDP body.
+        // (A `sdpRenegotiation` offer, if Meta ever sends one, is not applied
+        // here — the outbound path doesn't either; that's the media-update gap.)
+        if (isSocialAnswer) {
+          const body = (await res.json().catch(() => ({}))) as { sdpAnswer?: string };
+          if (body.sdpAnswer) {
+            await pc.setRemoteDescription({ type: "answer", sdp: body.sdpAnswer });
+          }
         }
         pendingOffersRef.current.delete(callId);
 

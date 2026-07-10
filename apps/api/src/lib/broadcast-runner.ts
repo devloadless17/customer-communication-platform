@@ -20,16 +20,6 @@ import { LIVE_CHANNELS, isPhoneChannel } from "@ccp/shared/providers/capabilitie
 type ChannelBinding = { provider: MessagingProvider; config: unknown };
 
 /**
- * Broadcasts send pre-approved WhatsApp templates, so they're bound to the
- * Meta channel by definition — templates are a Meta capability and the
- * recipient destination is a phone number. A future "broadcast over Telegram"
- * would be its own feature (different message shape, no template catalog), not
- * a per-recipient channel resolution here. Routed through the registry so the
- * provider/config indirection is uniform with the per-contact send paths.
- */
-const BROADCAST_CHANNEL: Channel = "whatsapp";
-
-/**
  * errorMessage stamped on recipients finalized by `BroadcastsService.cancel()`
  * (queued → failed for recipients that never sent). Also the marker
  * `retryFailed()` filters OUT so a deliberately-canceled audience is never
@@ -50,6 +40,7 @@ import {
   type VariableBindings,
 } from "@ccp/shared/template-bindings";
 import { extractFieldTokens, resolveFieldTokens } from "@ccp/shared/field-tokens";
+import { computeWindowStatus } from "@ccp/shared/utils/window";
 import type { Message } from "@ccp/shared/types";
 
 /**
@@ -723,6 +714,9 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         externalContactId: true,
         email: true,
         location: true,
+        // Drives the HUMAN_AGENT tag decision on freeform (social) sends — inside
+        // the 24h window Meta wants messaging_type:RESPONSE (no tag).
+        lastInboundAt: true,
         // Re-checked at SEND time (not just at audience-resolution time) so a
         // contact deleted AFTER the broadcast was created — the de-facto
         // opt-out path, most likely on a SCHEDULED broadcast whose create→fire
@@ -747,6 +741,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
             externalContactId: true,
             email: true,
             location: true,
+            lastInboundAt: true,
             deletedAt: true,
           },
         },
@@ -1085,6 +1080,7 @@ async function processOneRecipient(
       externalContactId: string | null;
       email: string | null;
       location: string | null;
+      lastInboundAt: Date | null;
       deletedAt: Date | null;
       customFields: Prisma.JsonValue;
     };
@@ -1124,6 +1120,21 @@ async function processOneRecipient(
   // is always body-based, so it always takes the freeform path.
   const sendTemplate = provider.sendTemplate;
   const isFreeform = broadcast.targetMode === "customer" || broadcast.kind === "freeform";
+  // Meta social: inside the 24h free-form window Meta wants messaging_type:
+  // RESPONSE (no tag); the HUMAN_AGENT tag is only for the 24h–7d support band.
+  // Freeform broadcasts target IN-WINDOW recipients, so without deriving this
+  // every social broadcast message would go out HUMAN_AGENT — tag misuse Meta
+  // penalizes. Mirrors send-text-internal. Ignored by WhatsApp (window null).
+  const freeFormMs = provider.capabilities.freeFormWindowMs;
+  const useHumanAgentTag =
+    freeFormMs !== null &&
+    ["closed", "never"].includes(
+      computeWindowStatus(
+        recipient.contact.lastInboundAt?.toISOString() ?? null,
+        Date.now(),
+        freeFormMs,
+      ).state,
+    );
   if (!isFreeform && !sendTemplate) {
     await markRecipientFailed(recipient.id, "provider does not support templates");
     bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
@@ -1348,7 +1359,7 @@ async function processOneRecipient(
       }
       try {
         send = isFreeform
-          ? await provider.sendText({ to: toPhone, body: broadcast.bodyText ?? "" }, config)
+          ? await provider.sendText({ to: toPhone, body: broadcast.bodyText ?? "", useHumanAgentTag }, config)
           : await sendTemplate!(
               {
                 to: toPhone,
@@ -1394,7 +1405,7 @@ async function processOneRecipient(
           await sleep(3_000 + Math.floor(Math.random() * 1_000));
           try {
             send = isFreeform
-              ? await provider.sendText({ to: toPhone, body: broadcast.bodyText ?? "" }, config)
+              ? await provider.sendText({ to: toPhone, body: broadcast.bodyText ?? "", useHumanAgentTag }, config)
               : await sendTemplate!(
                   {
                     to: toPhone,
@@ -2192,24 +2203,32 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
   type RenderCtx = {
     broadcast: NonNullable<Awaited<ReturnType<typeof db.broadcast.findUnique>>>;
     variables: ReturnType<typeof parseVariables>;
-    template: Awaited<ReturnType<typeof loadTemplate>>;
-    bindings: ReturnType<typeof parseVariableBindings>;
+    // null for freeform (social / customer-mode) broadcasts — they have no
+    // template; the inbox Message is recovered from the plain `bodyText`.
+    template: Awaited<ReturnType<typeof loadTemplate>> | null;
+    bindings: ReturnType<typeof parseVariableBindings> | null;
   };
   const ctxByBroadcast = new Map<string, RenderCtx | null>();
   const loadCtx = async (broadcastId: string): Promise<RenderCtx | null> => {
     if (ctxByBroadcast.has(broadcastId)) return ctxByBroadcast.get(broadcastId) ?? null;
     const broadcast = await db.broadcast.findUnique({ where: { id: broadcastId } });
-    if (!broadcast || broadcast.kind === "freeform") {
-      // Freeform broadcasts have no template variables to render/preview.
+    if (!broadcast) {
+      // Row genuinely vanished — nothing to recover against. (Distinct from a
+      // freeform broadcast, which recovers below with a null template.)
       ctxByBroadcast.set(broadcastId, null);
       return null;
     }
-    const template = await loadTemplate(broadcast.teamId, broadcast.templateId!);
+    // Freeform broadcasts have no template — recover the Message from the plain
+    // body + the recipient's own channel. Template broadcasts load + render.
+    const template =
+      broadcast.kind === "freeform"
+        ? null
+        : await loadTemplate(broadcast.teamId, broadcast.templateId!);
     const ctx: RenderCtx = {
       broadcast,
       variables: parseVariables(broadcast.variables),
       template,
-      bindings: parseVariableBindings(template.variableBindings),
+      bindings: template ? parseVariableBindings(template.variableBindings) : null,
     };
     ctxByBroadcast.set(broadcastId, ctx);
     return ctx;
@@ -2259,18 +2278,22 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
             email: true,
             location: true,
             customFields: true,
+            // Stamp the Message with the recipient's actual channel (matches the
+            // conversation it was sent on) — a freeform social recovery must not
+            // be misattributed to WhatsApp.
+            identityChannel: true,
           },
         });
         if (contact) {
-          const perRecipientVars = resolvePerRecipientVariables(
-            bindings,
-            variables,
-            contact,
-          );
-          const renderedBody = renderTemplateBody(
-            template.bodyText,
-            perRecipientVars.body,
-          );
+          // Template broadcasts render per-recipient variables; freeform ones
+          // send the plain body (mirrors the live send at the top of this file).
+          const renderedBody =
+            template && bindings
+              ? renderTemplateBody(
+                  template.bodyText,
+                  resolvePerRecipientVariables(bindings, variables, contact).body,
+                )
+              : broadcast.bodyText ?? "";
           await createOutboundMessageIdempotent({
             teamId: broadcast.teamId,
             conversationId,
@@ -2278,7 +2301,7 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
             senderUserId: broadcast.createdById,
             body: renderedBody,
             direction: "out",
-            channel: BROADCAST_CHANNEL,
+            channel: contact.identityChannel,
             status: "sent",
             rawPayload: {
               sentVia: "broadcast",

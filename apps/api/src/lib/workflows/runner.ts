@@ -348,7 +348,7 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
   // outcome (success / waiting / permanently failed), not raw log length.
   // Transient failures (BullMQ retry path) append a `failed` entry per
   // attempt — without this filter, three retries of a single flapping
-  // step burn three slots against the 100-step cap and a long workflow
+  // step burn three slots against the MAX_STEPS_PER_RUN cap and a long workflow
   // hits the ceiling prematurely.
   function progressCount(log: StepLogEntry[]): number {
     return new Set(log.map((e) => e.stepId)).size;

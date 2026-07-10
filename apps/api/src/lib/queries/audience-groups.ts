@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
-import type { Tag, TagColor } from "@ccp/shared/types";
+import type { Channel, Tag, TagColor } from "@ccp/shared/types";
 
 // Audience groups: saved named lists of contacts. Hybrid composition —
 // manual contact ids PLUS any contact carrying one of the group's tags.
@@ -180,20 +180,27 @@ async function resolveAudienceGroupMemberCount(
 export async function countAudienceContacts(
   teamId: string,
   { tagIds = [], contactIds = [] }: { tagIds?: string[]; contactIds?: string[] },
+  // A broadcast sends on ONE channel and drops contacts on other channels, so
+  // the composer's recipient count must be scoped to the target channel — else a
+  // freeform Messenger broadcast to a mixed-channel tag shows the whole audience
+  // but only reaches the Messenger subset. Omit to count every channel.
+  channel?: Channel,
 ): Promise<number> {
   const tags = tagIds.filter((s) => s.length > 0);
   const ids = contactIds.filter((s) => s.length > 0);
   if (tags.length === 0 && ids.length === 0) return 0;
+  const channelFilter = channel ? { identityChannel: channel } : {};
   const where: Prisma.ContactWhereInput =
     tags.length > 0 && ids.length > 0
       ? {
           teamId,
           deletedAt: null,
+          ...channelFilter,
           OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }],
         }
       : tags.length > 0
-        ? { teamId, deletedAt: null, tags: { some: { id: { in: tags } } } }
-        : { teamId, deletedAt: null, id: { in: ids } };
+        ? { teamId, deletedAt: null, ...channelFilter, tags: { some: { id: { in: tags } } } }
+        : { teamId, deletedAt: null, ...channelFilter, id: { in: ids } };
   return db.contact.count({ where });
 }
 

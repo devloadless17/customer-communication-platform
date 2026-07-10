@@ -133,6 +133,7 @@ async function selectAndDowngrade(): Promise<ParkedRow[]> {
       id: true,
       teamId: true,
       conversationId: true,
+      channel: true,
       mediaKind: true,
       mediaMimeType: true,
       mediaFilename: true,
@@ -149,9 +150,13 @@ async function selectAndDowngrade(): Promise<ParkedRow[]> {
   if (stuck.length === 0) return [];
 
   // Partition: rows past the recovery horizon get the final downgrade; the
-  // rest are eligible for a throttled re-download attempt.
-  const expired = stuck.filter((r) => r.createdAt < horizon);
-  const retriable = stuck.filter((r) => r.createdAt >= horizon);
+  // rest are eligible for a throttled re-download attempt. Only WhatsApp rows
+  // are retriable — `retryDownload` reconstructs the Meta media id from the
+  // WhatsApp webhook shape, so a stranded Messenger/Instagram row (expiring CDN
+  // URL, no re-fetchable media id) can never be recovered here; downgrade it
+  // straight to text-only instead of looping a no-op retry until the horizon.
+  const expired = stuck.filter((r) => r.createdAt < horizon || r.channel !== "whatsapp");
+  const retriable = stuck.filter((r) => r.createdAt >= horizon && r.channel === "whatsapp");
 
   // Downgrade the expired rows FIRST — both the batched UPDATE and the
   // media_ready publishes are DB/socket-bound (cheap), so they belong under

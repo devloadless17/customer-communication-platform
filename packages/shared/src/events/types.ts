@@ -17,6 +17,7 @@
  */
 
 import type {
+  Channel,
   Contact,
   ConversationStatus,
   ConversationWithRefs,
@@ -964,6 +965,11 @@ export interface CallIncomingEvent {
   conversationId: string;
   callId: string;
   externalCallId: string;
+  /** The call's channel. Drives the browser's answer signaling: WhatsApp
+   *  consumes the customer's webhook-delivered SDP offer, whereas a social
+   *  (Messenger) answer generates the offer locally — the frontend must know
+   *  which. Also drives the toast copy ("on WhatsApp" vs "on Messenger"). */
+  channel: Channel;
   /** Embedded so the toast can render contact name + avatar instantly. */
   contact: WorkflowContactSnapshot;
   ringingAt: string;

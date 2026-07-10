@@ -28,32 +28,26 @@ export interface BestChannelResult {
   inWindow: boolean;
 }
 
-export async function bestChannelForCustomer(
-  teamId: string,
-  customerId: string,
-  now: number = Date.now(),
-  /**
-   * When provided, restrict candidates to channels the caller knows the team
-   * can actually SEND on right now (a connected `ChannelConnection` with valid
-   * creds). Without it, `isChannelLive` only proves a provider is *registered*,
-   * so a person could be ranked onto a channel the team never connected (or
-   * whose token expired) and then be dropped at send instead of reaching them
-   * on a connected channel. Omit for callers that don't care (they get the
-   * previous behavior).
-   */
-  allowedChannels?: ReadonlySet<Channel>,
-): Promise<BestChannelResult | null> {
-  const contacts = await db.contact.findMany({
-    where: { teamId, customerId, deletedAt: null },
-    select: {
-      id: true,
-      identityChannel: true,
-      phoneNumber: true,
-      externalContactId: true,
-      lastInboundAt: true,
-    },
-  });
+/** The contact shape `pickBestChannel` ranks over — a subset of `Contact`. */
+export interface RankableContact {
+  id: string;
+  identityChannel: Channel;
+  phoneNumber: string | null;
+  externalContactId: string | null;
+  lastInboundAt: Date | null;
+}
 
+/**
+ * Pure ranking — pick a person's best reachable channel from ALREADY-LOADED
+ * contact rows. Extracted so a bulk caller (broadcast customer-mode) can fetch
+ * every person's siblings in ONE query and rank in memory, instead of one
+ * `findMany` per person. `bestChannelForCustomer` is the single-person wrapper.
+ */
+export function pickBestChannel(
+  contacts: RankableContact[],
+  now: number,
+  allowedChannels?: ReadonlySet<Channel>,
+): BestChannelResult | null {
   const candidates = contacts
     .map((c) => {
       // Only channels with a live provider are reachable at all.
@@ -86,4 +80,33 @@ export async function bestChannelForCustomer(
   );
   const best = candidates[0]!;
   return { contactId: best.contactId, channel: best.channel, to: best.to, inWindow: best.inWindow };
+}
+
+export async function bestChannelForCustomer(
+  teamId: string,
+  customerId: string,
+  now: number = Date.now(),
+  /**
+   * When provided, restrict candidates to channels the caller knows the team
+   * can actually SEND on right now (a connected `ChannelConnection` with valid
+   * creds). Without it, `isChannelLive` only proves a provider is *registered*,
+   * so a person could be ranked onto a channel the team never connected (or
+   * whose token expired) and then be dropped at send instead of reaching them
+   * on a connected channel. Omit for callers that don't care (they get the
+   * previous behavior).
+   */
+  allowedChannels?: ReadonlySet<Channel>,
+): Promise<BestChannelResult | null> {
+  const contacts = await db.contact.findMany({
+    where: { teamId, customerId, deletedAt: null },
+    select: {
+      id: true,
+      identityChannel: true,
+      phoneNumber: true,
+      externalContactId: true,
+      lastInboundAt: true,
+    },
+  });
+
+  return pickBestChannel(contacts, now, allowedChannels);
 }

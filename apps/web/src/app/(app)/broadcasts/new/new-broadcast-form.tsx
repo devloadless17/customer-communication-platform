@@ -728,6 +728,17 @@ export function NewBroadcastForm({
           onChange={setAudience}
           onCustomCountChange={handleCustomCount}
           onGroupSaved={handleGroupSaved}
+          // Scope the custom-audience recipient count to the channel the
+          // broadcast will actually send on: templates → WhatsApp, freeform →
+          // the chosen social channel. Customer-mode is person-level (reached on
+          // a best channel), so it stays unscoped.
+          channel={
+            messageKind === "template"
+              ? "whatsapp"
+              : messageKind === "freeform"
+                ? freeformChannel
+                : undefined
+          }
         />
       </StepCard>
 

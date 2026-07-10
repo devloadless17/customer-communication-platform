@@ -82,7 +82,8 @@ until a real step demands it.
 
 ## Loop guards
 
-Two ceilings on `MAX_STEPS_PER_RUN = 100`:
+Two ceilings on `MAX_STEPS_PER_RUN` (= `MAX_WORKFLOW_NODES` = 200, the
+publish-time node cap in `graph.ts`):
 
 1. **Total steps across all pickups for one run** — `stepLog.length`. A run
    that wakes from a wait into a loop can't chew the queue forever.

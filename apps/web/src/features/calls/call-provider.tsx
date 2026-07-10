@@ -51,8 +51,8 @@ export function CallProvider({
           float over whatever page is open and never shift the layout. */}
       <IncomingCallToast
         canReceiveCalls={canReceiveCalls}
-        onAnswer={(callId, contactName, conversationId) => {
-          void callApi.answerIncoming(callId, contactName, conversationId);
+        onAnswer={(callId, contactName, conversationId, channel) => {
+          void callApi.answerIncoming(callId, contactName, conversationId, channel);
         }}
         onReject={(callId) => {
           void callApi.reject(callId);

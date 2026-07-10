@@ -269,10 +269,16 @@ async function ingestMessageCorrection(
     where: {
       teamId_channel_externalId: { teamId, channel, externalId: evt.targetExternalId },
     },
-    select: { id: true, conversationId: true, body: true, deletedAt: true },
+    select: { id: true, conversationId: true, body: true, deletedAt: true, direction: true },
   });
   // Correction for a message we never stored — nothing to patch.
   if (!target) return;
+  // A customer edit/unsend applies ONLY to their own (inbound) message — never
+  // to one WE sent. Mirrors the `direction !== "out"` guard on ingestStatusUpdate
+  // (added the inverse-direction protection there); without this, a malformed/
+  // replayed correction whose target wamid/mid resolves to an agent's outbound
+  // row would silently tombstone or rewrite a sent message.
+  if (target.direction !== "in") return;
   // Already tombstoned (re-delivery) — skip write + fanout.
   if (evt.action === "delete" && target.deletedAt) return;
 
@@ -291,10 +297,18 @@ async function ingestMessageCorrection(
       editedAt: null,
       body: null,
     });
+    // If this was the thread's newest message, the inbox-list preview now shows
+    // deleted text — repoint it so the list converges on its next read/reconnect
+    // (the thread bubble already updated live via message.updated).
+    await refreshPreviewIfNewestCorrected(teamId, target.conversationId, target.id);
     return;
   }
-  // Edit: replace the body (no-op if identical) + mark edited.
-  const newBody = evt.newBody ?? "";
+  // Edit: replace the body (no-op if identical) + mark edited. ONLY when we have
+  // the actual new text — an edit event whose new content the parser couldn't
+  // extract (media-only caption edit / an unhandled shape) must NOT wipe the
+  // stored body to empty; skip rather than corrupt (the original content stays).
+  const newBody = evt.newBody;
+  if (newBody === undefined || newBody === "") return;
   if (target.body === newBody) return;
   await db.message.update({
     where: { id: target.id },
@@ -308,6 +322,40 @@ async function ingestMessageCorrection(
     deletedAt: null,
     editedAt: now.toISOString(),
     body: newBody,
+  });
+  // Keep the inbox-list preview in sync if this was the newest message.
+  await refreshPreviewIfNewestCorrected(teamId, target.conversationId, target.id);
+}
+
+/**
+ * After a customer edit/unsend, repoint the conversation's denormalized
+ * `lastMessagePreview` IFF the corrected message is still the thread's most
+ * recent one — otherwise the inbox list keeps showing the old/deleted text.
+ * The thread bubble already updated live via `message.updated`; the list
+ * converges on its next read (a background `message:new` eviction, a reconnect
+ * refetch, or opening the thread). No new socket event — mirrors how the
+ * denormalized preview is treated everywhere (drift-corrected, not live-pushed).
+ */
+async function refreshPreviewIfNewestCorrected(
+  teamId: string,
+  conversationId: string,
+  correctedMessageId: string,
+): Promise<void> {
+  const newest = await db.message.findFirst({
+    where: { teamId, conversationId },
+    orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+    select: { id: true, body: true, deletedAt: true, mediaKind: true },
+  });
+  if (!newest || newest.id !== correctedMessageId) return; // not the last message
+  const preview = newest.deletedAt
+    ? "🚫 Message deleted"
+    : (
+        newest.body?.trim() ||
+        mediaPreview((newest.mediaKind as MediaKind | null) ?? undefined)
+      ).slice(0, 200);
+  await db.conversation.updateMany({
+    where: { id: conversationId, teamId },
+    data: { lastMessagePreview: preview },
   });
 }
 
@@ -335,7 +383,15 @@ async function ingestReadWatermark(
     select: { id: true },
   });
   if (!conversation) return;
-  // Outbound messages the customer just saw that aren't already `read`.
+  // Outbound messages the customer just saw that aren't already `read`. A social
+  // "Seen" watermark can cover a whole burst; the old per-message loop did
+  // N × (findUnique + update + publish). Instead: ONE updateMany (sent/delivered
+  // → read is a forward-only transition, so the monotonic guard the per-message
+  // path enforces is unnecessary here), then fan out per-message read frames
+  // (the reducers key on messageId; the live hook RAF-coalesces the burst). This
+  // collapses O(N) DB round-trips to 1 findMany + 1 updateMany on the webhook
+  // hot path. Re-delivery is idempotent — the `status in (sent,delivered)`
+  // predicate matches nothing the second time.
   const msgs = await db.message.findMany({
     where: {
       teamId,
@@ -344,16 +400,23 @@ async function ingestReadWatermark(
       timestamp: { lte: evt.watermark },
       status: { in: ["sent", "delivered"] },
     },
-    select: { externalId: true },
+    select: { id: true },
   });
+  if (msgs.length === 0) return;
+  await db.message.updateMany({
+    where: { id: { in: msgs.map((m) => m.id) } },
+    data: { status: "read" },
+  });
+  const occurredAt = new Date().toISOString();
   for (const m of msgs) {
-    if (!m.externalId) continue;
-    await ingestStatusUpdate(teamId, channel, {
-      kind: "status",
-      externalId: m.externalId,
+    await publish({
+      type: "message.status_changed",
+      teamId,
+      conversationId: conversation.id,
+      contactId: contact.id,
+      messageId: m.id,
       status: "read",
-      timestamp: evt.watermark,
-      rawPayload: evt.rawPayload,
+      occurredAt,
     });
   }
 }
@@ -1844,14 +1907,24 @@ export async function enrichSocialContactNames(
       });
       if (!contact) return;
 
+      // Cheap pre-check BEFORE the Graph round-trip: a contact already enriched
+      // (a real name AND a captured R2 avatar) needs no profile fetch on a normal
+      // inbound — only a forced sync (the panel's Refresh) re-pulls. Without this
+      // guard, every inbound social message from a KNOWN contact fired a Graph
+      // profile call for nothing — a per-message round-trip against Meta's app
+      // rate limit that scales with thread volume.
+      const current = contact.name?.trim() ?? "";
+      const nameIsReal = current !== "" && current !== extId;
+      const hasCapturedAvatar = contact.avatarUrl?.startsWith("/api/contacts/");
+      if (nameIsReal && hasCapturedAvatar && !opts?.forceAvatar) return;
+
       const profile = await fetchProfile(extId, config);
 
       // Build the patch: fill a name still equal to the id default (never
       // overwrite a real one an agent/prior enrichment set); retain the IG
       // @username; store a profile picture when the contact has none yet.
-      const current = contact.name?.trim() ?? "";
       const data: Prisma.ContactUpdateInput = {};
-      if ((current === "" || current === extId) && profile.name && profile.name !== extId) {
+      if (!nameIsReal && profile.name && profile.name !== extId) {
         data.name = profile.name;
         const { firstName, lastName } = splitContactName(profile.name);
         data.firstName = firstName;
@@ -1867,7 +1940,6 @@ export async function enrichSocialContactNames(
       // forced sync (the panel's Refresh button) re-downloads and, via the
       // content-hash `?v`, updates only when the picture ACTUALLY changed —
       // that's what lets a customer's new IG photo flow through.
-      const hasCapturedAvatar = contact.avatarUrl?.startsWith("/api/contacts/");
       if (profile.avatarUrl && (opts?.forceAvatar || !hasCapturedAvatar)) {
         const captured = await captureRemoteContactAvatar(
           contact.id,
@@ -1877,19 +1949,28 @@ export async function enrichSocialContactNames(
         if (captured && captured !== contact.avatarUrl) data.avatarUrl = captured;
       }
       // Instagram richer signals (follower count / verified / follow-relationship).
-      // Change-gated like every other field so an unchanged profile doesn't
-      // republish a `contact.updated` frame on every inbound. Absent on
-      // Messenger, so this is a no-op there.
+      // MERGE field-by-field, keeping the stored value when the new one is absent:
+      // a transient/partial Graph response that omits a field must not clobber a
+      // previously-captured signal with undefined. `??` keeps an explicit `false`
+      // / `0` (a real update) while treating only null/undefined as "unknown".
+      // Change-gated so an unchanged profile doesn't republish `contact.updated`.
+      // Absent on Messenger, so this is a no-op there.
       if (profile.socialProfile) {
         const cur = (contact.socialProfile ?? {}) as SocialProfile;
         const next = profile.socialProfile;
+        const merged: SocialProfile = {
+          followerCount: next.followerCount ?? cur.followerCount ?? null,
+          isVerified: next.isVerified ?? cur.isVerified ?? null,
+          followsBusiness: next.followsBusiness ?? cur.followsBusiness ?? null,
+          businessFollows: next.businessFollows ?? cur.businessFollows ?? null,
+        };
         if (
-          cur.followerCount !== next.followerCount ||
-          cur.isVerified !== next.isVerified ||
-          cur.followsBusiness !== next.followsBusiness ||
-          cur.businessFollows !== next.businessFollows
+          cur.followerCount !== merged.followerCount ||
+          cur.isVerified !== merged.isVerified ||
+          cur.followsBusiness !== merged.followsBusiness ||
+          cur.businessFollows !== merged.businessFollows
         ) {
-          data.socialProfile = next as Prisma.InputJsonValue;
+          data.socialProfile = merged as Prisma.InputJsonValue;
         }
       }
       if (Object.keys(data).length === 0) return; // nothing new to persist

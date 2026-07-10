@@ -291,6 +291,12 @@ export class OutboundWebhooksService {
       v: WEBHOOK_WIRE_VERSION,
       team_id: teamId,
       test: true,
+      // Top-level `timestamp` — production fanout always stamps it (epoch ms)
+      // BEFORE the spread, so a Test ping must too, or it wouldn't be byte-shape
+      // identical for parser validation on every event type other than
+      // message.status_changed (whose per-case timestamp in the spread wins).
+      // No envelope occurred_at on the Test path, so use "now".
+      timestamp: Date.now(),
       ...toWirePayload(eventType, samplePayloadFor(eventType), {
         channelBase,
         teamAiAutopilotEnabled: team?.aiAutopilotEnabled ?? false,

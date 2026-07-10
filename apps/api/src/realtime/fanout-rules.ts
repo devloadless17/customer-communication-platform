@@ -634,6 +634,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
       conversationId: e.conversationId,
       callId: e.callId,
       externalCallId: e.externalCallId,
+      channel: e.channel,
       contactId: e.contact.id,
       contactName: e.contact.name,
       ringingAt: e.ringingAt,

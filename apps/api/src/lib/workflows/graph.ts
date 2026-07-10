@@ -202,8 +202,8 @@ export function validateGraph(graph: WorkflowGraph): string[] {
 
   // Cycle detection. A workflow graph MUST be a DAG. Without this guard,
   // an author wiring A → B → A by accident produces runs that hammer the
-  // 100-step ceiling on every fire — 100 step iterations + 100 outbox
-  // writes + 100 WorkflowRun updates PER trigger, throttled only by the
+  // MAX_WORKFLOW_NODES (200) step ceiling on every fire — 200 step iterations
+  // + 200 outbox writes + 200 WorkflowRun updates PER trigger, throttled only by the
   // worker concurrency. We exclude `jump_to_step` (its target is
   // condition-guarded; the runner caps cycles via the step ceiling).
   // Plain edges that form a cycle are always wrong.

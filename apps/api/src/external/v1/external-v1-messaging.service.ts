@@ -610,11 +610,13 @@ export class ExternalV1MessagingService {
     chainDepth?: number,
     /**
      * Reopen the conversation (closed → pending) ONLY after a fresh send lands.
-     * Set by the top-level POST /v1/messages flow so the reopen happens inside
-     * the claimed section (past the replay short-circuit) and after the Meta
-     * send succeeds — never before the claim, where a replayed retry or a
-     * validation failure would churn an agent-closed thread. The direct
-     * conversation-scoped route leaves this false (unchanged behavior).
+     * Set by BOTH send routes (top-level POST /v1/messages and the
+     * conversation-scoped POST /v1/conversations/:id/messages) for UI↔/v1 parity
+     * (§12) — the inbox reply reopens, so /v1 must too. The reopen happens inside
+     * the claimed section (past the replay short-circuit) and after the Meta send
+     * succeeds — never before the claim, where a replayed retry or a validation
+     * failure would churn an agent-closed thread. Defaults false for any internal
+     * caller that doesn't opt in.
      */
     reopenIfClosed = false,
   ) {
@@ -1254,8 +1256,22 @@ export class ExternalV1MessagingService {
         };
       } catch (err) {
         if (err instanceof SendTemplateValidationError) {
-          // Pre-delivery validation failure — nothing was sent. Release the
-          // claim so a corrected retry can re-claim fresh.
+          // The template send has TWO failure shapes that share the
+          // `conversation_not_found` code but land on opposite sides of the Meta
+          // call. The POST-send onMissing (message "conversation_disappeared_mid_send",
+          // thrown by commitOutboundSend AFTER Meta accepted + billed the
+          // template) is ambiguous — releasing the claim would let a same-key
+          // retry re-send a SECOND billed template. Leave the claim pending and
+          // surface a 502 so the retry gets 409 idempotency_ambiguous, mirroring
+          // the text path. Every OTHER SendTemplateValidationError is a
+          // pre-delivery validation failure — nothing was sent, so release the
+          // claim and 400 so a corrected retry can re-claim fresh.
+          if (err.message === "conversation_disappeared_mid_send") {
+            throw new BadGatewayException({
+              error: "send_ambiguous",
+              detail: "conversation_disappeared_mid_send",
+            });
+          }
           if (idempotencyKey) {
             await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
           }

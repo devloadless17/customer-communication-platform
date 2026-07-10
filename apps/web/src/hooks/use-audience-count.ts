@@ -17,7 +17,11 @@ import { apiFetch } from "@/lib/api/client-fetch";
 export function useAudienceCount(
   tagIds: string[],
   contactIds: string[],
-  { initial = 0, debounceMs = 300 }: { initial?: number; debounceMs?: number } = {},
+  {
+    initial = 0,
+    debounceMs = 300,
+    channel,
+  }: { initial?: number; debounceMs?: number; channel?: string } = {},
 ): { count: number; loading: boolean } {
   const [count, setCount] = useState(initial);
   const [loading, setLoading] = useState(false);
@@ -41,7 +45,7 @@ export function useAudienceCount(
         const res = await apiFetch("/api/contacts/count", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ tagIds, contactIds }),
+          body: JSON.stringify({ tagIds, contactIds, ...(channel ? { channel } : {}) }),
           signal: controller.signal,
         });
         // A non-2xx (429 rate-limit, 401 session blip, 500 during an api
@@ -67,7 +71,7 @@ export function useAudienceCount(
       window.clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tagKey, contactKey]);
+  }, [tagKey, contactKey, channel]);
 
   return { count, loading };
 }

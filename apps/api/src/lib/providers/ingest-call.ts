@@ -401,6 +401,7 @@ export async function ingestCallEvent(
           conversationId: conversation.id,
           callId: callRow.id,
           externalCallId: evt.externalCallId,
+          channel,
           contact: toWorkflowContact(contact),
           ringingAt: evt.timestamp.toISOString(),
         });
@@ -436,13 +437,22 @@ export async function ingestCallEvent(
       // provider's authoritative duration). Only fires on a real non-terminal→
       // terminal transition (alreadyTerminal already excluded above).
       if (!alreadyTerminal && isTerminalPhase) {
+        // Direction from the authoritative Call ROW, not the parser: the social
+        // `terminate` webhook carries no direction signal, so mapSocialCall
+        // hardcodes "in". Using it would record an OUTBOUND Messenger call as
+        // inbound in the audit timeline and skip the unanswered-counter reset.
+        // `existing` (pre-update snapshot) holds the real direction; on a
+        // terminal-on-first-insert we fall back to the same value the INSERT used.
+        const rowDirection: CallDirection =
+          existing?.direction ??
+          (evt.direction === "in" ? CallDirection.in : CallDirection.out);
         if (effectiveStatus === CallStatus.completed) {
           await publishInTx(tx, {
             type: "call.ended",
             teamId,
             conversationId: conversation.id,
             callId: callRow.id,
-            direction: evt.direction,
+            direction: rowDirection,
             endedAt: evt.timestamp.toISOString(),
             // The authoritative talk-time computed above (provider duration, or
             // endedAt − real pickup). Drives the "Call · 1:23" timeline pill.
@@ -451,7 +461,7 @@ export async function ingestCallEvent(
           });
           // A connected call resets the consecutive-unanswered counter (the
           // mirror of Meta's auto-revocation after 4 unanswered outbound calls).
-          if (evt.direction === "out") {
+          if (rowDirection === CallDirection.out) {
             await tx.contact.update({
               where: { id: contact.id },
               data: { consecutiveUnansweredOutCalls: 0 },
@@ -468,7 +478,7 @@ export async function ingestCallEvent(
           // Unanswered outbound — increment Meta's auto-revocation mirror. This
           // now actually fires: Meta reports unanswered business-initiated calls
           // as terminate/COMPLETED-without-duration, which we map to `missed`.
-          if (evt.direction === "out") {
+          if (rowDirection === CallDirection.out) {
             await tx.contact.update({
               where: { id: contact.id },
               data: { consecutiveUnansweredOutCalls: { increment: 1 } },

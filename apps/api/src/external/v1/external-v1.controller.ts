@@ -766,6 +766,11 @@ export class ExternalV1Controller {
       body,
       this.idemKeyRequired(idempotencyKey),
       parseChainDepth(xCcpDepth),
+      // Reopen a closed thread after the send lands — UI↔/v1 parity (§12): the
+      // inbox reply reopens, and so does the top-level POST /v1/messages route.
+      // Without it a conversation-scoped reply to a closed thread stayed closed
+      // and never surfaced under the open/pending inbox filters.
+      true,
     );
     // No-interrupt skip (onlyIfAiEnabled + a human took over): 200 with a
     // skipped marker and no message, so the n8n flow treats it as a clean
