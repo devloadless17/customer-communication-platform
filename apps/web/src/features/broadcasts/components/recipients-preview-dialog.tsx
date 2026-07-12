@@ -33,8 +33,13 @@ export function RecipientsPreviewDialog({
 }: {
   open: boolean;
   onClose: () => void;
-  /** The audience to resolve. `null` while there's nothing to preview yet. */
-  payload: { tagIds: string[]; contactIds: string[] } | null;
+  /** The audience to resolve. `null` while there's nothing to preview yet.
+   *  `channel` scopes it to the channel the broadcast will actually send on. */
+  payload: {
+    tagIds: string[];
+    contactIds: string[];
+    channel?: "whatsapp" | "messenger" | "instagram";
+  } | null;
   title?: string;
   subtitle?: string;
 }) {
@@ -45,8 +50,10 @@ export function RecipientsPreviewDialog({
   // Stable key so a parent re-render that hands us a fresh `payload` object of
   // the SAME audience doesn't blank the list + re-POST (same tagKey/contactKey
   // pattern as use-audience-count.ts). `payload` is still read inside the effect.
+  // `channel` is part of the key: switching the broadcast's channel resolves a
+  // different recipient set, so it has to re-POST rather than show the stale one.
   const payloadKey = payload
-    ? `${payload.tagIds.join(",")}|${payload.contactIds.join(",")}`
+    ? `${payload.tagIds.join(",")}|${payload.contactIds.join(",")}|${payload.channel ?? ""}`
     : null;
 
   useEffect(() => {

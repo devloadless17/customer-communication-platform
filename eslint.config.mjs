@@ -153,4 +153,14 @@ export default tseslint.config(
       "@typescript-eslint/no-require-imports": "off",
     },
   },
+
+  // ---- E2E harness scripts (.mjs): plain Node runtime, not app source ------
+  // The Meta e2e mock Graph server + helpers run under `node`, so they use
+  // process / Buffer / URL / console — declare the Node globals so core
+  // `no-undef` doesn't flag them (these aren't TS files, so the TS block's
+  // no-undef:off doesn't apply to them).
+  {
+    files: ["tests/**/*.mjs"],
+    languageOptions: { globals: { ...globals.node } },
+  },
 );

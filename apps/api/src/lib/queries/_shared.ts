@@ -453,3 +453,62 @@ export function mapActivityEvent(
     ...(actorWorkflowName !== undefined ? { actorWorkflowName } : {}),
   };
 }
+
+/**
+ * One channel a person is reachable on, with the contact behind it.
+ * `conversationId` is that contact's thread — always `null` unless the caller
+ * passed `withConversation`, since resolving it costs a correlated subquery per
+ * sibling and the contacts list only needs the channel set.
+ */
+export type SiblingChannel = {
+  contactId: string;
+  channel: Channel;
+  conversationId: string | null;
+};
+
+/**
+ * Roll up every non-deleted contact under each `customerId` into its list of
+ * channels (the "linked channels" of a unified person). Single source for the
+ * cross-channel sibling fetch used by both the contacts list and global search
+ * — keeps the query shape (and the tenant `teamId` scope) identical in both.
+ * Returns an empty map for an empty `customerIds` (no query issued).
+ *
+ * Pass `withConversation` when the caller lets the user jump straight into a
+ * sibling's thread (global search does; the contacts list doesn't).
+ */
+export async function siblingChannelsByCustomer(
+  teamId: string,
+  customerIds: string[],
+  opts?: { withConversation?: boolean },
+): Promise<Map<string, SiblingChannel[]>> {
+  const byCustomer = new Map<string, SiblingChannel[]>();
+  if (customerIds.length === 0) return byCustomer;
+  const where = { teamId, deletedAt: null, customerId: { in: customerIds } };
+  const siblings = opts?.withConversation
+    ? await db.contact.findMany({
+        where,
+        select: {
+          id: true,
+          customerId: true,
+          identityChannel: true,
+          conversations: { select: { id: true }, take: 1 },
+        },
+      })
+    : (
+        await db.contact.findMany({
+          where,
+          select: { id: true, customerId: true, identityChannel: true },
+        })
+      ).map((s) => ({ ...s, conversations: [] as Array<{ id: string }> }));
+  for (const s of siblings) {
+    if (!s.customerId) continue;
+    const list = byCustomer.get(s.customerId) ?? [];
+    list.push({
+      contactId: s.id,
+      channel: s.identityChannel as Channel,
+      conversationId: s.conversations[0]?.id ?? null,
+    });
+    byCustomer.set(s.customerId, list);
+  }
+  return byCustomer;
+}

@@ -1323,11 +1323,39 @@ export function useTeamEvents(
       if (conversationId) recoverConversation(conversationId);
     };
 
+    // Customer unsent / edited the thread's NEWEST message → the denormalized
+    // list preview changed with no new message. Patch just the preview text in
+    // place (no re-sort, no unread change). Guarded so an older correction can't
+    // clobber a preview a newer message already advanced.
+    const onConversationPreview: Parameters<
+      typeof socket.on<"conversation:preview">
+    >[1] = ({ conversationId, preview, lastMessageAt }) => {
+      setConversations((prev) => {
+        const idx = prev.findIndex((c) => c.conversation.id === conversationId);
+        if (idx === -1) return prev;
+        const existing = prev[idx]!;
+        if (
+          lastMessageAt !== null &&
+          existing.conversation.lastMessageAt > lastMessageAt
+        ) {
+          return prev; // a newer message already moved the preview forward
+        }
+        if (existing.conversation.lastMessagePreview === preview) return prev;
+        const next = prev.slice();
+        next[idx] = {
+          ...existing,
+          conversation: { ...existing.conversation, lastMessagePreview: preview },
+        };
+        return next;
+      });
+    };
+
     socket.on("message:new", onMessageNew);
     socket.on("conversation:assigned", onAssigned);
     socket.on("conversation:status", onStatus);
     socket.on("conversation:read", onRead);
     socket.on("conversation:deleted", onConversationDeleted);
+    socket.on("conversation:preview", onConversationPreview);
     socket.on("contact:updated", onContactUpdated);
     socket.on("contacts:bulk_updated", onContactsBulkUpdated);
     socket.on("call:incoming", onCallIncoming);
@@ -1366,6 +1394,7 @@ export function useTeamEvents(
       socket.off("conversation:status", onStatus);
       socket.off("conversation:read", onRead);
       socket.off("conversation:deleted", onConversationDeleted);
+      socket.off("conversation:preview", onConversationPreview);
       socket.off("contact:updated", onContactUpdated);
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
       socket.off("call:incoming", onCallIncoming);

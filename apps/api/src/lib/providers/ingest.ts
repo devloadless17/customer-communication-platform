@@ -8,8 +8,12 @@ import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { publish } from "@/lib/events/bus";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
-import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
+import {
+  createOutboundMessageIdempotent,
+  createOutboundMessageIdempotentDetailed,
+} from "@/lib/messages/idempotent-create";
 import { ingestCallEvent } from "@/lib/providers/ingest-call";
+import { applyContactShareFromReply } from "@/lib/identity/contact-share";
 import { resolveCustomerId } from "@/lib/identity/identity-service";
 import { ensureDefaultStage } from "@/lib/queries";
 import {
@@ -288,6 +292,10 @@ async function ingestMessageCorrection(
       where: { id: target.id },
       data: { deletedAt: now },
     });
+    // If this was the thread's newest message, the inbox-list preview now shows
+    // deleted text — repoint it (DB) and carry the new preview on the event so
+    // fanout pushes a live `conversation:preview` frame to the list.
+    const listUpdate = await refreshPreviewSafely(teamId, target.conversationId, target.id);
     await publish({
       type: "message.updated",
       teamId,
@@ -296,11 +304,10 @@ async function ingestMessageCorrection(
       deletedAt: now.toISOString(),
       editedAt: null,
       body: null,
+      ...(listUpdate
+        ? { listPreview: listUpdate.preview, listPreviewAt: listUpdate.at }
+        : {}),
     });
-    // If this was the thread's newest message, the inbox-list preview now shows
-    // deleted text — repoint it so the list converges on its next read/reconnect
-    // (the thread bubble already updated live via message.updated).
-    await refreshPreviewIfNewestCorrected(teamId, target.conversationId, target.id);
     return;
   }
   // Edit: replace the body (no-op if identical) + mark edited. ONLY when we have
@@ -314,6 +321,9 @@ async function ingestMessageCorrection(
     where: { id: target.id },
     data: { body: newBody, editedAt: now },
   });
+  // Keep the inbox-list preview in sync if this was the newest message, and
+  // carry it on the event so fanout pushes a live `conversation:preview` frame.
+  const listUpdate = await refreshPreviewSafely(teamId, target.conversationId, target.id);
   await publish({
     type: "message.updated",
     teamId,
@@ -322,31 +332,56 @@ async function ingestMessageCorrection(
     deletedAt: null,
     editedAt: now.toISOString(),
     body: newBody,
+    ...(listUpdate
+      ? { listPreview: listUpdate.preview, listPreviewAt: listUpdate.at }
+      : {}),
   });
-  // Keep the inbox-list preview in sync if this was the newest message.
-  await refreshPreviewIfNewestCorrected(teamId, target.conversationId, target.id);
+}
+
+/**
+ * `refreshPreviewIfNewestCorrected`, but a failure NEVER blocks the caller's
+ * `message.updated` publish. The list preview is a denormalized convenience
+ * (a drift sweeper + the next read both re-derive it); the realtime frame that
+ * tombstones the bubble is not. Letting a transient DB error here throw would
+ * skip the publish entirely — and the correction is already committed, so
+ * Meta's redelivery hits the `deletedAt` / identical-body early return and the
+ * frame is lost for good. Degrade to "no live preview frame" instead.
+ */
+async function refreshPreviewSafely(
+  teamId: string,
+  conversationId: string,
+  correctedMessageId: string,
+): Promise<{ preview: string; at: string } | null> {
+  try {
+    return await refreshPreviewIfNewestCorrected(teamId, conversationId, correctedMessageId);
+  } catch (err) {
+    console.error(
+      `[ingest] list-preview refresh failed for team=${teamId} conversation=${conversationId}:`,
+      err,
+    );
+    return null;
+  }
 }
 
 /**
  * After a customer edit/unsend, repoint the conversation's denormalized
  * `lastMessagePreview` IFF the corrected message is still the thread's most
  * recent one — otherwise the inbox list keeps showing the old/deleted text.
- * The thread bubble already updated live via `message.updated`; the list
- * converges on its next read (a background `message:new` eviction, a reconnect
- * refetch, or opening the thread). No new socket event — mirrors how the
- * denormalized preview is treated everywhere (drift-corrected, not live-pushed).
+ * Returns the recomputed preview + the newest message's ISO time when it DID
+ * change (so the caller can push a live `conversation:preview` frame), or null
+ * when the corrected message wasn't the newest (list needs no update).
  */
 async function refreshPreviewIfNewestCorrected(
   teamId: string,
   conversationId: string,
   correctedMessageId: string,
-): Promise<void> {
+): Promise<{ preview: string; at: string } | null> {
   const newest = await db.message.findFirst({
     where: { teamId, conversationId },
     orderBy: [{ timestamp: "desc" }, { id: "desc" }],
-    select: { id: true, body: true, deletedAt: true, mediaKind: true },
+    select: { id: true, body: true, deletedAt: true, mediaKind: true, timestamp: true },
   });
-  if (!newest || newest.id !== correctedMessageId) return; // not the last message
+  if (!newest || newest.id !== correctedMessageId) return null; // not the last message
   const preview = newest.deletedAt
     ? "🚫 Message deleted"
     : (
@@ -357,6 +392,7 @@ async function refreshPreviewIfNewestCorrected(
     where: { id: conversationId, teamId },
     data: { lastMessagePreview: preview },
   });
+  return { preview, at: newest.timestamp.toISOString() };
 }
 
 /**
@@ -965,14 +1001,48 @@ async function ingestInboundMessage(
           `ingest: inbound ${channel} message ${evt.externalId} has no contact identity`,
         );
       }
-      const existingContact = await tx.contact.findFirst({
-        where: isPhone
-          ? evt.contactPhone
-            ? { teamId, phoneNumber: evt.contactPhone }
-            : { teamId, identityChannel: channel, bsuid: evt.bsuid }
-          : { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
-        select: { id: true, deletedAt: true },
-      });
+      // A phone-channel person can be keyed by phone OR by BSUID, and Meta
+      // switches between the two for the SAME person: `wa_id` is omitted for
+      // contacts not messaged in the last 30 days, so a cold customer arrives
+      // as a bare BSUID and the same customer, once warm, arrives as a phone.
+      // Resolving on only the key this webhook happens to carry forks one person
+      // into two contacts and two conversations, permanently (there is no unique
+      // constraint on `bsuid` and no sweeper reconciles it). So try BOTH keys —
+      // phone first, since it is the canonical identity — and backfill the one
+      // that was missing onto whichever row we land on.
+      const contactIdentitySelect = {
+        id: true,
+        deletedAt: true,
+        phoneNumber: true,
+        bsuid: true,
+        username: true,
+      } as const;
+      let existingContact: {
+        id: string;
+        deletedAt: Date | null;
+        phoneNumber: string | null;
+        bsuid: string | null;
+        username: string | null;
+      } | null = null;
+      if (isPhone) {
+        if (evt.contactPhone) {
+          existingContact = await tx.contact.findFirst({
+            where: { teamId, phoneNumber: evt.contactPhone },
+            select: contactIdentitySelect,
+          });
+        }
+        if (!existingContact && evt.bsuid) {
+          existingContact = await tx.contact.findFirst({
+            where: { teamId, identityChannel: channel, bsuid: evt.bsuid },
+            select: contactIdentitySelect,
+          });
+        }
+      } else {
+        existingContact = await tx.contact.findFirst({
+          where: { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
+          select: contactIdentitySelect,
+        });
+      }
       const isNewContact = !existingContact;
       // A soft-deleted row being revived (deletedAt → null just below) is a
       // fresh directory appearance to every subscriber, exactly like the
@@ -996,9 +1066,29 @@ async function ingestInboundMessage(
         // first-contact profile name) stays put, and a contact who
         // progressed past the default stage isn't pulled back to it just
         // because they sent another message.
+        // …with ONE exception: identity keys we now know and the row is missing.
+        // This is what heals the BSUID↔phone transition — a contact first seen
+        // as a cold BSUID gets its phone (and country) the moment Meta reveals
+        // it, and a phone-keyed contact learns its BSUID — so the next webhook,
+        // whichever key it carries, resolves to this same row. Only ever fills a
+        // NULL; never overwrites an identity we already hold.
+        const identityBackfill: {
+          phoneNumber?: string;
+          countryCode?: string | null;
+          bsuid?: string;
+          username?: string;
+        } = {};
+        if (isPhone) {
+          if (evt.contactPhone && !existingContact.phoneNumber) {
+            identityBackfill.phoneNumber = evt.contactPhone;
+            identityBackfill.countryCode = getCountryFromPhone(evt.contactPhone);
+          }
+          if (evt.bsuid && !existingContact.bsuid) identityBackfill.bsuid = evt.bsuid;
+          if (evt.username && !existingContact.username) identityBackfill.username = evt.username;
+        }
         contact = await tx.contact.update({
           where: { id: existingContact.id },
-          data: { deletedAt: null },
+          data: { deletedAt: null, ...identityBackfill },
           // Load tags as `{ id }` so the `message.received` contact snapshot
           // (toWorkflowContact below) emits the RETURNING contact's real
           // tagIds — without this the relation is absent and tagIds is [].
@@ -1026,7 +1116,10 @@ async function ingestInboundMessage(
             // same shape so webhook receivers don't see partial rows.
             firstName,
             lastName,
-            countryCode: isPhone ? getCountryFromPhone(evt.contactPhone!) : null,
+            // A BSUID-only inbound (cold contact, Meta omits wa_id) carries no
+            // phone to derive a country from — don't assert one into existence.
+            countryCode:
+              isPhone && evt.contactPhone ? getCountryFromPhone(evt.contactPhone) : null,
             stageId: defaultStageId,
             // Unified Customer (§6): resolve which person this contact belongs to
             // through the single identity authority. On a deterministic strong
@@ -1429,7 +1522,12 @@ async function ingestInboundMessage(
         },
       });
 
-      return { messageId: created.id, resumeRunIds };
+      return {
+        messageId: created.id,
+        resumeRunIds,
+        contactId: contact.id,
+        conversationId: conversation.id,
+      };
     });
     // Post-commit: kick each awaiting run. Failure here just delays the
     // resume until the timeout job fires (it'll see pendingAnswer set and
@@ -1442,6 +1540,25 @@ async function ingestInboundMessage(
         } catch (err) {
           console.error("[ingest][ask_question_resume]", { runId, err });
         }
+      }
+    }
+
+    // Post-commit: did the contact just tap a "share my phone / email" consent
+    // chip? If so, stamp the strong key and fold them into the right unified
+    // Customer. Deliberately AFTER the tx and non-fatal — an identity
+    // enrichment must never cost us the message, and the customer-link drift
+    // sweeper backstops the linking half.
+    if (evt.interactiveReply && txResult) {
+      try {
+        await applyContactShareFromReply(
+          teamId,
+          channel,
+          txResult.conversationId,
+          txResult.contactId,
+          evt.interactiveReply,
+        );
+      } catch (err) {
+        console.error("[ingest][contact_share]", { contactId: txResult.contactId, err });
       }
     }
   } catch (err) {
@@ -1598,7 +1715,10 @@ async function ingestOutboundEcho(
             name: identityLabel,
             firstName,
             lastName,
-            countryCode: isPhone ? getCountryFromPhone(evt.contactPhone!) : null,
+            // A BSUID-only inbound (cold contact, Meta omits wa_id) carries no
+            // phone to derive a country from — don't assert one into existence.
+            countryCode:
+              isPhone && evt.contactPhone ? getCountryFromPhone(evt.contactPhone) : null,
             stageId: defaultStageId,
             // Same unified-Customer resolution as the inbound path — an echo can
             // be the FIRST time we see a contact (owner messaged them natively
@@ -1662,7 +1782,7 @@ async function ingestOutboundEcho(
     evt.media && !(evt.media.storageKey && evt.media.storageUrl),
   );
 
-  const created = await createOutboundMessageIdempotent({
+  const { message: created, created: isFreshRow } = await createOutboundMessageIdempotentDetailed({
     teamId,
     conversationId: conversation.id,
     externalId: evt.externalId,
@@ -1692,6 +1812,16 @@ async function ingestOutboundEcho(
         }
       : {}),
   });
+
+  // A raced duplicate of the same echo: the cheap findUnique above ran before
+  // either copy committed, so both reached the insert and the loser got the
+  // winner's row back. Everything past this point has SIDE EFFECTS —
+  // `message.sent` fanout (one outbound-webhook delivery per publish, and a
+  // +1 on Conversation.outgoingMessagesCount), the unread clear, the
+  // `contact.created` publish — so a duplicate must stop here. The inbound path
+  // already behaves this way (its P2002 rolls back before any publish); the
+  // echo path publishes from a separate tx, so it needs this explicit gate.
+  if (!isFreshRow) return;
 
   const preview = (evt.body.trim() || mediaPreview(evt.media?.kind)).slice(0, 200);
   const mediaBlock = buildEchoMediaBlock(created.id, evt.media, evt.body);
@@ -1926,9 +2056,16 @@ export async function enrichSocialContactNames(
       const data: Prisma.ContactUpdateInput = {};
       if (!nameIsReal && profile.name && profile.name !== extId) {
         data.name = profile.name;
-        const { firstName, lastName } = splitContactName(profile.name);
-        data.firstName = firstName;
-        data.lastName = lastName;
+        // Prefer Meta's own first/last split (Messenger returns it) over our
+        // heuristic — "Maria del Carmen Garcia" has no reliable split point.
+        if (profile.firstName || profile.lastName) {
+          data.firstName = profile.firstName;
+          data.lastName = profile.lastName;
+        } else {
+          const { firstName, lastName } = splitContactName(profile.name);
+          data.firstName = firstName;
+          data.lastName = lastName;
+        }
       }
       if (profile.username && contact.username !== profile.username) {
         data.username = profile.username;

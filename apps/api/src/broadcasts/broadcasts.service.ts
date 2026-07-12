@@ -26,6 +26,10 @@ import { countTemplatePlaceholders } from "@/lib/providers/meta";
 import { teamConnectedChannels } from "@/lib/providers";
 import { pickBestChannel, type RankableContact } from "@/lib/identity/best-channel";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
+import {
+  requiredTemplateButtonParams,
+  templateNamedPlaceholders,
+} from "@ccp/shared/template-render";
 import type { Channel } from "@ccp/shared/types";
 import { resolveAudienceGroupMembers } from "@/lib/queries";
 import {
@@ -192,7 +196,17 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     if (contactIds.length === 0) return [];
     const contacts = await this.db.contact.findMany({
       where: { teamId, deletedAt: null, id: { in: contactIds } },
-      select: { id: true, customerId: true, identityChannel: true },
+      // Same columns as the sibling load below: a singleton is ranked through
+      // `pickBestChannel` too (over a one-contact pool), so it needs to satisfy
+      // `RankableContact`.
+      select: {
+        id: true,
+        customerId: true,
+        identityChannel: true,
+        phoneNumber: true,
+        externalContactId: true,
+        lastInboundAt: true,
+      },
     });
 
     // Which channels can this team actually SEND on right now? A channel with a
@@ -203,12 +217,17 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // One entry per person: keyed by customerId, or the contact id for singletons.
     const persons = new Map<
       string,
-      { customerId: string | null; contactId: string; channel: Channel }
+      { customerId: string | null; contactId: string; channel: Channel; contact: RankableContact }
     >();
     for (const c of contacts) {
       const key = c.customerId ?? `contact:${c.id}`;
       if (!persons.has(key)) {
-        persons.set(key, { customerId: c.customerId, contactId: c.id, channel: c.identityChannel });
+        persons.set(key, {
+          customerId: c.customerId,
+          contactId: c.id,
+          channel: c.identityChannel,
+          contact: c,
+        });
       }
     }
 
@@ -242,15 +261,20 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     const now = Date.now();
     const rows: Array<{ contactId: string; customerId: string | null }> = [];
     for (const p of persons.values()) {
-      if (!p.customerId) {
-        // Singleton contact — no unified person to resolve across. Include only
-        // if its own channel is connected (else it would fail at send anyway).
-        if (connected.has(p.channel)) rows.push({ contactId: p.contactId, customerId: null });
-        continue;
-      }
+      // Singletons rank over a one-contact pool; linked people over their
+      // siblings. Both go through the SAME gate — a singleton used to be pushed
+      // on `connected.has(channel)` alone, with no window check, so an
+      // out-of-window singleton got a freeform send that Meta rejects (only a
+      // template can reopen a closed window) and was marked failed. That
+      // contradicted the composer's own promise that people with no open window
+      // are skipped, and treated two identically-situated people differently
+      // purely because one happened to be linked.
+      const pool = p.customerId
+        ? (siblingsByCustomer.get(p.customerId) ?? [])
+        : [p.contact];
       // Rank only over the team's CONNECTED channels so we never drop a person
       // reachable on a connected channel by picking an unconnected one.
-      const best = pickBestChannel(siblingsByCustomer.get(p.customerId) ?? [], now, connected);
+      const best = pickBestChannel(pool, now, connected);
       // Only in-window people are reachable by a freeform send; drop the rest.
       if (best && best.inWindow) {
         rows.push({ contactId: best.contactId, customerId: p.customerId });
@@ -303,6 +327,28 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         throw new ConflictException({
           error: "template not approved",
           detail: `Template is ${template.status}. Only approved templates can be broadcast.`,
+        });
+      }
+
+      // The composer binds POSITIONAL body variables only. A NAMED-format body
+      // or a button carrying a send-time parameter can't be filled from a
+      // broadcast, and Meta rejects every recipient. Reject up front — the
+      // runner repeats this as a backstop, but by then the row exists and the
+      // agent sees a "failed" broadcast instead of an actionable message.
+      const namedBodyVars = templateNamedPlaceholders(template.bodyText);
+      if (namedBodyVars.length > 0) {
+        throw new BadRequestException({
+          error: "template uses named variables",
+          detail: `This template's body uses named variables (${namedBodyVars.join(", ")}). Broadcasts support numbered {{1}} placeholders only.`,
+        });
+      }
+      const requiredButtons = requiredTemplateButtonParams(template.components);
+      if (requiredButtons.length > 0) {
+        throw new BadRequestException({
+          error: "template needs button parameters",
+          detail: `This template has button(s) that need a send-time value (${requiredButtons
+            .map((b) => `#${b.index + 1} ${b.subType}`)
+            .join(", ")}). Broadcasts can't supply them.`,
         });
       }
 

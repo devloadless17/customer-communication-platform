@@ -7,7 +7,10 @@ import {
 import type { Contact, Conversation } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
 import { publishInTx } from "@/lib/events/outbox";
+import { resolveCustomerId } from "@/lib/identity/identity-service";
+import { toContactWire } from "@/lib/queries/_shared";
 import {
   runWithSerializableRetry,
   splitContactName,
@@ -88,8 +91,13 @@ export async function ingestCallEvent(
   // the compound `(teamId, identityChannel, externalContactId)`. Exactly one
   // identity is set on the event, so a PSID is never digit-stripped into a
   // phone nor collides with a WhatsApp contact sharing the same digits.
+  // On phone channels the caller may be identified by a BSUID instead of a
+  // phone (Meta omits `wa_id` for contacts not messaged in 30 days) — same
+  // either/or the message path handles, resolved against both keys below.
   const isPhone = isPhoneChannel(channel);
-  const identityLabel = isPhone ? evt.contactPhone : evt.externalContactId;
+  const identityLabel = isPhone
+    ? evt.contactPhone ?? evt.bsuid
+    : evt.externalContactId;
 
   let contact: Contact;
   let conversation: Conversation;
@@ -118,12 +126,41 @@ export async function ingestCallEvent(
     // create duplicate rows.
     const defaultStageId = await ensureDefaultStage(teamId);
     const resolved = await runWithSerializableRetry(async (tx) => {
-      const existingContact = await tx.contact.findFirst({
-        where: isPhone
-          ? { teamId, phoneNumber: evt.contactPhone }
-          : { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
-        select: { id: true },
-      });
+      // Try BOTH phone and BSUID (phone first — it's the canonical key), so a
+      // caller first seen cold as a BSUID and later warm as a phone resolves to
+      // one contact instead of forking. Mirrors providers/ingest.ts.
+      const contactIdentitySelect = {
+        id: true,
+        phoneNumber: true,
+        bsuid: true,
+        // Drives the `wasRevived` signal for the contact.created publish below.
+        deletedAt: true,
+      } as const;
+      let existingContact: {
+        id: string;
+        phoneNumber: string | null;
+        bsuid: string | null;
+        deletedAt: Date | null;
+      } | null = null;
+      if (isPhone) {
+        if (evt.contactPhone) {
+          existingContact = await tx.contact.findFirst({
+            where: { teamId, phoneNumber: evt.contactPhone },
+            select: contactIdentitySelect,
+          });
+        }
+        if (!existingContact && evt.bsuid) {
+          existingContact = await tx.contact.findFirst({
+            where: { teamId, identityChannel: channel, bsuid: evt.bsuid },
+            select: contactIdentitySelect,
+          });
+        }
+      } else {
+        existingContact = await tx.contact.findFirst({
+          where: { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
+          select: contactIdentitySelect,
+        });
+      }
 
       const { firstName, lastName } = splitContactName(
         evt.contactName ?? identityLabel,
@@ -132,23 +169,54 @@ export async function ingestCallEvent(
       if (existingContact) {
         // Revive a soft-deleted contact on a call the same way ingest does
         // for a message — they're reaching out, they belong back in the
-        // directory. Do NOT touch name or stage.
+        // directory. Do NOT touch name or stage. Backfill only missing identity
+        // keys, so the next webhook resolves here whichever key it carries.
+        const identityBackfill: {
+          phoneNumber?: string;
+          countryCode?: string | null;
+          bsuid?: string;
+        } = {};
+        if (isPhone) {
+          if (evt.contactPhone && !existingContact.phoneNumber) {
+            identityBackfill.phoneNumber = evt.contactPhone;
+            identityBackfill.countryCode = getCountryFromPhone(evt.contactPhone);
+          }
+          if (evt.bsuid && !existingContact.bsuid) identityBackfill.bsuid = evt.bsuid;
+        }
         contact = await tx.contact.update({
           where: { id: existingContact.id },
-          data: { deletedAt: null },
+          data: { deletedAt: null, ...identityBackfill },
         });
       } else {
         contact = await tx.contact.create({
           data: {
             teamId,
             identityChannel: channel,
-            phoneNumber: isPhone ? evt.contactPhone : null,
+            phoneNumber: isPhone ? evt.contactPhone ?? null : null,
             externalContactId: isPhone ? null : evt.externalContactId,
+            bsuid: isPhone ? evt.bsuid ?? null : null,
             name: evt.contactName ?? identityLabel,
             firstName,
             lastName,
-            countryCode: isPhone ? getCountryFromPhone(evt.contactPhone!) : null,
+            // A BSUID-only caller has no phone to derive a country from.
+            countryCode:
+              isPhone && evt.contactPhone ? getCountryFromPhone(evt.contactPhone) : null,
             stageId: defaultStageId,
+            // Unified Customer (§6), exactly as message-ingest does. Without it a
+            // contact acquired by CALLING alone kept `customerId: null`, so the
+            // person never appeared in the linked-channels switcher, never rolled
+            // up in "Group by person", and was invisible to a `targetMode:
+            // "customer"` broadcast until the drift sweeper happened to catch it.
+            // Inside `tx` so the Customer rolls back with the contact.
+            customerId: await resolveCustomerId(
+              teamId,
+              {
+                phoneNumber: isPhone ? evt.contactPhone ?? null : null,
+                email: null,
+                name: evt.contactName ?? identityLabel,
+              },
+              tx,
+            ),
           },
         });
       }
@@ -188,11 +256,39 @@ export async function ingestCallEvent(
         // agent already chose to close it; reopening on every call is noisy).
         reopen = true;
       }
-      return { contact, conversation, needsReopen: reopen };
+      return {
+        contact,
+        conversation,
+        needsReopen: reopen,
+        isNewContact: !existingContact,
+        wasRevived: !!existingContact?.deletedAt,
+      };
     });
     contact = resolved.contact;
     conversation = resolved.conversation;
     needsReopen = resolved.needsReopen;
+
+    // A caller we've never seen is a brand-new directory entry — announce it the
+    // same way message-ingest does, so workflows, the audit timeline, the
+    // contacts list and subscribed partners learn about a contact acquired by
+    // CALL rather than by message. Post-commit + best-effort: the contact row is
+    // already durable, and losing the announcement must never fail the call.
+    if (resolved.isNewContact || resolved.wasRevived) {
+      try {
+        await publish({
+          type: "contact.created",
+          teamId,
+          contact: toContactWire(resolved.contact),
+          source: "inbound",
+          createdByUserId: null,
+        });
+      } catch (err) {
+        console.error(
+          `[ingest-call] publish(contact.created) failed for team=${teamId} contact=${resolved.contact.id}:`,
+          err,
+        );
+      }
+    }
   }
 
   // Upsert the Call row in its own tx so the publishInTx outbox row commits
@@ -556,12 +652,23 @@ async function handlePermissionEvent(
   // missing identity so an undefined `phoneNumber`/`externalContactId` filter
   // can't match an arbitrary contact.
   const isPhone = isPhoneChannel(channel);
-  const identityLabel = isPhone ? evt.contactPhone : evt.externalContactId;
+  const identityLabel = isPhone
+    ? evt.contactPhone ?? evt.bsuid
+    : evt.externalContactId;
   if (!identityLabel) return;
+  // Phone channels may identify the caller by phone OR BSUID — match either, or
+  // a permission grant from a cold (BSUID-only) caller silently lands nowhere.
+  const identityWhere = isPhone
+    ? {
+        teamId,
+        OR: [
+          ...(evt.contactPhone ? [{ phoneNumber: evt.contactPhone }] : []),
+          ...(evt.bsuid ? [{ identityChannel: channel, bsuid: evt.bsuid }] : []),
+        ],
+      }
+    : { teamId, identityChannel: channel, externalContactId: evt.externalContactId };
   const contact = await db.contact.findFirst({
-    where: isPhone
-      ? { teamId, phoneNumber: evt.contactPhone }
-      : { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
+    where: identityWhere,
     select: { id: true },
   });
   if (!contact) return;

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -10,6 +11,7 @@ import {
 } from "@nestjs/common";
 
 import type { Channel } from "@ccp/shared/types";
+import { LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
 import { RequireCapability } from "../auth/capability.guard";
 import { RequireRole } from "../auth/role.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
@@ -151,11 +153,19 @@ export class CallsController {
     @CurrentSession() session: ApiSession,
     @Query("channel") channel?: string,
   ) {
-    // Channel-aware: WhatsApp (Cloud API Calling) or Messenger (route inbound
-    // calls to us + call icon). Default WhatsApp for back-compat with the
-    // no-arg call. Anything else is rejected by the service capability gate.
-    const ch: Channel = channel === "messenger" ? "messenger" : "whatsapp";
-    return this.calls.enableCallingForTeam(session, ch);
+    // Validate the requested channel instead of silently coercing everything
+    // that isn't "messenger" to WhatsApp (which would enable the WRONG channel
+    // for `?channel=instagram` or a typo). Default WhatsApp for the no-arg call;
+    // reject an unknown channel here, and let the service's `capabilities.calling`
+    // gate reject a live-but-non-calling channel (Instagram) with a clear error.
+    const raw = channel ?? "whatsapp";
+    if (!LIVE_CHANNELS.has(raw as Channel)) {
+      throw new BadRequestException({
+        error: "invalid_channel",
+        detail: `Unknown or unsupported channel: ${raw}`,
+      });
+    }
+    return this.calls.enableCallingForTeam(session, raw as Channel);
   }
 
   /**
@@ -166,8 +176,18 @@ export class CallsController {
    */
   @Get("api/calls/admin/settings")
   @RequireRole("admin")
-  async getSettings(@CurrentSession() session: ApiSession) {
-    return this.calls.getPhoneNumberSettings(session);
+  async getSettings(
+    @CurrentSession() session: ApiSession,
+    @Query("channel") channel?: string,
+  ) {
+    const raw = channel ?? "whatsapp";
+    if (!LIVE_CHANNELS.has(raw as Channel)) {
+      throw new BadRequestException({
+        error: "invalid_channel",
+        detail: `Unknown or unsupported channel: ${raw}`,
+      });
+    }
+    return this.calls.getPhoneNumberSettings(session, raw as Channel);
   }
 
   // --- Call-scoped -----------------------------------------------------------

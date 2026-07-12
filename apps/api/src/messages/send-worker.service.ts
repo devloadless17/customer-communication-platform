@@ -78,6 +78,14 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
    * workflow worker is re-armed by its sweeper; this one re-arms itself).
    */
   private start(): void {
+    // Re-entry guard. Two overlapping respawns (a Redis flap can fire the fatal
+    // handler more than once before the first rebuild finishes) would otherwise
+    // each construct a Worker + a dedicated blocking ioredis connection, and the
+    // orphaned pair is never closed — it keeps consuming jobs and holding a
+    // connection for the process's life. Every other worker in the codebase has
+    // this guard (startWorkflowWorker, startBroadcastScheduleWorker,
+    // startWebhookDeliverWorker); this one was the outlier.
+    if (this.worker) return;
     // Dedicated blocking connection (NOT the shared producer) — see
     // createWorkerConnection in lib/workflows/queue.ts.
     const connection = createWorkerConnection("send-worker");

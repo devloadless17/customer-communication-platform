@@ -9,7 +9,7 @@ import type {
 } from "@ccp/shared/dtos";
 import type { MediaKind, MessageDirection } from "@ccp/shared/types";
 
-import { clampTake } from "./_shared";
+import { clampTake, siblingChannelsByCustomer } from "./_shared";
 import {
   encodeContactCursor,
   encodeMessageCursor,
@@ -68,80 +68,134 @@ export async function searchContacts(
   if (query.length === 0) return { items: [], nextCursor: null };
 
   const cursor = parseContactCursor(opts.cursor ?? null);
+  const overFetch = take * 4 + 1;
   const matchOr = [
     { name: { contains: query, mode: "insensitive" as const } },
     { phoneNumber: { contains: query } },
     { email: { contains: query, mode: "insensitive" as const } },
   ];
 
-  const rows = await db.contact.findMany({
-    // The match OR and the keyset OR must BOTH hold, so nest both inside AND —
-    // a single top-level `OR` key can't hold two independent disjunctions.
-    where: cursor
-      ? {
-          teamId,
-          deletedAt: null,
-          AND: [
-            { OR: matchOr },
-            {
-              OR: [
-                { createdAt: { lt: cursor.sortAt } },
-                { createdAt: cursor.sortAt, id: { lt: cursor.id } },
-              ],
-            },
-          ],
-        }
-      : { teamId, deletedAt: null, OR: matchOr },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    // Over-fetch: we paginate CONTACTS but display PEOPLE, and a person can span
-    // several channel-contacts. Fetch enough contacts to still fill a full page
-    // of `take` PEOPLE after collapsing — the previous code deduped AFTER slicing
-    // `take` contacts, so a page returned fewer than `take` hits and a
-    // multi-channel person could straddle two pages. 4× covers the common 1–3
-    // channels/person; a person with more simply defers a sibling to the tail.
-    take: take * 4 + 1,
-    select: {
-      id: true,
-      name: true,
-      phoneNumber: true,
-      email: true,
-      identityChannel: true,
-      avatarUrl: true,
-      createdAt: true,
-      customerId: true,
-      conversations: { select: { id: true }, take: 1 },
-    },
-  });
+  const fetchWindow = (from: { sortAt: Date; id: string } | null) =>
+    db.contact.findMany({
+      // The match OR and the keyset OR must BOTH hold, so nest both inside AND —
+      // a single top-level `OR` key can't hold two independent disjunctions.
+      where: from
+        ? {
+            teamId,
+            deletedAt: null,
+            AND: [
+              { OR: matchOr },
+              {
+                OR: [
+                  { createdAt: { lt: from.sortAt } },
+                  { createdAt: from.sortAt, id: { lt: from.id } },
+                ],
+              },
+            ],
+          }
+        : { teamId, deletedAt: null, OR: matchOr },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      // Over-fetch: we paginate CONTACTS but display PEOPLE, and a person can span
+      // several channel-contacts. Fetch enough contacts to still fill a full page
+      // of `take` PEOPLE after collapsing to one representative per person.
+      take: overFetch,
+      select: {
+        id: true,
+        name: true,
+        phoneNumber: true,
+        email: true,
+        identityChannel: true,
+        avatarUrl: true,
+        createdAt: true,
+        customerId: true,
+        conversations: { select: { id: true }, take: 1 },
+      },
+    });
+  type Row = Awaited<ReturnType<typeof fetchWindow>>[number];
 
   // Unified-identity rollup: collapse matched contacts that belong to the same
   // person (`customerId`) into ONE hit, so a 3-channel person shows once with a
-  // channel-badge cluster instead of three duplicate rows. A contact with no
-  // customerId (not-yet-linked, ~seconds after create) is its own person keyed
-  // by its contactId. Order preserved by the first-matched contact per person.
-  const personKey = (c: { customerId: string | null; id: string }) =>
-    c.customerId ?? `contact:${c.id}`;
+  // channel-badge cluster instead of three duplicate rows.
+  //
+  // A person is represented EXACTLY ONCE across the whole result set — at their
+  // GLOBALLY newest matching contact. We can't dedup with a per-page seen-set:
+  // it can't remember a person shown on an earlier page, so an older sibling
+  // would re-represent them on a later page (cross-page dup); and advancing the
+  // cursor past the (take+1)th person's contact silently DROPS a single-contact
+  // person sitting exactly on a page boundary. Instead we ask the DB for each
+  // matched person's newest matching contact (page-independent) and treat only
+  // THAT contact as the representative — every other matching contact is skipped.
+  const newestMatchForWindow = async (rows: Row[]): Promise<Map<string, string>> => {
+    const byCustomer = new Map<string, string>();
+    const ids = [...new Set(rows.map((r) => r.customerId).filter((v): v is string => !!v))];
+    if (ids.length === 0) return byCustomer;
+    const newest = await db.contact.findMany({
+      where: { teamId, deletedAt: null, customerId: { in: ids }, OR: matchOr },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      distinct: ["customerId"],
+      select: { customerId: true, id: true },
+    });
+    for (const n of newest) if (n.customerId) byCustomer.set(n.customerId, n.id);
+    return byCustomer;
+  };
 
-  // Walk contacts in keyset order, keeping ONE representative per person, until
-  // we have `take + 1` people. The cursor advances by the LAST CONTACT consumed
-  // (not the last person), so the next page resumes scanning older contacts and
-  // pages stay full.
-  const seenPersons = new Set<string>();
-  const reps: typeof rows = [];
-  let lastConsumed: { createdAt: Date; id: string } | null = null;
-  for (const c of rows) {
-    lastConsumed = { createdAt: c.createdAt, id: c.id };
-    const key = personKey(c);
-    if (seenPersons.has(key)) continue;
-    seenPersons.add(key);
-    reps.push(c);
-    if (reps.length > take) break; // have take+1 → know there's a next page
+  // Scan windows in keyset order collecting one representative per person until
+  // the page is full. A window can be mostly (even entirely) non-representatives
+  // — every contact in it belonging to a person already shown on an earlier page
+  // — so a single window is NOT guaranteed to yield `take` people. Keep scanning
+  // until the page fills, we prove there's an overflow person, or the matches run
+  // out. Capped so a pathological audience can't turn one search into an
+  // unbounded table walk; hitting the cap just returns a short page with a live
+  // cursor (the caller pages on `nextCursor`, never on `items.length`).
+  const MAX_SCAN_WINDOWS = 5;
+  const reps: Row[] = [];
+  let hasMoreReps = false; // saw a (take+1)th person → there is definitely a next page
+  let exhausted = false; // walked past the last matching contact
+  let lastRow: Row | null = null;
+  let scanFrom = cursor;
+
+  for (let i = 0; i < MAX_SCAN_WINDOWS && reps.length < take && !hasMoreReps; i++) {
+    const rows = await fetchWindow(scanFrom);
+    if (rows.length === 0) {
+      exhausted = true;
+      break;
+    }
+    const newestMatchByCustomer = await newestMatchForWindow(rows);
+    // A contact represents its person iff it's that person's newest match.
+    // Unlinked contacts (no customerId) are their own person and always represent.
+    const isRepresentative = (c: Row) =>
+      c.customerId === null || newestMatchByCustomer.get(c.customerId) === c.id;
+
+    for (const c of rows) {
+      if (!isRepresentative(c)) continue;
+      if (reps.length === take) {
+        hasMoreReps = true;
+        break;
+      }
+      reps.push(c);
+    }
+    lastRow = rows[rows.length - 1]!;
+    if (rows.length < overFetch) {
+      exhausted = true;
+      break;
+    }
+    scanFrom = { sortAt: lastRow.createdAt, id: lastRow.id };
   }
-  const hasMore = reps.length > take;
-  const pageReps = hasMore ? reps.slice(0, take) : reps;
-  const nextCursor =
-    hasMore && lastConsumed
-      ? encodeContactCursor({ sortAt: lastConsumed.createdAt, id: lastConsumed.id })
-      : null;
+
+  const pageReps = reps;
+  let nextCursor: string | null = null;
+  if (hasMoreReps) {
+    // Resume strictly older than the LAST INCLUDED person (never the overflow
+    // one), so the overflow person leads the next page — no boundary drop. Reps
+    // are globally unique per person, so re-scanning the skipped non-reps in
+    // between is a no-op, not a duplicate.
+    const last = reps[reps.length - 1]!;
+    nextCursor = encodeContactCursor({ sortAt: last.createdAt, id: last.id });
+  } else if (!exhausted && lastRow) {
+    // The page filled (or the scan cap hit) with matches still unscanned: every
+    // rep up to `lastRow` was collected, so resume past it.
+    nextCursor = encodeContactCursor({ sortAt: lastRow.createdAt, id: lastRow.id });
+  }
 
   // Fetch the SIBLING channels for every matched person so the cluster shows all
   // their channels, not only the ones that happened to match the query. Only for
@@ -149,28 +203,9 @@ export async function searchContacts(
   const customerIds = [
     ...new Set(pageReps.map((c) => c.customerId).filter((v): v is string => !!v)),
   ];
-  const siblingsByCustomer = new Map<string, ContactSearchHit["channels"]>();
-  if (customerIds.length > 0) {
-    const siblings = await db.contact.findMany({
-      where: { teamId, deletedAt: null, customerId: { in: customerIds } },
-      select: {
-        id: true,
-        customerId: true,
-        identityChannel: true,
-        conversations: { select: { id: true }, take: 1 },
-      },
-    });
-    for (const s of siblings) {
-      if (!s.customerId) continue;
-      const list = siblingsByCustomer.get(s.customerId) ?? [];
-      list.push({
-        contactId: s.id,
-        channel: s.identityChannel,
-        conversationId: s.conversations[0]?.id ?? null,
-      });
-      siblingsByCustomer.set(s.customerId, list);
-    }
-  }
+  const siblingsByCustomer = await siblingChannelsByCustomer(teamId, customerIds, {
+    withConversation: true,
+  });
 
   const lowered = query.toLowerCase();
   const items: ContactSearchHit[] = [];

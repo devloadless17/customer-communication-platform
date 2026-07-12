@@ -12,8 +12,13 @@
  *     Human Agent tag (valid across the 7-day support window; every send in an
  *     agent-operated shared inbox is a human agent reply).
  *
- * Scope (first increment): inbound TEXT + delivery status, outbound TEXT.
- * Attachments become a `[kind]` placeholder body; media in/out is a follow-up.
+ * Scope (current): inbound and outbound TEXT + MEDIA (image / video / audio /
+ * document / sticker; reels ingest as video), delivery + read receipts,
+ * reactions, quoted replies, unsend, Messenger message edits, native-inbox
+ * echoes, postbacks, ad/deep-link referral attribution, interactive quick
+ * replies with phone/email consent chips, and Messenger Calling. Attachments
+ * with no downloadable binary (location, shared post, appointment booking,
+ * fallback) still render as a labelled placeholder body.
  */
 
 import type {
@@ -25,6 +30,7 @@ import type {
   NormalizedMediaRef,
   NormalizedReaction,
   NormalizedStatusUpdate,
+  ContactShareField,
   SendInteractiveArgs,
   SendMediaArgs,
   SendTextArgs,
@@ -40,6 +46,7 @@ import {
   graphPostForm,
   graphPostJson,
 } from "@/lib/providers/meta-graph";
+import { kindFromMime } from "@/lib/media-storage";
 
 /** Shared identity of the Meta account addressing a send (Page id / IG id). */
 export interface SocialSendTarget {
@@ -69,12 +76,6 @@ function attachmentTypeFromKind(kind: MediaKind): "image" | "video" | "audio" | 
     default:
       return "image";
   }
-}
-function attachmentTypeFromMime(mime: string): "image" | "video" | "audio" | "file" {
-  if (mime.startsWith("image/")) return "image";
-  if (mime.startsWith("video/")) return "video";
-  if (mime.startsWith("audio/")) return "audio";
-  return "file";
 }
 
 interface SocialEnvelope {
@@ -129,6 +130,10 @@ interface MessagingEvent {
     // Set when the customer quoted a message — the mid they replied to.
     reply_to?: { mid?: string };
   };
+  // The customer EDITED a message (`message_edits` field). MESSENGER ONLY —
+  // Instagram ships no edit webhook, so an IG message's text is immutable once
+  // received. Carries the new text for an existing `mid`.
+  message_edit?: { mid?: string; text?: string; num_edit?: number };
   delivery?: { mids?: string[]; watermark?: number };
   // Messenger sends a `watermark` (all outbound up to it are read); Instagram
   // sends a per-message `mid` (the specific message the customer read).
@@ -196,10 +201,34 @@ function attachmentKind(type: string | undefined): MediaKind | null {
       return "audio";
     case "file":
       return "document";
-    // "location" | "template" | "fallback" carry no downloadable binary.
+    case "sticker":
+      return "sticker";
+    // A reel share is a video Meta hands us as a plain CDN url.
+    case "reel":
+    case "ig_reel":
+      return "video";
+    // "location" | "template" | "fallback" | "post" | "ig_post" |
+    // "appointment_booking" carry no downloadable binary — they render as a
+    // labelled placeholder via socialAttachmentLabel().
     default:
       return null;
   }
+}
+
+/**
+ * Pick the attachment we render as this message's media.
+ *
+ * Until 2026-08-30 Meta sends a sticker message as BOTH a `sticker` attachment
+ * (carrying `payload.sticker_id`) and an `image` attachment; after that date only
+ * `sticker` is sent. Preferring `sticker` makes the cutover a no-op — before and
+ * after, a sticker ingests as kind `sticker` — instead of silently degrading to
+ * an untyped image today and to a bare text label after the transition ends.
+ */
+function pickMediaAttachment<T extends { type?: string; payload?: { url?: string } }>(
+  atts: T[],
+): T | undefined {
+  const downloadable = atts.filter((a) => attachmentKind(a.type) && a.payload?.url);
+  return downloadable.find((a) => a.type === "sticker") ?? downloadable[0];
 }
 
 /** Provisional mime type before the download reads the real Content-Type. */
@@ -211,6 +240,11 @@ function provisionalMime(kind: MediaKind): string {
       return "video/mp4";
     case "audio":
       return "audio/mpeg";
+    // Stickers are webp everywhere on Meta, and the mime-guard only accepts
+    // image/webp for kind `sticker` — an octet-stream provisional would be
+    // rejected at download time.
+    case "sticker":
+      return "image/webp";
     default:
       return "application/octet-stream";
   }
@@ -225,7 +259,7 @@ function provisionalMime(kind: MediaKind): string {
 function attachmentMedia(
   atts: { type?: string; payload?: { url?: string } }[] | undefined,
 ): NormalizedMediaRef | null {
-  const att = atts?.find((a) => attachmentKind(a.type) && a.payload?.url);
+  const att = atts ? pickMediaAttachment(atts) : undefined;
   if (!att) return null;
   const kind = attachmentKind(att.type)!;
   return {
@@ -251,8 +285,13 @@ function socialAttachmentLabel(type: string): string {
       return "📖 Replied to your story";
     case "share":
       return "🔗 Shared a post";
+    case "post":
+    case "ig_post":
+      return "🔗 Shared a post";
     case "location":
       return "📍 Location";
+    case "appointment_booking":
+      return "📅 Appointment";
     default:
       return `[${type}]`;
   }
@@ -391,6 +430,22 @@ export function parseSocialMessaging(
           kind: "message_correction",
           action: "delete",
           targetExternalId: m.message.mid,
+          timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
+          rawPayload: m as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      // Edit (Messenger `message_edits`; Instagram has no equivalent webhook).
+      // Rewrites an existing row's body, exactly as the WhatsApp `type:"edit"`
+      // branch does — without this, the Page is subscribed to `message_edits`
+      // and the notification is parsed into nothing, leaving the agent looking
+      // at text the customer has already corrected.
+      if (m.message_edit?.mid && typeof m.message_edit.text === "string") {
+        events.push({
+          kind: "message_correction",
+          action: "edit",
+          targetExternalId: m.message_edit.mid,
+          newBody: m.message_edit.text,
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
           rawPayload: m as unknown as Record<string, unknown>,
         });
@@ -567,11 +622,18 @@ export function parseSocialMessaging(
           }
         }
       }
-      // Observability: a messaging event we don't handle yet (referral, optin,
-      // account_linking, message_edits, …). Logged — not dropped silently — so a
+      // Observability: a messaging event we don't handle yet (optin,
+      // account_linking, game_plays, …). Logged — not dropped silently — so a
       // new Meta event type surfaces in ops instead of vanishing. Fail-soft
-      // (still a 200). `message` with an echo lands here too (Phase 3 wires it).
-      if (!m.message && !m.postback && !m.reaction && !m.delivery && !m.read) {
+      // (still a 200). Echoes, unsends and edits are all handled above.
+      if (
+        !m.message &&
+        !m.message_edit &&
+        !m.postback &&
+        !m.reaction &&
+        !m.delivery &&
+        !m.read
+      ) {
         console.warn(
           JSON.stringify({
             event: "meta.webhook.unhandled_messaging",
@@ -631,22 +693,45 @@ export async function sendSocialText(
   return { externalId: messageId, timestamp: new Date() };
 }
 
+/** Meta's cap on quick replies per message (Messenger and Instagram alike). */
+const MAX_QUICK_REPLIES = 13;
+
+/** `ContactShareField` → Meta's auto-fill quick-reply `content_type`. */
+const CONTACT_SHARE_CONTENT_TYPE: Record<ContactShareField, string> = {
+  phone: "user_phone_number",
+  email: "user_email",
+};
+
 /**
  * Send an interactive question with tappable options on a social channel, as
  * Meta QUICK REPLIES (up to 13; title ≤20 chars; the option id rides in the
  * `payload` and comes back on the tapped reply). Both "buttons" and "list"
  * kinds collapse to quick replies — the social platforms have no native list
  * sheet, and quick replies are the closest tap-to-choose UX. Human Agent tag.
+ *
+ * `args.contactShare` appends Meta's auto-fill consent chips. Those carry ONLY
+ * a `content_type` — sending `title`/`payload` alongside makes Meta reject the
+ * whole message ("message[quick_replies][0][content_type] is required"), because
+ * the platform supplies both from the customer's profile. They're appended last
+ * so a full option set can't push them out of the 13-chip budget silently: the
+ * text options are trimmed instead.
  */
 export async function sendSocialInteractive(
   args: SendInteractiveArgs,
   opts: SocialSendTarget,
 ): Promise<SendTextResult> {
-  const quick_replies = args.options.slice(0, 13).map((o) => ({
-    content_type: "text",
-    title: o.title.slice(0, 20),
-    payload: o.id,
-  }));
+  const shares = args.contactShare ?? [];
+  const textBudget = Math.max(0, MAX_QUICK_REPLIES - shares.length);
+  const quick_replies: Array<Record<string, string>> = args.options
+    .slice(0, textBudget)
+    .map((o) => ({
+      content_type: "text",
+      title: o.title.slice(0, 20),
+      payload: o.id,
+    }));
+  for (const field of shares) {
+    quick_replies.push({ content_type: CONTACT_SHARE_CONTENT_TYPE[field] });
+  }
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
   const res = await graphPostJson(url, opts.accessToken, {
     recipient: { id: args.to },
@@ -673,7 +758,7 @@ export async function uploadSocialMedia(
   args: UploadMediaArgs,
   opts: SocialSendTarget,
 ): Promise<UploadMediaResult> {
-  const type = attachmentTypeFromMime(args.mimeType);
+  const type = attachmentTypeFromKind(kindFromMime(args.mimeType));
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/message_attachments`;
   const form = new FormData();
   form.append(
@@ -787,18 +872,55 @@ export interface SocialContactProfile {
   name: string | null;
   username: string | null;
   avatarUrl: string | null;
+  /** Meta-supplied name split (Messenger). Null when the node omits them. */
+  firstName: string | null;
+  lastName: string | null;
   /** Instagram-only richer signals; null on Messenger / when the node omits them. */
   socialProfile: SocialProfile | null;
 }
 
 export async function fetchSocialProfile(
   externalId: string,
-  opts: { accessToken: string; graphVersion: string; fields: string; label: string },
+  opts: {
+    accessToken: string;
+    graphVersion: string;
+    fields: string;
+    label: string;
+    /**
+     * Core field set to retry with when `fields` is rejected. Graph fails the
+     * WHOLE node request if ANY requested field is unavailable to the app, and
+     * this function fails soft to all-nulls — so one unapproved field would
+     * silently erase the display name of every contact on the channel. Same
+     * best-effort tiering as `PAGE_OPTIONAL_FIELDS` in meta-page-subscription.
+     */
+    fallbackFields?: string;
+  },
 ): Promise<SocialContactProfile> {
+  const fetchFields = async (fields: string) => {
+    const url = `${GRAPH_BASE}/${opts.graphVersion}/${encodeURIComponent(externalId)}?fields=${encodeURIComponent(fields)}`;
+    return graphGetJson(url, opts.accessToken, { retry: true });
+  };
   try {
-    const url = `${GRAPH_BASE}/${opts.graphVersion}/${encodeURIComponent(externalId)}?fields=${encodeURIComponent(opts.fields)}`;
-    const res = await graphGetJson(url, opts.accessToken, { retry: true });
+    let res: Record<string, unknown>;
+    try {
+      res = await fetchFields(opts.fields);
+    } catch (err) {
+      if (!opts.fallbackFields || opts.fallbackFields === opts.fields) throw err;
+      console.warn(
+        JSON.stringify({
+          event: "social.profile_fields_rejected",
+          severity: "info",
+          channel: opts.label,
+          retryingWith: opts.fallbackFields,
+        }),
+      );
+      res = await fetchFields(opts.fallbackFields);
+    }
     const name = typeof res.name === "string" ? res.name.trim() : "";
+    // Messenger exposes the split name directly — better than guessing where the
+    // surname starts, which `splitContactName` has to do for a single string.
+    const firstName = typeof res.first_name === "string" ? res.first_name.trim() : "";
+    const lastName = typeof res.last_name === "string" ? res.last_name.trim() : "";
     const username = typeof res.username === "string" ? res.username.trim() : "";
     const avatarUrl = typeof res.profile_pic === "string" ? res.profile_pic.trim() : "";
     // Instagram-only richer signals — Messenger never requests them, so they're
@@ -812,7 +934,9 @@ export async function fetchSocialProfile(
     if (typeof res.is_business_follow_user === "boolean")
       social.businessFollows = res.is_business_follow_user;
     return {
-      name: name || username || null,
+      name: name || [firstName, lastName].filter(Boolean).join(" ") || username || null,
+      firstName: firstName || null,
+      lastName: lastName || null,
       username: username || null,
       avatarUrl: avatarUrl || null,
       socialProfile: Object.keys(social).length > 0 ? social : null,
@@ -826,7 +950,14 @@ export async function fetchSocialProfile(
         error: err instanceof Error ? err.message : String(err),
       }),
     );
-    return { name: null, username: null, avatarUrl: null, socialProfile: null };
+    return {
+      name: null,
+      firstName: null,
+      lastName: null,
+      username: null,
+      avatarUrl: null,
+      socialProfile: null,
+    };
   }
 }
 

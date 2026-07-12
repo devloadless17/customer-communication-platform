@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
+import { checkTextCap } from "@/lib/messaging/text-cap";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
 import {
@@ -14,8 +15,12 @@ import {
 } from "@/lib/providers/channel";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Message } from "@ccp/shared/types";
-import type { InteractiveOption } from "@ccp/shared/providers/types";
-import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
+import type { ContactShareField, InteractiveOption } from "@ccp/shared/providers/types";
+import {
+  computeWindowStatus,
+  effectiveSendWindowMs,
+  outsideFreeFormWindow,
+} from "@ccp/shared/utils/window";
 
 import { SendTextValidationError } from "./send-text-internal";
 
@@ -42,8 +47,18 @@ export interface SendInteractiveInternalArgs {
    *  agent-driven send via the inbox composer. Drives bubble attribution
    *  the same way it does for text replies. Defaults to null. */
   senderUserId?: string | null;
+  /**
+   * Set on `/v1` external-API interactive sends so the `message.sent` event +
+   * audit timeline attribute the send to the API key instead of a real user.
+   * Mutually exclusive with `senderUserId` in practice. Mirrors
+   * `SendTemplateInternalArgs`.
+   */
+  senderApiKeyId?: string | null;
   /** Provenance label for raw_payload.sentVia. e.g. "workflow/<id>". */
   sentVia: string;
+  /** One-tap "share your phone / email" consent chips. Social channels only —
+   *  rejected with `contact_share_not_supported` elsewhere. */
+  contactShare?: ContactShareField[];
 }
 
 export interface SendInteractiveInternalResult {
@@ -96,6 +111,14 @@ export async function sendInteractiveInternal(
   const provider = conversation.channel;
   const binding = getProviderBinding(provider);
 
+  // Channel text-length cap — same gate as plain text, so an over-cap
+  // `ask_question` body fails with an actionable error instead of Meta's opaque
+  // one deep in the worker.
+  const tooLong = checkTextCap(bodyText, binding.provider.capabilities, provider);
+  if (tooLong) {
+    throw new SendTextValidationError("message_too_long", tooLong.detail);
+  }
+
   // Free-form send window — same gate as plain text. Driven by the provider's
   // declared window; `null` skips the check (channel has no window).
   const windowMs = effectiveSendWindowMs(binding.provider.capabilities);
@@ -111,13 +134,11 @@ export async function sendInteractiveInternal(
     }
   }
   // Meta social: inside the effective window but past the 24h free-form band we
-  // must attach the HUMAN_AGENT tag (RESPONSE otherwise). Same rule as sendText.
-  const freeFormMs = binding.provider.capabilities.freeFormWindowMs;
-  const useHumanAgentTag =
-    freeFormMs !== null &&
-    ["closed", "never"].includes(
-      computeWindowStatus(lastInboundIso, Date.now(), freeFormMs).state,
-    );
+  // must attach the HUMAN_AGENT tag (RESPONSE otherwise). Shared rule.
+  const useHumanAgentTag = outsideFreeFormWindow(
+    binding.provider.capabilities.freeFormWindowMs,
+    lastInboundIso,
+  );
 
   let sendConfig;
   try {
@@ -150,6 +171,17 @@ export async function sendInteractiveInternal(
     );
   }
 
+  // Consent chips are a Meta-social interactive type; WhatsApp has no equivalent
+  // and would reject the message. Gate on the capability, never on the channel
+  // name, so a future channel that gains them just flips the flag.
+  const contactShare = args.contactShare ?? [];
+  if (contactShare.length > 0 && !binding.provider.capabilities.contactShareChips) {
+    throw new SendTextValidationError(
+      "contact_share_not_supported",
+      `${channel.channel} cannot ask a contact to share their phone or email`,
+    );
+  }
+
   const send = await sendInteractive(
     {
       to: channel.to,
@@ -157,6 +189,7 @@ export async function sendInteractiveInternal(
       kind: args.kind,
       options: args.options,
       useHumanAgentTag,
+      ...(contactShare.length > 0 ? { contactShare } : {}),
       ...(args.listCtaLabel ? { listCtaLabel: args.listCtaLabel } : {}),
       ...(args.listSectionTitle ? { listSectionTitle: args.listSectionTitle } : {}),
     },
@@ -173,6 +206,20 @@ export async function sendInteractiveInternal(
   // Persist as a regular outbound message — body is the question text the
   // contact saw; the structured options live in rawPayload so they survive
   // for debugging without bloating the searchable body column.
+  // `interactive.contactShare` is the CORRELATION ANCHOR the ingest path reads:
+  // Meta's inbound frame for a tapped consent chip is indistinguishable from a
+  // normal text quick-reply, so the only trustworthy signal that a value is a
+  // shared phone/email is that THIS message offered that chip. Keep it in sync
+  // with `resolveContactShare` (@ccp/shared/utils/contact-share).
+  const rawPayload = {
+    sentVia: args.sentVia,
+    interactive: {
+      kind: args.kind,
+      options: args.options.map((o) => ({ id: o.id, title: o.title })),
+      ...(contactShare.length > 0 ? { contactShare } : {}),
+    },
+  };
+
   const created = await createOutboundMessageIdempotent({
     teamId: args.teamId,
     conversationId: args.conversationId,
@@ -182,13 +229,7 @@ export async function sendInteractiveInternal(
     direction: "out",
     channel: provider,
     status: "sent",
-    rawPayload: {
-      sentVia: args.sentVia,
-      interactive: {
-        kind: args.kind,
-        options: args.options.map((o) => ({ id: o.id, title: o.title })),
-      },
-    } as Prisma.InputJsonValue,
+    rawPayload: rawPayload as Prisma.InputJsonValue,
     timestamp: messageTimestamp,
   });
 
@@ -212,13 +253,7 @@ export async function sendInteractiveInternal(
     direction: "out",
     channel: provider,
     status: "sent",
-    rawPayload: {
-      sentVia: args.sentVia,
-      interactive: {
-        kind: args.kind,
-        options: args.options.map((o) => ({ id: o.id, title: o.title })),
-      },
-    },
+    rawPayload,
     timestamp: messageTimestamp.toISOString(),
   };
   // Strict-monotonic bump + atomic message.sent publish, unified in
@@ -235,6 +270,7 @@ export async function sendInteractiveInternal(
       message,
       preview: previewBody,
       senderUserId,
+      ...(args.senderApiKeyId ? { senderApiKeyId: args.senderApiKeyId } : {}),
     },
     onMissing: () => {
       throw new SendTextValidationError(

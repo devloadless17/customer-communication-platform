@@ -25,6 +25,9 @@ const PORT = Number(process.env.MOCK_PORT ?? 4100);
 /** @type {Array<{method:string,path:string,query:Record<string,string>,body:any,authorization:string|undefined,at:number}>} */
 let calls = [];
 let seq = 0;
+/** Fail the next `failSendsRemaining` sends with `failSendStatus`; 0 = normal. */
+let failSendsRemaining = 0;
+let failSendStatus = 500;
 
 function readBody(req) {
   return new Promise((resolve) => {
@@ -67,7 +70,23 @@ const server = createServer(async (req, res) => {
     // reusing ids would collide on the app's real (teamId,channel,externalId)
     // dedup and fold two distinct sends into one row.
     calls = [];
+    failSendsRemaining = 0;
     return json(res, 200, { ok: true });
+  }
+  // Arm the next `count` `POST .../messages` calls to fail with `status`. Lets a
+  // spec drive the AMBIGUOUS send path (Meta 5xx — the message may or may not
+  // have landed), the only way to exercise the OUTBOUND-1 invariant: the
+  // idempotency claim must be RETAINED so a same-key retry can't re-send a
+  // possibly-delivered, billed message.
+  //
+  // `count` (not one-shot) because the provider RETRIES a transient 5xx
+  // internally — a single injected failure is swallowed and the send succeeds.
+  // Arm more than the provider's retry budget to make the failure terminal.
+  // Cleared by /__mock/reset.
+  if (path === "/__mock/fail-next-send" && method === "POST") {
+    failSendStatus = Number(body?.status) || 500;
+    failSendsRemaining = Number(body?.count) || 1;
+    return json(res, 200, { ok: true, status: failSendStatus, count: failSendsRemaining });
   }
   if (path === "/__mock/calls" && method === "GET") {
     return json(res, 200, { calls });
@@ -99,6 +118,12 @@ const server = createServer(async (req, res) => {
   // POST /{v}/{id}/messages  → the send. WhatsApp and social share the path;
   // disambiguate on messaging_product (WhatsApp sets it, social never does).
   if (method === "POST" && last === "messages") {
+    if (failSendsRemaining > 0) {
+      failSendsRemaining -= 1;
+      return json(res, failSendStatus, {
+        error: { message: "Mock: injected send failure", code: 2, type: "OAuthException" },
+      });
+    }
     if (body && body.messaging_product === "whatsapp") {
       return json(res, 200, {
         messaging_product: "whatsapp",
@@ -184,7 +209,6 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  // eslint-disable-next-line no-console
   console.log(`[graph-mock] listening on http://127.0.0.1:${PORT}`);
 });
 

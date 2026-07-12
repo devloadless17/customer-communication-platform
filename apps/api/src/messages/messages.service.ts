@@ -33,6 +33,7 @@ import {
   consumeConversationSendBudget,
   ConversationSendRateLimitedError,
 } from "@/lib/messaging/conversation-send-budget";
+import { checkTextCap } from "@/lib/messaging/text-cap";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { setConversationAiEnabled } from "@/lib/conversations/mutations";
@@ -60,7 +61,11 @@ import type {
   Message,
   User,
 } from "@ccp/shared/types";
-import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
+import {
+  computeWindowStatus,
+  effectiveSendWindowMs,
+  outsideFreeFormWindow,
+} from "@ccp/shared/utils/window";
 import {
   workflowContactSnapshot,
   workflowConversationSnapshotAfterAssign,
@@ -119,23 +124,6 @@ const TEMPLATE_HEADER_MIME_HINT: Record<
   document:
     "A template document header must be a PDF, Word, Excel, PowerPoint, text, or CSV file.",
 };
-
-/**
- * Meta social: is the send OUTSIDE the free-form (24h) window — i.e. in the
- * 24h–7d support band where the Human Agent tag is required? Within 24h we send
- * `messaging_type: RESPONSE` instead (no tag, no feature dependency). Returns
- * false when the channel has no window model (`freeFormMs` null), so a non-social
- * channel never forces the tag. Reuses `computeWindowStatus` for boundary parity
- * with the preflight window check.
- */
-function outsideFreeFormWindow(
-  freeFormMs: number | null,
-  lastInboundAt: string | null,
-): boolean {
-  if (freeFormMs === null) return false;
-  const { state } = computeWindowStatus(lastInboundAt, Date.now(), freeFormMs);
-  return state === "closed" || state === "never";
-}
 
 @Injectable()
 export class MessagesService {
@@ -777,12 +765,12 @@ export class MessagesService {
     // Meta rejects an over-limit body with an opaque error deep in the worker;
     // fail fast here with an actionable 4xx instead. Capability-driven so a new
     // channel's limit is a data change, not a code branch.
-    const maxChars = binding.provider.capabilities.messageTextMaxChars;
-    if (input.body.length > maxChars) {
+    const tooLong = checkTextCap(input.body, binding.provider.capabilities, provider);
+    if (tooLong) {
       throw new UnprocessableEntityException({
         error: "message_too_long",
-        detail: `Message is ${input.body.length} characters — ${provider} allows at most ${maxChars}.`,
-        max: maxChars,
+        detail: tooLong.detail,
+        max: tooLong.max,
       });
     }
 
@@ -1560,19 +1548,25 @@ export class MessagesService {
         detail: `${policy.label} stickers must be image/webp (got ${mimeType}).`,
       });
     }
-    // Audio: Meta only accepts a specific mime set (per channel). `audio/webm`
-    // in particular is a frequent silent failure — Chrome's MediaRecorder
-    // defaults to it for voice notes, uploads succeed, then Meta returns a
-    // confusing `provider_rejected` at send time. Block it here with a clear
-    // error. The blob-storage allowlist still permits webm (so we can
-    // debug-replay), but we won't push it to Meta.
-    if (kind === "audio" && !policy.audioMime.has(mimeType)) {
+    // A genuine recording (`form.voice`) is transcoded to a channel-valid
+    // container further down, so its INCOMING mime says nothing about whether we
+    // can deliver it. Gating it here rejected Firefox's `audio/ogg` on Instagram
+    // before it ever reached the AAC transcode written for exactly that case.
+    // Recordings are validated AFTER transcode instead; see below.
+    const isRecording = kind === "audio" && form.voice === true;
+
+    // Audio FILES the user picked (not recordings): Meta only accepts a specific
+    // mime set per channel. `audio/webm` in particular is a frequent silent
+    // failure — uploads succeed, then Meta returns a confusing
+    // `provider_rejected` at send time. Block it here with a clear error. The
+    // blob-storage allowlist still permits webm (so we can debug-replay), but we
+    // won't push it to Meta.
+    if (kind === "audio" && !isRecording && !policy.audioMime.has(mimeType)) {
       throw new BadRequestException({
         error: "invalid_audio_mime",
         detail:
           `${policy.label} doesn't accept ${mimeType || "this audio format"}. ` +
-          `Supported: ${[...policy.audioMime].join(", ")}. ` +
-          "If this came from a voice recorder, try a different browser (Chrome 105+, Firefox, Safari).",
+          `Supported: ${[...policy.audioMime].join(", ")}.`,
       });
     }
     // Documents: kindFromMime is a catch-all (anything not image/video/audio
@@ -1611,7 +1605,6 @@ export class MessagesService {
     // voice note — see the sendMedia call below for why). Uploaded audio FILES
     // (form.voice=false — a user picked an mp3/m4a) are left alone: they deliver
     // fine already. Best-effort: if ffmpeg is missing/fails we log + send original.
-    const isRecording = kind === "audio" && form.voice === true;
     // Voice notes need a per-channel container. Instagram REJECTS ogg/webm
     // (`#100 attachment format is not supported`) but accepts AAC; WhatsApp needs
     // ogg/opus to DELIVER (Messenger accepts ogg too, via its upload path). So
@@ -1645,6 +1638,19 @@ export class MessagesService {
           }`,
         );
       }
+    }
+    // Recordings skipped the up-front mime gate because the transcode above is
+    // what makes them deliverable. Now that it has run (or best-effort failed),
+    // hold the RESULT to the channel's allow-list — otherwise a failed transcode
+    // silently ships a container Meta will reject at send time.
+    if (isRecording && !policy.audioMime.has(mimeType)) {
+      throw new BadRequestException({
+        error: "invalid_audio_mime",
+        detail:
+          `This voice note couldn't be converted to a format ${policy.label} accepts ` +
+          `(got ${mimeType || "an unknown format"}; supported: ${[...policy.audioMime].join(", ")}). ` +
+          "Please try again, or attach an audio file instead.",
+      });
     }
     // VERIFY-IN-PROD breadcrumb (2026-05-26 iOS voice-note fix): make the exact
     // path obvious in journald so a test send is diagnosable at a glance.
@@ -2797,6 +2803,7 @@ export class MessagesService {
         kind: input.kind,
         options: input.options,
         ...(input.listCtaLabel ? { listCtaLabel: input.listCtaLabel } : {}),
+        ...(input.contactShare?.length ? { contactShare: input.contactShare } : {}),
         senderUserId: userId,
         sentVia: "api/messages/interactive",
       });
@@ -2808,9 +2815,13 @@ export class MessagesService {
             ? 422
             : err.code === "provider_not_configured"
               ? 422
-              : err.code === "conversation_not_found"
-                ? 404
-                : 400;
+              : // The channel simply has no such interactive type (WhatsApp has
+                // no phone/email consent chip) — a semantic, not syntactic, error.
+                err.code === "contact_share_not_supported"
+                ? 422
+                : err.code === "conversation_not_found"
+                  ? 404
+                  : 400;
         throw new HttpException(
           { error: err.code, ...(err.detail ? { detail: err.detail } : {}) },
           status,
@@ -2866,6 +2877,8 @@ const TEMPLATE_ERROR_STATUS: Record<SendTemplateValidationError["code"], number>
   template_not_found: 404,
   template_not_approved: 409,
   wrong_body_var_count: 400,
+  named_body_vars_required: 400,
+  button_params_required: 400,
   header_var_required: 400,
   header_media_required: 400,
   header_media_unsupported: 422,

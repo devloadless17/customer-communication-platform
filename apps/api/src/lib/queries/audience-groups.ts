@@ -179,17 +179,27 @@ async function resolveAudienceGroupMemberCount(
  */
 export async function countAudienceContacts(
   teamId: string,
-  { tagIds = [], contactIds = [] }: { tagIds?: string[]; contactIds?: string[] },
+  {
+    tagIds = [],
+    contactIds = [],
+    all = false,
+  }: { tagIds?: string[]; contactIds?: string[]; all?: boolean },
   // A broadcast sends on ONE channel and drops contacts on other channels, so
   // the composer's recipient count must be scoped to the target channel — else a
   // freeform Messenger broadcast to a mixed-channel tag shows the whole audience
   // but only reaches the Messenger subset. Omit to count every channel.
   channel?: Channel,
 ): Promise<number> {
+  const channelFilter = channel ? { identityChannel: channel } : {};
+  // "All contacts" audience: every team contact (channel-scoped), tags/ids
+  // ignored. Kept separate from the empty-selection case below, which returns 0
+  // on purpose so an unconfigured custom audience never fans out to everyone.
+  if (all) {
+    return db.contact.count({ where: { teamId, deletedAt: null, ...channelFilter } });
+  }
   const tags = tagIds.filter((s) => s.length > 0);
   const ids = contactIds.filter((s) => s.length > 0);
   if (tags.length === 0 && ids.length === 0) return 0;
-  const channelFilter = channel ? { identityChannel: channel } : {};
   const where: Prisma.ContactWhereInput =
     tags.length > 0 && ids.length > 0
       ? {
@@ -214,6 +224,11 @@ export async function previewAudienceContacts(
   teamId: string,
   { tagIds = [], contactIds = [] }: { tagIds?: string[]; contactIds?: string[] },
   sampleLimit = 200,
+  // Scoped exactly like `countAudienceContacts` — the preview answers "who am I
+  // sending to", so it must resolve the same set the count shows and the runner
+  // actually sends to. Unscoped, a freeform Instagram broadcast previewed every
+  // WhatsApp contact in the group as a recipient it will never message.
+  channel?: Channel,
 ): Promise<{
   total: number;
   sample: Array<{
@@ -223,15 +238,21 @@ export async function previewAudienceContacts(
     tags: Tag[];
   }>;
 }> {
+  const channelFilter = channel ? { identityChannel: channel } : {};
   const tags = tagIds.filter((s) => s.length > 0);
   const ids = contactIds.filter((s) => s.length > 0);
   if (tags.length === 0 && ids.length === 0) return { total: 0, sample: [] };
   const where: Prisma.ContactWhereInput =
     tags.length > 0 && ids.length > 0
-      ? { teamId, deletedAt: null, OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }] }
+      ? {
+          teamId,
+          deletedAt: null,
+          ...channelFilter,
+          OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }],
+        }
       : tags.length > 0
-        ? { teamId, deletedAt: null, tags: { some: { id: { in: tags } } } }
-        : { teamId, deletedAt: null, id: { in: ids } };
+        ? { teamId, deletedAt: null, ...channelFilter, tags: { some: { id: { in: tags } } } }
+        : { teamId, deletedAt: null, ...channelFilter, id: { in: ids } };
   const [total, sample] = await Promise.all([
     db.contact.count({ where }),
     db.contact.findMany({

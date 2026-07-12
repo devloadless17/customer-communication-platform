@@ -328,7 +328,17 @@ interface MetaStatus {
 
 interface MetaContact {
   profile?: { name?: string };
+  /** The customer's phone. CONDITIONAL since the 2026 BSUID rollout: Meta omits
+   *  it unless we've messaged/called that number in the last 30 days. */
   wa_id?: string;
+  /** The business-scoped user id (BSUID), e.g. "LB.946402411360800". Present on
+   *  inbound webhooks since the April-2026 rollout, whether or not the customer
+   *  enabled a username. This — not `messages[]` — is where Meta puts it. */
+  user_id?: string;
+  /** Set only for customers who enabled the optional WhatsApp @username (2026). */
+  username?: string;
+  /** Parent portfolio BSUID ("US.ENT.…") for multi-portfolio businesses. */
+  parent_user_id?: string;
 }
 
 interface MetaMediaPayload {
@@ -350,9 +360,17 @@ interface MetaContextRef {
 }
 
 interface MetaInteractivePayload {
-  type?: "button_reply" | "list_reply";
+  /**
+   * We consume `button_reply` / `list_reply`; Meta also sends `nfm_reply` (a
+   * submitted WhatsApp Flow) and adds new subtypes over time. Typed as an open
+   * string so the parser is forced to handle the unknown case rather than having
+   * the compiler assure us it can't happen — it can, and it did.
+   */
+  type?: "button_reply" | "list_reply" | (string & {});
   button_reply?: { id?: string; title?: string };
   list_reply?: { id?: string; title?: string; description?: string };
+  /** WhatsApp Flows submission payload (JSON string). Retained via rawPayload. */
+  nfm_reply?: { response_json?: string; name?: string };
 }
 
 interface MetaLocationPayload {
@@ -369,11 +387,10 @@ interface MetaContactsPayload {
 
 interface MetaMessage {
   from?: string;
-  // BSUID forward-compat (Meta 2026): a webhook may identify the sender by a
-  // business-scoped id + @username instead of the phone. Field names are stamped
-  // conservatively; the exact wire keys are confirmed at rollout. Absent today.
-  bsuid?: string;
-  username?: string;
+  // NOTE: BSUID / @username do NOT live here. Meta stamps them on `contacts[]`
+  // as `user_id` / `username` (see MetaContact) — the parser reads them from
+  // there. `messages[].from` carries the phone (or the BSUID once Meta stops
+  // sending the phone for a cold contact).
   // Present on Coexistence echo/history rows the BUSINESS sent: the CUSTOMER's
   // number. Absent on ordinary inbound `messages[]` (where `from` is already
   // the customer).
@@ -722,11 +739,19 @@ function parseMetaCall(
       ? "out"
       : "in";
 
-  // Pick the CUSTOMER's phone number based on direction. For outbound calls
-  // `from` is the BUSINESS number; using it blindly creates phantom contacts.
-  const rawPhone = direction === "in" ? c.from : c.to;
-  const phone = rawPhone ? rawPhone.replace(/\D/g, "") : undefined;
-  if (!phone) return null;
+  // Pick the CUSTOMER's identity based on direction. For outbound calls `from`
+  // is the BUSINESS number; using it blindly creates phantom contacts.
+  //
+  // As on the message path, the identity is a phone ONLY when it is all digits.
+  // Meta omits `wa_id` for contacts not messaged in 30 days, so a cold caller is
+  // identified by a business-scoped user id ("LB.946402411360800"). Digit-
+  // stripping that would mint the phantom phone contact "946402411360800" —
+  // a fabricated identity, detached from the person's real thread.
+  const rawIdentity = (direction === "in" ? c.from : c.to)?.trim();
+  if (!rawIdentity) return null;
+  const identityIsPhone = !/\D/.test(rawIdentity);
+  const phone = identityIsPhone ? rawIdentity : undefined;
+  const bsuid = identityIsPhone ? undefined : rawIdentity;
 
   // Connected-call evidence. Meta puts `start_time` (epoch s, REAL pickup) +
   // `duration` (talk seconds) on the terminate webhook ONLY for calls that
@@ -769,7 +794,8 @@ function parseMetaCall(
   return {
     kind: "call",
     externalCallId,
-    contactPhone: phone,
+    ...(phone ? { contactPhone: phone } : {}),
+    ...(bsuid ? { bsuid } : {}),
     contactName: null,
     direction,
     phase,
@@ -1049,26 +1075,33 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           continue;
         }
 
-        // Build a quick wa_id → name lookup from the contacts array.
-        const nameByWaId = new Map<string, string>();
+        // `contacts[]` — not `messages[]` — is where Meta puts the customer's
+        // identity: display name, the business-scoped user id (`user_id`, the
+        // BSUID) and the optional WhatsApp `username`. Index by BOTH keys: since
+        // the 2026 rollout Meta omits `wa_id` for a contact we haven't messaged
+        // in 30 days, and then `messages[].from` is the BSUID instead.
+        const contactByKey = new Map<string, MetaContact>();
         for (const c of Array.isArray(value.contacts) ? value.contacts : []) {
-          if (c.wa_id && c.profile?.name) nameByWaId.set(c.wa_id, c.profile.name);
+          if (c.wa_id) contactByKey.set(c.wa_id.replace(/\D/g, ""), c);
+          if (c.user_id) contactByKey.set(c.user_id, c);
         }
 
         for (const m of Array.isArray(value.messages) ? value.messages : []) {
           const externalId = m.id;
-          // Meta's wa_id is digits-only by spec, but we strip non-digits
-          // defensively. The DB stores digits-only too (lib/phone.ts) so the
-          // contact lookup will hit on the inbound's first reply.
-          const phone = m.from ? m.from.replace(/\D/g, "") : undefined;
-          // BSUID forward-compat: accept a message identified by a business-
-          // scoped id / @username when Meta omits the phone (2026 rollout), so
-          // it isn't dropped. Phone stays primary today (bsuid/username null).
-          const bsuid = typeof m.bsuid === "string" && m.bsuid ? m.bsuid : undefined;
-          const username =
-            typeof m.username === "string" && m.username ? m.username : undefined;
+          const rawFrom = typeof m.from === "string" ? m.from.trim() : "";
+          // A wa_id is digits-only by spec; a BSUID is prefixed and dotted
+          // ("LB.946402411360800"). Never digit-strip a BSUID — that would mint
+          // a bogus phone number and create a contact under a fake identity.
+          const fromIsPhone = rawFrom.length > 0 && !/\D/.test(rawFrom);
+          const phone = fromIsPhone ? rawFrom : undefined;
+          const contact = contactByKey.get(rawFrom);
+          // BSUID + @username come off `contacts[]`; fall back to `from` when it
+          // IS the BSUID (Meta omitted the phone for a cold contact).
+          const bsuid =
+            contact?.user_id?.trim() || (!fromIsPhone && rawFrom ? rawFrom : undefined);
+          const username = contact?.username?.trim() || undefined;
           if (!externalId || (!phone && !bsuid)) continue;
-          const contactName = (phone ? nameByWaId.get(phone) : undefined) ?? null;
+          const contactName = contact?.profile?.name ?? null;
           // Shared identity fragment spread into every inbound-message emit
           // below (exactly one of phone/bsuid is the resolve key at ingest).
           const identity = {
@@ -1176,8 +1209,23 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               } satisfies NormalizedInboundMessage);
               continue;
             }
-            // Unknown interactive subtype — skip rather than fabricate a
-            // body. Future Meta additions (e.g. nfm_reply) land here.
+            // Any other interactive subtype — today most importantly WhatsApp
+            // Flows (`nfm_reply`, a submitted form). Persist a placeholder row
+            // rather than dropping it: we 200 the webhook, so Meta never
+            // redelivers, and a bare `continue` loses the customer's submission
+            // completely — no message row, no unread bump, no 24h-window reset,
+            // not even the raw payload to recover from later. Same contract as
+            // placeholderForUnhandledType for location/contacts/order.
+            events.push({
+              kind: "message",
+              externalId,
+              ...identity,
+              contactName,
+              body: inner?.type === "nfm_reply" ? "📝 Form response" : "💬 Interactive reply",
+              timestamp: ts,
+              rawPayload: payload as Record<string, unknown>,
+              ...(replyToExternalId ? { replyToExternalId } : {}),
+            } satisfies NormalizedInboundMessage);
             continue;
           }
 

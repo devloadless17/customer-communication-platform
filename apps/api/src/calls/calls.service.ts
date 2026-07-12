@@ -469,7 +469,7 @@ export class CallsService {
    */
   async getPhoneNumberSettings(
     session: ApiSession,
-    channel: "whatsapp" = "whatsapp",
+    channel: Channel = "whatsapp",
   ): Promise<{ raw: unknown }> {
     const binding = getProviderBinding(channel);
     const fn = binding.provider.getPhoneNumberSettings;

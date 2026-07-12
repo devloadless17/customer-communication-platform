@@ -8,6 +8,10 @@ import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/layouts/page-header";
+import {
+  PageSubscriptionWarning,
+  type PageSubscription,
+} from "@/components/settings/page-subscription-warning";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 
@@ -20,6 +24,7 @@ export interface MessengerCurrent {
   pageAccessToken: string | null;
   appSecret: string | null;
   credentialsUndecryptable?: boolean;
+  webhookSubscription?: PageSubscription | null;
 }
 
 export function MessengerSettings({
@@ -130,6 +135,13 @@ export function MessengerSettings({
             </div>
           )}
         </div>
+
+        {current.connected && (
+          <PageSubscriptionWarning
+            subscription={current.webhookSubscription}
+            channelLabel="Messenger"
+          />
+        )}
       </div>
 
       {canManage && showForm && (

@@ -247,6 +247,22 @@ curl -s -X POST "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/mes
   -d '{ "body": "On our way!" }'
 ```
 
+**Send an interactive message** — `POST /conversations/:id/interactive` · `write:messages`
+Tappable options (`kind: "buttons"`, or `kind: "list"` for up to 10) plus, on Messenger/Instagram only, Meta's one-tap **consent chips** that let the customer share their phone or email straight from their Meta profile. Those chips are the only way a social contact's phone/email ever reaches you — and therefore the only email that will auto-merge them into a unified customer.
+
+Option `id`s and `title`s must each be unique (Meta rejects duplicate button titles). Requires an `Idempotency-Key`. WhatsApp has no consent chips and returns `422 contact_share_not_supported` if you ask for them.
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/interactive" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{ "body": "How would you like your order?",
+        "kind": "buttons",
+        "options": [ { "id": "pickup",  "title": "Pick up" },
+                     { "id": "deliver", "title": "Deliver" } ],
+        "contactShare": ["phone"] }'
+```
+
 **Get one message** — `GET /messages/:id` · `read:messages`
 ```bash
 curl -s "$CCP_BASE_URL/api/external/v1/messages/MESSAGE_ID" \

@@ -19,7 +19,12 @@ import {
   countTemplatePlaceholders,
   renderTemplateBody,
 } from "@/lib/providers/meta";
-import type { TemplateComponent } from "@ccp/shared/providers/types";
+import {
+  renderTemplateBodyNamed,
+  requiredTemplateButtonParams,
+  templateNamedPlaceholders,
+} from "@ccp/shared/template-render";
+import type { TemplateComponent, TemplateVariableSet } from "@ccp/shared/providers/types";
 import type { Message } from "@ccp/shared/types";
 
 /**
@@ -41,11 +46,16 @@ export interface SendTemplateInternalArgs {
   teamId: string;
   conversationId: string;
   templateId: string;
-  variables: {
-    body: string[];
-    header?: string;
-    headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
-  };
+  /**
+   * The provider's full variable set — `body`, `bodyNamed`, `header`,
+   * `headerMedia`, `buttons`. This used to be a narrowed inline shape carrying
+   * only body/header/headerMedia, which meant NO caller could ever supply
+   * `buttons` or `bodyNamed` even though `metaProvider.sendTemplate` builds both:
+   * every template with a dynamic URL button, a coupon copy-code button, or a
+   * NAMED body was silently built without those components and hard-rejected by
+   * Meta. Widening to the shared type closes that off at the type level.
+   */
+  variables: TemplateVariableSet;
   /** Null for system / automation sends. */
   senderUserId: string | null;
   /**
@@ -71,6 +81,12 @@ export class SendTemplateValidationError extends Error {
     | "template_not_found"
     | "template_not_approved"
     | "wrong_body_var_count"
+    // Body is NAMED-format (`{{order_id}}`) and the caller supplied no/partial
+    // `bodyNamed`. Meta rejects these for missing body parameters.
+    | "named_body_vars_required"
+    // Template has a dynamic URL button or a copy-code button, which Meta
+    // requires a send-time parameter for; the caller supplied none.
+    | "button_params_required"
     | "header_var_required"
     | "header_media_required"
     | "header_media_unsupported"
@@ -126,13 +142,51 @@ export async function sendTemplateInternal(
   // Validate var shape matches the template's placeholders. Caller is
   // expected to fill these out at config time; surfacing the mismatch here
   // catches drift between a config and a template that was later edited.
-  const bodyVarCount = countTemplatePlaceholders(template.bodyText);
-  if (args.variables.body.length !== bodyVarCount) {
-    throw new SendTemplateValidationError(
-      "wrong_body_var_count",
-      "wrong variable count",
-      `Template body expects ${bodyVarCount} variable(s), got ${args.variables.body.length}.`,
-    );
+  //
+  // A body is EITHER positional (`{{1}}`) or NAMED (`{{order_id}}`) — never
+  // both — so we pick the matching check. Named bodies previously scored 0
+  // positional placeholders, passed validation with zero variables, and were
+  // rejected by Meta with nothing the agent could act on.
+  const namedBodyVars = templateNamedPlaceholders(template.bodyText);
+  if (namedBodyVars.length > 0) {
+    const supplied = new Set((args.variables.bodyNamed ?? []).map((v) => v.name));
+    const missing = namedBodyVars.filter((n) => !supplied.has(n));
+    if (missing.length > 0) {
+      throw new SendTemplateValidationError(
+        "named_body_vars_required",
+        "named body variables required",
+        `Template body expects named variable(s): ${missing.join(", ")}.`,
+      );
+    }
+  } else {
+    const bodyVarCount = countTemplatePlaceholders(template.bodyText);
+    if (args.variables.body.length !== bodyVarCount) {
+      throw new SendTemplateValidationError(
+        "wrong_body_var_count",
+        "wrong variable count",
+        `Template body expects ${bodyVarCount} variable(s), got ${args.variables.body.length}.`,
+      );
+    }
+  }
+
+  // Dynamic URL buttons and copy-code buttons carry a send-time parameter. Meta
+  // rejects the message without it, so a template like an authentication OTP or
+  // a coupon was undeliverable with an opaque provider error. Fail here with the
+  // reason instead. (Quick-reply payloads are optional on the wire — not
+  // required, so templates that send correctly today keep working.)
+  const requiredButtons = requiredTemplateButtonParams(template.components);
+  if (requiredButtons.length > 0) {
+    const supplied = new Set((args.variables.buttons ?? []).map((b) => `${b.index}:${b.subType}`));
+    const missing = requiredButtons.filter((b) => !supplied.has(`${b.index}:${b.subType}`));
+    if (missing.length > 0) {
+      throw new SendTemplateValidationError(
+        "button_params_required",
+        "button parameters required",
+        `This template's button(s) need a send-time value: ` +
+          missing.map((b) => `#${b.index + 1} (${b.subType})`).join(", ") +
+          `. Supply them as \`variables.buttons\`.`,
+      );
+    }
   }
 
   const components = Array.isArray(template.components)
@@ -262,8 +316,10 @@ export async function sendTemplateInternal(
       language: template.language,
       variables: {
         body: args.variables.body,
+        ...(args.variables.bodyNamed ? { bodyNamed: args.variables.bodyNamed } : {}),
         ...(args.variables.header ? { header: args.variables.header } : {}),
         ...(headerMedia ? { headerMedia } : {}),
+        ...(args.variables.buttons ? { buttons: args.variables.buttons } : {}),
       },
     },
     sendConfig,
@@ -271,8 +327,10 @@ export async function sendTemplateInternal(
 
   // Store the rendered preview ("Hi John, your order is ready") not the raw
   // template ("Hi {{1}}, your order is {{2}}"), so the inbox shows what the
-  // customer actually got.
-  const renderedBody = renderTemplateBody(template.bodyText, args.variables.body);
+  // customer actually got. Named bodies render by name, positional by index.
+  const renderedBody = args.variables.bodyNamed?.length
+    ? renderTemplateBodyNamed(template.bodyText, args.variables.bodyNamed)
+    : renderTemplateBody(template.bodyText, args.variables.body);
   const previewBody = renderedBody.slice(0, 200);
 
   // Monotonicity guard — same fix as send-text-internal.ts. Meta sends
@@ -301,10 +359,12 @@ export async function sendTemplateInternal(
       templateLanguage: template.language,
       variables: {
         body: args.variables.body,
+        ...(args.variables.bodyNamed ? { bodyNamed: args.variables.bodyNamed } : {}),
         ...(args.variables.header ? { header: args.variables.header } : {}),
         ...(headerMedia ? { headerMedia } : {}),
+        ...(args.variables.buttons ? { buttons: args.variables.buttons } : {}),
       },
-    } as Prisma.InputJsonValue,
+    } as unknown as Prisma.InputJsonValue,
     timestamp: messageTimestamp,
   });
 

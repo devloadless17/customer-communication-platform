@@ -46,6 +46,7 @@ import type {
   ExternalCreateContactInput,
   ExternalCreateTagInput,
   ExternalNoteInput,
+  ExternalSendInteractiveInput,
   ExternalSendMessageInput,
   ExternalSetAiInput,
   ExternalStatusInput,
@@ -208,6 +209,22 @@ export class ExternalV1Service {
       idempotencyKey,
       chainDepth,
       reopenIfClosed,
+    );
+  }
+
+  sendInteractive(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalSendInteractiveInput,
+    idempotencyKey: string,
+  ) {
+    return this.messaging.sendInteractive(
+      teamId,
+      apiKeyId,
+      conversationId,
+      input,
+      idempotencyKey,
     );
   }
 

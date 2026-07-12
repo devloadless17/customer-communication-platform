@@ -141,7 +141,13 @@ export function matchesContactFiltersExceptWindow(
   if (filters.sourceFilter !== "all" && contact.source !== filters.sourceFilter) {
     return false;
   }
+  // Person mode rolls up across channels, so `fetchContactsPage` deliberately
+  // does NOT send `channel`. This local mirror must drop it too — otherwise a
+  // live `contact.updated` for a visible person whose representative contact
+  // sits on a filtered-out channel fails the match and the row silently
+  // vanishes from a list the server would still return it in.
   if (
+    !filters.groupByPerson &&
     filters.channelFilter !== "any" &&
     contact.identityChannel !== filters.channelFilter
   ) {

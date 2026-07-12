@@ -72,12 +72,22 @@ export const SendInteractiveSchema = z
       .min(1)
       .max(10),
     listCtaLabel: z.string().min(1).max(20).optional(),
+    // One-tap "share your phone / email" consent chips. Messenger + Instagram
+    // only (capability `contactShareChips`); the send helper rejects the rest.
+    // Meta renders these beside the options and pre-fills them from the
+    // customer's profile — the only way a social contact's phone/email can ever
+    // reach us, and therefore the only way they become auto-mergeable into a
+    // unified Customer. See docs/identity.md.
+    contactShare: z.array(z.enum(["phone", "email"])).max(2).optional(),
     // Pre-Meta idempotency key (same as text/media/template sends). A double-
     // click or network-retry that re-POSTs the same clientTempId within the
     // window short-circuits to the first result instead of producing a second
     // interactive message + Meta send. Optional — legacy clients run through
     // un-deduped exactly as before.
     clientTempId: z.string().min(1).optional(),
+  })
+  .refine((b) => new Set(b.contactShare ?? []).size === (b.contactShare ?? []).length, {
+    message: "contactShare entries must be unique",
   })
   .refine((b) => b.kind !== "buttons" || b.options.length <= 3, {
     message: "buttons supports at most 3 options — use kind=list for more",

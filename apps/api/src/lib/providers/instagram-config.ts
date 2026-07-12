@@ -1,6 +1,7 @@
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
+import { TtlCache } from "@/lib/providers/config-cache";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 
 /**
@@ -45,9 +46,6 @@ export interface InstagramWebhookConfig {
 }
 
 const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
-const CONFIG_TTL_MS = 60_000;
-const CONFIG_CACHE_MAX = 10_000;
-const CONFIG_SWEEP_INTERVAL_MS = 5 * 60_000;
 
 interface SendCipher {
   igId: string;
@@ -64,24 +62,9 @@ type CachedSend =
   | { kind: "ok"; cipher: SendCipher }
   | { kind: "err"; missing: readonly string[] };
 
-const sendCache = new Map<string, { entry: CachedSend; exp: number }>();
-const webhookCache = new Map<string, { value: WebhookCipher | null; exp: number }>();
-
-function evictExpired<V extends { exp: number }>(map: Map<string, V>): void {
-  const now = Date.now();
-  for (const [k, v] of map) if (v.exp <= now) map.delete(k);
-}
-function evictOldestIfOverCap<V>(map: Map<string, V>, max: number): void {
-  if (map.size < max) return;
-  const oldest = map.keys().next().value;
-  if (oldest !== undefined) map.delete(oldest);
-}
-
-const sweeper = setInterval(() => {
-  evictExpired(sendCache);
-  evictExpired(webhookCache);
-}, CONFIG_SWEEP_INTERVAL_MS);
-sweeper.unref?.();
+// TTL/cap/sweep mechanics live in the shared TtlCache primitive (config-cache.ts).
+const sendCache = new TtlCache<CachedSend>();
+const webhookCache = new TtlCache<WebhookCipher | null>();
 
 /** Drop cached Instagram credentials for a team. Call after the settings save. */
 export function invalidateInstagramConfig(teamId: string): void {
@@ -137,15 +120,14 @@ function materialize(teamId: string, cipher: SendCipher): InstagramSendConfig {
 /** Send-side Instagram config. Throws ProviderNotConfigured when unconnected. */
 export async function getInstagramSendConfig(teamId: string): Promise<InstagramSendConfig> {
   const hit = sendCache.get(teamId);
-  if (hit && hit.exp > Date.now()) {
-    if (hit.entry.kind === "err") {
-      throw new ProviderNotConfiguredError(teamId, [...hit.entry.missing]);
+  if (hit) {
+    if (hit.kind === "err") {
+      throw new ProviderNotConfiguredError(teamId, [...hit.missing]);
     }
-    return materialize(teamId, hit.entry.cipher);
+    return materialize(teamId, hit.cipher);
   }
   const entry = await loadSendCipher(teamId);
-  evictOldestIfOverCap(sendCache, CONFIG_CACHE_MAX);
-  sendCache.set(teamId, { entry, exp: Date.now() + CONFIG_TTL_MS });
+  sendCache.set(teamId, entry);
   if (entry.kind === "err") throw new ProviderNotConfiguredError(teamId, [...entry.missing]);
   return materialize(teamId, entry.cipher);
 }
@@ -156,8 +138,8 @@ export async function getInstagramWebhookConfig(
 ): Promise<InstagramWebhookConfig | null> {
   const hit = webhookCache.get(teamId);
   let cipher: WebhookCipher | null;
-  if (hit && hit.exp > Date.now()) {
-    cipher = hit.value;
+  if (hit !== undefined) {
+    cipher = hit;
   } else {
     const conn = await db.channelConnection.findUnique({
       where: { teamId_channel: { teamId, channel: "instagram" } },
@@ -173,8 +155,7 @@ export async function getInstagramWebhookConfig(
             igId: config.igId ?? null,
           }
         : null;
-    evictOldestIfOverCap(webhookCache, CONFIG_CACHE_MAX);
-    webhookCache.set(teamId, { value: cipher, exp: Date.now() + CONFIG_TTL_MS });
+    webhookCache.set(teamId, cipher);
   }
   if (!cipher) return null;
   try {

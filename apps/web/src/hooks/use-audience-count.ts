@@ -21,10 +21,16 @@ export function useAudienceCount(
     initial = 0,
     debounceMs = 300,
     channel,
-  }: { initial?: number; debounceMs?: number; channel?: string } = {},
-): { count: number; loading: boolean } {
+    all = false,
+  }: { initial?: number; debounceMs?: number; channel?: string; all?: boolean } = {},
+): { count: number; loading: boolean; resolved: boolean } {
   const [count, setCount] = useState(initial);
   const [loading, setLoading] = useState(false);
+  // `count` is only trustworthy once a request for the CURRENT key succeeded.
+  // Callers that have a sane approximation (the all-channel total, a group's
+  // memberCount) render that until `resolved` flips, instead of showing the 0
+  // this hook leaves behind after an empty-selection run or a failed fetch.
+  const [resolved, setResolved] = useState(false);
 
   // Stable keys so the effect only re-runs on actual membership changes, not
   // on every render that produces a new array identity.
@@ -32,7 +38,11 @@ export function useAudienceCount(
   const contactKey = contactIds.join(",");
 
   useEffect(() => {
-    if (tagIds.length === 0 && contactIds.length === 0) {
+    // A new key invalidates the previous answer until this run succeeds.
+    setResolved(false);
+    // `all` counts every team contact (channel-scoped) with no tag/id selection,
+    // so it must NOT take the empty-selection early return.
+    if (!all && tagIds.length === 0 && contactIds.length === 0) {
       setCount(0);
       setLoading(false);
       return;
@@ -45,7 +55,12 @@ export function useAudienceCount(
         const res = await apiFetch("/api/contacts/count", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ tagIds, contactIds, ...(channel ? { channel } : {}) }),
+          body: JSON.stringify({
+            tagIds,
+            contactIds,
+            ...(channel ? { channel } : {}),
+            ...(all ? { all: true } : {}),
+          }),
           signal: controller.signal,
         });
         // A non-2xx (429 rate-limit, 401 session blip, 500 during an api
@@ -53,7 +68,10 @@ export function useAudienceCount(
         // zero the badge. Throw so the keep-last catch below handles it too.
         if (!res.ok) throw new Error(`count failed: ${res.status}`);
         const data = (await res.json()) as { count?: number };
-        if (!cancelled) setCount(data.count ?? 0);
+        if (!cancelled) {
+          setCount(data.count ?? 0);
+          setResolved(true);
+        }
       } catch {
         // Either an abort (a newer query superseded this one — `cancelled` is
         // already true, so no write), an HTTP error status, or a real network
@@ -71,7 +89,7 @@ export function useAudienceCount(
       window.clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tagKey, contactKey, channel]);
+  }, [tagKey, contactKey, channel, all]);
 
-  return { count, loading };
+  return { count, loading, resolved };
 }

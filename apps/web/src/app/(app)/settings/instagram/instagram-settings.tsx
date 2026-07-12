@@ -8,6 +8,10 @@ import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/layouts/page-header";
+import {
+  PageSubscriptionWarning,
+  type PageSubscription,
+} from "@/components/settings/page-subscription-warning";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 
@@ -22,6 +26,7 @@ export interface InstagramCurrent {
   igAccessToken: string | null;
   appSecret: string | null;
   credentialsUndecryptable?: boolean;
+  webhookSubscription?: PageSubscription | null;
 }
 
 export function InstagramSettings({
@@ -134,6 +139,15 @@ export function InstagramSettings({
             </div>
           )}
         </div>
+
+        {/* Instagram DMs ride the linked Page, so an unsubscribed Page silences
+            IG inbound exactly like Messenger's. Same banner, same remedy. */}
+        {current.connected && (
+          <PageSubscriptionWarning
+            subscription={current.webhookSubscription}
+            channelLabel="Instagram"
+          />
+        )}
       </div>
 
       {canManage && showForm && (

@@ -745,6 +745,7 @@ export class ContactsService {
       tagIds: filter.tagIds,
       window: filter.window,
       stageId: filter.stageId,
+      channel: filter.channel,
     };
   }
 
@@ -1515,15 +1516,15 @@ export class ContactsService {
   countAudience(teamId: string, input: AudienceCountInput): Promise<number> {
     return countAudienceContacts(
       teamId,
-      { tagIds: input.tagIds, contactIds: input.contactIds },
+      { tagIds: input.tagIds, contactIds: input.contactIds, all: input.all },
       input.channel,
     );
   }
 
   /** First N matches for an audience selection (for the preview list). */
   previewAudience(teamId: string, input: AudiencePreviewInput) {
-    const { limit, ...audience } = input;
-    return previewAudienceContacts(teamId, audience, limit);
+    const { limit, channel, ...audience } = input;
+    return previewAudienceContacts(teamId, audience, limit, channel);
   }
 
   /**

@@ -40,10 +40,30 @@ import { drainParkedStatus } from "@/lib/providers/ingest";
  */
 type TxOrDb = Prisma.TransactionClient | typeof db;
 
+/**
+ * `created: false` means the row already existed — a raced duplicate of the same
+ * `externalId`. Callers that publish domain events off the back of the insert
+ * MUST check it: a webhook-driven path (an echo re-delivered by Meta) otherwise
+ * fans out `message.sent` twice for one message, minting two outbound-webhook
+ * deliveries and double-counting analytics.
+ */
+export interface IdempotentCreateResult {
+  message: Message;
+  created: boolean;
+}
+
+/** Convenience wrapper for callers that don't care whether it was a dedup hit. */
 export async function createOutboundMessageIdempotent(
   data: Prisma.MessageUncheckedCreateInput,
   txOrDb?: TxOrDb,
 ): Promise<Message> {
+  return (await createOutboundMessageIdempotentDetailed(data, txOrDb)).message;
+}
+
+export async function createOutboundMessageIdempotentDetailed(
+  data: Prisma.MessageUncheckedCreateInput,
+  txOrDb?: TxOrDb,
+): Promise<IdempotentCreateResult> {
   // Tx path: single attempt, P2002 still returns existing row, no retry.
   // The drain-parked-status fire-and-forget normally happens here too,
   // but inside a tx it could try to drain BEFORE the row commits — and a
@@ -71,7 +91,7 @@ export async function createOutboundMessageIdempotent(
             },
           },
         });
-        if (existing) return existing;
+        if (existing) return { message: existing, created: false };
       }
       throw err;
     }
@@ -100,7 +120,7 @@ export async function createOutboundMessageIdempotent(
         })();
       }, 0);
     }
-    return created;
+    return { message: created, created: true };
   }
 
   const MAX_ATTEMPTS = 5;
@@ -133,7 +153,7 @@ export async function createOutboundMessageIdempotent(
           );
         }
       }
-      return created;
+      return { message: created, created: true };
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError) {
         // P2002: duplicate externalId — legitimate, return existing row.
@@ -151,7 +171,7 @@ export async function createOutboundMessageIdempotent(
               },
             },
           });
-          if (existing) return existing;
+          if (existing) return { message: existing, created: false };
           throw err;
         }
       }

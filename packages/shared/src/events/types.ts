@@ -192,9 +192,10 @@ export interface MessageReactionChangedEvent {
 /**
  * The customer unsent (deleted) or edited a message (WhatsApp revoke/edit,
  * Messenger/Instagram unsend). Only socket-fanout subscribes — it emits
- * `message:updated` to the conversation room so viewers patch the bubble to the
- * tombstone / edited body. No audit/workflow subscribers (a customer editing
- * their own message isn't a business state change to automate on).
+ * `message:updated` to the TEAM room so both the open thread and the inbox
+ * shell's cached background snapshots patch the bubble to the tombstone /
+ * edited body. No audit/workflow subscribers (a customer editing their own
+ * message isn't a business state change to automate on).
  */
 export interface MessageUpdatedEvent {
   teamId: string;
@@ -206,6 +207,16 @@ export interface MessageUpdatedEvent {
   editedAt: string | null;
   /** The (possibly edited) body; null when unchanged/irrelevant. */
   body: string | null;
+  /**
+   * Set ONLY when this correction was the thread's NEWEST message, so the
+   * denormalized inbox-list preview changed. Carries the recomputed preview
+   * text (tombstone / new body) + the newest message's ISO timestamp so
+   * socket-fanout can push a team-room `conversation:preview` frame and the
+   * list updates live instead of waiting for the next read to converge.
+   * Absent for a correction to a non-newest message (bubble patch only).
+   */
+  listPreview?: string;
+  listPreviewAt?: string;
 }
 
 /**

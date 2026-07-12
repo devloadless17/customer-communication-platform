@@ -111,12 +111,16 @@ export const messengerProvider: MessagingProvider<MessengerSendConfig> = {
     externalId: string,
     config: MessengerSendConfig,
   ): Promise<SocialContactProfile> {
-    // Messenger's user node only exposes name + profile_pic (no @username, no
-    // follower/verified signals — those are Instagram-only).
+    // Messenger's user node exposes name, the pre-split first/last name, and
+    // profile_pic (no @username, no follower/verified signals — Instagram-only).
+    // `first_name`/`last_name` beat splitting `name` ourselves, but they need
+    // the profile permission, so a rejection falls back to the core pair rather
+    // than losing the display name entirely.
     return fetchSocialProfile(externalId, {
       accessToken: config.pageAccessToken,
       graphVersion: config.graphVersion,
-      fields: "name,profile_pic",
+      fields: "name,first_name,last_name,profile_pic",
+      fallbackFields: "name,profile_pic",
       label: "messenger",
     });
   },

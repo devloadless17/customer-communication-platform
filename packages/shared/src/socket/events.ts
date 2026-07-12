@@ -94,6 +94,13 @@ export interface ServerToClientEvents {
    * (our internal id). `deletedAt` set → render "deleted"; `editedAt` + `body`
    * set → replace the text with an "edited" marker.
    */
+  /**
+   * The customer unsent (deleted) or edited a message. TEAM-scoped, not
+   * conversation-scoped: this event is in `THREAD_REDUCER_EVENTS`, so the inbox
+   * shell patches its CACHED (background) thread snapshots from it, and those
+   * conversations' rooms were never joined. Rare enough (a customer correcting
+   * their own message) that the team frame costs nothing.
+   */
   "message:updated": (payload: {
     teamId: string;
     conversationId: string;
@@ -101,6 +108,23 @@ export interface ServerToClientEvents {
     deletedAt: string | null;
     editedAt: string | null;
     body: string | null;
+  }) => void;
+
+  /**
+   * The inbox-list preview for a conversation changed WITHOUT a new message —
+   * fired when the customer unsends/edits the thread's NEWEST message, so the
+   * denormalized `lastMessagePreview` (tombstone / edited text) updates live in
+   * the list instead of waiting for the next read to converge. Team-scoped (the
+   * list is team-wide); the sibling `message:updated` frame patches the open
+   * thread's bubble. Carries no unread/assignment change and must not re-sort
+   * the row — `lastMessageAt` is the newest message's own (unchanged) time,
+   * forwarded only for the list's recency guard.
+   */
+  "conversation:preview": (payload: {
+    teamId: string;
+    conversationId: string;
+    preview: string;
+    lastMessageAt: string | null;
   }) => void;
 
   /**

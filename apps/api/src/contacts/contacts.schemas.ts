@@ -15,19 +15,35 @@ export const SetContactTagsSchema = z.object({
 });
 export type SetContactTagsInput = z.infer<typeof SetContactTagsSchema>;
 
-export const AudienceCountSchema = z.object({
-  tagIds: z.array(z.string().min(1)).max(MAX_IDS).default([]),
-  contactIds: z.array(z.string().min(1)).max(MAX_IDS).default([]),
-  /** Scope the count to one channel — a broadcast sends on a single channel, so
-   *  the composer count must match what actually gets sent. Omit = all channels. */
-  channel: z.enum(["whatsapp", "messenger", "instagram"]).optional(),
-});
+export const AudienceCountSchema = z
+  .object({
+    tagIds: z.array(z.string().min(1)).max(MAX_IDS).default([]),
+    contactIds: z.array(z.string().min(1)).max(MAX_IDS).default([]),
+    /** Scope the count to one channel — a broadcast sends on a single channel, so
+     *  the composer count must match what actually gets sent. Omit = all channels. */
+    channel: z.enum(["whatsapp", "messenger", "instagram"]).optional(),
+    /** "All contacts" audience: count every team contact (tags/ids ignored),
+     *  optionally scoped to `channel`. Distinct from the empty tags+ids case, which
+     *  deliberately counts 0 so an unset custom audience never targets everyone. */
+    all: z.boolean().optional(),
+  })
+  // `all` IGNORES tagIds/contactIds server-side, so accepting both would silently
+  // answer a different question than the caller asked ("all contacts tagged VIP"
+  // → the whole team). Make the conflict a 400 instead of a wrong number.
+  .refine((v) => !(v.all && (v.tagIds.length > 0 || v.contactIds.length > 0)), {
+    message: "`all` cannot be combined with tagIds/contactIds",
+    path: ["all"],
+  });
 export type AudienceCountInput = z.infer<typeof AudienceCountSchema>;
 
 export const AudiencePreviewSchema = z.object({
   tagIds: z.array(z.string().min(1)).max(MAX_IDS).default([]),
   contactIds: z.array(z.string().min(1)).max(MAX_IDS).default([]),
   limit: z.number().int().min(1).max(200).default(50),
+  /** Scope the preview to one channel, mirroring `AudienceCountSchema`. A
+   *  broadcast sends on a single channel, so "who am I sending to" must show the
+   *  same set the count and the send resolve. Omit = all channels. */
+  channel: z.enum(["whatsapp", "messenger", "instagram"]).optional(),
 });
 export type AudiencePreviewInput = z.infer<typeof AudiencePreviewSchema>;
 
@@ -196,6 +212,10 @@ export const BulkFilterSchema = z.object({
   tagIds: z.array(z.string().min(1)).max(MAX_IDS).optional(),
   window: z.enum(["open", "closed"]).optional(),
   stageId: z.string().min(1).optional(),
+  // Load-bearing: without this, a "select all N matching" bulk op run while the
+  // list is scoped to one channel silently targets every channel's contacts —
+  // the superset the agent explicitly filtered out and never saw.
+  channel: z.enum(["whatsapp", "messenger", "instagram"]).optional(),
 });
 export type BulkFilterInput = z.infer<typeof BulkFilterSchema>;
 

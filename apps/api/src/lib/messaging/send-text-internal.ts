@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
+import { checkTextCap } from "@/lib/messaging/text-cap";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getProviderBinding } from "@/lib/providers";
 import {
@@ -14,7 +15,11 @@ import {
 } from "@/lib/providers/channel";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Message } from "@ccp/shared/types";
-import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
+import {
+  computeWindowStatus,
+  effectiveSendWindowMs,
+  outsideFreeFormWindow,
+} from "@ccp/shared/utils/window";
 
 /**
  * Slim "send a free-form text to this conversation" helper used by the
@@ -49,7 +54,14 @@ export class SendTextValidationError extends Error {
     | "contact_has_no_phone"
     | "provider_not_configured"
     | "outside_24h_window"
-    | "empty_body";
+    | "empty_body"
+    // Body exceeds the channel's `messageTextMaxChars`. Parity with the composer
+    // and `/v1`, which both reject up front rather than letting Meta fail the
+    // send with an opaque error deep inside the worker.
+    | "message_too_long"
+    // Consent chips (`contactShare`) asked for on a channel whose capabilities
+    // don't declare `contactShareChips` — WhatsApp today.
+    | "contact_share_not_supported";
   detail?: string;
 
   constructor(
@@ -121,6 +133,16 @@ export async function sendTextInternal(
   }
   const provider = conversation.channel;
   const binding = getProviderBinding(provider);
+
+  // Channel text-length cap, same gate the composer and `/v1` apply. Without it a
+  // workflow `send_message` whose rendered body overran the channel's limit
+  // reached Meta, got rejected, and surfaced to the team as a generic step
+  // failure with nothing actionable in it.
+  const tooLong = checkTextCap(body, binding.provider.capabilities, provider);
+  if (tooLong) {
+    throw new SendTextValidationError("message_too_long", tooLong.detail);
+  }
+
   const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
 
   // Free-form send window — pre-check on our side so we surface a clean error
@@ -141,15 +163,12 @@ export async function sendTextInternal(
 
   // Meta social: inside the 24h free-form window Meta wants `messaging_type:
   // RESPONSE` (no tag); in the 24h–7d support band it needs the HUMAN_AGENT tag.
-  // The other three send paths (UI text/media, /v1) already derive this — without
-  // it here, every workflow-driven social send goes out HUMAN_AGENT even inside
-  // 24h, which Meta flags as tag misuse. Ignored by WhatsApp (window null).
-  const freeFormMs = binding.provider.capabilities.freeFormWindowMs;
-  const useHumanAgentTag =
-    freeFormMs !== null &&
-    ["closed", "never"].includes(
-      computeWindowStatus(lastInboundAt, Date.now(), freeFormMs).state,
-    );
+  // Shared with every other send path via `outsideFreeFormWindow`. Ignored by
+  // WhatsApp (window null).
+  const useHumanAgentTag = outsideFreeFormWindow(
+    binding.provider.capabilities.freeFormWindowMs,
+    lastInboundAt,
+  );
 
   let sendConfig;
   try {

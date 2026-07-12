@@ -148,12 +148,21 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
-  // Customer unsent / edited a message. Conversation-room scoped, same
-  // reasoning as reactions — only thread viewers patch the bubble to the
-  // tombstone / edited body. (The list preview is refreshed separately when a
-  // deletion clears the last message; not modeled here to keep the frame small.)
+  // Customer unsent / edited a message. TEAM-room scoped, unlike reactions and
+  // status ticks: `message:updated` is in THREAD_REDUCER_EVENTS, so the inbox
+  // shell's LRU ThreadCache patches its CACHED snapshots from it — and a cached
+  // background thread's socket never joined `conv:<id>`, so a conversation-room
+  // frame silently skipped it. The agent would then open that thread and see the
+  // original text of a message the list already showed as deleted. Corrections
+  // (customer unsend/edit) are rare, so one small team frame is the right cost
+  // for making all three thread consumers converge (CLAUDE.md §10).
+  //
+  // When the correction hit the thread's NEWEST message the denormalized list
+  // preview also changed: the event carries `listPreview`, and we push a second
+  // team frame (`conversation:preview`) that the inbox LIST consumes — the list
+  // doesn't read thread events, and thread consumers don't read the preview.
   "message.updated": (e, emitter) => {
-    emitter.emitToConversation(e.conversationId, "message:updated", {
+    emitter.emitToTeam(e.teamId, "message:updated", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       messageId: e.messageId,
@@ -161,6 +170,14 @@ export const FANOUT_RULES: FanoutRuleMap = {
       editedAt: e.editedAt,
       body: e.body,
     });
+    if (e.listPreview !== undefined) {
+      emitter.emitToTeam(e.teamId, "conversation:preview", {
+        teamId: e.teamId,
+        conversationId: e.conversationId,
+        preview: e.listPreview,
+        lastMessageAt: e.listPreviewAt ?? null,
+      });
+    }
   },
 
   // Background send worker failed. Emit team-wide (same shape as message:new

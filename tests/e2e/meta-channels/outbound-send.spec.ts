@@ -14,7 +14,6 @@ import { test, expect } from "@playwright/test";
 import { db } from "../_helpers/db";
 import {
   seedMetaTestTeam,
-  wipeMetaTestTeam,
   seedSocialConversation,
   v1Send,
   resetMock,
@@ -31,9 +30,14 @@ let apiToken: string;
 test.beforeAll(async () => {
   ({ apiToken } = await seedMetaTestTeam());
 });
-test.afterAll(async () => {
-  await wipeMetaTestTeam();
-});
+// NO afterAll wipe. Specs share one serial worker and one isolated api, and that
+// api caches provider config for 60s with no invalidation on a DB wipe — so a
+// MID-RUN delete→reseed leaves every later spec pointing at a ChannelConnection
+// that no longer exists, and their social webhooks silently stop ingesting.
+// This spec used to wipe here, which was harmless only while it happened to sort
+// first; adding any spec before it (`audit-fixes-…`) turned the whole suite red.
+// Only the LAST spec (`webhook-ingest`) wipes, so filename order stays
+// irrelevant. Seeds are idempotent upserts and our external ids are unique.
 test.beforeEach(async () => {
   await resetMock();
 });

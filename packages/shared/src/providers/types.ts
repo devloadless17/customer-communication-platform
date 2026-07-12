@@ -205,6 +205,14 @@ export interface NormalizedCallEvent {
    */
   contactPhone?: string;
   externalContactId?: string;
+  /**
+   * WhatsApp business-scoped user id (BSUID). Meta omits `wa_id` for contacts
+   * not messaged in the last 30 days, so a cold caller arrives identified by a
+   * BSUID and no phone. A BSUID is NOT a phone number and must never be
+   * digit-stripped into one — carry it here and let ingest resolve on it, the
+   * same way the inbound-message path does.
+   */
+  bsuid?: string;
   contactName: string | null;
   direction: "in" | "out";
   /**
@@ -517,7 +525,24 @@ export interface SendInteractiveArgs {
   replyToExternalId?: string;
   /** Meta social only — see SendTextArgs.useHumanAgentTag. */
   useHumanAgentTag?: boolean;
+  /**
+   * Ask the contact to share their phone and/or email in ONE TAP, as consent
+   * chips rendered beside the regular options. Only channels whose capabilities
+   * declare `contactShareChips` accept this (Messenger + Instagram; WhatsApp has
+   * no equivalent interactive type). Meta pre-fills the value from the customer's
+   * profile and hides the chip entirely when their profile has no such value.
+   *
+   * This is the ONLY route by which a social contact's phone/email can ever reach
+   * us — and therefore the only way a Messenger/Instagram contact becomes
+   * auto-mergeable into a unified `Customer` (identity resolution keys on exact
+   * phone/email; see docs/identity.md). A tap shares the value once and grants
+   * no standing access to it.
+   */
+  contactShare?: ContactShareField[];
 }
+
+/** A profile field a social contact can share with one tap. */
+export type ContactShareField = "phone" | "email";
 
 export interface UploadMediaArgs {
   bytes: Uint8Array;
@@ -812,6 +837,22 @@ export interface ProviderCapabilities {
    * Messenger).
    */
   mediaSendByUrl?: boolean;
+  /**
+   * The channel exposes a fetchable contact PROFILE (display name / picture, and
+   * for Instagram follower/verified/follow signals) that we can Sync on demand —
+   * i.e. the provider implements `fetchContactProfile`. Drives the contact
+   * panel's "Refresh profile" affordance. Meta social (Messenger/Instagram) only;
+   * WhatsApp carries the name inline and has no richer profile to pull.
+   */
+  profileSync?: boolean;
+  /**
+   * The channel supports one-tap consent chips that let the contact share their
+   * phone / email (`SendInteractiveArgs.contactShare`). Messenger + Instagram
+   * only: Meta exposes `content_type: "user_phone_number" | "user_email"` quick
+   * replies there. WhatsApp has no equivalent — it already knows the phone, and
+   * its interactive types (buttons / list / CTA-url / flows) have no such chip.
+   */
+  contactShareChips?: boolean;
 }
 
 export interface MessagingProvider<SendConfig = unknown> {
@@ -838,6 +879,10 @@ export interface MessagingProvider<SendConfig = unknown> {
     config: SendConfig,
   ): Promise<{
     name: string | null;
+    /** Provider-supplied name split (Messenger `first_name`/`last_name`). When
+     *  present ingest uses it verbatim instead of guessing a split point. */
+    firstName?: string | null;
+    lastName?: string | null;
     /** Instagram public @username, when the profile exposes one. */
     username?: string | null;
     /** Profile picture URL (Meta CDN), when available. Best-effort avatar. */

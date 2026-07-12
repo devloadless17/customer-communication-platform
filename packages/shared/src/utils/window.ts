@@ -42,6 +42,25 @@ export function effectiveSendWindowMs(caps: {
   return caps.humanAgentWindowMs ?? caps.freeFormWindowMs;
 }
 
+/**
+ * Meta social only: is a send OUTSIDE the free-form (24h) window — i.e. in the
+ * 24h–7d support band where the Human Agent tag is required? Within 24h the send
+ * uses `messaging_type: RESPONSE` (no tag). Returns false when the channel has no
+ * window model (`freeFormMs` null), so a non-social channel never forces the tag.
+ * Single source of truth for the tag decision across every send path (internal
+ * UI text/media/interactive, workflow steps, and the /v1 API) — reuses
+ * `computeWindowStatus` for boundary parity with the preflight window check.
+ */
+export function outsideFreeFormWindow(
+  freeFormMs: number | null,
+  lastInboundAt: string | null,
+  now: number = Date.now(),
+): boolean {
+  if (freeFormMs === null) return false;
+  const { state } = computeWindowStatus(lastInboundAt, now, freeFormMs);
+  return state === "closed" || state === "never";
+}
+
 export interface WindowStatus {
   state: WindowState;
   /** ISO timestamp of the last inbound, or null if there's never been one. */

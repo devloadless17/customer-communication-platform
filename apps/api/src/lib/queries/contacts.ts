@@ -9,7 +9,7 @@ import type {
   CursorPage,
 } from "@ccp/shared/types";
 
-import { clampTake, normalizeCustomFields } from "./_shared";
+import { clampTake, normalizeCustomFields, siblingChannelsByCustomer } from "./_shared";
 import { encodeContactCursor, parseContactCursor } from "./_cursors";
 
 export const CONTACTS_PAGE = 50;
@@ -430,19 +430,16 @@ export async function listPeople(
   const customerIds = [
     ...new Set(rows.map((r) => r.customerId).filter((v): v is string => !!v)),
   ];
+  // Dedup each person's sibling contacts down to the distinct channels they span
+  // (the list row only needs the channel set, not the per-channel conversation).
+  const siblingsByCustomer = await siblingChannelsByCustomer(teamId, customerIds);
   const channelsByCustomer = new Map<string, Channel[]>();
-  if (customerIds.length > 0) {
-    const siblings = await db.contact.findMany({
-      where: { teamId, deletedAt: null, customerId: { in: customerIds } },
-      select: { customerId: true, identityChannel: true },
-    });
+  for (const [customerId, siblings] of siblingsByCustomer) {
+    const channels: Channel[] = [];
     for (const s of siblings) {
-      if (!s.customerId) continue;
-      const list = channelsByCustomer.get(s.customerId) ?? [];
-      const ch = s.identityChannel as Channel;
-      if (!list.includes(ch)) list.push(ch);
-      channelsByCustomer.set(s.customerId, list);
+      if (!channels.includes(s.channel)) channels.push(s.channel);
     }
+    channelsByCustomer.set(customerId, channels);
   }
 
   const tagIdsByContact = new Map<string, string[]>();

@@ -1157,6 +1157,8 @@ export function AskQuestionEditor({
     answerKind?: AnswerKind;
     options?: AskOption[];
     listCtaLabel?: string;
+    /** Meta one-tap consent chips; buttons/list + social channels only. */
+    contactShare?: Array<"phone" | "email">;
     numberMin?: number;
     numberMax?: number;
     saveTo?: AskQuestionSaveTo;
@@ -1208,7 +1210,17 @@ export function AskQuestionEditor({
       next !== "buttons" &&
       next !== "list";
     if (next === "free_text") {
-      const { options: _o, listCtaLabel: _l, numberMin: _nmin, numberMax: _nmax, ...rest } = config;
+      // `contactShare` rides the interactive send, so it must be dropped with the
+      // other interactive-shape fields — the step's parseConfig rejects it on a
+      // non-buttons/list kind, which would fail the publish rather than silently.
+      const {
+        options: _o,
+        listCtaLabel: _l,
+        contactShare: _cs,
+        numberMin: _nmin,
+        numberMax: _nmax,
+        ...rest
+      } = config;
       const nextConfig = { ...rest, answerKind: undefined };
       if (leavingOptionKind) {
         onChangeWithEdges(nextConfig, { kind: "remove_all_options", optionId: "" });
@@ -1219,8 +1231,8 @@ export function AskQuestionEditor({
     }
     if (next === "number" || next === "date") {
       // Drop interactive shape fields so a switch buttons → number doesn't
-      // carry stale options through.
-      const { options: _o, listCtaLabel: _l, ...rest } = config;
+      // carry stale options (or consent chips) through.
+      const { options: _o, listCtaLabel: _l, contactShare: _cs, ...rest } = config;
       const nextConfig = { ...rest, answerKind: next };
       if (leavingOptionKind) {
         onChangeWithEdges(nextConfig, { kind: "remove_all_options", optionId: "" });
@@ -1445,6 +1457,38 @@ export function AskQuestionEditor({
             maxLength={20}
             className="max-w-50"
           />
+        </Field>
+      )}
+
+      {(answerKind === "buttons" || answerKind === "list") && (
+        <Field
+          label="Also ask them to share (Messenger / Instagram only)"
+          hint="Meta shows a one-tap chip pre-filled from the contact's profile (hidden if they haven't set it). This is the only way a social contact's phone or email can reach us — and the only way they auto-merge with their WhatsApp profile. WhatsApp has no such chip; the step routes to the timeout edge there."
+        >
+          <div className="flex items-center gap-4">
+            {(["phone", "email"] as const).map((field) => {
+              const selected = config.contactShare ?? [];
+              const checked = selected.includes(field);
+              return (
+                <label key={field} className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => {
+                      const next = e.target.checked
+                        ? [...selected, field]
+                        : selected.filter((f) => f !== field);
+                      onChange({
+                        ...config,
+                        contactShare: next.length > 0 ? next : undefined,
+                      });
+                    }}
+                  />
+                  {field === "phone" ? "Phone number" : "Email address"}
+                </label>
+              );
+            })}
+          </div>
         </Field>
       )}
 

@@ -435,3 +435,51 @@ export async function seedSocialConversation(o: {
   });
   return { contactId: contact.id, conversationId: conversation.id };
 }
+
+/** POST /v1/conversations/:id/interactive — buttons / list / consent chips. */
+export async function v1SendInteractive(
+  apiToken: string,
+  conversationId: string,
+  body: {
+    body: string;
+    kind: "buttons" | "list";
+    options: Array<{ id: string; title: string; description?: string }>;
+    listCtaLabel?: string;
+    contactShare?: Array<"phone" | "email">;
+  },
+  idempotencyKey: string,
+): Promise<{ status: number; json: any }> {
+  const res = await fetch(
+    `${META_API_BASE}/api/external/v1/conversations/${conversationId}/interactive`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiToken}`,
+        "idempotency-key": idempotencyKey,
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  const text = await res.text();
+  let json: unknown = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = { __raw: text };
+  }
+  return { status: res.status, json };
+}
+
+/**
+ * Arm the mock Graph to fail the NEXT send with `status` (default 500), then
+ * behave normally. Drives the ambiguous-send path: with a 5xx, Meta may or may
+ * not have delivered, so the idempotency claim must be RETAINED.
+ */
+export async function failNextMetaSend(status = 500, count = 1): Promise<void> {
+  await fetch(`${GRAPH_MOCK_BASE}/__mock/fail-next-send`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status, count }),
+  });
+}

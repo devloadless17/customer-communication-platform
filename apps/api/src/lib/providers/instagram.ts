@@ -115,6 +115,10 @@ export const instagramProvider: MessagingProvider<InstagramSendConfig> = {
       graphVersion: config.graphVersion,
       fields:
         "name,username,profile_pic,follower_count,is_verified_user,is_user_follow_business,is_business_follow_user",
+      // The follow/verified signals need `instagram_manage_messages` on a
+      // business-linked account; without it Graph rejects the whole node
+      // request, so fall back to the identity core rather than lose the handle.
+      fallbackFields: "name,username,profile_pic",
       label: "instagram",
     });
   },

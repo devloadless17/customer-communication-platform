@@ -95,11 +95,12 @@ export default function ApiDocsPage() {
           <div>
             <dt className="font-semibold text-foreground">Idempotency</dt>
             <dd className="text-muted-foreground">
-              The two send routes (<code>POST /messages</code>,{" "}
-              <code>POST /conversations/:id/messages</code>) <strong>require</strong>{" "}
-              an <code>Idempotency-Key</code> header — reuse it on a retry and we
-              never double-send (the inbound message id is a good key). Other
-              mutations accept it optionally.
+              The send routes (<code>POST /messages</code>,{" "}
+              <code>POST /conversations/:id/messages</code>,{" "}
+              <code>POST /conversations/:id/interactive</code>){" "}
+              <strong>require</strong> an <code>Idempotency-Key</code> header —
+              reuse it on a retry and we never double-send (the inbound message
+              id is a good key). Other mutations accept it optionally.
             </dd>
           </div>
           <div>
@@ -370,6 +371,31 @@ export default function ApiDocsPage() {
           Send a WhatsApp text. 24h-window enforced. Idempotency via{" "}
           <code>Idempotency-Key</code> header. Sending into a closed thread
           reopens it (closed → pending) once the send lands, like an inbox reply.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/conversations/:id/interactive"
+          body={{
+            body: "How would you like your order?",
+            kind: "buttons",
+            options: [
+              { id: "pickup", title: "Pick up" },
+              { id: "deliver", title: "Deliver" },
+            ],
+            contactShare: ["phone"],
+          }}
+          headers={{ "Idempotency-Key": "<uuid>" }}
+        >
+          Tappable options — <code>kind: &quot;buttons&quot;</code> or{" "}
+          <code>kind: &quot;list&quot;</code> (up to 10). Option <code>id</code>s
+          and <code>title</code>s must each be unique. On Messenger &amp;
+          Instagram you can also add <code>contactShare</code> consent chips (
+          <code>&quot;phone&quot;</code> / <code>&quot;email&quot;</code>) that
+          let the customer share those details in one tap from their Meta
+          profile — the only way a social contact&apos;s phone or email ever
+          reaches you. WhatsApp has no such chip and returns{" "}
+          <code>422 contact_share_not_supported</code>. Requires{" "}
+          <code>Idempotency-Key</code>.
         </Endpoint>
         <Endpoint
           method="POST"

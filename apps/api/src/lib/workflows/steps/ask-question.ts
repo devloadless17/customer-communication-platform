@@ -17,7 +17,7 @@ import { toContactWire } from "@/lib/queries/_shared";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 import type { Contact } from "@ccp/shared/types";
-import type { InteractiveOption } from "@ccp/shared/providers/types";
+import type { ContactShareField, InteractiveOption } from "@ccp/shared/providers/types";
 
 import {
   type StepHandler,
@@ -133,6 +133,17 @@ export interface AskQuestionStepConfig {
   answerKind?: AskQuestionAnswerKind;
   options?: InteractiveOption[];
   listCtaLabel?: string;
+  /**
+   * Buttons/list only, Messenger + Instagram only: also offer Meta's one-tap
+   * "share your phone / email" consent chips beside the options. The tapped
+   * value is written to the contact and folds them into the right unified
+   * `Customer` (`applyContactShareFromReply`) — the only route by which a social
+   * contact ever gains a mergeable strong key. On a channel without the
+   * `contactShareChips` capability (WhatsApp) the send raises
+   * `contact_share_not_supported`, which routes to the `timeout` edge like any
+   * other send failure, so the author's fallback branch still runs.
+   */
+  contactShare?: ContactShareField[];
   /** number kind only: inclusive bounds. */
   numberMin?: number;
   numberMax?: number;
@@ -239,6 +250,32 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
       }
       options = parsed;
     }
+    // Consent chips ride the interactive send, so they only mean something for
+    // buttons/list. Reject at publish time rather than silently dropping them.
+    let contactShare: ContactShareField[] | undefined;
+    if (r.contactShare !== undefined) {
+      if (!Array.isArray(r.contactShare)) {
+        throw new StepConfigError("ask_question.contactShare must be an array");
+      }
+      const seenShare = new Set<string>();
+      for (const f of r.contactShare) {
+        if (f !== "phone" && f !== "email") {
+          throw new StepConfigError(
+            `ask_question.contactShare entries must be "phone" or "email" (got ${JSON.stringify(f)})`,
+          );
+        }
+        if (seenShare.has(f)) {
+          throw new StepConfigError(`ask_question.contactShare has duplicate entry "${f}"`);
+        }
+        seenShare.add(f);
+      }
+      if (seenShare.size > 0 && answerKind !== "buttons" && answerKind !== "list") {
+        throw new StepConfigError(
+          'ask_question.contactShare requires answerKind="buttons" or "list"',
+        );
+      }
+      if (seenShare.size > 0) contactShare = [...seenShare] as ContactShareField[];
+    }
     const listCtaLabel =
       typeof r.listCtaLabel === "string" && r.listCtaLabel.trim()
         ? r.listCtaLabel
@@ -268,6 +305,7 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
       ...(saveTo ? { saveTo } : {}),
       ...(answerKind !== "free_text" ? { answerKind } : {}),
       ...(options ? { options } : {}),
+      ...(contactShare ? { contactShare } : {}),
       ...(listCtaLabel ? { listCtaLabel } : {}),
       ...(numberMin !== undefined ? { numberMin } : {}),
       ...(numberMax !== undefined ? { numberMax } : {}),
@@ -438,6 +476,7 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
           bodyText: body,
           kind: config.answerKind,
           options: config.options ?? [],
+          ...(config.contactShare?.length ? { contactShare: config.contactShare } : {}),
           ...(config.listCtaLabel ? { listCtaLabel: config.listCtaLabel } : {}),
           sentVia: `workflow/${ctx.workflowId}`,
         });

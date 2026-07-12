@@ -42,6 +42,8 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     typingIndicators: true,
     interactive: true,
     calling: true,
+    profileSync: true,
+    contactShareChips: true,
   },
   // Instagram DM: same 24h + 7-day human-agent window as Messenger. No templates.
   // Calling stays FALSE: Meta ships NO Instagram calling API (only Messenger
@@ -58,6 +60,8 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     calling: false,
     // Instagram media send is URL-based (payload.url), not upload/attachment_id.
     mediaSendByUrl: true,
+    profileSync: true,
+    contactShareChips: true,
   },
 
   // ---- DESIGNED-FOR, NOT YET IMPLEMENTED (see LIVE_CHANNELS) ----------------

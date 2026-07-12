@@ -34,6 +34,7 @@ import { assertReducerCoverage } from "@/features/inbox/lib/thread-reducers";
 import { usePanelResize } from "@/features/inbox/hooks/use-panel-resize";
 import { INBOX_DETAILS_WIDTH_COOKIE } from "@/features/inbox/lib/panel-cookies";
 import { CHANNEL_LABEL } from "./channel-badge";
+import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import { LinkedChannels } from "./linked-channels";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type {
@@ -677,8 +678,10 @@ function ContactPanelImpl({
 
   // Social channels expose a richer profile on Meta than the inbound webhook
   // carries; this pulls it on demand (name / @username / avatar / follower +
-  // verified signals). Phone channels (WhatsApp) have nothing extra to sync.
-  const canSyncProfile = panelChannel !== "whatsapp";
+  // verified signals). Capability-driven so a future channel opts in explicitly
+  // rather than being inferred from "not WhatsApp" (which would wrongly show the
+  // button for SMS / Email / Telegram once they ship).
+  const canSyncProfile = CHANNEL_CAPABILITIES[panelChannel]?.profileSync ?? false;
   async function syncProfile() {
     if (syncing) return;
     setSyncing(true);

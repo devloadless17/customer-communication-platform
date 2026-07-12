@@ -1,5 +1,6 @@
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
+import { TtlCache } from "@/lib/providers/config-cache";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 
 /**
@@ -99,20 +100,9 @@ const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
  * (phone number id is in every webhook payload) or shared-with-Meta
  * (verify token is the GET-challenge handshake value).
  *
- * Single-process only by design (CLAUDE.md: one VPS, one app instance).
- * The day a second instance shows up this moves to Redis alongside the
- * Socket.io adapter — and the same "store ciphertext, decrypt-on-demand"
- * invariant applies there.
+ * The TTL/cap/sweep mechanics live in the shared `TtlCache` primitive
+ * (config-cache.ts); this file only owns the WhatsApp config shape + loaders.
  */
-const CONFIG_TTL_MS = 60_000;
-// Bound the per-team caches so a multi-tenant scale-up doesn't grow them
-// unboundedly. 10k teams is comfortably above the documented "~5 tenants"
-// trigger threshold from CLAUDE.md — entries past that get LRU-evicted
-// on insert. Periodic sweep drops expired entries on top of that so
-// memory stays bounded even before the cap kicks in.
-const CONFIG_CACHE_MAX = 10_000;
-const CONFIG_SWEEP_INTERVAL_MS = 5 * 60_000;
-
 interface SendConfigCipher {
   phoneNumberId: string;
   accessTokenCipher: string;
@@ -128,29 +118,8 @@ interface WebhookConfigCipher {
 type CachedSend =
   | { kind: "ok"; cipher: SendConfigCipher }
   | { kind: "err"; missing: readonly string[] };
-const sendCache = new Map<string, { entry: CachedSend; exp: number }>();
-const webhookCache = new Map<
-  string,
-  { value: WebhookConfigCipher | null; exp: number }
->();
-
-function evictExpired<V extends { exp: number }>(map: Map<string, V>): void {
-  const now = Date.now();
-  for (const [k, v] of map) {
-    if (v.exp <= now) map.delete(k);
-  }
-}
-function evictOldestIfOverCap<V>(map: Map<string, V>, max: number): void {
-  if (map.size < max) return;
-  const oldest = map.keys().next().value;
-  if (oldest !== undefined) map.delete(oldest);
-}
-
-const configSweeper = setInterval(() => {
-  evictExpired(sendCache);
-  evictExpired(webhookCache);
-}, CONFIG_SWEEP_INTERVAL_MS);
-configSweeper.unref?.();
+const sendCache = new TtlCache<CachedSend>();
+const webhookCache = new TtlCache<WebhookConfigCipher | null>();
 
 /** Drop cached credentials for a team. Call after the settings page writes. */
 export function invalidateProviderConfig(teamId: string): void {
@@ -227,15 +196,14 @@ function materializeSendConfig(
  */
 export async function getMetaSendConfig(teamId: string): Promise<MetaSendConfig> {
   const hit = sendCache.get(teamId);
-  if (hit && hit.exp > Date.now()) {
-    if (hit.entry.kind === "err") {
-      throw new ProviderNotConfiguredError(teamId, [...hit.entry.missing]);
+  if (hit) {
+    if (hit.kind === "err") {
+      throw new ProviderNotConfiguredError(teamId, [...hit.missing]);
     }
-    return materializeSendConfig(teamId, hit.entry.cipher);
+    return materializeSendConfig(teamId, hit.cipher);
   }
   const entry = await loadSendCipher(teamId);
-  evictOldestIfOverCap(sendCache, CONFIG_CACHE_MAX);
-  sendCache.set(teamId, { entry, exp: Date.now() + CONFIG_TTL_MS });
+  sendCache.set(teamId, entry);
   if (entry.kind === "err") {
     throw new ProviderNotConfiguredError(teamId, [...entry.missing]);
   }
@@ -286,8 +254,8 @@ export async function getMetaWebhookConfig(
 ): Promise<MetaWebhookConfig | null> {
   const hit = webhookCache.get(teamId);
   let cipher: WebhookConfigCipher | null;
-  if (hit && hit.exp > Date.now()) {
-    cipher = hit.value;
+  if (hit !== undefined) {
+    cipher = hit;
   } else {
     const conn = await db.channelConnection.findUnique({
       where: { teamId_channel: { teamId, channel: "whatsapp" } },
@@ -303,8 +271,7 @@ export async function getMetaWebhookConfig(
             phoneNumberId: config.phoneNumberId ?? null,
           }
         : null;
-    evictOldestIfOverCap(webhookCache, CONFIG_CACHE_MAX);
-    webhookCache.set(teamId, { value: cipher, exp: Date.now() + CONFIG_TTL_MS });
+    webhookCache.set(teamId, cipher);
   }
   if (!cipher) return null;
   try {

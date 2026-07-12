@@ -106,6 +106,31 @@ export const ExternalTopLevelSendMessageSchema = z.object({
               filename: z.string().max(255).optional(),
             })
             .optional(),
+          // NAMED-format bodies (`parameter_format: NAMED`, `{{order_id}}`).
+          // When present the provider ignores the positional `body` array.
+          bodyNamed: z
+            .array(
+              z.object({
+                name: z.string().min(1).max(80),
+                text: z.string().max(MAX_TEXT),
+              }),
+            )
+            .max(32)
+            .optional(),
+          // Send-time parameters for dynamic buttons: a URL button's `{{1}}`
+          // suffix, a coupon copy-code, or a quick-reply payload. Meta rejects
+          // the send without them, so a template with one is undeliverable
+          // unless the caller supplies it here.
+          buttons: z
+            .array(
+              z.object({
+                index: z.number().int().min(0).max(9),
+                subType: z.enum(["url", "copy_code", "quick_reply"]),
+                text: z.string().min(1).max(MAX_TEXT),
+              }),
+            )
+            .max(10)
+            .optional(),
         })
         .default({ body: [] }),
     })
@@ -368,3 +393,65 @@ export const ExternalUpdateTagSchema = z
   })
   .refine((b) => Object.keys(b).length > 0, { message: "nothing to update" });
 export type ExternalUpdateTagInput = z.infer<typeof ExternalUpdateTagSchema>;
+
+// ===========================================================================
+// NEW — interactive send (buttons / list / consent chips)
+// ===========================================================================
+
+/**
+ * Body for `POST /v1/conversations/:id/interactive`. Mirrors the internal
+ * `SendInteractiveSchema` (apps/api/src/messages/messages.schemas.ts) field for
+ * field, minus `conversationId` (it's the path param) and `clientTempId` (`/v1`
+ * dedupes on the mandatory `Idempotency-Key` header instead).
+ *
+ * This endpoint exists because §12 locks `/v1` to full parity with the UI, and
+ * `contactShare` — Meta's one-tap "share your phone / email" consent chips — was
+ * reachable only from the composer. Those chips are the ONLY way a Messenger /
+ * Instagram contact's phone or email ever reaches us, and therefore the only
+ * source of a self-asserted email that may auto-merge a unified Customer
+ * (docs/identity.md). An automation that can't send them can't build a person.
+ */
+export const ExternalSendInteractiveSchema = z
+  .object({
+    body: z.string().trim().min(1).max(1024),
+    kind: z.enum(["buttons", "list"]),
+    options: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(256),
+          title: z.string().min(1).max(24),
+          description: z.string().max(72).optional(),
+        }),
+      )
+      .min(1)
+      .max(10),
+    listCtaLabel: z.string().min(1).max(20).optional(),
+    contactShare: z.array(z.enum(["phone", "email"])).max(2).optional(),
+  })
+  .refine((b) => new Set(b.contactShare ?? []).size === (b.contactShare ?? []).length, {
+    message: "contactShare must not repeat a field",
+    path: ["contactShare"],
+  })
+  // The three refines below MUST stay identical to `SendInteractiveSchema`
+  // (apps/api/src/messages/messages.schemas.ts). §12 makes /v1 a mirror of the
+  // UI; a partner sending the same body an agent can send must get the same
+  // answer, not an opaque Meta error the composer would have caught.
+  .refine((b) => b.kind !== "buttons" || b.options.length <= 3, {
+    message: "buttons supports at most 3 options — use kind=list for more",
+    path: ["options"],
+  })
+  .refine((b) => new Set(b.options.map((o) => o.id)).size === b.options.length, {
+    message: "option ids must be unique",
+    path: ["options"],
+  })
+  .refine(
+    // Meta rejects repeated button titles (error 131009 "Duplicate button
+    // title"). Trimmed + case-insensitive, so "Yes" and "yes " can't both slip
+    // through — an exact-string Set would let them, and Meta would reject.
+    (b) => {
+      const titles = b.options.map((o) => o.title.trim().toLowerCase());
+      return new Set(titles).size === titles.length;
+    },
+    { message: "option titles must be unique", path: ["options"] },
+  );
+export type ExternalSendInteractiveInput = z.infer<typeof ExternalSendInteractiveSchema>;

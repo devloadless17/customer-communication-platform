@@ -36,6 +36,7 @@ import { Input } from "@/components/ui/input";
 import { WindowBadge } from "@/features/inbox/components/window-badge";
 import { ChannelBadge } from "@/features/inbox/components/channel-badge";
 import { LocalTime } from "@/components/local-time";
+import type { Channel } from "@ccp/shared/types";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import { TagChip, TagAddButton } from "@/features/tags/components/tag-chip";
@@ -470,6 +471,7 @@ export function ContactsClient({
       tagIds?: string[];
       window?: "open" | "closed";
       stageId?: string;
+      channel?: Channel;
     } = {};
     if (list.search.trim()) f.search = list.search.trim();
     if (list.fieldFilter) {
@@ -480,6 +482,11 @@ export function ContactsClient({
     if (list.windowFilter !== "any") f.window = list.windowFilter;
     if (list.tagIds.length > 0) f.tagIds = list.tagIds;
     if (list.stageFilter !== "any") f.stageId = list.stageFilter;
+    // Mirror `fetchContactsPage` exactly (contact-browser.tsx): person mode rolls
+    // up across channels, so the list and its totalCount ignore `channel`.
+    // Sending it here would resolve a channel-scoped SUBSET of the N persons the
+    // user is looking at and clicked "select all N matching" on.
+    if (!list.groupByPerson && list.channelFilter !== "any") f.channel = list.channelFilter;
     return f;
   }, [
     list.search,
@@ -488,6 +495,8 @@ export function ContactsClient({
     list.windowFilter,
     list.tagIds,
     list.stageFilter,
+    list.channelFilter,
+    list.groupByPerson,
   ]);
 
   // Apply a tag op either to the loaded selection (id mode) or — when the user

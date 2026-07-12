@@ -26,7 +26,9 @@ Stages, tags, and custom fields: decide per-field whether they live on `Contact`
 
 ## Rules that keep this safe (no magic)
 
-1. **Auto-merge ONLY on deterministic strong keys.** Two contacts auto-link into one customer only when they share a *verified exact* identifier: same normalized phone number, or same verified email. Nothing else.
+1. **Auto-merge ONLY on deterministic strong keys.** Two contacts auto-link into one customer only when they share a *verified exact* identifier: same normalized phone number, or same **self-asserted** email. Nothing else.
+
+   "Self-asserted" is load-bearing for email. Meta supplies no email on any channel, so `Contact.email` is either typed by an agent, imported from a CSV, or shared by the customer tapping Meta's `user_email` autofill chip. Only the last identifies a person. `resolveCustomerId` therefore gates the email arm behind `trustEmailAsStrongKey`, which **only** `lib/identity/contact-share.ts` passes. Without that gate a shared inbox (`info@acme.com`, a family address) fuses two different humans into one `Customer` — exposing one person's thread under the other's unified profile and misrouting a `targetMode:"customer"` broadcast to the wrong channel. Under-merging is recoverable through the manual merge API; over-merging silently leaks data.
 2. **No fuzzy matching, ever.** No name similarity, no "probably the same person," no ML. Fuzzy matching is the single biggest source of wrong-customer data leaks — it is explicitly out of scope.
 3. **Everything else is manual and reversible.** Agents can manually merge two customers or split one — implemented as `link`/`unlink` in `CustomersService`, which only re-point `Contact.customerId` (so a split fully undoes a merge). ⚠️ **Gap:** the audit-trail record (a `ConversationEvent`-style "who merged what, when") is NOT yet persisted — merge/split only writes log lines today. Add it before relying on merge history.
 4. **Merge is idempotent and conservative.** Merging never deletes a `Contact` or its messages — it only re-points `Contact.customerId`. Split re-points them back.

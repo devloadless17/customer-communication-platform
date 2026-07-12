@@ -5,6 +5,10 @@ import { BadGatewayException, BadRequestException, Injectable, Logger } from "@n
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
 import { invalidateMessengerConfig } from "@/lib/providers/messenger-config";
+import {
+  ensurePageSubscribedToMessaging,
+  getPageSubscription,
+} from "@/lib/providers/meta-page-subscription";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 
 import { EventBus } from "../../events/event-bus.module";
@@ -39,6 +43,17 @@ export interface MessengerConfigView {
   appSecret: string | null;
   /** True when secrets exist but decrypt failed (key rotated / corrupt). */
   credentialsUndecryptable: boolean;
+  /**
+   * Live Page↔app webhook subscription, read from Graph. `null` when we can't
+   * check (not connected yet, or Graph unreachable). When `receivesMessages` is
+   * false the channel is "connected" but Meta will never deliver a single
+   * inbound message — the settings page must say so loudly.
+   */
+  webhookSubscription: {
+    receivesMessages: boolean;
+    subscribedFields: string[];
+    missingFields: string[];
+  } | null;
 }
 
 function pruneUndefined<T extends object>(o: T): T {
@@ -115,6 +130,27 @@ export class MessengerService {
       }
     }
 
+    // Best-effort webhook health. A Page can be "connected" with perfect
+    // credentials and still receive nothing, because Meta only delivers to Pages
+    // subscribed to the app for `messages` — and a re-save in Meta's dashboard
+    // silently resets that set. Read the truth from Graph so the settings page
+    // can say it out loud. Never fatal: a Graph blip must not break the page.
+    let webhookSubscription: MessengerConfigView["webhookSubscription"] = null;
+    if (config.pageId && pageAccessToken) {
+      try {
+        const status = await getPageSubscription(config.pageId, pageAccessToken, GRAPH_VERSION);
+        webhookSubscription = {
+          receivesMessages: status.receivesMessages,
+          subscribedFields: status.subscribedFields,
+          missingFields: status.missingFields,
+        };
+      } catch (err) {
+        this.logger.warn(
+          `[${teamId}] could not read messenger page subscription: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     return {
       pageId: config.pageId ?? null,
       pageName: config.pageName ?? null,
@@ -123,6 +159,7 @@ export class MessengerService {
       pageAccessToken,
       appSecret,
       credentialsUndecryptable,
+      webhookSubscription,
     };
   }
 
@@ -239,6 +276,19 @@ export class MessengerService {
     });
 
     invalidateMessengerConfig(teamId);
+
+    // Subscribe the Page to the messaging webhook fields. Without this Meta never
+    // sends a single `object:"page"` event — the silent "connected but no inbound"
+    // failure. Best-effort: the credentials are already persisted and valid, so a
+    // Graph hiccup or a missing permission must not fail the connect. `getConfig`
+    // re-reads the real subscription and warns if `messages` is still absent.
+    const sub = await ensurePageSubscribedToMessaging(pageId, tokenToStore, GRAPH_VERSION);
+    if (!sub.ok) {
+      this.logger.warn(
+        `[${teamId}] messenger connected but page subscription failed for page=${pageId}: ${sub.error}`,
+      );
+    }
+
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "channels" });
 
     return { config: { pageId, pageName: pageName ?? null, verifyToken } };

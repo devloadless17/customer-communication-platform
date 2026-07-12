@@ -348,6 +348,18 @@ export function applyCallEnded(
   let nextHistory: CallSnapshot[];
   if (existingIdx >= 0) {
     const existing = history[existingIdx]!;
+    // Redelivered terminal frame for a call already in its final shape: nothing
+    // changes, so return the SAME reference. Reducers that allocate on a no-op
+    // make the cache shell and the live hook treat a duplicate frame as a real
+    // update and re-render the thread (§10 / §15).
+    if (
+      !wasActive &&
+      existing.status === payload.status &&
+      existing.endedAt === payload.endedAt &&
+      existing.durationSeconds === payload.durationSeconds
+    ) {
+      return prev;
+    }
     nextHistory = history.slice();
     nextHistory[existingIdx] = {
       ...existing,
@@ -377,9 +389,10 @@ export function applyCallEnded(
     });
   } else {
     // Terminal frame for a call we never saw an active state for (page
-    // load mid-call, late frame, etc.). Skip — the next full thread fetch
-    // will surface it.
-    nextHistory = history;
+    // load mid-call, late frame, etc.). Nothing to append and no activeCall to
+    // clear — return `prev` untouched rather than allocating an identical
+    // snapshot that every consumer would mistake for a change.
+    return prev;
   }
   return {
     ...prev,

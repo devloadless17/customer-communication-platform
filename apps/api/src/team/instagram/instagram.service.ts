@@ -5,6 +5,10 @@ import { BadGatewayException, BadRequestException, Injectable, Logger } from "@n
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
 import { invalidateInstagramConfig } from "@/lib/providers/instagram-config";
+import {
+  ensurePageSubscribedToMessaging,
+  getPageSubscription,
+} from "@/lib/providers/meta-page-subscription";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 
 import { EventBus } from "../../events/event-bus.module";
@@ -40,6 +44,16 @@ export interface InstagramConfigView {
   igAccessToken: string | null;
   appSecret: string | null;
   credentialsUndecryptable: boolean;
+  /**
+   * Live subscription of the LINKED PAGE to the app. Instagram DMs ride the Page,
+   * so an unsubscribed Page means no inbound — same failure mode as Messenger.
+   * `null` when it couldn't be checked.
+   */
+  webhookSubscription: {
+    receivesMessages: boolean;
+    subscribedFields: string[];
+    missingFields: string[];
+  } | null;
 }
 
 function pruneUndefined<T extends object>(o: T): T {
@@ -87,6 +101,25 @@ export class InstagramService {
       (secrets.igAccessToken != null && igAccessToken === null) ||
       (secrets.appSecret != null && appSecret === null);
 
+    // Instagram DMs are delivered through the LINKED PAGE, so an unsubscribed
+    // Page is the same silent "connected but no inbound" failure as Messenger.
+    // Best-effort read; never fatal.
+    let webhookSubscription: InstagramConfigView["webhookSubscription"] = null;
+    if (config.pageId && igAccessToken) {
+      try {
+        const status = await getPageSubscription(config.pageId, igAccessToken, GRAPH_VERSION);
+        webhookSubscription = {
+          receivesMessages: status.receivesMessages,
+          subscribedFields: status.subscribedFields,
+          missingFields: status.missingFields,
+        };
+      } catch (err) {
+        this.logger.warn(
+          `[${teamId}] could not read instagram page subscription: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     let verifyToken = config.verifyToken ?? null;
     if (verifyToken == null) {
       const minted = randomBytes(24).toString("hex");
@@ -121,6 +154,7 @@ export class InstagramService {
       igAccessToken,
       appSecret,
       credentialsUndecryptable,
+      webhookSubscription,
     };
   }
 
@@ -257,6 +291,18 @@ export class InstagramService {
     });
 
     invalidateInstagramConfig(teamId);
+
+    // Instagram DMs ride the linked Page, so the Page must be subscribed to the
+    // app. The helper posts the UNION of existing + required fields — critical
+    // here, because a plain replace would unsubscribe Messenger from the SAME
+    // Page. Best-effort; `getConfig` surfaces the truth.
+    const sub = await ensurePageSubscribedToMessaging(pageId, tokenToStore, GRAPH_VERSION);
+    if (!sub.ok) {
+      this.logger.warn(
+        `[${teamId}] instagram connected but page subscription failed for page=${pageId}: ${sub.error}`,
+      );
+    }
+
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "channels" });
 
     return { config: { igId, igUsername: igUsername ?? null, pageId, verifyToken } };

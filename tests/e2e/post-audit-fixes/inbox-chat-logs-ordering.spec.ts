@@ -30,6 +30,7 @@ let teamId: string;
 let userId: string;
 let adminName: string;
 let conversationId: string;
+let contactId: string;
 
 // ── timeline snapshot helpers ──────────────────────────────────────────────
 
@@ -198,6 +199,33 @@ async function injectInbound(body: string, atMs: number): Promise<string> {
         preview: body.slice(0, 200),
         lastMessageAt: ts.toISOString(),
         unreadCount: 1,
+        // `contact` + `conversation` are REQUIRED on a real MessageReceivedEvent —
+        // `toPublicEnvelopes` derefs `e.contact.id` to build the outbound-webhook
+        // body. Omitting them made the drainer's dispatch throw
+        // "Cannot read properties of undefined (reading 'id')", which the
+        // subscriber's outer catch swallowed: the test still passed while the
+        // api log filled with errors. Publish the shape ingest actually publishes.
+        contact: {
+          id: contactId,
+          phoneNumber: PHONE,
+          name: "Chat Smoke Contact",
+          identityChannel: "whatsapp",
+          externalContactId: null,
+          tagIds: [],
+          stageId: null,
+          customFields: {},
+        },
+        conversation: {
+          id: conversationId,
+          status: "open",
+          unreadCount: 1,
+          lastMessageAt: ts.toISOString(),
+          assignedUserId: null,
+          aiEnabled: true,
+        },
+        isNewConversation: false,
+        reopened: false,
+        sessionKind: "continued",
       },
     },
   });
@@ -243,6 +271,7 @@ test.beforeAll(async () => {
     },
   });
   conversationId = conv.id;
+  contactId = contact.id;
 
   // A few seeded messages, oldest→newest, including one with emoji so we can
   // assert emoji render without needing a successful outbound send.

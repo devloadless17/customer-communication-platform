@@ -23,6 +23,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@ccp/shared/utils";
 import type { ContactFieldDefinition, ContactStage, Tag, TemplateDto } from "@ccp/shared/types";
+import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
@@ -34,6 +35,7 @@ import {
 import { parseVariableBindings, type VariableBinding } from "@ccp/shared/template-bindings";
 
 import { apiFetch } from "@/lib/api/client-fetch";
+import { useAudienceCount } from "@/hooks/use-audience-count";
 import { toast } from "@/lib/toast";
 import { AudiencePicker, type AudienceState } from "@/features/broadcasts/components/audience-picker";
 import { RecipientsPreviewDialog } from "@/features/broadcasts/components/recipients-preview-dialog";
@@ -397,42 +399,100 @@ export function NewBroadcastForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTemplateId, bodyVarCount, headerVarCount]);
 
+  // The channel a template/freeform broadcast actually sends on. All/group
+  // recipient counts must be scoped to it (a WhatsApp template can't reach a
+  // Messenger-only contact). Customer ("People") mode is person-level → the
+  // count stays the raw all-channel totals (unscoped, best-channel reach).
+  const countChannel: "whatsapp" | "messenger" | "instagram" | undefined =
+    messageKind === "template"
+      ? "whatsapp"
+      : messageKind === "freeform"
+        ? freeformChannel
+        : undefined;
+
+  const scopedGroup =
+    audience.mode === "group"
+      ? groups.find((x) => x.id === audience.selectedGroupId) ?? null
+      : null;
+
+  // Channel-scoped server counts for the all/group audiences (custom mode's
+  // count comes from the builder). Both are inert unless a single channel is
+  // targeted — in customer ("People") mode we render the raw all-channel totals,
+  // so firing these requests would just burn rate limit for a discarded answer.
+  const allCount = useAudienceCount([], [], {
+    all: audience.mode === "all" && !!countChannel,
+    channel: countChannel,
+    initial: totalContactCount,
+  });
+  const groupCount = useAudienceCount(
+    countChannel && scopedGroup ? scopedGroup.tagIds : [],
+    countChannel && scopedGroup ? scopedGroup.contactIds : [],
+    { channel: countChannel },
+  );
+
   // Recipient count for the active mode. Custom mode's count comes from the
-  // shared builder (server-resolved union); all/group are known up front.
+  // shared builder (server-resolved union). All/group show the raw all-channel
+  // total until the channel-scoped server count actually RESOLVES — mid-flight
+  // and on a failed fetch the hook's `count` is a stale 0, which would wrongly
+  // read as "no recipients" and disable Send for a valid audience.
   const audienceCount = useMemo(() => {
-    if (audience.mode === "all") return totalContactCount;
-    if (audience.mode === "group") {
-      const g = groups.find((x) => x.id === audience.selectedGroupId);
-      return g?.memberCount ?? 0;
+    if (audience.mode === "custom") return customCount;
+    if (audience.mode === "all") {
+      if (!countChannel) return totalContactCount;
+      return allCount.resolved ? allCount.count : totalContactCount;
     }
-    return customCount;
-  }, [audience, groups, totalContactCount, customCount]);
+    // group
+    if (!scopedGroup) return 0;
+    if (!countChannel) return scopedGroup.memberCount;
+    return groupCount.resolved ? groupCount.count : scopedGroup.memberCount;
+  }, [
+    audience,
+    totalContactCount,
+    customCount,
+    countChannel,
+    scopedGroup,
+    allCount.resolved,
+    allCount.count,
+    groupCount.resolved,
+    groupCount.count,
+  ]);
 
   const audienceDone =
     audienceCount > 0 && !(audience.mode === "custom" && customCountLoading);
 
   // What "Preview recipients" resolves against — the same { tagIds, contactIds }
   // union the server expands. Null for "all" (no point) and for an empty
-  // selection. Group mode reuses the group dto's tag + manual snapshot.
-  const selectedGroup =
-    audience.mode === "group"
-      ? groups.find((g) => g.id === audience.selectedGroupId) ?? null
-      : null;
-  const previewPayload: { tagIds: string[]; contactIds: string[] } | null = (() => {
+  // selection. Group mode reuses the group dto's tag + manual snapshot
+  // (`scopedGroup`, resolved above for the recipient count).
+  // Scoped by `countChannel` for the same reason the count is: the send drops
+  // off-channel contacts, so previewing them as recipients is a lie.
+  const previewPayload: {
+    tagIds: string[];
+    contactIds: string[];
+    channel?: "whatsapp" | "messenger" | "instagram";
+  } | null = (() => {
     if (
       audience.mode === "custom" &&
       (audience.selectedTagIds.length > 0 || audience.selectedIds.length > 0)
     ) {
-      return { tagIds: audience.selectedTagIds, contactIds: audience.selectedIds };
+      return {
+        tagIds: audience.selectedTagIds,
+        contactIds: audience.selectedIds,
+        ...(countChannel ? { channel: countChannel } : {}),
+      };
     }
-    if (audience.mode === "group" && selectedGroup) {
-      return { tagIds: selectedGroup.tagIds, contactIds: selectedGroup.contactIds };
+    if (audience.mode === "group" && scopedGroup) {
+      return {
+        tagIds: scopedGroup.tagIds,
+        contactIds: scopedGroup.contactIds,
+        ...(countChannel ? { channel: countChannel } : {}),
+      };
     }
     return null;
   })();
   const previewSubtitle =
     audience.mode === "group"
-      ? `Saved group: ${selectedGroup?.name ?? "—"}`
+      ? `Saved group: ${scopedGroup?.name ?? "—"}`
       : `${audience.selectedTagIds.length} tag${audience.selectedTagIds.length === 1 ? "" : "s"} · ${audience.selectedIds.length} hand-picked`;
 
   const templateDone = selectedTemplate !== null;
@@ -592,13 +652,13 @@ export function NewBroadcastForm({
               .replace(/\s+/g, " ")
               .trim();
         const bodyPreview = truncate(resolvedBody, 90);
+        // Single source of truth for channel display names — a local ternary here
+        // silently mislabels the moment a fourth channel goes live.
         const channelLabel = isCustomerMode
           ? "each person's best channel"
           : isFreeform
-            ? freeformChannel === "instagram"
-              ? "Instagram"
-              : "Messenger"
-            : "WhatsApp";
+            ? CHANNEL_LABEL[freeformChannel]
+            : CHANNEL_LABEL.whatsapp;
         const ok = await confirm({
           title: `Send to ${countLabel} now?`,
           description:
@@ -693,13 +753,14 @@ export function NewBroadcastForm({
         </Link>
         <h1 className="text-2xl font-semibold tracking-tight">New broadcast</h1>
         <p className="text-sm text-muted-foreground">
-          Send a pre-approved WhatsApp template to many recipients in one go.
-          Same template + same variable values for everyone.
+          Send one message to many recipients at once — the same content and the
+          same variable values for everyone.
         </p>
         <p className="text-sm text-muted-foreground">
-          Broadcasts go to people outside the 24-hour customer service window, so
-          Meta only allows pre-approved templates here — free-form text isn&apos;t
-          permitted for cold or post-24h outbound.
+          Only a pre-approved <strong>WhatsApp template</strong> can reach someone
+          outside the 24-hour customer service window. <strong>Free-form</strong>{" "}
+          messages on Messenger and Instagram reach only people whose window is
+          still open — anyone else is skipped.
         </p>
       </header>
 
@@ -709,9 +770,9 @@ export function NewBroadcastForm({
         summary={
           audienceDone
             ? audience.mode === "all"
-              ? `All ${totalContactCount} contact${totalContactCount === 1 ? "" : "s"}`
+              ? `All ${audienceCount} contact${audienceCount === 1 ? "" : "s"}`
               : audience.mode === "group"
-                ? `${groups.find((g) => g.id === audience.selectedGroupId)?.name ?? "group"} · ${audienceCount} member${audienceCount === 1 ? "" : "s"}`
+                ? `${scopedGroup?.name ?? "group"} · ${audienceCount} member${audienceCount === 1 ? "" : "s"}`
                 : `${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`
             : undefined
         }
@@ -775,7 +836,7 @@ export function NewBroadcastForm({
           title="Message"
           summary={
             freeformDone
-              ? `${messageKind === "customer" ? "People" : freeformChannel} · ${freeformBody.slice(0, 40)}`
+              ? `${messageKind === "customer" ? "People" : CHANNEL_LABEL[freeformChannel]} · ${freeformBody.slice(0, 40)}`
               : undefined
           }
           done={freeformDone}
@@ -841,7 +902,11 @@ export function NewBroadcastForm({
         </StepCard>
       )}
 
-      {selectedTemplate && (
+      {/* Template-only. Without the messageKind gate, picking a template and then
+          switching to Free-form / People left this step (and the warning below)
+          on screen beside the free-form composer — two contradictory ways to
+          compose one message. */}
+      {messageKind === "template" && selectedTemplate && (
         <StepCard
           index={3}
           title="Variables"
@@ -1007,7 +1072,7 @@ export function NewBroadcastForm({
         {/* Pre-send warning: recipients missing a mapped template field. Advisory
             only (Send stays enabled) — the agent can set a default, exclude them,
             or knowingly proceed (those recipients will fail with a clear reason). */}
-        {missingPreview && missingPreview.affectedCount > 0 && (
+        {messageKind === "template" && missingPreview && missingPreview.affectedCount > 0 && (
           <div className="rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-xs text-warning-fg">
             <div className="flex items-center gap-1.5 font-medium">
               <AlertTriangle className="size-3.5 shrink-0" />

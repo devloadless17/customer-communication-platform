@@ -35,6 +35,7 @@ import {
   ExternalCreateContactSchema,
   ExternalCreateTagSchema,
   ExternalNoteSchema,
+  ExternalSendInteractiveSchema,
   ExternalSendMessageSchema,
   ExternalSetAiSchema,
   ExternalStatusSchema,
@@ -56,6 +57,7 @@ import {
   type ExternalCreateContactInput,
   type ExternalCreateTagInput,
   type ExternalNoteInput,
+  type ExternalSendInteractiveInput,
   type ExternalSendMessageInput,
   type ExternalSetAiInput,
   type ExternalStatusInput,
@@ -106,6 +108,7 @@ import {
  *   POST   /v1/conversations/:id/status
  *   GET    /v1/conversations/:id/messages
  *   POST   /v1/conversations/:id/messages
+ *   POST   /v1/conversations/:id/interactive  — buttons / list / phone-email consent chips
  *   POST   /v1/conversations/:id/notes
  *   GET    /v1/messages/:id                   — find a single message
  *
@@ -779,6 +782,37 @@ export class ExternalV1Controller {
       return { ok: true, skipped: out.skipped, message: null };
     }
     return { ok: true, message: out.message };
+  }
+
+  /**
+   * Interactive send — buttons / list options, plus Meta's one-tap "share your
+   * phone / email" consent chips. The external twin of the composer's
+   * `POST /api/messages/interactive`; §12 locks `/v1` to UI parity, and this was
+   * the last capability the UI had that the API didn't.
+   *
+   * Social channels only for `contactShare` (capability `contactShareChips`) —
+   * WhatsApp already knows the phone and has no such chip, so it 422s with
+   * `contact_share_not_supported` rather than silently dropping the chips.
+   */
+  @Post("conversations/:id/interactive")
+  @RequireScope("write:messages")
+  @RateLimit({ perMinute: 60 })
+  async sendInteractive(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(ExternalSendInteractiveSchema)) body: ExternalSendInteractiveInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    // Loop guard before idempotency/body checks — see sendTopLevelMessage.
+    this.guardChainDepth(xCcpDepth);
+    return this.api.sendInteractive(
+      auth.teamId,
+      auth.apiKeyId,
+      id,
+      body,
+      this.idemKeyRequired(idempotencyKey),
+    );
   }
 
   // ---- Notes --------------------------------------------------------

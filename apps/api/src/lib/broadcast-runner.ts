@@ -12,6 +12,10 @@ import {
   normalizeMetaSendError,
   renderTemplateBody,
 } from "@/lib/providers/meta";
+import {
+  requiredTemplateButtonParams,
+  templateNamedPlaceholders,
+} from "@ccp/shared/template-render";
 import type { MessagingProvider } from "@ccp/shared/providers/types";
 import type { Channel } from "@ccp/shared/types";
 import { LIVE_CHANNELS, isPhoneChannel } from "@ccp/shared/providers/capabilities";
@@ -593,6 +597,30 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   const templateBody = template?.bodyText ?? "";
   const bindings = parseVariableBindings(template?.variableBindings ?? null);
   if (template) {
+    // The broadcast composer only binds POSITIONAL body variables. A template
+    // whose body is NAMED-format, or whose buttons carry a send-time parameter
+    // (dynamic URL suffix / coupon copy-code), cannot be filled from a broadcast
+    // — Meta would reject every single recipient. Fail the whole broadcast HERE,
+    // before the CAS claim and before one message is sent, rather than burning
+    // the audience on a guaranteed provider rejection.
+    const namedBodyVars = templateNamedPlaceholders(templateBody);
+    if (namedBodyVars.length > 0) {
+      await fail(
+        broadcast.id,
+        `Template uses named variables (${namedBodyVars.join(", ")}), which broadcasts can't fill. Use a template with numbered {{1}} placeholders.`,
+      );
+      return;
+    }
+    const requiredButtons = requiredTemplateButtonParams(template.components);
+    if (requiredButtons.length > 0) {
+      await fail(
+        broadcast.id,
+        `Template has button(s) needing a send-time value (${requiredButtons
+          .map((b) => `#${b.index + 1} ${b.subType}`)
+          .join(", ")}), which broadcasts can't supply.`,
+      );
+      return;
+    }
     const bodyVarCount = countTemplatePlaceholders(templateBody);
     if (variables.body.length !== bodyVarCount) {
       await fail(
@@ -963,19 +991,23 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     const queuedRemaining = await db.broadcastRecipient.count({
       where: { broadcastId: broadcast.id, status: "queued" },
     });
-    await db.broadcast.updateMany({
+    const paused = await db.broadcast.updateMany({
       where: { id: broadcast.id, status: "running" },
       data: { status: "paused" },
     });
     console.warn(
       `[broadcast ${broadcast.id}] paused for shutdown — ${queuedRemaining} recipient(s) remain queued`,
     );
-    await publish({
-      type: "broadcast.status_changed",
-      teamId: broadcast.teamId,
-      broadcastId: broadcast.id,
-      status: "paused",
-    });
+    // §10 again: a broadcast cancelled mid-shutdown already left `running`, so
+    // the CAS matches nothing and there is no state change to announce.
+    if (paused.count > 0) {
+      await publish({
+        type: "broadcast.status_changed",
+        teamId: broadcast.teamId,
+        broadcastId: broadcast.id,
+        status: "paused",
+      });
+    }
   } else {
     // Normal completion. But a run where EVERY recipient failed must not be
     // stored as `completed` — that made it match the "Completed" filter while
@@ -990,16 +1022,22 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     const allFailed =
       !!fresh && fresh.totalCount > 0 && fresh.failedCount >= fresh.totalCount;
     const finalStatus = allFailed ? "failed" : "completed";
-    await db.broadcast.updateMany({
+    const finished = await db.broadcast.updateMany({
       where: { id: broadcast.id, status: "running" },
       data: { status: finalStatus, completedAt: new Date() },
     });
-    await publish({
-      type: "broadcast.status_changed",
-      teamId: broadcast.teamId,
-      broadcastId: broadcast.id,
-      status: finalStatus,
-    });
+    // §10: emit only after a state change that actually committed. A racing
+    // cancel() flips the row out of `running` first, so this CAS matches 0 —
+    // publishing anyway would tell every client the broadcast "completed" after
+    // it was cancelled. Same guard cancel() and maybeTripPermanentBreaker use.
+    if (finished.count > 0) {
+      await publish({
+        type: "broadcast.status_changed",
+        teamId: broadcast.teamId,
+        broadcastId: broadcast.id,
+        status: finalStatus,
+      });
+    }
   }
   } catch (err) {
     // An unexpected throw (e.g. a persistent DB error that outlived
@@ -2425,14 +2463,19 @@ export async function pruneBroadcastInMemoryStateForTerminalRows(): Promise<void
 async function loadTemplate(
   teamId: string,
   templateId: string,
-): Promise<{ bodyText: string; variableBindings: Prisma.JsonValue }> {
+): Promise<{
+  bodyText: string;
+  variableBindings: Prisma.JsonValue;
+  components: Prisma.JsonValue;
+}> {
   const row = await db.messageTemplate.findFirst({
     where: { id: templateId, teamId },
-    select: { bodyText: true, variableBindings: true },
+    select: { bodyText: true, variableBindings: true, components: true },
   });
   return {
     bodyText: row?.bodyText ?? "",
     variableBindings: row?.variableBindings ?? {},
+    components: row?.components ?? [],
   };
 }
 

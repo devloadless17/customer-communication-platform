@@ -95,7 +95,9 @@ Messenger / Instagram have **no** approved-template catalog (`templates:false`).
 | Drift sweeper backstop | ✅ | `customer-link-drift.ts` |
 | Manual reversible merge / split | ✅ | `CustomersService.link`/`unlink` |
 | Merge / split audit trail (persisted) | ✅ | `CustomerIdentityEvent` model |
-| BSUID / @username forward-compat (Meta 2026) | 🔜 columns + parse + resolve + send-address ready; NULL today | `Contact.bsuid`/`username`, `NormalizedContactIdentity` |
+| BSUID / @username capture (Meta 2026) | ✅ parsed from `contacts[].user_id` / `contacts[].username` (NOT `messages[]` — the original forward-compat guess had the wrong wire keys, so both columns stayed NULL). Live in webhooks since Apr 2026 | `Contact.bsuid`/`username`, `meta.ts` `contactByKey` |
+| Phone-less (BSUID-only) inbound resolves without fabricating a phone | ✅ `messages[].from` is only treated as a phone when it is digits-only; `"LB.946…"` is never digit-stripped | `meta.ts` `fromIsPhone` |
+| **Consent chips** — one-tap "share your phone / email" on Messenger + Instagram, writing a strong key and auto-merging the person | ✅ | `SendInteractiveArgs.contactShare` + `applyContactShareFromReply` |
 | Social identity enrichment (name + @username + profile_pic → avatar) | ✅ | `fetchSocialProfile` + `enrichSocialContactNames` |
 | Instagram rich signals (`follower_count`, `is_verified_user`, follows-business / business-follows) | ✅ | `Contact.socialProfile` JSON → contact-panel "Instagram" row |
 | Avatar durability — social `profile_pic` is a short-lived signed CDN URL, so it's **downloaded into R2** (`avatars/contact-{id}`) + served same-origin `GET /api/contacts/:id/avatar?v=<hash>`, never hotlinked | ✅ | `captureRemoteContactAvatar` |
@@ -115,12 +117,37 @@ Messenger / Instagram have **no** approved-template catalog (`templates:false`).
 |---|---|---|---|
 | Strong id | phone (real E.164) | PSID (opaque, per-page) | IGSID (opaque, per-app) |
 | Display name | ✅ profile name | ✅ `name` | ✅ `name` |
-| `@username` | — | — | ✅ `username` |
+| `@username` | ✅ `contacts[].username` (2026, opt-in per user) | — | ✅ `username` |
+| BSUID | ✅ `contacts[].user_id` | — | — |
 | Avatar | ❌ (none in webhook) | ✅ `profile_pic` | ✅ `profile_pic` |
-| Phone / Email | phone = the id; no email | ❌ both | ❌ both |
-| Extra signals | — | — | `follower_count`, `is_verified_user`, follow-relationship |
+| Phone | phone = the id | ⚠️ consent chip only | ⚠️ consent chip only |
+| Email | ❌ never | ⚠️ consent chip only | ⚠️ consent chip only |
+| Extra signals | Click-to-WhatsApp `ctwa_clid` | `locale`/`timezone`/`gender` (each behind a `pages_user_*` App Review; **not requested today**) | `follower_count`, `is_verified_user`, follow-relationship |
 
-Consequence: **Phone/Email can never be auto-filled for Messenger/Instagram** — Meta doesn't expose them (a PSID/IGSID is deliberately opaque). Only WhatsApp yields a deterministic strong key, so cross-channel auto-merge of a social contact to a WhatsApp one is impossible from Meta data and stays manual. Enrichment is inbound-gated (runs on a new inbound); the Sync button back-fills contacts that predate it.
+**Email is never auto-retrievable on any channel, and phone is never auto-retrievable on the social channels** — a PSID/IGSID is deliberately opaque, and Meta's User Profile API returns neither.
+
+The one exception (⚠️ above) is the **consent chip**: Meta supports quick replies with
+`content_type: "user_phone_number"` / `"user_email"` on Messenger *and* Instagram. The platform
+pre-fills the value from the customer's profile (hiding the chip entirely when the profile has
+none) and delivers it on a single tap. That tap is the ONLY route by which a social contact can
+acquire a strong key — and therefore the only way `resolveCustomerId` (exact phone/email, no fuzzy
+matching, ever) can auto-merge a Messenger/Instagram contact into the same `Customer` as a
+WhatsApp thread. Send it via `SendInteractiveArgs.contactShare` (capability `contactShareChips`).
+
+Two non-obvious properties of that flow, both load-bearing:
+
+1. **The inbound frame is ambiguous.** A tapped chip arrives with the value in *both*
+   `message.text` and `message.quick_reply.payload`, structurally identical to an ordinary text
+   quick-reply. Nothing on the wire says which chip it was. We therefore never infer from the
+   value: `applyContactShareFromReply` correlates against the offered chips persisted on the
+   preceding outbound message (`rawPayload.interactive.contactShare`) and rejects any payload
+   matching an authored option id. Without that guard, an `ask_question` option whose id happened
+   to be `sales@acme.com` would overwrite the customer's email.
+2. **The value is raw.** Meta does not document any E.164 normalization, so it is normalized and
+   validated on our side before it is written or merged on.
+
+Enrichment (name/avatar) is inbound-gated (runs on a new inbound); the Sync button back-fills
+contacts that predate it.
 
 ---
 

@@ -21,6 +21,9 @@ import {
 } from "@/lib/external-shapes";
 import { toExternalMediaUrl } from "@/lib/blob-storage";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
+import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
+import { SendTextValidationError } from "@/lib/messaging/send-text-internal";
+import { checkTextCap } from "@/lib/messaging/text-cap";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { MAX_CHAIN_DEPTH } from "@/lib/workflows/events";
 
@@ -57,7 +60,11 @@ import { encodeConvoCursor, parseConvoCursor } from "@/lib/queries/_cursors";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
 import type { Message, Channel } from "@ccp/shared/types";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
-import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
+import {
+  computeWindowStatus,
+  effectiveSendWindowMs,
+  outsideFreeFormWindow,
+} from "@ccp/shared/utils/window";
 import {
   assignConversation,
   setConversationStatus,
@@ -73,6 +80,7 @@ import type {
   ExternalContactAssignInput,
   ExternalContactStatusInput,
   ExternalNoteInput,
+  ExternalSendInteractiveInput,
   ExternalSendMessageInput,
   ExternalStatusInput,
   ExternalSetAiInput,
@@ -729,13 +737,13 @@ export class ExternalV1MessagingService {
     // Channel text-length cap — parity with the internal send path (WhatsApp
     // 4096, Messenger 2000, Instagram 1000). Fail fast before Meta's opaque
     // over-limit reject.
-    const maxChars = binding.provider.capabilities.messageTextMaxChars;
-    if (input.body.length > maxChars) {
+    const tooLong = checkTextCap(input.body, binding.provider.capabilities, provider);
+    if (tooLong) {
       if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
       throw new UnprocessableEntityException({
         error: "message_too_long",
-        detail: `message is ${input.body.length} characters — ${provider} allows at most ${maxChars}.`,
-        max: maxChars,
+        detail: tooLong.detail,
+        max: tooLong.max,
       });
     }
 
@@ -759,10 +767,10 @@ export class ExternalV1MessagingService {
     // Meta social: past the 24h free-form band (but inside the effective window)
     // the send must carry the HUMAN_AGENT tag; RESPONSE otherwise. Same rule as
     // the internal send paths — parity keeps /v1 sends policy-correct too.
-    const freeFormMs = binding.provider.capabilities.freeFormWindowMs;
-    const useHumanAgentTag =
-      freeFormMs !== null &&
-      ["closed", "never"].includes(computeWindowStatus(lastInboundAt, Date.now(), freeFormMs).state);
+    const useHumanAgentTag = outsideFreeFormWindow(
+      binding.provider.capabilities.freeFormWindowMs,
+      lastInboundAt,
+    );
 
     let replyToMessageId: string | null = null;
     let replyToExternalId: string | undefined;
@@ -1462,6 +1470,140 @@ export class ExternalV1MessagingService {
     });
 
     return { note: notePayload };
+  }
+
+  // ===========================================================================
+  // INTERACTIVE SEND (buttons / list / consent chips)
+  // ===========================================================================
+
+  /**
+   * `POST /v1/conversations/:id/interactive` — the external twin of the
+   * composer's `POST /api/messages/interactive`. Closes the §12 parity gap that
+   * left `contactShare` (Meta's one-tap phone/email consent chips) reachable
+   * only from the UI.
+   *
+   * Delegates to the SAME domain function the composer uses
+   * (`sendInteractiveInternal`), so the window gate, the capability check, the
+   * HUMAN_AGENT tag decision, persistence, and the atomic `message.sent` publish
+   * are shared, not re-implemented. This service only adds what `/v1` owes every
+   * send: a mandatory `Idempotency-Key` claim and API-key attribution.
+   */
+  async sendInteractive(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalSendInteractiveInput,
+    idempotencyKey: string,
+  ): Promise<{ ok: true; messageId: string; externalId: string }> {
+    // CLAIM-then-execute, identical to the text/template sends. A replay returns
+    // the prior response with zero side effects; `refuseStaleOnAmbiguity` stops
+    // a crashed-mid-send pending row from auto-clearing into a second send.
+    {
+      const claim = await this.claimIdempotency<{
+        ok: true;
+        messageId: string;
+        externalId: string;
+      }>(
+        teamId,
+        apiKeyId,
+        idempotencyKey,
+        requestFingerprint("send_interactive", { conversationId, ...input }),
+        { refuseStaleOnAmbiguity: true },
+      );
+      if (claim.kind === "replay") return claim.result;
+    }
+
+    try {
+      const result = await sendInteractiveInternal({
+        teamId,
+        conversationId,
+        bodyText: input.body,
+        kind: input.kind,
+        options: input.options,
+        ...(input.listCtaLabel ? { listCtaLabel: input.listCtaLabel } : {}),
+        ...(input.contactShare?.length ? { contactShare: input.contactShare } : {}),
+        senderUserId: null,
+        senderApiKeyId: apiKeyId,
+        sentVia: "api/external/v1/interactive",
+      });
+      const payload = {
+        ok: true as const,
+        messageId: result.messageId,
+        externalId: result.externalId,
+      };
+      await this.completeIdempotency(teamId, apiKeyId, idempotencyKey, payload);
+      return payload;
+    } catch (err) {
+      // OUTBOUND-1: release the claim ONLY when the send PROVABLY never reached
+      // Meta. A validation error never called Graph; a Meta 4xx means Graph
+      // refused. An ambiguous 5xx/timeout keeps the pending claim so a same-key
+      // retry can't re-send a possibly-delivered message.
+      //
+      // ONE exception, and it is the whole reason this branch is subtle:
+      // `sendInteractiveInternal` sends to Meta FIRST, then commits. If the
+      // conversation vanishes between those two steps, `commitOutboundSend`'s
+      // `onMissing` throws a SendTextValidationError whose code is the same
+      // `conversation_not_found` used by the PRE-send guard — but Meta has
+      // already accepted and billed the message. Releasing the claim there would
+      // let a same-key retry send it a SECOND time. The message is the only
+      // discriminator; the template path (sendTemplate, above) guards it the
+      // same way.
+      const normalized = normalizeMetaSendError(err);
+      const sentThenLostConversation =
+        err instanceof SendTextValidationError &&
+        err.message === "conversation_disappeared_mid_send";
+      const provablyNotSent =
+        !sentThenLostConversation &&
+        (err instanceof SendTextValidationError ||
+          err instanceof ProviderNotConfiguredError ||
+          (normalized != null && normalized.httpStatus < 500));
+      if (provablyNotSent) {
+        await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+      }
+
+      if (sentThenLostConversation) {
+        // Meta accepted it; we just couldn't commit. A 404 would tell the partner
+        // "nothing happened" and invite a retry of an already-billed send. Surface
+        // it as ambiguous so a same-key retry gets 409 idempotency_ambiguous —
+        // identical to the text and template paths.
+        throw new BadGatewayException({
+          error: "send_ambiguous",
+          detail: "conversation_disappeared_mid_send",
+        });
+      }
+      if (err instanceof SendTextValidationError) {
+        // Same mapping the composer uses, so a partner and an agent get the
+        // same status for the same cause.
+        const status =
+          err.code === "conversation_not_found"
+            ? 404
+            : err.code === "outside_24h_window" ||
+                err.code === "provider_not_configured" ||
+                err.code === "contact_share_not_supported"
+              ? 422
+              : 400;
+        throw new HttpException(
+          { error: err.code, ...(err.detail ? { detail: err.detail } : {}) },
+          status,
+        );
+      }
+      if (err instanceof ProviderNotConfiguredError) {
+        throw new ConflictException({ error: "channel_not_connected", detail: err.message });
+      }
+      if (normalized) {
+        throw new UnprocessableEntityException({
+          error: normalized.code,
+          detail: `Meta ${normalized.httpStatus}: ${normalized.message}${
+            normalized.detail ? ` — ${normalized.detail}` : ""
+          }`,
+        });
+      }
+      this.logger.error("external sendInteractive failed", err);
+      throw new BadGatewayException({
+        error: "send_failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
 
