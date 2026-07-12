@@ -31,6 +31,7 @@ import {
   templateNamedPlaceholders,
 } from "@ccp/shared/template-render";
 import type { Channel } from "@ccp/shared/types";
+import { CHANNEL_CAPABILITIES, LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
 import { resolveAudienceGroupMembers } from "@/lib/queries";
 import {
   parseVariableBindings,
@@ -398,6 +399,30 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
             detail: `This template's header expects a ${headerMediaKind}.`,
           });
         }
+      }
+    }
+
+    // Freeform body length gate — the composer's 2000-char Textarea/schema bound
+    // is the WhatsApp/Messenger limit, but Instagram's is 1000
+    // (CHANNEL_CAPABILITIES.instagram.messageTextMaxChars). Without this an
+    // Instagram freeform broadcast with a 1001–2000 char body sails through
+    // create and then fails EVERY recipient at Meta. Fail fast here, same as the
+    // four other send paths use `checkTextCap`. For a fixed freeform channel we
+    // cap against that channel; customer-mode resolves a channel per recipient,
+    // so we cap against the SMALLEST live-channel limit — the only bound that
+    // guarantees no recipient fails on length.
+    if (effectiveKind === "freeform" && input.bodyText) {
+      const capChannels = freeformChannel ? [freeformChannel] : [...LIVE_CHANNELS];
+      const smallestCap = Math.min(
+        ...capChannels.map((c) => CHANNEL_CAPABILITIES[c].messageTextMaxChars),
+      );
+      if (input.bodyText.length > smallestCap) {
+        throw new BadRequestException({
+          error: "message_too_long",
+          detail: freeformChannel
+            ? `Message is ${input.bodyText.length} characters — ${freeformChannel} allows at most ${smallestCap}.`
+            : `Message is ${input.bodyText.length} characters — must be at most ${smallestCap} to reach every channel.`,
+        });
       }
     }
 

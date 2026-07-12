@@ -39,7 +39,7 @@ curl -s "$CCP_BASE_URL/api/external/v1/conversations?limit=5" \
 | **Scopes** | Each route needs a scope (listed per endpoint). A **Full access** key has all of them. |
 | **Idempotency** | The two **send** routes **require** an `Idempotency-Key` header — reuse the same value on a retry and we won't double-send. Use something stable per logical send (e.g. the inbound message id). |
 | **Rate limit** | **60 req/min per key**, across *all* routes — over it returns `429 {"error":"rate_limited"}`. Sends carry an extra **30/min per conversation** loop-guard. Missing/bad keys are throttled separately at 30/min per IP. |
-| **24-hour window** | Free-form text/media only sends to a customer who messaged you in the last 24h. Outside it, use a **template**. |
+| **24-hour window** | Free-form text/media only sends to a customer who messaged you within the channel's window (WhatsApp 24h; Messenger/Instagram 24h + a 7-day human-agent extension). Outside it, WhatsApp needs a **template**; Messenger/Instagram have no templates — wait for the customer to message again. |
 | **Pagination** | List routes take `?limit=&cursor=`. The response includes `nextCursor` (null when done) — pass it back as `cursor`. |
 | **Errors** | Non-2xx returns `{ "error": "code", "detail": "..." }`. Common: `401` (missing/invalid key), `403 insufficient_scope` (key lacks the route's scope), `404` (not found / wrong org), `409 duplicate_phone` (create on an existing number), `422`/`400` (validation), `429 rate_limited` / `chain_depth_exceeded`. |
 | **`silent`** | Mutating routes accept `"silent": true` to suppress the webhook/automation echo for that write — use it when your own flow would otherwise loop. |
@@ -48,7 +48,7 @@ curl -s "$CCP_BASE_URL/api/external/v1/conversations?limit=5" \
 
 ## 3. Contacts
 
-A contact is one WhatsApp identity. Scopes: `read:contacts`, `write:contacts`, `delete:contacts`.
+A contact is one channel identity (a WhatsApp number, a Messenger PSID, an Instagram IGSID). Scopes: `read:contacts`, `write:contacts`, `delete:contacts`.
 
 **List / find contacts** — `GET /contacts` · `read:contacts`
 Filters (all optional, exact-match unless noted): `phone`, `email`, `externalContactId`, `search` (fuzzy across name/phone/email), `stageId`, `tagIds` (comma-separated, ANY-match), `limit`, `cursor`.
@@ -276,7 +276,7 @@ curl -s "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/messages?li
   -H "Authorization: Bearer $CCP_API_KEY"
 ```
 
-**Add an internal note** (never sent to WhatsApp) — `POST /conversations/:id/notes` · `write:notes`
+**Add an internal note** (never sent to the customer) — `POST /conversations/:id/notes` · `write:notes`
 `authorUserId` is **required** — it must be the id of a team member (from `GET /users`). Create a dedicated service-account user for your integration if no human author applies.
 ```bash
 curl -s -X POST "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/notes" \
@@ -284,6 +284,15 @@ curl -s -X POST "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/not
   -H "Content-Type: application/json" \
   -d '{ "body": "Customer prefers WhatsApp over email.", "authorUserId": "USER_ID" }'
 ```
+
+**Delete an internal note** — `DELETE /conversations/:id/notes/:noteId` · `write:notes`
+Removes the note and fires the `note.deleted` webhook (symmetric with the create above, so a CRM mirror can complete a create→delete round-trip). Idempotent — deleting an already-removed note returns `404 note_not_found`.
+```bash
+curl -s -X DELETE "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/notes/NOTE_ID" \
+  -H "Authorization: Bearer $CCP_API_KEY"
+```
+
+> **Note on unified customers:** merging/splitting a `Customer` (linking channel contacts into one person) is currently a **UI-only** capability — there is no `/v1` customers resource yet. Auto-merge on a self-asserted strong key (exact phone/email) still happens automatically at ingest. Programmatic merge/split is a planned addition; until then, reconcile identities in the inbox.
 
 ---
 

@@ -107,7 +107,7 @@ function materialize(teamId: string, cipher: SendCipher): InstagramSendConfig {
         err instanceof Error ? err.message : String(err)
       }`,
     );
-    throw new ProviderNotConfiguredError(teamId, ["igAccessToken (decrypt failed)"]);
+    throw new ProviderNotConfiguredError(teamId, ["igAccessToken (decrypt failed)"], "instagram");
   }
   return {
     igId: cipher.igId,
@@ -122,13 +122,13 @@ export async function getInstagramSendConfig(teamId: string): Promise<InstagramS
   const hit = sendCache.get(teamId);
   if (hit) {
     if (hit.kind === "err") {
-      throw new ProviderNotConfiguredError(teamId, [...hit.missing]);
+      throw new ProviderNotConfiguredError(teamId, [...hit.missing], "instagram");
     }
     return materialize(teamId, hit.cipher);
   }
   const entry = await loadSendCipher(teamId);
   sendCache.set(teamId, entry);
-  if (entry.kind === "err") throw new ProviderNotConfiguredError(teamId, [...entry.missing]);
+  if (entry.kind === "err") throw new ProviderNotConfiguredError(teamId, [...entry.missing], "instagram");
   return materialize(teamId, entry.cipher);
 }
 

@@ -46,6 +46,7 @@ import { dispatchLocalSocketEvents } from "@/lib/socket-client";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
+import { mediaSizeCap, channelSupportsMediaKind } from "@ccp/shared/providers/media-caps";
 import { CHANNEL_LABEL } from "./channel-badge";
 import type { Channel } from "@ccp/shared/types";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
@@ -102,23 +103,32 @@ type Mode = "reply" | "note";
 // Meta Cloud API media size caps (per their docs). We trim ~5% off each so a
 // borderline file doesn't get rejected after a 4-minute upload due to
 // multipart envelope overhead.
-const MEDIA_SIZE_LIMITS = {
-  image: { bytes: 4_800_000, label: "Image" }, // Meta: 5 MB
-  video: { bytes: 15_000_000, label: "Video" }, // Meta: 16 MB
-  audio: { bytes: 15_000_000, label: "Audio" }, // Meta: 16 MB
-  sticker: { bytes: 500_000, label: "Sticker" }, // Meta: 500 KB
-  document: { bytes: 95_000_000, label: "Document" }, // Meta: 100 MB
-} as const;
+const KIND_LABEL: Record<MediaKind, string> = {
+  image: "Image",
+  video: "Video",
+  audio: "Audio",
+  sticker: "Sticker",
+  document: "Document",
+};
 
-// Mirror the SERVER's kind mapping (kindFromMime / kindFromMimeClient) so the
-// client guard checks against the SAME cap the server will enforce. The key
-// case is `image/webp`, which both sides classify as a STICKER (500KB cap) —
-// not the 4.8MB image cap. Checking webp against the image cap let a 3MB webp
-// pass the client guard, burn the whole upload, then 413 with a confusing
-// "too large for sticker". Now an oversized webp is rejected up-front with the
-// correct Sticker label.
-function pickSizeLimit(file: File): { bytes: number; label: string } {
-  return MEDIA_SIZE_LIMITS[kindFromMimeClient(file.type)];
+// Apply a small safety margin below the server's hard cap so a borderline file
+// isn't rejected AFTER a multi-minute upload due to multipart envelope overhead.
+const SIZE_SAFETY_MARGIN = 0.96;
+
+// Derive the client guard from the SHARED per-channel cap map (the same source
+// `mediaPolicyForChannel` uses on the server), so the two can't disagree — this
+// composer previously hardcoded WhatsApp caps and wrongly rejected a valid 20 MB
+// Messenger video / accepted an 20 MB Instagram image the server rejects.
+//
+// The kind mapping mirrors the server's (kindFromMime / kindFromMimeClient): the
+// key case is `image/webp`, which both sides classify as a STICKER (tiny cap),
+// not an image — so an oversized webp is rejected up-front with the right label.
+function pickSizeLimit(file: File, channel: Channel): { bytes: number; label: string } {
+  const kind = kindFromMimeClient(file.type);
+  return {
+    bytes: Math.floor(mediaSizeCap(channel, kind) * SIZE_SAFETY_MARGIN),
+    label: KIND_LABEL[kind],
+  };
 }
 
 function formatMb(bytes: number): string {
@@ -624,7 +634,20 @@ function ReplyBoxImpl({
     (file: File | null | undefined) => {
       if (!file) return;
       if (isNote || windowClosed) return; // notes + closed window can't attach
-      const limit = pickSizeLimit(file);
+      // Per-channel supported-KIND gate (mirrors the server): Instagram DM can't
+      // send documents, so reject one up front instead of burning an upload that
+      // 400s. Size/mime still gate below.
+      const fileKind = kindFromMimeClient(file.type);
+      if (!channelSupportsMediaKind(channel, fileKind)) {
+        setError(
+          `${CHANNEL_LABEL[channel]} doesn't support sending ${
+            fileKind === "document" ? "documents" : `${fileKind}s`
+          }.`,
+        );
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
+      }
+      const limit = pickSizeLimit(file, channel);
       if (file.size > limit.bytes) {
         setError(
           `${limit.label} attachments can't exceed ${formatMb(limit.bytes)}. Try a smaller file.`,
@@ -635,7 +658,7 @@ function ReplyBoxImpl({
       setError(null);
       setAttachment(file);
     },
-    [isNote, windowClosed],
+    [isNote, windowClosed, channel],
   );
 
   // -------------------------------------------------------------------------
@@ -1481,10 +1504,12 @@ function ReplyBoxImpl({
             // right-align with correct base direction, matching the bubble it
             // produces. Latin input stays LTR.
             dir="auto"
-            // Meta caps WhatsApp text bodies at 4096 chars. Cap the input in
-            // reply mode so a long paste can't sail through and 400 server-side
-            // after painting an optimistic bubble. Notes are DB-only (no cap).
-            maxLength={isNote ? undefined : 4096}
+            // Per-channel text cap (WhatsApp 4096 / Messenger 2000 / Instagram
+            // 1000) from the capability map. Cap the input in reply mode so a
+            // long paste can't sail through and 400 server-side after painting an
+            // optimistic bubble — with the counter below reading the same cap so a
+            // Retry isn't hopeless. Notes are DB-only (no cap).
+            maxLength={isNote ? undefined : caps.messageTextMaxChars}
             value={value}
             // Paste an image/file straight onto the composer to attach it —
             // the single most common support gesture. Falls through to normal
@@ -1522,7 +1547,9 @@ function ReplyBoxImpl({
               isNote
                 ? "Leave an internal note for your teammates…"
                 : windowClosed
-                  ? "Free-form replies blocked — send a pre-approved template to re-engage."
+                  ? caps.templates
+                    ? "Free-form replies blocked — send a pre-approved template to re-engage."
+                    : "Free-form replies blocked — wait for the customer to message again to re-open the conversation."
                   : attachment
                     ? "Add a caption (optional)…"
                     : `Reply on ${CHANNEL_LABEL[channel]}…`
@@ -1659,7 +1686,9 @@ function ReplyBoxImpl({
                 isNote
                   ? "Notes can't have attachments"
                   : windowClosed
-                    ? "Window closed — only templates can be sent"
+                    ? caps.templates
+                      ? "Window closed — only templates can be sent"
+                      : "Window closed — wait for the customer to message again"
                     : "Attach image, video, audio, or document"
               }
               onClick={() => fileInputRef.current?.click()}
@@ -1756,7 +1785,9 @@ function ReplyBoxImpl({
                 isNote
                   ? "Voice messages aren't supported in Note mode"
                   : windowClosed
-                    ? "Window closed — only templates can be sent"
+                    ? caps.templates
+                      ? "Window closed — only templates can be sent"
+                      : "Window closed — wait for the customer to message again"
                     : "Record a voice message"
               }
             />
@@ -1795,7 +1826,7 @@ function ReplyBoxImpl({
                   exit={{ opacity: 0, x: -4 }}
                   className="ml-1 text-2xs font-medium text-note-fg"
                 >
-                  Internal · not sent to WhatsApp
+                  Internal · not sent to {CHANNEL_LABEL[channel]}
                 </motion.span>
               )}
             </AnimatePresence>
@@ -1805,16 +1836,16 @@ function ReplyBoxImpl({
                 drops first, then the Send button collapses to a round
                 icon-only button — driven by the @container on this row. */}
             <div className="ml-auto flex items-center gap-2">
-              {!isNote && value.length > 3500 && (
+              {!isNote && value.length > caps.messageTextMaxChars * 0.85 && (
                 <span
                   className={cn(
                     "text-3xs tabular-nums",
-                    value.length >= 4096
+                    value.length >= caps.messageTextMaxChars
                       ? "text-destructive"
                       : "text-muted-foreground",
                   )}
                 >
-                  {value.length}/4096
+                  {value.length}/{caps.messageTextMaxChars}
                 </span>
               )}
               <span className="hidden text-3xs text-muted-foreground @[34rem]:inline">

@@ -41,46 +41,67 @@ import { db } from "@/lib/db";
  */
 type IdentityClient = Pick<typeof db, "contact" | "customer">;
 
-export async function resolveCustomerId(
+interface ResolveContactInput {
+  id?: string;
+  phoneNumber: string | null;
+  email: string | null;
+  name: string;
+}
+
+interface ResolveOpts {
+  /**
+   * Set ONLY when the email was asserted by the person themselves (today: the
+   * contact-share autofill flow). Defaults off — see the header note.
+   */
+  trustEmailAsStrongKey?: boolean;
+}
+
+/**
+ * Find an EXISTING already-linked person that shares a deterministic strong key
+ * with this contact, or null if none. **Never creates a Customer** — this is the
+ * "did we adopt someone?" question, split out from {@link resolveCustomerId} so a
+ * caller that already owns a Customer (contact-share) can tell a real adoption
+ * apart from "no match". Re-pointing a contact onto a freshly-minted solo
+ * Customer would silently tear it out of a manually-merged profile or churn its
+ * id and discard a person-level rename — so that decision needs this signal.
+ */
+export async function findExistingCustomerIdByStrongKey(
   teamId: string,
-  contact: {
-    id?: string;
-    phoneNumber: string | null;
-    email: string | null;
-    name: string;
-  },
+  contact: ResolveContactInput,
   client: IdentityClient = db,
-  {
-    /**
-     * Set ONLY when the email was asserted by the person themselves (today: the
-     * contact-share autofill flow). Defaults off — see the header note.
-     */
-    trustEmailAsStrongKey = false,
-  }: { trustEmailAsStrongKey?: boolean } = {},
-): Promise<string> {
-  // Build the strong-key OR arms for whichever verified identifiers exist.
+  { trustEmailAsStrongKey = false }: ResolveOpts = {},
+): Promise<string | null> {
   const strongKeys: Prisma.ContactWhereInput[] = [];
   if (contact.phoneNumber) strongKeys.push({ phoneNumber: contact.phoneNumber });
   if (contact.email && trustEmailAsStrongKey) strongKeys.push({ email: contact.email });
+  if (strongKeys.length === 0) return null;
 
-  if (strongKeys.length > 0) {
-    // Another ALREADY-LINKED contact in the team sharing a strong key is the
-    // same person — adopt its customer. Oldest wins so the canonical customer
-    // is stable regardless of sweep order. `id` is optional: at ingest the
-    // contact row doesn't exist yet, so there's nothing to exclude.
-    const match = await client.contact.findFirst({
-      where: {
-        teamId,
-        ...(contact.id ? { id: { not: contact.id } } : {}),
-        customerId: { not: null },
-        deletedAt: null,
-        OR: strongKeys,
-      },
-      select: { customerId: true },
-      orderBy: { createdAt: "asc" },
-    });
-    if (match?.customerId) return match.customerId;
-  }
+  // Another ALREADY-LINKED contact in the team sharing a strong key is the same
+  // person — adopt its customer. Oldest wins so the canonical customer is stable
+  // regardless of sweep order. `id` is optional: at ingest the contact row
+  // doesn't exist yet, so there's nothing to exclude.
+  const match = await client.contact.findFirst({
+    where: {
+      teamId,
+      ...(contact.id ? { id: { not: contact.id } } : {}),
+      customerId: { not: null },
+      deletedAt: null,
+      OR: strongKeys,
+    },
+    select: { customerId: true },
+    orderBy: { createdAt: "asc" },
+  });
+  return match?.customerId ?? null;
+}
+
+export async function resolveCustomerId(
+  teamId: string,
+  contact: ResolveContactInput,
+  client: IdentityClient = db,
+  opts: ResolveOpts = {},
+): Promise<string> {
+  const existing = await findExistingCustomerIdByStrongKey(teamId, contact, client, opts);
+  if (existing) return existing;
 
   // Distinct person → fresh Customer, seeded with the contact's display name.
   const customer = await client.customer.create({

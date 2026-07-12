@@ -89,11 +89,12 @@ export class CallsService {
   /**
    * Initiate an outbound call. Pre-flight gauntlet runs in this order so
    * each failure surfaces a precise reason the UI can render:
-   *   1. capability check (gate decorator already ran; sanity check here)
-   *   2. conversation + contact load (with phone country)
-   *   3. region gate (BIC_BLOCKED_COUNTRY_CODES + sanctioned)
-   *   4. revocation gate (Contact.callPermissionRevokedUntil)
-   *   5. 24h window check OR live permission
+   *   1. conversation + contact load, then a capability gate on the channel's
+   *      declared `capabilities.calling` (Instagram / any future non-calling
+   *      channel is refused here, not left to fail deep in the provider)
+   *   2. region gate (BIC_BLOCKED_COUNTRY_CODES + sanctioned)
+   *   3. revocation gate (Contact.callPermissionRevokedUntil)
+   *   4. 24h window check OR live permission
    *   6. 5-calls-per-24h-per-contact cap
    *   7. placeCall against Meta + INSERT Call row + publish ringing_out
    */
@@ -128,6 +129,18 @@ export class CallsService {
     // + a PSID + Meta's own permission check. Branch the whole preflight on it.
     const channelForCall = conversation.channel ?? "whatsapp";
     const binding = getProviderBinding(channelForCall);
+    // Capability gate (defense-in-depth; the @RequireCalling guard + the UI
+    // hiding the button are the front line). Derive from the DECLARED capability,
+    // not from whether the provider happens to expose a call method — Instagram
+    // (no Meta calling API) and any future non-calling channel are refused here
+    // with a clean error instead of failing deep in the provider. Mirrors
+    // enableCallingForTeam, which gates the same way.
+    if (!binding.provider.capabilities.calling) {
+      throw new BadRequestException({
+        error: "calling_not_supported",
+        detail: `Calling isn't available on ${channelForCall}.`,
+      });
+    }
     const isUnified = usesUnifiedCalling(binding.provider);
     const to = isUnified ? contact.externalContactId : contact.phoneNumber;
     if (!to) {
@@ -596,11 +609,20 @@ export class CallsService {
         rateLimitedUntil: true,
       },
     });
+    if (latest?.rateLimitedUntil && latest.rateLimitedUntil.getTime() > now) {
+      // Rate-limit placeholder rows are written with expiresAt = new Date(0)
+      // (epoch), so surface the real retry-at time (`rateLimitedUntil`) as the
+      // caller-facing timestamp — returning the epoch expiresAt made the UI
+      // render a permission that "expired" in 1970 / a huge negative countdown.
+      return {
+        permissionRequestId: latest.externalRequestId ?? latest.id,
+        expiresAt: latest.rateLimitedUntil.toISOString(),
+      };
+    }
     if (
-      (latest?.rateLimitedUntil && latest.rateLimitedUntil.getTime() > now) ||
-      (latest?.status === CallPermissionStatus.pending &&
-        !latest.rateLimitedUntil &&
-        latest.expiresAt.getTime() > now)
+      latest?.status === CallPermissionStatus.pending &&
+      !latest.rateLimitedUntil &&
+      latest.expiresAt.getTime() > now
     ) {
       return {
         permissionRequestId: latest.externalRequestId ?? latest.id,

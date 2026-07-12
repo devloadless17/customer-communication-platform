@@ -9,14 +9,16 @@ import type { Channel } from "@ccp/shared/types";
 import type { MessagingProvider } from "@ccp/shared/providers/types";
 
 /**
- * Provider registry. Today there's only one channel (Meta WhatsApp Cloud), but
- * the indirection is real: every per-contact send selects its provider from the
+ * Provider registry. Three live channels are registered below — WhatsApp,
+ * Messenger, and Instagram (all Meta Graph, distinct channels) — and the
+ * indirection is real: every per-contact send selects its provider from the
  * contact's channel (see `resolveContactChannel`) and looks it up here, instead
- * of hard-referencing Meta. Adding Instagram DM / Telegram / SMS later is:
+ * of hard-referencing Meta. Adding a designed-for channel (Telegram / SMS /
+ * Email) later is:
  *
  *   1. implement `MessagingProvider<TheirConfig>` (a sibling of meta.ts),
  *   2. add a `<channel>-config.ts` with a `get…SendConfig(teamId)` loader,
- *   3. register a `ProviderBinding` below,
+ *   3. register a `ProviderBinding` below and add it to `LIVE_CHANNELS`,
  *   4. add a webhook controller that calls `provider.parseWebhook` and hands
  *      off to the SAME `ingestEvents(teamId, provider, events)`.
  *

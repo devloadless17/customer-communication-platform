@@ -102,7 +102,7 @@ step count does.
 | Step throws `UnknownStepTypeError`     | Run fails immediately (no retry).      |
 | Step throws `StepConfigError`          | Run fails immediately (no retry).      |
 | Step throws anything else              | BullMQ retries with exponential backoff. The failing attempt's `stepLog` entry is persisted before the throw, so the UI shows the cause across retries. |
-| Worker process crashes mid-step        | BullMQ marks the job failed-on-restart and retries. The runner re-reads the row and resumes from `currentStepId`. |
+| Worker process crashes mid-step        | BullMQ marks the job failed-on-restart and retries; the runner re-reads the row and resumes from `currentStepId`. The per-run mutex TTL (`RUN_LOCK_TTL_MS`, 60s) is boot-asserted below the BullMQ job lock (`WORKFLOW_LOCK_DURATION_MS`, 90s) so the dead lane's run-lock has usually expired before the redelivery lands — the retry reacquires it and resumes instead of no-op-skipping into a permanent `running` strand. The residual window (BullMQ renews its job lock mid-flight, so a redelivery can arrive a few seconds before the run-lock expires and `skipped`-completes) is closed by the waiting-sweeper's **`running` backstop**: a `running` row with no per-run lock held = a dead lane, so it re-enqueues the run (`workflow-waiting.ts`). |
 | Workflow disabled while running        | Next pickup marks the run "skipped" and exits cleanly. |
 | `MAX_STEPS_PER_RUN` exceeded           | Run marked failed with `errorMessage: "step ceiling exceeded"`. |
 

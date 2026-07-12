@@ -89,8 +89,38 @@ export async function ingestEvents(
   // in its own try so one bad row doesn't make Meta retry the whole
   // batch.
   const INGEST_CONCURRENCY = 8;
-  const queue = events.slice();
-  const lanes = Math.min(INGEST_CONCURRENCY, queue.length);
+  // Group events by the CONTACT they touch so same-contact events run
+  // SEQUENTIALLY (one lane) while different contacts still parallelize. The N
+  // media siblings of one multi-attachment message — or a rapid burst from one
+  // person — otherwise ran concurrently across lanes and issued competing
+  // `contact.update()`s on the same row, which Serializable-conflict (P2034);
+  // under load the per-event retries exhaust and a perfectly valid message 503s
+  // (→ Meta redelivery). Events with no contact key (status / template / etc.)
+  // get a unique bucket and parallelize exactly as before. Sequential order
+  // within a contact also pins the primary message ahead of its media siblings.
+  const groups = new Map<string, NormalizedEvent[]>();
+  events.forEach((evt, i) => {
+    // Key on whichever contact identity the event carries — phone channels
+    // (WhatsApp) set `contactPhone`, non-phone channels (Messenger/Instagram)
+    // set `externalContactId`, and a BSUID-only inbound sets `bsuid`. Keying
+    // only on externalContactId would leave WhatsApp — the primary channel — in
+    // per-event `u:` buckets, so a rapid same-person burst would still
+    // Serializable-conflict on contact.update(). Events with no contact identity
+    // (status / template_status) fall to the unique bucket and parallelize.
+    const key =
+      "externalContactId" in evt && evt.externalContactId
+        ? `c:${evt.externalContactId}`
+        : "contactPhone" in evt && evt.contactPhone
+          ? `p:${evt.contactPhone}`
+          : "bsuid" in evt && evt.bsuid
+            ? `b:${evt.bsuid}`
+            : `u:${i}`;
+    const g = groups.get(key);
+    if (g) g.push(evt);
+    else groups.set(key, [evt]);
+  });
+  const groupQueue = [...groups.values()];
+  const lanes = Math.min(INGEST_CONCURRENCY, groupQueue.length);
   const runOne = async (evt: NormalizedEvent): Promise<void> => {
     try {
       if (evt.kind === "message") {
@@ -172,10 +202,12 @@ export async function ingestEvents(
       }
   };
   const runners = Array.from({ length: lanes }, async () => {
-    while (queue.length > 0) {
-      const next = queue.shift();
-      if (next === undefined) return;
-      await runOne(next);
+    while (groupQueue.length > 0) {
+      const group = groupQueue.shift();
+      if (group === undefined) return;
+      // Sequential within a contact (primary before its media siblings) so
+      // there's no same-row write conflict; distinct-contact groups run parallel.
+      for (const evt of group) await runOne(evt);
     }
   });
   await Promise.all(runners);

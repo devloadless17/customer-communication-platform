@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { zLiveChannel } from "@/common/channel-schema";
 
 const MAX_IDS = 5000;
 const MAX_TEXT = 500;
@@ -21,7 +22,7 @@ export const AudienceCountSchema = z
     contactIds: z.array(z.string().min(1)).max(MAX_IDS).default([]),
     /** Scope the count to one channel — a broadcast sends on a single channel, so
      *  the composer count must match what actually gets sent. Omit = all channels. */
-    channel: z.enum(["whatsapp", "messenger", "instagram"]).optional(),
+    channel: zLiveChannel().optional(),
     /** "All contacts" audience: count every team contact (tags/ids ignored),
      *  optionally scoped to `channel`. Distinct from the empty tags+ids case, which
      *  deliberately counts 0 so an unset custom audience never targets everyone. */
@@ -43,7 +44,7 @@ export const AudiencePreviewSchema = z.object({
   /** Scope the preview to one channel, mirroring `AudienceCountSchema`. A
    *  broadcast sends on a single channel, so "who am I sending to" must show the
    *  same set the count and the send resolve. Omit = all channels. */
-  channel: z.enum(["whatsapp", "messenger", "instagram"]).optional(),
+  channel: zLiveChannel().optional(),
 });
 export type AudiencePreviewInput = z.infer<typeof AudiencePreviewSchema>;
 
@@ -66,7 +67,7 @@ export const ListContactsQuerySchema = z.object({
   /** Comma-separated list of tag ids; ANY-match. Empty entries are dropped. */
   tagIds: z.string().optional(),
   /** Filter to one channel (whatsapp / messenger / instagram). */
-  channel: z.enum(["whatsapp", "messenger", "instagram"]).optional().catch(undefined),
+  channel: zLiveChannel().optional().catch(undefined),
   /** "Group by person" view — one row per unified Customer (offset mode). */
   groupByPerson: z.coerce.boolean().optional().catch(undefined),
   window: z.enum(["open", "closed"]).optional().catch(undefined),
@@ -215,7 +216,7 @@ export const BulkFilterSchema = z.object({
   // Load-bearing: without this, a "select all N matching" bulk op run while the
   // list is scoped to one channel silently targets every channel's contacts —
   // the superset the agent explicitly filtered out and never saw.
-  channel: z.enum(["whatsapp", "messenger", "instagram"]).optional(),
+  channel: zLiveChannel().optional(),
 });
 export type BulkFilterInput = z.infer<typeof BulkFilterSchema>;
 

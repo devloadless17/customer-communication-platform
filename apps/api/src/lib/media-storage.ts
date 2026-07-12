@@ -1,4 +1,5 @@
 import type { Channel, MediaKind } from "@ccp/shared/types";
+import { mediaSizeCaps } from "@ccp/shared/providers/media-caps";
 
 /**
  * Mime-type helpers + per-kind size caps. The actual byte storage lives behind
@@ -19,15 +20,9 @@ import type { Channel, MediaKind } from "@ccp/shared/types";
  * error on a non-WhatsApp thread.
  */
 
-const MB = 1024 * 1024;
-
-export const MEDIA_SIZE_CAPS: Record<MediaKind, number> = {
-  image: 5 * MB,
-  video: 16 * MB,
-  audio: 16 * MB,
-  sticker: 500 * 1024,
-  document: 100 * MB,
-};
+// The historical WhatsApp default, kept as a named export for existing callers.
+// Sourced from the shared per-channel map so there is one source of truth.
+export const MEDIA_SIZE_CAPS: Record<MediaKind, number> = mediaSizeCaps("whatsapp");
 
 /**
  * OUTBOUND document allowlist — Meta's documented supported document types.
@@ -99,35 +94,25 @@ export interface ChannelMediaPolicy {
   documentMime: ReadonlySet<string>;
 }
 
+// Size caps come from the SHARED `mediaSizeCaps` map so the client composer
+// guard and this server policy can never disagree per channel.
 const WHATSAPP_MEDIA_POLICY: ChannelMediaPolicy = {
   label: "WhatsApp",
-  caps: MEDIA_SIZE_CAPS,
+  caps: mediaSizeCaps("whatsapp"),
   audioMime: WHATSAPP_AUDIO_MIME,
   documentMime: META_DOCUMENT_MIME_ALLOWED,
 };
 
 const MESSENGER_MEDIA_POLICY: ChannelMediaPolicy = {
   label: "Messenger",
-  caps: {
-    image: 25 * MB,
-    video: 25 * MB,
-    audio: 25 * MB,
-    sticker: 25 * MB,
-    document: 25 * MB,
-  },
+  caps: mediaSizeCaps("messenger"),
   audioMime: MESSENGER_AUDIO_MIME,
   documentMime: META_DOCUMENT_MIME_ALLOWED,
 };
 
 const INSTAGRAM_MEDIA_POLICY: ChannelMediaPolicy = {
   label: "Instagram",
-  caps: {
-    image: 8 * MB,
-    video: 25 * MB,
-    audio: 25 * MB,
-    sticker: 8 * MB,
-    document: 25 * MB,
-  },
+  caps: mediaSizeCaps("instagram"),
   audioMime: INSTAGRAM_AUDIO_MIME,
   documentMime: META_DOCUMENT_MIME_ALLOWED,
 };

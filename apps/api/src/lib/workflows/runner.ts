@@ -82,8 +82,20 @@ export interface RunWorkflowResult {
 // 60s), so this is NOT a "max pickup" — it's the lapse window if the process
 // DIES. While the pickup is alive a heartbeat renews the lock at TTL/3, so it
 // never lapses mid-flight; on a dead lane the heartbeat stops and the lock
-// expires after one TTL so a retry / waiting-sweeper recovers.
-const RUN_LOCK_TTL_MS = 120_000;
+// expires after one TTL so the BullMQ stalled-redelivery recovers.
+//
+// It MUST be strictly less than the BullMQ job lockDuration (WORKFLOW_LOCK_
+// DURATION_MS, 90s) — worker.ts boot-asserts this. Why: when a lane crashes
+// mid-step the redelivered job must be able to ACQUIRE this run-lock, else
+// runWorkflow returns "skipped", BullMQ marks the redelivery COMPLETED (a
+// resolved processor ends the job with no further retry), and the run strands
+// in "running" forever with no sweeper to recover it. BullMQ can't redeliver
+// until the 90s job-lock lapses, so a TTL below 90s guarantees this run-lock
+// has already expired by the time the redelivery lands — the retry resumes the
+// run instead of no-op-skipping it. The heartbeat (renew at TTL/3) keeps a LIVE
+// long pickup's lock alive regardless of the TTL, so shrinking it doesn't
+// weaken the concurrent-lane double-fire guard this lock exists for.
+export const RUN_LOCK_TTL_MS = 60_000;
 
 /**
  * Per-run mutual-exclusion wrapper around the real runner. BullMQ's per-JOB

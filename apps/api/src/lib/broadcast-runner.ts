@@ -1143,8 +1143,13 @@ async function processOneRecipient(
       : broadcast.channel;
   const activeBinding = bindingByChannel.get(sendChannel);
   if (!activeBinding) {
-    await markRecipientFailed(recipient.id, `${sendChannel} is not connected.`);
-    bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
+    await failRecipientAndCount(
+      recipient.id,
+      `${sendChannel} is not connected.`,
+      broadcast.id,
+      broadcast.teamId,
+      pendingBumps,
+    );
     return;
   }
   const { provider, config } = activeBinding;
@@ -1174,8 +1179,13 @@ async function processOneRecipient(
       ).state,
     );
   if (!isFreeform && !sendTemplate) {
-    await markRecipientFailed(recipient.id, "provider does not support templates");
-    bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
+    await failRecipientAndCount(
+      recipient.id,
+      "provider does not support templates",
+      broadcast.id,
+      broadcast.teamId,
+      pendingBumps,
+    );
     return;
   }
   // Re-check contact liveness at FIRE time. Audience resolution filters
@@ -1187,11 +1197,13 @@ async function processOneRecipient(
   // don't reopen a closed thread for someone who was removed. Mirrors the
   // missing-phone guard below.
   if (recipient.contact.deletedAt) {
-    await markRecipientFailed(
+    await failRecipientAndCount(
       recipient.id,
       "Contact was deleted after the broadcast was created.",
+      broadcast.id,
+      broadcast.teamId,
+      pendingBumps,
     );
-    bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
     return;
   }
   // Per-recipient conversation resolution. Outside the send try because a
@@ -1272,8 +1284,13 @@ async function processOneRecipient(
         unreadCount: conversation.unreadCount,
       });
     } catch (err) {
-      await markRecipientFailed(recipient.id, errorDetail(err));
-      bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
+      await failRecipientAndCount(
+        recipient.id,
+        errorDetail(err),
+        broadcast.id,
+        broadcast.teamId,
+        pendingBumps,
+      );
       return;
     }
 
@@ -1298,13 +1315,15 @@ async function processOneRecipient(
       ? recipient.contact.phoneNumber
       : recipient.contact.externalContactId;
     if (!toPhone) {
-      await markRecipientFailed(
+      await failRecipientAndCount(
         recipient.id,
         dialsPhone
           ? "Contact has no phone number for this channel."
           : "Contact has no messaging id for this channel.",
+        broadcast.id,
+        broadcast.teamId,
+        pendingBumps,
       );
-      bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
       return;
     }
 
@@ -1323,11 +1342,13 @@ async function processOneRecipient(
       perRecipientVars.header.trim().length === 0;
     if (emptyBodyIdx !== -1 || headerEmpty) {
       const which = headerEmpty ? "the header variable" : `variable {{${emptyBodyIdx + 1}}}`;
-      await markRecipientFailed(
+      await failRecipientAndCount(
         recipient.id,
         `Skipped — ${which} resolved to empty for this contact (a mapped field like email is missing and the template has no default value). WhatsApp rejects templates with an empty variable.`,
+        broadcast.id,
+        broadcast.teamId,
+        pendingBumps,
       );
-      bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
       return;
     }
 
@@ -1342,8 +1363,13 @@ async function processOneRecipient(
       conversationId,
     );
     if (attemptClaim.kind === "abort") {
-      await markRecipientFailed(recipient.id, attemptClaim.reason);
-      bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
+      await failRecipientAndCount(
+        recipient.id,
+        attemptClaim.reason,
+        broadcast.id,
+        broadcast.teamId,
+        pendingBumps,
+      );
       return;
     }
 
@@ -1386,11 +1412,11 @@ async function processOneRecipient(
         // empty-variable guards above (fail one recipient, keep the run going).
         // Release the claimed attempt so a manual retry can re-claim cleanly.
         await releaseBroadcastSendAttempt(recipient.id);
-        await markRecipientFailed(recipient.id, errorDetail(err));
-        bumpCountersFireAndForget(
+        await failRecipientAndCount(
+          recipient.id,
+          errorDetail(err),
           broadcast.id,
           broadcast.teamId,
-          { failed: 1 },
           pendingBumps,
         );
         return;
@@ -1461,11 +1487,11 @@ async function processOneRecipient(
                 );
           } catch (retryErr) {
             await releaseBroadcastSendAttempt(recipient.id);
-            await markRecipientFailed(recipient.id, errorDetail(retryErr));
-            bumpCountersFireAndForget(
+            await failRecipientAndCount(
+              recipient.id,
+              errorDetail(retryErr),
               broadcast.id,
               broadcast.teamId,
-              { failed: 1 },
               pendingBumps,
             );
             // A first error that looked like a rate-limit can resolve into a
@@ -1481,11 +1507,11 @@ async function processOneRecipient(
           }
         } else {
           await releaseBroadcastSendAttempt(recipient.id);
-          await markRecipientFailed(recipient.id, errorDetail(err));
-          bumpCountersFireAndForget(
+          await failRecipientAndCount(
+            recipient.id,
+            errorDetail(err),
             broadcast.id,
             broadcast.teamId,
-            { failed: 1 },
             pendingBumps,
           );
           // Permanent-error breaker: a credential that's dead for the whole run
@@ -1706,13 +1732,41 @@ async function processOneRecipient(
     }
 }
 
-async function markRecipientFailed(recipientId: string, message: string): Promise<void> {
+async function markRecipientFailed(
+  recipientId: string,
+  message: string,
+): Promise<boolean> {
   // CAS so a recipient that was already marked `sent` (or `failed`) by a
-  // prior pass isn't reverted.
-  await db.broadcastRecipient.updateMany({
+  // prior pass isn't reverted. Returns whether THIS call actually flipped a
+  // queued row — the caller counts the failure only when it did (see
+  // `failRecipientAndCount`).
+  const res = await db.broadcastRecipient.updateMany({
     where: { id: recipientId, status: "queued" },
     data: { status: "failed", errorMessage: message.slice(0, 500) },
   });
+  return res.count > 0;
+}
+
+/**
+ * Fail a recipient and count it AT MOST ONCE. The failure counter is bumped only
+ * when the queued→failed CAS actually won. If `cancel()`'s finalize UPDATE
+ * already flipped this queued recipient to failed+CANCEL_RECIPIENT_MARKER (it
+ * counts every not-in-flight queued row as failed), the CAS here misses and we
+ * must NOT bump again — otherwise `sentCount + failedCount` exceeds `totalCount`.
+ * This mirrors the success path, which only bumps `{ sent: 1 }` when its
+ * queued→sent CAS wins and otherwise reconciles the marker instead.
+ */
+async function failRecipientAndCount(
+  recipientId: string,
+  message: string,
+  broadcastId: string,
+  teamId: string,
+  pendingBumps: Set<Promise<unknown>>,
+): Promise<void> {
+  const flipped = await markRecipientFailed(recipientId, message);
+  if (flipped) {
+    bumpCountersFireAndForget(broadcastId, teamId, { failed: 1 }, pendingBumps);
+  }
 }
 
 /**

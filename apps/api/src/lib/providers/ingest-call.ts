@@ -365,13 +365,73 @@ export async function ingestCallEvent(
               : null)
           : null;
 
+      // ONE terminal→terminal correction is allowed: a row locked as `missed`
+      // when it actually CONNECTED. Happens on an outbound call the customer
+      // answered but the agent hung up before the browser's `markConnected`
+      // stamped answeredAt — endCall CAS-flips ringing→missed. Meta's
+      // authoritative terminate then arrives carrying start_time/duration (proof
+      // it connected), but the `alreadyTerminal` no-op would otherwise leave it
+      // permanently `missed` with durationSeconds=null. Correct the stored FIELDS
+      // only; the non-idempotent side effects (publishes, unanswered-counter)
+      // stay suppressed, so this can't re-fire subscribers or inflate the counter.
+      const upgradeMissedToCompleted =
+        !!existing &&
+        existing.status === CallStatus.missed &&
+        effectiveStatus === CallStatus.completed &&
+        (evt.connectedAt != null || evt.durationSeconds != null);
+
       if (existing) {
         // Terminal-state guard. If the row already landed in a terminal
         // state, ANY later webhook (terminal or not, out-of-order delivery)
         // must NOT mutate the row's status/timestamps — `alreadyTerminal` also
         // suppresses the side-effect publishes below, so this is a complete
-        // no-op against Meta's at-least-once redelivery.
-        if (alreadyTerminal) {
+        // no-op against Meta's at-least-once redelivery. The sole exception is
+        // the missed→completed correction above.
+        if (alreadyTerminal && upgradeMissedToCompleted) {
+          const corrected = await tx.call.update({
+            where: { id: existing.id },
+            data: {
+              status: CallStatus.completed,
+              ...(answeredAt ? { answeredAt } : {}),
+              ...(terminalDurationSeconds != null
+                ? { durationSeconds: terminalDurationSeconds }
+                : {}),
+              endedAt: evt.timestamp,
+            },
+            select: { id: true, status: true },
+          });
+          callRow = corrected;
+          // The row was locked as `missed` but Meta's terminate proves it
+          // CONNECTED, so mirror the two side effects a normal missed→completed
+          // transition performs — the `!alreadyTerminal && isTerminalPhase`
+          // block below is skipped for this already-terminal correction. Both
+          // are idempotent: this branch runs exactly once (the next duplicate
+          // terminate sees status=completed, so upgradeMissedToCompleted is
+          // false and the plain no-op applies).
+          //   1. Reset the unanswered-outbound counter — a connected outbound
+          //      call clears it (mirror of Meta's auto-revocation reset),
+          //      otherwise a real answer leaves the contact-panel warning stuck.
+          if (existing.direction === CallDirection.out) {
+            await tx.contact.update({
+              where: { id: contact.id },
+              data: { consecutiveUnansweredOutCalls: 0 },
+            });
+          }
+          //   2. Publish the corrective terminal event so the conversation audit
+          //      timeline (which recorded a `call_missed` pill from endCall) is
+          //      superseded by `call_completed`, ending the divergence between
+          //      the Calls page (row=completed) and the thread timeline.
+          await publishInTx(tx, {
+            type: "call.ended",
+            teamId,
+            conversationId: conversation.id,
+            callId: corrected.id,
+            direction: existing.direction,
+            endedAt: evt.timestamp.toISOString(),
+            durationSeconds: terminalDurationSeconds,
+            reason: "hangup_by_customer",
+          });
+        } else if (alreadyTerminal) {
           callRow = { id: existing.id, status: existing.status };
         } else {
           // Status-rank guard (same posture as the Message.status statusRank

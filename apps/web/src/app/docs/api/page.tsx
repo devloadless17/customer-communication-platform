@@ -424,12 +424,21 @@ export default function ApiDocsPage() {
           path="/api/external/v1/conversations/:id/notes"
           body={{ body: "Customer prefers SMS", authorUserId: "<user-id>" }}
         >
-          Add an internal note (never sent to WhatsApp). Body:{" "}
+          Add an internal note (never sent to the customer). Body:{" "}
           <code>{`{ body: string, authorUserId: string }`}</code> —{" "}
           <code>authorUserId</code> is <strong>required</strong> (omitting it
           returns <code>400 authorUserId_required</code>) and must be a team
           member id from <code>GET /users</code>; create a dedicated
           service-account user for your integration if no human author applies.
+        </Endpoint>
+        <Endpoint
+          method="DELETE"
+          path="/api/external/v1/conversations/:id/notes/:noteId"
+        >
+          Delete an internal note. Fires the <code>note.deleted</code> webhook
+          (symmetric with the create above, so a CRM mirror can complete a
+          create→delete round-trip). Idempotent — a repeated delete returns{" "}
+          <code>404 note_not_found</code>.
         </Endpoint>
       </Section>
 

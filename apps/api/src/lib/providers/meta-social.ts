@@ -125,7 +125,15 @@ interface MessagingEvent {
     // The customer UNSENT this message (Messenger/Instagram). References an
     // existing `mid`; carries no new content — we tombstone the stored row.
     is_deleted?: boolean;
-    attachments?: { type?: string; payload?: { url?: string } }[];
+    // `title` + `payload.coordinates` ride on a `type:"location"` share (a
+    // customer tapping "Send Location"); every other attachment uses
+    // `payload.url`. Widened here so the location branch can lift coordinates
+    // into a structured map card (see socialStructuredFromAttachments).
+    attachments?: {
+      type?: string;
+      title?: string;
+      payload?: { url?: string; coordinates?: { lat?: number; long?: number } };
+    }[];
     quick_reply?: { payload?: string };
     // Set when the customer quoted a message — the mid they replied to.
     reply_to?: { mid?: string };
@@ -271,6 +279,28 @@ function attachmentMedia(
 }
 
 /**
+ * EVERY downloadable attachment on a message, in delivery order. Meta can pack
+ * several media into ONE Messenger/Instagram messaging event (a customer sends
+ * 3 photos at once → one `mid`, a 3-element `attachments[]`), whereas the
+ * WhatsApp Cloud API delivers each media as its own wamid. Without this the
+ * social parser kept only `pickMediaAttachment`'s single pick and the rest
+ * vanished with no row and no placeholder. Ingest emits the first as the primary
+ * message row and the rest as sibling rows (see the inbound branch).
+ */
+function allAttachmentMedia(
+  atts: { type?: string; payload?: { url?: string } }[] | undefined,
+): NormalizedMediaRef[] {
+  if (!atts) return [];
+  const out: NormalizedMediaRef[] = [];
+  for (const att of atts) {
+    const kind = attachmentKind(att.type);
+    if (!kind || !att.payload?.url) continue;
+    out.push({ kind, externalMediaId: "", sourceUrl: att.payload.url, mimeType: provisionalMime(kind) });
+  }
+  return out;
+}
+
+/**
  * A human label for a non-downloadable social attachment (no `payload.url` we
  * can store) so the row isn't blank. Meta withholds the content of ephemeral /
  * vanish-mode messages, so those get a clear "disappearing message" note.
@@ -304,8 +334,28 @@ function socialAttachmentLabel(type: string): string {
  * for non-story attachments (handled elsewhere).
  */
 function socialStructuredFromAttachments(
-  atts: { type?: string; payload?: { url?: string } }[] | undefined,
+  atts:
+    | {
+        type?: string;
+        title?: string;
+        payload?: { url?: string; coordinates?: { lat?: number; long?: number } };
+      }[]
+    | undefined,
 ): MessageStructured | undefined {
+  // A shared location renders a map pin — the social equivalent of WhatsApp's
+  // structuredForMessage location card — instead of a bare "📍 Location" label
+  // that hides where the customer actually is. Coordinates ride on
+  // `payload.coordinates`; the bare label stays the body for search/preview.
+  const loc = atts?.find((a) => a.type === "location");
+  const coords = loc?.payload?.coordinates;
+  if (loc && coords?.lat != null && coords.long != null) {
+    return {
+      kind: "location",
+      latitude: coords.lat,
+      longitude: coords.long,
+      ...(loc.title?.trim() ? { name: loc.title.trim() } : {}),
+    };
+  }
   const att = atts?.find(
     (a) => a.type === "story_mention" || a.type === "story_reply" || a.type === "share",
   );
@@ -473,6 +523,30 @@ export function parseSocialMessaging(
             timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
             rawPayload: m as unknown as Record<string, unknown>,
           });
+          // A business can send a multi-photo album from Meta's native inbox;
+          // Meta mirrors it back as ONE echo mid with N attachments. Mirror the
+          // inbound multi-attachment handling so photos 2..N aren't dropped (the
+          // CDN urls expire and are never re-fetched). Same sticker-skip + stable
+          // `${mid}:att:{i}` dedup id the inbound branch uses below.
+          const hasSticker =
+            m.message.attachments?.some((a) => a.type === "sticker") ?? false;
+          const extraEchoMedia =
+            media && !hasSticker
+              ? allAttachmentMedia(m.message.attachments).filter(
+                  (x) => x.sourceUrl !== media.sourceUrl,
+                )
+              : [];
+          extraEchoMedia.forEach((extra, i) => {
+            events.push({
+              kind: "echo",
+              externalId: `${mid}:att:${i + 1}`,
+              externalContactId: customerId,
+              body: "",
+              media: extra,
+              timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
+              rawPayload: m as unknown as Record<string, unknown>,
+            });
+          });
         }
         continue;
       }
@@ -482,6 +556,17 @@ export function parseSocialMessaging(
         const mid = m.message.mid;
         if (!senderId || !mid) continue;
         const media = attachmentMedia(m.message.attachments);
+        // Meta can pack several media into ONE social message (3 photos at once
+        // → one mid). The primary row carries the first pick + any caption; the
+        // rest become sibling rows below so nothing is silently dropped. Skip
+        // this when a sticker is present: sticker+image is the ONE transition
+        // sticker (pickMediaAttachment already prefers the sticker), not two
+        // media. Sibling urls are de-duped against the primary's.
+        const hasSticker = m.message.attachments?.some((a) => a.type === "sticker") ?? false;
+        const extraMedia =
+          media && !hasSticker
+            ? allAttachmentMedia(m.message.attachments).filter((x) => x.sourceUrl !== media.sourceUrl)
+            : [];
         const text = m.message.text;
         // Body is the text (media caption if any); empty for media-only. When a
         // message has neither text nor a downloadable attachment, fall back to a
@@ -533,6 +618,22 @@ export function parseSocialMessaging(
           rawPayload: m as unknown as Record<string, unknown>,
         };
         events.push(msg);
+        // Sibling rows for the additional media in a multi-attachment message.
+        // Stable derived externalId (`${mid}:att:${i}`) keeps dedup idempotent
+        // across Meta's at-least-once redelivery — mirrors how WhatsApp yields
+        // one row per media, so the inbox renders all N attachments.
+        extraMedia.forEach((extra, i) => {
+          events.push({
+            kind: "message",
+            externalId: `${mid}:att:${i + 1}`,
+            externalContactId: senderId,
+            contactName: null,
+            body: "",
+            media: extra,
+            timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
+            rawPayload: m as unknown as Record<string, unknown>,
+          } satisfies NormalizedInboundMessage);
+        });
         continue;
       }
       // Postback: Get-Started / persistent-menu / structured-button tap. Surface
@@ -559,6 +660,36 @@ export function parseSocialMessaging(
             rawPayload: m as unknown as Record<string, unknown>,
           };
           events.push(msg);
+        }
+        continue;
+      }
+      // Standalone referral: a RETURNING customer clicked a Click-to-Messenger ad
+      // or an m.me?ref= deep link WITHOUT sending a message, so Meta delivers a
+      // bare `referral` messaging event (no message, no postback). Surface it as a
+      // synthesized inbound touch carrying the "from your ad" attribution — the
+      // same convention the postback branch uses for a non-text user action — so
+      // the ad re-engagement isn't silently dropped into the unhandled-log below
+      // (the team pays to subscribe to messaging_referrals). No mid on a bare
+      // referral, so the dedup id is sender+timestamp-derived, idempotent across
+      // Meta's at-least-once redelivery.
+      if (m.referral && !m.message && !m.postback) {
+        const senderId = m.sender?.id;
+        if (senderId) {
+          const attribution = attributionFromSocialReferral(m.referral);
+          const externalId = `${senderId}:${m.timestamp ?? entry.time ?? 0}:referral`;
+          const label = attribution.headline
+            ? `Started a conversation from your ad · ${attribution.headline}`
+            : "Started a conversation from your ad";
+          events.push({
+            kind: "message",
+            externalId,
+            externalContactId: senderId,
+            contactName: null,
+            body: label,
+            attribution,
+            timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
+            rawPayload: m as unknown as Record<string, unknown>,
+          } satisfies NormalizedInboundMessage);
         }
         continue;
       }

@@ -399,10 +399,14 @@ services:
       # local testing. MUST NOT be set in production — uncommenting this
       # in prod would let any authenticated user inject inbound events.
       ENABLE_DEV_TOOLS: ${ENABLE_DEV_TOOLS:-}
-      # Kill-switch for WhatsApp-calling webhook ingest (in-flight feature).
-      # Default empty = calling ENABLED. Set to 1 to make inbound call webhooks
-      # a logged no-op WITHOUT a redeploy if a WebRTC-signaling bug surfaces —
-      # message ingest keeps flowing. Flip back to "" to re-enable.
+      # Kill-switch for calling webhook ingest (ALL channels — WhatsApp +
+      # Messenger). Default empty = calling ENABLED. Set to 1 to make inbound call
+      # webhooks a logged no-op WITHOUT a redeploy if a WebRTC-signaling bug
+      # surfaces — message ingest keeps flowing. Flip back to "" to re-enable.
+      # DISABLE_CALLING is the current name (docs reference it); the legacy
+      # DISABLE_WHATSAPP_CALLING is still honored as a fallback. Both must be
+      # DECLARED here or Docker never injects them into the container.
+      DISABLE_CALLING: ${DISABLE_CALLING:-}
       DISABLE_WHATSAPP_CALLING: ${DISABLE_WHATSAPP_CALLING:-}
     ports:
       # Loopback-only — Caddy is the public ingress (same posture as `app`).

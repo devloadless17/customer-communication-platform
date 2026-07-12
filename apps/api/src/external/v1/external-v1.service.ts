@@ -276,6 +276,10 @@ export class ExternalV1Service {
     );
   }
 
+  deleteNote(teamId: string, conversationId: string, noteId: string) {
+    return this.messaging.deleteNote(teamId, conversationId, noteId);
+  }
+
   // ===========================================================================
   // CONTACTS — read
   // ===========================================================================

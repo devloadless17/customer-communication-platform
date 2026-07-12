@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
-import { resolveCustomerId } from "@/lib/identity/identity-service";
+import { findExistingCustomerIdByStrongKey } from "@/lib/identity/identity-service";
 import { toContactWire } from "@/lib/queries/_shared";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 import { resolveContactShare } from "@ccp/shared/utils/contact-share";
@@ -108,14 +108,21 @@ export async function applyContactShareFromReply(
   await db.contact.update({ where: { id: contact.id }, data: next });
 
   // The contact just gained a strong key, so it may now belong to an EXISTING
-  // person. The customer-link sweeper only rescues `customerId: null` contacts,
-  // and this one already has its own solo Customer — so re-resolve explicitly.
+  // person. This contact ALREADY has its own Customer, so we only want to MOVE it
+  // when the new key genuinely adopts a DIFFERENT, pre-existing person — never
+  // when resolution would merely mint a fresh solo Customer. Using the
+  // mint-on-no-match `resolveCustomerId` here was a real bug: a shared phone/email
+  // the business didn't already hold matches no sibling, mints a new customer,
+  // and the `!==` check then re-points the contact onto it — tearing a
+  // manually-merged contact out of its unified profile (silent un-merge) or
+  // churning a solo contact's id and discarding a person-level rename. So ask the
+  // "did we adopt someone?" question directly and act ONLY on a real match.
   //
   // `trustEmailAsStrongKey` is set here and ONLY here: the address arrived
   // because the customer tapped Meta's `user_email` autofill on their own
   // account, so it identifies them. An agent-typed or CSV-imported email carries
   // no such assertion and must never auto-merge two people.
-  const targetCustomerId = await resolveCustomerId(
+  const adoptedCustomerId = await findExistingCustomerIdByStrongKey(
     teamId,
     {
       id: contact.id,
@@ -125,10 +132,10 @@ export async function applyContactShareFromReply(
     undefined,
     { trustEmailAsStrongKey: true },
   );
-  if (targetCustomerId !== contact.customerId) {
+  if (adoptedCustomerId && adoptedCustomerId !== contact.customerId) {
     await db.contact.update({
       where: { id: contact.id },
-      data: { customerId: targetCustomerId },
+      data: { customerId: adoptedCustomerId },
     });
     // The customer it used to sit alone under is now childless — reap it. The
     // `contacts: none` guard makes this safe when the old customer still owns
@@ -178,7 +185,7 @@ export async function applyContactShareFromReply(
       channel,
       contactId: contact.id,
       field: share.field,
-      merged: targetCustomerId !== contact.customerId,
+      merged: Boolean(adoptedCustomerId && adoptedCustomerId !== contact.customerId),
     }),
   );
   return share.field;

@@ -14,6 +14,7 @@ import {
 import {
   failRunFromRetryExhaustion,
   rollbackOncePerContactLedger,
+  RUN_LOCK_TTL_MS,
   runWorkflow,
 } from "@/lib/workflows/runner";
 import { MAX_STEP_TIMEOUT_MS } from "@/lib/workflows/steps/http-request";
@@ -32,6 +33,20 @@ if (WORKFLOW_LOCK_DURATION_MS <= MAX_STEP_TIMEOUT_MS + WORKFLOW_LOCK_MARGIN_MS) 
       `MAX_STEP_TIMEOUT_MS (${MAX_STEP_TIMEOUT_MS}) + ${WORKFLOW_LOCK_MARGIN_MS}ms margin. ` +
       `A step that runs to its timeout would outlive the lock and get re-delivered, ` +
       `causing duplicate side-effects. Raise WORKFLOW_LOCK_DURATION_MS or lower the cap.`,
+  );
+}
+
+// The per-run mutex TTL MUST expire before BullMQ can redeliver a crashed job
+// (redelivery can't happen until the job lock lapses). If a dead lane's run-lock
+// outlived the redelivery, the retry would fail to acquire it, runWorkflow would
+// return "skipped", BullMQ would complete the redelivery, and the run would
+// strand permanently in "running". Boot-assert the ordering so a future TTL bump
+// can't silently reintroduce the strand.
+if (RUN_LOCK_TTL_MS >= WORKFLOW_LOCK_DURATION_MS) {
+  throw new Error(
+    `[workflows] RUN_LOCK_TTL_MS (${RUN_LOCK_TTL_MS}) must be < WORKFLOW_LOCK_DURATION_MS ` +
+      `(${WORKFLOW_LOCK_DURATION_MS}) so a crashed lane's run-lock expires before BullMQ ` +
+      `redelivers the job — otherwise the redelivery no-op-skips and the run strands in "running".`,
   );
 }
 

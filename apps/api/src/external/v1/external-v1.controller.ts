@@ -110,6 +110,7 @@ import {
  *   POST   /v1/conversations/:id/messages
  *   POST   /v1/conversations/:id/interactive  — buttons / list / phone-email consent chips
  *   POST   /v1/conversations/:id/notes
+ *   DELETE /v1/conversations/:id/notes/:noteId — remove a note (fires note.deleted)
  *   GET    /v1/messages/:id                   — find a single message
  *
  * Bearer auth via TeamApiKey; ApiKeyGuard validates and exposes ApiKeyContext
@@ -835,5 +836,15 @@ export class ExternalV1Controller {
       parseChainDepth(xCcpDepth),
     );
     return { ok: true, note: out.note };
+  }
+
+  @Delete("conversations/:id/notes/:noteId")
+  @RequireScope("write:notes")
+  async deleteNote(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Param("noteId") noteId: string,
+  ) {
+    return this.api.deleteNote(auth.teamId, id, noteId);
   }
 }

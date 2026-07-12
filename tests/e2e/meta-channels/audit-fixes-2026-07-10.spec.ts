@@ -164,6 +164,57 @@ test("Messenger `reel` and Instagram `ig_reel` ingest as video media", async () 
   expect((await msgByExternalId("instagram", igMid))!.mediaKind).toBe("video");
 });
 
+test("multi-attachment Messenger message keeps ALL media, not just the first", async () => {
+  const mid = `m_multi_${uniq()}`;
+  const res = await postMetaWebhook(
+    META_TEST_TEAM_ID,
+    socialEvent("page", MSGR_PAGE_ID, `psid_${uniq()}`, {
+      message: {
+        mid,
+        // A customer sends 3 photos in one Messenger message → one mid, a
+        // 3-element attachments[]. Meta packs these into ONE event (unlike the
+        // WhatsApp Cloud API, which delivers each media as its own wamid).
+        attachments: [
+          { type: "image", payload: { url: "https://cdn.example.com/a.jpg" } },
+          { type: "image", payload: { url: "https://cdn.example.com/b.jpg" } },
+          { type: "image", payload: { url: "https://cdn.example.com/c.jpg" } },
+        ],
+      },
+    }),
+  );
+  expect(res.status).toBe(200);
+
+  // The primary row keyed by mid, plus sibling rows for the extra attachments —
+  // previously attachments 2 and 3 vanished with no row and no placeholder.
+  const primary = await msgByExternalId("messenger", mid);
+  expect(primary!.mediaKind).toBe("image");
+  expect((await msgByExternalId("messenger", `${mid}:att:1`))!.mediaKind).toBe("image");
+  expect((await msgByExternalId("messenger", `${mid}:att:2`))!.mediaKind).toBe("image");
+
+  // Exactly 3 rows for this message — no more (idempotent under redelivery).
+  await postMetaWebhook(
+    META_TEST_TEAM_ID,
+    socialEvent("page", MSGR_PAGE_ID, `psid_x`, {
+      message: {
+        mid,
+        attachments: [
+          { type: "image", payload: { url: "https://cdn.example.com/a.jpg" } },
+          { type: "image", payload: { url: "https://cdn.example.com/b.jpg" } },
+          { type: "image", payload: { url: "https://cdn.example.com/c.jpg" } },
+        ],
+      },
+    }),
+  );
+  const rows = await db().message.count({
+    where: {
+      teamId: META_TEST_TEAM_ID,
+      channel: "messenger",
+      externalId: { in: [mid, `${mid}:att:1`, `${mid}:att:2`] },
+    },
+  });
+  expect(rows).toBe(3);
+});
+
 test("Messenger message_edits rewrites the stored body", async () => {
   const psid = `psid_edit_${uniq()}`;
   const mid = `m_edit_${uniq()}`;

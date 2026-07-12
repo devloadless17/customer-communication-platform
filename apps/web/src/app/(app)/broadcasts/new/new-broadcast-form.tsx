@@ -24,6 +24,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@ccp/shared/utils";
 import type { ContactFieldDefinition, ContactStage, Tag, TemplateDto } from "@ccp/shared/types";
 import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
+import { CHANNEL_CAPABILITIES, LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
@@ -409,6 +410,19 @@ export function NewBroadcastForm({
       : messageKind === "freeform"
         ? freeformChannel
         : undefined;
+
+  // Per-target text cap for the freeform composer, mirroring the server's
+  // smallest-cap gate (broadcasts.service create): a fixed freeform channel caps
+  // against that channel (Messenger 2000 / Instagram 1000); customer-mode resolves
+  // a channel per recipient, so it caps against the SMALLEST live-channel limit —
+  // the only bound guaranteeing no recipient fails on length. Static 2000 let a
+  // 1001–2000 char Instagram/customer body pass the composer and 400 at create.
+  const freeformMaxChars =
+    messageKind === "customer"
+      ? Math.min(
+          ...[...LIVE_CHANNELS].map((c) => CHANNEL_CAPABILITIES[c].messageTextMaxChars),
+        )
+      : CHANNEL_CAPABILITIES[freeformChannel].messageTextMaxChars;
 
   const scopedGroup =
     audience.mode === "group"
@@ -866,13 +880,13 @@ export function NewBroadcastForm({
               onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setFreeformBody(e.target.value)}
               placeholder="Type your message… (sent only to contacts inside their window)"
               rows={4}
-              maxLength={2000}
+              maxLength={freeformMaxChars}
             />
             <p className="text-2xs text-muted-foreground">
               {messageKind === "customer"
                 ? "Each person is reached ONCE on their best live channel (WhatsApp, Messenger, or Instagram). People with no open messaging window are skipped."
                 : "Free-form messages reach only contacts within their messaging window; others are skipped."}{" "}
-              {freeformBody.length}/2000
+              {freeformBody.length}/{freeformMaxChars}
             </p>
           </div>
         </StepCard>

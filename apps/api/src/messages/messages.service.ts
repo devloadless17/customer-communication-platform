@@ -28,6 +28,7 @@ import {
   kindFromMime,
   normalizeMimeType,
 } from "@/lib/media-storage";
+import { channelSupportsMediaKind } from "@ccp/shared/providers/media-caps";
 import { transcodeToAac, transcodeToOggOpus, VOICE_IOS_PROFILE } from "@/lib/media/audio-transcode";
 import {
   consumeConversationSendBudget,
@@ -783,8 +784,13 @@ export class MessagesService {
       await binding.getSendConfig(teamId);
     } catch (err) {
       if (err instanceof ProviderNotConfiguredError) {
+        // Channel-neutral key — this internal composer route (not /v1, whose
+        // `whatsapp_not_connected` stays a contract) fires on any channel; the
+        // web toast renders `error: detail`, so a WhatsApp-specific key read
+        // wrong on an Instagram/Messenger thread. `err.message` is now
+        // channel-aware (ProviderNotConfiguredError).
         throw new ConflictException({
-          error: "whatsapp_not_connected",
+          error: "channel_not_connected",
           detail: err.message,
         });
       }
@@ -921,7 +927,7 @@ export class MessagesService {
     if (!exists) throw new NotFoundException({ error: "conversation not found" });
     if (configOrErr instanceof ProviderNotConfiguredError) {
       throw new ConflictException({
-        error: "whatsapp_not_connected",
+        error: "channel_not_connected",
         detail: configOrErr.message,
       });
     }
@@ -1533,6 +1539,15 @@ export class MessagesService {
     // (and a different audio set) than WhatsApp, so reusing WhatsApp's caps
     // would wrongly reject valid social media.
     const policy = mediaPolicyForChannel(provider);
+    // Per-channel supported-KIND gate (coarser than size/mime). Instagram DM
+    // can't send documents at all, so reject one up front with an actionable
+    // error instead of shipping a nameless by-URL "file" Meta rejects with #100.
+    if (!channelSupportsMediaKind(provider, kind)) {
+      throw new BadRequestException({
+        error: "media_kind_unsupported",
+        detail: `${policy.label} doesn't support sending ${kind === "document" ? "documents" : `${kind}s`}.`,
+      });
+    }
     const cap = policy.caps[kind];
     if (file.size > cap) {
       throw new PayloadTooLargeException({

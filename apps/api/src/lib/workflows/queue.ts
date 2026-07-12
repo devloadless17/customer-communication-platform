@@ -300,6 +300,19 @@ export async function releaseWorkflowRunLock(
   }
 }
 
+/**
+ * Whether a per-run lock is currently held — i.e. a LIVE lane is processing this
+ * run (it acquires the lock before setting status `running` and heartbeat-renews
+ * it for the whole pickup). Absence on a `running` row therefore means the lane
+ * died and the run is stranded — the waiting-sweeper's `running` backstop uses
+ * this to re-enqueue it, closing the crash window the run-lock TTL alone can't
+ * guarantee (redelivery can land before a just-crashed lane's lock expires).
+ */
+export async function workflowRunLockHeld(runId: string): Promise<boolean> {
+  const n = await getRedisConnection().exists(`${RUN_LOCK_PREFIX}${runId}`);
+  return n === 1;
+}
+
 export async function closeWorkflowQueue(): Promise<void> {
   if (state.queue) {
     await state.queue.close();

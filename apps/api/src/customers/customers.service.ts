@@ -205,6 +205,15 @@ export class CustomersService {
       if (contact.customerId === customerId) return; // already linked — no-op
 
       const previousCustomerId = contact.customerId;
+      // Capture the source person's name BEFORE the reap below deletes its row.
+      // Persisting it makes the merge non-destructive (a deliberate rename
+      // survives in the audit trail) and lets `unlink` restore it.
+      const previousCustomer = previousCustomerId
+        ? await tx.customer.findFirst({
+            where: { id: previousCustomerId, teamId },
+            select: { name: true },
+          })
+        : null;
       await tx.contact.update({ where: { id: contactId }, data: { customerId } });
 
       // Persisted audit (§6): who merged this contact into which customer, and
@@ -215,6 +224,7 @@ export class CustomersService {
           contactId,
           action: "link",
           fromCustomerId: previousCustomerId,
+          fromCustomerName: previousCustomer?.name ?? null,
           toCustomerId: customerId,
           actorUserId,
         },
@@ -257,8 +267,20 @@ export class CustomersService {
       }
       const previousCustomerId = contact.customerId;
 
+      // Restore the pre-merge person name when this contact was previously linked
+      // into its current customer (reversing that merge). The latest `link` event
+      // for this contact recorded the source customer's name before it was reaped;
+      // prefer it over the channel-contact name so a deliberate rename survives a
+      // merge→unlink round-trip. Falls back to the contact's own name otherwise.
+      const lastLink = await tx.customerIdentityEvent.findFirst({
+        where: { teamId, contactId, action: "link", toCustomerId: previousCustomerId ?? undefined },
+        orderBy: { createdAt: "desc" },
+        select: { fromCustomerName: true },
+      });
+      const restoredName = lastLink?.fromCustomerName?.trim() || contact.name;
+
       const fresh = await tx.customer.create({
-        data: { teamId, name: contact.name },
+        data: { teamId, name: restoredName },
         select: { id: true },
       });
       await tx.contact.update({ where: { id: contactId }, data: { customerId: fresh.id } });

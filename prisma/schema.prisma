@@ -925,6 +925,13 @@ model CustomerIdentityEvent {
   action         CustomerIdentityAction
   // Customer the contact belonged to before the action (null if it had none).
   fromCustomerId String?
+  // The `from` customer's person-level NAME at the time of the action. Captured
+  // because a `link` reaps the emptied source customer, hard-deleting its row —
+  // without this the source person's deliberate rename ("VIP – do not merge")
+  // would be permanently discarded, making merge non-reversible. `unlink` reads
+  // the latest link event to restore the pre-merge name onto the split-off
+  // customer. Null when the source had no name or no source customer.
+  fromCustomerName String?
   // Customer the contact belongs to after the action.
   toCustomerId   String
   // Who performed it — a human session (null for system/sweeper actions).

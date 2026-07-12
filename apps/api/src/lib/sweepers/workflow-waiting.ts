@@ -3,6 +3,7 @@ import {
   clearTerminalJob,
   enqueueWorkflowResume,
   enqueueWorkflowRun,
+  workflowRunLockHeld,
 } from "@/lib/workflows/queue";
 
 /**
@@ -22,6 +23,16 @@ import {
  *     `queued` with no BullMQ job — invisible to BullMQ, invisible to
  *     the original `waiting`-only sweep query, invisible to operators.
  *     This is the same crash-window class as the waiting case.
+ *
+ *   - `running` runs whose lane DIED mid-pickup. A live lane holds the
+ *     per-run Redis lock (acquired before status→running, heartbeat-
+ *     renewed for the whole pickup), so a `running` row with NO lock is
+ *     stranded. The run-lock TTL is boot-asserted below the BullMQ job
+ *     lock so a redelivery usually reacquires and resumes — but BullMQ
+ *     renews its job lock mid-flight, so a redelivery can land a few
+ *     seconds BEFORE a just-crashed lane's run-lock expires, return
+ *     `skipped`, and be marked complete with no further retry. This
+ *     backstop closes that residual window definitively.
  *
  * Without this sweep, a stranded run sits forever with no visibility.
  * The runs UI shows the row but nothing happens.
@@ -110,7 +121,30 @@ async function sweepOnce(): Promise<void> {
     take: 100,
   });
 
-  if (strandedWaiting.length === 0 && strandedQueued.length === 0) return;
+  // `running` rows that have been running a while (> the run-lock TTL + margin):
+  // candidates for the dead-lane backstop. A LIVE lane still holds the per-run
+  // lock, so we filter those OUT below via `workflowRunLockHeld` — only a
+  // running row with NO lock is genuinely stranded. The longer grace (90s vs 30s)
+  // keeps this off the hot path and clear of the lock TTL boundary.
+  const runningCutoff = new Date(now.getTime() - 90_000);
+  const maybeStrandedRunning = await db.workflowRun.findMany({
+    where: { status: "running", startedAt: { lte: runningCutoff } },
+    select: { id: true },
+    take: 100,
+  });
+  const strandedRunning: { id: string }[] = [];
+  for (const run of maybeStrandedRunning) {
+    // Authoritative liveness probe: a held lock = a live lane is on it, skip.
+    if (!(await workflowRunLockHeld(run.id))) strandedRunning.push(run);
+  }
+
+  if (
+    strandedWaiting.length === 0 &&
+    strandedQueued.length === 0 &&
+    strandedRunning.length === 0
+  ) {
+    return;
+  }
 
   const nowMs = now.getTime();
   for (const run of strandedWaiting) {
@@ -173,8 +207,29 @@ async function sweepOnce(): Promise<void> {
     }
   }
 
+  for (const run of strandedRunning) {
+    // Same `run-${runId}` jobId + clear-terminal dance as the queued loop. The
+    // re-enqueued job reacquires the now-free run-lock and resumes from
+    // currentStepId; if a redelivery is racing us, one wins and the other
+    // `skipped`s — idempotent either way.
+    try {
+      await clearTerminalJob(`run-${run.id}`);
+      await enqueueWorkflowRun(run.id);
+    } catch (err) {
+      console.warn(
+        `[workflow-waiting-sweeper] running re-enqueue failed for run=${run.id}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   // Log on non-empty sweeps so an operator can spot a pattern. Quiet
   // when there's nothing to do.
+  if (strandedRunning.length > 0) {
+    console.warn(
+      `[workflow-waiting-sweeper] re-enqueued ${strandedRunning.length} stranded running run(s) (dead lane, no lock)`,
+    );
+  }
   if (strandedWaiting.length > 0) {
     console.warn(
       `[workflow-waiting-sweeper] re-enqueued ${strandedWaiting.length} stranded waiting run(s)`,

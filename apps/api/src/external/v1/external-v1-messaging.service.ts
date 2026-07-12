@@ -1472,6 +1472,34 @@ export class ExternalV1MessagingService {
     return { note: notePayload };
   }
 
+  /**
+   * `DELETE /v1/conversations/:id/notes/:noteId` — the external twin of the
+   * inbox's `DELETE /api/notes/:id`, closing the §12 parity gap that left note
+   * deletion (and the partner-facing `note.deleted` webhook) reachable only from
+   * the UI. Publishes the SAME `note.deleted` event the UI path does, so an
+   * API-driven CRM mirror can complete a create→delete round-trip. Naturally
+   * idempotent — a repeated delete 404s, so no Idempotency-Key is required.
+   * Team scope goes through the parent conversation (InternalNote has no teamId).
+   */
+  async deleteNote(teamId: string, conversationId: string, noteId: string) {
+    const note = await this.db.internalNote.findFirst({
+      where: { id: noteId, conversationId, conversation: { teamId } },
+      select: { id: true, conversationId: true },
+    });
+    if (!note) throw new NotFoundException({ error: "note_not_found", detail: "note not found" });
+
+    await this.db.internalNote.delete({ where: { id: note.id } });
+    await this.bus.publish({
+      type: "note.deleted",
+      teamId,
+      conversationId: note.conversationId,
+      noteId: note.id,
+      // API-driven deletion has no human actor — the API key is the actor.
+      deletedByUserId: null,
+    });
+    return { ok: true as const, deleted: note.id };
+  }
+
   // ===========================================================================
   // INTERACTIVE SEND (buttons / list / consent chips)
   // ===========================================================================

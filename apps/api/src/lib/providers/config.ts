@@ -2,6 +2,7 @@ import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 import { TtlCache } from "@/lib/providers/config-cache";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
+import type { Channel } from "@ccp/shared/types";
 
 /**
  * Per-team provider configuration. CLAUDE.md rule #6: secrets live in the DB,
@@ -59,15 +60,27 @@ export interface MetaWebhookConfig {
   phoneNumberId: string | null;
 }
 
+// Human channel names for error copy (settings paths are the enum values). Kept
+// local so this low-level module needs no shared UI-label dep; the three live
+// channels are the only ones a loader throws for today.
+const CHANNEL_DISPLAY_NAME: Partial<Record<Channel, string>> = {
+  whatsapp: "WhatsApp",
+  messenger: "Messenger",
+  instagram: "Instagram",
+};
+
 export class ProviderNotConfiguredError extends Error {
   readonly teamId: string;
-  constructor(teamId: string, missing: string[]) {
+  readonly channel: Channel;
+  constructor(teamId: string, missing: string[], channel: Channel = "whatsapp") {
+    const label = CHANNEL_DISPLAY_NAME[channel] ?? channel;
     super(
-      `Team ${teamId} is missing WhatsApp config: ${missing.join(", ")}. ` +
-        `Connect the number in /settings/whatsapp.`,
+      `Team ${teamId} is missing ${label} config: ${missing.join(", ")}. ` +
+        `Reconnect it in /settings/${channel}.`,
     );
     this.name = "ProviderNotConfiguredError";
     this.teamId = teamId;
+    this.channel = channel;
   }
 }
 

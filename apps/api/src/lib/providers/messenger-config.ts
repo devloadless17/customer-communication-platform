@@ -98,7 +98,7 @@ function materialize(teamId: string, cipher: SendCipher): MessengerSendConfig {
         err instanceof Error ? err.message : String(err)
       }`,
     );
-    throw new ProviderNotConfiguredError(teamId, ["pageAccessToken (decrypt failed)"]);
+    throw new ProviderNotConfiguredError(teamId, ["pageAccessToken (decrypt failed)"], "messenger");
   }
   return { pageId: cipher.pageId, pageAccessToken, graphVersion: DEFAULT_GRAPH_VERSION };
 }
@@ -108,13 +108,13 @@ export async function getMessengerSendConfig(teamId: string): Promise<MessengerS
   const hit = sendCache.get(teamId);
   if (hit) {
     if (hit.kind === "err") {
-      throw new ProviderNotConfiguredError(teamId, [...hit.missing]);
+      throw new ProviderNotConfiguredError(teamId, [...hit.missing], "messenger");
     }
     return materialize(teamId, hit.cipher);
   }
   const entry = await loadSendCipher(teamId);
   sendCache.set(teamId, entry);
-  if (entry.kind === "err") throw new ProviderNotConfiguredError(teamId, [...entry.missing]);
+  if (entry.kind === "err") throw new ProviderNotConfiguredError(teamId, [...entry.missing], "messenger");
   return materialize(teamId, entry.cipher);
 }
 

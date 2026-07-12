@@ -14,12 +14,13 @@ import type { Channel } from "@ccp/shared/types";
  * sends also use its `channel` to stamp the new `Conversation.channel`.
  *
  * This is the single place the "phone number == identity" assumption is
- * allowed to live. WhatsApp contacts carry a `phoneNumber` and a null
- * `identityChannel` (the phone IS the identity). Future channels (Instagram
- * scoped-user-id, Telegram chat-id) carry `identityChannel` +
- * `externalContactId` and a null phone. Send paths call this instead of
- * reading `contact.phoneNumber` directly, so adding a channel doesn't mean
- * hunting down every `to: contact.phoneNumber`.
+ * allowed to live. Phone-keyed channels (WhatsApp today; SMS later) carry a
+ * `phoneNumber` — the phone IS the destination — and `identityChannel` names
+ * WHICH phone channel it is (non-null: every contact-create path stamps it).
+ * Non-phone channels (Instagram scoped-user-id, Telegram chat-id) carry
+ * `identityChannel` + `externalContactId` and a null phone. Send paths call
+ * this instead of reading `contact.phoneNumber` directly, so adding a channel
+ * doesn't mean hunting down every `to: contact.phoneNumber`.
  */
 
 /** Minimal contact shape needed to route a send. */
@@ -59,9 +60,13 @@ export function resolveContactChannel(contact: ChannelResolvable): ResolvedChann
   if (contact.identityChannel && contact.externalContactId) {
     return { channel: contact.identityChannel, to: contact.externalContactId };
   }
-  // WhatsApp (and any phone-keyed channel): the phone number is the identity.
+  // Phone-keyed channel: the phone number is the destination, and
+  // `identityChannel` says WHICH phone channel (WhatsApp today, SMS later). It's
+  // non-null in practice; the `?? "whatsapp"` is a defensive default. This keeps
+  // all three live channels byte-identical while letting SMS route with zero
+  // further core edits.
   if (contact.phoneNumber) {
-    return { channel: "whatsapp", to: contact.phoneNumber };
+    return { channel: contact.identityChannel ?? "whatsapp", to: contact.phoneNumber };
   }
   // BSUID forward-compat: a phone-keyed contact Meta identified only by its
   // business-scoped id (2026 rollout) still sends — the BSUID rides the same
