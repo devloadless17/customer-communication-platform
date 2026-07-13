@@ -631,9 +631,16 @@ export function parseSocialMessaging(
               ? ""
               : m.message.attachments?.[0]?.type
                 ? socialAttachmentLabel(m.message.attachments[0].type)
-                : m.message.is_unsupported
-                  ? "⚠️ Unsupported message"
-                  : "";
+                : // No text, no downloadable media, no typed attachment. Either
+                  // Meta flagged it `is_unsupported`, OR it's a bare `{ mid }`
+                  // envelope: Messenger/Instagram WITHHOLD the content of message
+                  // types their API can't deliver — a shared LOCATION (verified
+                  // 2026-07-13: the webhook carries only a mid, no coordinates),
+                  // and other unsupported shares. Give the agent a clear cue to
+                  // open the native app rather than a blank bubble that renders as
+                  // "Attachment unavailable" (which specifically means a FAILED
+                  // media download — a different case with real media at parse).
+                  "⚠️ Unsupported message — open the app to view";
         const msg: NormalizedInboundMessage = {
           kind: "message",
           externalId: mid,
