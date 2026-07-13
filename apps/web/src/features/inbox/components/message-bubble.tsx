@@ -130,50 +130,50 @@ import { QuotedReply } from "./message-bubble/quoted-reply";
 import { StructuredBlock } from "./message-bubble/structured-block";
 
 /**
- * One reaction pill: a small avatar (WHO reacted) + the emoji. The avatar is the
- * whole point — in a shared inbox a bare emoji can't say whether the customer or
- * your team reacted, so the customer's initial-gradient chip and our tinted
- * "team" chip make it unmistakable at a glance. `onDismiss` (Instagram customer
- * pill only) turns it into a click-to-clear button, since IG never sends a
- * reaction-removal webhook.
+ * One reaction: an emoji-forward circular badge with a small corner avatar
+ * marking WHO reacted (the customer's gradient-initial dot vs. our "team" dot),
+ * tucked over the bubble edge — the iMessage/WhatsApp look: compact, unobtrusive,
+ * emoji-first. `onDismiss` (Instagram customer badge only) overlays a clear-X on
+ * hover, since IG never sends a reaction-removal webhook.
  */
-function ReactionPill({
+function ReactionBadge({
   glyph,
-  avatar,
-  tone,
+  whoBadge,
   who,
   onDismiss,
 }: {
   glyph: string;
-  avatar: ReactNode;
-  tone: "neutral" | "accent";
+  whoBadge: ReactNode;
   who: string;
   onDismiss?: () => void;
 }) {
-  const base = cn(
-    "inline-flex items-center gap-1 rounded-full border py-0.5 pl-0.5 pr-2 shadow-sm",
-    tone === "accent" ? "border-primary/30 bg-primary/10" : "border-border bg-card",
-  );
   const emoji = reactionGlyph(glyph);
+  const badge =
+    "relative inline-grid size-6 place-items-center rounded-full bg-background text-[13px] leading-none shadow-sm ring-1 ring-border/60";
+  const corner = (
+    <span className="absolute -bottom-1 -right-1 grid size-3.5 place-items-center overflow-hidden rounded-full ring-2 ring-background">
+      {whoBadge}
+    </span>
+  );
   if (onDismiss) {
     return (
       <button
         type="button"
         onClick={onDismiss}
-        className={cn(base, "group/rx cursor-pointer transition-colors hover:border-destructive/50")}
+        className={cn(badge, "group/rx cursor-pointer transition hover:ring-destructive/50")}
         aria-label={`${who} reacted ${emoji} — click to dismiss (Instagram doesn't notify us when a customer removes a reaction)`}
         title="Instagram doesn't tell us when a customer removes their reaction — click to clear it"
       >
-        {avatar}
-        <span className="text-sm leading-none group-hover/rx:hidden">{emoji}</span>
-        <X className="hidden size-3 text-destructive group-hover/rx:block" />
+        <span className="transition-opacity group-hover/rx:opacity-0">{emoji}</span>
+        <X className="absolute size-3.5 text-destructive opacity-0 transition-opacity group-hover/rx:opacity-100" />
+        {corner}
       </button>
     );
   }
   return (
-    <span className={base} aria-label={`${who} reacted ${emoji}`} title={`${who} reacted ${emoji}`}>
-      {avatar}
-      <span className="text-sm leading-none">{emoji}</span>
+    <span className={badge} aria-label={`${who} reacted ${emoji}`} title={`${who} reacted ${emoji}`}>
+      {emoji}
+      {corner}
     </span>
   );
 }
@@ -196,26 +196,27 @@ function MessageReactions({
   contactSeed: string;
 }) {
   if (message.deletedAt || (!message.reaction && !message.agentReaction)) return null;
-  const customerAvatar = (
+  // The tiny corner marker (14px) — the customer's gradient initial vs. our
+  // solid "team" dot with a person glyph. Small on purpose: the emoji leads.
+  const customerBadge = (
     <span
-      className="grid size-[18px] shrink-0 place-items-center rounded-full text-[9px] font-semibold text-white"
+      className="grid size-full place-items-center text-[7px] font-bold leading-none text-white"
       style={{ backgroundImage: avatarGradient(contactSeed) }}
     >
       {initials(contactName)}
     </span>
   );
-  const agentAvatar = (
-    <span className="grid size-[18px] shrink-0 place-items-center rounded-full bg-primary text-primary-foreground">
-      <User className="size-2.5" />
+  const agentBadge = (
+    <span className="grid size-full place-items-center bg-primary text-primary-foreground">
+      <User className="size-2" />
     </span>
   );
   return (
-    <div className={cn("relative z-10 -mt-2 flex gap-1", isOut ? "mr-1 justify-end" : "ml-1")}>
+    <div className={cn("relative z-10 -mt-2.5 flex gap-1.5", isOut ? "mr-1 justify-end" : "ml-1")}>
       {message.reaction && (
-        <ReactionPill
+        <ReactionBadge
           glyph={message.reaction}
-          avatar={customerAvatar}
-          tone="neutral"
+          whoBadge={customerBadge}
           who={contactName}
           onDismiss={
             message.channel === "instagram"
@@ -225,7 +226,7 @@ function MessageReactions({
         />
       )}
       {message.agentReaction && (
-        <ReactionPill glyph={message.agentReaction} avatar={agentAvatar} tone="accent" who="You" />
+        <ReactionBadge glyph={message.agentReaction} whoBadge={agentBadge} who="You" />
       )}
     </div>
   );
