@@ -102,6 +102,14 @@ export interface SocialProfile {
   followsBusiness?: boolean | null;
   /** The business follows the customer back — `is_business_follow_user`. */
   businessFollows?: boolean | null;
+  // ── Messenger identity signals (each behind a `pages_user_*` App Review; null
+  //    until that permission is approved, so these degrade cleanly to absent). ──
+  /** IETF-ish locale from Meta, e.g. `en_US` — the customer's language/region. */
+  locale?: string | null;
+  /** GMT offset in hours (Meta `timezone`, e.g. `2`, `-7`) → renders "Local time". */
+  timezone?: number | null;
+  /** Meta-reported gender, e.g. `male` / `female`. */
+  gender?: string | null;
 }
 
 export interface Contact {
@@ -411,7 +419,18 @@ export type MessageStructured =
     }
   | {
       kind: "contacts";
-      contacts: Array<{ name: string; phones: string[] }>;
+      // A shared vCard. `phones` stays a plain string[] (back-compat with rows
+      // stored before the richer fields existed); the rest are optional so old
+      // rows render unchanged while new ones carry everything WhatsApp shows.
+      contacts: Array<{
+        name: string;
+        phones: string[];
+        emails?: string[];
+        /** Pre-formatted, human-readable address lines. */
+        addresses?: string[];
+        /** "Title · Company" (whichever parts the vCard included). */
+        company?: string;
+      }>;
     }
   | {
       // Instagram story interaction: the customer mentioned you in / replied to
@@ -420,6 +439,20 @@ export type MessageStructured =
       kind: "story";
       storyType: "mention" | "reply" | "share";
       url?: string;
+    }
+  | {
+      // A WhatsApp catalog order the customer placed (`type:"order"`). Items
+      // reference catalog products by retailer id — we don't resolve product
+      // names (no catalog join), so the card shows id × qty @ price + a total.
+      kind: "order";
+      items: Array<{
+        retailerId: string;
+        quantity: number;
+        price?: number;
+      }>;
+      itemCount: number;
+      total?: number;
+      currency?: string;
     };
 
 /**
@@ -478,12 +511,19 @@ export interface Message {
   statusErrorTitle?: string | null;
   statusErrorDetail?: string | null;
   /**
-   * The customer's current emoji reaction to this message (WhatsApp lets a
+   * The CUSTOMER's current emoji reaction to this message (WhatsApp lets a
    * contact react to any message). Set / replaced / cleared by inbound
    * reaction webhooks; null/absent = no reaction. Rendered as a small pill on
-   * the bubble. Inbound-only — agent-side reacting is deferred.
+   * the bubble.
    */
   reaction?: string | null;
+  /**
+   * OUR team's outbound reaction to this message — the business-side twin of
+   * `reaction`, a separate field so a customer reaction and our reaction on the
+   * same message coexist. Set / cleared by the send-reaction path; null/absent
+   * = we haven't reacted. Rendered as its own pill next to the customer's.
+   */
+  agentReaction?: string | null;
   /**
    * Structured non-media content (shared location pin / contact card). Drives a
    * dedicated bubble; `body` still holds the text placeholder. Absent for normal

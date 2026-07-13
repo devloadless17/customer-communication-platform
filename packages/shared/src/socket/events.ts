@@ -75,15 +75,18 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
-   * A customer set / changed / removed their emoji reaction to one of our
-   * messages. Scoped to the conversation room (like `message:status`): only
-   * agents viewing the thread consume it, patching the reacted-to bubble.
-   * `emoji` is null when the reaction was removed.
+   * A reaction on a message changed — set / replaced / removed. `actor` says
+   * which side: `customer` (an inbound react) or `agent` (our own outbound
+   * react), each an independent field on the message so both can show at once.
+   * Scoped to the conversation room (like `message:status`): only agents
+   * viewing the thread consume it, patching the reacted-to bubble. `emoji` is
+   * null when the reaction was removed.
    */
   "message:reaction": (payload: {
     teamId: string;
     conversationId: string;
     messageId: string;
+    actor: "customer" | "agent";
     emoji: string | null;
   }) => void;
 

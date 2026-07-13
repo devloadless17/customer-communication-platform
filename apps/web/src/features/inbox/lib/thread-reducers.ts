@@ -181,18 +181,22 @@ export function applyMessageStatus(
 
 export function applyMessageReaction(
   prev: ConversationWithRefs,
-  payload: { messageId: string; emoji: string | null },
+  payload: { messageId: string; emoji: string | null; actor?: "customer" | "agent" },
 ): ConversationWithRefs {
   const idx = prev.messages.findIndex((m) => m.id === payload.messageId);
   if (idx === -1) return prev;
   const existing = prev.messages[idx]!;
-  if ((existing.reaction ?? null) === payload.emoji) return prev;
+  // `actor` picks the side: our own reaction lands on `agentReaction`, the
+  // customer's on `reaction`, so both coexist. Defaults to customer for legacy
+  // frames without the field.
+  const field = payload.actor === "agent" ? "agentReaction" : "reaction";
+  if ((existing[field] ?? null) === payload.emoji) return prev;
   const nextMessages = prev.messages.slice();
   if (payload.emoji) {
-    nextMessages[idx] = { ...existing, reaction: payload.emoji };
+    nextMessages[idx] = { ...existing, [field]: payload.emoji };
   } else {
-    // Reaction removed — drop the field so the bubble stops rendering the pill.
-    const { reaction: _reaction, ...rest } = existing;
+    // Reaction removed — drop that side's field so its pill stops rendering.
+    const { [field]: _dropped, ...rest } = existing;
     nextMessages[idx] = rest;
   }
   return { ...prev, messages: nextMessages };

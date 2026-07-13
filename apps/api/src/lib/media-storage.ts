@@ -67,10 +67,15 @@ const MESSENGER_AUDIO_MIME: ReadonlySet<string> = new Set([
   "audio/ogg",
   "audio/wav",
 ]);
+// Instagram's documented set is EXACTLY aac / m4a / wav / mp4 — NO mp3
+// (`audio/mpeg`). An mp3 sent by URL is rejected by Meta with an opaque
+// `(#100) attachment format is not supported` (subcode 2534080), so gate it out
+// here with an actionable error instead. `audio/x-m4a` is the alt mime some
+// browsers/OSes attach to a `.m4a` pick.
 const INSTAGRAM_AUDIO_MIME: ReadonlySet<string> = new Set([
   "audio/aac",
   "audio/mp4",
-  "audio/mpeg",
+  "audio/x-m4a",
   "audio/wav",
 ]);
 
@@ -88,17 +93,30 @@ export interface ChannelMediaPolicy {
   /** Human-facing channel name for error copy. */
   label: string;
   caps: Record<MediaKind, number>;
+  /** Outbound image mime allow-list. Instagram accepts ONLY png/jpeg; a gif or
+   *  webp image reaches Meta and is rejected with an opaque #100 without this. */
+  imageMime: ReadonlySet<string>;
   /** Outbound audio mime allow-list. */
   audioMime: ReadonlySet<string>;
   /** Outbound document mime allow-list. */
   documentMime: ReadonlySet<string>;
 }
 
+// WhatsApp/Messenger accept the common web image set; Instagram is png/jpeg only.
+const PERMISSIVE_IMAGE_MIME: ReadonlySet<string> = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+]);
+const INSTAGRAM_IMAGE_MIME: ReadonlySet<string> = new Set(["image/jpeg", "image/png"]);
+
 // Size caps come from the SHARED `mediaSizeCaps` map so the client composer
 // guard and this server policy can never disagree per channel.
 const WHATSAPP_MEDIA_POLICY: ChannelMediaPolicy = {
   label: "WhatsApp",
   caps: mediaSizeCaps("whatsapp"),
+  imageMime: PERMISSIVE_IMAGE_MIME,
   audioMime: WHATSAPP_AUDIO_MIME,
   documentMime: META_DOCUMENT_MIME_ALLOWED,
 };
@@ -106,15 +124,21 @@ const WHATSAPP_MEDIA_POLICY: ChannelMediaPolicy = {
 const MESSENGER_MEDIA_POLICY: ChannelMediaPolicy = {
   label: "Messenger",
   caps: mediaSizeCaps("messenger"),
+  imageMime: PERMISSIVE_IMAGE_MIME,
   audioMime: MESSENGER_AUDIO_MIME,
   documentMime: META_DOCUMENT_MIME_ALLOWED,
 };
 
+// Instagram's ONLY documented File format is PDF (25 MB); every other document
+// mime is rejected by Meta with an opaque #100, so gate IG documents to PDF.
+const INSTAGRAM_DOCUMENT_MIME: ReadonlySet<string> = new Set(["application/pdf"]);
+
 const INSTAGRAM_MEDIA_POLICY: ChannelMediaPolicy = {
   label: "Instagram",
   caps: mediaSizeCaps("instagram"),
+  imageMime: INSTAGRAM_IMAGE_MIME,
   audioMime: INSTAGRAM_AUDIO_MIME,
-  documentMime: META_DOCUMENT_MIME_ALLOWED,
+  documentMime: INSTAGRAM_DOCUMENT_MIME,
 };
 
 const CHANNEL_MEDIA_POLICY: Partial<Record<Channel, ChannelMediaPolicy>> = {

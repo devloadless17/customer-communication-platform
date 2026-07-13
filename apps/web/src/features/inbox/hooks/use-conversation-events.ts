@@ -1144,12 +1144,21 @@ export function useConversationEvents(
               if (!f) return m; // optimistic, or older than fresh's window
               // Reconcile server-owned fields the live frames could have missed
               // while this thread was cached/backgrounded: status, media, AND
-              // reaction (a customer (un-)react on a non-displayed thread is
-              // otherwise stale until reload). Sync `reaction` to the server's
-              // value authoritatively so an un-react (f.reaction null) clears it.
-              const reactionChanged = (f.reaction ?? null) !== (m.reaction ?? null);
+              // BOTH reaction sides (a customer or agent (un-)react on a
+              // non-displayed thread is otherwise stale until reload). Sync each
+              // reaction to the server's value authoritatively so an un-react
+              // (null) clears it.
+              const reactionChanged =
+                (f.reaction ?? null) !== (m.reaction ?? null) ||
+                (f.agentReaction ?? null) !== (m.agentReaction ?? null);
               return f.status !== m.status || (f.media && !m.media) || reactionChanged
-                ? { ...m, status: f.status, ...(f.media ? { media: f.media } : {}), reaction: f.reaction }
+                ? {
+                    ...m,
+                    status: f.status,
+                    ...(f.media ? { media: f.media } : {}),
+                    reaction: f.reaction,
+                    agentReaction: f.agentReaction,
+                  }
                 : m;
             });
             const appended = fresh.messages.filter((m) => !have.has(m.externalId));

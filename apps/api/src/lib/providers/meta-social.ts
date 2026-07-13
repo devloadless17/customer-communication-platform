@@ -33,6 +33,7 @@ import type {
   ContactShareField,
   SendInteractiveArgs,
   SendMediaArgs,
+  SendReactionArgs,
   SendTextArgs,
   SendTextResult,
   SocialCallPermission,
@@ -125,6 +126,11 @@ interface MessagingEvent {
     // The customer UNSENT this message (Messenger/Instagram). References an
     // existing `mid`; carries no new content — we tombstone the stored row.
     is_deleted?: boolean;
+    // The customer sent media/content the Instagram Messaging API can't
+    // represent (`is_unsupported`). Carries no text/attachment we can render, so
+    // without a label it would commit an EMPTY inbound bubble ("Attachment
+    // unavailable"); we surface a clear placeholder instead.
+    is_unsupported?: boolean;
     // `title` + `payload.coordinates` ride on a `type:"location"` share (a
     // customer tapping "Send Location"); every other attachment uses
     // `payload.url`. Widened here so the location branch can lift coordinates
@@ -136,7 +142,11 @@ interface MessagingEvent {
     }[];
     quick_reply?: { payload?: string };
     // Set when the customer quoted a message — the mid they replied to.
-    reply_to?: { mid?: string };
+    // A quoted reply to a message (`mid`) OR — Instagram only — a reply to one of
+    // OUR stories, which arrives as a normal text message with `reply_to.story`
+    // (no mid). We surface the latter as a story-reply card so the agent sees the
+    // context, not a bare text bubble.
+    reply_to?: { mid?: string; story?: { url?: string; id?: string } };
   };
   // The customer EDITED a message (`message_edits` field). MESSENGER ONLY —
   // Instagram ships no edit webhook, so an IG message's text is immutable once
@@ -196,6 +206,32 @@ function attributionFromSocialReferral(r: SocialReferral): MessageAttribution {
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
+}
+
+/**
+ * Resolve a Messenger/Instagram reaction webhook into the emoji to STORE, or
+ * `null` to CLEAR it.
+ *
+ * The ONLY reliable "add" signal is a real emoji GLYPH (a non-ASCII char). Meta
+ * sends the glyph on every genuine react — standard AND custom/"other". A remove
+ * drops the glyph. Crucially, Instagram reports a REMOVE by keeping the stale
+ * reaction TYPE name ("love"/"other") while dropping the glyph and often WITHOUT
+ * `action:"unreact"` — so trusting the type name (the old behavior) both rendered
+ * the literal word "other" AND resurrected a reaction the customer had removed
+ * (the "IG unreact never clears" bug). Therefore: a real glyph → add that glyph;
+ * ANYTHING ELSE (explicit unreact, empty/missing glyph, a bare type name) →
+ * `null` = clear. An explicit unreact action short-circuits first for clarity.
+ */
+function socialReactionEmoji(
+  action: string | undefined,
+  emoji: string | undefined,
+  _type: string | undefined,
+): string | null {
+  const a = (action ?? "").trim().toLowerCase();
+  if (a === "unreact" || a === "remove" || a === "delete") return null;
+  if (emoji && [...emoji].some((c) => (c.codePointAt(0) ?? 0) > 127)) return emoji;
+  // No real glyph — a removal (or an un-renderable type-only payload). Clear it.
+  return null;
 }
 
 /** Map a Meta social attachment `type` to our channel-agnostic MediaKind. */
@@ -322,6 +358,13 @@ function socialAttachmentLabel(type: string): string {
       return "📍 Location";
     case "appointment_booking":
       return "📅 Appointment";
+    // Meta's generic fallbacks for content the Send/webhook shape can't model
+    // (a shared link, a structured template) — a clean label beats the raw
+    // "[fallback]" / "[template]" the default used to emit.
+    case "fallback":
+      return "🔗 Shared content";
+    case "template":
+      return "💬 Message";
     default:
       return `[${type}]`;
   }
@@ -356,12 +399,22 @@ function socialStructuredFromAttachments(
       ...(loc.title?.trim() ? { name: loc.title.trim() } : {}),
     };
   }
+  // Story interactions + shared posts/links all render as an openable card.
+  // `share`/`post`/`ig_post` (and a `fallback` that carries a url — Meta's
+  // generic shared-link envelope) collapse to the "share" style so the URL is
+  // clickable instead of thrown away behind a bare label.
   const att = atts?.find(
-    (a) => a.type === "story_mention" || a.type === "story_reply" || a.type === "share",
+    (a) =>
+      a.type === "story_mention" ||
+      a.type === "story_reply" ||
+      a.type === "share" ||
+      a.type === "post" ||
+      a.type === "ig_post" ||
+      (a.type === "fallback" && !!a.payload?.url),
   );
   if (!att) return undefined;
   const storyType: "mention" | "reply" | "share" =
-    att.type === "story_reply" ? "reply" : att.type === "share" ? "share" : "mention";
+    att.type === "story_reply" ? "reply" : att.type === "story_mention" ? "mention" : "share";
   return {
     kind: "story",
     storyType,
@@ -578,7 +631,9 @@ export function parseSocialMessaging(
               ? ""
               : m.message.attachments?.[0]?.type
                 ? socialAttachmentLabel(m.message.attachments[0].type)
-                : "";
+                : m.message.is_unsupported
+                  ? "⚠️ Unsupported message"
+                  : "";
         const msg: NormalizedInboundMessage = {
           kind: "message",
           externalId: mid,
@@ -610,8 +665,21 @@ export function parseSocialMessaging(
             ? { attribution: attributionFromSocialReferral(m.referral) }
             : {}),
           // Instagram story interaction (mention / reply / share) → story card.
+          // A story REPLY arrives as a normal text message carrying
+          // `reply_to.story` (no attachment), so fall back to that when the
+          // attachments yield nothing — the customer's reply text stays the body.
           ...(() => {
-            const structured = socialStructuredFromAttachments(m.message?.attachments);
+            const structured =
+              socialStructuredFromAttachments(m.message?.attachments) ??
+              (m.message?.reply_to?.story
+                ? {
+                    kind: "story" as const,
+                    storyType: "reply" as const,
+                    ...(m.message.reply_to.story.url
+                      ? { url: m.message.reply_to.story.url }
+                      : {}),
+                  }
+                : undefined);
             return structured ? { structured } : {};
           })(),
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
@@ -695,13 +763,15 @@ export function parseSocialMessaging(
       }
       // Reaction to one of our messages (Messenger/IG `reaction`). `action`
       // is "react" | "unreact"; on unreact the emoji is cleared. Ingest matches
-      // the target message by mid and sets its reaction column. Instagram puts
-      // the emoji in `reaction` on some payloads, Messenger in `emoji` — read both.
+      // the target message by mid and sets its reaction column.
       if (m.reaction && m.reaction.mid) {
-        const emoji =
-          m.reaction.action === "unreact"
-            ? null
-            : m.reaction.emoji ?? m.reaction.reaction ?? null;
+        // Resolver decides add-vs-remove from action/glyph/type (IG unreacts
+        // omit both the "unreact" action AND the glyph — see socialReactionEmoji).
+        const emoji = socialReactionEmoji(
+          m.reaction.action,
+          m.reaction.emoji,
+          m.reaction.reaction,
+        );
         const reaction: NormalizedReaction = {
           kind: "reaction",
           externalId: `${m.reaction.mid}:reaction`,
@@ -989,6 +1059,30 @@ export async function sendSocialSenderAction(
 }
 
 /**
+ * Send (or remove) a business reaction to a customer message on a Meta SOCIAL
+ * channel (Messenger / Instagram). Both use the unified messaging endpoint with
+ * `sender_action: "react" | "unreact"` and a `payload.message_id` (+ `reaction`
+ * emoji for react). Empty emoji ⇒ unreact. Mirrors the WhatsApp reaction on the
+ * WhatsApp provider — same `SendReactionArgs` shape.
+ */
+export async function sendSocialReaction(
+  args: SendReactionArgs,
+  opts: SocialSendTarget,
+): Promise<SendTextResult> {
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
+  const remove = args.emoji.trim() === "";
+  await graphPostJson(url, opts.accessToken, {
+    recipient: { id: args.to },
+    sender_action: remove ? "unreact" : "react",
+    payload: remove
+      ? { message_id: args.messageExternalId }
+      : { message_id: args.messageExternalId, reaction: args.emoji },
+  });
+  // Reactions mutate the target message, not a new row — return a synthetic id.
+  return { externalId: `reaction:${args.messageExternalId}`, timestamp: new Date() };
+}
+
+/**
  * Best-effort profile for a social contact — the messaging webhook carries no
  * name, so we read the profile node (`/{id}?fields=…`). `fields` differs per
  * channel (Messenger: `name,profile_pic`; Instagram: `name,username,
@@ -1064,6 +1158,12 @@ export async function fetchSocialProfile(
       social.followsBusiness = res.is_user_follow_business;
     if (typeof res.is_business_follow_user === "boolean")
       social.businessFollows = res.is_business_follow_user;
+    // Messenger identity signals (behind `pages_user_*` App Review). Meta's
+    // `timezone` is a GMT offset NUMBER (e.g. -7); `locale`/`gender` are strings.
+    // Each copied only when present so an un-approved perm degrades to absent.
+    if (typeof res.locale === "string" && res.locale.trim()) social.locale = res.locale.trim();
+    if (typeof res.timezone === "number") social.timezone = res.timezone;
+    if (typeof res.gender === "string" && res.gender.trim()) social.gender = res.gender.trim();
     return {
       name: name || [firstName, lastName].filter(Boolean).join(" ") || username || null,
       firstName: firstName || null,
@@ -1197,32 +1297,46 @@ export async function getSocialCallRouting(
     : null;
 }
 
-/** Show/hide the call icon in Messenger threads for this Page. */
-export async function setSocialCallIconEnabled(
+/**
+ * Turn the Page's CALL SETTINGS on. `audio_enabled` + `video_enabled` are the
+ * actual on-switch — WITHOUT them Meta reports "Call Settings Not Enabled"
+ * (subcode 1893056) on every calling API (permission check, place-call), even
+ * with the feature granted and routing set. `icon_enabled` just shows the in-
+ * thread call button. Verified live 2026-07-13: setting only `icon_enabled`
+ * left calling non-functional; adding audio/video is what enables it.
+ */
+export async function setSocialCallEnabled(
   enabled: boolean,
   opts: SocialSendTarget,
 ): Promise<void> {
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messenger_call_settings`;
-  await graphPostJson(url, opts.accessToken, { icon_enabled: enabled });
+  await graphPostJson(url, opts.accessToken, {
+    audio_enabled: enabled,
+    video_enabled: enabled,
+    icon_enabled: enabled,
+  });
 }
 
 /**
  * One-shot "make this Page ready to place AND receive calls in our inbox":
+ *   - ENABLE audio + video calling on the Page (the load-bearing on-switch —
+ *     without it every calling API returns "Call Settings Not Enabled"),
  *   - route consumer-initiated calls to PARTNERS (us) — REQUIRED to receive
  *     inbound calls here rather than only in Meta Business Inbox, and
  *   - show the in-thread call icon.
  * Then report the feature status so ops can see whether Meta has actually
- * enabled Messenger Calling on the Page. Idempotent; mirrors the shape of
- * WhatsApp's `enableCalling`.
+ * enabled Messenger Calling on the Page. Idempotent; mirrors WhatsApp's
+ * `enableCalling`.
  */
 export async function enableSocialCalling(
   opts: SocialSendTarget,
 ): Promise<{ ok: true; raw: unknown }> {
+  // Audio/video enablement first — it's what makes calling actually work.
+  await setSocialCallEnabled(true, opts);
   await setSocialCallRouting("PARTNERS", opts);
-  await setSocialCallIconEnabled(true, opts).catch(() => {
-    // Icon toggle is cosmetic — a failure here must not fail the (load-bearing)
-    // routing change above.
-  });
   const featureEnabled = await socialCallFeatureEnabled(opts).catch(() => false);
-  return { ok: true, raw: { ring_target: "PARTNERS", icon_enabled: true, featureEnabled } };
+  return {
+    ok: true,
+    raw: { audio_enabled: true, video_enabled: true, icon_enabled: true, ring_target: "PARTNERS", featureEnabled },
+  };
 }

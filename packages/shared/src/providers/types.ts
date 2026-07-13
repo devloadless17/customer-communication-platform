@@ -544,6 +544,50 @@ export interface SendInteractiveArgs {
 /** A profile field a social contact can share with one tap. */
 export type ContactShareField = "phone" | "email";
 
+/** Outbound location share (WhatsApp `type:"location"`). */
+export interface SendLocationArgs {
+  /** E.164 digits, no '+'. */
+  to: string;
+  latitude: number;
+  longitude: number;
+  /** Place name shown above the address. */
+  name?: string;
+  /** Human-readable address line. */
+  address?: string;
+  replyToExternalId?: string;
+  /** Meta social only — see SendTextArgs.useHumanAgentTag. */
+  useHumanAgentTag?: boolean;
+}
+
+/** One vCard in an outbound contacts message. */
+export interface SharedContactInput {
+  name: string;
+  phones: string[];
+  emails?: string[];
+  /** Pre-formatted, human-readable address lines. */
+  addresses?: string[];
+  /** "Title · Company" (or whichever part exists). */
+  company?: string;
+}
+
+/** Outbound contact share (WhatsApp `type:"contacts"`). */
+export interface SendContactsArgs {
+  to: string;
+  contacts: SharedContactInput[];
+  replyToExternalId?: string;
+  useHumanAgentTag?: boolean;
+}
+
+/** Outbound emoji reaction to a customer message (WhatsApp `type:"reaction"`). */
+export interface SendReactionArgs {
+  to: string;
+  /** The wamid of the message being reacted to. */
+  messageExternalId: string;
+  /** The emoji; an empty string REMOVES the reaction (Meta's convention). */
+  emoji: string;
+  useHumanAgentTag?: boolean;
+}
+
 export interface UploadMediaArgs {
   bytes: Uint8Array;
   mimeType: string;
@@ -804,6 +848,13 @@ export interface ProviderCapabilities {
    */
   messageTextMaxChars: number;
   /**
+   * True when the channel's text limit is counted in UTF-8 BYTES, not UTF-16
+   * chars. Instagram's 1000 limit is BYTES — so ~600 Arabic characters (or ~300
+   * emoji) fit `messageTextMaxChars` by JS `.length` yet exceed 1000 bytes and
+   * Meta rejects the send. When set, the length gate measures bytes instead.
+   */
+  textLimitIsBytes?: boolean;
+  /**
    * Extended outbound window (ms) for channels that allow agent replies past
    * the standard free-form window under a support-only policy. Meta social
    * (Messenger/Instagram) permit sends up to 7 days since the last inbound via
@@ -823,6 +874,22 @@ export interface ProviderCapabilities {
    * the button is hidden on their threads instead of erroring on send.
    */
   interactive: boolean;
+  /**
+   * Outbound location share (`type:"location"`). Gates the composer's "Send
+   * location" affordance at the channel level (WhatsApp today). Optional —
+   * absent = false.
+   */
+  sendLocation?: boolean;
+  /**
+   * Outbound contact share (`type:"contacts"` vCard). Gates the composer's
+   * "Send contact" affordance. Optional — absent = false.
+   */
+  sendContacts?: boolean;
+  /**
+   * Outbound emoji reaction to a customer message. Gates the bubble's "react"
+   * affordance. Optional — absent = false.
+   */
+  sendReaction?: boolean;
   /**
    * Voice calling. True if the provider implements placeCall / acceptCall /
    * etc. Gates the inbox "Call" button at the channel level — a future
@@ -897,6 +964,13 @@ export interface MessagingProvider<SendConfig = unknown> {
    * how to degrade). Same 24h-window rule applies as plain text sends.
    */
   sendInteractive?(args: SendInteractiveArgs, config: SendConfig): Promise<SendTextResult>;
+  /** Outbound location share (map pin). Optional — providers without it are
+   *  gated at the send path with an actionable error. */
+  sendLocation?(args: SendLocationArgs, config: SendConfig): Promise<SendTextResult>;
+  /** Outbound contact share (vCard). Optional — see sendLocation. */
+  sendContacts?(args: SendContactsArgs, config: SendConfig): Promise<SendTextResult>;
+  /** Outbound emoji reaction to a customer message. Empty emoji un-reacts. */
+  sendReaction?(args: SendReactionArgs, config: SendConfig): Promise<SendTextResult>;
   /** Outbound media — caller uploads first, then sends with the returned id. */
   uploadMedia?(args: UploadMediaArgs, config: SendConfig): Promise<UploadMediaResult>;
   sendMedia?(args: SendMediaArgs, config: SendConfig): Promise<SendTextResult>;

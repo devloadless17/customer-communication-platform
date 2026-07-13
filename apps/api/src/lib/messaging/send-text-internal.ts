@@ -61,7 +61,10 @@ export class SendTextValidationError extends Error {
     | "message_too_long"
     // Consent chips (`contactShare`) asked for on a channel whose capabilities
     // don't declare `contactShareChips` — WhatsApp today.
-    | "contact_share_not_supported";
+    | "contact_share_not_supported"
+    // Reaction target message not found / has no provider id yet (outbound
+    // reaction path).
+    | "message_not_found";
   detail?: string;
 
   constructor(

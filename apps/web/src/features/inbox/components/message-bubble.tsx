@@ -1,14 +1,36 @@
 "use client";
 
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import { motion } from "framer-motion";
-import { Ban, Check, Megaphone, Paperclip } from "lucide-react";
+import { Ban, Check, Megaphone, Paperclip, User, X } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { cn, initials } from "@ccp/shared/utils";
 import type { Channel, Message, MessageAttribution } from "@ccp/shared/types";
+import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { highlightQuery } from "./message-search";
+
+/**
+ * Locally clear a stuck CUSTOMER reaction. Instagram never sends a reaction-
+ * removal webhook, so a customer who removes their reaction leaves it stuck in
+ * our inbox — this lets the agent dismiss it. The server clears our stored value
+ * and fans out `message.reaction_changed`, which the live reducer applies (so it
+ * disappears here and for every other agent). No optimistic dispatch needed —
+ * the fanout round-trips in ~100ms and keeps a single source of truth.
+ */
+async function dismissCustomerReaction(messageId: string): Promise<void> {
+  try {
+    await apiFetch("/api/messages/reaction/dismiss", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messageId }),
+    });
+  } catch {
+    // Best-effort — a failed dismiss just leaves the pill; the agent can retry.
+  }
+}
 
 /**
  * "From your ad" chip on the first inbound of an ad-sourced conversation
@@ -16,6 +38,48 @@ import { highlightQuery } from "./message-search";
  * headline and links to the ad, so an agent instantly knows the customer came
  * from a campaign. Sits at the top of the bubble, above the message content.
  */
+// Meta social reactions can arrive as a TYPE NAME ("like" / "love" / "other"
+// for a custom or sticker reaction) instead of an emoji glyph. Ingest now maps
+// them, but rows stored before that fix still hold the raw word — so normalize
+// at render too: a real glyph (non-ASCII) shows as-is; an ASCII type-name maps
+// to its emoji (default ❤️) so the pill is never the literal word "other".
+const REACTION_TYPE_EMOJI: Record<string, string> = {
+  like: "👍",
+  love: "❤️",
+  care: "🥰",
+  haha: "😆",
+  laugh: "😆",
+  smile: "😆",
+  wow: "😮",
+  sad: "😢",
+  angry: "😠",
+};
+/**
+ * Force EMOJI presentation on a single-codepoint symbol that defaults to TEXT.
+ * Meta sends the heart reaction as the bare base char `❤` (U+2764) WITHOUT the
+ * variation selector U+FE0F, so browsers render the black text-style heart
+ * instead of the red emoji. Appending U+FE0F fixes it. Only touch a lone BMP
+ * symbol with no existing selector — an already-composed emoji (`❤️`, a ZWJ
+ * sequence) is length ≥ 2 and left alone; astral emoji (👍, cp > 0xFFFF) are
+ * emoji-default and need nothing. Appending the selector to a symbol that is
+ * already emoji-default is harmless (it just reaffirms emoji presentation).
+ */
+function withEmojiPresentation(glyph: string): string {
+  const cps = [...glyph];
+  if (cps.length !== 1) return glyph;
+  const cp = cps[0]!.codePointAt(0) ?? 0;
+  return cp >= 0x2000 && cp <= 0xffff ? cps[0] + "\uFE0F" : glyph;
+}
+
+function reactionGlyph(raw: string): string {
+  // A real emoji glyph has a non-ASCII code point; a Meta type-name ("other")
+  // is pure ASCII → map it to an emoji so the pill is never a literal word.
+  for (const ch of raw) {
+    if ((ch.codePointAt(0) ?? 0) > 0x7f) return withEmojiPresentation(raw);
+  }
+  return REACTION_TYPE_EMOJI[raw.trim().toLowerCase()] ?? "❤️";
+}
+
 function AdAttributionChip({ attribution }: { attribution: MessageAttribution }) {
   const label =
     attribution.source === "post"
@@ -64,6 +128,108 @@ import { BubbleMeta, SenderChip } from "./message-bubble/bubble-meta";
 import { MediaBlock, StickerImage } from "./message-bubble/media-blocks";
 import { QuotedReply } from "./message-bubble/quoted-reply";
 import { StructuredBlock } from "./message-bubble/structured-block";
+
+/**
+ * One reaction pill: a small avatar (WHO reacted) + the emoji. The avatar is the
+ * whole point — in a shared inbox a bare emoji can't say whether the customer or
+ * your team reacted, so the customer's initial-gradient chip and our tinted
+ * "team" chip make it unmistakable at a glance. `onDismiss` (Instagram customer
+ * pill only) turns it into a click-to-clear button, since IG never sends a
+ * reaction-removal webhook.
+ */
+function ReactionPill({
+  glyph,
+  avatar,
+  tone,
+  who,
+  onDismiss,
+}: {
+  glyph: string;
+  avatar: ReactNode;
+  tone: "neutral" | "accent";
+  who: string;
+  onDismiss?: () => void;
+}) {
+  const base = cn(
+    "inline-flex items-center gap-1 rounded-full border py-0.5 pl-0.5 pr-2 shadow-sm",
+    tone === "accent" ? "border-primary/30 bg-primary/10" : "border-border bg-card",
+  );
+  const emoji = reactionGlyph(glyph);
+  if (onDismiss) {
+    return (
+      <button
+        type="button"
+        onClick={onDismiss}
+        className={cn(base, "group/rx cursor-pointer transition-colors hover:border-destructive/50")}
+        aria-label={`${who} reacted ${emoji} — click to dismiss (Instagram doesn't notify us when a customer removes a reaction)`}
+        title="Instagram doesn't tell us when a customer removes their reaction — click to clear it"
+      >
+        {avatar}
+        <span className="text-sm leading-none group-hover/rx:hidden">{emoji}</span>
+        <X className="hidden size-3 text-destructive group-hover/rx:block" />
+      </button>
+    );
+  }
+  return (
+    <span className={base} aria-label={`${who} reacted ${emoji}`} title={`${who} reacted ${emoji}`}>
+      {avatar}
+      <span className="text-sm leading-none">{emoji}</span>
+    </span>
+  );
+}
+
+/**
+ * Reaction row tucked over the bubble's bottom edge — up to two pills (the
+ * customer's `reaction` and our `agentReaction`), each avatar-tagged so who-is-
+ * who is obvious. Both are independent fields, so both can show at once and
+ * neither clobbers the other; renders for any message type / either direction.
+ */
+function MessageReactions({
+  message,
+  isOut,
+  contactName,
+  contactSeed,
+}: {
+  message: Message;
+  isOut: boolean;
+  contactName: string;
+  contactSeed: string;
+}) {
+  if (message.deletedAt || (!message.reaction && !message.agentReaction)) return null;
+  const customerAvatar = (
+    <span
+      className="grid size-[18px] shrink-0 place-items-center rounded-full text-[9px] font-semibold text-white"
+      style={{ backgroundImage: avatarGradient(contactSeed) }}
+    >
+      {initials(contactName)}
+    </span>
+  );
+  const agentAvatar = (
+    <span className="grid size-[18px] shrink-0 place-items-center rounded-full bg-primary text-primary-foreground">
+      <User className="size-2.5" />
+    </span>
+  );
+  return (
+    <div className={cn("relative z-10 -mt-2 flex gap-1", isOut ? "mr-1 justify-end" : "ml-1")}>
+      {message.reaction && (
+        <ReactionPill
+          glyph={message.reaction}
+          avatar={customerAvatar}
+          tone="neutral"
+          who={contactName}
+          onDismiss={
+            message.channel === "instagram"
+              ? () => dismissCustomerReaction(message.id)
+              : undefined
+          }
+        />
+      )}
+      {message.agentReaction && (
+        <ReactionPill glyph={message.agentReaction} avatar={agentAvatar} tone="accent" who="You" />
+      )}
+    </div>
+  );
+}
 
 interface MessageBubbleProps {
   message: Message;
@@ -251,6 +417,15 @@ function BubbleContent({
   const canReply = Boolean(onReply) && live;
   const canForward = Boolean(onForward) && live;
   const canSelect = Boolean(onStartSelect) && live;
+  // React to ANY real message — inbound OR outbound (WhatsApp lets you react to
+  // your own sends too), and every content type (text, media, location, …). The
+  // only gates: it's a real Meta message (has an externalId), the channel
+  // supports outbound reactions, and it isn't deleted. Our reaction is stored
+  // separately (agentReaction) so it never collides with the customer's.
+  const canReact =
+    Boolean(message.externalId) &&
+    !message.deletedAt &&
+    Boolean(CHANNEL_CAPABILITIES[message.channel]?.sendReaction);
 
   // Stickers stand alone — no bubble chrome, just the image. Rendered
   // outside the standard bubble path because the visual treatment differs.
@@ -302,9 +477,11 @@ function BubbleContent({
       {isOut && (
         <BubbleActions
           message={message}
+          conversationId={message.conversationId}
           canReply={canReply}
           canForward={canForward}
           canSelect={canSelect}
+          canReact={canReact}
           onReply={onReply}
           onForward={onForward}
           onStartSelect={onStartSelect}
@@ -335,8 +512,10 @@ function BubbleContent({
           className={cn(
             "overflow-hidden rounded-2xl text-sm leading-snug shadow-xs ring-1 transition-[box-shadow,background-color]",
             // Reduce horizontal padding when the leading element is a media
-            // block — they look better edge-to-edge inside the bubble.
-            media || reply ? "p-1" : "px-3.5 py-2",
+            // block or a structured card (location map / contact / order) —
+            // they look better edge-to-edge inside the bubble, WhatsApp-style,
+            // instead of floating in bubble-colored padding.
+            media || reply || message.structured ? "p-1" : "px-3.5 py-2",
             // Failed bubble: red ring so the eye snaps to it. Pending no
             // longer dims — the clock icon in the meta row conveys "in
             // flight" without making the bubble look unfinished, so a fast
@@ -372,8 +551,22 @@ function BubbleContent({
           ) : message.structured ? (
             // Location pin / contact card — a dedicated bubble replacing the
             // plain text placeholder (the placeholder body is still stored for
-            // search / list preview, just not rendered here).
-            <StructuredBlock structured={message.structured} isOut={isOut} />
+            // search / list preview, just not rendered here). A STORY reply,
+            // though, carries the customer's actual reply TEXT as the body, so
+            // render it under the card — hiding it would drop the message.
+            <>
+              <StructuredBlock structured={message.structured} isOut={isOut} />
+              {message.structured.kind === "story" && message.body && (
+                <p
+                  dir="auto"
+                  className="whitespace-pre-wrap wrap-break-word px-2.5 pb-1.5 pt-2"
+                >
+                  {searchQuery && searchQuery.trim().length > 0
+                    ? highlightQuery(message.body, searchQuery)
+                    : message.body}
+                </p>
+              )}
+            </>
           ) : (
             <>
               {reply && (
@@ -434,23 +627,12 @@ function BubbleContent({
           )}
         </div>
 
-        {message.reaction && (
-          // Customer's emoji reaction, tucked over the bubble's bottom edge
-          // (WhatsApp-style). Side-aligned by the column's items-end/start.
-          // A genuine content change (arrives live, after the message), so the
-          // small reflow it causes is fine — the stick-to-bottom observer keeps
-          // the thread pinned, same as any new content.
-          <span
-            className={cn(
-              "relative z-10 -mt-1.5 inline-flex items-center rounded-full border border-border bg-card px-1.5 py-px text-xs leading-none shadow-xs",
-              isOut ? "mr-1.5" : "ml-1.5",
-            )}
-            aria-label={`Customer reacted ${message.reaction}`}
-            title={`Customer reacted ${message.reaction}`}
-          >
-            {message.reaction}
-          </span>
-        )}
+        <MessageReactions
+          message={message}
+          isOut={isOut}
+          contactName={contactName}
+          contactSeed={contactSeed}
+        />
 
         {showMeta && <BubbleMeta message={message} isOut={isOut} />}
         {isFailed && (
@@ -477,9 +659,11 @@ function BubbleContent({
       {!isOut && (
         <BubbleActions
           message={message}
+          conversationId={message.conversationId}
           canReply={canReply}
           canForward={canForward}
           canSelect={canSelect}
+          canReact={canReact}
           onReply={onReply}
           onForward={onForward}
           onStartSelect={onStartSelect}

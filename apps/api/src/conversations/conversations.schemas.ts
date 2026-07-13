@@ -86,9 +86,21 @@ export const BulkDeleteConversationsSchema = z.object({
 });
 export type BulkDeleteConversationsInput = z.infer<typeof BulkDeleteConversationsSchema>;
 
-export const StartConversationSchema = z.object({
-  contactId: z.string().min(1),
-});
+export const StartConversationSchema = z
+  .object({
+    contactId: z.string().min(1).optional(),
+    /**
+     * Alternative to `contactId`: start (or reopen) a conversation with a phone
+     * number, find-or-creating the WhatsApp contact server-side. Powers the
+     * shared-contact card's "Message" action, which has a number, not an id.
+     */
+    phone: z.string().min(1).optional(),
+    /** Display name to seed a newly-created contact (ignored if it exists). */
+    name: z.string().trim().max(200).optional(),
+  })
+  .refine((v) => !!v.contactId || !!v.phone, {
+    message: "contactId or phone is required",
+  });
 export type StartConversationInput = z.infer<typeof StartConversationSchema>;
 
 /**

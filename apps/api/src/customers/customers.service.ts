@@ -1,6 +1,29 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import {
+  isSocialContactPlaceholder,
+  socialContactPlaceholder,
+} from "@ccp/shared/providers/capabilities";
+import type { Channel } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
+
+/**
+ * A brand-new social contact carries its opaque PSID/IGSID as `name` until the
+ * async Graph enrichment pass fills the real display name. Never surface that raw
+ * id: show the channel placeholder ("Instagram user") for a channel-contact, and
+ * — for the PERSON header — prefer a linked channel's already-enriched real name
+ * over the id the Customer row was stamped with at creation time (the
+ * "1932759190769573" leak). Mirrors `contactDisplayIdentity` in queries/_shared.
+ */
+function isRealContactName(
+  name: string | null | undefined,
+  externalContactId: string | null,
+): boolean {
+  const n = name?.trim();
+  return (
+    !!n && n !== externalContactId && !isSocialContactPlaceholder(n)
+  );
+}
 
 /** A channel-contact under a customer, shaped for the profile's channel switcher. */
 export interface CustomerContactView {
@@ -87,9 +110,14 @@ export class CustomersService {
     if (!customer) throw new NotFoundException({ error: "customer_not_found" });
     const contacts: CustomerContactView[] = customer.contacts.map((c) => {
       const convo = c.conversations[0] ?? null;
+      // Substitute the friendly placeholder for a still-un-enriched contact whose
+      // name is its raw id — so the switcher never shows "1932759190769573".
+      const contactName = isRealContactName(c.name, c.externalContactId)
+        ? c.name
+        : socialContactPlaceholder(c.identityChannel as Channel | null);
       return {
         id: c.id,
-        name: c.name,
+        name: contactName,
         identityChannel: c.identityChannel,
         phoneNumber: c.phoneNumber,
         externalContactId: c.externalContactId,
@@ -126,9 +154,30 @@ export class CustomersService {
       }
       return out;
     };
+    // Person display name. The Customer row is stamped with the contact's name at
+    // creation — for a fresh social contact that's the raw PSID/IGSID, and it
+    // never got refreshed once the contact enriched to a real name. So only keep
+    // `customer.name` when it's a REAL name (not a raw id, not a placeholder);
+    // otherwise fall back to the best linked channel's already-enriched name
+    // (contacts are sorted most-active first), else null → "Unnamed person".
+    const externalIds = customer.contacts
+      .map((c) => c.externalContactId)
+      .filter((x): x is string => !!x);
+    const customerNameIsReal =
+      !!customer.name?.trim() &&
+      !externalIds.includes(customer.name.trim()) &&
+      !isSocialContactPlaceholder(customer.name.trim());
+    // `contacts` is sorted most-active-first and already carries the placeholder
+    // for un-enriched names, so the first that reads as a real name is the best.
+    const bestContactName = contacts.find((c) =>
+      isRealContactName(c.name, c.externalContactId),
+    )?.name;
+    const personName = customerNameIsReal
+      ? customer.name
+      : bestContactName ?? null;
     return {
       id: customer.id,
-      name: customer.name,
+      name: personName,
       contacts,
       unreadTotal: contacts.reduce((sum, c) => sum + c.unreadCount, 0),
       details: {

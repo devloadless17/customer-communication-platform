@@ -57,16 +57,16 @@ const securityHeaders = [
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   {
     // `microphone=(self)` — voice notes in the inbox composer call
-    // navigator.mediaDevices.getUserMedia. With the empty allowlist `()`,
-    // even an in-page same-origin call is policy-blocked, so the browser
-    // shows its permission prompt, the user clicks Allow, and getUserMedia
-    // still throws NotAllowedError — making the recorder appear permanently
-    // stuck on "Microphone permission denied." Same-origin allowlist is
-    // safe: X-Frame-Options + frame-ancestors above block embedding, so
-    // there's no third-party origin that could inherit this capability.
-    // camera/geolocation/interest-cohort stay denied — unused.
+    // navigator.mediaDevices.getUserMedia. `geolocation=(self)` — the "Send
+    // location → My location" composer calls navigator.geolocation. With the
+    // empty allowlist `()`, even an in-page same-origin call is policy-blocked,
+    // so the browser shows its permission prompt, the user clicks Allow, and the
+    // API still throws — making the feature appear permanently denied.
+    // Same-origin allowlist is safe: X-Frame-Options + frame-ancestors above
+    // block embedding, so there's no third-party origin that could inherit these
+    // capabilities. camera/interest-cohort stay denied — unused.
     key: "Permissions-Policy",
-    value: "camera=(), microphone=(self), geolocation=(), interest-cohort=()",
+    value: "camera=(), microphone=(self), geolocation=(self), interest-cohort=()",
   },
 ];
 

@@ -10,6 +10,7 @@ import {
 import { AlertTriangle, ChevronLeft, Inbox as InboxIcon } from "lucide-react";
 
 import type {
+  Channel,
   Contact,
   ContactFieldDefinition,
   ContactPanelBuiltins,
@@ -60,24 +61,30 @@ import { toast } from "@/lib/toast";
 // BOTH set the in-panel error AND raise a toast — a pre-flight rejection tears
 // down `liveCall` (which unmounts CallPanel, the only consumer of `callError`),
 // so without the toast the message would never be seen.
-function callReasonMessage(reason: string): string {
+function callReasonMessage(reason: string, channel?: Channel | null): string {
+  // Channel-aware copy — the same call flow serves WhatsApp AND Messenger
+  // (Messenger Calling is GA), so a Messenger rejection must not read "WhatsApp".
+  const label = channel === "messenger" ? "Messenger" : channel === "instagram" ? "Instagram" : "WhatsApp";
+  const settings = channel === "messenger" ? "Settings → Messenger" : "Settings → WhatsApp";
   switch (reason) {
     case "permission_required":
       return "Permission request sent to the customer. Try again once they accept.";
     case "permission_pending":
       return "Waiting on the customer to accept your call-permission request. Try again once they do.";
     case "bic_blocked_region":
-      return "Outbound WhatsApp calls aren't supported in this customer's country.";
+      return `Outbound ${label} calls aren't supported in this customer's country.`;
     case "permission_revoked":
       return "Calling permission was revoked. Wait for the customer to message you first.";
     case "rate_limited":
-      return "WhatsApp limits how often you can request call permission from this customer (roughly once a day). Wait for them to accept the request or message you first.";
+      return `${label} limits how often you can request call permission from this customer (roughly once a day). Wait for them to accept the request or message you first.`;
     case "daily_cap_reached":
       return "Daily limit reached: 5 connected calls per customer per 24 hours.";
     case "provider_not_configured":
-      return "WhatsApp calling isn't configured for this team. Open Settings → WhatsApp.";
+      return `${label} calling isn't configured for this team. Open ${settings}.`;
     case "provider_rejected":
-      return "WhatsApp rejected the call. Make sure calling is enabled on your number.";
+      return channel === "messenger"
+        ? "Messenger rejected the call — your Page's call settings aren't enabled. Turn on calling in your Facebook Page / Meta Business Suite settings (Inbox → Calling), then try again."
+        : `${label} rejected the call. Make sure calling is enabled on your number.`;
     case "call_in_progress":
       return "You're already on a call. End it before starting another.";
     case "mic_permission_denied":
@@ -1115,7 +1122,8 @@ export function InboxShell({
     if (!result.ok) {
       // A pre-flight rejection tore down `liveCall`, so the global CallPanel
       // won't show it — a toast guarantees the agent sees why it didn't start.
-      toast.error(callReasonMessage(result.reason));
+      // Pass the thread's channel so the copy names the right product.
+      toast.error(callReasonMessage(result.reason, snapshot?.data.conversation.channel));
     }
   }, [cache, callApi]);
 

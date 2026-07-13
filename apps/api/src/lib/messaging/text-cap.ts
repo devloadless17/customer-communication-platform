@@ -21,9 +21,15 @@ export function checkTextCap(
   channelLabel: string,
 ): { detail: string; max: number } | null {
   const max = capabilities.messageTextMaxChars;
-  if (body.length <= max) return null;
+  // Instagram counts its limit in UTF-8 bytes, not UTF-16 chars — measure the
+  // right unit so an Arabic/emoji body that Meta would reject fails our gate too
+  // (with an actionable message) instead of dying opaquely in the send worker.
+  const byteMode = capabilities.textLimitIsBytes === true;
+  const size = byteMode ? Buffer.byteLength(body, "utf8") : body.length;
+  if (size <= max) return null;
+  const unit = byteMode ? "bytes" : "characters";
   return {
     max,
-    detail: `Message is ${body.length} characters — ${channelLabel} allows at most ${max}.`,
+    detail: `Message is ${size} ${unit} — ${channelLabel} allows at most ${max} ${unit}.`,
   };
 }

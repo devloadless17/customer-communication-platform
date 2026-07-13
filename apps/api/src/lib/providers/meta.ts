@@ -34,6 +34,9 @@ import type {
   NormalizedTemplateStatusUpdate,
   ProviderTemplate,
   SendInteractiveArgs,
+  SendLocationArgs,
+  SendContactsArgs,
+  SendReactionArgs,
   SendMediaArgs,
   SendTemplateArgs,
   SendTextArgs,
@@ -382,7 +385,19 @@ interface MetaLocationPayload {
 
 interface MetaContactsPayload {
   name?: { formatted_name?: string };
-  phones?: Array<{ phone?: string }>;
+  phones?: Array<{ phone?: string; wa_id?: string; type?: string }>;
+  emails?: Array<{ email?: string; type?: string }>;
+  addresses?: Array<{
+    street?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
+    country?: string;
+    country_code?: string;
+    type?: string;
+  }>;
+  org?: { company?: string; title?: string; department?: string };
+  urls?: Array<{ url?: string; type?: string }>;
 }
 
 interface MetaMessage {
@@ -444,6 +459,16 @@ interface MetaMessage {
   // / list-preview stay correct instead of the message vanishing silently.
   location?: MetaLocationPayload;
   contacts?: MetaContactsPayload[];
+  order?: {
+    catalog_id?: string;
+    text?: string;
+    product_items?: Array<{
+      product_retailer_id?: string;
+      quantity?: number | string;
+      item_price?: number | string;
+      currency?: string;
+    }>;
+  };
   // Present on `type: "unsupported"` inbound (and some others): Meta's reason
   // the Cloud API can't represent the message — e.g. a template/interactive
   // message received BY a business number from another business. The content
@@ -529,15 +554,80 @@ function structuredForMessage(m: MetaMessage): MessageStructured | undefined {
   }
   if (m.type === "contacts" && Array.isArray(m.contacts)) {
     const contacts = m.contacts
+      .map((c) => {
+        // Fold a vCard address into one human line ("1 Lucky Way, Menlo Park,
+        // CA 94025, US"), dropping empty parts — the same way WhatsApp shows it.
+        const addresses = (c.addresses ?? [])
+          .map((a) =>
+            [a.street, a.city, a.state, a.zip, a.country ?? a.country_code]
+              .map((x) => x?.trim())
+              .filter((x): x is string => !!x && x.length > 0)
+              .join(", "),
+          )
+          .filter((a) => a.length > 0);
+        // "Title · Company" (either part optional).
+        const company = [c.org?.title?.trim(), c.org?.company?.trim()]
+          .filter((x): x is string => !!x && x.length > 0)
+          .join(" · ");
+        return {
+          name: c.name?.formatted_name?.trim() ?? "",
+          phones: (c.phones ?? [])
+            .map((p) => p.phone?.trim() ?? "")
+            .filter((p) => p.length > 0),
+          emails: (c.emails ?? [])
+            .map((e) => e.email?.trim() ?? "")
+            .filter((e) => e.length > 0),
+          addresses,
+          ...(company ? { company } : {}),
+        };
+      })
+      .filter(
+        (c) =>
+          c.name.length > 0 ||
+          c.phones.length > 0 ||
+          c.emails.length > 0 ||
+          c.addresses.length > 0,
+      )
+      // Keep the wire lean: drop empty optional arrays so an old-shape row and a
+      // new phones-only row serialize identically.
       .map((c) => ({
-        name: c.name?.formatted_name?.trim() ?? "",
-        phones: (c.phones ?? [])
-          .map((p) => p.phone?.trim() ?? "")
-          .filter((p) => p.length > 0),
-      }))
-      .filter((c) => c.name.length > 0 || c.phones.length > 0);
+        name: c.name,
+        phones: c.phones,
+        ...(c.emails.length ? { emails: c.emails } : {}),
+        ...(c.addresses.length ? { addresses: c.addresses } : {}),
+        ...(c.company ? { company: c.company } : {}),
+      }));
     if (contacts.length === 0) return undefined;
     return { kind: "contacts", contacts };
+  }
+  if (m.type === "order" && m.order?.product_items?.length) {
+    const items = m.order.product_items
+      .map((it) => {
+        const retailerId = it.product_retailer_id?.trim() ?? "";
+        const quantity = Number(it.quantity ?? 0) || 0;
+        const price = it.item_price != null ? Number(it.item_price) : undefined;
+        return {
+          retailerId,
+          quantity,
+          ...(price != null && Number.isFinite(price) ? { price } : {}),
+        };
+      })
+      .filter((it) => it.retailerId.length > 0 && it.quantity > 0);
+    if (items.length === 0) return undefined;
+    const currency = m.order.product_items.find((it) => it.currency)?.currency;
+    // Only surface a `total` when EVERY item is priced — otherwise it would
+    // understate the real order while being labelled a definitive "Total".
+    const allPriced = items.every((it) => it.price != null);
+    const total = allPriced
+      ? items.reduce((sum, it) => sum + (it.price ?? 0) * it.quantity, 0)
+      : 0;
+    return {
+      kind: "order",
+      items,
+      itemCount: items.reduce((n, it) => n + it.quantity, 0),
+      ...(allPriced && total > 0 ? { total } : {}),
+      ...(currency ? { currency } : {}),
+    };
   }
   return undefined;
 }
@@ -1545,6 +1635,140 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       throw new Error(`meta sendInteractive response missing message id: ${JSON.stringify(json)}`);
     }
     return { externalId, timestamp: new Date() };
+  },
+
+  async sendLocation(args: SendLocationArgs, config: MetaSendConfig): Promise<SendTextResult> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    const res = await metaFetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: args.to,
+        type: "location",
+        location: {
+          latitude: args.latitude,
+          longitude: args.longitude,
+          ...(args.name ? { name: args.name } : {}),
+          ...(args.address ? { address: args.address } : {}),
+        },
+        ...(args.replyToExternalId
+          ? { context: { message_id: args.replyToExternalId } }
+          : {}),
+      }),
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(`meta sendLocation failed: ${res.status} ${text}`, res.status, text);
+    }
+    const json = (await res.json()) as { messages?: Array<{ id?: string }> };
+    const externalId = json.messages?.[0]?.id;
+    if (!externalId) {
+      throw new Error(`meta sendLocation response missing message id: ${JSON.stringify(json)}`);
+    }
+    return { externalId, timestamp: new Date() };
+  },
+
+  async sendContacts(args: SendContactsArgs, config: MetaSendConfig): Promise<SendTextResult> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    // Map our vCard shape → Meta's `contacts` wire shape. Meta requires
+    // `name.formatted_name` + at least one of first/last, so seed first_name
+    // from the display name. Our addresses are pre-joined human lines, so they
+    // go in the `street` slot (Meta renders them fine).
+    const contacts = args.contacts.map((c) => {
+      const [first = c.name, ...rest] = c.name.trim().split(/\s+/);
+      const last = rest.join(" ");
+      return {
+        name: {
+          formatted_name: c.name || "Contact",
+          first_name: first || c.name || "Contact",
+          ...(last ? { last_name: last } : {}),
+        },
+        ...(c.phones.length
+          ? {
+              // Our contacts store the number as digits (the wa_id shape). Send
+              // `phone` in display E.164 (leading "+") so the customer sees the
+              // full international number, and set `wa_id` (digits) so the card
+              // gets working "Message" + "Save contact" buttons on WhatsApp
+              // (without wa_id Meta shows only "Invite to WhatsApp").
+              phones: c.phones.map((raw) => {
+                const digits = raw.replace(/\D/g, "");
+                return {
+                  phone: digits ? `+${digits}` : raw,
+                  type: "CELL",
+                  ...(digits.length >= 8 ? { wa_id: digits } : {}),
+                };
+              }),
+            }
+          : {}),
+        ...(c.emails?.length
+          ? { emails: c.emails.map((email) => ({ email, type: "WORK" })) }
+          : {}),
+        ...(c.addresses?.length
+          ? { addresses: c.addresses.map((street) => ({ street, type: "HOME" })) }
+          : {}),
+        ...(c.company ? { org: { company: c.company } } : {}),
+      };
+    });
+    const res = await metaFetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: args.to,
+        type: "contacts",
+        contacts,
+        ...(args.replyToExternalId
+          ? { context: { message_id: args.replyToExternalId } }
+          : {}),
+      }),
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(`meta sendContacts failed: ${res.status} ${text}`, res.status, text);
+    }
+    const json = (await res.json()) as { messages?: Array<{ id?: string }> };
+    const externalId = json.messages?.[0]?.id;
+    if (!externalId) {
+      throw new Error(`meta sendContacts response missing message id: ${JSON.stringify(json)}`);
+    }
+    return { externalId, timestamp: new Date() };
+  },
+
+  async sendReaction(args: SendReactionArgs, config: MetaSendConfig): Promise<SendTextResult> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    const res = await metaFetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: args.to,
+        type: "reaction",
+        // Meta's convention: an empty emoji removes the business's reaction.
+        reaction: { message_id: args.messageExternalId, emoji: args.emoji },
+      }),
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(`meta sendReaction failed: ${res.status} ${text}`, res.status, text);
+    }
+    const json = (await res.json()) as { messages?: Array<{ id?: string }> };
+    const externalId = json.messages?.[0]?.id;
+    // A reaction send returns a message id; we don't persist a new row for it
+    // (it mutates the target message), but keep the shape uniform.
+    return { externalId: externalId ?? `reaction:${args.messageExternalId}`, timestamp: new Date() };
   },
 
   async sendTypingIndicator(externalId: string, config: MetaSendConfig): Promise<void> {

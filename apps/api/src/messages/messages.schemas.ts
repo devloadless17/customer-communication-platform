@@ -8,6 +8,52 @@ export const SendTextSchema = z.object({
 });
 export type SendTextInput = z.infer<typeof SendTextSchema>;
 
+/** Outbound location share (map pin). */
+export const SendLocationSchema = z.object({
+  conversationId: z.string().min(1),
+  latitude: z.number().gte(-90).lte(90),
+  longitude: z.number().gte(-180).lte(180),
+  name: z.string().trim().max(200).optional(),
+  address: z.string().trim().max(500).optional(),
+  clientTempId: z.string().min(1).optional(),
+});
+export type SendLocationInput = z.infer<typeof SendLocationSchema>;
+
+/** Outbound contact share (vCard). At least one contact, each with a name. */
+export const SendContactsSchema = z.object({
+  conversationId: z.string().min(1),
+  clientTempId: z.string().min(1).optional(),
+  contacts: z
+    .array(
+      z.object({
+        name: z.string().trim().min(1).max(200),
+        phones: z.array(z.string().trim().min(1).max(40)).max(20).default([]),
+        emails: z.array(z.string().trim().min(1).max(200)).max(20).optional(),
+        addresses: z.array(z.string().trim().min(1).max(500)).max(10).optional(),
+        company: z.string().trim().max(200).optional(),
+      }),
+    )
+    .min(1)
+    .max(10),
+});
+export type SendContactsInput = z.infer<typeof SendContactsSchema>;
+
+/** Outbound emoji reaction to a message. Empty `emoji` removes the reaction. */
+export const SendReactionSchema = z.object({
+  conversationId: z.string().min(1),
+  messageId: z.string().min(1),
+  emoji: z.string().max(16),
+});
+export type SendReactionInput = z.infer<typeof SendReactionSchema>;
+
+// Locally clear a CUSTOMER reaction that's stuck (Instagram never sends a
+// removal webhook — see dismissReaction). No Meta call; just clears our stored
+// value + fans out so every agent sees it gone.
+export const DismissReactionSchema = z.object({
+  messageId: z.string().min(1),
+});
+export type DismissReactionInput = z.infer<typeof DismissReactionSchema>;
+
 /**
  * Composer translate. Stateless text transform (no conversation context).
  * `targetLang` is a language NAME (e.g. "Arabic", "French") — Claude reads a

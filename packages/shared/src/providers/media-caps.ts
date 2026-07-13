@@ -41,13 +41,12 @@ export function mediaSizeCap(channel: Channel, kind: MediaKind): number {
 }
 
 /**
- * Outbound media KINDS each channel accepts. Instagram DM has no file/document
- * send support — Meta rejects a `type:"file"` attachment with an opaque #100, and
- * the by-URL send path can't even carry a filename — so a document attached on an
- * IG thread must be refused up front (with an actionable error) instead of shipped
- * as a nameless "file" that fails at Meta. Size + mime still gate WITHIN a kind;
- * this is the coarser kind-level gate that size/mime alone couldn't express.
- * A channel without an entry accepts every kind.
+ * Outbound media KINDS each channel accepts. Instagram DM supports documents but
+ * ONLY as PDF (Meta's documented File format for IG is `pdf`, 25 MB) — any other
+ * document mime is rejected with an opaque #100, so the PER-MIME document gate
+ * (`documentMime`, PDF-only for IG) refuses the rest with an actionable error.
+ * Size + mime gate WITHIN a kind; this coarser kind-level gate is for channels
+ * that reject a whole kind. A channel without an entry accepts every kind.
  */
 const ALL_MEDIA_KINDS: ReadonlySet<MediaKind> = new Set<MediaKind>([
   "image",
@@ -58,7 +57,7 @@ const ALL_MEDIA_KINDS: ReadonlySet<MediaKind> = new Set<MediaKind>([
 ]);
 
 const MEDIA_KINDS_BY_CHANNEL: Partial<Record<Channel, ReadonlySet<MediaKind>>> = {
-  instagram: new Set<MediaKind>(["image", "video", "audio", "sticker"]),
+  instagram: new Set<MediaKind>(["image", "video", "audio", "sticker", "document"]),
 };
 
 /** Whether `channel` can send outbound media of `kind`. */

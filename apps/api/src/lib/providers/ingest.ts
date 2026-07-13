@@ -56,7 +56,7 @@ import type {
 } from "@ccp/shared/types";
 import { mediaPreviewLabel } from "@ccp/shared/types";
 import { getCountryFromPhone } from "@ccp/shared/utils";
-import { isPhoneChannel } from "@ccp/shared/providers/capabilities";
+import { isPhoneChannel, isSocialContactPlaceholder } from "@ccp/shared/providers/capabilities";
 
 /**
  * Provider-agnostic ingest pipeline.
@@ -267,14 +267,50 @@ async function ingestReaction(
     select: { id: true, conversationId: true, reaction: true },
   });
   // Reaction to a message we don't have a row for — nothing to attach it to.
-  if (!target) return;
-  // No change (re-delivery, or a second identical reaction) — skip the write
-  // AND the fanout so we don't churn a no-op socket frame.
-  if (target.reaction === evt.emoji) return;
+  // Log it (not silent): a reaction whose target mid never matches a stored
+  // outbound message is the signature of a mid-format mismatch — the leading
+  // diagnostic for "reactions don't work on <channel>" (e.g. Messenger). If this
+  // NEVER logs on that channel, the webhook isn't arriving at all (a missing
+  // `message_reactions` page subscription), which is the OTHER likely cause.
+  if (!target) {
+    console.warn(
+      JSON.stringify({
+        event: "reaction.target_not_found",
+        severity: "info",
+        channel,
+        targetExternalId: evt.targetExternalId,
+        hasEmoji: evt.emoji != null,
+      }),
+    );
+    return;
+  }
+  // Canonicalize the emoji by dropping the VS16 presentation selector (U+FE0F)
+  // so the comparisons below can't miss on `❤` vs `❤️` — Meta is inconsistent
+  // about sending it. The bubble re-adds emoji presentation at render.
+  const incoming = evt.emoji ? evt.emoji.replace(/\uFE0F/g, "") : null;
+
+  let next: string | null;
+  if (target.reaction === incoming) {
+    // Identical reaction re-arriving. On SOCIAL channels this is the REMOVE:
+    // Instagram (and Messenger) report an un-reaction as the SAME emoji tapped
+    // again rather than an explicit empty/unreact, so a repeat of the current
+    // reaction toggles it OFF — matching the apps' tap-again-to-remove. WhatsApp
+    // sends an explicit empty-emoji remove and never re-sends the same glyph, so
+    // its identical re-arrival stays a pure no-op (a Meta at-least-once
+    // redelivery must not clear a still-present WhatsApp reaction).
+    const isSocial = channel === "messenger" || channel === "instagram";
+    if (isSocial && incoming != null) {
+      next = null;
+    } else {
+      return; // genuine no-op (redelivery / already-cleared)
+    }
+  } else {
+    next = incoming;
+  }
 
   await db.message.update({
     where: { id: target.id },
-    data: { reaction: evt.emoji },
+    data: { reaction: next },
   });
 
   await publish({
@@ -282,7 +318,8 @@ async function ingestReaction(
     teamId,
     conversationId: target.conversationId,
     messageId: target.id,
-    emoji: evt.emoji,
+    actor: "customer",
+    emoji: next,
   });
 }
 
@@ -2076,7 +2113,14 @@ export async function enrichSocialContactNames(
       // profile call for nothing — a per-message round-trip against Meta's app
       // rate limit that scales with thread volume.
       const current = contact.name?.trim() ?? "";
-      const nameIsReal = current !== "" && current !== extId;
+      // "Real" = not empty, not the raw-id default, and not the friendly
+      // placeholder ("Messenger user") the wire shows for an un-enriched contact.
+      // The placeholder normally lives only on the wire (the DB keeps the id),
+      // but guard against it here too so a contact whose placeholder somehow
+      // reached the DB (e.g. an edit-form save mid-enrichment) still gets its
+      // real name filled instead of wedging enrichment forever.
+      const nameIsReal =
+        current !== "" && current !== extId && !isSocialContactPlaceholder(current);
       const hasCapturedAvatar = contact.avatarUrl?.startsWith("/api/contacts/");
       if (nameIsReal && hasCapturedAvatar && !opts?.forceAvatar) return;
 
@@ -2123,7 +2167,10 @@ export async function enrichSocialContactNames(
       // previously-captured signal with undefined. `??` keeps an explicit `false`
       // / `0` (a real update) while treating only null/undefined as "unknown".
       // Change-gated so an unchanged profile doesn't republish `contact.updated`.
-      // Absent on Messenger, so this is a no-op there.
+      // IG carries the follower/verified signals; Messenger carries locale/
+      // timezone/gender (once the `pages_user_*` perms are approved) — the merge
+      // whitelists BOTH sets, so `merged` must list every key or an update would
+      // silently drop the ones it omits.
       if (profile.socialProfile) {
         const cur = (contact.socialProfile ?? {}) as SocialProfile;
         const next = profile.socialProfile;
@@ -2132,12 +2179,18 @@ export async function enrichSocialContactNames(
           isVerified: next.isVerified ?? cur.isVerified ?? null,
           followsBusiness: next.followsBusiness ?? cur.followsBusiness ?? null,
           businessFollows: next.businessFollows ?? cur.businessFollows ?? null,
+          locale: next.locale ?? cur.locale ?? null,
+          timezone: next.timezone ?? cur.timezone ?? null,
+          gender: next.gender ?? cur.gender ?? null,
         };
         if (
           cur.followerCount !== merged.followerCount ||
           cur.isVerified !== merged.isVerified ||
           cur.followsBusiness !== merged.followsBusiness ||
-          cur.businessFollows !== merged.businessFollows
+          cur.businessFollows !== merged.businessFollows ||
+          cur.locale !== merged.locale ||
+          cur.timezone !== merged.timezone ||
+          cur.gender !== merged.gender
         ) {
           data.socialProfile = merged as Prisma.InputJsonValue;
         }
@@ -2359,6 +2412,15 @@ function buildMessageDomain(args: {
           ...(mediaPending ? { mediaPending: true } : {}),
         }
       : {}),
+    // Structured rendering (location map-pin / contact vCard / IG story card)
+    // and ad/deep-link attribution ("from your ad" chip) MUST ride the live
+    // frame too — they're persisted on the row (see the create above), so
+    // without them here a contact-card / location / story / ad message renders
+    // its plain-text placeholder body live and only becomes a card after a
+    // refetch (the "text now, card after refresh" bug). Same shape the DB read
+    // path returns, so the live bubble and the refetched bubble are identical.
+    ...(evt.structured ? { structured: evt.structured } : {}),
+    ...(evt.attribution ? { attribution: evt.attribution } : {}),
   };
 }
 

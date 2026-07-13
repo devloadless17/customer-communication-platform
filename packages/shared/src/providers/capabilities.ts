@@ -27,12 +27,20 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     readReceipts: true,
     typingIndicators: true,
     interactive: true,
+    // WhatsApp supports outbound location + contact (vCard) + emoji reactions.
+    sendLocation: true,
+    sendContacts: true,
+    sendReaction: true,
     calling: true,
   },
   // Facebook Messenger: 24h free-form window + a 7-day Human Agent extension for
-  // support replies. No approved-template catalog. Voice calling is GA (Messenger
-  // Calling API, WebRTC) — enabled. Read receipts (mark_seen) + typing (typing_on)
-  // are by-thread sender_actions on the PSID.
+  // support replies. No approved-template catalog. Read receipts (mark_seen) +
+  // typing (typing_on) are by-thread sender_actions on the PSID.
+  //
+  // Calling: the Messenger Calling API is GA (WebRTC) and the provider methods
+  // exist, but the feature is DISABLED for now — kept off (like Instagram) so the
+  // product only offers WhatsApp calling. Flip `calling: true` + restore the
+  // onboarding `enableSocialCalling` step to bring it back.
   messenger: {
     freeFormWindowMs: DAY_MS,
     humanAgentWindowMs: 7 * DAY_MS,
@@ -41,7 +49,10 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     readReceipts: true,
     typingIndicators: true,
     interactive: true,
-    calling: true,
+    // Business reactions via the unified social messaging endpoint (sender_action
+    // react/unreact). Location/contact vCard message types are WhatsApp-only.
+    sendReaction: true,
+    calling: false,
     profileSync: true,
     contactShareChips: true,
   },
@@ -53,10 +64,15 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     freeFormWindowMs: DAY_MS,
     humanAgentWindowMs: 7 * DAY_MS,
     messageTextMaxChars: 1000,
+    // Instagram's 1000 limit is UTF-8 BYTES — Arabic/emoji bodies that fit by
+    // char count still exceed it, so the length gate measures bytes for IG.
+    textLimitIsBytes: true,
     templates: false,
     readReceipts: true,
     typingIndicators: true,
     interactive: true,
+    // Business reactions via the unified social messaging endpoint.
+    sendReaction: true,
     calling: false,
     // Instagram media send is URL-based (payload.url), not upload/attachment_id.
     mediaSendByUrl: true,
@@ -145,4 +161,34 @@ export const CHANNEL_IDENTITY_KIND: Record<Channel, ChannelIdentityKind> = {
 /** True when the channel keys contacts by phone number (WhatsApp today). */
 export function isPhoneChannel(channel: Channel): boolean {
   return CHANNEL_IDENTITY_KIND[channel] === "phone";
+}
+
+/**
+ * Friendly stand-in shown for a contact whose real display name hasn't been
+ * fetched yet. A brand-new Messenger/Instagram conversation arrives with NO
+ * display name — only an opaque PSID/IGSID — and the async Graph enrichment pass
+ * fills the real name a few hundred ms later. Without this the inbox flashes the
+ * raw id (e.g. "17885439021234") before the name lands. The wire serializer
+ * substitutes this when a contact's name still equals its external id; the
+ * enrichment guard treats it as "not a real name yet" so it can never wedge the
+ * enrichment (kept here, next to the identity maps, so the two agree).
+ */
+const CHANNEL_CONTACT_PLACEHOLDER: Partial<Record<Channel, string>> = {
+  messenger: "Messenger user",
+  instagram: "Instagram user",
+  telegram: "Telegram user",
+};
+
+export function socialContactPlaceholder(channel: Channel | null | undefined): string {
+  return (channel ? CHANNEL_CONTACT_PLACEHOLDER[channel] : undefined) ?? "New contact";
+}
+
+const PLACEHOLDER_NAMES: ReadonlySet<string> = new Set<string>([
+  ...Object.values(CHANNEL_CONTACT_PLACEHOLDER),
+  "New contact",
+]);
+
+/** Whether a stored name is one of the un-enriched placeholders (never "real"). */
+export function isSocialContactPlaceholder(name: string | null | undefined): boolean {
+  return !!name && PLACEHOLDER_NAMES.has(name);
 }

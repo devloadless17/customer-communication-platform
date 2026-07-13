@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
+import { socialContactPlaceholder } from "@ccp/shared/providers/capabilities";
 import type {
   ActivityActorKind,
   Contact,
@@ -135,16 +136,46 @@ export function mapUser(u: MappableUser): User {
   };
 }
 
+/**
+ * Wire display name + name-parts for a contact. A brand-new social contact has
+ * no display name yet — ingest stores the opaque PSID/IGSID as `name` until the
+ * async Graph enrichment pass fills the real name. Show a friendly stand-in
+ * ("Messenger user") instead of the raw id so the inbox never flashes
+ * "17885439021234" before enrichment lands (a few hundred ms later, via a
+ * `contact.updated` frame carrying the real name). Wire-only: the DB row keeps
+ * the id as `name` (the enrichment guard keys on that), and `externalContactId`
+ * still carries the raw id. Shared by both contact mappers so they can't drift.
+ */
+function contactDisplayIdentity(c: {
+  name: string;
+  firstName: string | null;
+  lastName: string | null;
+  identityChannel: string | null;
+  externalContactId: string | null;
+}): { name: string; firstName: string | null; lastName: string | null } {
+  if (!c.externalContactId || c.name !== c.externalContactId) {
+    return { name: c.name, firstName: c.firstName, lastName: c.lastName };
+  }
+  // Null the split-from-id parts too, so no surface reading firstName/lastName
+  // leaks the raw id; initials fall back to the placeholder name.
+  return {
+    name: socialContactPlaceholder(c.identityChannel as Channel | null),
+    firstName: null,
+    lastName: null,
+  };
+}
+
 export function mapContact(c: PrismaContact): Contact {
+  const display = contactDisplayIdentity(c);
   return {
     id: c.id,
     teamId: c.teamId,
     phoneNumber: c.phoneNumber,
     identityChannel: c.identityChannel as Channel | null,
     externalContactId: c.externalContactId,
-    name: c.name,
-    firstName: c.firstName,
-    lastName: c.lastName,
+    name: display.name,
+    firstName: display.firstName,
+    lastName: display.lastName,
     username: c.username,
     language: c.language,
     countryCode: c.countryCode,
@@ -225,15 +256,16 @@ type PrismaContactListItem = Omit<
   | "socialProfile"
 >;
 export function mapContactListItem(c: PrismaContactListItem): Contact {
+  const display = contactDisplayIdentity(c);
   return {
     id: c.id,
     teamId: c.teamId,
     phoneNumber: c.phoneNumber,
     identityChannel: c.identityChannel as Channel | null,
     externalContactId: c.externalContactId,
-    name: c.name,
-    firstName: c.firstName,
-    lastName: c.lastName,
+    name: display.name,
+    firstName: display.firstName,
+    lastName: display.lastName,
     language: c.language,
     countryCode: c.countryCode,
     avatarUrl: c.avatarUrl ?? undefined,
@@ -307,9 +339,11 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
     ...(m.status === "failed" && m.statusErrorDetail != null
       ? { statusErrorDetail: m.statusErrorDetail }
       : {}),
-    // Customer's current emoji reaction (null/absent ⇒ none). Hydrated so a
-    // refresh stays consistent with the live `message:reaction` socket frame.
+    // Both reaction sides (null/absent ⇒ none) — the customer's and our own —
+    // hydrated so a refresh stays consistent with the live `message:reaction`
+    // socket frames, which patch each side independently.
     ...(m.reaction ? { reaction: m.reaction } : {}),
+    ...(m.agentReaction ? { agentReaction: m.agentReaction } : {}),
     // Structured content (location pin / contact card) → dedicated bubble. The
     // JSONB round-trips as the discriminated MessageStructured shape.
     ...(m.structured

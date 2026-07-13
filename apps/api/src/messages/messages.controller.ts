@@ -32,13 +32,21 @@ import { zBody } from "../common/zod-validation.pipe";
 import { MessagesService } from "./messages.service";
 import {
   ForwardMessagesSchema,
+  SendContactsSchema,
   SendInteractiveSchema,
+  SendLocationSchema,
   SendMediaFormSchema,
+  SendReactionSchema,
+  DismissReactionSchema,
   SendTemplateSchema,
   SendTextSchema,
   TranslateSchema,
   type ForwardMessagesInput,
+  type SendContactsInput,
   type SendInteractiveInput,
+  type SendLocationInput,
+  type SendReactionInput,
+  type DismissReactionInput,
   type SendMediaFormInput,
   type SendTemplateInput,
   type SendTextInput,
@@ -237,6 +245,44 @@ export class MessagesController {
   ) {
     const out = await this.messages.sendInteractive(session.teamId, session.userId, body);
     return { ok: true, messageId: out.messageId };
+  }
+
+  @Post("location")
+  async sendLocation(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(SendLocationSchema)) body: SendLocationInput,
+  ) {
+    const out = await this.messages.sendLocation(session.teamId, session.userId, body);
+    return { ok: true, messageId: out.messageId };
+  }
+
+  @Post("contact")
+  async sendContacts(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(SendContactsSchema)) body: SendContactsInput,
+  ) {
+    const out = await this.messages.sendContacts(session.teamId, session.userId, body);
+    return { ok: true, messageId: out.messageId };
+  }
+
+  @Post("reaction")
+  async react(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(SendReactionSchema)) body: SendReactionInput,
+  ) {
+    await this.messages.reactToMessage(session.teamId, session.userId, body);
+    return { ok: true };
+  }
+
+  // Locally clear a stuck CUSTOMER reaction (Instagram never delivers a removal
+  // webhook, so the agent dismisses it manually). No Meta call — see
+  // MessagesService.dismissReaction.
+  @Post("reaction/dismiss")
+  async dismissReaction(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(DismissReactionSchema)) body: DismissReactionInput,
+  ) {
+    return this.messages.dismissReaction(session.teamId, body.messageId);
   }
 
   @Post("forward")

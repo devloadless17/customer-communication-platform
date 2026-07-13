@@ -14,7 +14,9 @@ import { blobStorage } from "@/lib/blob-storage";
 import { getProviderBinding } from "@/lib/providers";
 import { resolveContactChannel } from "@/lib/providers/channel";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
+import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import type { Channel } from "@ccp/shared/types";
+import { ContactsService } from "../contacts/contacts.service";
 import {
   getConversationWithRefs,
   listConversationAttachments,
@@ -52,6 +54,7 @@ export class ConversationsService {
   constructor(
     private readonly db: DbService,
     private readonly bus: EventBus,
+    private readonly contacts: ContactsService,
   ) {}
 
   // ---- Reads ----------------------------------------------------------
@@ -572,6 +575,51 @@ export class ConversationsService {
     actorUserId: string,
     input: StartConversationInput,
   ): Promise<{ conversationId: string; created: boolean; reopened: boolean }> {
+    // Resolve the target contact id — either given directly, or found/created
+    // from a phone number (the shared-contact card's "Message" action passes a
+    // number, not an id). Find-or-create keeps it a single atomic call and
+    // reuses the canonical ContactsService.create (stage seeding, soft-delete
+    // revive, contact.created event) instead of a fragile client dance.
+    let contactId = input.contactId ?? null;
+    if (!contactId) {
+      const phone = normalizePhoneE164(input.phone ?? "");
+      if (!phone) {
+        throw new BadRequestException({
+          error: "a valid contactId or phone number is required",
+        });
+      }
+      const active = await this.db.contact.findFirst({
+        where: { teamId, phoneNumber: phone, deletedAt: null },
+        select: { id: true },
+      });
+      if (active) {
+        contactId = active.id;
+      } else {
+        try {
+          contactId = (
+            await this.contacts.create(teamId, actorUserId, {
+              phoneNumber: phone,
+              ...(input.name ? { name: input.name } : {}),
+            })
+          ).id;
+        } catch (err) {
+          // A concurrent "Message" click for the same number won the create
+          // (phone is @@unique). Don't surface its 409 — re-find and reuse the
+          // winner's contact, mirroring the conversation-create P2002 rescue.
+          const isDuplicate =
+            err instanceof ConflictException ||
+            (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002");
+          if (!isDuplicate) throw err;
+          const winner = await this.db.contact.findFirst({
+            where: { teamId, phoneNumber: phone, deletedAt: null },
+            select: { id: true },
+          });
+          if (!winner) throw err;
+          contactId = winner.id;
+        }
+      }
+    }
+
     // `deletedAt: null` — every other contact-lookup path filters tombstoned
     // rows (contacts list, search, audience groups). Without it here, a
     // soft-deleted contact's id would still spawn a conversation, surfacing
@@ -580,7 +628,7 @@ export class ConversationsService {
     // tombstoned rows on purpose so threads remain intact, but starting a
     // NEW thread to a deleted contact has no defensible UX.
     const contact = await this.db.contact.findFirst({
-      where: { id: input.contactId, teamId, deletedAt: null },
+      where: { id: contactId, teamId, deletedAt: null },
       select: { id: true, phoneNumber: true, identityChannel: true, externalContactId: true },
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });

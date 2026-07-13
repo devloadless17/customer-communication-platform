@@ -17,6 +17,7 @@ import type {
   NormalizedEvent,
   SendInteractiveArgs,
   SendMediaArgs,
+  SendReactionArgs,
   SendTextArgs,
   SendTextResult,
   SocialCallPermission,
@@ -33,6 +34,7 @@ import {
   sendSocialCallAction,
   sendSocialInteractive,
   sendSocialMedia,
+  sendSocialReaction,
   sendSocialSenderAction,
   sendSocialText,
   socialCallFeatureEnabled,
@@ -63,6 +65,13 @@ export const messengerProvider: MessagingProvider<MessengerSendConfig> = {
     config: MessengerSendConfig,
   ): Promise<SendTextResult> {
     return sendSocialText(args, target(config));
+  },
+
+  async sendReaction(
+    args: SendReactionArgs,
+    config: MessengerSendConfig,
+  ): Promise<SendTextResult> {
+    return sendSocialReaction(args, target(config));
   },
 
   async uploadMedia(
@@ -113,14 +122,18 @@ export const messengerProvider: MessagingProvider<MessengerSendConfig> = {
   ): Promise<SocialContactProfile> {
     // Messenger's user node exposes name, the pre-split first/last name, and
     // profile_pic (no @username, no follower/verified signals — Instagram-only).
-    // `first_name`/`last_name` beat splitting `name` ourselves, but they need
-    // the profile permission, so a rejection falls back to the core pair rather
-    // than losing the display name entirely.
+    // We ALSO request `locale`/`timezone`/`gender` — the only extra identity
+    // Meta offers here (drives the "Local time" / language rows). Each sits
+    // behind a `pages_user_*` App Review, and Graph fails the WHOLE node if any
+    // requested field is unapproved, so the fallback drops just those three and
+    // keeps the name split + avatar. Two-tier: full → name+split+pic. Until the
+    // perms clear, this is one extra rejected request then the fallback — a
+    // no-op enrichment-wise (name/avatar still land).
     return fetchSocialProfile(externalId, {
       accessToken: config.pageAccessToken,
       graphVersion: config.graphVersion,
-      fields: "name,first_name,last_name,profile_pic",
-      fallbackFields: "name,profile_pic",
+      fields: "name,first_name,last_name,profile_pic,locale,timezone,gender",
+      fallbackFields: "name,first_name,last_name,profile_pic",
       label: "messenger",
     });
   },

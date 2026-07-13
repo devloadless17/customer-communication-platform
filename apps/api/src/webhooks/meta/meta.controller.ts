@@ -21,9 +21,14 @@ import type { Request, Response } from "express";
 
 import { runWithConcurrency } from "@/common/concurrency";
 import { blobStorage } from "@/lib/blob-storage";
+import { reconcileInboundMediaMime } from "@/lib/blob-storage/mime-guard";
 import { publish } from "@/lib/events/bus";
 import { MEDIA_SIZE_CAPS, mediaPolicyForChannel } from "@/lib/media-storage";
-import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
+import {
+  extractImageThumbnail,
+  extractVideoPosterFrame,
+  probeMediaDurationMs,
+} from "@/lib/media-thumbnail";
 import { getMetaProvider } from "@/lib/providers";
 import { MediaTooLargeError } from "@/lib/providers/meta";
 import {
@@ -42,7 +47,8 @@ import {
 } from "@/lib/providers/ingest";
 import { enqueueHistoryChunk } from "@/lib/coexistence/history-queue";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
-import type { Channel } from "@ccp/shared/types";
+import type { Channel, MediaKind } from "@ccp/shared/types";
+import { mediaPreviewLabel } from "@ccp/shared/types";
 
 /**
  * Which channel a Meta webhook envelope belongs to, from its `object` field.
@@ -91,6 +97,10 @@ type DownloadOutcome =
       mimeType: string;
       thumbnailStorageKey?: string;
       thumbnailStorageUrl?: string;
+      // Probed from the bytes for inbound audio/voice (the WhatsApp webhook
+      // carries no duration) so the bubble shows the length up front like real
+      // WhatsApp. Undefined for other kinds / when the probe fails.
+      durationMs?: number;
     }
   // `retriable` tells `completePendingMedia` whether to clear the row to
   // text-only NOW (permanent failure — re-downloading can't help) or PARK it
@@ -518,6 +528,7 @@ export class MetaWebhookController implements OnModuleDestroy {
         conversationId: true,
         mediaUrl: true,
         mediaKind: true,
+        body: true,
       },
     });
     const rowByExtId = new Map(rows.map((r) => [r.externalId, r]));
@@ -540,6 +551,9 @@ export class MetaWebhookController implements OnModuleDestroy {
         //     mediaUrl + mediaKey on a row whose mediaKind is null — the
         //     bubble renders with no kind metadata.
         if (row.mediaUrl || !row.mediaKind) continue;
+        // Prefer a duration probed from the bytes (inbound audio has none on the
+        // webhook) over whatever the event carried.
+        const durationMs = outcome.durationMs ?? evt.media.durationMs ?? null;
         const updated = await this.db.message.updateMany({
           where: { id: row.id, mediaUrl: null, mediaKind: { not: null } },
           data: {
@@ -547,6 +561,7 @@ export class MetaWebhookController implements OnModuleDestroy {
             mediaUrl: outcome.storageUrl,
             mediaSizeBytes: outcome.sizeBytes,
             mediaMimeType: outcome.mimeType,
+            ...(durationMs != null ? { mediaDurationMs: durationMs } : {}),
             ...(outcome.thumbnailStorageKey && outcome.thumbnailStorageUrl
               ? {
                   mediaThumbnailKey: outcome.thumbnailStorageKey,
@@ -568,7 +583,7 @@ export class MetaWebhookController implements OnModuleDestroy {
             sizeBytes: outcome.sizeBytes,
             ...(evt.body ? { caption: evt.body } : {}),
             ...(evt.media.filename ? { filename: evt.media.filename } : {}),
-            ...(evt.media.durationMs != null ? { durationMs: evt.media.durationMs } : {}),
+            ...(durationMs != null ? { durationMs } : {}),
             // Carry the WhatsApp push-to-talk flag so the just-arrived voice note
             // renders with the mic glyph + waveform LIVE — applyMessageMediaReady
             // replaces `media` wholesale, so a voice-less frame would otherwise
@@ -600,6 +615,14 @@ export class MetaWebhookController implements OnModuleDestroy {
         // (concurrent Meta retry that also failed) becomes a no-op instead
         // of re-emitting the clear event to every connected agent.
         if (!row.mediaKind || row.mediaUrl) continue;
+        // When the row would otherwise collapse to an EMPTY bubble (no caption),
+        // stamp a kind label ("🌟 Sticker" / "🎤 Voice message" / …) so a media we
+        // couldn't download reads as what it was, not a bare "Attachment
+        // unavailable". Only when the body is empty — a caption is preserved.
+        const fallbackBody =
+          row.body && row.body.length > 0
+            ? undefined
+            : mediaPreviewLabel(row.mediaKind as MediaKind);
         const cleared = await this.db.message.updateMany({
           where: { id: row.id, mediaKind: { not: null }, mediaUrl: null },
           data: {
@@ -611,6 +634,7 @@ export class MetaWebhookController implements OnModuleDestroy {
             mediaKey: null,
             mediaUrl: null,
             mediaSizeBytes: null,
+            ...(fallbackBody ? { body: fallbackBody } : {}),
           },
         });
         if (cleared.count === 0) continue;
@@ -619,6 +643,9 @@ export class MetaWebhookController implements OnModuleDestroy {
           teamId,
           conversationId: row.conversationId,
           messageId: row.id,
+          // No media (download failed) — the reducer strips the media block. The
+          // fallback label lands on the row via `body` above; it shows on the next
+          // fetch/reload (the media_ready frame carries no body).
         });
       }
     }
@@ -744,11 +771,14 @@ export class MetaWebhookController implements OnModuleDestroy {
           outcomes.set(evt.externalId, { ok: false, retriable: false });
           return;
         }
+        // Meta's social CDN mislabels voice notes (m4a/aac = MP4 container) as
+        // `video/mp4`; reconcile against the trusted kind so audio isn't dropped.
+        const storeMime = reconcileInboundMediaMime(mediaKind, fetched.mimeType, fetched.bytes);
         const saved = await retry(
           () =>
             blobStorage.upload({
               bytes: fetched.bytes,
-              mimeType: fetched.mimeType,
+              mimeType: storeMime,
               kind: mediaKind,
               context: {
                 teamId,
@@ -766,9 +796,15 @@ export class MetaWebhookController implements OnModuleDestroy {
 
         let thumbnailStorageKey: string | undefined;
         let thumbnailStorageUrl: string | undefined;
-        if (mediaKind === "video") {
+        if (mediaKind === "video" || mediaKind === "image") {
           try {
-            const poster = await extractVideoPosterFrame(fetched.bytes);
+            // Video → poster frame; image → downscaled thumbnail. Both are
+            // uploaded + served the same way (the bubble prefers the thumb, taps
+            // through to the original).
+            const poster =
+              mediaKind === "video"
+                ? await extractVideoPosterFrame(fetched.bytes)
+                : await extractImageThumbnail(fetched.bytes);
             if (poster && poster.length > 0) {
               const thumb = await retry(
                 () =>
@@ -798,15 +834,21 @@ export class MetaWebhookController implements OnModuleDestroy {
           }
         }
 
+        let durationMs: number | undefined;
+        if (mediaKind === "audio") {
+          durationMs = (await probeMediaDurationMs(fetched.bytes)) ?? undefined;
+        }
+
         outcomes.set(evt.externalId, {
           ok: true,
           storageKey: saved.key,
           storageUrl: saved.url,
           sizeBytes: saved.sizeBytes,
-          mimeType: fetched.mimeType,
+          mimeType: storeMime,
           ...(thumbnailStorageKey && thumbnailStorageUrl
             ? { thumbnailStorageKey, thumbnailStorageUrl }
             : {}),
+          ...(durationMs != null ? { durationMs } : {}),
         });
       } catch (err) {
         this.logger.warn(
@@ -935,11 +977,15 @@ export class MetaWebhookController implements OnModuleDestroy {
           outcomes.set(evt.externalId, { ok: false, retriable: false });
           return;
         }
+        // Reconcile a CDN-mislabeled audio/video Content-Type against the trusted
+        // kind (same voice-note guard as the social path — harmless here since
+        // WhatsApp's media-node mime is usually accurate).
+        const storeMime = reconcileInboundMediaMime(mediaKind, fetched.mimeType, fetched.bytes);
         const saved = await retry(
           () =>
             blobStorage.upload({
               bytes: fetched.bytes,
-              mimeType: fetched.mimeType,
+              mimeType: storeMime,
               kind: mediaKind,
               context: {
                 teamId,
@@ -961,9 +1007,15 @@ export class MetaWebhookController implements OnModuleDestroy {
         // an ffmpeg failure or corrupt video leaves thumbnail* fields null
         // and the VideoBlock falls back to bg-black (same end-state as
         // before M8 landed). Bounded at ~10s of ffmpeg wall-clock.
-        if (mediaKind === "video") {
+        if (mediaKind === "video" || mediaKind === "image") {
           try {
-            const poster = await extractVideoPosterFrame(fetched.bytes);
+            // Video → poster frame; image → downscaled thumbnail. Both are
+            // uploaded + served the same way (the bubble prefers the thumb, taps
+            // through to the original).
+            const poster =
+              mediaKind === "video"
+                ? await extractVideoPosterFrame(fetched.bytes)
+                : await extractImageThumbnail(fetched.bytes);
             if (poster && poster.length > 0) {
               const thumb = await retry(
                 () =>
@@ -997,6 +1049,13 @@ export class MetaWebhookController implements OnModuleDestroy {
           }
         }
 
+        // Audio/voice: the WhatsApp webhook carries no duration, so probe it
+        // from the bytes (best-effort) — real WhatsApp shows the length up front.
+        let durationMs: number | undefined;
+        if (mediaKind === "audio") {
+          durationMs = (await probeMediaDurationMs(fetched.bytes)) ?? undefined;
+        }
+
         // Commit the successful outcome AFTER every async step is done.
         // Single atomic Map.set per event — no torn state possible because
         // the caller reads the value, not individual fields.
@@ -1005,10 +1064,11 @@ export class MetaWebhookController implements OnModuleDestroy {
           storageKey: saved.key,
           storageUrl: saved.url,
           sizeBytes: saved.sizeBytes,
-          mimeType: fetched.mimeType,
+          mimeType: storeMime,
           ...(thumbnailStorageKey && thumbnailStorageUrl
             ? { thumbnailStorageKey, thumbnailStorageUrl }
             : {}),
+          ...(durationMs != null ? { durationMs } : {}),
         });
       } catch (err) {
         // minor#3: an over-cap file (rejected pre-buffer via Content-Length) is

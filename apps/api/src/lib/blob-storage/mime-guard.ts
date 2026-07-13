@@ -1,4 +1,4 @@
-import { normalizeMimeType } from "@/lib/media-storage";
+import { kindFromMime, normalizeMimeType } from "@/lib/media-storage";
 
 /**
  * Provider-agnostic media validation, shared by every blob-storage impl.
@@ -40,9 +40,12 @@ export const ALLOWED_MIME_BY_KIND: Record<string, ReadonlySet<string>> = {
   audio: new Set([
     "audio/aac",
     "audio/mp4",
+    "audio/x-m4a", // m4a alt mime (some OS/browser file pickers)
     "audio/mpeg",
     "audio/amr",
     "audio/ogg",
+    "audio/wav", // Messenger/Instagram accept wav; keep storage in step
+    "audio/x-wav",
     "audio/webm",
     "audio/opus",
   ]),
@@ -57,7 +60,11 @@ export const ALLOWED_MIME_BY_KIND: Record<string, ReadonlySet<string>> = {
     "text/plain",
     "text/csv",
   ]),
-  sticker: new Set(["image/webp"]),
+  // Stickers are webp on WhatsApp, but Messenger/Instagram deliver them as png /
+  // gif / jpeg — all benign raster (SVG stays excluded, so no stored-XSS
+  // surface). Without these, an inbound social sticker failed the download and
+  // rendered "Attachment unavailable".
+  sticker: new Set(["image/webp", "image/png", "image/gif", "image/jpeg"]),
 };
 
 export function assertAllowedMime(kind: string, mimeType: string): void {
@@ -169,6 +176,59 @@ const MP4_FAMILY: ReadonlySet<string> = new Set([
   "audio/mp4",
   "audio/aac",
 ]);
+
+/**
+ * Reconcile a fetched Content-Type against the TRUSTED media kind for an
+ * INBOUND download. `kind` comes from Meta's attachment categorization (the
+ * webhook `type` / `messages[].type`), NOT the CDN's Content-Type, so it is
+ * authoritative here.
+ *
+ * Meta's lookaside CDN routinely serves a voice note — an m4a/aac clip, which is
+ * an MP4 container — with `Content-Type: video/mp4`. Storing that verbatim made
+ * the `audio` allowlist reject a legitimate voice message: the download failed,
+ * the row's media columns were stripped, and the bubble rendered "Attachment
+ * unavailable" for EVERY inbound Messenger / Instagram voice note. Audio and
+ * video carry no stored-XSS surface (bytes served with an `audio/*` or `video/*`
+ * Content-Type can't execute script), so for those two kinds we can safely
+ * coerce the stored mime to match the known kind.
+ *
+ * Image / sticker are repaired ONLY from the byte SNIFF, which can return just
+ * png / jpeg / gif / webp — never SVG — so the stored-XSS surface stays closed.
+ * Documents are returned UNCHANGED (they can legitimately be html/text): the
+ * strict assertAllowedMime + sniff gate must decide there.
+ */
+export function reconcileInboundMediaMime(
+  kind: string,
+  fetchedMime: string,
+  bytes: Uint8Array,
+): string {
+  const claimed = normalizeMimeType(fetchedMime);
+  // Already consistent with the trusted kind — keep the CDN's type.
+  if (kindFromMime(claimed) === kind) return claimed;
+  // Documents keep the strict path (they may be html/text — XSS-sensitive).
+  if (kind === "document") return claimed;
+  // Trust the bytes: if the signature is a type of the right kind, use it. For a
+  // sticker, Meta may serve png/gif whose sniffed kind is "image" — accept those
+  // (the sticker allowlist covers png/gif/webp). This is the XSS-safe repair for
+  // image/sticker (sniffMime never yields SVG).
+  const sniffed = sniffMime(bytes);
+  if (sniffed && (kindOfMime(sniffed) === kind || (kind === "sticker" && kindOfMime(sniffed) === "image"))) {
+    return sniffed;
+  }
+  // Beyond this point only audio/video get a container/canonical fallback (no
+  // XSS surface); image/sticker with an unrecognized sniff keep the strict gate.
+  if (kind !== "audio" && kind !== "video") return claimed;
+  // The common voice-note case: an mp4-family container mislabeled across the
+  // audio/video line (audio kind, `video/mp4` claim, or the inverse). Coerce to
+  // that kind's mp4 canonical — the allowlist accepts it and the signature check
+  // reconciles it via MP4_FAMILY.
+  if (MP4_FAMILY.has(claimed) || (sniffed && MP4_FAMILY.has(sniffed))) {
+    return kind === "audio" ? "audio/mp4" : "video/mp4";
+  }
+  // Opaque/garbage Content-Type on trusted audio/video (e.g. octet-stream) →
+  // canonical fallback for the kind so a real clip is never dropped to text.
+  return kind === "audio" ? "audio/mpeg" : "video/mp4";
+}
 
 export function assertSignatureMatches(bytes: Uint8Array, claimedMime: string): void {
   const sniffed = sniffMime(bytes);

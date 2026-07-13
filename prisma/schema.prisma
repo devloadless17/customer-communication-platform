@@ -1187,12 +1187,18 @@ model Message {
   statusErrorCode   Int?
   statusErrorTitle  String?
   statusErrorDetail String?
-  // The customer's current emoji reaction to THIS message (WhatsApp lets a
+  // The CUSTOMER's current emoji reaction to THIS message (WhatsApp lets a
   // contact react to any message). A single value because a conversation has
   // exactly one customer; a new reaction REPLACES it and an empty reaction
-  // payload CLEARS it (null). Inbound-only for now — agent-side reacting is
-  // deferred. Set by the ingest `reaction` path; null = no reaction.
+  // payload CLEARS it (null). Set by the ingest `reaction` path; null = none.
   reaction       String?
+  // OUR team's outbound reaction to THIS message — the business-side twin of
+  // `reaction`. A SEPARATE column so a customer reaction and an agent reaction
+  // on the SAME message coexist instead of clobbering one field (the bug when
+  // both sides reacted). Meta allows one business reaction per message: a new
+  // one REPLACES it, an empty emoji CLEARS it (null). Set by the send-reaction
+  // path; null = we haven't reacted.
+  agentReaction  String?
   // Structured non-media content (shared location pin / contact card) that gets
   // a dedicated bubble. Shape = MessageStructured (discriminated by `kind`:
   // location | contacts); `body` still holds the text placeholder for search /

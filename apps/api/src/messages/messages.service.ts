@@ -29,7 +29,7 @@ import {
   normalizeMimeType,
 } from "@/lib/media-storage";
 import { channelSupportsMediaKind } from "@ccp/shared/providers/media-caps";
-import { transcodeToAac, transcodeToOggOpus, VOICE_IOS_PROFILE } from "@/lib/media/audio-transcode";
+import { transcodeToM4a, transcodeToOggOpus, VOICE_IOS_PROFILE } from "@/lib/media/audio-transcode";
 import {
   consumeConversationSendBudget,
   ConversationSendRateLimitedError,
@@ -40,6 +40,8 @@ import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { setConversationAiEnabled } from "@/lib/conversations/mutations";
 import { SendTextValidationError } from "@/lib/messaging/send-text-internal";
 import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
+import { sendStructuredInternal } from "@/lib/messaging/send-structured-internal";
+import { sendReactionInternal } from "@/lib/messaging/send-reaction-internal";
 import {
   SendTemplateValidationError,
   sendTemplateInternal,
@@ -1555,6 +1557,17 @@ export class MessagesService {
         cap,
       });
     }
+    // Images: Instagram accepts ONLY png/jpeg (a gif/webp image is rejected by
+    // Meta with an opaque #100). WhatsApp/Messenger take the common web set. Gate
+    // up front with an actionable error instead of a mystery failure at send.
+    if (kind === "image" && !policy.imageMime.has(mimeType)) {
+      throw new BadRequestException({
+        error: "invalid_image_mime",
+        detail:
+          `${policy.label} doesn't accept ${mimeType || "this image format"}. ` +
+          `Supported: ${[...policy.imageMime].map((m) => m.replace("image/", "")).join(", ")}.`,
+      });
+    }
     // Stickers: Meta only accepts `image/webp`. Reject other types up front
     // with a clear error instead of letting Meta reject with opaque code 100.
     if (kind === "sticker" && mimeType.toLowerCase() !== "image/webp") {
@@ -1569,14 +1582,20 @@ export class MessagesService {
     // before it ever reached the AAC transcode written for exactly that case.
     // Recordings are validated AFTER transcode instead; see below.
     const isRecording = kind === "audio" && form.voice === true;
+    // Instagram sends audio by URL and accepts ONLY aac / m4a / wav / mp4. Unlike
+    // the other channels we DON'T reject an incompatible IG audio upload (mp3,
+    // webm, …) up front — we TRANSCODE it to M4A below so it actually delivers.
+    const igAudio =
+      kind === "audio" && binding.provider.capabilities.mediaSendByUrl === true;
 
     // Audio FILES the user picked (not recordings): Meta only accepts a specific
     // mime set per channel. `audio/webm` in particular is a frequent silent
     // failure — uploads succeed, then Meta returns a confusing
     // `provider_rejected` at send time. Block it here with a clear error. The
     // blob-storage allowlist still permits webm (so we can debug-replay), but we
-    // won't push it to Meta.
-    if (kind === "audio" && !isRecording && !policy.audioMime.has(mimeType)) {
+    // won't push it to Meta. Instagram is exempt — its incompatible uploads are
+    // transcoded to M4A below rather than rejected.
+    if (kind === "audio" && !isRecording && !igAudio && !policy.audioMime.has(mimeType)) {
       throw new BadRequestException({
         error: "invalid_audio_mime",
         detail:
@@ -1589,11 +1608,15 @@ export class MessagesService {
     // be accepted + stored before Meta rejects them on send. Gate to Meta's
     // supported document set.
     if (kind === "document" && !policy.documentMime.has(mimeType)) {
+      // Instagram accepts only PDF; WhatsApp/Messenger accept the fuller office set.
+      const supported = policy.documentMime.has("application/pdf") && policy.documentMime.size === 1
+        ? "PDF"
+        : "PDF, Word, Excel, PowerPoint, plain text, CSV";
       throw new BadRequestException({
         error: "unsupported_file_type",
         detail:
           `${policy.label} doesn't support ${mimeType || "this file type"} as a document. ` +
-          "Supported: PDF, Word, Excel, PowerPoint, plain text, CSV.",
+          `Supported: ${supported}.`,
       });
     }
 
@@ -1620,20 +1643,26 @@ export class MessagesService {
     // voice note — see the sendMedia call below for why). Uploaded audio FILES
     // (form.voice=false — a user picked an mp3/m4a) are left alone: they deliver
     // fine already. Best-effort: if ffmpeg is missing/fails we log + send original.
-    // Voice notes need a per-channel container. Instagram REJECTS ogg/webm
-    // (`#100 attachment format is not supported`) but accepts AAC; WhatsApp needs
-    // ogg/opus to DELIVER (Messenger accepts ogg too, via its upload path). So
-    // URL-based channels (Instagram) get AAC, everyone else gets ogg/opus.
-    const instagramAudio =
-      isRecording && binding.provider.capabilities.mediaSendByUrl === true;
-    if (instagramAudio && mimeType !== "audio/aac") {
+    // Voice notes need a per-channel container. Instagram's URL-fetch validator
+    // REJECTS ogg/webm AND bare ADTS `.aac` with `#100 attachment format is not
+    // supported`, but reliably accepts M4A (AAC in an MP4 container — audio/mp4,
+    // in IG's documented aac/m4a/wav/mp4 set); WhatsApp needs ogg/opus to
+    // DELIVER (Messenger accepts ogg too, via its upload path). So URL-based
+    // channels (Instagram) get M4A, everyone else gets ogg/opus.
+    //
+    // Instagram: transcode to M4A whenever the source isn't ALREADY an
+    // IG-accepted format — i.e. every recording (browser mp4/webm containers are
+    // fragmented/unreliable over IG's fetcher) AND any incompatible upload
+    // (mp3/webm/…). A real, already-compatible upload (mp4/aac/wav) passes
+    // through untouched.
+    if (igAudio && (isRecording || !policy.audioMime.has(mimeType))) {
       try {
-        bytes = await transcodeToAac(bytes);
-        mimeType = "audio/aac";
-        filename = filename.replace(/\.[^./\\]+$/, "") + ".aac";
+        bytes = await transcodeToM4a(bytes);
+        mimeType = "audio/mp4";
+        filename = filename.replace(/\.[^./\\]+$/, "") + ".m4a";
       } catch (err) {
         this.logger.warn(
-          `voice transcode to AAC failed; sending original ${mimeType}: ${
+          `IG audio transcode to M4A failed; sending original ${mimeType}: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
@@ -1654,17 +1683,18 @@ export class MessagesService {
         );
       }
     }
-    // Recordings skipped the up-front mime gate because the transcode above is
-    // what makes them deliverable. Now that it has run (or best-effort failed),
-    // hold the RESULT to the channel's allow-list — otherwise a failed transcode
-    // silently ships a container Meta will reject at send time.
-    if (isRecording && !policy.audioMime.has(mimeType)) {
+    // Recordings (and IG audio uploads) skipped the up-front mime gate because
+    // the transcode above is what makes them deliverable. Now that it has run (or
+    // best-effort failed), hold the RESULT to the channel's allow-list —
+    // otherwise a failed transcode silently ships a container Meta will reject at
+    // send time.
+    if ((isRecording || igAudio) && !policy.audioMime.has(mimeType)) {
       throw new BadRequestException({
         error: "invalid_audio_mime",
         detail:
-          `This voice note couldn't be converted to a format ${policy.label} accepts ` +
+          `This audio couldn't be converted to a format ${policy.label} accepts ` +
           `(got ${mimeType || "an unknown format"}; supported: ${[...policy.audioMime].join(", ")}). ` +
-          "Please try again, or attach an audio file instead.",
+          "Please try again, or attach a different audio file.",
       });
     }
     // VERIFY-IN-PROD breadcrumb (2026-05-26 iOS voice-note fix): make the exact
@@ -1740,7 +1770,13 @@ export class MessagesService {
         const blob = await blobUploadPromise;
         // Meta fetches the URL asynchronously and may retry over minutes; give it
         // a generous 1h window so a slow/retried fetch can't expire mid-flight.
-        mediaUrl = await blobStorage.presignGetUrl(blob.key, { ttlSeconds: 3600 });
+        // For DOCUMENTS, attach the real filename via Content-Disposition — Meta
+        // reads it when fetching the URL and shows it to the recipient. Without
+        // this the recipient sees the hashy R2 key name (`<id>-document.pdf`).
+        mediaUrl = await blobStorage.presignGetUrl(blob.key, {
+          ttlSeconds: 3600,
+          ...(kind === "document" ? { downloadFilename: filename } : {}),
+        });
       } catch (err) {
         throw new UnprocessableEntityException({
           error: "media_url_unavailable",
@@ -2857,6 +2893,152 @@ export class MessagesService {
         detail: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /** Outbound location share — persists as a `structured` location that renders
+   *  the same map-pin card an inbound location does. */
+  async sendLocation(
+    teamId: string,
+    userId: string,
+    input: import("./messages.schemas").SendLocationInput,
+  ): Promise<{ messageId: string }> {
+    // Pre-Meta idempotency lock (parity with text/media/template/interactive) —
+    // a double-tap / network-retry re-POSTing the same clientTempId returns the
+    // first result instead of sending a SECOND map pin to the customer. No-ops
+    // when clientTempId is absent.
+    return runWithSendIdempotency(
+      { teamId, userId, conversationId: input.conversationId, clientTempId: input.clientTempId },
+      async () => {
+        try {
+          const r = await sendStructuredInternal({
+            teamId,
+            conversationId: input.conversationId,
+            kind: "location",
+            latitude: input.latitude,
+            longitude: input.longitude,
+            ...(input.name ? { name: input.name } : {}),
+            ...(input.address ? { address: input.address } : {}),
+            senderUserId: userId,
+            sentVia: "api/messages/location",
+          });
+          this.markReadOnAgentSend(teamId, userId, input.conversationId);
+          this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
+          return { messageId: r.messageId };
+        } catch (err) {
+          this.throwStructuredSendError(err, "location");
+        }
+      },
+    );
+  }
+
+  /** Outbound contact share — persists as a `structured` contacts card. */
+  async sendContacts(
+    teamId: string,
+    userId: string,
+    input: import("./messages.schemas").SendContactsInput,
+  ): Promise<{ messageId: string }> {
+    return runWithSendIdempotency(
+      { teamId, userId, conversationId: input.conversationId, clientTempId: input.clientTempId },
+      async () => {
+        try {
+          const r = await sendStructuredInternal({
+            teamId,
+            conversationId: input.conversationId,
+            kind: "contacts",
+            contacts: input.contacts,
+            senderUserId: userId,
+            sentVia: "api/messages/contact",
+          });
+          this.markReadOnAgentSend(teamId, userId, input.conversationId);
+          this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
+          return { messageId: r.messageId };
+        } catch (err) {
+          this.throwStructuredSendError(err, "contact");
+        }
+      },
+    );
+  }
+
+  /** Outbound emoji reaction to a customer message — mutates the target's
+   *  reaction (no new row) and fans out via message.reaction_changed. */
+  async reactToMessage(
+    teamId: string,
+    userId: string,
+    input: import("./messages.schemas").SendReactionInput,
+  ): Promise<{ ok: true }> {
+    try {
+      await sendReactionInternal({
+        teamId,
+        conversationId: input.conversationId,
+        messageId: input.messageId,
+        emoji: input.emoji,
+        senderUserId: userId,
+      });
+      return { ok: true };
+    } catch (err) {
+      this.throwStructuredSendError(err, "reaction");
+    }
+  }
+
+  /**
+   * DISMISS a stuck CUSTOMER reaction locally. Instagram never sends a reaction-
+   * removal webhook (verified against live traffic: only the `react` add arrives,
+   * never an `unreact`), so a customer who removes their reaction leaves it stuck
+   * in our inbox forever. WhatsApp/Messenger clear via their removal webhooks and
+   * never need this. This is a LOCAL cleanup — no Meta call (we can't un-react on
+   * the customer's behalf) — it just clears our stored `reaction` and fans out
+   * `message.reaction_changed` (customer side) so every agent sees it cleared.
+   */
+  async dismissReaction(teamId: string, messageId: string): Promise<{ ok: true }> {
+    const target = await this.db.message.findFirst({
+      where: { id: messageId, teamId },
+      select: { id: true, conversationId: true, reaction: true },
+    });
+    if (!target) {
+      throw new NotFoundException({ error: "message_not_found" });
+    }
+    if (target.reaction === null) return { ok: true }; // already clear — idempotent
+    await this.db.message.update({ where: { id: target.id }, data: { reaction: null } });
+    await publish({
+      type: "message.reaction_changed",
+      teamId,
+      conversationId: target.conversationId,
+      messageId: target.id,
+      actor: "customer",
+      emoji: null,
+    });
+    return { ok: true };
+  }
+
+  /** Shared SendTextValidationError / Meta-error → HTTP mapping for the
+   *  structured (location / contact / reaction) sends. Mirrors the interactive path. */
+  private throwStructuredSendError(err: unknown, kind: string): never {
+    if (err instanceof SendTextValidationError) {
+      const status =
+        err.code === "outside_24h_window" || err.code === "provider_not_configured"
+          ? 422
+          : err.code === "conversation_not_found" || err.code === "message_not_found"
+            ? 404
+            : 400;
+      throw new HttpException(
+        { error: err.code, ...(err.detail ? { detail: err.detail } : {}) },
+        status,
+      );
+    }
+    const normalized = normalizeMetaSendError(err);
+    if (normalized) {
+      throw new UnprocessableEntityException({
+        error: normalized.code,
+        message: normalized.message,
+        status: normalized.httpStatus,
+        detail: normalized.detail,
+      });
+    }
+    this.logger.error(`${kind} send failed`, err);
+    throw new BadGatewayException({
+      error: "send_failed",
+      detail: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

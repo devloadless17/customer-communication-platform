@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
-import { Loader2, PlugZap, Unplug } from "lucide-react";
+import { CheckCircle2, Loader2, Phone, PlugZap, TriangleAlert, Unplug } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -144,6 +144,10 @@ export function MessengerSettings({
         )}
       </div>
 
+      {canManage && current.connected && (
+        <CallingCard pageName={current.pageName} />
+      )}
+
       {canManage && showForm && (
         <form
           className="flex flex-col gap-4 rounded-xl border bg-card p-5"
@@ -199,6 +203,91 @@ export function MessengerSettings({
             </Button>
           </div>
         </form>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One-click enablement of Messenger Calling for the connected Page. Calls the
+ * admin endpoint, which turns on audio + video calling, routes consumer calls
+ * to this app (PARTNERS), shows the in-thread call icon, and reports whether
+ * Meta has granted the `messenger_api_calling` feature. Enabling the audio/video
+ * settings is the load-bearing step — without it Meta reports "Call Settings Not
+ * Enabled" on every calling API even when the feature is granted.
+ */
+function CallingCard({ pageName }: { pageName: string | null }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<
+    | { ok: true; featureEnabled: boolean }
+    | { ok: false; error: string }
+    | null
+  >(null);
+
+  async function enable() {
+    setBusy(true);
+    setResult(null);
+    try {
+      const res = await apiFetch("/api/calls/admin/enable?channel=messenger", {
+        method: "POST",
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        raw?: { featureEnabled?: boolean };
+        error?: string;
+        detail?: string;
+      };
+      if (!res.ok || !data.ok) {
+        setResult({ ok: false, error: data.detail || data.error || `Failed (HTTP ${res.status})` });
+        return;
+      }
+      const featureEnabled = data.raw?.featureEnabled === true;
+      setResult({ ok: true, featureEnabled });
+      toast.success("Messenger calling enabled");
+    } catch (err) {
+      setResult({ ok: false, error: err instanceof Error ? err.message : "Network error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border bg-card p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <Phone className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+          <div>
+            <p className="text-sm font-medium">Calling</p>
+            <p className="text-xs text-muted-foreground">
+              Turn on audio &amp; video calls for {pageName ?? "this Page"} — agents can
+              place calls and inbound customer calls ring in your inbox.
+            </p>
+          </div>
+        </div>
+        <Button size="sm" onClick={enable} disabled={busy} className="shrink-0">
+          {busy ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : <Phone className="mr-1.5 size-3.5" />}
+          Enable calling
+        </Button>
+      </div>
+
+      {result?.ok && (
+        <div className="mt-3 flex items-start gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400">
+          <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" />
+          <span>
+            Calling settings enabled (audio + video, routed to this app).{" "}
+            {result.featureEnabled ? (
+              "Meta has granted the calling feature for this Page — you're all set. On the first call, the customer taps “Allow” to grant permission, then calls connect."
+            ) : (
+              "Note: Meta hasn't granted the `messenger_api_calling` feature for this Page yet — request it in your Meta App dashboard before calls will connect."
+            )}
+          </span>
+        </div>
+      )}
+      {result && !result.ok && (
+        <div className="mt-3 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+          <span>{result.error}</span>
+        </div>
       )}
     </div>
   );

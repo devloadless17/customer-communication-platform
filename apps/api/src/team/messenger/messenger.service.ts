@@ -289,6 +289,12 @@ export class MessengerService {
       );
     }
 
+    // NOTE: Messenger calling is intentionally DISABLED (see
+    // CHANNEL_CAPABILITIES.messenger.calling === false) — the product only offers
+    // WhatsApp calling for now, so onboarding does NOT enable call routing/audio
+    // on the Page. Re-add the `enableSocialCalling` step here when calling is
+    // turned back on.
+
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "channels" });
 
     return { config: { pageId, pageName: pageName ?? null, verifyToken } };

@@ -3,7 +3,8 @@
 import { memo, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
-import { AtSign, BadgeCheck, ChevronLeft, Mail, Paperclip, Phone, MapPin, Clock, FileText, Heart, Loader2, PanelRightClose, RefreshCw, User as UserIcon, Globe, Flag, Users } from "lucide-react";
+import { useNow } from "@/hooks/use-now";
+import { AtSign, BadgeCheck, ChevronLeft, Mail, Paperclip, Phone, MapPin, Clock, FileText, Heart, Loader2, PanelRightClose, RefreshCw, Sparkles, User as UserIcon, Globe, Flag, Users } from "lucide-react";
 
 import {
   AddFieldRow,
@@ -14,6 +15,7 @@ import { TagChip, TagAddButton } from "@/features/tags/components/tag-chip";
 import { TagMultiPicker } from "@/features/tags/components/tag-multi-picker";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { LocalTime } from "@/components/local-time";
@@ -33,6 +35,7 @@ import { toast } from "@/lib/toast";
 import { assertReducerCoverage } from "@/features/inbox/lib/thread-reducers";
 import { usePanelResize } from "@/features/inbox/hooks/use-panel-resize";
 import { INBOX_DETAILS_WIDTH_COOKIE } from "@/features/inbox/lib/panel-cookies";
+import { emitOpenTemplatePicker } from "@/features/inbox/lib/open-template-picker";
 import { CHANNEL_LABEL } from "./channel-badge";
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import { LinkedChannels } from "./linked-channels";
@@ -92,6 +95,27 @@ function SocialSignals({ profile }: { profile: SocialProfile }) {
           Follows you
         </span>
       )}
+    </span>
+  );
+}
+
+/**
+ * The customer's current LOCAL time, derived from Meta's `timezone` GMT offset
+ * (Messenger). Live — ticks each minute via `useNow()` — so it stays honest
+ * without a reload, exactly like the "Local time" row in Meta's own inbox.
+ * Shift epoch into the contact's offset, then read the UTC parts = their wall
+ * clock (works for fractional offsets like +5.5).
+ */
+function ContactLocalTime({ offsetHours }: { offsetHours: number }) {
+  const now = useNow();
+  const d = new Date(now + offsetHours * 3_600_000);
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  const gmt = `GMT${offsetHours >= 0 ? "+" : "−"}${Math.abs(offsetHours)}`;
+  return (
+    <span title={gmt}>
+      {hh}:{mm}
+      <span className="ml-1 text-muted-foreground">· {gmt}</span>
     </span>
   );
 }
@@ -1074,6 +1098,26 @@ function ContactPanelImpl({
           </Badge>
         </div>
 
+        {/* Start a conversation with an approved template — the WhatsApp re-
+            engagement path when the 24h free-form window is closed (templates are
+            WhatsApp-only, so this is hidden on Messenger/Instagram). Opens the
+            composer's existing template picker for this thread via a signal, so
+            the full load/variable-fill/send flow isn't duplicated here. */}
+        {CHANNEL_CAPABILITIES[panelChannel]?.templates && (
+          <div className="px-5 pb-4">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 w-full gap-1.5 text-xs"
+              onClick={() => emitOpenTemplatePicker(conversation.id)}
+            >
+              <Sparkles className="size-3.5" />
+              Send template
+            </Button>
+          </div>
+        )}
+
         {/* Unified customer: the same person's other channel-contacts + link/split. */}
         <div className="border-t">
           <LinkedChannels contactId={contact.id} />
@@ -1133,6 +1177,16 @@ function ContactPanelImpl({
               icon={BadgeCheck}
               label="Instagram"
               value={<SocialSignals profile={contact.socialProfile} />}
+            />
+          )}
+          {/* Customer's local time — Meta's `timezone` (Messenger, once the
+              `pages_user_timezone` App Review clears). Data-gated (not channel-
+              gated): shows whenever a numeric offset is present, absent otherwise. */}
+          {typeof contact.socialProfile?.timezone === "number" && (
+            <ReadOnlyRow
+              icon={Clock}
+              label="Local time"
+              value={<ContactLocalTime offsetHours={contact.socialProfile.timezone} />}
             />
           )}
           {builtins.firstName && (

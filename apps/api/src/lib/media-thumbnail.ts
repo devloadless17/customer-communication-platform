@@ -69,6 +69,146 @@ export async function extractVideoPosterFrame(
 }
 
 /**
+ * Downscale an image buffer to a ~512px-wide JPEG thumbnail, or null on any
+ * failure. Inbound images can be up to 5 MB but render in a ~320px bubble slot,
+ * so serving a small thumbnail (with the full image behind a tap) saves large
+ * downloads + decode on every thread open. Reuses the same ffmpeg binary the
+ * video poster path relies on. Best-effort + bounded 10s.
+ */
+export async function extractImageThumbnail(bytes: Uint8Array): Promise<Uint8Array | null> {
+  let workDir: string | null = null;
+  try {
+    workDir = await mkdtemp(join(tmpdir(), "ccp-imgthumb-"));
+    const srcPath = join(workDir, `src-${randomUUID()}`);
+    const outPath = join(workDir, `out-${randomUUID()}.jpg`);
+    await writeFile(srcPath, bytes);
+    await runFfmpegImageThumb(srcPath, outPath);
+    const out = await safeReadOutput(outPath);
+    if (!out || out.length === 0) return null;
+    // A thumbnail bigger than the source is pointless — signal "no thumb" so the
+    // bubble serves the original.
+    if (out.length >= bytes.length) return null;
+    return new Uint8Array(out);
+  } catch {
+    return null;
+  } finally {
+    if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+function runFfmpegImageThumb(srcPath: string, outPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stderr = "";
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      finish(() => {
+        ff.kill("SIGKILL");
+        reject(new Error("ffmpeg image thumbnail timeout"));
+      });
+    }, 10_000);
+    // Scale to at most 512px wide (never upscale), height auto (`-2` keeps it
+    // even for the JPEG encoder); one frame; quality ~q:v 4 (visually clean,
+    // small). Never upscales a small image because `min(512,iw)`.
+    const ff = spawn(
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-i",
+        srcPath,
+        "-vf",
+        "scale='min(512,iw)':-2",
+        "-frames:v",
+        "1",
+        "-q:v",
+        "4",
+        "-y",
+        outPath,
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    ff.stderr.on("data", (d: Buffer) => {
+      stderr += d.toString();
+      if (stderr.length > 4096) stderr = stderr.slice(-4096);
+    });
+    ff.on("error", (err) => finish(() => reject(err)));
+    ff.on("close", (code) =>
+      finish(() =>
+        code === 0 ? resolve() : reject(new Error(`ffmpeg image thumb exit ${code}: ${stderr.slice(0, 300)}`)),
+      ),
+    );
+  });
+}
+
+/**
+ * Probe a media buffer's duration in milliseconds via ffmpeg, or null on any
+ * failure (no ffmpeg, unreadable bytes, no duration line). Used for inbound
+ * WhatsApp voice notes / audio, whose webhook carries no duration — real
+ * WhatsApp shows the length (e.g. 0:07) up front, so we probe it once during the
+ * async media download and stamp it on the row + the media_ready frame. Runs
+ * `ffmpeg -i <file>` (no output file — ffmpeg prints "Duration: HH:MM:SS.ss" to
+ * stderr then exits non-zero, which we ignore) so it needs only the same ffmpeg
+ * binary the poster path already relies on. Bounded 10s.
+ */
+export async function probeMediaDurationMs(bytes: Uint8Array): Promise<number | null> {
+  let workDir: string | null = null;
+  try {
+    workDir = await mkdtemp(join(tmpdir(), "ccp-dur-"));
+    const srcPath = join(workDir, `src-${randomUUID()}`);
+    await writeFile(srcPath, bytes);
+    const stderr = await runFfmpegProbe(srcPath);
+    // "  Duration: 00:00:07.42, start: 0.000000, bitrate: 33 kb/s"
+    const m = stderr.match(/Duration:\s*(\d+):(\d{2}):(\d{2})\.(\d{1,3})/);
+    if (!m) return null;
+    const hh = Number(m[1] ?? "0");
+    const mm = Number(m[2] ?? "0");
+    const ss = Number(m[3] ?? "0");
+    const frac = Number((m[4] ?? "0").padEnd(3, "0"));
+    const ms = (hh * 3600 + mm * 60 + ss) * 1000 + frac;
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
+  } catch {
+    return null;
+  } finally {
+    if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+function runFfmpegProbe(srcPath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stderr = "";
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      finish(() => {
+        ff.kill("SIGKILL");
+        reject(new Error("ffmpeg duration probe timeout"));
+      });
+    }, 10_000);
+    // `-i` with no output makes ffmpeg emit the format header (incl. Duration)
+    // then exit 1 ("At least one output file must be specified") — expected.
+    const ff = spawn("ffmpeg", ["-hide_banner", "-i", srcPath], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    ff.stderr.on("data", (d: Buffer) => {
+      stderr += d.toString();
+      if (stderr.length > 8192) stderr = stderr.slice(-8192);
+    });
+    ff.on("error", (err) => finish(() => reject(err)));
+    ff.on("close", () => finish(() => resolve(stderr)));
+  });
+}
+
+/**
  * Read the ffmpeg output file. Returns null on ENOENT (legitimate "no
  * frame produced"), null + warning log on any other error (ENOSPC, EACCES,
  * EIO — operational issues we want visible). Without this distinction

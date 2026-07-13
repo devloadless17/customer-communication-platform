@@ -15,6 +15,7 @@ import type {
   NormalizedEvent,
   SendInteractiveArgs,
   SendMediaArgs,
+  SendReactionArgs,
   SendTextArgs,
   SendTextResult,
   UploadMediaArgs,
@@ -26,6 +27,7 @@ import {
   parseSocialMessaging,
   sendSocialInteractive,
   sendSocialMedia,
+  sendSocialReaction,
   sendSocialSenderAction,
   sendSocialText,
   uploadSocialMedia,
@@ -61,6 +63,13 @@ export const instagramProvider: MessagingProvider<InstagramSendConfig> = {
     config: InstagramSendConfig,
   ): Promise<SendTextResult> {
     return sendSocialText(args, target(config));
+  },
+
+  async sendReaction(
+    args: SendReactionArgs,
+    config: InstagramSendConfig,
+  ): Promise<SendTextResult> {
+    return sendSocialReaction(args, target(config));
   },
 
   async uploadMedia(

@@ -176,15 +176,19 @@ export interface MessageStatusChangedEvent {
 }
 
 /**
- * A customer's emoji reaction to one of our messages changed (set, replaced,
- * or removed). Published by ingest's `reaction` path. UI-only: only the socket
- * fanout subscribes — no workflow/outbound-webhook reactions (a 👍 isn't a
- * business event), so this carries just enough to patch the live thread.
+ * A reaction on a message changed (set, replaced, or removed). Published by
+ * ingest's `reaction` path (the CUSTOMER side) and by the send-reaction path
+ * (OUR side). `actor` says which side changed so subscribers patch the right
+ * field — the two sides are independent columns and never clobber. UI-only:
+ * only the socket fanout subscribes (a 👍 isn't a business event), so this
+ * carries just enough to patch the live thread.
  */
 export interface MessageReactionChangedEvent {
   teamId: string;
   conversationId: string;
   messageId: string;
+  /** Which side reacted — customer (inbound) or our team (outbound). */
+  actor: "customer" | "agent";
   /** The emoji, or null when the reaction was removed. */
   emoji: string | null;
 }

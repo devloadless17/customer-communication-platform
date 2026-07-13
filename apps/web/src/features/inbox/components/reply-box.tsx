@@ -3,6 +3,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Languages,
+  MapPin,
   MessageSquare,
   MousePointerClick,
   Paperclip,
@@ -10,6 +11,7 @@ import {
   Smile,
   Sparkles,
   StickyNote,
+  UserRound,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -36,6 +38,7 @@ import {
   emitOptimisticListBump,
   emitOptimisticListBumpRevert,
 } from "@/features/inbox/lib/optimistic-list-bump";
+import { onOpenTemplatePicker } from "@/features/inbox/lib/open-template-picker";
 import { nextOptimisticSeq } from "@/features/inbox/lib/optimistic-seq";
 import {
   buildOptimisticAiChange,
@@ -80,6 +83,14 @@ const TranslatePopover = dynamic(
 );
 const InteractivePopover = dynamic(
   () => import("./interactive-popover").then((m) => m.InteractivePopover),
+  { ssr: false },
+);
+const LocationComposer = dynamic(
+  () => import("./location-composer").then((m) => m.LocationComposer),
+  { ssr: false },
+);
+const ContactComposer = dynamic(
+  () => import("./contact-composer").then((m) => m.ContactComposer),
   { ssr: false },
 );
 
@@ -665,9 +676,21 @@ function ReplyBoxImpl({
   // Template picker state
   // -------------------------------------------------------------------------
   const [pickerOpen, setPickerOpen] = useState(false);
+  // The contact panel's "Send template" button opens THIS picker (the full flow
+  // lives here). Only for a WhatsApp thread that actually supports templates,
+  // and only this thread's composer (conversationId guard). Reuses the exact
+  // same picker + send path the closed-window button uses.
+  useEffect(() => {
+    if (!caps.templates) return;
+    return onOpenTemplatePicker((cid) => {
+      if (cid === conversationId) setPickerOpen(true);
+    });
+  }, [caps.templates, conversationId]);
   // Interactive (buttons) popover state. Synchronous-send agent-side
   // counterpart of the workflow ask_question step's interactive path.
   const [interactiveOpen, setInteractiveOpen] = useState(false);
+  const [locationOpen, setLocationOpen] = useState(false);
+  const [contactOpen, setContactOpen] = useState(false);
   const [templates, setTemplates] = useState<TemplateDto[]>([]);
   const [templatesLoaded, setTemplatesLoaded] = useState(false);
   const [templatesLoading, setTemplatesLoading] = useState(false);
@@ -1753,6 +1776,62 @@ function ReplyBoxImpl({
                 }}
               />
             </div>
+            )}
+            {caps.sendLocation && (
+              <div className="relative">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 pointer-coarse:size-9 text-muted-foreground disabled:text-muted-foreground/40"
+                  type="button"
+                  disabled={isNote || windowClosed}
+                  aria-label="Send location"
+                  title={
+                    isNote
+                      ? "Locations can only be sent in Reply mode"
+                      : windowClosed
+                        ? "Window closed — reopen the messaging window to send a location"
+                        : "Send a location"
+                  }
+                  onClick={() => setLocationOpen(true)}
+                >
+                  <MapPin className="size-4" />
+                </Button>
+                <LocationComposer
+                  open={locationOpen}
+                  onClose={() => setLocationOpen(false)}
+                  conversationId={conversationId}
+                  onSent={() => {}}
+                />
+              </div>
+            )}
+            {caps.sendContacts && (
+              <div className="relative">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 pointer-coarse:size-9 text-muted-foreground disabled:text-muted-foreground/40"
+                  type="button"
+                  disabled={isNote || windowClosed}
+                  aria-label="Send a contact"
+                  title={
+                    isNote
+                      ? "Contacts can only be sent in Reply mode"
+                      : windowClosed
+                        ? "Window closed — reopen the messaging window to send a contact"
+                        : "Send a contact"
+                  }
+                  onClick={() => setContactOpen(true)}
+                >
+                  <UserRound className="size-4" />
+                </Button>
+                <ContactComposer
+                  open={contactOpen}
+                  onClose={() => setContactOpen(false)}
+                  conversationId={conversationId}
+                  onSent={() => {}}
+                />
+              </div>
             )}
             <div className="relative">
               <Button

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -83,23 +83,25 @@ export async function transcodeToOggOpus(
 }
 
 /**
- * Transcode any recording to ADTS AAC (audio/aac). Instagram DM REJECTS ogg /
- * webm with `(#100) attachment format is not supported`, but accepts AAC. ADTS
- * is a streamable AAC container (unlike mp4/m4a it needs no seekable output for
- * a moov atom), so it pipes to stdout exactly like the ogg path. Stereo 44.1kHz,
- * metadata stripped.
+ * Transcode any recording to M4A — AAC in an MP4 container (audio/mp4).
+ * Instagram DM's URL-fetch validator REJECTS ogg / webm AND bare ADTS `.aac`
+ * with `(#100) attachment format is not supported` (subcode 2534080), but
+ * reliably accepts m4a/mp4 (its documented set is aac / m4a / wav / mp4). MP4
+ * needs a seekable output for the moov atom, so this writes to a temp `.m4a`
+ * file (with `+faststart` so the moov leads) and reads it back, rather than
+ * piping to stdout. Stereo 44.1kHz, source metadata stripped.
  */
-export async function transcodeToAac(
+export async function transcodeToM4a(
   input: Uint8Array,
 ): Promise<Uint8Array<ArrayBuffer>> {
-  return transcode(input, [
+  return transcodeToFile(input, "out.m4a", [
     "-map_metadata", "-1",
     "-vn",
     "-c:a", "aac",
     "-b:a", "128k",
     "-ar", "44100",
-    "-f", "adts",
-    "pipe:1",
+    "-movflags", "+faststart",
+    "-f", "ipod",
   ]);
 }
 
@@ -115,6 +117,71 @@ async function transcode(
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * Like {@link transcode} but for a container that needs a SEEKABLE output (mp4/
+ * m4a — ffmpeg must rewind to write the moov atom, which `pipe:1` can't do).
+ * ffmpeg writes to a temp `<dir>/<outName>`; we read the bytes back and clean up.
+ * `outputArgs` must NOT include an output target — the temp path is appended.
+ */
+async function transcodeToFile(
+  input: Uint8Array,
+  outName: string,
+  outputArgs: string[],
+): Promise<Uint8Array<ArrayBuffer>> {
+  const dir = await mkdtemp(join(tmpdir(), "ccp-voice-"));
+  const inPath = join(dir, "in");
+  const outPath = join(dir, outName);
+  try {
+    await writeFile(inPath, Buffer.from(input));
+    // Run ffmpeg to the temp file (stdout stays empty); `-y` overwrites.
+    await runFfmpegToFile(inPath, [...outputArgs, "-y", outPath]);
+    const buf = await readFile(outPath);
+    if (buf.byteLength === 0) throw new Error("ffmpeg produced an empty file");
+    const result = new Uint8Array(buf.byteLength);
+    result.set(buf);
+    return result;
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** Run ffmpeg with a FILE output target (no stdout capture). Resolves on a clean
+ *  exit, rejects on ENOENT / non-zero / timeout — same contract as {@link runFfmpeg}. */
+function runFfmpegToFile(inPath: string, outputArgs: string[]): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const ff = spawn(
+      "ffmpeg",
+      ["-hide_banner", "-loglevel", "error", "-i", inPath, ...outputArgs],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let stderr = "";
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      finish(() => {
+        ff.kill("SIGKILL");
+        reject(new Error("ffmpeg transcode timed out"));
+      });
+    }, TRANSCODE_TIMEOUT_MS);
+    ff.on("error", (err) => finish(() => reject(err))); // ENOENT = not installed
+    ff.stderr.on("data", (c: Buffer) => {
+      if (stderr.length < 4000) stderr += c.toString();
+    });
+    ff.on("close", (code) => {
+      finish(() =>
+        code === 0
+          ? resolve()
+          : reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(0, 500)}`)),
+      );
+    });
+  });
 }
 
 function runFfmpeg(inPath: string, outputArgs: string[]): Promise<Uint8Array<ArrayBuffer>> {
