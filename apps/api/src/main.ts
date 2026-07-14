@@ -334,6 +334,24 @@ async function bootstrap(): Promise<void> {
     process.exit(1);
   }
 
+  // Same fail-loud posture for the dev-only webhook signature bypass. Setting it
+  // makes the inbound Meta webhook routes accept ANY body without HMAC
+  // verification (a local-tunnel convenience) — catastrophic in production,
+  // where anyone could forge inbound messages/status. The runtime check also
+  // hard-gates on NODE_ENV, but a prod env carrying this flag is a red flag on
+  // its own, so refuse to boot.
+  if (
+    process.env.NODE_ENV === "production" &&
+    process.env.META_WEBHOOK_INSECURE_SKIP_VERIFY === "1"
+  ) {
+    console.error(
+      "FATAL: META_WEBHOOK_INSECURE_SKIP_VERIFY=1 in production. This disables " +
+        "inbound webhook HMAC verification, letting anyone forge Meta events. " +
+        "Refusing to boot. It's a local-dev-only flag.",
+    );
+    process.exit(1);
+  }
+
   // NOTE: CORS preflight (OPTIONS) responses are emitted by enableCors BEFORE
   // any guard runs — the SessionGuard / RateLimitInterceptor / ApiKeyGuard chain is
   // skipped for OPTIONS by design. Today this is harmless because Caddy makes

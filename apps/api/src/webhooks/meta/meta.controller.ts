@@ -221,7 +221,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     }
 
     const config = await getMetaWebhookConfig(teamId);
-    if (!config) throw new HttpException("forbidden", 403);
+    if (!config) throw webhookForbidden(this.logger, teamId, "whatsapp", req, "no_config");
 
     // Verify against the EXACT bytes Meta signed. main.ts's bodyParser
     // captures req.rawBody on every JSON-parsed request. Without it,
@@ -238,8 +238,11 @@ export class MetaWebhookController implements OnModuleDestroy {
       );
       return { ok: true, ingested: 0, dropped: "missing_raw_body" };
     }
-    if (!verifySignature(rawBody, signature, config.appSecret)) {
-      throw new HttpException("forbidden", 403);
+    if (!insecureSkipVerify(this.logger)) {
+      if (!signature) throw webhookForbidden(this.logger, teamId, "whatsapp", req, "no_signature");
+      if (!verifySignature(rawBody, signature, config.appSecret)) {
+        throw webhookForbidden(this.logger, teamId, "whatsapp", req, "bad_signature");
+      }
     }
 
     // Dev wire log (DEBUG_META_WIRE): the authentic raw webhook, so you can see
@@ -397,7 +400,7 @@ export class MetaWebhookController implements OnModuleDestroy {
   ): Promise<{ ok: boolean; ingested?: number; dropped?: string }> {
     const { provider, getWebhookConfig } = SOCIAL[channel];
     const config = await getWebhookConfig(teamId);
-    if (!config) throw new HttpException("forbidden", 403);
+    if (!config) throw webhookForbidden(this.logger, teamId, channel, req, "no_config");
 
     const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
     if (!rawBody) {
@@ -406,8 +409,11 @@ export class MetaWebhookController implements OnModuleDestroy {
       );
       return { ok: true, ingested: 0, dropped: "missing_raw_body" };
     }
-    if (!verifySignature(rawBody, signature, config.appSecret)) {
-      throw new HttpException("forbidden", 403);
+    if (!insecureSkipVerify(this.logger)) {
+      if (!signature) throw webhookForbidden(this.logger, teamId, channel, req, "no_signature");
+      if (!verifySignature(rawBody, signature, config.appSecret)) {
+        throw webhookForbidden(this.logger, teamId, channel, req, "bad_signature");
+      }
     }
 
     // Dev wire log (DEBUG_META_WIRE): the authentic raw social webhook.
@@ -1293,6 +1299,54 @@ function verifySignature(
   const b = Buffer.from(header);
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
+}
+
+/**
+ * DEV-ONLY escape hatch: skip inbound webhook HMAC verification so local testing
+ * over a tunnel never drops an event to a signature mismatch. HARD prod gate —
+ * always false when NODE_ENV=production. Opt in with
+ * META_WEBHOOK_INSECURE_SKIP_VERIFY=1 (in the root .env). Warns ONCE so it can
+ * never be silently on. This is a crutch to unblock local dev, NOT a fix — a
+ * wrong app secret drops webhooks in production too, so fix the secret.
+ */
+let insecureSkipWarned = false;
+function insecureSkipVerify(logger: Logger): boolean {
+  if (process.env.META_WEBHOOK_INSECURE_SKIP_VERIFY !== "1") return false;
+  if (process.env.NODE_ENV === "production") return false;
+  if (!insecureSkipWarned) {
+    insecureSkipWarned = true;
+    logger.warn(
+      "META_WEBHOOK_INSECURE_SKIP_VERIFY is ON — inbound webhook signatures are NOT verified (dev only). Never enable in production.",
+    );
+  }
+  return true;
+}
+
+/**
+ * Build the 403 for a rejected webhook AND log WHY (bare "forbidden" is
+ * un-debuggable). A rejected body never reaches the after-verify `wireIn`, so
+ * with DEBUG_META_WIRE on we surface it here too — this is how you see the
+ * webhooks Meta sent that we're dropping.
+ */
+function webhookForbidden(
+  logger: Logger,
+  teamId: string,
+  channel: Channel,
+  req: Request,
+  reason: "no_config" | "no_signature" | "bad_signature",
+): HttpException {
+  const objectType =
+    (req.body as { object?: string } | null | undefined)?.object ?? "?";
+  const hint =
+    reason === "bad_signature"
+      ? "X-Hub-Signature-256 didn't match this channel's stored app secret — re-check the secret in onboarding, or the same callback URL is subscribed under a DIFFERENT Meta app (each app signs with its own secret)."
+      : reason === "no_config"
+        ? "no webhook config for this team+channel."
+        : "Meta sent no signature header.";
+  logger.warn(`[${teamId}] ${channel} webhook 403 — ${reason} (object=${objectType}): ${hint}`);
+  const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
+  if (rawBody) wireIn(`${channel} REJECTED (${reason})`, rawBody.toString("utf8"));
+  return new HttpException("forbidden", 403);
 }
 
 /**
