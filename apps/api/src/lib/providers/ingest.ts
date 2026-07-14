@@ -42,6 +42,7 @@ import type {
   NormalizedOutboundEcho,
   NormalizedReaction,
   NormalizedReadWatermark,
+  NormalizedDeliveredWatermark,
   NormalizedStatusUpdate,
   NormalizedTemplateStatusUpdate,
 } from "@ccp/shared/providers/types";
@@ -140,6 +141,8 @@ export async function ingestEvents(
         await ingestMessageFeedback(teamId, channel, evt);
       } else if (evt.kind === "read_watermark") {
         await ingestReadWatermark(teamId, channel, evt);
+      } else if (evt.kind === "delivered_watermark") {
+        await ingestDeliveredWatermark(teamId, channel, evt);
       } else if (evt.kind === "template_status") {
         await ingestTemplateStatusUpdate(teamId, evt);
       } else if (evt.kind === "call") {
@@ -563,6 +566,62 @@ async function ingestReadWatermark(
       contactId: contact.id,
       messageId: m.id,
       status: "read",
+      occurredAt,
+    });
+  }
+}
+
+/**
+ * Apply a Messenger delivery watermark: mark every outbound message to this
+ * customer at/before the watermark as `delivered`. Twin of ingestReadWatermark,
+ * but the transition is `sent` → `delivered` ONLY — a message already
+ * `delivered` or `read` must never be downgraded (the `status: "sent"` predicate
+ * enforces monotonicity + makes redelivery idempotent). Messenger's
+ * `message_deliveries` webhook always carries a watermark even when `mids` is
+ * omitted, so this catches deliveries the old per-mid path dropped.
+ */
+async function ingestDeliveredWatermark(
+  teamId: string,
+  channel: Channel,
+  evt: NormalizedDeliveredWatermark,
+): Promise<void> {
+  const extId = evt.externalContactId;
+  if (!extId) return;
+  const contact = await db.contact.findFirst({
+    where: { teamId, identityChannel: channel, externalContactId: extId, deletedAt: null },
+    select: { id: true },
+  });
+  if (!contact) return;
+  const conversation = await db.conversation.findFirst({
+    where: { teamId, contactId: contact.id },
+    select: { id: true },
+  });
+  if (!conversation) return;
+  const msgs = await db.message.findMany({
+    where: {
+      teamId,
+      conversationId: conversation.id,
+      direction: "out",
+      timestamp: { lte: evt.watermark },
+      status: "sent",
+    },
+    select: { id: true },
+  });
+  if (msgs.length === 0) return;
+  await db.message.updateMany({
+    where: { id: { in: msgs.map((m) => m.id) } },
+    data: { status: "delivered" },
+  });
+  const occurredAt = new Date().toISOString();
+  for (const m of msgs) {
+    await publish({
+      type: "message.status_changed",
+      teamId,
+      channel,
+      conversationId: conversation.id,
+      contactId: contact.id,
+      messageId: m.id,
+      status: "delivered",
       occurredAt,
     });
   }

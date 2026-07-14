@@ -599,11 +599,22 @@ export function parseSocialMessaging(
         if (customerId && mid) {
           const media = attachmentMedia(m.message.attachments);
           const text = m.message.text;
+          // Fallback label when a native-inbox reply is a NON-downloadable
+          // attachment (template/product/fallback echo has no `payload.url`, so
+          // `media` is null and there's no text). Without this the echo mirrors
+          // back as a blank outbound bubble — mirror the inbound label path.
+          const echoAtt = m.message.attachments?.[0]?.type;
+          const echoBody =
+            text && text.length > 0
+              ? text
+              : !media && echoAtt
+                ? socialAttachmentLabel(echoAtt)
+                : "";
           events.push({
             kind: "echo",
             externalId: mid,
             externalContactId: customerId,
-            body: text && text.length > 0 ? text : "",
+            body: echoBody,
             ...(media ? { media } : {}),
             timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
             rawPayload: m as unknown as Record<string, unknown>,
@@ -831,11 +842,12 @@ export function parseSocialMessaging(
         continue;
       }
       // Messenger 👍/👎 "message feedback" (`response_feedback`) is Meta's
-      // built-in business-message feedback, NOT a real reaction — deliberately
-      // IGNORED so it never gets painted onto a message. Real emoji reactions
-      // arrive via `message_reactions` (handled above). Explicit no-op (also
-      // silences the unhandled-messaging log). Could surface as a separate note
-      // later if the team wants to track like/dislike.
+      // built-in business-message feedback — the customer rating a message the
+      // Page sent. It is NOT a reaction (real emoji reactions arrive via the
+      // `reaction` field, handled above), so we surface it as a DISTINCT feedback
+      // chip: emit `message_feedback` → ingest patches `Message.feedback` and the
+      // bubble renders a separate "Helpful / Not helpful" chip. Meta delivers
+      // this on the messaging webhook without a dedicated subscription field.
       if (m.response_feedback?.mid) {
         const fb: NormalizedMessageFeedback = {
           kind: "message_feedback",
@@ -848,19 +860,21 @@ export function parseSocialMessaging(
         events.push(fb);
         continue;
       }
-      // Delivery receipts carry the mids Meta delivered.
-      if (m.delivery && Array.isArray(m.delivery.mids)) {
-        const ts = new Date(m.delivery.watermark ?? m.timestamp ?? Date.now());
-        for (const mid of m.delivery.mids) {
-          if (!mid) continue;
-          const status: NormalizedStatusUpdate = {
-            kind: "status",
-            externalId: mid,
-            status: "delivered",
-            timestamp: ts,
+      // Delivery receipt (Messenger). `message_deliveries` ALWAYS carries a
+      // `watermark` and only SOMETIMES a `mids[]` (omitted for older clients), so
+      // key on the watermark — mark every outbound to the customer at/before it
+      // as delivered, exactly like the read path below. A watermark-only delivery
+      // is no longer silently dropped (the old `mids`-array guard missed it).
+      // Instagram sends no delivery webhook, so this never fires for IG.
+      if (m.delivery && typeof m.delivery.watermark === "number") {
+        const from = m.sender?.id;
+        if (from) {
+          events.push({
+            kind: "delivered_watermark",
+            externalContactId: from,
+            watermark: new Date(m.delivery.watermark),
             rawPayload: m as unknown as Record<string, unknown>,
-          };
-          events.push(status);
+          });
         }
       }
       // Read receipt ("Seen"). Instagram sends a per-message `mid` — mark THAT

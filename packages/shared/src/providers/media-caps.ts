@@ -62,6 +62,11 @@ const MEDIA_KINDS_BY_CHANNEL: Partial<Record<Channel, ReadonlySet<MediaKind>>> =
   // rejected with an opaque #100. Exclude `sticker` so the kind-level gate
   // refuses it with an actionable error instead of failing silently at Meta.
   instagram: new Set<MediaKind>(["image", "video", "audio", "document"]),
+  // Messenger likewise has no arbitrary sticker send — an outbound sticker must
+  // be a first-party catalog `sticker_id` (a different Send API body), not an
+  // uploaded attachment. A `.webp` would otherwise be pushed as a plain image
+  // (animation lost). Exclude `sticker` so it errors instead of degrading.
+  messenger: new Set<MediaKind>(["image", "video", "audio", "document"]),
 };
 
 /** Whether `channel` can send outbound media of `kind`. */

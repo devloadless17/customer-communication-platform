@@ -180,6 +180,23 @@ export interface NormalizedReadWatermark {
 }
 
 /**
+ * A "delivered up to here" receipt. Messenger's `message_deliveries` webhook
+ * ALWAYS carries a `watermark` (and only SOMETIMES a `mids[]` — omitted for
+ * older clients). So delivery is watermark-based exactly like read: mark every
+ * outbound message to the customer at/before `watermark` as `delivered`. Without
+ * this a watermark-only delivery is dropped and the message sits on a lone
+ * "sent" tick until it's read. Instagram has no delivery webhook (never emits
+ * this); WhatsApp uses the per-message status path.
+ */
+export interface NormalizedDeliveredWatermark {
+  kind: "delivered_watermark";
+  externalContactId?: string;
+  contactPhone?: string;
+  watermark: Date;
+  rawPayload: Record<string, unknown>;
+}
+
+/**
  * One step of a WhatsApp call's lifecycle as it arrives via webhook. The
  * Meta provider emits one of these per call webhook (incoming offer,
  * outbound answer, terminal status). Ingest dedupes by
@@ -457,6 +474,7 @@ export type NormalizedEvent =
   | NormalizedInboundMessage
   | NormalizedStatusUpdate
   | NormalizedReadWatermark
+  | NormalizedDeliveredWatermark
   | NormalizedCallEvent
   | NormalizedReaction
   | NormalizedTemplateStatusUpdate
