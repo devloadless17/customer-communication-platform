@@ -440,6 +440,19 @@ export interface NormalizedMessageCorrection {
   rawPayload: Record<string, unknown>;
 }
 
+/**
+ * The customer's 👍/👎 feedback on a message the BUSINESS sent (Messenger
+ * `response_feedback`). NOT a reaction — a distinct helpful/not-helpful signal
+ * on our OUTBOUND message. Matched by `targetExternalId` (the message id).
+ */
+export interface NormalizedMessageFeedback {
+  kind: "message_feedback";
+  targetExternalId: string;
+  feedback: "positive" | "negative";
+  timestamp: Date;
+  rawPayload: Record<string, unknown>;
+}
+
 export type NormalizedEvent =
   | NormalizedInboundMessage
   | NormalizedStatusUpdate
@@ -449,7 +462,8 @@ export type NormalizedEvent =
   | NormalizedTemplateStatusUpdate
   | NormalizedOutboundEcho
   | NormalizedContactSync
-  | NormalizedMessageCorrection;
+  | NormalizedMessageCorrection
+  | NormalizedMessageFeedback;
 
 export interface SendTextArgs {
   /** E.164 digits, no '+'. */
@@ -480,6 +494,15 @@ export interface SendTextArgs {
 export interface SendTextResult {
   externalId: string;
   timestamp: Date;
+  /**
+   * Set by `sendMedia` when a caption COULDN'T ride inline on the media (Meta
+   * audio/sticker + all social media) and was therefore delivered as a separate
+   * follow-up text — this is that follow-up's message id. The send orchestration
+   * uses it to persist the caption as its OWN tracked message row (so it renders
+   * as a real text bubble AND its echo dedups instead of returning as a phantom
+   * "via app" message). Absent when the caption rode inline or there was none.
+   */
+  captionExternalId?: string;
 }
 
 /**
@@ -751,6 +774,15 @@ export interface TemplateVariableSet {
   bodyNamed?: Array<{ name: string; text: string }>;
   /** Header `{{1}}` value when the header is TEXT with a placeholder. */
   header?: string;
+  /**
+   * Named header parameter, for NAMED-format templates whose HEADER is
+   * `{{customer_name}}` rather than `{{1}}`. When present the provider sends the
+   * header param as `{ type: "text", parameter_name, text }` (Meta requires
+   * `parameter_name` on every component of a NAMED template); the derived name
+   * comes from the template definition, so the caller still only supplies the
+   * value via `header`. Absent for positional headers.
+   */
+  headerNamed?: { name: string; text: string };
   /** Media for an IMAGE/VIDEO/DOCUMENT header. Required when the template's
    *  HEADER component format is one of those; ignored for TEXT headers. */
   headerMedia?: TemplateHeaderMedia;
@@ -866,6 +898,16 @@ export interface ProviderCapabilities {
   humanAgentWindowMs?: number | null;
   templates: boolean;
   readReceipts: boolean;
+  /**
+   * The channel emits a DELIVERY receipt (message reached the device), distinct
+   * from the read/seen receipt. WhatsApp + Messenger do; INSTAGRAM does NOT —
+   * Meta's `message_deliveries` webhook is Messenger-only, and even the native
+   * IG app shows only Sent → Seen. Absent = true. When false, the UI has no
+   * "delivered" tick to wait for, so a successfully-sent message renders as
+   * delivered (two ticks) immediately instead of a lone "sent" tick that looks
+   * stuck until the customer reads it.
+   */
+  deliveryReceipts?: boolean;
   typingIndicators: boolean;
   /**
    * Interactive replies (quick-reply buttons / list). True if the provider

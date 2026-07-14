@@ -136,12 +136,17 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   // Reaction set / changed / removed (customer OR our own agent side — `actor`
-  // discriminates). Conversation-room scoped, same reasoning as
-  // message.status_changed: only viewers of THIS thread patch the reacted-to
-  // bubble; the inbox LIST doesn't render reactions, so a team-wide blast would
-  // be pure waste. `emoji` is null when the reaction was removed.
+  // discriminates). TEAM-room scoped, same reasoning as message.updated and
+  // media_ready: `message:reaction` is in THREAD_REDUCER_EVENTS, so the inbox
+  // shell's LRU ThreadCache patches its CACHED snapshots from it
+  // (applyMessageReaction) — and a cached background thread's socket never
+  // joined `conv:<id>`, so a conversation-room frame silently skipped it,
+  // leaving a stale/missing reaction badge on switch-back until a hard reload.
+  // Reactions are human-cadence (one frame per emoji tap) so a small team frame
+  // carries no storm risk, and a persistent removable badge is worth converging
+  // all three thread consumers (CLAUDE.md §10). `emoji` is null on removal.
   "message.reaction_changed": (e, emitter) => {
-    emitter.emitToConversation(e.conversationId, "message:reaction", {
+    emitter.emitToTeam(e.teamId, "message:reaction", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       messageId: e.messageId,
@@ -171,6 +176,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
       deletedAt: e.deletedAt,
       editedAt: e.editedAt,
       body: e.body,
+      ...(e.feedback !== undefined ? { feedback: e.feedback } : {}),
     });
     if (e.listPreview !== undefined) {
       emitter.emitToTeam(e.teamId, "conversation:preview", {

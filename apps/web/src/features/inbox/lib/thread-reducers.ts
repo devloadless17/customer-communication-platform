@@ -209,6 +209,8 @@ export function applyMessageUpdated(
     deletedAt: string | null;
     editedAt: string | null;
     body: string | null;
+    /** Customer 👍/👎 feedback on our outbound; undefined on edit/unsend. */
+    feedback?: "positive" | "negative" | null;
   },
 ): ConversationWithRefs {
   const idx = prev.messages.findIndex((m) => m.id === payload.messageId);
@@ -220,13 +222,17 @@ export function applyMessageUpdated(
   const sameEdited =
     (existing.editedAt ?? null) === payload.editedAt &&
     (payload.body === null || existing.body === payload.body);
-  if (sameDeleted && sameEdited) return prev;
+  const sameFeedback =
+    payload.feedback === undefined ||
+    (existing.feedback ?? null) === payload.feedback;
+  if (sameDeleted && sameEdited && sameFeedback) return prev;
   const nextMessages = prev.messages.slice();
   nextMessages[idx] = {
     ...existing,
     ...(payload.deletedAt ? { deletedAt: payload.deletedAt } : {}),
     ...(payload.editedAt ? { editedAt: payload.editedAt } : {}),
     ...(payload.body !== null ? { body: payload.body } : {}),
+    ...(payload.feedback !== undefined ? { feedback: payload.feedback } : {}),
   };
   return { ...prev, messages: nextMessages };
 }

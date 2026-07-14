@@ -48,7 +48,7 @@ import {
 import { dispatchLocalSocketEvents } from "@/lib/socket-client";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
-import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
+import { CHANNEL_CAPABILITIES, supportsInlineCaption } from "@ccp/shared/providers/capabilities";
 import { mediaSizeCap, channelSupportsMediaKind } from "@ccp/shared/providers/media-caps";
 import { CHANNEL_LABEL } from "./channel-badge";
 import type { Channel } from "@ccp/shared/types";
@@ -633,10 +633,27 @@ function ReplyBoxImpl({
 
   const isNote = mode === "note";
   // When the WhatsApp window is closed, only Notes + Templates are allowed.
+  // Per-channel text cap in the SAME unit the server gate (checkTextCap) and
+  // Meta enforce: Instagram counts UTF-8 bytes (caps.textLimitIsBytes), everyone
+  // else UTF-16 chars. Measuring bytes here means a multibyte (Arabic/emoji) IG
+  // draft that would 400 server-side is caught BEFORE we paint an optimistic
+  // "sent" bubble, and the counter warns with the real remaining budget.
+  // Measure the TRIMMED value — submit() sends value.trim() and the server's
+  // checkTextCap measures that trimmed body, so counting the raw value would
+  // wrongly block a valid message padded with trailing/leading whitespace.
+  const byteTextMode = caps.textLimitIsBytes === true;
+  const trimmedValue = value.trim();
+  const textSize = byteTextMode
+    ? new TextEncoder().encode(trimmedValue).length
+    : trimmedValue.length;
+  const overTextCap = !isNote && textSize > caps.messageTextMaxChars;
+
   // Free-form text and media both require the 24h customer-service window
   // to be open — Meta would reject them with error 131047 otherwise.
   const canSend =
-    (attachment !== null || value.trim().length > 0) && (isNote || !windowClosed);
+    (attachment !== null || value.trim().length > 0) &&
+    (isNote || !windowClosed) &&
+    !overTextCap;
 
   // Single entry point for attaching a file — reused by the file-input,
   // paste-to-attach, and drag-and-drop paths. Enforces the same Meta size cap
@@ -1005,6 +1022,14 @@ function ReplyBoxImpl({
       if (file) {
         const mimeType = file.type || "application/octet-stream";
         const kind: MediaKind = kindFromMimeClient(mimeType);
+        // Whether Meta lets the caption ride INLINE on this media (WhatsApp
+        // image/video/document). When it can't (WhatsApp audio/sticker, all
+        // social media) the server delivers + persists the caption as a SEPARATE
+        // tracked message, so paint the optimistic media with NO caption from the
+        // start — otherwise the caption flashes ON the audio for a beat, then
+        // the server's split yanks it into its own bubble (the flicker).
+        const inlineCaption = supportsInlineCaption(channel, kind);
+        const mediaCaptionText = inlineCaption ? effectiveCaption : "";
         // Local blob URL works as the bubble's media src until the server
         // reply swaps in /api/media/<id>. The browser keeps the blob alive
         // as long as some element references it.
@@ -1015,7 +1040,7 @@ function ReplyBoxImpl({
           conversationId,
           externalId: clientTempId,
           senderUserId: currentUser.id,
-          body: effectiveCaption,
+          body: mediaCaptionText,
           direction: "out",
           channel,
           status: "sent",
@@ -1038,7 +1063,7 @@ function ReplyBoxImpl({
             url: blobUrl,
             mimeType,
             sizeBytes: file.size,
-            ...(effectiveCaption ? { caption: effectiveCaption } : {}),
+            ...(mediaCaptionText ? { caption: mediaCaptionText } : {}),
             ...(kind === "document" ? { filename: file.name } : {}),
             // Voice recording → show the mic affordance on the optimistic
             // bubble immediately (server confirms it via mediaVoice).
@@ -1531,8 +1556,11 @@ function ReplyBoxImpl({
             // 1000) from the capability map. Cap the input in reply mode so a
             // long paste can't sail through and 400 server-side after painting an
             // optimistic bubble — with the counter below reading the same cap so a
-            // Retry isn't hopeless. Notes are DB-only (no cap).
-            maxLength={isNote ? undefined : caps.messageTextMaxChars}
+            // Retry isn't hopeless. A char `maxLength` can't express Instagram's
+            // BYTE cap (a multibyte body is under 1000 chars but over 1000 bytes),
+            // so in byte mode we drop the hard limit and let the byte counter +
+            // disabled Send below govern. Notes are DB-only (no cap).
+            maxLength={isNote || byteTextMode ? undefined : caps.messageTextMaxChars}
             value={value}
             // Paste an image/file straight onto the composer to attach it —
             // the single most common support gesture. Falls through to normal
@@ -1574,7 +1602,9 @@ function ReplyBoxImpl({
                     ? "Free-form replies blocked — send a pre-approved template to re-engage."
                     : "Free-form replies blocked — wait for the customer to message again to re-open the conversation."
                   : attachment
-                    ? "Add a caption (optional)…"
+                    ? supportsInlineCaption(channel, kindFromMimeClient(attachment.type))
+                      ? "Add a caption (optional)…"
+                      : "Add a message — sent as a separate message after the file…"
                     : `Reply on ${CHANNEL_LABEL[channel]}…`
             }
             className={cn(
@@ -1915,16 +1945,16 @@ function ReplyBoxImpl({
                 drops first, then the Send button collapses to a round
                 icon-only button — driven by the @container on this row. */}
             <div className="ml-auto flex items-center gap-2">
-              {!isNote && value.length > caps.messageTextMaxChars * 0.85 && (
+              {!isNote && textSize > caps.messageTextMaxChars * 0.85 && (
                 <span
                   className={cn(
                     "text-3xs tabular-nums",
-                    value.length >= caps.messageTextMaxChars
+                    textSize >= caps.messageTextMaxChars
                       ? "text-destructive"
                       : "text-muted-foreground",
                   )}
                 >
-                  {value.length}/{caps.messageTextMaxChars}
+                  {textSize}/{caps.messageTextMaxChars}
                 </span>
               )}
               <span className="hidden text-3xs text-muted-foreground @[34rem]:inline">

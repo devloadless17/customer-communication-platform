@@ -11,7 +11,7 @@
  * Framework-agnostic (no Prisma / no DOM) so it's shared verbatim.
  */
 
-import type { Channel } from "../types";
+import type { Channel, MediaKind } from "../types";
 import type { ProviderCapabilities } from "./types";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -69,6 +69,11 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     textLimitIsBytes: true,
     templates: false,
     readReceipts: true,
+    // Instagram has NO delivery receipt — Meta's `message_deliveries` webhook is
+    // Messenger-only, and the native IG app shows only Sent → Seen. So the UI
+    // treats a sent IG message as delivered (two ticks) rather than leaving a
+    // lone "sent" tick that looks stuck until the customer reads it.
+    deliveryReceipts: false,
     typingIndicators: true,
     interactive: true,
     // Business reactions via the unified social messaging endpoint.
@@ -191,4 +196,21 @@ const PLACEHOLDER_NAMES: ReadonlySet<string> = new Set<string>([
 /** Whether a stored name is one of the un-enriched placeholders (never "real"). */
 export function isSocialContactPlaceholder(name: string | null | undefined): boolean {
   return !!name && PLACEHOLDER_NAMES.has(name);
+}
+
+/**
+ * Whether a caption rides INLINE on the media itself (one message) for this
+ * channel + media kind, per Meta's actual API:
+ *   - WhatsApp: only image / video / document accept a `caption` field. Audio +
+ *     sticker reject it (Meta error 100).
+ *   - Messenger / Instagram: a `message` is an attachment OR text, NEVER both —
+ *     no caption field exists on any social attachment.
+ * When this is false, a typed caption can't be inlined; the send layer delivers
+ * it as a SEPARATE follow-up text (never silently dropped), and the composer
+ * says so instead of promising a single-message "caption". Single source of
+ * truth so the UI hint and the send behavior can never disagree.
+ */
+export function supportsInlineCaption(channel: Channel, kind: MediaKind): boolean {
+  if (channel !== "whatsapp") return false;
+  return kind === "image" || kind === "video" || kind === "document";
 }

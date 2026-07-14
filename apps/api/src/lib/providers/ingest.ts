@@ -38,6 +38,7 @@ import type {
   NormalizedEvent,
   NormalizedInboundMessage,
   NormalizedMessageCorrection,
+  NormalizedMessageFeedback,
   NormalizedOutboundEcho,
   NormalizedReaction,
   NormalizedReadWatermark,
@@ -135,6 +136,8 @@ export async function ingestEvents(
         await ingestReaction(teamId, channel, evt);
       } else if (evt.kind === "message_correction") {
         await ingestMessageCorrection(teamId, channel, evt);
+      } else if (evt.kind === "message_feedback") {
+        await ingestMessageFeedback(teamId, channel, evt);
       } else if (evt.kind === "read_watermark") {
         await ingestReadWatermark(teamId, channel, evt);
       } else if (evt.kind === "template_status") {
@@ -408,6 +411,44 @@ async function ingestMessageCorrection(
 }
 
 /**
+ * A customer gave 👍/👎 feedback on a message the BUSINESS sent (Messenger
+ * `response_feedback` — Meta's business-message feedback, NOT an emoji
+ * reaction). Patch the target OUTBOUND message's `feedback` column and fan out
+ * `message.updated` so the bubble shows the helpful/not-helpful chip live.
+ * Idempotent: a re-delivery of the same value is a no-op. UI-only (like
+ * reactions) — no workflow / outbound-webhook fanout.
+ */
+async function ingestMessageFeedback(
+  teamId: string,
+  channel: Channel,
+  evt: NormalizedMessageFeedback,
+): Promise<void> {
+  const target = await db.message.findUnique({
+    where: {
+      teamId_channel_externalId: { teamId, channel, externalId: evt.targetExternalId },
+    },
+    select: { id: true, conversationId: true, feedback: true, direction: true },
+  });
+  // Feedback is the customer rating a message WE sent — only ever on outbound.
+  if (!target || target.direction !== "out") return;
+  if (target.feedback === evt.feedback) return; // unchanged — skip write + fanout
+  await db.message.update({
+    where: { id: target.id },
+    data: { feedback: evt.feedback },
+  });
+  await publish({
+    type: "message.updated",
+    teamId,
+    conversationId: target.conversationId,
+    messageId: target.id,
+    deletedAt: null,
+    editedAt: null,
+    body: null,
+    feedback: evt.feedback,
+  });
+}
+
+/**
  * `refreshPreviewIfNewestCorrected`, but a failure NEVER blocks the caller's
  * `message.updated` publish. The list preview is a denormalized convenience
  * (a drift sweeper + the next read both re-derive it); the realtime frame that
@@ -517,6 +558,7 @@ async function ingestReadWatermark(
     await publish({
       type: "message.status_changed",
       teamId,
+      channel,
       conversationId: conversation.id,
       contactId: contact.id,
       messageId: m.id,
@@ -626,6 +668,7 @@ async function ingestStatusUpdate(
   await publish({
     type: "message.status_changed",
     teamId: existing.teamId,
+    channel,
     conversationId: existing.conversationId,
     contactId: existing.conversation.contactId,
     messageId: existing.id,
@@ -906,6 +949,7 @@ export async function drainParkedStatus(
   await publish({
     type: "message.status_changed",
     teamId,
+    channel,
     conversationId,
     contactId,
     messageId,
@@ -1095,8 +1139,17 @@ async function ingestInboundMessage(
       } | null = null;
       if (isPhone) {
         if (evt.contactPhone) {
+          // Scope by identityChannel like the bsuid/externalContactId lookups
+          // below: contact-share can stamp this same phone onto a
+          // messenger/instagram contact (the partial unique on
+          // (teamId, phoneNumber) fires ONLY for identityChannel='whatsapp', so
+          // a social row holding the shared phone is allowed). Without the
+          // channel scope this phone-channel inbound could resolve to that
+          // social contact and fold a WhatsApp thread onto a messenger
+          // conversation. Cross-channel personhood lives on Customer, never by
+          // folding contacts.
           existingContact = await tx.contact.findFirst({
-            where: { teamId, phoneNumber: evt.contactPhone },
+            where: { teamId, identityChannel: channel, phoneNumber: evt.contactPhone },
             select: contactIdentitySelect,
           });
         }
@@ -2263,8 +2316,14 @@ export async function ingestHistoricalMessage(
   const { firstName, lastName } = splitContactName(msg.contactPhone);
 
   const conversation = await runWithSerializableRetry(async (tx) => {
+    // Channel-scoped like the live message/call ingest sites: contact-share can
+    // stamp this phone onto a messenger/instagram contact (the (teamId,
+    // phoneNumber) partial unique is whatsapp-only), so an unscoped lookup would
+    // fold this WhatsApp coexistence-history backfill onto a social contact.
+    // channel is always 'whatsapp' here; cross-channel identity is a Customer
+    // concern, never a fold.
     const found = await tx.contact.findFirst({
-      where: { teamId, phoneNumber: msg.contactPhone },
+      where: { teamId, identityChannel: channel, phoneNumber: msg.contactPhone },
       select: { id: true },
     });
     let contactId = found?.id;
@@ -2680,6 +2739,34 @@ function toDomainConversation(c: {
  * id). Used by ingest (inbound replies, externalId lookup) and the outbound
  * routes (where the caller already has the local id).
  */
+/**
+ * Meta's BSUID transition gives a customer's OWN message TWO wamids: the inbound
+ * webhook stores a PHONE-encoded id (`wamid.HBgL…<phone>…`), but when the
+ * customer QUOTES that message the reply's `context.id` is BSUID-encoded
+ * (`wamid.HBgS…<user_id>…`). Same message, different string — so a direct
+ * externalId lookup misses and the quote was lost ("reply-to-own shows as a
+ * normal message"). The per-message hash TAIL of the wamid is identical across
+ * both encodings (verified: they differ only in the sender-id prefix and a
+ * 2-byte `15 xx` marker), so extract that tail as a stable cross-identity key.
+ * Returns null for non-wamid ids (social mids carry no identity prefix and match
+ * directly) or an unrecognised wamid layout.
+ */
+export function wamidMessageKey(externalId: string): string | null {
+  if (!externalId.startsWith("wamid.")) return null;
+  try {
+    const b = Buffer.from(externalId.slice(6), "base64");
+    // Layout: 1C 18 <idLen> <sender-id bytes> 15 <marker> <stable message hash>.
+    if (b.length < 5 || b[0] !== 0x1c || b[1] !== 0x18) return null;
+    const idLen = b[2]!;
+    const rest = b.subarray(3 + idLen);
+    if (rest.length < 3 || rest[0] !== 0x15) return null;
+    // Drop the `15 <marker>` (02 on the sent id, 14 on the quoted context id).
+    return rest.subarray(2).toString("hex");
+  } catch {
+    return null;
+  }
+}
+
 export async function loadReplySnapshotByExternalId(
   externalId: string,
   scope: { teamId: string; channel: Channel },
@@ -2697,7 +2784,25 @@ export async function loadReplySnapshotByExternalId(
     },
     select: REPLY_TO_INCLUDE.select,
   });
-  return mapReplySnapshot(row);
+  if (row) return mapReplySnapshot(row);
+
+  // BSUID fallback (WhatsApp only): the quoted id may be a re-encoding, under
+  // the customer's OTHER identity, of a message we DID store — match on the
+  // identity-independent wamid tail. Bounded scan; runs ONLY when the direct
+  // lookup misses (rare — a customer quoting their own message), so it never
+  // touches the common reply-to-us path.
+  const key = wamidMessageKey(externalId);
+  if (!key) return null;
+  const candidates = await db.message.findMany({
+    where: { teamId: scope.teamId, channel: scope.channel },
+    orderBy: { createdAt: "desc" },
+    take: 300,
+    select: { ...REPLY_TO_INCLUDE.select, externalId: true },
+  });
+  const match = candidates.find(
+    (c) => c.externalId != null && wamidMessageKey(c.externalId) === key,
+  );
+  return match ? mapReplySnapshot(match) : null;
 }
 
 export async function loadReplySnapshotById(

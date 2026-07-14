@@ -635,6 +635,30 @@ function BubbleContent({
           contactSeed={contactSeed}
         />
 
+        {/* Customer 👍/👎 "message feedback" on our outbound (Messenger's
+            response_feedback). A DISTINCT helpful/not-helpful chip — explicitly
+            NOT an emoji reaction — since customers can't emoji-react to a
+            business message on Messenger; the thumbs are the only signal. */}
+        {message.feedback && (
+          <div className={cn("relative z-10 -mt-1 flex", isOut ? "mr-1 justify-end" : "ml-1")}>
+            <span
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-2xs font-medium",
+                message.feedback === "positive"
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                  : "border-destructive/40 bg-destructive/10 text-destructive",
+              )}
+              title={
+                message.feedback === "positive"
+                  ? "The customer marked this message helpful (Messenger feedback)"
+                  : "The customer marked this message not helpful (Messenger feedback)"
+              }
+            >
+              {message.feedback === "positive" ? "👍 Helpful" : "👎 Not helpful"}
+            </span>
+          </div>
+        )}
+
         {showMeta && <BubbleMeta message={message} isOut={isOut} />}
         {isFailed && (
           <FailedRecovery

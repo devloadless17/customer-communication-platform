@@ -344,6 +344,11 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
     // socket frames, which patch each side independently.
     ...(m.reaction ? { reaction: m.reaction } : {}),
     ...(m.agentReaction ? { agentReaction: m.agentReaction } : {}),
+    // Customer 👍/👎 feedback on our outbound (Messenger response_feedback) —
+    // a distinct chip, hydrated so a refresh matches the live message:updated.
+    ...(m.feedback === "positive" || m.feedback === "negative"
+      ? { feedback: m.feedback }
+      : {}),
     // Structured content (location pin / contact card) → dedicated bubble. The
     // JSONB round-trips as the discriminated MessageStructured shape.
     ...(m.structured

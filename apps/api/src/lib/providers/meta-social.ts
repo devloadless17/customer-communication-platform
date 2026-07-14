@@ -29,6 +29,7 @@ import type {
   NormalizedInboundMessage,
   NormalizedMediaRef,
   NormalizedReaction,
+  NormalizedMessageFeedback,
   NormalizedStatusUpdate,
   ContactShareField,
   SendInteractiveArgs,
@@ -157,6 +158,11 @@ interface MessagingEvent {
   // sends a per-message `mid` (the specific message the customer read).
   read?: { watermark?: number; mid?: string };
   reaction?: { mid?: string; action?: string; emoji?: string; reaction?: string };
+  // Messenger's 👍/👎 "message feedback" on a BUSINESS message. Customers can't
+  // emoji-react to a message the Page sent — Meta shows the thumbs instead — so
+  // this IS their reaction to our outbound. `feedback` is "Good response" /
+  // "Bad response"; `mid` is the message they rated.
+  response_feedback?: { feedback?: string; mid?: string };
   // A postback: the customer tapped a Get-Started button, a persistent-menu
   // item, or a structured-message button whose `payload` we authored. Parallel
   // to `quick_reply` on a message, but a top-level messaging event. `mid` is
@@ -790,6 +796,24 @@ export function parseSocialMessaging(
         events.push(reaction);
         continue;
       }
+      // Messenger 👍/👎 "message feedback" (`response_feedback`) is Meta's
+      // built-in business-message feedback, NOT a real reaction — deliberately
+      // IGNORED so it never gets painted onto a message. Real emoji reactions
+      // arrive via `message_reactions` (handled above). Explicit no-op (also
+      // silences the unhandled-messaging log). Could surface as a separate note
+      // later if the team wants to track like/dislike.
+      if (m.response_feedback?.mid) {
+        const fb: NormalizedMessageFeedback = {
+          kind: "message_feedback",
+          targetExternalId: m.response_feedback.mid,
+          feedback:
+            m.response_feedback.feedback === "Bad response" ? "negative" : "positive",
+          timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
+          rawPayload: m as unknown as Record<string, unknown>,
+        };
+        events.push(fb);
+        continue;
+      }
       // Delivery receipts carry the mids Meta delivered.
       if (m.delivery && Array.isArray(m.delivery.mids)) {
         const ts = new Date(m.delivery.watermark ?? m.timestamp ?? Date.now());
@@ -1019,6 +1043,7 @@ export async function sendSocialMedia(
   // media send (which already went out and bills nothing extra to retry). But a
   // silent swallow means a caption can vanish with no trace — so retry once, and
   // if it still fails, LOG (don't swallow blind) so the drop is diagnosable.
+  let captionExternalId: string | undefined;
   if (args.caption && args.caption.trim().length > 0) {
     const sendCaption = () =>
       sendSocialText(
@@ -1026,10 +1051,10 @@ export async function sendSocialMedia(
         opts,
       );
     try {
-      await sendCaption();
+      captionExternalId = (await sendCaption()).externalId;
     } catch (first) {
       try {
-        await sendCaption();
+        captionExternalId = (await sendCaption()).externalId;
       } catch (second) {
         console.warn(
           JSON.stringify({
@@ -1044,7 +1069,11 @@ export async function sendSocialMedia(
       }
     }
   }
-  return { externalId: messageId, timestamp: new Date() };
+  return {
+    externalId: messageId,
+    timestamp: new Date(),
+    ...(captionExternalId ? { captionExternalId } : {}),
+  };
 }
 
 /**

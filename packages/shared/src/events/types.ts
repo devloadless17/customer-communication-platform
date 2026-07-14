@@ -148,6 +148,14 @@ export interface MessageStatusChangedEvent {
   messageId: string;
   status: MessageStatus;
   /**
+   * The message's channel. Carried so the outbound-webhook `status_changed` wire
+   * payload attributes the receipt to the RIGHT channel on a multi-channel team.
+   * Without it `deriveEventChannel` returns null and the resolver falls back to
+   * the team's oldest connection — misreporting e.g. an Instagram read receipt as
+   * `whatsapp`. Optional for source-compat; absent → the null→primary fallback.
+   */
+  channel?: Channel;
+  /**
    * When the status transition actually occurred (ISO 8601), stamped at publish
    * in ingest. Carried so the outbound-webhook `status_changed` wire payload can
    * emit a real `timestamp` (epoch ms) instead of synthesizing one at delivery
@@ -211,6 +219,12 @@ export interface MessageUpdatedEvent {
   editedAt: string | null;
   /** The (possibly edited) body; null when unchanged/irrelevant. */
   body: string | null;
+  /**
+   * Customer 👍/👎 feedback on our outbound message (Messenger
+   * `response_feedback`). Set only on a feedback update; undefined on
+   * edit/unsend corrections so the reducer leaves it untouched.
+   */
+  feedback?: "positive" | "negative" | null;
   /**
    * Set ONLY when this correction was the thread's NEWEST message, so the
    * denormalized inbox-list preview changed. Carries the recomputed preview

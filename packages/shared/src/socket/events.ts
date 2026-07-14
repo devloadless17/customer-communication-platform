@@ -111,6 +111,8 @@ export interface ServerToClientEvents {
     deletedAt: string | null;
     editedAt: string | null;
     body: string | null;
+    /** Customer 👍/👎 feedback on our outbound (Messenger response_feedback). */
+    feedback?: "positive" | "negative" | null;
   }) => void;
 
   /**

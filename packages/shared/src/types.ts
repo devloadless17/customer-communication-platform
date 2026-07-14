@@ -525,6 +525,13 @@ export interface Message {
    */
   agentReaction?: string | null;
   /**
+   * The CUSTOMER's 👍/👎 "message feedback" on this (our outbound) message —
+   * Messenger's `response_feedback`. NOT an emoji reaction (customers can't
+   * emoji-react to a business message on Messenger); rendered as a distinct
+   * helpful/not-helpful chip. "positive" | "negative"; null/absent = none.
+   */
+  feedback?: "positive" | "negative" | null;
+  /**
    * Structured non-media content (shared location pin / contact card). Drives a
    * dedicated bubble; `body` still holds the text placeholder. Absent for normal
    * text/media messages. See {@link MessageStructured}.

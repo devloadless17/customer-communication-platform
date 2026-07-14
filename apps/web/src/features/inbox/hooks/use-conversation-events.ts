@@ -1151,13 +1151,33 @@ export function useConversationEvents(
               const reactionChanged =
                 (f.reaction ?? null) !== (m.reaction ?? null) ||
                 (f.agentReaction ?? null) !== (m.agentReaction ?? null);
-              return f.status !== m.status || (f.media && !m.media) || reactionChanged
+              // Edit/unsend (message:updated) can be missed while backgrounded
+              // too — these fields were added AFTER this reconcile list was first
+              // written, so a customer unsend/edit during a real reconnect stayed
+              // stale until a chat-switch. Converge deletedAt/editedAt/body to the
+              // server row, and adopt media/mediaPending wholesale so a
+              // media:ready missed during the drop can't leave a stuck
+              // "downloading" over a now-present url.
+              const editChanged =
+                (f.deletedAt ?? null) !== (m.deletedAt ?? null) ||
+                (f.editedAt ?? null) !== (m.editedAt ?? null) ||
+                (f.body ?? null) !== (m.body ?? null);
+              const mediaChanged =
+                (f.media && !m.media) || (!!m.mediaPending && !f.mediaPending);
+              return f.status !== m.status ||
+                mediaChanged ||
+                reactionChanged ||
+                editChanged
                 ? {
                     ...m,
                     status: f.status,
                     ...(f.media ? { media: f.media } : {}),
+                    mediaPending: f.mediaPending,
                     reaction: f.reaction,
                     agentReaction: f.agentReaction,
+                    deletedAt: f.deletedAt,
+                    editedAt: f.editedAt,
+                    body: f.body,
                   }
                 : m;
             });

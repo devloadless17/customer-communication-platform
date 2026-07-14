@@ -1199,6 +1199,12 @@ model Message {
   // one REPLACES it, an empty emoji CLEARS it (null). Set by the send-reaction
   // path; null = we haven't reacted.
   agentReaction  String?
+  // The CUSTOMER's 👍/👎 "message feedback" on THIS (our outbound) message —
+  // Messenger's `response_feedback`, which is Meta's business-message feedback,
+  // NOT an emoji reaction (customers can't emoji-react to a business message).
+  // Rendered as a distinct "helpful / not helpful" chip, never as a reaction.
+  // "positive" | "negative"; null = no feedback given.
+  feedback       String?
   // Structured non-media content (shared location pin / contact card) that gets
   // a dedicated bubble. Shape = MessageStructured (discriminated by `kind`:
   // location | contacts); `body` still holds the text placeholder for search /

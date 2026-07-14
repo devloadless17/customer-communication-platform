@@ -6,6 +6,7 @@ import { LocalTime } from "@/components/local-time";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useTimezone } from "@/providers/tz-provider";
 import { cn, formatLocaleString, initials } from "@ccp/shared/utils";
+import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import type { Message } from "@ccp/shared/types";
 
 export function BubbleMeta({
@@ -98,6 +99,16 @@ function StatusTicks({
         />
       );
     case "sent":
+      // A channel with NO delivery receipt (Instagram) never reports
+      // "delivered", so a sent message would otherwise sit on a lone single
+      // tick until it's read. It reached Meta and there's no pre-read signal
+      // coming, so render it as delivered (two muted ticks) — matching the
+      // native IG "Sent → Seen" flow instead of looking stuck.
+      if (CHANNEL_CAPABILITIES[message.channel]?.deliveryReceipts === false) {
+        return (
+          <CheckCheck className="size-3 opacity-70" strokeWidth={2} aria-label="Sent" />
+        );
+      }
       return <Check className="size-3 opacity-70" aria-label="Sent" />;
     case "delivered":
       // Thin, muted double-check. Differs from "read" by WEIGHT + opacity, not

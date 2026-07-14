@@ -4,7 +4,6 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Building2,
-  ChevronRight,
   Loader2,
   Mail,
   MapPin,
@@ -128,7 +127,6 @@ function ContactCardRow({ contact: c }: { contact: SharedContact; isOut: boolean
             </span>
           ) : null}
         </span>
-        <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
       </div>
 
       {hasDetails ? (

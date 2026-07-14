@@ -1955,10 +1955,13 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
   async sendMedia(args: SendMediaArgs, config: MetaSendConfig): Promise<SendTextResult> {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
-    // Build the type-specific subobject. Caption is only accepted on
-    // image/video/document; sticker + audio reject it (Meta returns 100).
+    // Build the type-specific subobject. Caption is only accepted INLINE on
+    // image/video/document; sticker + audio reject it (Meta returns 100), so for
+    // those a caption is delivered as a follow-up text after the media (below).
+    const captionInline =
+      args.kind === "image" || args.kind === "video" || args.kind === "document";
     const sub: Record<string, unknown> = { id: args.mediaId };
-    if (args.caption && (args.kind === "image" || args.kind === "video" || args.kind === "document")) {
+    if (args.caption && captionInline) {
       sub.caption = args.caption;
     }
     if (args.kind === "document" && args.filename) {
@@ -2002,7 +2005,64 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     if (!externalId) {
       throw new Error(`meta sendMedia response missing id: ${JSON.stringify(json)}`);
     }
-    return { externalId, timestamp: new Date() };
+
+    // Audio / sticker can't carry an inline caption, so a caption typed with a
+    // voice note (or sticker) would silently vanish on the customer's side —
+    // deliver it as a follow-up text right after the media. Mirrors the social
+    // caption-follow-up. Best-effort: the media already went out, so a failed
+    // caption must NOT fail the send; retry once, then LOG (never swallow blind).
+    let captionExternalId: string | undefined;
+    if (args.caption && args.caption.trim().length > 0 && !captionInline) {
+      const caption = args.caption;
+      const sendCaption = async () => {
+        const r = await metaFetch(url, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${config.accessToken}`,
+          },
+          body: JSON.stringify({
+            messaging_product: "whatsapp",
+            recipient_type: "individual",
+            to: args.to,
+            type: "text",
+            text: { body: caption, preview_url: /https?:\/\//i.test(caption) },
+          }),
+        });
+        if (!r.ok) {
+          throw new MetaSendError(
+            `caption follow-up failed: ${r.status} ${await safeMetaText(r)}`,
+            r.status,
+            "",
+          );
+        }
+        const cj = (await r.json()) as { messages?: Array<{ id?: string }> };
+        captionExternalId = cj.messages?.[0]?.id;
+      };
+      try {
+        await sendCaption();
+      } catch (first) {
+        try {
+          await sendCaption();
+        } catch (second) {
+          console.warn(
+            JSON.stringify({
+              event: "whatsapp.caption_dropped",
+              severity: "warning",
+              kind: args.kind,
+              mediaMessageId: externalId,
+              error: second instanceof Error ? second.message : String(second),
+              firstError: first instanceof Error ? first.message : String(first),
+            }),
+          );
+        }
+      }
+    }
+    return {
+      externalId,
+      timestamp: new Date(),
+      ...(captionExternalId ? { captionExternalId } : {}),
+    };
   },
 
   // -------------------------------------------------------------------------
@@ -2230,6 +2290,19 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       components.push({
         type: "header",
         parameters: [{ type: kind, [kind]: media }],
+      });
+    } else if (args.variables.headerNamed) {
+      // NAMED-format template: Meta requires `parameter_name` on the header
+      // component exactly like the body, else it rejects with 132000.
+      components.push({
+        type: "header",
+        parameters: [
+          {
+            type: "text",
+            parameter_name: args.variables.headerNamed.name,
+            text: args.variables.headerNamed.text,
+          },
+        ],
       });
     } else if (args.variables.header && args.variables.header.length > 0) {
       components.push({

@@ -69,6 +69,7 @@ import {
   effectiveSendWindowMs,
   outsideFreeFormWindow,
 } from "@ccp/shared/utils/window";
+import { supportsInlineCaption } from "@ccp/shared/providers/capabilities";
 import {
   workflowContactSnapshot,
   workflowConversationSnapshotAfterAssign,
@@ -1890,7 +1891,14 @@ export class MessagesService {
       );
     }
 
-    const previewBody = (caption || mediaPreview(kind)).slice(0, 200);
+    // A caption that can't ride INLINE on the media (WhatsApp audio/sticker, all
+    // Messenger/Instagram media) is delivered by the provider as a separate text
+    // and persisted below as its OWN tracked message — so the media row carries
+    // NO caption (empty body), mirroring exactly what the customer sees (media,
+    // then a text). `mediaBody` is the caption only when Meta accepts it inline.
+    const inlineCaption = supportsInlineCaption(provider, kind);
+    const mediaBody = inlineCaption ? caption : "";
+    const previewBody = (mediaBody || mediaPreview(kind)).slice(0, 200);
 
     // Timestamp monotonicity guard — see send-text-internal.ts for full
     // rationale. Outbound must sort strictly after any inbound in the
@@ -1905,7 +1913,7 @@ export class MessagesService {
       conversationId,
       externalId: send.externalId,
       senderUserId: userId,
-      body: caption,
+      body: mediaBody,
       direction: "out",
       channel: provider,
       status: "sent",
@@ -1924,7 +1932,7 @@ export class MessagesService {
         ? {
             mediaKind: kind,
             mediaMimeType: mimeType,
-            mediaCaption: caption || null,
+            mediaCaption: mediaBody || null,
             mediaFilename: kind === "document" ? filename : null,
             mediaKey: saved.key,
             mediaUrl: saved.url,
@@ -1977,7 +1985,7 @@ export class MessagesService {
           url: `/api/media/${createdId}`,
           mimeType,
           sizeBytes: saved.sizeBytes,
-          ...(caption ? { caption } : {}),
+          ...(mediaBody ? { caption: mediaBody } : {}),
           ...(kind === "document" ? { filename } : {}),
           // Carry the voice-note flag on the LIVE message.sent frame (it's
           // persisted to mediaVoice above). Without it the agent's own voice
@@ -1999,7 +2007,7 @@ export class MessagesService {
       conversationId,
       externalId: send.externalId,
       senderUserId: userId,
-      body: caption,
+      body: mediaBody,
       direction: "out",
       channel: provider,
       status: "sent",
@@ -2040,6 +2048,69 @@ export class MessagesService {
       this.logger.error(
         `sendMedia commit failed for message=${createdId}: ${err instanceof Error ? err.message : err}`,
       );
+    }
+
+    // Non-inline caption (WhatsApp audio/sticker, all Messenger/Instagram media):
+    // the provider delivered it as a SEPARATE follow-up text and returned its id.
+    // Persist it as its OWN tracked message so it renders as a real text bubble
+    // (matching the customer's two-message view) AND its inbound echo dedups on
+    // this externalId — killing the phantom "via app" message. Best-effort: the
+    // text already reached the customer; if this persist fails, the social echo
+    // will create the row anyway (just without status).
+    if (!inlineCaption && caption && send.captionExternalId) {
+      const captionTs = new Date(messageTimestamp.getTime() + 1);
+      const captionCreated = await createOutboundMessageIdempotent({
+        teamId,
+        conversationId,
+        externalId: send.captionExternalId,
+        senderUserId: userId,
+        body: caption,
+        direction: "out",
+        channel: provider,
+        status: "sent",
+        rawPayload: { sentVia: "api/messages/media:caption" } as Prisma.InputJsonValue,
+        timestamp: captionTs,
+      }).catch((err): null => {
+        this.logger.error(
+          `caption message persist failed (mid=${send.captionExternalId})`,
+          err,
+        );
+        return null;
+      });
+      if (captionCreated) {
+        const captionMessage: Message = {
+          id: captionCreated.id,
+          teamId,
+          conversationId,
+          externalId: send.captionExternalId,
+          senderUserId: userId,
+          body: caption,
+          direction: "out",
+          channel: provider,
+          status: "sent",
+          rawPayload: { sentVia: "api/messages/media:caption" },
+          timestamp: captionTs.toISOString(),
+        };
+        await this.commitOutboundEvent({
+          conversationId,
+          bumpTimestamp: captionTs,
+          preview: caption.slice(0, 200),
+          event: {
+            type: "message.sent",
+            teamId,
+            conversationId,
+            contactId: conversation.contactId,
+            message: captionMessage,
+            preview: caption.slice(0, 200),
+            senderUserId: userId,
+          },
+        }).catch((err) => {
+          this.logger.error(
+            `caption message commit failed (mid=${send.captionExternalId})`,
+            err,
+          );
+        });
+      }
     }
 
     return {
@@ -2340,16 +2411,19 @@ export class MessagesService {
             // Required lazily (inside the per-message try) so a channel without
             // media support fails just THIS media message, not the whole
             // forward — text messages in the same batch still go through.
-            const uploadMedia = requireProviderMethod(
-              binding.provider,
-              "uploadMedia",
-              channel.channel,
-            );
             const sendMedia = requireProviderMethod(
               binding.provider,
               "sendMedia",
               channel.channel,
             );
+            // URL-based channels (Instagram) presign the just-stored blob so
+            // Meta fetches it directly — the upload/attachment_id path errors on
+            // IG. Only require + call uploadMedia on upload-based channels
+            // (WhatsApp/Messenger), mirroring the composer's sendMediaWithTempFile.
+            const byUrl = binding.provider.capabilities.mediaSendByUrl === true;
+            const uploadMedia = byUrl
+              ? null
+              : requireProviderMethod(binding.provider, "uploadMedia", channel.channel);
             const mb = await loadMediaBytes(src);
             if (!mb) {
               failed++;
@@ -2361,9 +2435,31 @@ export class MessagesService {
             const filename = mb.filename ?? "upload";
             const withCaption = captionable(mb.kind) ? caption : undefined;
 
+            // URL-based channels (Instagram) reject ogg/opus and other non-m4a
+            // audio at their URL fetcher. Transcode to M4A exactly like the
+            // composer's igAudio branch so a forwarded voice note is deliverable
+            // instead of a generic Meta rejection. Best-effort: a failed
+            // transcode falls through and Meta surfaces its own error.
+            let sendBytes = mb.bytes;
+            let sendMime = mb.mime;
+            let sendFilename = filename;
+            if (byUrl && mb.kind === "audio") {
+              try {
+                sendBytes = await transcodeToM4a(mb.bytes);
+                sendMime = "audio/mp4";
+                sendFilename = filename.replace(/\.[^./\\]+$/, "") + ".m4a";
+              } catch (err) {
+                this.logger.warn(
+                  `[forward] IG audio transcode to M4A failed; sending original ${mb.mime}: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
+              }
+            }
+
             // Pre-send. Run the Meta media upload and our own blob-storage
-            // upload in parallel — both consume `mb.bytes` and neither
-            // depends on the other. Saves ~200-500ms per forwarded media
+            // upload in parallel — both consume the (possibly transcoded) bytes
+            // and neither depends on the other. Saves ~200-500ms per forwarded media
             // message vs. the previous strict serial order.
             //
             // The blob upload's `externalId` context field gets a
@@ -2371,14 +2467,16 @@ export class MessagesService {
             // canonical link to Meta lives on the Message row via
             // `externalId` after the send completes.
             const [uploaded, saved] = await Promise.all([
-              uploadMedia(
-                { bytes: mb.bytes, mimeType: mb.mime, filename },
-                sendConfig,
-              ),
+              uploadMedia
+                ? uploadMedia(
+                    { bytes: sendBytes, mimeType: sendMime, filename: sendFilename },
+                    sendConfig,
+                  )
+                : Promise.resolve(null),
               blobStorage
                 .upload({
-                  bytes: mb.bytes,
-                  mimeType: mb.mime,
+                  bytes: sendBytes,
+                  mimeType: sendMime,
                   kind: mb.kind,
                   context: {
                     teamId,
@@ -2406,11 +2504,28 @@ export class MessagesService {
                   return null;
                 }),
             ]);
+            // URL-based channels: presign the stored object (with the real
+            // filename for documents, like the composer) so Meta fetches it. A
+            // failed blob upload means there's nothing to point Meta at — fail
+            // just this media message.
+            let mediaUrl: string | undefined;
+            if (byUrl) {
+              if (!saved) {
+                failed++;
+                firstError ??= "couldn't prepare the media for sending";
+                continue;
+              }
+              mediaUrl = await blobStorage.presignGetUrl(saved.key, {
+                ttlSeconds: 3600,
+                ...(mb.kind === "document" ? { downloadFilename: filename } : {}),
+              });
+            }
             const send = await sendMedia(
               {
                 to: contactPhone,
                 kind: mb.kind,
-                mediaId: uploaded.mediaId,
+                mediaId: uploaded?.mediaId ?? "",
+                ...(mediaUrl ? { mediaUrl } : {}),
                 caption: withCaption,
                 filename: mb.kind === "document" ? filename : undefined,
                 useHumanAgentTag,
@@ -2440,7 +2555,9 @@ export class MessagesService {
               rawPayload: {
                 sentVia: "api/messages/forward",
                 forwardedFrom: src.id,
-                mediaId: uploaded.mediaId,
+                // null on URL-based channels (Instagram) — no Meta upload id,
+                // Meta fetched the presigned blob URL instead.
+                mediaId: uploaded?.mediaId ?? null,
                 ...(saved ? {} : { blobUploadFailed: true }),
               } as Prisma.InputJsonValue,
               timestamp: fwdMediaTs,
@@ -2456,9 +2573,12 @@ export class MessagesService {
                     mediaKey: saved.key,
                     mediaUrl: saved.url,
                     mediaSizeBytes: saved.sizeBytes,
-                    mediaMimeType: mb.mime,
+                    // sendMime/sendFilename reflect the transcoded bytes actually
+                    // stored + sent (IG audio → audio/mp4), so the bubble renders
+                    // the real stored object, not the pre-transcode mime.
+                    mediaMimeType: sendMime,
                     mediaCaption: withCaption ?? null,
-                    mediaFilename: mb.kind === "document" ? filename : null,
+                    mediaFilename: mb.kind === "document" ? sendFilename : null,
                   }
                 : {}),
             }).catch((err): null => {
