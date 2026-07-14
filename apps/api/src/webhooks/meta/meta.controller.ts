@@ -31,7 +31,7 @@ import {
 } from "@/lib/media-thumbnail";
 import { getMetaProvider } from "@/lib/providers";
 import { MediaTooLargeError } from "@/lib/providers/meta";
-import { wireIn } from "@/lib/providers/meta-wire";
+import { metaWireEnabled, wireIn } from "@/lib/providers/meta-wire";
 import {
   getMetaSendConfig,
   getMetaWebhookConfig,
@@ -240,7 +240,9 @@ export class MetaWebhookController implements OnModuleDestroy {
     }
     if (!insecureSkipVerify(this.logger)) {
       if (!signature) throw webhookForbidden(this.logger, teamId, "whatsapp", req, "no_signature");
-      if (!verifySignature(rawBody, signature, [config.appSecret, config.appSecretFallback])) {
+      const cands = [config.appSecret, config.appSecretFallback];
+      if (!verifySignature(rawBody, signature, cands)) {
+        logSignatureDiag(this.logger, signature, rawBody, cands);
         throw webhookForbidden(this.logger, teamId, "whatsapp", req, "bad_signature");
       }
     }
@@ -411,7 +413,9 @@ export class MetaWebhookController implements OnModuleDestroy {
     }
     if (!insecureSkipVerify(this.logger)) {
       if (!signature) throw webhookForbidden(this.logger, teamId, channel, req, "no_signature");
-      if (!verifySignature(rawBody, signature, [config.appSecret, config.appSecretFallback])) {
+      const cands = [config.appSecret, config.appSecretFallback];
+      if (!verifySignature(rawBody, signature, cands)) {
+        logSignatureDiag(this.logger, signature, rawBody, cands);
         throw webhookForbidden(this.logger, teamId, channel, req, "bad_signature");
       }
     }
@@ -1356,6 +1360,36 @@ function webhookForbidden(
   const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
   if (rawBody) wireIn(`${channel} REJECTED (${reason})`, rawBody.toString("utf8"));
   return new HttpException("forbidden", 403);
+}
+
+/**
+ * DEBUG_META_WIRE aid for a bad_signature: print the received signature next to
+ * what each STORED secret would produce over these exact bytes. If `received`
+ * matches none of the expected values, the stored app secret is simply the wrong
+ * value — paste the correct one. For Instagram that is the "Instagram app secret"
+ * in the app's Instagram product settings, which is a DIFFERENT value from the
+ * Facebook "App Secret" (Settings → Basic). These are HMAC digests (not the
+ * secret itself), and only a prefix is shown.
+ */
+function logSignatureDiag(
+  logger: Logger,
+  signature: string | undefined,
+  rawBody: Buffer,
+  candidates: ReadonlyArray<string | undefined>,
+): void {
+  if (!metaWireEnabled()) return;
+  const expected = candidates
+    .filter((s): s is string => !!s)
+    .map(
+      (s, i) =>
+        `secret#${i + 1}→${createHmac("sha256", s).update(rawBody).digest("hex").slice(0, 20)}…`,
+    );
+  const recv = (signature ?? "(none)").replace(/^sha256=/, "").slice(0, 20);
+  logger.warn(
+    `  ↳ sig diag: received=${recv}…  expected=[ ${expected.join("  ")} ]  ` +
+      `— ${expected.length} stored secret(s) tried; matches none ⇒ the stored secret is wrong ` +
+      `(Instagram uses the "Instagram app secret", not the Facebook App Secret).`,
+  );
 }
 
 /**
