@@ -37,7 +37,7 @@ curl -s "$CCP_BASE_URL/api/external/v1/conversations?limit=5" \
 | **Base path** | `$CCP_BASE_URL/api/external/v1` |
 | **Auth** | `Authorization: Bearer $CCP_API_KEY` on every request |
 | **Scopes** | Each route needs a scope (listed per endpoint). A **Full access** key has all of them. |
-| **Idempotency** | The two **send** routes **require** an `Idempotency-Key` header — reuse the same value on a retry and we won't double-send. Use something stable per logical send (e.g. the inbound message id). |
+| **Idempotency** | The three **send** routes (`POST /messages`, `POST /conversations/:id/messages`, `POST /conversations/:id/interactive`) **require** an `Idempotency-Key` header — reuse the same value on a retry and we won't double-send. Use something stable per logical send (e.g. the inbound message id). |
 | **Rate limit** | **60 req/min per key**, across *all* routes — over it returns `429 {"error":"rate_limited"}`. Sends carry an extra **30/min per conversation** loop-guard. Missing/bad keys are throttled separately at 30/min per IP. |
 | **24-hour window** | Free-form text/media only sends to a customer who messaged you within the channel's window (WhatsApp 24h; Messenger/Instagram 24h + a 7-day human-agent extension). Outside it, WhatsApp needs a **template**; Messenger/Instagram have no templates — wait for the customer to message again. |
 | **Pagination** | List routes take `?limit=&cursor=`. The response includes `nextCursor` (null when done) — pass it back as `cursor`. |
@@ -250,7 +250,7 @@ curl -s -X POST "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/mes
 **Send an interactive message** — `POST /conversations/:id/interactive` · `write:messages`
 Tappable options (`kind: "buttons"`, or `kind: "list"` for up to 10) plus, on Messenger/Instagram only, Meta's one-tap **consent chips** that let the customer share their phone or email straight from their Meta profile. Those chips are the only way a social contact's phone/email ever reaches you — and therefore the only email that will auto-merge them into a unified customer.
 
-Option `id`s and `title`s must each be unique (Meta rejects duplicate button titles). Requires an `Idempotency-Key`. WhatsApp has no consent chips and returns `422 contact_share_not_supported` if you ask for them.
+Option `id`s and `title`s must each be unique (Meta rejects duplicate button titles). Requires an `Idempotency-Key`. Sending into a **closed** thread reopens it (closed → pending) once the send lands — same as the text send routes. WhatsApp has no consent chips and returns `422 contact_share_not_supported` if you ask for them.
 ```bash
 curl -s -X POST "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/interactive" \
   -H "Authorization: Bearer $CCP_API_KEY" \
@@ -293,6 +293,8 @@ curl -s -X DELETE "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/n
 ```
 
 > **Note on unified customers:** merging/splitting a `Customer` (linking channel contacts into one person) is currently a **UI-only** capability — there is no `/v1` customers resource yet. Auto-merge on a self-asserted strong key (exact phone/email) still happens automatically at ingest. Programmatic merge/split is a planned addition; until then, reconcile identities in the inbox.
+
+> **Note on broadcasts:** bulk templated/free-form outbound (**Broadcasts**) is currently a **UI-only** capability — there is no `/v1` broadcasts resource yet. To reach many contacts programmatically today, iterate the send routes above (each with its own `Idempotency-Key`). A `/v1` broadcast trigger is a planned addition.
 
 ---
 
