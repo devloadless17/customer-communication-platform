@@ -284,6 +284,9 @@ export interface WhatsappConfigView {
   /** True when secrets are present in the DB but decrypt failed (key rotated,
    *  envelope corrupt). Page surfaces this so admin can re-paste. */
   credentialsUndecryptable: boolean;
+  /** True when a send failed with Graph 190 (token expired/revoked) — drives the
+   *  Settings "reconnect" banner, consistent with Messenger/Instagram. */
+  needsReconnect: boolean;
 }
 
 // Re-export commonly co-imported types so callers can grab everything from

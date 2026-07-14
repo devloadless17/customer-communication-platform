@@ -36,6 +36,8 @@ export interface WhatsappCurrent {
   // ENCRYPTION_KEY changed between write and read). The form is shown empty
   // and the banner tells the admin to re-paste from Meta.
   credentialsUndecryptable?: boolean;
+  /** Set when a send failed with Graph 190 — the token expired/was revoked. */
+  needsReconnect?: boolean;
 }
 
 export function WhatsappSettings({
@@ -57,6 +59,7 @@ export function WhatsappSettings({
   const [showForm, setShowForm] = useState(
     !current.connected ||
       Boolean(current.credentialsUndecryptable) ||
+      Boolean(current.needsReconnect) ||
       expandAdvanced,
   );
 
@@ -291,6 +294,19 @@ function ConnectionStatus({
           </>
         )}
       </dl>
+      {current.needsReconnect && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-amber-700 dark:text-amber-400">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <div>
+            <p className="font-medium">Access token expired — reconnect to keep sending</p>
+            <p className="mt-0.5 text-amber-700/80 dark:text-amber-400/80">
+              Meta rejected the last send because the token was revoked or expired.
+              Inbound messages still arrive, but replies will fail until you re-enter
+              a valid token below.
+            </p>
+          </div>
+        </div>
+      )}
       {showFinalStepHint && (
         <>
           <p className="mt-3 border-t border-success-border pt-2 text-2xs text-muted-foreground">

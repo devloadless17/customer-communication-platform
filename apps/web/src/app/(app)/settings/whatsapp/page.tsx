@@ -37,6 +37,7 @@ export default async function WhatsappSettingsPage() {
       accessToken: config.accessToken,
       appSecret: config.appSecret,
       credentialsUndecryptable: config.credentialsUndecryptable,
+      needsReconnect: config.needsReconnect,
     };
   } else {
     const { connected } = await listWhatsappTemplates();

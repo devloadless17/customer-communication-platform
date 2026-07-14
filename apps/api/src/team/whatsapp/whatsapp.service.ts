@@ -103,7 +103,7 @@ export class WhatsappService {
   async getConfig(teamId: string): Promise<WhatsappConfigView> {
     const conn = await this.db.channelConnection.findUnique({
       where: { teamId_channel: { teamId, channel: META_PROVIDER } },
-      select: { config: true, secrets: true },
+      select: { config: true, secrets: true, needsReconnect: true },
     });
     const config = (conn?.config ?? {}) as MetaChannelConfig;
     const secrets = (conn?.secrets ?? {}) as MetaChannelSecrets;
@@ -156,6 +156,7 @@ export class WhatsappService {
       accessToken,
       appSecret,
       credentialsUndecryptable,
+      needsReconnect: conn?.needsReconnect ?? false,
     };
   }
 
@@ -325,6 +326,9 @@ export class WhatsappService {
         config: newConfig as Prisma.InputJsonValue,
         secrets: newSecrets as Prisma.InputJsonValue,
         isActive: true,
+        // A fresh token clears any prior expired-token (Graph 190) flag.
+        needsReconnect: false,
+        lastAuthErrorAt: null,
       },
     });
 
