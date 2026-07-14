@@ -2,7 +2,8 @@
 
 import { useState, useTransition } from "react";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
-import { Loader2, PlugZap, TriangleAlert, Unplug } from "lucide-react";
+import { Check, Loader2, PlugZap, TriangleAlert, Unplug } from "lucide-react";
+import { cn } from "@ccp/shared/utils";
 
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -106,16 +107,26 @@ export function InstagramSettings({
 
       {confirmDialog}
 
-      <div className="rounded-xl border bg-card p-5">
+      <div
+        className={cn(
+          "rounded-xl border p-5",
+          current.connected ? "border-success-border bg-success-bg" : "bg-card",
+        )}
+      >
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <span
-              className={`inline-flex size-2.5 rounded-full ${
-                current.connected ? "bg-emerald-500" : "bg-muted-foreground/40"
-              }`}
-            />
+            {current.connected ? (
+              <Check className="size-4 shrink-0 text-success-fg" />
+            ) : (
+              <span className="inline-flex size-2.5 rounded-full bg-muted-foreground/40" />
+            )}
             <div>
-              <p className="text-sm font-medium">
+              <p
+                className={cn(
+                  "text-sm font-medium",
+                  current.connected && "text-success-fg",
+                )}
+              >
                 {current.connected ? "Connected" : "Not connected"}
               </p>
               {current.connected && (
