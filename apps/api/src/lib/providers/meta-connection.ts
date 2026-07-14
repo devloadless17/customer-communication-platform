@@ -111,3 +111,21 @@ export async function getMetaConnection(
     graphVersion: cipher.graphVersion,
   };
 }
+
+/**
+ * Candidate app secrets for inbound webhook HMAC verification. Prefer the shared
+ * Meta App secret (rotating it there covers every channel at once), but ALSO
+ * expose the channel's OWN stored secret as a fallback — so a channel connected
+ * to a DIFFERENT Meta app than the shared one (e.g. Instagram on its own app,
+ * signed with that app's secret) still verifies. `verifySignature` accepts
+ * either candidate; both are secrets the team itself configured.
+ */
+export function resolveWebhookSecrets(
+  sharedSecret: string | null | undefined,
+  ownSecret: string,
+): { appSecret: string; appSecretFallback?: string } {
+  if (sharedSecret && sharedSecret !== ownSecret) {
+    return { appSecret: sharedSecret, appSecretFallback: ownSecret };
+  }
+  return { appSecret: sharedSecret ?? ownSecret };
+}

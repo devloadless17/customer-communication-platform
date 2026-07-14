@@ -240,7 +240,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     }
     if (!insecureSkipVerify(this.logger)) {
       if (!signature) throw webhookForbidden(this.logger, teamId, "whatsapp", req, "no_signature");
-      if (!verifySignature(rawBody, signature, config.appSecret)) {
+      if (!verifySignature(rawBody, signature, [config.appSecret, config.appSecretFallback])) {
         throw webhookForbidden(this.logger, teamId, "whatsapp", req, "bad_signature");
       }
     }
@@ -411,7 +411,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     }
     if (!insecureSkipVerify(this.logger)) {
       if (!signature) throw webhookForbidden(this.logger, teamId, channel, req, "no_signature");
-      if (!verifySignature(rawBody, signature, config.appSecret)) {
+      if (!verifySignature(rawBody, signature, [config.appSecret, config.appSecretFallback])) {
         throw webhookForbidden(this.logger, teamId, channel, req, "bad_signature");
       }
     }
@@ -1291,14 +1291,23 @@ function containsHistory(payload: unknown): boolean {
 function verifySignature(
   rawBody: Buffer,
   header: string | undefined,
-  secret: string,
+  // One or more candidate secrets. A channel may be verifiable by EITHER the
+  // shared Meta App secret OR its own stored secret (when it's connected to a
+  // different Meta app than the shared one). Accept if ANY candidate matches —
+  // every candidate is a secret the team itself configured, so this never
+  // widens trust beyond the team's own apps.
+  secret: string | ReadonlyArray<string | undefined>,
 ): boolean {
   if (!header) return false;
-  const expected = "sha256=" + createHmac("sha256", secret).update(rawBody).digest("hex");
-  const a = Buffer.from(expected);
   const b = Buffer.from(header);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+  const candidates = typeof secret === "string" ? [secret] : secret;
+  for (const s of candidates) {
+    if (!s) continue;
+    const expected = "sha256=" + createHmac("sha256", s).update(rawBody).digest("hex");
+    const a = Buffer.from(expected);
+    if (a.length === b.length && timingSafeEqual(a, b)) return true;
+  }
+  return false;
 }
 
 /**

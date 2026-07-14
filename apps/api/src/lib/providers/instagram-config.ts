@@ -2,7 +2,7 @@ import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import { TtlCache } from "@/lib/providers/config-cache";
-import { getMetaConnection } from "@/lib/providers/meta-connection";
+import { getMetaConnection, resolveWebhookSecrets } from "@/lib/providers/meta-connection";
 
 /**
  * Per-team Instagram DM config. Same credential model as WhatsApp / Messenger
@@ -41,6 +41,8 @@ export interface InstagramSendConfig {
 
 export interface InstagramWebhookConfig {
   appSecret: string;
+  /** Secondary secret to also try during HMAC verify (channel on its own app). */
+  appSecretFallback?: string;
   verifyToken: string;
   igId: string | null;
 }
@@ -164,7 +166,7 @@ export async function getInstagramWebhookConfig(
     // / pre-Meta-App rows. See getMetaWebhookConfig for the rationale.
     const meta = await getMetaConnection(teamId);
     return {
-      appSecret: meta?.appSecret ?? decryptSecret(cipher.appSecretCipher),
+      ...resolveWebhookSecrets(meta?.appSecret, decryptSecret(cipher.appSecretCipher)),
       verifyToken: cipher.verifyToken,
       igId: cipher.igId,
     };

@@ -1,7 +1,7 @@
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 import { TtlCache } from "@/lib/providers/config-cache";
-import { getMetaConnection } from "@/lib/providers/meta-connection";
+import { getMetaConnection, resolveWebhookSecrets } from "@/lib/providers/meta-connection";
 import type { Channel } from "@ccp/shared/types";
 
 /**
@@ -52,6 +52,8 @@ export interface MetaSendConfig {
 
 export interface MetaWebhookConfig {
   appSecret: string;
+  /** Secondary secret to also try during HMAC verify (channel on its own app). */
+  appSecretFallback?: string;
   verifyToken: string;
   /** Optional — when set, every webhook's `entry[].changes[].value.metadata.phone_number_id`
    *  must match. Caching this here lets the controller's mismatch check
@@ -294,7 +296,7 @@ export async function getMetaWebhookConfig(
     // fall back to the per-channel cipher for legacy / pre-Meta-App rows.
     const meta = await getMetaConnection(teamId);
     return {
-      appSecret: meta?.appSecret ?? decryptSecret(cipher.appSecretCipher),
+      ...resolveWebhookSecrets(meta?.appSecret, decryptSecret(cipher.appSecretCipher)),
       verifyToken: cipher.verifyToken,
       phoneNumberId: cipher.phoneNumberId,
     };

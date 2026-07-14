@@ -2,7 +2,7 @@ import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import { TtlCache } from "@/lib/providers/config-cache";
-import { getMetaConnection } from "@/lib/providers/meta-connection";
+import { getMetaConnection, resolveWebhookSecrets } from "@/lib/providers/meta-connection";
 
 /**
  * Per-team Facebook Messenger config. Same model as WhatsApp
@@ -39,6 +39,8 @@ export interface MessengerSendConfig {
 
 export interface MessengerWebhookConfig {
   appSecret: string;
+  /** Secondary secret to also try during HMAC verify (channel on its own app). */
+  appSecretFallback?: string;
   verifyToken: string;
   /** The Page id every legit Messenger webhook carries in `entry[].id`. */
   pageId: string | null;
@@ -150,7 +152,7 @@ export async function getMessengerWebhookConfig(
     // / pre-Meta-App rows. See getMetaWebhookConfig for the rationale.
     const meta = await getMetaConnection(teamId);
     return {
-      appSecret: meta?.appSecret ?? decryptSecret(cipher.appSecretCipher),
+      ...resolveWebhookSecrets(meta?.appSecret, decryptSecret(cipher.appSecretCipher)),
       verifyToken: cipher.verifyToken,
       pageId: cipher.pageId,
     };
