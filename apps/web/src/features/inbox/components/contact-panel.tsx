@@ -90,9 +90,11 @@ function SocialSignals({ profile }: { profile: SocialProfile }) {
           {formatFollowerCount(profile.followerCount)} followers
         </span>
       )}
+      {/* Follow relationship — two independent directions, each its own row with
+          the SAME filled heart (a filled-vs-outline mix read as inconsistent). */}
       {profile.followsBusiness && (
         <span className="inline-flex items-center gap-0.5 text-muted-foreground">
-          <Heart className="size-3.5" />
+          <Heart className="size-3.5 fill-current" />
           Follows you
         </span>
       )}
@@ -1194,6 +1196,18 @@ function ContactPanelImpl({
               icon={Clock}
               label="Local time"
               value={<ContactLocalTime offsetHours={contact.socialProfile.timezone} />}
+            />
+          )}
+          {/* Meta-reported gender (Messenger, once `pages_user_gender` App Review
+              clears). Data-gated; capitalized for display ("male" → "Male"). */}
+          {contact.socialProfile?.gender && (
+            <ReadOnlyRow
+              icon={UserIcon}
+              label="Gender"
+              value={
+                contact.socialProfile.gender.charAt(0).toUpperCase() +
+                contact.socialProfile.gender.slice(1)
+              }
             />
           )}
           {builtins.firstName && (
