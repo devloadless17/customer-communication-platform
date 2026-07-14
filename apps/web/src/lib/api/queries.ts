@@ -397,6 +397,7 @@ export interface MessengerConfigView {
   pageAccessToken: string | null;
   appSecret: string | null;
   credentialsUndecryptable: boolean;
+  needsReconnect: boolean;
   /** Live Page↔app webhook subscription; null when it couldn't be checked. */
   webhookSubscription: {
     receivesMessages: boolean;
@@ -421,6 +422,7 @@ export interface InstagramConfigView {
   igAccessToken: string | null;
   appSecret: string | null;
   credentialsUndecryptable: boolean;
+  needsReconnect: boolean;
   /** Live subscription of the LINKED PAGE (IG DMs ride it); null when unchecked. */
   webhookSubscription: {
     receivesMessages: boolean;

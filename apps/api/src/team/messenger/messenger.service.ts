@@ -43,6 +43,9 @@ export interface MessengerConfigView {
   appSecret: string | null;
   /** True when secrets exist but decrypt failed (key rotated / corrupt). */
   credentialsUndecryptable: boolean;
+  /** True when a send failed with Graph 190 — the token expired/was revoked and
+   *  the channel must be reconnected. Drives the Settings "reconnect" banner. */
+  needsReconnect: boolean;
   /**
    * Live Page↔app webhook subscription, read from Graph. `null` when we can't
    * check (not connected yet, or Graph unreachable). When `receivesMessages` is
@@ -92,7 +95,7 @@ export class MessengerService {
   async getConfig(teamId: string): Promise<MessengerConfigView> {
     const conn = await this.db.channelConnection.findUnique({
       where: { teamId_channel: { teamId, channel: CHANNEL } },
-      select: { config: true, secrets: true },
+      select: { config: true, secrets: true, needsReconnect: true },
     });
     const config = (conn?.config ?? {}) as MessengerChannelConfig;
     const secrets = (conn?.secrets ?? {}) as MessengerChannelSecrets;
@@ -159,6 +162,7 @@ export class MessengerService {
       pageAccessToken,
       appSecret,
       credentialsUndecryptable,
+      needsReconnect: conn?.needsReconnect ?? false,
       webhookSubscription,
     };
   }
@@ -272,6 +276,9 @@ export class MessengerService {
         config: newConfig as Prisma.InputJsonValue,
         secrets: newSecrets as Prisma.InputJsonValue,
         isActive: true,
+        // A fresh token clears any prior expired-token (Graph 190) flag.
+        needsReconnect: false,
+        lastAuthErrorAt: null,
       },
     });
 

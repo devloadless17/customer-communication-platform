@@ -44,6 +44,9 @@ export interface InstagramConfigView {
   igAccessToken: string | null;
   appSecret: string | null;
   credentialsUndecryptable: boolean;
+  /** True when a send failed with Graph 190 (token expired/revoked) — drives the
+   *  Settings "reconnect" banner. */
+  needsReconnect: boolean;
   /**
    * Live subscription of the LINKED PAGE to the app. Instagram DMs ride the Page,
    * so an unsubscribed Page means no inbound — same failure mode as Messenger.
@@ -90,7 +93,7 @@ export class InstagramService {
   async getConfig(teamId: string): Promise<InstagramConfigView> {
     const conn = await this.db.channelConnection.findUnique({
       where: { teamId_channel: { teamId, channel: CHANNEL } },
-      select: { config: true, secrets: true },
+      select: { config: true, secrets: true, needsReconnect: true },
     });
     const config = (conn?.config ?? {}) as InstagramChannelConfig;
     const secrets = (conn?.secrets ?? {}) as InstagramChannelSecrets;
@@ -154,6 +157,7 @@ export class InstagramService {
       igAccessToken,
       appSecret,
       credentialsUndecryptable,
+      needsReconnect: conn?.needsReconnect ?? false,
       webhookSubscription,
     };
   }
@@ -287,6 +291,9 @@ export class InstagramService {
         config: newConfig as Prisma.InputJsonValue,
         secrets: newSecrets as Prisma.InputJsonValue,
         isActive: true,
+        // A fresh token clears any prior expired-token (Graph 190) flag.
+        needsReconnect: false,
+        lastAuthErrorAt: null,
       },
     });
 

@@ -13,6 +13,7 @@ import {
   type PageSubscription,
 } from "@/components/settings/page-subscription-warning";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import { toast } from "@/lib/toast";
 
 export interface MessengerCurrent {
@@ -24,6 +25,8 @@ export interface MessengerCurrent {
   pageAccessToken: string | null;
   appSecret: string | null;
   credentialsUndecryptable?: boolean;
+  /** Set when a send failed with Graph 190 — the token expired/was revoked. */
+  needsReconnect?: boolean;
   webhookSubscription?: PageSubscription | null;
 }
 
@@ -39,7 +42,9 @@ export function MessengerSettings({
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(
-    !current.connected || Boolean(current.credentialsUndecryptable),
+    !current.connected ||
+      Boolean(current.credentialsUndecryptable) ||
+      Boolean(current.needsReconnect),
   );
   // Controlled fields — only the Page id + an optional token override; the App
   // secret + verify token come from the shared Meta App connection.
@@ -136,6 +141,20 @@ export function MessengerSettings({
           )}
         </div>
 
+        {current.connected && current.needsReconnect && (
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400">
+            <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+            <div>
+              <p className="font-medium">Access token expired — reconnect to keep sending</p>
+              <p className="mt-0.5 text-amber-700/80 dark:text-amber-400/80">
+                Meta rejected the last send because the Page token was revoked or
+                expired. Inbound messages still arrive, but replies will fail until
+                you re-enter a valid token below.
+              </p>
+            </div>
+          </div>
+        )}
+
         {current.connected && (
           <PageSubscriptionWarning
             subscription={current.webhookSubscription}
@@ -144,7 +163,12 @@ export function MessengerSettings({
         )}
       </div>
 
-      {canManage && current.connected && (
+      {/* Gated on the Messenger calling capability (currently off — the product
+          offers WhatsApp calling only). This mirrors the inbox call button and
+          the backend initiateCall gate, so all three respect the one flag: flip
+          `CHANNEL_CAPABILITIES.messenger.calling` back on to restore the whole
+          calling surface at once. */}
+      {canManage && current.connected && CHANNEL_CAPABILITIES.messenger.calling && (
         <CallingCard pageName={current.pageName} />
       )}
 

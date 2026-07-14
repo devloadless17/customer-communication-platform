@@ -29,6 +29,7 @@ export default async function MessengerSettingsPage() {
       pageAccessToken: config.pageAccessToken,
       appSecret: config.appSecret,
       credentialsUndecryptable: config.credentialsUndecryptable,
+      needsReconnect: config.needsReconnect,
       webhookSubscription: config.webhookSubscription,
     };
   } else {

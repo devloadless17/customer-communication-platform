@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
-import { Loader2, PlugZap, Unplug } from "lucide-react";
+import { Loader2, PlugZap, TriangleAlert, Unplug } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -26,6 +26,8 @@ export interface InstagramCurrent {
   igAccessToken: string | null;
   appSecret: string | null;
   credentialsUndecryptable?: boolean;
+  /** Set when a send failed with Graph 190 — the token expired/was revoked. */
+  needsReconnect?: boolean;
   webhookSubscription?: PageSubscription | null;
 }
 
@@ -41,7 +43,9 @@ export function InstagramSettings({
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(
-    !current.connected || Boolean(current.credentialsUndecryptable),
+    !current.connected ||
+      Boolean(current.credentialsUndecryptable) ||
+      Boolean(current.needsReconnect),
   );
   // Controlled fields — React 19 `<form action>` resets the DOM form after the
   // action. Only the identity + an optional token override; App secret + verify
@@ -139,6 +143,20 @@ export function InstagramSettings({
             </div>
           )}
         </div>
+
+        {current.connected && current.needsReconnect && (
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400">
+            <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+            <div>
+              <p className="font-medium">Access token expired — reconnect to keep sending</p>
+              <p className="mt-0.5 text-amber-700/80 dark:text-amber-400/80">
+                Meta rejected the last send because the token was revoked or expired.
+                Inbound DMs still arrive, but replies will fail until you re-enter a
+                valid token below.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Instagram DMs ride the linked Page, so an unsubscribed Page silences
             IG inbound exactly like Messenger's. Same banner, same remedy. */}

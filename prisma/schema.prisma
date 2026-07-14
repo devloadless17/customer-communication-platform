@@ -487,6 +487,11 @@ model ChannelConnection {
   config    Json         @default("{}")
   secrets   Json         @default("{}")
   isActive  Boolean      @default(true)
+  // Set when a send fails with Graph error 190 (access token expired/revoked) so
+  // Settings can surface a "reconnect" banner and admins are prompted to re-issue
+  // the token — per Meta's access-token best practice. Cleared on reconnect.
+  needsReconnect  Boolean   @default(false)
+  lastAuthErrorAt DateTime?
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
   team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)

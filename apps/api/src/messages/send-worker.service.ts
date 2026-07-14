@@ -13,6 +13,7 @@ import type IORedis from "ioredis";
 
 import { publish } from "@/lib/events/bus";
 import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta";
+import { flagChannelNeedsReconnect, clearChannelNeedsReconnect } from "@/lib/providers/channel-health";
 import { createWorkerConnection } from "@/lib/workflows/queue";
 
 import { MessagesService } from "./messages.service";
@@ -90,7 +91,7 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
     // createWorkerConnection in lib/workflows/queue.ts.
     const connection = createWorkerConnection("send-worker");
     this.connection = connection;
-    this.worker = new Worker<MessageSendJobData>(
+    const worker = new Worker<MessageSendJobData>(
       MESSAGE_SEND_QUEUE_NAME,
       // `job.id` is BullMQ's stable identifier — same value across all 3
       // retry attempts when a worker dies mid-job. Threaded into the
@@ -118,10 +119,11 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
         maxStalledCount: 3,
       },
     );
-    this.worker.on("ready", () => {
+    this.worker = worker;
+    worker.on("ready", () => {
       this.logger.log("message-sends worker ready");
     });
-    this.worker.on("error", (err) => {
+    worker.on("error", (err) => {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(`worker error: ${msg}`);
       // Fatal classes (Redis socket closed, auth) leave the worker wedged with
@@ -131,9 +133,11 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
         msg.includes("Connection is closed") ||
         msg.includes("WRONGPASS") ||
         msg.includes("NOAUTH");
-      if (fatal && !this.shuttingDown) {
+      // Only the currently-registered worker may clear the shared slot — a late
+      // error from a superseded worker must not blank the live replacement.
+      if (fatal && !this.shuttingDown && this.worker === worker) {
         this.logger.warn("message-sends worker unrecoverable; re-spawning");
-        this.worker?.close().catch(() => undefined);
+        worker.close().catch(() => undefined);
         this.connection?.disconnect();
         this.worker = null;
         this.connection = null;
@@ -142,7 +146,7 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
         }, 1_000).unref();
       }
     });
-    this.worker.on("failed", (job, err) => {
+    worker.on("failed", (job, err) => {
       // Fires when a job is moved to the failed state — i.e. retries are
       // exhausted (or it threw UnrecoverableError). This is where the ACTIONABLE
       // "Failed · Retry" bubble is published for a RECOVERABLE error, NOT
@@ -251,10 +255,19 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     try {
       await this.messages.executeTextSendJob(data, jobId);
+      // Send worked → the token is healthy; self-heal a stale reconnect flag
+      // (no-op query when it isn't set). Covers every channel, incl. WhatsApp.
+      void clearChannelNeedsReconnect(data.teamId, data.channel ?? "whatsapp");
     } catch (err) {
       const { reason, detail, recoverable } = categorizeSendError(err);
 
       if (!recoverable) {
+        // Access token expired/revoked (Graph 190) → flag the channel so Settings
+        // surfaces a "reconnect" banner. Meta's best practice: notify admins to
+        // re-issue the token rather than silently retrying a dead credential.
+        if (reason === "auth_expired") {
+          void flagChannelNeedsReconnect(data.teamId, data.channel ?? "whatsapp");
+        }
         // Permanent failure — no retry is coming, so publish the actionable
         // "Failed · Retry" bubble now and stop. (worker.on("failed") skips
         // republishing for UnrecoverableError, so there's no duplicate frame.)

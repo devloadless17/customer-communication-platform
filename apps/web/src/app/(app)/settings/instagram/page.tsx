@@ -28,6 +28,7 @@ export default async function InstagramSettingsPage() {
       igAccessToken: config.igAccessToken,
       appSecret: config.appSecret,
       credentialsUndecryptable: config.credentialsUndecryptable,
+      needsReconnect: config.needsReconnect,
       webhookSubscription: config.webhookSubscription,
     };
   } else {
