@@ -106,7 +106,9 @@ export interface ChannelMediaPolicy {
   documentMime: ReadonlySet<string>;
 }
 
-// WhatsApp/Messenger accept the common web image set; Instagram is png/jpeg only.
+// Messenger accepts the common web image set; Instagram + WhatsApp are png/jpeg
+// only (WhatsApp image messages support ONLY JPEG/PNG per the doc — a webp is
+// routed to the sticker kind, and a gif-as-image would be rejected by Meta).
 const PERMISSIVE_IMAGE_MIME: ReadonlySet<string> = new Set([
   "image/jpeg",
   "image/png",
@@ -114,9 +116,12 @@ const PERMISSIVE_IMAGE_MIME: ReadonlySet<string> = new Set([
   "image/gif",
 ]);
 const INSTAGRAM_IMAGE_MIME: ReadonlySet<string> = new Set(["image/jpeg", "image/png"]);
+const WHATSAPP_IMAGE_MIME: ReadonlySet<string> = new Set(["image/jpeg", "image/png"]);
 
-// Video containers. WhatsApp/Messenger take the common web set; Instagram's
-// documented formats are mp4/ogg/avi/mov/webm (avi = x-msvideo, mov = quicktime).
+// Video containers. Messenger takes the common web set; Instagram's documented
+// formats are mp4/ogg/avi/mov/webm; WhatsApp accepts ONLY mp4 + 3gpp (a common
+// iPhone `.mov`/`video/quicktime` is rejected by Meta, so gate it up front with
+// an actionable error instead of an opaque #100 late in the send).
 const PERMISSIVE_VIDEO_MIME: ReadonlySet<string> = new Set([
   "video/mp4",
   "video/quicktime",
@@ -132,15 +137,16 @@ const INSTAGRAM_VIDEO_MIME: ReadonlySet<string> = new Set([
   "video/quicktime",
   "video/webm",
 ]);
+const WHATSAPP_VIDEO_MIME: ReadonlySet<string> = new Set(["video/mp4", "video/3gpp"]);
 
 // Size caps come from the SHARED `mediaSizeCaps` map so the client composer
 // guard and this server policy can never disagree per channel.
 const WHATSAPP_MEDIA_POLICY: ChannelMediaPolicy = {
   label: "WhatsApp",
   caps: mediaSizeCaps("whatsapp"),
-  imageMime: PERMISSIVE_IMAGE_MIME,
+  imageMime: WHATSAPP_IMAGE_MIME,
   audioMime: WHATSAPP_AUDIO_MIME,
-  videoMime: PERMISSIVE_VIDEO_MIME,
+  videoMime: WHATSAPP_VIDEO_MIME,
   documentMime: META_DOCUMENT_MIME_ALLOWED,
 };
 

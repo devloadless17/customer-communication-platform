@@ -19,6 +19,7 @@ import {
 import type { MessagingProvider } from "@ccp/shared/providers/types";
 import type { Channel } from "@ccp/shared/types";
 import { LIVE_CHANNELS, isPhoneChannel } from "@ccp/shared/providers/capabilities";
+import { flagChannelNeedsReconnect } from "@/lib/providers/channel-health";
 
 /** Resolved send binding for one channel — the provider + its per-team config. */
 type ChannelBinding = { provider: MessagingProvider; config: unknown };
@@ -1808,7 +1809,7 @@ function isPermanentCredentialError(err: unknown): boolean {
  * broadcast (re-resolving the send config) once the credential is fixed.
  */
 async function maybeTripPermanentBreaker(
-  broadcast: { id: string; teamId: string },
+  broadcast: { id: string; teamId: string; channel: Channel },
   err: unknown,
 ): Promise<void> {
   if (!isPermanentCredentialError(err)) {
@@ -1816,6 +1817,12 @@ async function maybeTripPermanentBreaker(
     // accumulating permanent streak — those are isolated, not a dead credential.
     resetPermanentStreak(broadcast.id);
     return;
+  }
+  // Light the Settings "reconnect" banner on the FIRST expired-token hit — a
+  // broadcast bypasses the send-worker's flag, so otherwise a token dying
+  // mid-broadcast pauses the broadcast but leaves the reconnect CTA dark.
+  if (normalizeMetaSendError(err)?.code === "auth_expired") {
+    void flagChannelNeedsReconnect(broadcast.teamId, broadcast.channel);
   }
   const streak = trackPermanentHit(broadcast.id);
   if (streak < PERMANENT_ERROR_PAUSE_THRESHOLD) return;

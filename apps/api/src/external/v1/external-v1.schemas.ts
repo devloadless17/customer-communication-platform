@@ -80,7 +80,7 @@ export const ExternalTopLevelSendMessageSchema = z.object({
       url: z.string().url(),
       mime_type: z.string().min(1).max(120),
       filename: z.string().max(MAX_TEXT).optional(),
-      caption: z.string().max(4096).optional(),
+      caption: z.string().max(1024).optional(), // WhatsApp inline-caption max
     })
     .optional(),
   template: z

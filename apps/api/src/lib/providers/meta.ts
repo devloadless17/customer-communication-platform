@@ -487,6 +487,9 @@ interface MetaMessage {
     message?: string;
     error_data?: { details?: string };
   }>;
+  // `type:"system"` — a customer changed their WhatsApp number. `system.wa_id`
+  // is the NEW number; `messages[].from` is the OLD one.
+  system?: { body?: string; wa_id?: string; type?: string };
 }
 
 const META_MEDIA_TYPES: MediaKind[] = ["image", "video", "audio", "document", "sticker"];
@@ -523,8 +526,12 @@ function placeholderForUnhandledType(m: MetaMessage): string | null {
       if (names.length > 0) return `👤 Contact card: ${names.join(", ")}`;
       return "👤 Contact card shared";
     }
-    case "order":
-      return "🛒 Order shared";
+    case "order": {
+      // Surface the buyer's note attached to the order (doc `order.text`) instead
+      // of dropping it — otherwise the customer's message is invisible in-inbox.
+      const note = m.order?.text?.trim();
+      return note ? `🛒 Order shared — ${note}` : "🛒 Order shared";
+    }
     case "unsupported": {
       // Meta strips the content for unsupported types; the errors array is the
       // only context. Common cause: a template/interactive message received by
@@ -740,7 +747,11 @@ function mapMetaStatus(s: string | undefined): MessageStatus | null {
       return "sent";
     case "delivered":
       return "delivered";
+    // A voice note being PLAYED implies it was read (blue mic) — map both to
+    // "read" so a played-but-not-separately-read voice note still reaches its
+    // final state instead of being dropped.
     case "read":
+    case "played":
       return "read";
     case "failed":
       return "failed";
@@ -1190,8 +1201,13 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           // A wa_id is digits-only by spec; a BSUID is prefixed and dotted
           // ("LB.946402411360800"). Never digit-strip a BSUID — that would mint
           // a bogus phone number and create a contact under a fake identity.
-          const fromIsPhone = rawFrom.length > 0 && !/\D/.test(rawFrom);
-          const phone = fromIsPhone ? rawFrom : undefined;
+          // A phone `from` is all digits; tolerate the doc's leading "+"
+          // (`+16505551234`) by stripping it before the digit test so a plus-
+          // prefixed number isn't misclassified as a BSUID (phone is stored
+          // digits-only elsewhere anyway).
+          const phoneDigits = rawFrom.replace(/^\+/, "");
+          const fromIsPhone = phoneDigits.length > 0 && !/\D/.test(phoneDigits);
+          const phone = fromIsPhone ? phoneDigits : undefined;
           const contact = contactByKey.get(rawFrom);
           // BSUID + @username come off `contacts[]`; fall back to `from` when it
           // IS the BSUID (Meta omitted the phone for a cold contact).
@@ -1215,6 +1231,23 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
           const tsSecs = m.timestamp ? Number(m.timestamp) : NaN;
           const ts = Number.isFinite(tsSecs) ? new Date(tsSecs * 1000) : new Date();
+
+          // Customer changed their WhatsApp number (`type:"system"`). Migrate the
+          // existing contact to the NEW number (`system.wa_id`) so their thread
+          // CONTINUES instead of forking into a second contact/conversation when
+          // they next message. `from` (= `phone` here) is the OLD number.
+          if (m.type === "system" && m.system?.type === "user_changed_number") {
+            const newPhone = m.system.wa_id?.replace(/^\+/, "").trim();
+            if (phone && newPhone && /^\d+$/.test(newPhone) && newPhone !== phone) {
+              events.push({
+                kind: "contact_number_change",
+                oldPhone: phone,
+                newPhone,
+                rawPayload: payload as Record<string, unknown>,
+              });
+            }
+            continue;
+          }
 
           // Customer EDITED or UNSENT (revoked) a prior message — a correction,
           // not a new message. Match is EXACT (`original_message_id` = the target
@@ -2758,7 +2791,11 @@ function normalizeMetaTemplate(row: MetaTemplateRow): ProviderTemplate | null {
 
 function mapTemplateStatus(s: string | undefined): TemplateStatus | null {
   switch ((s ?? "").toUpperCase()) {
+    // REINSTATED = Meta re-enabled a previously disabled/paused/flagged template;
+    // it "can be sent again" (doc). Without it the row stays locally un-sendable
+    // and broadcasts keep skipping it until a manual Sync.
     case "APPROVED":
+    case "REINSTATED":
       return "approved";
     case "PENDING":
     case "IN_APPEAL":
@@ -2766,10 +2803,15 @@ function mapTemplateStatus(s: string | undefined): TemplateStatus | null {
       return "pending";
     case "REJECTED":
       return "rejected";
+    // A FLAGGED template can't be sent — treat like paused so it's not offered.
     case "PAUSED":
+    case "FLAGGED":
       return "paused";
+    // ARCHIVED templates are scheduled for deletion and can't be sent — mark them
+    // non-sendable rather than leaving a stale "approved".
     case "DISABLED":
     case "DELETED":
+    case "ARCHIVED":
       return "disabled";
     default:
       return null;

@@ -163,9 +163,12 @@ export type SendInteractiveInput = z.infer<typeof SendInteractiveSchema>;
  */
 export const SendMediaFormSchema = z.object({
   conversationId: z.string().min(1),
+  // WhatsApp caps an inline media caption at 1024 chars (image/video/document);
+  // a longer one is rejected by Meta with an opaque error. Social channels don't
+  // inline captions at all, so 1024 is the safe ceiling for every channel.
   caption: z
     .string()
-    .max(2000)
+    .max(1024)
     .optional()
     .transform((v) => (v ?? "").trim()),
   clientTempId: z.string().min(1).optional(),

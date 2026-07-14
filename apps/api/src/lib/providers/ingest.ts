@@ -35,6 +35,7 @@ import { findAndConsumeAwaitingReplies } from "@/lib/workflows/resume-on-inbound
 import { sessionKindFromFlags } from "@ccp/shared/events/types";
 import type {
   NormalizedContactSync,
+  NormalizedContactNumberChange,
   NormalizedEvent,
   NormalizedInboundMessage,
   NormalizedMessageCorrection,
@@ -143,6 +144,8 @@ export async function ingestEvents(
         await ingestReadWatermark(teamId, channel, evt);
       } else if (evt.kind === "delivered_watermark") {
         await ingestDeliveredWatermark(teamId, channel, evt);
+      } else if (evt.kind === "contact_number_change") {
+        await ingestContactNumberChange(teamId, channel, evt);
       } else if (evt.kind === "template_status") {
         await ingestTemplateStatusUpdate(teamId, evt);
       } else if (evt.kind === "call") {
@@ -2167,6 +2170,74 @@ async function ingestContactSync(
   } catch (err) {
     console.error(
       `[ingest] publish(contact.updated) failed for state_sync team=${teamId} contact=${contact.id}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
+ * Migrate a WhatsApp contact to a NEW phone number after the customer changed it
+ * (`system.type:"user_changed_number"`). Re-points the existing contact so their
+ * thread continues instead of forking. If a contact already exists under the new
+ * number, leaves both for a manual merge rather than violating the phone unique
+ * key. Best-effort — a system webhook must never throw into the ingest pipeline.
+ */
+async function ingestContactNumberChange(
+  teamId: string,
+  channel: Channel,
+  evt: NormalizedContactNumberChange,
+): Promise<void> {
+  const oldContact = await db.contact.findFirst({
+    where: { teamId, identityChannel: channel, phoneNumber: evt.oldPhone, deletedAt: null },
+    select: { id: true },
+  });
+  if (!oldContact) return;
+  const existingNew = await db.contact.findFirst({
+    where: { teamId, identityChannel: channel, phoneNumber: evt.newPhone, deletedAt: null },
+    select: { id: true },
+  });
+  if (existingNew) {
+    console.warn(
+      JSON.stringify({
+        event: "whatsapp.number_change_conflict",
+        severity: "warning",
+        teamId,
+        oldContactId: oldContact.id,
+        newContactId: existingNew.id,
+        note: "a contact already exists under the new number — left for a manual merge",
+      }),
+    );
+    return;
+  }
+  const updated = await db.contact
+    .update({
+      where: { id: oldContact.id },
+      data: { phoneNumber: evt.newPhone },
+      include: { tags: { select: { id: true } } },
+    })
+    .catch((err) => {
+      console.error(
+        `[ingest] number-change update failed team=${teamId} contact=${oldContact.id}:`,
+        err instanceof Error ? err.message : err,
+      );
+      return null;
+    });
+  if (!updated) return;
+  try {
+    await publish({
+      type: "contact.updated",
+      teamId,
+      contact: toContactWire(updated),
+      previousStageId: updated.stageId,
+      fieldChanges: [],
+      changedByUserId: null,
+      workflowContact: toWorkflowContact(updated),
+      // Local identity migration, not a business event partners subscribe to.
+      silent: true,
+    });
+  } catch (err) {
+    console.error(
+      `[ingest] publish(contact.updated) failed for number_change team=${teamId} contact=${oldContact.id}:`,
       err instanceof Error ? err.message : err,
     );
   }

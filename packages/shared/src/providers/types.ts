@@ -470,8 +470,25 @@ export interface NormalizedMessageFeedback {
   rawPayload: Record<string, unknown>;
 }
 
+/**
+ * A customer changed their WhatsApp phone number. WhatsApp sends a `system`
+ * message (`system.type:"user_changed_number"`) whose `system.wa_id` is the NEW
+ * number and whose `messages[].from` is the OLD one. Ingest re-points the
+ * existing contact to the new number so the person's thread CONTINUES instead of
+ * fragmenting into a second contact + conversation when they next message.
+ */
+export interface NormalizedContactNumberChange {
+  kind: "contact_number_change";
+  /** OLD phone (digits) — the contact to migrate. */
+  oldPhone: string;
+  /** NEW WhatsApp id / phone (digits) the customer moved to. */
+  newPhone: string;
+  rawPayload: Record<string, unknown>;
+}
+
 export type NormalizedEvent =
   | NormalizedInboundMessage
+  | NormalizedContactNumberChange
   | NormalizedStatusUpdate
   | NormalizedReadWatermark
   | NormalizedDeliveredWatermark
