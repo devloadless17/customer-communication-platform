@@ -2306,6 +2306,10 @@ export async function enrichSocialContactNames(
         ) {
           data.socialProfile = merged as Prisma.InputJsonValue;
         }
+        // NOTE: `locale` is surfaced in the UI under the grouped "Messenger" row
+        // (contact-panel derives the language name from `socialProfile.locale`),
+        // NOT copied onto the editable `Contact.language` builtin — keeping it in
+        // one place avoids showing the same value in two fields.
       }
       if (Object.keys(data).length === 0) return; // nothing new to persist
 

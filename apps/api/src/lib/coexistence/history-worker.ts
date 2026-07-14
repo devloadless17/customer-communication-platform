@@ -135,7 +135,9 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
       msg.includes("Connection is closed") ||
       msg.includes("WRONGPASS") ||
       msg.includes("NOAUTH");
-    if (fatal && !state.shuttingDown) {
+    // Only the currently-registered worker may clear the shared slot — a late
+    // error from a superseded worker must not blank the live replacement.
+    if (fatal && !state.shuttingDown && state.worker === worker) {
       console.warn("[coexistence-history] worker unrecoverable; re-spawning");
       worker.close().catch(() => undefined);
       connection.disconnect();

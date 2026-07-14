@@ -263,7 +263,12 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
       msg.includes("Connection is closed") ||
       msg.includes("WRONGPASS") ||
       msg.includes("NOAUTH");
-    if (fatal && !state.shuttingDown) {
+    // Only the currently-registered worker may tear down the shared slot. A
+    // superseded worker (already respawned) can emit a late fatal error while
+    // its close() settles — without this guard that stale error would blank the
+    // reference to the LIVE replacement worker, orphaning it (+ its ioredis
+    // blocking connection) to run unreferenced and never drain on shutdown.
+    if (fatal && !state.shuttingDown && state.worker === worker) {
       console.warn(
         "[workflows] worker entered unrecoverable state; re-spawning",
       );

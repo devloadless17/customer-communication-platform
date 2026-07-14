@@ -621,6 +621,24 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       );
       return;
     }
+    // A NAMED-format HEADER ({{customer_name}}) also can't be filled from a
+    // broadcast (the composer binds only a positional header) and needs a
+    // parameter_name on the wire — so it too would 132000 every recipient.
+    // Backstop the create-time guard here for the same reason as the body check.
+    const headerText = (Array.isArray(template.components) ? template.components : [])
+      .map((c) =>
+        c && typeof c === "object"
+          ? (c as { type?: string; format?: string; text?: string })
+          : null,
+      )
+      .find((c) => c?.type === "HEADER" && c?.format === "TEXT")?.text;
+    if (headerText && templateNamedPlaceholders(headerText).length > 0) {
+      await fail(
+        broadcast.id,
+        `Template's header uses a named variable, which broadcasts can't fill. Use a template with numbered {{1}} placeholders.`,
+      );
+      return;
+    }
     const bodyVarCount = countTemplatePlaceholders(templateBody);
     if (variables.body.length !== bodyVarCount) {
       await fail(

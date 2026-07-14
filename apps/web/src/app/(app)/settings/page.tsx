@@ -5,7 +5,7 @@ import {
   Bell,
   Layers,
   ListChecks,
-  MessageSquare,
+  MessagesSquare,
   Plug,
   ShieldCheck,
   Sparkles,
@@ -96,11 +96,11 @@ export default async function SettingsIndex() {
             label: "Channels & integrations",
             cards: [
               {
-                href: "/settings/whatsapp",
-                icon: MessageSquare,
-                title: "WhatsApp",
+                href: "/settings/channels",
+                icon: MessagesSquare,
+                title: "Channels",
                 description:
-                  "Meta Cloud API credentials, phone number, and template catalog.",
+                  "Connect WhatsApp, Messenger, and Instagram so every conversation lands in one shared inbox.",
               },
               {
                 href: "/settings/integrations",

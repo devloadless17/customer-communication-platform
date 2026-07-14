@@ -4,7 +4,7 @@ import { memo, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { useNow } from "@/hooks/use-now";
-import { AtSign, BadgeCheck, ChevronLeft, Mail, Paperclip, Phone, MapPin, Clock, FileText, Heart, Loader2, PanelRightClose, RefreshCw, Sparkles, User as UserIcon, Globe, Flag, Users } from "lucide-react";
+import { AtSign, BadgeCheck, ChevronLeft, Mail, Paperclip, Phone, MapPin, Clock, FileText, Heart, Loader2, MessageSquare, PanelRightClose, RefreshCw, Sparkles, User as UserIcon, Globe, Flag, Users } from "lucide-react";
 
 import {
   AddFieldRow,
@@ -102,6 +102,55 @@ function SocialSignals({ profile }: { profile: SocialProfile }) {
         <span className="inline-flex items-center gap-0.5 text-muted-foreground">
           <Heart className="size-3.5 fill-current" />
           You follow them
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** True when a social profile carries at least one Messenger-provided signal. */
+function hasMessengerSignals(p: SocialProfile): boolean {
+  return (
+    (typeof p.gender === "string" && p.gender.trim() !== "") ||
+    (typeof p.locale === "string" && p.locale.trim() !== "") ||
+    typeof p.timezone === "number"
+  );
+}
+
+/** Meta locale (`en_US`) → readable language name ("English"); raw locale on
+ *  fallback. Mirrors the server-side helper in providers/ingest.ts. */
+function languageNameFromLocale(locale: string): string {
+  const lang = locale.split(/[_-]/)[0]?.trim().toLowerCase();
+  if (!lang) return locale;
+  try {
+    return new Intl.DisplayNames(["en"], { type: "language" }).of(lang) ?? locale;
+  } catch {
+    return locale;
+  }
+}
+
+/** Stacked list of Messenger profile details (gender · language · local time),
+ *  rendered as the value of the single "Messenger" ReadOnlyRow — the Messenger
+ *  analogue of {@link SocialSignals} for Instagram. */
+function MessengerSignals({ profile }: { profile: SocialProfile }) {
+  return (
+    <span className="flex flex-col gap-y-0.5">
+      {profile.gender && (
+        <span className="inline-flex items-center gap-1 text-muted-foreground">
+          <UserIcon className="size-3.5" />
+          {profile.gender.charAt(0).toUpperCase() + profile.gender.slice(1)}
+        </span>
+      )}
+      {profile.locale && (
+        <span className="inline-flex items-center gap-1 text-muted-foreground">
+          <Globe className="size-3.5" />
+          {languageNameFromLocale(profile.locale)}
+        </span>
+      )}
+      {typeof profile.timezone === "number" && (
+        <span className="inline-flex items-center gap-1 text-muted-foreground">
+          <Clock className="size-3.5" />
+          <ContactLocalTime offsetHours={profile.timezone} />
         </span>
       )}
     </span>
@@ -1188,26 +1237,17 @@ function ContactPanelImpl({
               value={<SocialSignals profile={contact.socialProfile} />}
             />
           )}
-          {/* Customer's local time — Meta's `timezone` (Messenger, once the
-              `pages_user_timezone` App Review clears). Data-gated (not channel-
-              gated): shows whenever a numeric offset is present, absent otherwise. */}
-          {typeof contact.socialProfile?.timezone === "number" && (
+          {/* Messenger profile details grouped under ONE "Messenger" row —
+              gender · language (from `locale`) · local time (from `timezone`) —
+              the Messenger analogue of the "Instagram" row above. Each field is
+              behind a `pages_user_*` App Review perm, so the row shows only the
+              signals Meta actually returned, and hides entirely when there are
+              none. */}
+          {contact.socialProfile && hasMessengerSignals(contact.socialProfile) && (
             <ReadOnlyRow
-              icon={Clock}
-              label="Local time"
-              value={<ContactLocalTime offsetHours={contact.socialProfile.timezone} />}
-            />
-          )}
-          {/* Meta-reported gender (Messenger, once `pages_user_gender` App Review
-              clears). Data-gated; capitalized for display ("male" → "Male"). */}
-          {contact.socialProfile?.gender && (
-            <ReadOnlyRow
-              icon={UserIcon}
-              label="Gender"
-              value={
-                contact.socialProfile.gender.charAt(0).toUpperCase() +
-                contact.socialProfile.gender.slice(1)
-              }
+              icon={MessageSquare}
+              label="Messenger"
+              value={<MessengerSignals profile={contact.socialProfile} />}
             />
           )}
           {builtins.firstName && (

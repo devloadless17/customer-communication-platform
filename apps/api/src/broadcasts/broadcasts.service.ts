@@ -32,6 +32,7 @@ import {
 } from "@ccp/shared/template-render";
 import type { Channel } from "@ccp/shared/types";
 import { CHANNEL_CAPABILITIES, LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
+import { checkTextCap } from "../lib/messaging/text-cap";
 import { resolveAudienceGroupMembers } from "@/lib/queries";
 import {
   parseVariableBindings,
@@ -366,6 +367,22 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         ? (template.components as unknown as TemplateComponent[])
         : [];
       const headerComp = components.find((c) => c.type === "HEADER");
+      // A NAMED-format header ({{customer_name}}) needs a `parameter_name` on the
+      // wire (see send-template-internal's headerNamed path). The composer binds
+      // only a positional header value, so a broadcast can't supply it — without
+      // this guard a NAMED-header template with a static body slips past the
+      // body/count checks above and 132000s EVERY recipient at Meta. Reject up
+      // front, mirroring the named-body-var rejection.
+      if (
+        headerComp?.format === "TEXT" &&
+        headerComp.text &&
+        templateNamedPlaceholders(headerComp.text).length > 0
+      ) {
+        throw new BadRequestException({
+          error: "template uses named variables",
+          detail: `This template's header uses a named variable. Broadcasts support numbered {{1}} placeholders only.`,
+        });
+      }
       const headerVarCount =
         headerComp?.format === "TEXT" && headerComp.text
           ? countTemplatePlaceholders(headerComp.text)
@@ -403,26 +420,28 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Freeform body length gate — the composer's 2000-char Textarea/schema bound
-    // is the WhatsApp/Messenger limit, but Instagram's is 1000
-    // (CHANNEL_CAPABILITIES.instagram.messageTextMaxChars). Without this an
-    // Instagram freeform broadcast with a 1001–2000 char body sails through
-    // create and then fails EVERY recipient at Meta. Fail fast here, same as the
-    // four other send paths use `checkTextCap`. For a fixed freeform channel we
-    // cap against that channel; customer-mode resolves a channel per recipient,
-    // so we cap against the SMALLEST live-channel limit — the only bound that
-    // guarantees no recipient fails on length.
+    // is the WhatsApp/Messenger limit, but Instagram's is 1000 UTF-8 BYTES
+    // (CHANNEL_CAPABILITIES.instagram: messageTextMaxChars=1000 + textLimitIsBytes).
+    // Without this an Instagram freeform broadcast with an over-limit body sails
+    // through create and then fails EVERY recipient at Meta. Reuse the shared,
+    // byte-aware `checkTextCap` the four other send paths use so a multibyte
+    // (Arabic/emoji) body is measured in the SAME unit Meta enforces — a bare
+    // `.length` char count silently under-counts Instagram's byte cap. For a
+    // fixed freeform channel we cap against that channel; customer-mode resolves
+    // a channel per recipient, so we check EVERY live channel and raise on the
+    // first (strictest, byte-aware) bound any recipient could hit.
     if (effectiveKind === "freeform" && input.bodyText) {
       const capChannels = freeformChannel ? [freeformChannel] : [...LIVE_CHANNELS];
-      const smallestCap = Math.min(
-        ...capChannels.map((c) => CHANNEL_CAPABILITIES[c].messageTextMaxChars),
-      );
-      if (input.bodyText.length > smallestCap) {
-        throw new BadRequestException({
-          error: "message_too_long",
-          detail: freeformChannel
-            ? `Message is ${input.bodyText.length} characters — ${freeformChannel} allows at most ${smallestCap}.`
-            : `Message is ${input.bodyText.length} characters — must be at most ${smallestCap} to reach every channel.`,
-        });
+      for (const c of capChannels) {
+        const over = checkTextCap(input.bodyText, CHANNEL_CAPABILITIES[c], c);
+        if (over) {
+          throw new BadRequestException({
+            error: "message_too_long",
+            detail: freeformChannel
+              ? over.detail
+              : `${over.detail} (must fit every channel to reach all recipients).`,
+          });
+        }
       }
     }
 

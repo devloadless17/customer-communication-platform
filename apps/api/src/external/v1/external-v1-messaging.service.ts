@@ -333,18 +333,24 @@ export class ExternalV1MessagingService {
     apiKeyId: string,
     conversationId: string,
   ): Promise<void> {
-    const current = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
-      select: { status: true },
-    });
-    if (current?.status !== "closed") return;
-    await this.setStatus(teamId, apiKeyId, conversationId, { status: "pending" }).catch((err) => {
+    // Fully best-effort: this runs AFTER the send is committed + the idempotency
+    // claim completed, so neither the status READ nor the setStatus mutation may
+    // throw out of the caller — a transient DB blip here must never turn a
+    // successful, billed send into a failure response. Swallow everything.
+    try {
+      const current = await this.db.conversation.findFirst({
+        where: { id: conversationId, teamId },
+        select: { status: true },
+      });
+      if (current?.status !== "closed") return;
+      await this.setStatus(teamId, apiKeyId, conversationId, { status: "pending" });
+    } catch (err) {
       this.logger.warn(
         `reopen after top-level send failed for conversation ${conversationId}: ${
           err instanceof Error ? err.message : err
         }`,
       );
-    });
+    }
   }
 
   private async setStatusInternal(
@@ -1559,7 +1565,18 @@ export class ExternalV1MessagingService {
         messageId: result.messageId,
         externalId: result.externalId,
       };
+      // COMPLETE the idempotency claim FIRST — the send already reached Meta and
+      // billed, so the success must be durably recorded before any best-effort
+      // follow-up. The text + template paths order it exactly this way. Doing the
+      // reopen before completing would let a transient DB error in the reopen
+      // read fall into the catch below and return a false 502 with the claim
+      // stuck pending (success unrecoverable, retries double-bill).
       await this.completeIdempotency(teamId, apiKeyId, idempotencyKey, payload);
+      // A closed thread that receives an interactive send should reopen to
+      // pending, like the /v1 text send (reopenIfClosed) and the composer's
+      // interactive path (autoAssignOnAgentSend). Best-effort AND past the
+      // completed claim, so a reopen hiccup can neither re-send nor strand it.
+      await this.reopenIfStillClosed(teamId, apiKeyId, conversationId);
       return payload;
     } catch (err) {
       // OUTBOUND-1: release the claim ONLY when the send PROVABLY never reached

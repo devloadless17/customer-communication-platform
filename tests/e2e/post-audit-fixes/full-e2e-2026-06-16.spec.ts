@@ -138,7 +138,10 @@ test("inbox: thread renders all message types + reaction + voice + reply + note 
   // of the "thanks!" message (which replies to it), so >1 match is correct.
   await expect(thread.getByText("hello, I need help with my order").first()).toBeVisible();
   await expect(thread.getByText("Hi! Happy to help", { exact: false }).first()).toBeVisible();
-  await expect(thread.locator('[aria-label="Customer reacted 👍"]')).toBeVisible();
+  // Reaction badge aria-label is `<who> reacted 👍`; the emoji-forward badge
+  // refactor made `who` the contact's name (was the literal "Customer"), so
+  // match by the stable suffix instead of the drifted prefix.
+  await expect(thread.locator('[aria-label$="reacted 👍"]').first()).toBeVisible();
   // voice-note affordance
   expect(
     (await thread.getByRole("button", { name: /voice message/i }).count()) +

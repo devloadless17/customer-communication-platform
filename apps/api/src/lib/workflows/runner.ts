@@ -263,7 +263,19 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
 
   await db.workflowRun.update({
     where: { id: run.id },
-    data: { status: "running", attempts: input.attempt },
+    data: {
+      status: "running",
+      attempts: input.attempt,
+      // Pin the entry step for a genuinely-fresh run (currentStepId still null
+      // from createAndEnqueue). Without this, a crash while executing the FIRST
+      // step (a common shape: "message received → send greeting") reloads with
+      // currentStepId=null AND a non-empty stepLog, so the corruption guard
+      // below misfires and marks the run failed — defeating the orphan
+      // skip-after-crash / ask_question re-arm recovery for first-step nodes.
+      // A resumed run already has a non-null currentStepId, so this is a no-op
+      // rewrite of the same value for it.
+      currentStepId: run.currentStepId ?? graph.startNodeId,
+    },
   });
 
   const envelope = buildEnvelope(wf.teamId, run.trigger, run.eventPayload);

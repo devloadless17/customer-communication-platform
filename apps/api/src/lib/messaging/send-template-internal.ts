@@ -193,17 +193,38 @@ export async function sendTemplateInternal(
     ? (template.components as unknown as TemplateComponent[])
     : [];
   const headerComp = components.find((c) => c.type === "HEADER");
+  // A TEXT header carries one send-time value in EITHER format: positional
+  // `{{1}}` (countTemplatePlaceholders) or NAMED `{{customer_name}}`
+  // (templateNamedPlaceholders — WhatsApp allows a single header variable).
   const headerVarCount =
     headerComp?.format === "TEXT" && headerComp.text
       ? countTemplatePlaceholders(headerComp.text)
       : 0;
-  if (headerVarCount > 0 && (!args.variables.header || args.variables.header.length === 0)) {
+  const namedHeaderVars =
+    headerComp?.format === "TEXT" && headerComp.text
+      ? templateNamedPlaceholders(headerComp.text)
+      : [];
+  // Require the value for BOTH formats. Without the named check a NAMED header
+  // slipped past this guard (count sees only `{{n}}`) AND then shipped to Meta
+  // with no `parameter_name` → opaque 132000, undeliverable.
+  if (
+    (headerVarCount > 0 || namedHeaderVars.length > 0) &&
+    (!args.variables.header || args.variables.header.length === 0)
+  ) {
     throw new SendTemplateValidationError(
       "header_var_required",
       "header variable required",
       "This template's header has a placeholder — fill it in.",
     );
   }
+  // NAMED header: pair the value the caller supplied (`header`) with the
+  // placeholder name from the template definition so the provider can emit the
+  // `parameter_name` Meta demands. The caller never has to know the name.
+  const namedHeaderName = namedHeaderVars[0];
+  const headerNamed =
+    namedHeaderName && args.variables.header
+      ? { name: namedHeaderName, text: args.variables.header }
+      : undefined;
 
   // Media-header templates (IMAGE/VIDEO/DOCUMENT) need the actual media for
   // this send, supplied as a public link. Without it Meta rejects the send,
@@ -317,7 +338,11 @@ export async function sendTemplateInternal(
       variables: {
         body: args.variables.body,
         ...(args.variables.bodyNamed ? { bodyNamed: args.variables.bodyNamed } : {}),
-        ...(args.variables.header ? { header: args.variables.header } : {}),
+        ...(headerNamed
+          ? { headerNamed }
+          : args.variables.header
+            ? { header: args.variables.header }
+            : {}),
         ...(headerMedia ? { headerMedia } : {}),
         ...(args.variables.buttons ? { buttons: args.variables.buttons } : {}),
       },
@@ -360,7 +385,11 @@ export async function sendTemplateInternal(
       variables: {
         body: args.variables.body,
         ...(args.variables.bodyNamed ? { bodyNamed: args.variables.bodyNamed } : {}),
-        ...(args.variables.header ? { header: args.variables.header } : {}),
+        ...(headerNamed
+          ? { headerNamed }
+          : args.variables.header
+            ? { header: args.variables.header }
+            : {}),
         ...(headerMedia ? { headerMedia } : {}),
         ...(args.variables.buttons ? { buttons: args.variables.buttons } : {}),
       },

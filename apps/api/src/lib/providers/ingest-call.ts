@@ -144,8 +144,13 @@ export async function ingestCallEvent(
       } | null = null;
       if (isPhone) {
         if (evt.contactPhone) {
+          // Channel-scoped like message ingest: contact-share can stamp this
+          // phone onto a social contact (the (teamId, phoneNumber) partial
+          // unique is whatsapp-only), so an unscoped lookup could attach an
+          // inbound WhatsApp call to a messenger/instagram contact sharing the
+          // number. Cross-channel identity is a Customer concern, not a fold.
           existingContact = await tx.contact.findFirst({
-            where: { teamId, phoneNumber: evt.contactPhone },
+            where: { teamId, identityChannel: channel, phoneNumber: evt.contactPhone },
             select: contactIdentitySelect,
           });
         }

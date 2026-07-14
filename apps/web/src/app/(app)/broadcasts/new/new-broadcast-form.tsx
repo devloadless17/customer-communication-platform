@@ -417,12 +417,25 @@ export function NewBroadcastForm({
   // a channel per recipient, so it caps against the SMALLEST live-channel limit —
   // the only bound guaranteeing no recipient fails on length. Static 2000 let a
   // 1001–2000 char Instagram/customer body pass the composer and 400 at create.
-  const freeformMaxChars =
-    messageKind === "customer"
-      ? Math.min(
-          ...[...LIVE_CHANNELS].map((c) => CHANNEL_CAPABILITIES[c].messageTextMaxChars),
-        )
-      : CHANNEL_CAPABILITIES[freeformChannel].messageTextMaxChars;
+  const freeformCapChannels =
+    messageKind === "customer" ? [...LIVE_CHANNELS] : [freeformChannel];
+  const freeformMaxChars = Math.min(
+    ...freeformCapChannels.map((c) => CHANNEL_CAPABILITIES[c].messageTextMaxChars),
+  );
+  // Instagram's cap is UTF-8 BYTES, not chars (textLimitIsBytes) — match the
+  // server's byte-aware checkTextCap so a multibyte body can't pass the composer
+  // and 400 at create. If any candidate channel counts bytes, measure bytes.
+  const freeformByteMode = freeformCapChannels.some(
+    (c) => CHANNEL_CAPABILITIES[c].textLimitIsBytes === true,
+  );
+  // Measure the TRIMMED body — create sends freeformBody.trim() and the server
+  // measures that, so counting the raw value would wrongly block a valid body
+  // padded with whitespace.
+  const freeformTrimmed = freeformBody.trim();
+  const freeformTextSize = freeformByteMode
+    ? new TextEncoder().encode(freeformTrimmed).length
+    : freeformTrimmed.length;
+  const freeformOverCap = freeformTextSize > freeformMaxChars;
 
   const scopedGroup =
     audience.mode === "group"
@@ -519,7 +532,7 @@ export function NewBroadcastForm({
     // otherwise it sends with a stale/empty link the moment a prior upload
     // populated `headerMedia` but the current pick hasn't finished.
     !headerMediaUploading;
-  const freeformDone = freeformBody.trim().length > 0;
+  const freeformDone = freeformBody.trim().length > 0 && !freeformOverCap;
   const readyToSend =
     audienceDone &&
     (messageKind === "template" ? templateDone && variablesDone : freeformDone);
@@ -880,13 +893,19 @@ export function NewBroadcastForm({
               onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setFreeformBody(e.target.value)}
               placeholder="Type your message… (sent only to contacts inside their window)"
               rows={4}
-              maxLength={freeformMaxChars}
+              // A char maxLength can't express Instagram's byte cap, so in byte
+              // mode we drop the hard limit and let the byte counter + the
+              // freeformDone gate govern (mirrors the reply-box composer).
+              maxLength={freeformByteMode ? undefined : freeformMaxChars}
             />
             <p className="text-2xs text-muted-foreground">
               {messageKind === "customer"
                 ? "Each person is reached ONCE on their best live channel (WhatsApp, Messenger, or Instagram). People with no open messaging window are skipped."
                 : "Free-form messages reach only contacts within their messaging window; others are skipped."}{" "}
-              {freeformBody.length}/{freeformMaxChars}
+              <span className={cn(freeformOverCap && "text-destructive")}>
+                {freeformTextSize}/{freeformMaxChars}
+                {freeformByteMode ? " bytes" : ""}
+              </span>
             </p>
           </div>
         </StepCard>

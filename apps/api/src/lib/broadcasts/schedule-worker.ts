@@ -83,7 +83,7 @@ export function startBroadcastScheduleWorker(): void {
   state.shuttingDown = false;
   const connection = createBroadcastScheduleWorkerConnection();
   state.connection = connection;
-  state.worker = new Worker<BroadcastScheduleJobData>(
+  const worker = new Worker<BroadcastScheduleJobData>(
     BROADCAST_SCHEDULE_QUEUE_NAME,
     async (job: Job<BroadcastScheduleJobData>) => {
       await fireScheduled(job.data.broadcastId);
@@ -114,7 +114,8 @@ export function startBroadcastScheduleWorker(): void {
       maxStalledCount: 3,
     },
   );
-  state.worker.on("failed", (job, err) => {
+  state.worker = worker;
+  worker.on("failed", (job, err) => {
     console.error(
       `[broadcast-schedule] job ${job?.id} (broadcast ${job?.data.broadcastId}) failed`,
       err,
@@ -124,7 +125,7 @@ export function startBroadcastScheduleWorker(): void {
     }
   });
 
-  state.worker.on("error", (err) => {
+  worker.on("error", (err) => {
     console.error("[broadcast-schedule] worker error", err);
     // Fatal error classes (an ECONNRESET BullMQ can't recover from, a Redis
     // auth failure) can wedge the worker: jobs stop processing but state.worker
@@ -141,12 +142,14 @@ export function startBroadcastScheduleWorker(): void {
       msg.includes("Connection is closed") ||
       msg.includes("WRONGPASS") ||
       msg.includes("NOAUTH");
-    if (fatal && !state.shuttingDown) {
+    // Only the currently-registered worker may clear the shared slot — a late
+    // error from a superseded worker must not blank the live replacement.
+    if (fatal && !state.shuttingDown && state.worker === worker) {
       console.warn(
         "[broadcast-schedule] worker entered unrecoverable state; re-spawning",
       );
       // Best-effort close; ignore errors since the connection is already broken.
-      state.worker?.close().catch(() => undefined);
+      worker.close().catch(() => undefined);
       connection.disconnect();
       state.worker = undefined;
       state.connection = undefined;

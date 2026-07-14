@@ -789,6 +789,12 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
  * then falls back to the team's primary connection).
  */
 function deriveEventChannel(event: Record<string, unknown>): ChannelMedium | null {
+  // Top-level `channel` — carried by message.status_changed (which has no
+  // `message`/`conversation` snapshot to read it from), so a delivery/read
+  // receipt attributes to the right channel instead of the primary-connection
+  // fallback.
+  const topLevel = event.channel as ChannelMedium | undefined;
+  if (topLevel) return topLevel;
   const message = event.message as { channel?: ChannelMedium } | undefined;
   if (message?.channel) return message.channel;
   const workflowMessage = event.workflowMessage as { channel?: ChannelMedium } | undefined;
