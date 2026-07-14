@@ -17,6 +17,7 @@ import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Message } from "@ccp/shared/types";
 import {
   computeWindowStatus,
+  closedWindowMessage,
   effectiveSendWindowMs,
   outsideFreeFormWindow,
 } from "@ccp/shared/utils/window";
@@ -159,7 +160,7 @@ export async function sendTextInternal(
       throw new SendTextValidationError(
         "outside_24h_window",
         "outside_24h_window",
-        "24h customer-service window closed — use a template step instead.",
+        closedWindowMessage(binding.provider.capabilities),
       );
     }
   }

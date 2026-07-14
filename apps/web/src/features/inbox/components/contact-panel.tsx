@@ -61,7 +61,8 @@ function hasSocialSignals(p: SocialProfile): boolean {
   return (
     p.isVerified === true ||
     typeof p.followerCount === "number" ||
-    p.followsBusiness === true
+    p.followsBusiness === true ||
+    p.businessFollows === true
   );
 }
 
@@ -93,6 +94,12 @@ function SocialSignals({ profile }: { profile: SocialProfile }) {
         <span className="inline-flex items-center gap-0.5 text-muted-foreground">
           <Heart className="size-3.5" />
           Follows you
+        </span>
+      )}
+      {profile.businessFollows && (
+        <span className="inline-flex items-center gap-0.5 text-muted-foreground">
+          <Heart className="size-3.5 fill-current" />
+          You follow them
         </span>
       )}
     </span>

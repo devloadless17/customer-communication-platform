@@ -148,6 +148,11 @@ interface MessagingEvent {
     // (no mid). We surface the latter as a story-reply card so the agent sees the
     // context, not a bare text bubble.
     reply_to?: { mid?: string; story?: { url?: string; id?: string } };
+    // Instagram nests ad/deep-link attribution INSIDE the first message
+    // (`message.referral`) — a Click-to-Instagram-Direct ad or an Instagram-Shop
+    // product referral — whereas Messenger delivers it as a sibling `referral`
+    // messaging event. Read both so IG's "from your ad" attribution isn't lost.
+    referral?: SocialReferral;
   };
   // The customer EDITED a message (`message_edits` field). MESSENGER ONLY —
   // Instagram ships no edit webhook, so an IG message's text is immutable once
@@ -673,9 +678,12 @@ export function parseSocialMessaging(
                 },
               }
             : {}),
-          // Click-to-Messenger ad / m.me-ref attribution → "from your ad" chip.
-          ...(m.referral
-            ? { attribution: attributionFromSocialReferral(m.referral) }
+          // Ad / deep-link attribution → "from your ad" chip. Messenger puts it
+          // at the messaging-event level (`m.referral`); Instagram nests it in
+          // the message (`m.message.referral`) for a Click-to-IG-Direct ad or a
+          // Shop product referral. Read both (sibling first, then nested).
+          ...((m.referral ?? m.message.referral)
+            ? { attribution: attributionFromSocialReferral((m.referral ?? m.message.referral)!) }
             : {}),
           // Instagram story interaction (mention / reply / share) → story card.
           // A story REPLY arrives as a normal text message carrying
@@ -758,9 +766,14 @@ export function parseSocialMessaging(
         if (senderId) {
           const attribution = attributionFromSocialReferral(m.referral);
           const externalId = `${senderId}:${m.timestamp ?? entry.time ?? 0}:referral`;
-          const label = attribution.headline
-            ? `Started a conversation from your ad · ${attribution.headline}`
-            : "Started a conversation from your ad";
+          // A PAID ad carries `ad_id` (source "ad"); a bare ig.me/m.me link is an
+          // organic click (`source:"SHORTLINK"`, `type:"OPEN_THREAD"`, no ad_id →
+          // source "ref"). Don't call an organic link click "your ad".
+          const base =
+            attribution.source === "ad"
+              ? "Started a conversation from your ad"
+              : "Started a conversation from a link";
+          const label = attribution.headline ? `${base} · ${attribution.headline}` : base;
           events.push({
             kind: "message",
             externalId,
@@ -952,7 +965,12 @@ export async function sendSocialInteractive(
   args: SendInteractiveArgs,
   opts: SocialSendTarget,
 ): Promise<SendTextResult> {
-  const shares = args.contactShare ?? [];
+  // Instagram's auto-fill quick replies document ONLY `user_phone_number` — a
+  // `user_email` chip is a Messenger-only content_type and makes Meta reject the
+  // whole IG message. Drop the email chip on Instagram (phone still offered).
+  const shares = (args.contactShare ?? []).filter(
+    (field) => !(field === "email" && opts.label === "instagram"),
+  );
   const textBudget = Math.max(0, MAX_QUICK_REPLIES - shares.length);
   const quick_replies: Array<Record<string, string>> = args.options
     .slice(0, textBudget)
@@ -1075,12 +1093,18 @@ export async function sendSocialReaction(
 ): Promise<SendTextResult> {
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
   const remove = args.emoji.trim() === "";
+  // Instagram supports exactly ONE outbound (business) reaction: the literal
+  // `reaction:"love"` (a heart). Any other value is rejected by Meta (#100).
+  // Customers can react INBOUND with any emoji, but an agent can only send the
+  // heart — so coerce IG to "love" (the composer also offers heart-only on IG).
+  // Messenger accepts the emoji glyph, so pass it through there.
+  const reaction = opts.label === "instagram" ? "love" : args.emoji;
   await graphPostJson(url, opts.accessToken, {
     recipient: { id: args.to },
     sender_action: remove ? "unreact" : "react",
     payload: remove
       ? { message_id: args.messageExternalId }
-      : { message_id: args.messageExternalId, reaction: args.emoji },
+      : { message_id: args.messageExternalId, reaction },
   });
   // Reactions mutate the target message, not a new row — return a synthetic id.
   return { externalId: `reaction:${args.messageExternalId}`, timestamp: new Date() };

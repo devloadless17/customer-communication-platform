@@ -28,6 +28,14 @@ import type { Message } from "@ccp/shared/types";
 // chosen to be valid on WhatsApp AND the social channels' standard reaction bar.
 const QUICK_REACTIONS = ["👍", "❤️", "😆", "😮", "😢", "😠"];
 
+// Instagram's Send API accepts exactly ONE business reaction — a heart (Meta
+// maps it to `reaction:"love"`); any other emoji is rejected. So an agent
+// reacting on an IG thread only ever gets the heart, and the send layer coerces
+// it to "love". WhatsApp/Messenger keep the full bar.
+function reactionsForChannel(channel: Message["channel"]): string[] {
+  return channel === "instagram" ? ["❤️"] : QUICK_REACTIONS;
+}
+
 export function BubbleActions({
   message,
   conversationId,
@@ -137,7 +145,7 @@ export function BubbleActions({
               role="menu"
               className="absolute bottom-full left-1/2 z-50 mb-1.5 flex -translate-x-1/2 items-center gap-0.5 rounded-full border bg-popover p-1 shadow-lg animate-in fade-in-0 zoom-in-95 duration-100"
             >
-              {QUICK_REACTIONS.map((emoji) => (
+              {reactionsForChannel(message.channel).map((emoji) => (
                 <button
                   key={emoji}
                   type="button"

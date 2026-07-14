@@ -57,7 +57,11 @@ const ALL_MEDIA_KINDS: ReadonlySet<MediaKind> = new Set<MediaKind>([
 ]);
 
 const MEDIA_KINDS_BY_CHANNEL: Partial<Record<Channel, ReadonlySet<MediaKind>>> = {
-  instagram: new Set<MediaKind>(["image", "video", "audio", "sticker", "document"]),
+  // Instagram has NO arbitrary sticker send — Meta ships only the built-in
+  // `like_heart` sticker (not an attachment upload), and a `.webp` attachment is
+  // rejected with an opaque #100. Exclude `sticker` so the kind-level gate
+  // refuses it with an actionable error instead of failing silently at Meta.
+  instagram: new Set<MediaKind>(["image", "video", "audio", "document"]),
 };
 
 /** Whether `channel` can send outbound media of `kind`. */

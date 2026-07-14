@@ -18,6 +18,7 @@ import type { Message } from "@ccp/shared/types";
 import type { ContactShareField, InteractiveOption } from "@ccp/shared/providers/types";
 import {
   computeWindowStatus,
+  closedWindowMessage,
   effectiveSendWindowMs,
   outsideFreeFormWindow,
 } from "@ccp/shared/utils/window";
@@ -129,7 +130,7 @@ export async function sendInteractiveInternal(
       throw new SendTextValidationError(
         "outside_24h_window",
         "outside_24h_window",
-        "24h customer-service window closed — use a template step instead.",
+        closedWindowMessage(binding.provider.capabilities),
       );
     }
   }

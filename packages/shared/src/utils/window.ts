@@ -43,6 +43,28 @@ export function effectiveSendWindowMs(caps: {
 }
 
 /**
+ * Human-readable reason a free-form send is blocked, derived from the channel's
+ * CAPABILITIES rather than assuming WhatsApp. Templated channels (WhatsApp) can
+ * re-engage with an approved template; social channels (Messenger/Instagram)
+ * have no template catalog and simply need the customer to message again — and
+ * their reply window is 7 days, not 24h. Keeps every send path's copy accurate.
+ */
+export function closedWindowMessage(caps: {
+  templates?: boolean;
+  freeFormWindowMs: number | null;
+  humanAgentWindowMs?: number | null;
+}): string {
+  if (caps.templates) {
+    return "24h customer-service window closed — send an approved template to re-engage.";
+  }
+  const ms = effectiveSendWindowMs(caps);
+  const days = ms ? Math.round(ms / (24 * 60 * 60 * 1000)) : 0;
+  const within =
+    days > 0 ? `within ${days} day${days === 1 ? "" : "s"} of` : "shortly after";
+  return `Messaging window closed — you can only reply ${within} the customer's last message. Wait for them to message again to reopen the conversation.`;
+}
+
+/**
  * Meta social only: is a send OUTSIDE the free-form (24h) window — i.e. in the
  * 24h–7d support band where the Human Agent tag is required? Within 24h the send
  * uses `messaging_type: RESPONSE` (no tag). Returns false when the channel has no

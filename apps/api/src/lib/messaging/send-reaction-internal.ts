@@ -8,6 +8,7 @@ import {
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import {
   computeWindowStatus,
+  closedWindowMessage,
   effectiveSendWindowMs,
   outsideFreeFormWindow,
 } from "@ccp/shared/utils/window";
@@ -87,7 +88,7 @@ export async function sendReactionInternal(args: SendReactionInternalArgs): Prom
       throw new SendTextValidationError(
         "outside_24h_window",
         "outside_24h_window",
-        "24h customer-service window closed — can't react right now.",
+        closedWindowMessage(binding.provider.capabilities),
       );
     }
   }

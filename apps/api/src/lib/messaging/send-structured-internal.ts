@@ -13,6 +13,7 @@ import type { Message, MessageStructured } from "@ccp/shared/types";
 import type { SharedContactInput } from "@ccp/shared/providers/types";
 import {
   computeWindowStatus,
+  closedWindowMessage,
   effectiveSendWindowMs,
   outsideFreeFormWindow,
 } from "@ccp/shared/utils/window";
@@ -98,7 +99,7 @@ export async function sendStructuredInternal(
       throw new SendTextValidationError(
         "outside_24h_window",
         "outside_24h_window",
-        "24h customer-service window closed — use a template step instead.",
+        closedWindowMessage(binding.provider.capabilities),
       );
     }
   }
