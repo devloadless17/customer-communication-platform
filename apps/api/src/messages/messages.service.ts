@@ -1608,6 +1608,14 @@ export class MessagesService {
     // lands here), so without an explicit allowlist arbitrary file types would
     // be accepted + stored before Meta rejects them on send. Gate to Meta's
     // supported document set.
+    if (kind === "video" && !policy.videoMime.has(mimeType)) {
+      throw new BadRequestException({
+        error: "unsupported_file_type",
+        detail:
+          `${policy.label} doesn't accept ${mimeType || "this video format"}. ` +
+          `Supported: ${[...policy.videoMime].map((m) => m.replace("video/", "")).join(", ")}.`,
+      });
+    }
     if (kind === "document" && !policy.documentMime.has(mimeType)) {
       // Instagram accepts only PDF; WhatsApp/Messenger accept the fuller office set.
       const supported = policy.documentMime.has("application/pdf") && policy.documentMime.size === 1

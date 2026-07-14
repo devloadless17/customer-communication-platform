@@ -98,6 +98,10 @@ export interface ChannelMediaPolicy {
   imageMime: ReadonlySet<string>;
   /** Outbound audio mime allow-list. */
   audioMime: ReadonlySet<string>;
+  /** Outbound video mime allow-list. Instagram restricts video containers to
+   *  mp4/ogg/avi/mov/webm; an out-of-spec container reaches Meta and fails with
+   *  an opaque #100 without this gate. */
+  videoMime: ReadonlySet<string>;
   /** Outbound document mime allow-list. */
   documentMime: ReadonlySet<string>;
 }
@@ -111,6 +115,24 @@ const PERMISSIVE_IMAGE_MIME: ReadonlySet<string> = new Set([
 ]);
 const INSTAGRAM_IMAGE_MIME: ReadonlySet<string> = new Set(["image/jpeg", "image/png"]);
 
+// Video containers. WhatsApp/Messenger take the common web set; Instagram's
+// documented formats are mp4/ogg/avi/mov/webm (avi = x-msvideo, mov = quicktime).
+const PERMISSIVE_VIDEO_MIME: ReadonlySet<string> = new Set([
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
+  "video/x-msvideo",
+  "video/ogg",
+  "video/3gpp",
+]);
+const INSTAGRAM_VIDEO_MIME: ReadonlySet<string> = new Set([
+  "video/mp4",
+  "video/ogg",
+  "video/x-msvideo",
+  "video/quicktime",
+  "video/webm",
+]);
+
 // Size caps come from the SHARED `mediaSizeCaps` map so the client composer
 // guard and this server policy can never disagree per channel.
 const WHATSAPP_MEDIA_POLICY: ChannelMediaPolicy = {
@@ -118,6 +140,7 @@ const WHATSAPP_MEDIA_POLICY: ChannelMediaPolicy = {
   caps: mediaSizeCaps("whatsapp"),
   imageMime: PERMISSIVE_IMAGE_MIME,
   audioMime: WHATSAPP_AUDIO_MIME,
+  videoMime: PERMISSIVE_VIDEO_MIME,
   documentMime: META_DOCUMENT_MIME_ALLOWED,
 };
 
@@ -126,6 +149,7 @@ const MESSENGER_MEDIA_POLICY: ChannelMediaPolicy = {
   caps: mediaSizeCaps("messenger"),
   imageMime: PERMISSIVE_IMAGE_MIME,
   audioMime: MESSENGER_AUDIO_MIME,
+  videoMime: PERMISSIVE_VIDEO_MIME,
   documentMime: META_DOCUMENT_MIME_ALLOWED,
 };
 
@@ -138,6 +162,7 @@ const INSTAGRAM_MEDIA_POLICY: ChannelMediaPolicy = {
   caps: mediaSizeCaps("instagram"),
   imageMime: INSTAGRAM_IMAGE_MIME,
   audioMime: INSTAGRAM_AUDIO_MIME,
+  videoMime: INSTAGRAM_VIDEO_MIME,
   documentMime: INSTAGRAM_DOCUMENT_MIME,
 };
 
