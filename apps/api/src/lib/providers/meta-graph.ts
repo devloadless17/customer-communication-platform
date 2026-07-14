@@ -23,6 +23,7 @@
  * runtime), so a const is correct and cheapest. Prod never sets the override.
  */
 import { MetaSendError } from "./meta-send-error";
+import { wireOut } from "./meta-wire";
 
 export const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
 const GRAPH_TIMEOUT_MS = 15_000;
@@ -57,6 +58,7 @@ export async function graphGetJson(
         signal: ac.signal,
       });
       const text = await res.text().catch(() => "");
+      wireOut("GET", redactUrl(url), undefined, res.status, text);
       if (!res.ok) {
         if (res.status >= 500 && attempt < maxAttempts - 1) continue;
         throw new Error(`graph GET ${res.status} ${redactUrl(url)}: ${text.slice(0, 300)}`);
@@ -98,6 +100,7 @@ export async function graphPostForm(
       signal: ac.signal,
     });
     const text = await res.text().catch(() => "");
+    wireOut("POST(form)", redactUrl(url), "<multipart media upload>", res.status, text);
     if (!res.ok) {
       throw new Error(`graph POST(form) ${res.status} ${redactUrl(url)}: ${text.slice(0, 500)}`);
     }
@@ -135,6 +138,7 @@ export async function graphPostJson(
       signal: ac.signal,
     });
     const text = await res.text().catch(() => "");
+    wireOut("POST", redactUrl(url), body, res.status, text);
     if (!res.ok) {
       // Throw the SAME error type WhatsApp sends throw so `normalizeMetaSendError`
       // classifies social failures (rate-limit backoff, window-closed, blocked

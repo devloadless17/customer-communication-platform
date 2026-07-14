@@ -368,6 +368,13 @@ function ReplyBoxImpl({
 
   const [error, setError] = useState<string | null>(null);
   const [attachment, setAttachment] = useState<File | null>(null);
+  // A file whose caption can't be inlined (WhatsApp audio, ALL Messenger/IG
+  // media) sends on its OWN — the textarea is disabled while it's attached so no
+  // caption gets typed, dropped, and lost. The agent sends text as its own
+  // message. Kept here (not per-render) so disabled + placeholder agree.
+  const attachmentSendsAlone =
+    attachment != null &&
+    !supportsInlineCaption(channel, kindFromMimeClient(attachment.type));
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [translateOpen, setTranslateOpen] = useState(false);
@@ -997,11 +1004,16 @@ function ReplyBoxImpl({
       sendConfirmed = true;
     };
     if (!isNote) window.addEventListener(confirmEv, onSendConfirmed);
-    // For voice-only sends the caption is the empty string (we don't want
-    // the textarea contents leaking into a voice message — they'll get sent
-    // separately on the next submit). Otherwise the trimmed value rides
-    // along as the caption.
-    const effectiveCaption = overrideFile ? "" : trimmed;
+    // A caption only rides along when the channel + media kind actually inline
+    // it (WhatsApp image/video/document). Everywhere else — WhatsApp audio,
+    // ALL Messenger/Instagram media — the file is sent ON ITS OWN: Meta can't
+    // attach text to it, and delivering the text as a separate follow-up echoed
+    // back as a corrupt "via app" duplicate. So the textarea contents don't leak
+    // onto the file; the agent sends text as its own message. Voice-only sends
+    // (overrideFile) likewise carry no caption.
+    const attachmentInlineCaption =
+      file != null && supportsInlineCaption(channel, kindFromMimeClient(file.type));
+    const effectiveCaption = overrideFile || !attachmentInlineCaption ? "" : trimmed;
     // Capture reply target NOW so the parent can clear the pill while the
     // network call is still in flight (next message in the same thread can
     // start typing immediately). The id rides through the API to the server.
@@ -1593,7 +1605,7 @@ function ReplyBoxImpl({
               // on mousedown so clicking an entry doesn't blur first.
               setSlashRange(null);
             }}
-            disabled={!isNote && windowClosed}
+            disabled={!isNote && (windowClosed || attachmentSendsAlone)}
             placeholder={
               isNote
                 ? "Leave an internal note for your teammates…"
@@ -1602,9 +1614,9 @@ function ReplyBoxImpl({
                     ? "Free-form replies blocked — send a pre-approved template to re-engage."
                     : "Free-form replies blocked — wait for the customer to message again to re-open the conversation."
                   : attachment
-                    ? supportsInlineCaption(channel, kindFromMimeClient(attachment.type))
-                      ? "Add a caption (optional)…"
-                      : "Add a message — sent as a separate message after the file…"
+                    ? attachmentSendsAlone
+                      ? "This file sends on its own — send a message separately after."
+                      : "Add a caption (optional)…"
                     : `Reply on ${CHANNEL_LABEL[channel]}…`
             }
             className={cn(

@@ -1014,10 +1014,11 @@ export async function uploadSocialMedia(
 
 /**
  * Send a previously-uploaded media attachment on a social channel. Meta social
- * messages can't carry BOTH an attachment and text in one call, so a caption is
- * delivered as a best-effort follow-up text message (the media row still stores
- * the caption for the agent's view). Returns the ATTACHMENT message's id — the
- * one the app persists. Human Agent tag, same as text.
+ * messages can't carry BOTH an attachment and text in one call, so media is sent
+ * ON ITS OWN — no caption ride-along and no follow-up text (a separate follow-up
+ * echoed back as a corrupt "via app" duplicate). The composer sends such a file
+ * alone; any caption reaching here is ignored. Returns the ATTACHMENT message's
+ * id — the one the app persists. Human Agent tag, same as text.
  */
 export async function sendSocialMedia(
   args: SendMediaArgs,
@@ -1039,41 +1040,8 @@ export async function sendSocialMedia(
   if (!messageId) {
     throw new Error(`${opts.label} sendMedia: response missing message_id`);
   }
-  // Caption → follow-up text. Best-effort: a failed caption must not fail the
-  // media send (which already went out and bills nothing extra to retry). But a
-  // silent swallow means a caption can vanish with no trace — so retry once, and
-  // if it still fails, LOG (don't swallow blind) so the drop is diagnosable.
-  let captionExternalId: string | undefined;
-  if (args.caption && args.caption.trim().length > 0) {
-    const sendCaption = () =>
-      sendSocialText(
-        { to: args.to, body: args.caption!, useHumanAgentTag: args.useHumanAgentTag },
-        opts,
-      );
-    try {
-      captionExternalId = (await sendCaption()).externalId;
-    } catch (first) {
-      try {
-        captionExternalId = (await sendCaption()).externalId;
-      } catch (second) {
-        console.warn(
-          JSON.stringify({
-            event: "social.caption_dropped",
-            severity: "warning",
-            channel: opts.label,
-            mediaMessageId: messageId,
-            error: second instanceof Error ? second.message : String(second),
-            firstError: first instanceof Error ? first.message : String(first),
-          }),
-        );
-      }
-    }
-  }
-  return {
-    externalId: messageId,
-    timestamp: new Date(),
-    ...(captionExternalId ? { captionExternalId } : {}),
-  };
+  // No caption follow-up: social media sends on its own (see the doc comment).
+  return { externalId: messageId, timestamp: new Date() };
 }
 
 /**

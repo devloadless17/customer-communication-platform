@@ -1815,6 +1815,13 @@ export class MessagesService {
       }
     }
 
+    // Whether Meta accepts this caption INLINE on the media (WhatsApp
+    // image/video/document only). When it doesn't — WhatsApp audio/sticker, ALL
+    // Messenger/Instagram media — the file is sent ON ITS OWN: no caption
+    // ride-along, and no separate follow-up text (which echoed back as a corrupt
+    // "via app" duplicate on social). Text with a file is a separate agent send.
+    const inlineCaption = supportsInlineCaption(provider, kind);
+
     // 2) Send the message referencing that mediaId. Same logic — throwing
     //    pre-send is fine.
     let send;
@@ -1826,7 +1833,7 @@ export class MessagesService {
           mediaId,
           ...(mediaUrl ? { mediaUrl } : {}),
           useHumanAgentTag,
-          caption: caption || undefined,
+          caption: inlineCaption ? caption || undefined : undefined,
           filename: kind === "document" ? filename : undefined,
           ...(replyToExternalId ? { replyToExternalId } : {}),
           // VOICE NOTE flag — GATED behind WHATSAPP_VOICE_IOS_PROFILE (off by
@@ -1891,12 +1898,9 @@ export class MessagesService {
       );
     }
 
-    // A caption that can't ride INLINE on the media (WhatsApp audio/sticker, all
-    // Messenger/Instagram media) is delivered by the provider as a separate text
-    // and persisted below as its OWN tracked message — so the media row carries
-    // NO caption (empty body), mirroring exactly what the customer sees (media,
-    // then a text). `mediaBody` is the caption only when Meta accepts it inline.
-    const inlineCaption = supportsInlineCaption(provider, kind);
+    // The media row carries a caption only when Meta inlines it (see
+    // `inlineCaption` above); otherwise the file was sent on its own and the row
+    // has no caption body.
     const mediaBody = inlineCaption ? caption : "";
     const previewBody = (mediaBody || mediaPreview(kind)).slice(0, 200);
 
@@ -2048,69 +2052,6 @@ export class MessagesService {
       this.logger.error(
         `sendMedia commit failed for message=${createdId}: ${err instanceof Error ? err.message : err}`,
       );
-    }
-
-    // Non-inline caption (WhatsApp audio/sticker, all Messenger/Instagram media):
-    // the provider delivered it as a SEPARATE follow-up text and returned its id.
-    // Persist it as its OWN tracked message so it renders as a real text bubble
-    // (matching the customer's two-message view) AND its inbound echo dedups on
-    // this externalId — killing the phantom "via app" message. Best-effort: the
-    // text already reached the customer; if this persist fails, the social echo
-    // will create the row anyway (just without status).
-    if (!inlineCaption && caption && send.captionExternalId) {
-      const captionTs = new Date(messageTimestamp.getTime() + 1);
-      const captionCreated = await createOutboundMessageIdempotent({
-        teamId,
-        conversationId,
-        externalId: send.captionExternalId,
-        senderUserId: userId,
-        body: caption,
-        direction: "out",
-        channel: provider,
-        status: "sent",
-        rawPayload: { sentVia: "api/messages/media:caption" } as Prisma.InputJsonValue,
-        timestamp: captionTs,
-      }).catch((err): null => {
-        this.logger.error(
-          `caption message persist failed (mid=${send.captionExternalId})`,
-          err,
-        );
-        return null;
-      });
-      if (captionCreated) {
-        const captionMessage: Message = {
-          id: captionCreated.id,
-          teamId,
-          conversationId,
-          externalId: send.captionExternalId,
-          senderUserId: userId,
-          body: caption,
-          direction: "out",
-          channel: provider,
-          status: "sent",
-          rawPayload: { sentVia: "api/messages/media:caption" },
-          timestamp: captionTs.toISOString(),
-        };
-        await this.commitOutboundEvent({
-          conversationId,
-          bumpTimestamp: captionTs,
-          preview: caption.slice(0, 200),
-          event: {
-            type: "message.sent",
-            teamId,
-            conversationId,
-            contactId: conversation.contactId,
-            message: captionMessage,
-            preview: caption.slice(0, 200),
-            senderUserId: userId,
-          },
-        }).catch((err) => {
-          this.logger.error(
-            `caption message commit failed (mid=${send.captionExternalId})`,
-            err,
-          );
-        });
-      }
     }
 
     return {

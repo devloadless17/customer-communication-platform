@@ -31,6 +31,7 @@ import {
 } from "@/lib/media-thumbnail";
 import { getMetaProvider } from "@/lib/providers";
 import { MediaTooLargeError } from "@/lib/providers/meta";
+import { wireIn } from "@/lib/providers/meta-wire";
 import {
   getMetaSendConfig,
   getMetaWebhookConfig,
@@ -241,6 +242,10 @@ export class MetaWebhookController implements OnModuleDestroy {
       throw new HttpException("forbidden", 403);
     }
 
+    // Dev wire log (DEBUG_META_WIRE): the authentic raw webhook, so you can see
+    // EXACTLY what Meta sent. After verify so we never log a forged body.
+    wireIn(channel, rawBody.toString("utf8"));
+
     // Body is already parsed by main.ts's bodyParser.json — req.body has it.
     const payload = req.body as unknown;
 
@@ -404,6 +409,9 @@ export class MetaWebhookController implements OnModuleDestroy {
     if (!verifySignature(rawBody, signature, config.appSecret)) {
       throw new HttpException("forbidden", 403);
     }
+
+    // Dev wire log (DEBUG_META_WIRE): the authentic raw social webhook.
+    wireIn(channel, rawBody.toString("utf8"));
 
     const payload = req.body as unknown;
 

@@ -1,6 +1,7 @@
 import { readLimitedBody } from "@/lib/http/safe-fetch";
 import type { MetaSendConfig } from "@/lib/providers/config";
 import { MetaSendError, normalizeMetaSendError } from "./meta-send-error";
+import { metaWireEnabled, wireOut } from "./meta-wire";
 
 // Meta error responses are tiny in practice (JSON envelope, a few KB).
 // Cap reads so a future endpoint or a compromised upstream returning a
@@ -149,6 +150,13 @@ async function metaFetch(
         await res.text().catch(() => {});
         await sleep(500 + Math.random() * 250);
         continue;
+      }
+      // Dev wire log (DEBUG_META_WIRE): read a CLONE so the caller's body is
+      // untouched. Gated + guarded — never affects the returned response.
+      if (metaWireEnabled()) {
+        const reqBody = typeof fetchInit.body === "string" ? fetchInit.body : "<binary>";
+        const text = await res.clone().text().catch(() => "");
+        wireOut(String(fetchInit.method ?? "GET"), redactUrlForError(input), reqBody, res.status, text);
       }
       return res;
     } catch (err) {
@@ -2006,63 +2014,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       throw new Error(`meta sendMedia response missing id: ${JSON.stringify(json)}`);
     }
 
-    // Audio / sticker can't carry an inline caption, so a caption typed with a
-    // voice note (or sticker) would silently vanish on the customer's side —
-    // deliver it as a follow-up text right after the media. Mirrors the social
-    // caption-follow-up. Best-effort: the media already went out, so a failed
-    // caption must NOT fail the send; retry once, then LOG (never swallow blind).
-    let captionExternalId: string | undefined;
-    if (args.caption && args.caption.trim().length > 0 && !captionInline) {
-      const caption = args.caption;
-      const sendCaption = async () => {
-        const r = await metaFetch(url, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${config.accessToken}`,
-          },
-          body: JSON.stringify({
-            messaging_product: "whatsapp",
-            recipient_type: "individual",
-            to: args.to,
-            type: "text",
-            text: { body: caption, preview_url: /https?:\/\//i.test(caption) },
-          }),
-        });
-        if (!r.ok) {
-          throw new MetaSendError(
-            `caption follow-up failed: ${r.status} ${await safeMetaText(r)}`,
-            r.status,
-            "",
-          );
-        }
-        const cj = (await r.json()) as { messages?: Array<{ id?: string }> };
-        captionExternalId = cj.messages?.[0]?.id;
-      };
-      try {
-        await sendCaption();
-      } catch (first) {
-        try {
-          await sendCaption();
-        } catch (second) {
-          console.warn(
-            JSON.stringify({
-              event: "whatsapp.caption_dropped",
-              severity: "warning",
-              kind: args.kind,
-              mediaMessageId: externalId,
-              error: second instanceof Error ? second.message : String(second),
-              firstError: first instanceof Error ? first.message : String(first),
-            }),
-          );
-        }
-      }
-    }
-    return {
-      externalId,
-      timestamp: new Date(),
-      ...(captionExternalId ? { captionExternalId } : {}),
-    };
+    // Audio / sticker can't carry an inline caption (Meta rejects it), so a
+    // caption is NOT sent with them — the media goes on its own. The send layer
+    // only passes a caption for kinds that inline it, and the composer sends
+    // such a file alone, so nothing is silently dropped here.
+    return { externalId, timestamp: new Date() };
   },
 
   // -------------------------------------------------------------------------
