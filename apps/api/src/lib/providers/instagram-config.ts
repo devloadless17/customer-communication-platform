@@ -37,6 +37,8 @@ export interface InstagramSendConfig {
   pageId: string;
   igAccessToken: string;
   graphVersion: string;
+  /** This channel's app secret, for appsecret_proof on Graph calls. */
+  appSecret?: string;
 }
 
 export interface InstagramWebhookConfig {
@@ -53,6 +55,9 @@ interface SendCipher {
   igId: string;
   pageId: string;
   igAccessTokenCipher: string;
+  /** This channel's OWN app secret cipher — for appsecret_proof (IG may be a
+   *  DIFFERENT app than the shared one). Optional: proof skipped if absent. */
+  appSecretCipher?: string;
 }
 interface WebhookCipher {
   appSecretCipher: string;
@@ -95,6 +100,7 @@ async function loadSendCipher(teamId: string): Promise<CachedSend> {
       igId: config.igId!,
       pageId: config.pageId!,
       igAccessTokenCipher: secrets.igAccessToken!,
+      ...(secrets.appSecret ? { appSecretCipher: secrets.appSecret } : {}),
     },
   };
 }
@@ -111,11 +117,22 @@ function materialize(teamId: string, cipher: SendCipher): InstagramSendConfig {
     );
     throw new ProviderNotConfiguredError(teamId, ["igAccessToken (decrypt failed)"], "instagram");
   }
+  // App secret for appsecret_proof — best-effort; a decrypt failure must not
+  // break sending (the proof is additive).
+  let appSecret: string | undefined;
+  if (cipher.appSecretCipher) {
+    try {
+      appSecret = decryptSecret(cipher.appSecretCipher);
+    } catch {
+      appSecret = undefined;
+    }
+  }
   return {
     igId: cipher.igId,
     pageId: cipher.pageId,
     igAccessToken,
     graphVersion: DEFAULT_GRAPH_VERSION,
+    ...(appSecret ? { appSecret } : {}),
   };
 }
 

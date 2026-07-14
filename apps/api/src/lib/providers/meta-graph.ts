@@ -24,6 +24,7 @@
  */
 import { MetaSendError } from "./meta-send-error";
 import { wireOut } from "./meta-wire";
+import { withAppsecretProof } from "./appsecret-proof";
 
 export const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
 const GRAPH_TIMEOUT_MS = 15_000;
@@ -46,14 +47,16 @@ export async function graphGetJson(
   url: string,
   accessToken: string,
   opts?: { retry?: boolean },
+  appSecret?: string,
 ): Promise<Record<string, unknown>> {
   const maxAttempts = opts?.retry ? 2 : 1;
+  const reqUrl = withAppsecretProof(url, accessToken, appSecret);
   let lastErr: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), GRAPH_TIMEOUT_MS);
     try {
-      const res = await fetch(url, {
+      const res = await fetch(reqUrl, {
         headers: { authorization: `Bearer ${accessToken}` },
         signal: ac.signal,
       });
@@ -89,11 +92,12 @@ export async function graphPostForm(
   url: string,
   accessToken: string,
   form: FormData,
+  appSecret?: string,
 ): Promise<Record<string, unknown>> {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), GRAPH_UPLOAD_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
+    const res = await fetch(withAppsecretProof(url, accessToken, appSecret), {
       method: "POST",
       headers: { authorization: `Bearer ${accessToken}` },
       body: form,
@@ -124,11 +128,12 @@ export async function graphPostJson(
   url: string,
   accessToken: string,
   body: unknown,
+  appSecret?: string,
 ): Promise<Record<string, unknown>> {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), GRAPH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
+    const res = await fetch(withAppsecretProof(url, accessToken, appSecret), {
       method: "POST",
       headers: {
         "content-type": "application/json",

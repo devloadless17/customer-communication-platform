@@ -57,6 +57,10 @@ export interface SocialSendTarget {
   graphVersion: string;
   /** Provider name for error messages ("messenger" / "instagram"). */
   label: string;
+  /** This channel's app secret, for appsecret_proof on Graph calls (optional —
+   *  proof is skipped when absent). Must be the secret of the app that issued
+   *  `accessToken` (the channel's OWN stored secret; IG may be a different app). */
+  appSecret?: string;
 }
 
 /**
@@ -965,7 +969,7 @@ export async function sendSocialText(
     ...messagingTypeFields(args.useHumanAgentTag),
     ...replyToFragment(args.replyToExternalId),
     message: { text: args.body },
-  });
+  }, opts.appSecret);
   const messageId = typeof res.message_id === "string" ? res.message_id : "";
   if (!messageId) {
     throw new Error(`${opts.label} sendText: response missing message_id`);
@@ -1023,7 +1027,7 @@ export async function sendSocialInteractive(
     ...messagingTypeFields(args.useHumanAgentTag),
     ...replyToFragment(args.replyToExternalId),
     message: { text: args.bodyText, quick_replies },
-  });
+  }, opts.appSecret);
   const messageId = typeof res.message_id === "string" ? res.message_id : "";
   if (!messageId) {
     throw new Error(`${opts.label} sendInteractive: response missing message_id`);
@@ -1057,7 +1061,7 @@ export async function uploadSocialMedia(
     new Blob([args.bytes], { type: args.mimeType }),
     args.filename,
   );
-  const res = await graphPostForm(url, opts.accessToken, form);
+  const res = await graphPostForm(url, opts.accessToken, form, opts.appSecret);
   const attachmentId = typeof res.attachment_id === "string" ? res.attachment_id : "";
   if (!attachmentId) {
     throw new Error(`${opts.label} uploadMedia: response missing attachment_id`);
@@ -1088,7 +1092,7 @@ export async function sendSocialMedia(
     ...messagingTypeFields(args.useHumanAgentTag),
     ...replyToFragment(args.replyToExternalId),
     message: { attachment: { type, payload } },
-  });
+  }, opts.appSecret);
   const messageId = typeof res.message_id === "string" ? res.message_id : "";
   if (!messageId) {
     throw new Error(`${opts.label} sendMedia: response missing message_id`);
@@ -1112,7 +1116,7 @@ export async function sendSocialSenderAction(
   await graphPostJson(url, opts.accessToken, {
     recipient: { id: recipientId },
     sender_action: action,
-  });
+  }, opts.appSecret);
 }
 
 /**
@@ -1140,7 +1144,7 @@ export async function sendSocialReaction(
     payload: remove
       ? { message_id: args.messageExternalId }
       : { message_id: args.messageExternalId, reaction },
-  });
+  }, opts.appSecret);
   // Reactions mutate the target message, not a new row — return a synthetic id.
   return { externalId: `reaction:${args.messageExternalId}`, timestamp: new Date() };
 }

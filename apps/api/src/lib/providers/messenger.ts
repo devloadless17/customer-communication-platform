@@ -49,6 +49,7 @@ function target(config: MessengerSendConfig) {
     accessToken: config.pageAccessToken,
     graphVersion: config.graphVersion,
     label: "messenger",
+    ...(config.appSecret ? { appSecret: config.appSecret } : {}),
   };
 }
 

@@ -47,6 +47,7 @@ function target(config: InstagramSendConfig) {
     accessToken: config.igAccessToken,
     graphVersion: config.graphVersion,
     label: "instagram",
+    ...(config.appSecret ? { appSecret: config.appSecret } : {}),
   };
 }
 

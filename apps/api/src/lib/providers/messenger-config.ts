@@ -35,6 +35,8 @@ export interface MessengerSendConfig {
   pageId: string;
   pageAccessToken: string;
   graphVersion: string;
+  /** This channel's app secret, for appsecret_proof on Graph calls. */
+  appSecret?: string;
 }
 
 export interface MessengerWebhookConfig {
@@ -51,6 +53,10 @@ const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
 interface SendCipher {
   pageId: string;
   pageAccessTokenCipher: string;
+  /** This channel's OWN app secret cipher — for appsecret_proof on send. The
+   *  proof must use the secret of the app that issued the token; each channel
+   *  stores that alongside its token. Optional: proof is skipped if absent. */
+  appSecretCipher?: string;
 }
 interface WebhookCipher {
   appSecretCipher: string;
@@ -86,7 +92,11 @@ async function loadSendCipher(teamId: string): Promise<CachedSend> {
   if (missing.length > 0) return { kind: "err", missing };
   return {
     kind: "ok",
-    cipher: { pageId: config.pageId!, pageAccessTokenCipher: secrets.pageAccessToken! },
+    cipher: {
+      pageId: config.pageId!,
+      pageAccessTokenCipher: secrets.pageAccessToken!,
+      ...(secrets.appSecret ? { appSecretCipher: secrets.appSecret } : {}),
+    },
   };
 }
 
@@ -102,7 +112,22 @@ function materialize(teamId: string, cipher: SendCipher): MessengerSendConfig {
     );
     throw new ProviderNotConfiguredError(teamId, ["pageAccessToken (decrypt failed)"], "messenger");
   }
-  return { pageId: cipher.pageId, pageAccessToken, graphVersion: DEFAULT_GRAPH_VERSION };
+  // App secret for appsecret_proof — best-effort: a decrypt failure must NOT
+  // break sending (the proof is additive), so fall back to no proof.
+  let appSecret: string | undefined;
+  if (cipher.appSecretCipher) {
+    try {
+      appSecret = decryptSecret(cipher.appSecretCipher);
+    } catch {
+      appSecret = undefined;
+    }
+  }
+  return {
+    pageId: cipher.pageId,
+    pageAccessToken,
+    graphVersion: DEFAULT_GRAPH_VERSION,
+    ...(appSecret ? { appSecret } : {}),
+  };
 }
 
 /** Send-side Messenger config. Throws ProviderNotConfigured when unconnected. */
