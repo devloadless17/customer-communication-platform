@@ -124,6 +124,28 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     interactive: false,
     calling: false,
   },
+
+  // ---- LIVE (first-party) ---------------------------------------------------
+  // Website chat widget: a live in-browser session, so there's NO 24h window
+  // (freeFormWindowMs: null — the composer is always open) and no templates. We
+  // own both ends of the wire (our widget renderer + our fanout), so media is
+  // delivered by same-origin R2 URL (mediaSendByUrl) and captions inline as one
+  // bubble (see supportsInlineCaption). Read/delivery receipts + typing are
+  // driven over the visitor socket. No reactions, no calling.
+  webchatwidget: {
+    freeFormWindowMs: null,
+    humanAgentWindowMs: null,
+    messageTextMaxChars: 4096,
+    templates: false,
+    readReceipts: true,
+    deliveryReceipts: true,
+    typingIndicators: true,
+    interactive: false,
+    sendReaction: false,
+    calling: false,
+    mediaSendByUrl: true,
+    profileSync: false,
+  },
 };
 
 /**
@@ -137,6 +159,7 @@ export const LIVE_CHANNELS: ReadonlySet<Channel> = new Set<Channel>([
   "whatsapp",
   "messenger",
   "instagram",
+  "webchatwidget",
 ]);
 
 export function isChannelLive(channel: Channel): boolean {
@@ -161,6 +184,9 @@ export const CHANNEL_IDENTITY_KIND: Record<Channel, ChannelIdentityKind> = {
   telegram: "external",
   email: "external",
   sms: "phone",
+  // Website widget: an opaque per-browser visitor id, keyed via
+  // (teamId, identityChannel, externalContactId) like the social channels.
+  webchatwidget: "external",
 };
 
 /** True when the channel keys contacts by phone number (WhatsApp today). */
@@ -182,6 +208,8 @@ const CHANNEL_CONTACT_PLACEHOLDER: Partial<Record<Channel, string>> = {
   messenger: "Messenger user",
   instagram: "Instagram user",
   telegram: "Telegram user",
+  // A visitor who hasn't submitted the pre-chat form has no name yet.
+  webchatwidget: "Website visitor",
 };
 
 export function socialContactPlaceholder(channel: Channel | null | undefined): string {
@@ -211,6 +239,9 @@ export function isSocialContactPlaceholder(name: string | null | undefined): boo
  * truth so the UI hint and the send behavior can never disagree.
  */
 export function supportsInlineCaption(channel: Channel, kind: MediaKind): boolean {
+  // Website widget: we control the renderer, so any media can carry an inline
+  // caption in the same bubble (no awkward follow-up text like the Meta channels).
+  if (channel === "webchatwidget") return true;
   if (channel !== "whatsapp") return false;
   return kind === "image" || kind === "video" || kind === "document";
 }

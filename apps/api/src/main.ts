@@ -274,6 +274,31 @@ async function bootstrap(): Promise<void> {
     next();
   });
 
+  // The embeddable chat widget runs on arbitrary CUSTOMER origins, so its public
+  // endpoints (POST /api/widget/media, GET /api/widget/media/:id) must accept
+  // cross-origin requests. Reflect the request Origin but WITHOUT credentials —
+  // the widget authenticates with a public site key in the query, never cookies,
+  // so reflecting the origin here can't enable a credentialed CSRF (the footgun
+  // the pinned enableCors below avoids). The REAL boundary is the per-widget
+  // origin allow-list enforced in the controller/gateway, not this header. Runs
+  // BEFORE enableCors and fully answers the preflight so the pinned policy (which
+  // wouldn't allow a third-party origin) never rejects it.
+  app.use("/api/widget", (req: Request, res: Response, next: NextFunction) => {
+    const origin = req.headers["origin"];
+    if (typeof origin === "string" && origin.length > 0) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
+      res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "content-type");
+      res.setHeader("Access-Control-Max-Age", "7200");
+    }
+    if (req.method === "OPTIONS") {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
   // Hard refuse prod boot if the dev-emit toggle is somehow set —
   // /api/dev/emit lets any authenticated user spoof inbound Meta webhook
   // events, so it must NEVER be on in production. Per-request gate

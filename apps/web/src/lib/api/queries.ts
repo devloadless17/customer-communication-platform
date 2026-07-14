@@ -449,6 +449,30 @@ export async function getTeamMetaConfig(): Promise<MetaConfigView> {
   return config;
 }
 
+/** One website chat widget (a team runs many). Mirrors the API's WidgetView. */
+export interface WebchatWidgetView {
+  id: string;
+  name: string;
+  publicKey: string;
+  allowedOrigins: string[];
+  config: {
+    theme?: { primaryColor?: string; launcherColor?: string; userBubbleColor?: string };
+    welcomeMessage?: string;
+    headerTitle?: string;
+    suggestedQuestions?: string[];
+    preChatFields?: { id: string; label: string; type: "text" | "name" | "email" | "phone"; required: boolean }[];
+    showBranding?: boolean;
+  };
+  isActive: boolean;
+  conversationCount: number;
+  createdAt: string;
+}
+
+export async function getTeamWebchatWidgets(): Promise<WebchatWidgetView[]> {
+  const { widgets } = await api<{ widgets: WebchatWidgetView[] }>("/api/team/webchatwidget");
+  return widgets;
+}
+
 export async function listWhatsappTemplates(): Promise<{
   templates: TemplateDto[];
   hasWabaId: boolean;

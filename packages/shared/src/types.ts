@@ -24,13 +24,16 @@ export type MessageStatus = "sent" | "delivered" | "read" | "failed";
 //   DESIGNED-FOR (disabled): telegram / email / sms — enum value + capability
 //              maps exist so the architecture is ready, but there's no provider
 //              yet, so no row can carry them. See LIVE_CHANNELS.
+//   webchatwidget: first-party embeddable website chat widget (external identity,
+//              keyed by an opaque per-browser visitor id). No external vendor.
 export type Channel =
   | "whatsapp"
   | "messenger"
   | "instagram"
   | "telegram"
   | "email"
-  | "sms";
+  | "sms"
+  | "webchatwidget";
 // Provenance of an outbound message. `api` = sent through this platform;
 // `business_app` = sent from the WhatsApp Business App on the owner's phone and
 // mirrored to us via WhatsApp Coexistence. Mirrors the Prisma `MessageOrigin`
@@ -780,6 +783,14 @@ export interface Conversation {
    * absent = whatsapp (the only channel in the data model right now).
    */
   channel?: Channel;
+  /**
+   * `webchatwidget` threads only: the source website widget's name (an org runs
+   * many named widgets, one per site) so the inbox shows WHICH website a chat
+   * came from. Null/absent on every other channel. The id is always present when
+   * known; the name is resolved via a join on the primary read paths.
+   */
+  webchatWidgetId?: string | null;
+  webchatWidgetName?: string | null;
 }
 
 /**

@@ -164,6 +164,15 @@ function ConversationListItemImpl({
           >
             {contact.name}
           </span>
+          {conversation.channel === "webchatwidget" && conversation.webchatWidgetName && (
+            <span
+              title={`From ${conversation.webchatWidgetName}`}
+              className="shrink-0 truncate rounded bg-muted px-1.5 py-0.5 text-2xs text-muted-foreground"
+              style={{ maxWidth: "40%" }}
+            >
+              {conversation.webchatWidgetName}
+            </span>
+          )}
           <span title={fullDateTime} className="shrink-0">
             <LocalTime
               iso={conversation.lastMessageAt}

@@ -85,6 +85,18 @@ function TelegramLogo() {
   );
 }
 
+function WebchatWidgetLogo() {
+  return (
+    <svg viewBox="0 0 24 24" className="size-full" aria-hidden="true">
+      <rect x="2" y="2" width="20" height="20" rx="6" fill="#4F46E5" />
+      <path
+        fill="#fff"
+        d="M7 8.5A1.5 1.5 0 0 1 8.5 7h7A1.5 1.5 0 0 1 17 8.5v4A1.5 1.5 0 0 1 15.5 14H11l-2.6 2.2c-.3.26-.77.04-.77-.35V14h-.13A1.5 1.5 0 0 1 6 12.5v-4A1.5 1.5 0 0 1 7 8.5Z"
+      />
+    </svg>
+  );
+}
+
 const LOGOS: Record<Channel, (() => JSX.Element) | null> = {
   whatsapp: WhatsAppLogo,
   messenger: MessengerLogo,
@@ -92,6 +104,7 @@ const LOGOS: Record<Channel, (() => JSX.Element) | null> = {
   telegram: TelegramLogo,
   email: null,
   sms: null,
+  webchatwidget: WebchatWidgetLogo,
 };
 
 /** Human label per channel — for headers, the contact panel, and a11y. */
@@ -102,6 +115,7 @@ export const CHANNEL_LABEL: Record<Channel, string> = {
   telegram: "Telegram",
   email: "Email",
   sms: "SMS",
+  webchatwidget: "Website",
 };
 
 /**

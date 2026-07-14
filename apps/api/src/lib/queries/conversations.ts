@@ -200,6 +200,8 @@ export async function listConversations(
     orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
     take: take + 1,
     include: {
+      // Source website widget name (webchatwidget threads) — one cheap string.
+      webchatWidget: { select: { name: true } },
       // Explicit select keeps the per-row payload lean — adding heavier
       // relations to Contact (customFields, identityChannel, etc.) doesn't
       // automatically bloat every inbox-list response. Tags come back via
@@ -293,6 +295,7 @@ export async function getConversationWithRefs(
   const row = await db.conversation.findFirst({
     where: { id: conversationId, teamId },
     include: {
+      webchatWidget: { select: { name: true } },
       contact: { include: { tags: { select: { id: true } } } },
       assignedUser: { select: ASSIGNED_USER_SELECT },
       // +1 to detect "more older exists" without a count query.

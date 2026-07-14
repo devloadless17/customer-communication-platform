@@ -115,6 +115,12 @@ enum Channel {
   telegram
   email
   sms
+  // First-party embeddable website chat widget. Unlike the others it has no
+  // external vendor — the org drops a <script> on their site, visitor messages
+  // arrive over a public Socket.io namespace, and outbound is delivered by the
+  // realtime fanout (see apps/api/src/webchatwidget/). Identity is `external`
+  // (an opaque per-browser visitor id in Contact.externalContactId).
+  webchatwidget
 }
 
 // Mirrors Meta's template review states. We cache every status so admins can
@@ -467,6 +473,7 @@ model Team {
   outboundEvents          OutboundEvent[]
   outboundSendAttempts    OutboundSendAttempt[]
   channelConnections      ChannelConnection[]
+  webchatWidgets          WebchatWidget[]
   metaConnection          MetaConnection?
   calls                   Call[]
   callPermissionRequests  CallPermissionRequest[]
@@ -497,6 +504,40 @@ model ChannelConnection {
   team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
   @@unique([teamId, channel])
+}
+
+// A single embeddable website chat widget. Unlike the Meta channels — where a
+// team has exactly ONE ChannelConnection per channel — a team runs MANY named
+// widgets (one per website they own: "Acme Store", "Support Portal", …), each
+// with its own public site key, embed origins, and appearance. So widgets are
+// their own rows, not a ChannelConnection: the `webchatwidget` channel is
+// "connected" for a team iff it has ≥1 active WebchatWidget (see
+// getWebchatwidgetSendConfig). Every webchatwidget Conversation is stamped with
+// its source widget (Conversation.webchatWidgetId) so the inbox shows which
+// website a chat came from.
+model WebchatWidget {
+  id     String @id @default(cuid())
+  teamId String
+  // Human name shown to agents ("which website is this chat from").
+  name   String
+  // Public site key embedded in the <script> tag (`wc_pk_<hex>`). Safe-in-HTML;
+  // abuse is bounded by allowedOrigins + rate limits, not secrecy. Globally
+  // unique so an anonymous visitor handshake resolves (team, widget) with ONE
+  // indexed lookup instead of scanning JSON.
+  publicKey String @unique
+  // Origins allowed to embed this widget: "example.com" or "*.example.com".
+  allowedOrigins String[] @default([])
+  // Non-secret appearance + pre-chat config the widget fetches (theme,
+  // welcomeMessage, headerTitle, suggestedQuestions, preChatFields, showBranding).
+  config    Json     @default("{}")
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  team          Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+
+  @@index([teamId])
 }
 
 // Shared Meta-app credentials for a team — the ONE App ID + App secret +
@@ -1035,6 +1076,10 @@ model Conversation {
   // this but exists for a different reason (the dedup key — see its comment);
   // the equality is a consistency invariant, not duplicated data.
   channel            Channel            @default(whatsapp)
+  // For `webchatwidget` conversations: which named website widget this thread
+  // originated from (a team runs many). Null on every other channel. SetNull on
+  // delete so removing a widget config never deletes its conversation history.
+  webchatWidgetId    String?
   assignedUserId     String?
   // New chats land in `pending` so they sit in the triage column until an
   // agent claims them (→ open) or closes them out. The webhook ingest, the
@@ -1097,6 +1142,7 @@ model Conversation {
   team         Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
   contact      Contact                   @relation(fields: [contactId], references: [id], onDelete: Cascade)
   assignedUser User?                     @relation("AssignedConversations", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  webchatWidget WebchatWidget?           @relation(fields: [webchatWidgetId], references: [id], onDelete: SetNull)
   messages     Message[]
   notes        InternalNote[]
   // Audit timeline rows for this conversation. Cascade with the parent —

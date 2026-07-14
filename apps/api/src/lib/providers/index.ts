@@ -4,6 +4,8 @@ import { messengerProvider } from "@/lib/providers/messenger";
 import { getMessengerSendConfig } from "@/lib/providers/messenger-config";
 import { instagramProvider } from "@/lib/providers/instagram";
 import { getInstagramSendConfig } from "@/lib/providers/instagram-config";
+import { webchatwidgetProvider } from "@/lib/providers/webchatwidget";
+import { getWebchatwidgetSendConfig } from "@/lib/providers/webchatwidget-config";
 import { LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
 import type { Channel } from "@ccp/shared/types";
 import type { MessagingProvider } from "@ccp/shared/providers/types";
@@ -81,6 +83,14 @@ const REGISTRY: Partial<Record<Channel, ProviderBinding>> = {
   instagram: {
     provider: instagramProvider,
     getSendConfig: getInstagramSendConfig,
+  } as ProviderBinding,
+  // First-party website chat widget. Its provider does no vendor I/O — sends are
+  // delivered to the visitor's browser by the realtime fanout (see
+  // apps/api/src/webchatwidget/). getSendConfig still gates on a connected row so
+  // preflight fails with channel_not_connected when the widget isn't set up.
+  webchatwidget: {
+    provider: webchatwidgetProvider,
+    getSendConfig: getWebchatwidgetSendConfig,
   } as ProviderBinding,
 };
 

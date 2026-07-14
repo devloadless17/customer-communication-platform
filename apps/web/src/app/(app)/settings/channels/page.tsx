@@ -6,6 +6,7 @@ import {
   getTeamInstagramConfig,
   getTeamMessengerConfig,
   getTeamMetaConfig,
+  getTeamWebchatWidgets,
   getTeamWhatsappConfig,
 } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
@@ -35,17 +36,20 @@ export default async function ChannelsCatalogPage() {
   let wa = false;
   let msgr = false;
   let ig = false;
+  let widgetCount = 0;
   if (canManage) {
-    const [meta, w, m, i] = await Promise.all([
+    const [meta, w, m, i, widgets] = await Promise.all([
       getTeamMetaConfig().catch(() => null),
       getTeamWhatsappConfig().catch(() => null),
       getTeamMessengerConfig().catch(() => null),
       getTeamInstagramConfig().catch(() => null),
+      getTeamWebchatWidgets().catch(() => []),
     ]);
     metaReady = Boolean(meta?.appSecret && meta?.systemUserToken);
     wa = Boolean(w?.phoneNumberId);
     msgr = Boolean(m?.pageId);
     ig = Boolean(i?.igId);
+    widgetCount = widgets.filter((x) => x.isActive).length;
   }
 
   const live: CardModel[] = [
@@ -75,6 +79,19 @@ export default async function ChannelsCatalogPage() {
       href: "/settings/instagram",
       connected: ig,
       status: ig ? "connected" : "not_connected",
+    },
+  ];
+
+  const firstParty: CardModel[] = [
+    {
+      key: "webchatwidget",
+      channel: "webchatwidget",
+      name: "Website chat",
+      description:
+        "Embed a chat widget on any website — one per site. Visitor messages land in your inbox.",
+      href: "/settings/webchatwidget",
+      connected: widgetCount > 0,
+      status: widgetCount > 0 ? "connected" : "not_connected",
     },
   ];
 
@@ -153,6 +170,12 @@ export default async function ChannelsCatalogPage() {
       <Section title="Meta">
         <CatalogCard card={metaCard} canManage={canManage} />
         {live.map((c) => (
+          <CatalogCard key={c.key} card={c} canManage={canManage} />
+        ))}
+      </Section>
+
+      <Section title="Your website">
+        {firstParty.map((c) => (
           <CatalogCard key={c.key} card={c} canManage={canManage} />
         ))}
       </Section>

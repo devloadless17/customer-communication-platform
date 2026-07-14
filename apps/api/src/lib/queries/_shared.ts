@@ -283,7 +283,11 @@ export function mapContactListItem(c: PrismaContactListItem): Contact {
 // the implementation lives in exactly one place (see normalize-string-map.ts).
 export { normalizeStringMap as normalizeCustomFields } from "@/lib/normalize-string-map";
 
-export function mapConversation(c: PrismaConversation): Conversation {
+export function mapConversation(
+  // The source widget name rides along ONLY when the caller included the
+  // relation (the primary inbox reads do); the scalar id is always present.
+  c: PrismaConversation & { webchatWidget?: { name: string } | null },
+): Conversation {
   return {
     id: c.id,
     teamId: c.teamId,
@@ -298,6 +302,9 @@ export function mapConversation(c: PrismaConversation): Conversation {
     // The channel discriminator drives the per-row channel badge and the
     // channel-aware composer. Without it every thread reads as WhatsApp.
     channel: c.channel as Channel,
+    // Website-widget attribution — which site this chat came from.
+    ...(c.webchatWidgetId ? { webchatWidgetId: c.webchatWidgetId } : {}),
+    ...(c.webchatWidget ? { webchatWidgetName: c.webchatWidget.name } : {}),
   };
 }
 

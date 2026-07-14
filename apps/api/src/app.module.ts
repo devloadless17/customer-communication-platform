@@ -23,6 +23,7 @@ import { TeamModule } from "./team/team.module";
 import { TeamChatModule } from "./team-chat/team-chat.module";
 import { TeamsModule } from "./registration/teams.module";
 import { UsersModule } from "./users/users.module";
+import { WebchatwidgetModule } from "./webchatwidget/webchatwidget.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
 import { WorkflowsModule } from "./workflows/workflows.module";
 
@@ -60,6 +61,10 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     MediaModule,
     ExternalV1Module,
     OutboundWebhooksModule,
+    // Public visitor surface for the website chat widget (/widget socket
+    // namespace + /api/widget media endpoints). Admin onboarding lives under
+    // TeamModule (team/webchatwidget/).
+    WebchatwidgetModule,
     // DevModule is import-gated on NODE_ENV. The module's onModuleInit also
     // throws hard if production somehow reaches it — belt-and-suspenders so
     // a refactor that swaps the import order or the env check still can't

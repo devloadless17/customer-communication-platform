@@ -69,6 +69,7 @@ const CHANNEL_DISPLAY_NAME: Partial<Record<Channel, string>> = {
   whatsapp: "WhatsApp",
   messenger: "Messenger",
   instagram: "Instagram",
+  webchatwidget: "Website chat",
 };
 
 export class ProviderNotConfiguredError extends Error {

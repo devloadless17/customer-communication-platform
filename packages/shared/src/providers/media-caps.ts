@@ -28,6 +28,9 @@ export const MEDIA_SIZE_CAPS_BY_CHANNEL: Partial<Record<Channel, Record<MediaKin
   whatsapp: WHATSAPP_CAPS,
   messenger: { image: 25 * MB, video: 25 * MB, audio: 25 * MB, sticker: 25 * MB, document: 25 * MB },
   instagram: { image: 8 * MB, video: 25 * MB, audio: 25 * MB, sticker: 8 * MB, document: 25 * MB },
+  // First-party widget: a flat 25 MB matches the visitor upload cap (both ends
+  // are ours). Stickers aren't a thing here.
+  webchatwidget: { image: 25 * MB, video: 25 * MB, audio: 25 * MB, sticker: 25 * MB, document: 25 * MB },
 };
 
 /** The full per-kind cap table for a channel (WhatsApp caps for designed-for channels). */
@@ -67,6 +70,8 @@ const MEDIA_KINDS_BY_CHANNEL: Partial<Record<Channel, ReadonlySet<MediaKind>>> =
   // uploaded attachment. A `.webp` would otherwise be pushed as a plain image
   // (animation lost). Exclude `sticker` so it errors instead of degrading.
   messenger: new Set<MediaKind>(["image", "video", "audio", "document"]),
+  // Website widget: text + image/video/audio/document + reply; no stickers.
+  webchatwidget: new Set<MediaKind>(["image", "video", "audio", "document"]),
 };
 
 /** Whether `channel` can send outbound media of `kind`. */

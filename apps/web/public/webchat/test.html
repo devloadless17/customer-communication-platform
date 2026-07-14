@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Widget test page</title>
+    <style>
+      body {
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        margin: 0;
+        padding: 48px;
+        background: #f8fafc;
+        color: #0f172a;
+      }
+      .card {
+        max-width: 640px;
+        margin: 0 auto;
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 16px;
+        padding: 28px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 20px;
+      }
+      p {
+        color: #475569;
+        line-height: 1.6;
+      }
+      input {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        font: inherit;
+      }
+      button {
+        margin-top: 12px;
+        padding: 10px 16px;
+        border: 0;
+        border-radius: 8px;
+        background: #4f46e5;
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Fake customer website</h1>
+      <p>
+        Paste a widget public key (<code>wc_pk_…</code>) from Settings → Website chat,
+        then click load. The launcher appears bottom-right.
+      </p>
+      <input id="key" placeholder="wc_pk_..." />
+      <button id="load">Load widget</button>
+      <p id="hint" style="font-size: 13px"></p>
+    </div>
+    <script>
+      document.getElementById("load").addEventListener("click", function () {
+        var key = document.getElementById("key").value.trim();
+        if (!key) return;
+        if (document.getElementById("ccp-webchat-root")) {
+          document.getElementById("hint").textContent =
+            "Widget already loaded — reload the page to switch keys.";
+          return;
+        }
+        var s = document.createElement("script");
+        // Served from the SAME origin as this test page.
+        s.src = "/widget.js";
+        s.setAttribute("data-webchat-key", key);
+        s.defer = true;
+        document.body.appendChild(s);
+        document.getElementById("hint").textContent = "Loading… look bottom-right.";
+      });
+    </script>
+  </body>
+</html>
