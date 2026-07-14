@@ -111,9 +111,10 @@ export const messengerProvider: MessagingProvider<MessengerSendConfig> = {
     _externalId: string,
     config: MessengerSendConfig,
     recipientId?: string,
+    active: boolean = true,
   ): Promise<void> {
     if (!recipientId) return;
-    await sendSocialSenderAction("typing_on", recipientId, target(config));
+    await sendSocialSenderAction(active ? "typing_on" : "typing_off", recipientId, target(config));
   },
 
   async fetchContactProfile(

@@ -86,6 +86,13 @@ export const BulkDeleteConversationsSchema = z.object({
 });
 export type BulkDeleteConversationsInput = z.infer<typeof BulkDeleteConversationsSchema>;
 
+// Typing indicator: `active:false` sends `typing_off` (Messenger/Instagram) to
+// clear the customer's bubble immediately; default/omitted = `typing_on`.
+export const TypingSchema = z.object({
+  active: z.boolean().optional(),
+});
+export type TypingInput = z.infer<typeof TypingSchema>;
+
 export const StartConversationSchema = z
   .object({
     contactId: z.string().min(1).optional(),

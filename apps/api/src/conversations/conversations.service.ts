@@ -820,6 +820,7 @@ export class ConversationsService {
   async sendTyping(
     teamId: string,
     conversationId: string,
+    active: boolean = true,
   ): Promise<{ ok: true; skipped?: string }> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
@@ -854,6 +855,7 @@ export class ConversationsService {
         latestInbound.externalId,
         config,
         recipientId,
+        active,
       );
     } catch (err) {
       if (err instanceof ProviderNotConfiguredError) {

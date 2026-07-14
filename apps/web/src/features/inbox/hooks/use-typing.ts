@@ -44,6 +44,10 @@ export function useTyping(
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastMetaPingRef = useRef(0);
   const metaStartTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // True once we've actually sent Meta a `typing_on` this session — so we only
+  // send `typing_off` (to clear the customer's bubble) when there's a live one
+  // to clear. A brief burst that never reached Meta needs no stop.
+  const metaActiveRef = useRef(false);
 
   const cancelMetaStart = useCallback(() => {
     if (metaStartTimer.current) {
@@ -61,9 +65,20 @@ export function useTyping(
     }
     // Cancel any not-yet-fired first Meta ping. Brief typing bursts (<800ms)
     // never reach Meta, so the customer doesn't see a 25-second bubble after
-    // a single keystroke. Already-fired pings have a 25s Meta-side TTL we
-    // can't shorten — Meta exposes no "stop typing" endpoint.
+    // a single keystroke.
     cancelMetaStart();
+    // If we DID send a live `typing_on`, tell Meta to clear the bubble now
+    // (typing_off) instead of waiting out its ~20s TTL. WhatsApp has no
+    // typing_off — the server no-ops there — so this is a harmless best-effort
+    // ping on every channel.
+    if (metaActiveRef.current) {
+      metaActiveRef.current = false;
+      void apiFetch(`/api/conversations/${conversationId}/typing`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ active: false }),
+      }).catch(() => {});
+    }
     getClientSocket().emit("typing:stop", { conversationId });
   }, [conversationId, cancelMetaStart]);
 
@@ -71,6 +86,7 @@ export function useTyping(
     // Fire-and-forget; server handles the "no inbound to anchor on" case
     // and Meta failures are logged server-side. Errors here must not pop
     // up in the agent UI — keystroke side-effect should be invisible.
+    metaActiveRef.current = true;
     void apiFetch(`/api/conversations/${conversationId}/typing`, {
       method: "POST",
     }).catch(() => {});

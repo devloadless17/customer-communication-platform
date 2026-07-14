@@ -1084,11 +1084,17 @@ export interface MessagingProvider<SendConfig = unknown> {
    *
    * Best-effort like markIncomingRead — callers swallow errors so a provider
    * hiccup doesn't degrade the local typing UX.
+   *
+   * `active` (default true) sends `typing_on`; `false` sends `typing_off` to
+   * clear the bubble immediately on the channels that support it (Messenger /
+   * Instagram). WhatsApp has no `typing_off` (the indicator only auto-expires),
+   * so its provider no-ops on `active:false`.
    */
   sendTypingIndicator?(
     externalId: string,
     config: SendConfig,
     recipientId?: string,
+    active?: boolean,
   ): Promise<void>;
 
   // ---- WhatsApp Business Calling ---------------------------------------

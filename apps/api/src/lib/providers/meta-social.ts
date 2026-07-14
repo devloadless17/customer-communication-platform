@@ -534,6 +534,27 @@ export function parseSocialMessaging(
         rawPayload: entry as unknown as Record<string, unknown>,
       });
     }
+    // Defensive: `entry.standby[]` means ANOTHER app currently holds thread
+    // control under Conversation Routing and we're only receiving passive copies
+    // (we can't reply until control is passed to us). We onboard as the sole
+    // Customer-Care app and never enable routing, so this normally never fires —
+    // but if a customer connects a routing-enabled bot that claims the default
+    // app, our REAL inbound would arrive only here. Log loudly so it's
+    // diagnosable instead of a silent drop; full Handover-Protocol support is a
+    // separate build.
+    const standby = (entry as { standby?: unknown[] }).standby;
+    if (Array.isArray(standby) && standby.length > 0) {
+      console.warn(
+        JSON.stringify({
+          event: "social.standby_received",
+          severity: "warning",
+          channel: expectedObject,
+          entryId: (entry as { id?: string }).id ?? null,
+          count: standby.length,
+          note: "another app holds thread control (Conversation Routing); inbound on standby is not ingested — take/receive thread control to handle it",
+        }),
+      );
+    }
     if (!Array.isArray(entry.messaging)) continue;
     for (const m of entry.messaging) {
       // Unsend: the customer deleted a message. References an existing mid;

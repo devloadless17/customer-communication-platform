@@ -1779,7 +1779,15 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     return { externalId: externalId ?? `reaction:${args.messageExternalId}`, timestamp: new Date() };
   },
 
-  async sendTypingIndicator(externalId: string, config: MetaSendConfig): Promise<void> {
+  async sendTypingIndicator(
+    externalId: string,
+    config: MetaSendConfig,
+    _recipientId?: string,
+    active: boolean = true,
+  ): Promise<void> {
+    // WhatsApp has NO "stop typing" — the indicator only auto-expires — so a
+    // `typing_off` request (active:false) is a no-op here.
+    if (!active) return;
     // Meta bundles the typing bubble onto the read-receipt endpoint: the call
     // marks `externalId` as read AND shows the customer a typing indicator
     // for up to 25 seconds. The indicator auto-dismisses when the next

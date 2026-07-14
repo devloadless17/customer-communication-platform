@@ -28,6 +28,7 @@ import {
   SetConversationAiEnabledSchema,
   SetConversationStatusSchema,
   StartConversationSchema,
+  TypingSchema,
   type AssignConversationInput,
   type BulkDeleteConversationsInput,
   type ListAttachmentsQuery,
@@ -38,6 +39,7 @@ import {
   type SetConversationAiEnabledInput,
   type SetConversationStatusInput,
   type StartConversationInput,
+  type TypingInput,
 } from "./conversations.schemas";
 
 /**
@@ -264,7 +266,8 @@ export class ConversationsController {
   async typing(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
+    @Body(zBody(TypingSchema)) body: TypingInput,
   ) {
-    return this.conversations.sendTyping(session.teamId, id);
+    return this.conversations.sendTyping(session.teamId, id, body.active ?? true);
   }
 }
