@@ -1,8 +1,11 @@
 # PR → typecheck only.
-# Push to main → typecheck + (changes-detect + conditional builds + smoke +
+# Push to main → typecheck + lint ONLY (main is the integration branch; a push
+#                here NEVER deploys). Bring changes to prod by fast-forwarding
+#                main → production and pushing production.
+# Push to production → typecheck + (changes-detect + conditional builds + smoke +
 #                ship + external health + auto-rollback on failure).
 #
-# Job graph (push to main):
+# Job graph (push to production):
 #
 #   typecheck ──────────────────────────────────────────┐
 #   changes ─┬─→ build-web (if web changed) ─┐          │
@@ -26,7 +29,7 @@ name: Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, production]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -67,7 +70,12 @@ jobs:
       - run: pnpm run lint
 
   changes:
-    if: github.event_name != 'pull_request'
+    # The deploy pipeline (this job + everything that chains off it: build-web,
+    # build-api, smoke, ship) runs ONLY on a push to `production` or a manual
+    # workflow_dispatch. A push to `main` runs the typecheck job above and
+    # nothing else — main never deploys. Downstream jobs skip automatically
+    # when this one is skipped (they read its outputs / gate on its result).
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/production')
     runs-on: ubuntu-latest
     timeout-minutes: 3
     outputs:
