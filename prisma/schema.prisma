@@ -486,6 +486,22 @@ model Team {
   callPermissionRequests  CallPermissionRequest[]
   customerIdentityEvents  CustomerIdentityEvent[]
   aiHandoffAssignee       User?                     @relation("AiHandoffAssignee", fields: [aiHandoffAssigneeId], references: [id], onDelete: SetNull)
+
+  // --- Native AI Assistant subsystem (SEPARATE from the legacy autopilot/n8n
+  // fields above: aiAutopilotEnabled / aiHandoff* / firstTouchGreeter). Nothing
+  // here is shared with that system; the ConversationAutomationClaim row is the
+  // atomic arbiter that keeps the two from ever answering the same message.
+  aiAssistantConfig       AiAssistantConfig?
+  aiContextDocuments      AiContextDocument[]
+  aiContextChunks         AiContextChunk[]
+  aiConversationStates    AiConversationState[]
+  aiAutomationClaims      ConversationAutomationClaim[]
+  aiSessionSummaries      ConversationSessionSummary[]
+  aiCustomerMemories      AiCustomerMemory[]
+  aiMessageMetadata       AiMessageMetadata[]
+  aiMessageTranscriptions AiMessageTranscription[]
+  aiInteractions          AiAssistantInteraction[]
+  aiReplySuggestions      AiReplySuggestion[]
 }
 
 // Per-(team, channel) connection: credentials + settings for one provider.
@@ -2686,4 +2702,440 @@ model CallPermissionRequest {
   // contactId-leading index backs the Contact-cascade delete (GDPR hard-purge)
   // — the composite above is teamId-leading and can't serve a bare contactId.
   @@index([contactId])
+}
+
+// ===========================================================================
+// Native AI Assistant subsystem
+// ---------------------------------------------------------------------------
+// A first-party, in-app AI auto-responder. DELIBERATELY SEPARATE from the
+// legacy n8n "autopilot" (Team.aiAutopilotEnabled / AiHandoffAction /
+// FirstTouchGreeter / Conversation.aiEnabled). Nothing here shares state with
+// that system. The two are kept from ever answering the same inbound message
+// by the atomic ConversationAutomationClaim below — a unique
+// (teamId, inboundMessageId) row that exactly one owner can insert.
+//
+// FK discipline: every table cascades from Team (tenant hard-delete). Other
+// references (conversationId / messageId / customerId) are PLAIN string columns
+// with their own index — matching CustomerIdentityEvent.contactId — so this
+// subsystem can be dropped without altering Conversation/Message/Customer.
+// The one exception is AiContextChunk -> AiContextDocument, which cascades so
+// deleting a knowledge file removes its chunks (correction #13).
+// ===========================================================================
+
+enum AiAutoReplyMode {
+  auto_send // send automatically (pause on human takeover)
+  draft // produce a persisted suggestion; a human sends it
+  hybrid // auto_send outside opening hours, draft during
+}
+
+enum AiLanguagePolicy {
+  match_customer // reply in the customer's detected language/script
+  default_language // always reply in AiAssistantConfig.defaultLanguage
+  specific // always reply in AiAssistantConfig.specificLanguage
+}
+
+enum AiReplyChannelMode {
+  text
+  voice
+  match_customer // voice if the customer sent voice, else text
+  text_and_voice // send both
+}
+
+enum AiContextDocStatus {
+  processing
+  ready
+  failed
+  disabled // uploaded but excluded from retrieval by an admin
+}
+
+// Per-conversation native-AI state machine (correction #2). A human reply
+// CANCELS the pending AI turn and moves the conversation to human_active, but
+// does NOT permanently pause: the next CUSTOMER inbound auto-resumes to
+// ai_active. ai_paused is the EXPLICIT agent pause (sticky until resumed);
+// disabled turns the assistant off for this thread entirely.
+enum AiConvAutomationState {
+  ai_active
+  human_active
+  ai_paused
+  disabled
+}
+
+// Which automation system owns (answers) a given inbound message. The claim
+// row is the atomic arbiter — the unique index makes the first INSERT win.
+enum AiAutomationOwner {
+  native_ai
+  autopilot
+  workflow
+}
+
+enum AiMemoryKind {
+  preferred_language
+  dialect
+  script
+  tone
+  communication_style
+  interest
+  recurring_need
+  preference
+}
+
+enum AiMemoryStatus {
+  candidate // extracted, below the auto-confirm bar; needs confidence/review
+  confirmed // surfaced in the panel + fed back into prompts
+  rejected // an agent dismissed it; never resurfaced
+}
+
+enum AiMemorySource {
+  system // extracted by the model
+  agent // hand-entered/edited by a human
+}
+
+enum AiInteractionDecision {
+  replied // auto-sent an outbound
+  suggested // wrote a draft suggestion (draft/hybrid mode)
+  skipped // eligibility failed before generation
+  escalated // model flagged human handoff
+  cancelled // eligibility failed on the pre-send recheck (e.g. human replied)
+  failed // generation/send error
+}
+
+enum AiSuggestionState {
+  pending
+  accepted // sent as-is
+  edited // sent after an agent edit
+  rejected
+  expired
+}
+
+enum AiTranscriptionStatus {
+  pending
+  ready
+  failed
+}
+
+// One row per team — the whole AI Assistant configuration surface (the 7
+// settings tabs). `configVersion` is bumped on every save, stamped onto every
+// AiAssistantInteraction (audit traceability) and used as the CAS token on the
+// settings PUT. `enabled` is the master switch, SEPARATE from
+// Team.aiAutopilotEnabled.
+model AiAssistantConfig {
+  id            String  @id @default(cuid())
+  teamId        String  @unique
+  team          Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  enabled       Boolean @default(false)
+  configVersion Int     @default(1)
+
+  // --- Company Identity ---
+  companyName      String?
+  shortDescription String?
+  fullDescription  String? @db.Text
+  industry         String?
+  website          String?
+  phone            String?
+  locations        Json    @default("[]")
+  serviceAreas     Json    @default("[]")
+
+  // --- Business Details ---
+  products               String? @db.Text
+  services               String? @db.Text
+  pricingNotes           String? @db.Text
+  paymentMethods         String? @db.Text
+  deliveryPolicy         String? @db.Text
+  returnPolicy           String? @db.Text
+  bookingRules           String? @db.Text
+  faqs                   Json    @default("[]")
+  restrictions           String? @db.Text
+  escalationInstructions String? @db.Text
+
+  // --- Opening Hours ---
+  timezone           String  @default("Asia/Beirut")
+  weeklySchedule     Json    @default("{}")
+  holidays           Json    @default("[]")
+  scheduleExceptions Json    @default("[]")
+  afterHoursBehavior String? @db.Text
+
+  // --- Languages & Dialect ---
+  supportedLanguages Json             @default("[\"ar\", \"en\"]")
+  defaultLanguage    String           @default("ar")
+  languagePolicy     AiLanguagePolicy @default(match_customer)
+  specificLanguage   String?
+  lebaneseDialect    Boolean          @default(true)
+  lebaneseStyle      String?          @db.Text
+  allowArabizi       Boolean          @default(true)
+  scriptPolicy       String           @default("match_customer") // arabic | latin | match_customer
+  codeSwitching      Boolean          @default(true)
+  emojiPolicy        String           @default("sparing") // none | sparing | expressive
+
+  // --- Tone & Reply Behavior ---
+  tone                  String          @default("friendly")
+  matchCustomerTone     Boolean         @default(true)
+  replyLength           String          @default("balanced") // short | balanced | detailed
+  customInstructions    String?         @db.Text
+  autoReplyMode         AiAutoReplyMode @default(auto_send)
+  // Below this model-reported confidence the assistant DRAFTS instead of
+  // auto-sending, even in auto_send mode (correction: confidence threshold).
+  confidenceThreshold   Float           @default(0.55)
+  // 0 = unlimited. Otherwise the assistant stops auto-replying on a thread
+  // after N consecutive AI turns without a human, to bound runaway loops.
+  maxAutoRepliesPerConv Int             @default(0)
+  humanTakeoverBehavior String          @default("cancel_and_yield")
+
+  // --- Voice ---
+  incomingTranscription Boolean            @default(true)
+  saveTranscript        Boolean            @default(true)
+  replyChannelMode      AiReplyChannelMode @default(text)
+  // A TESTED, configured ElevenLabs voice id. No Lebanese-accent quality is
+  // guaranteed by the system — the admin selects/tests a voice (correction #12).
+  voiceId               String?
+  voiceLanguage         String             @default("ar")
+  voiceSpeed            Float              @default(1.0)
+  maxVoiceDurationSec   Int                @default(60)
+  voiceTextFallback     Boolean            @default(true)
+
+  // Logical tier key -> resolved to an env-configured Anthropic model id at
+  // call time (never a hardcoded display name in code; correction #11).
+  replyModelTier String @default("reply")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// An uploaded knowledge file. Bytes live in R2 under a private, team-prefixed
+// key; text is extracted (bounded, encrypted-PDF rejected) into AiContextChunk
+// rows for retrieval. Deleting a row cleans up R2 + chunks (correction #13).
+model AiContextDocument {
+  id           String             @id @default(cuid())
+  teamId       String
+  team         Team               @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  filename     String
+  mimeType     String
+  sizeBytes    Int
+  r2Key        String
+  status       AiContextDocStatus @default(processing)
+  enabled      Boolean            @default(true)
+  error        String?            @db.Text
+  chunkCount   Int                @default(0)
+  tokenCount   Int                @default(0)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  processedAt  DateTime?
+
+  chunks AiContextChunk[]
+
+  @@index([teamId, createdAt(sort: Desc)])
+}
+
+// A retrievable slice of a knowledge document. Retrieval uses a Postgres
+// full-text keyword search (a GIN index on to_tsvector('simple', content) is
+// added in raw SQL in the migration; pgvector can replace it later without a
+// model change). Only the top tenant-filtered chunks are injected per prompt —
+// never every document's full text (correction #8).
+model AiContextChunk {
+  id         String            @id @default(cuid())
+  teamId     String
+  team       Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  documentId String
+  document   AiContextDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  ordinal    Int
+  content    String            @db.Text
+  tokenCount Int               @default(0)
+  createdAt  DateTime          @default(now())
+
+  @@index([teamId])
+  @@index([documentId, ordinal])
+}
+
+// Per-conversation native-AI state (correction #2). Default row is created
+// lazily on first eligibility check as ai_active when the team config is on.
+model AiConversationState {
+  id             String                @id @default(cuid())
+  teamId         String
+  team           Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  conversationId String                @unique
+  state          AiConvAutomationState @default(ai_active)
+  // Who/when for an explicit pause (state = ai_paused). Plain user id, no FK.
+  pausedByUserId String?
+  pausedAt       DateTime?
+  stateChangedAt DateTime              @default(now())
+  // Consecutive AI auto-replies since the last human/customer break — enforces
+  // AiAssistantConfig.maxAutoRepliesPerConv.
+  autoReplyCount Int                   @default(0)
+  updatedAt      DateTime              @updatedAt
+
+  @@index([teamId])
+}
+
+// Atomic mutual-exclusion arbiter (correction #3). Exactly one owner may claim
+// a given inbound message. The unique (teamId, inboundMessageId) makes the
+// first INSERT win; every other automation system's insert hits P2002 and must
+// not answer. Native AI inserts owner = native_ai; a future autopilot/workflow
+// integration inserts its own owner. This is the ONLY cross-system coupling and
+// it is write-based, not a read-only guard.
+model ConversationAutomationClaim {
+  id              String            @id @default(cuid())
+  teamId          String
+  team            Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  conversationId  String
+  inboundMessageId String
+  owner           AiAutomationOwner
+  claimedAt       DateTime          @default(now())
+
+  @@unique([teamId, inboundMessageId])
+  @@index([teamId, conversationId])
+}
+
+// Session-level rollup (correction #6). A session is open until the
+// conversation closes OR 12h of inactivity. `sessionEndAt` null = the current
+// open session (the one the "Latest Session Summary" panel reads). Summaries
+// update INCREMENTALLY: lastSummarizedMessageId marks progress, summaryVersion
+// bumps each pass. Temporary order/complaint details live HERE, not in
+// permanent customer memory (correction #7).
+model ConversationSessionSummary {
+  id                    String    @id @default(cuid())
+  teamId                String
+  team                  Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  conversationId        String
+  sessionStartAt        DateTime
+  sessionEndAt          DateTime?
+  lastSummarizedMessageId String?
+  summaryVersion        Int       @default(0)
+  // Structured session fields for the panel.
+  customerGoal          String?   @db.Text
+  importantContext      String?   @db.Text
+  questions             Json      @default("[]")
+  answers               Json      @default("[]")
+  commitments           Json      @default("[]") // company commitments/promises
+  openQuestions         Json      @default("[]")
+  requiredFollowUp      String?   @db.Text
+  sentiment             String?
+  language              String?
+  tone                  String?
+  latestStatus          String?   @db.Text
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([teamId, conversationId, sessionStartAt(sort: Desc)])
+}
+
+// Permanent, PERSON-level memory (correction #1 + #7). Structured candidates,
+// each with confidence + provenance (source conversation/message), editable and
+// deletable. Confirmed items feed the panel + future prompts. NOT stored on
+// Customer/Message.
+model AiCustomerMemory {
+  id                   String         @id @default(cuid())
+  teamId               String
+  team                 Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  customerId           String
+  kind                 AiMemoryKind
+  value                String         @db.Text
+  confidence           Float          @default(0)
+  status               AiMemoryStatus @default(candidate)
+  source               AiMemorySource @default(system)
+  sourceConversationId String?
+  sourceMessageId      String?
+  createdByUserId      String? // set when source = agent
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  @@index([teamId, customerId, status])
+  @@index([teamId, customerId, kind])
+}
+
+// Per-message AI metadata, kept OFF the Message row (correction #1). The
+// aiGenerated flag is the loop guard: the assistant never answers a message
+// that carries an aiGenerated=true metadata row (correction #15, last case).
+model AiMessageMetadata {
+  id            String   @id @default(cuid())
+  teamId        String
+  team          Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  messageId     String   @unique
+  aiGenerated   Boolean  @default(false)
+  model         String?
+  language      String?
+  dialect       String?
+  script        String?
+  intent        String?
+  confidence    Float?
+  interactionId String?
+  createdAt     DateTime @default(now())
+
+  @@index([teamId])
+}
+
+// Inbound-voice transcription, kept OFF the Message row (correction #1 + #5).
+model AiMessageTranscription {
+  id            String                @id @default(cuid())
+  teamId        String
+  team          Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  messageId     String                @unique
+  status        AiTranscriptionStatus @default(pending)
+  transcript    String?               @db.Text
+  language      String?
+  provider      String?
+  durationMs    Int?
+  // Agent correction of the machine transcript (correction: allow correction).
+  correctedText String?               @db.Text
+  correctedByUserId String?
+  error         String?               @db.Text
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  @@index([teamId])
+}
+
+// Durable per-attempt audit (correction #9). One row per assistant run —
+// what it decided and why, for observability + debugging + cost tracking.
+model AiAssistantInteraction {
+  id               String                @id @default(cuid())
+  teamId           String
+  team             Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  conversationId   String
+  inboundMessageId String
+  outboundMessageId String?
+  suggestionId     String?
+  configVersion    Int
+  model            String?
+  language         String?
+  dialect          String?
+  intent           String?
+  confidence       Float?
+  decision         AiInteractionDecision
+  skipReason       String?
+  selectedChunkIds Json                  @default("[]")
+  inputTokens      Int?
+  outputTokens     Int?
+  cacheReadTokens  Int?
+  latencyMs        Int?
+  error            String?               @db.Text
+  createdAt        DateTime              @default(now())
+
+  @@index([teamId, conversationId, createdAt(sort: Desc)])
+  @@index([teamId, createdAt(sort: Desc)])
+}
+
+// Durable draft (correction #10). Survives refresh/reconnect because it lives
+// in Postgres, not client state. One per inbound; regenerate updates in place.
+model AiReplySuggestion {
+  id               String            @id @default(cuid())
+  teamId           String
+  team             Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  conversationId   String
+  inboundMessageId String
+  text             String            @db.Text
+  replyLanguage    String?
+  replyScript      String?
+  channelMode      AiReplyChannelMode @default(text)
+  // Set when a voice draft was pre-rendered; R2 key of the preview audio.
+  audioR2Key       String?
+  usedChunkIds     Json              @default("[]")
+  state            AiSuggestionState @default(pending)
+  editedText       String?           @db.Text
+  decidedByUserId  String?
+  decidedAt        DateTime?
+  expiresAt        DateTime
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@unique([teamId, inboundMessageId])
+  @@index([teamId, conversationId, state])
 }

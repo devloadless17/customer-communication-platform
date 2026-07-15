@@ -4,6 +4,7 @@ import { usePathname } from "next/navigation";
 import {
   BarChart3,
   Bell,
+  Bot,
   Layers,
   ListChecks,
   MessagesSquare,
@@ -45,6 +46,7 @@ export function SettingsSubSidebar({
   const canFields = permissions["contactFields:manage"];
   const canSnippets = permissions["snippets:manage"];
   const canTags = permissions["tags:manage"];
+  const canAiAssistant = permissions["aiAssistant:manage"];
 
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(href + "/");
@@ -123,6 +125,14 @@ export function SettingsSubSidebar({
       )}
 
       <SubSidebarSection label="Conversation config">
+        {canAiAssistant && (
+          <SubSidebarItem
+            href="/settings/ai-assistant"
+            label="AI Assistant"
+            leading={<Bot className="size-4" />}
+            active={isActive("/settings/ai-assistant")}
+          />
+        )}
         {canSnippets && (
           <SubSidebarItem
             href="/settings/snippets"

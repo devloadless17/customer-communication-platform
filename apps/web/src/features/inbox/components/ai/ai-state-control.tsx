@@ -1,0 +1,97 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import { apiFetch } from "@/lib/api/client-fetch";
+
+/**
+ * Conversation-header AI state chip + actions (placement map §4):
+ *   states  : AI Active · Human Active · Paused · Disabled
+ *   actions : Pause AI · Resume AI · Take over · Return to AI · Disable/Enable
+ * Reflects the server state machine (correction #2). Persisted, so it survives
+ * refresh; refetched on mount.
+ */
+
+type State = "ai_active" | "human_active" | "ai_paused" | "disabled";
+
+const META: Record<State, { label: string; className: string }> = {
+  ai_active: { label: "AI Active", className: "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300" },
+  human_active: { label: "Human Active", className: "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300" },
+  ai_paused: { label: "AI Paused", className: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" },
+  disabled: { label: "AI Disabled", className: "bg-muted text-muted-foreground" },
+};
+
+const ACTIONS: Record<State, Array<[string, string]>> = {
+  ai_active: [["Pause AI", "pause"], ["Take over", "takeover"], ["Disable", "disable"]],
+  human_active: [["Return to AI", "resume"], ["Pause AI", "pause"], ["Disable", "disable"]],
+  ai_paused: [["Resume AI", "resume"], ["Disable", "disable"]],
+  disabled: [["Enable AI", "enable"]],
+};
+
+export function AiStateControl({ conversationId }: { conversationId: string }) {
+  const [state, setState] = useState<State | null>(null);
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  const load = useCallback(async () => {
+    const res = await apiFetch(`/api/ai-assistant/conversations/${conversationId}/overview`);
+    if (!res.ok) return;
+    const data = (await res.json()) as { state?: State };
+    if (data.state) setState(data.state);
+  }, [conversationId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  async function act(action: string) {
+    setOpen(false);
+    const res = await apiFetch(`/api/ai-assistant/conversations/${conversationId}/state`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { state?: { state?: State } };
+      if (data.state?.state) setState(data.state.state);
+      else void load();
+    }
+  }
+
+  if (!state) return null;
+  const meta = META[state];
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className={`rounded-full px-2 py-1 text-xs font-medium ${meta.className}`}
+        title="AI Assistant state"
+      >
+        {meta.label}
+      </button>
+      {open && (
+        <div className="absolute right-0 z-20 mt-1 min-w-40 rounded-md border border-border bg-popover p-1 shadow-md">
+          {ACTIONS[state].map(([label, action]) => (
+            <button
+              key={action}
+              onClick={() => void act(action)}
+              className="block w-full rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

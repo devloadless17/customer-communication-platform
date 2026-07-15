@@ -55,6 +55,7 @@ import { EditableField } from "./contact-panel/editable-field";
 import { EditableHeading } from "./contact-panel/editable-heading";
 import { ReadOnlyRow } from "./contact-panel/read-only-row";
 import { Section } from "./contact-panel/section";
+import { AiConversationPanel } from "./ai/ai-conversation-panel";
 
 /** True when a social profile carries at least one signal worth rendering. */
 function hasSocialSignals(p: SocialProfile): boolean {
@@ -1506,6 +1507,10 @@ function ContactPanelImpl({
             )}
           </div>
         </Section>
+
+        {/* Native AI Assistant: person-level memory, then the current session
+            summary. Two distinct surfaces (never merged). */}
+        <AiConversationPanel conversationId={conversation.id} />
 
         {/* Status is already shown in the thread header, and a raw message count
             isn't actionable — so this section now surfaces ONLY the internal-note

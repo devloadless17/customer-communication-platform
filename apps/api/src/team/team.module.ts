@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 
+import { AiAssistantModule } from "./ai-assistant/ai-assistant.module";
 import { ApiKeysModule } from "./api-keys/api-keys.module";
 import { AudienceGroupsModule } from "./audience-groups/audience-groups.module";
 import { ContactFieldsModule } from "./contact-fields/contact-fields.module";
@@ -42,6 +43,7 @@ import { WorkflowsModule as TeamWorkflowsModule } from "./workflows/workflows.mo
     TeamWebchatwidgetModule,
     TeamWorkflowsModule,
     PermissionsModule,
+    AiAssistantModule,
   ],
   controllers: [TeamRootController],
   providers: [TeamRootService],

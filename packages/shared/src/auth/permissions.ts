@@ -104,7 +104,8 @@ export type Capability =
   | "availability:manage"
   | "calls:make"
   | "calls:receive"
-  | "teamActivity:view";
+  | "teamActivity:view"
+  | "aiAssistant:manage";
 
 export const ALL_CAPABILITIES: Capability[] = [
   "conversations:delete",
@@ -121,6 +122,7 @@ export const ALL_CAPABILITIES: Capability[] = [
   "calls:make",
   "calls:receive",
   "teamActivity:view",
+  "aiAssistant:manage",
 ];
 
 /** Roles whose capabilities an admin may edit. admin/superAdmin are fixed. */
@@ -143,6 +145,7 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   "calls:make": "Place outbound voice calls",
   "calls:receive": "Answer incoming voice calls",
   "teamActivity:view": "View team activity report",
+  "aiAssistant:manage": "Configure the AI Assistant (company profile, knowledge, voice)",
 };
 
 /**
@@ -190,6 +193,11 @@ export const DEFAULT_CAPABILITIES: Record<Role, Record<Capability, boolean>> = {
     // default (admin/manager get it); an admin can grant it per role in
     // Settings → Role permissions.
     "teamActivity:view": false,
+    // Configuring the AI Assistant (company profile, knowledge base, voice,
+    // auto-reply behavior) is an admin/manager setting — off for agents by
+    // default. Agents still OPERATE the assistant in the inbox (pause/resume,
+    // send/edit a suggestion, take over) without this capability.
+    "aiAssistant:manage": false,
   },
 };
 
