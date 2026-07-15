@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 
 import { db, appAdmin, pollUntil } from "../_helpers/db";
-import { setConversationStatus } from "../_helpers/api";
+import { setConversationStatus, createWorkflow, publishWorkflow, createOutboundWebhook } from "../_helpers/api";
 
 /**
  * End-to-end for the website chat-widget channel (`webchatwidget`).
@@ -65,6 +65,9 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  // Workflows + outbound webhooks created by the automation-wiring tests.
+  await db().workflow.deleteMany({ where: { teamId, name: { contains: RUN } } });
+  await db().outboundWebhook.deleteMany({ where: { teamId, name: { contains: RUN } } });
   // Contacts cascade to their conversations + messages; widgets SetNull.
   for (const id of createdContactIds) {
     await db().contact.deleteMany({ where: { id, teamId } });
@@ -435,6 +438,94 @@ test("deploy mode: inline embed renders in a container (always open, no launcher
     // The shadow host moved into our container.
     const inside = await v.evaluate(() => !!document.getElementById("ccp-inline")?.querySelector("#ccp-webchat-root"));
     expect(inside).toBe(true);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("automation: a workflow triggers on a webchatwidget message and auto-replies into the widget", async ({ browser, request }) => {
+  const marker = `wfmark${RUN}`;
+  const reply = `auto-reply from workflow ${RUN}`;
+  // Scope the trigger to our marker so it only fires for this test's message.
+  const wf = await createWorkflow(request, {
+    name: `E2E widget wf ${RUN}`,
+    trigger: "message_received",
+    triggerConditions: [{ field: "body", op: "contains", value: marker }],
+    graph: {
+      startNodeId: "n1",
+      nodes: [{ id: "n1", type: "send_message", config: { body: reply } }],
+      edges: [],
+    } as never,
+  });
+  await publishWorkflow(request, wf.id);
+
+  const ctx = await browser.newContext();
+  const v = await ctx.newPage();
+  try {
+    await mountWidget(v, PUBLIC_KEY);
+    await pastPreChat(v);
+    await v.locator(".composer textarea").fill(`Hello ${marker}`);
+    await v.locator(".composer textarea").press("Enter");
+
+    // The message_received workflow trigger fires for the webchatwidget message
+    // and its send_message action delivers the auto-reply live into the widget.
+    await expect(v.locator(".bubble", { hasText: reply })).toBeVisible({ timeout: 25_000 });
+
+    // …and it's persisted as an outbound webchatwidget message (system-authored).
+    const m = await pollUntil(
+      async () =>
+        db().message.findFirst({
+          where: { teamId, channel: CHANNEL, direction: "out", body: reply },
+          select: { conversationId: true, senderUserId: true },
+        }),
+      { timeoutMs: 25_000, label: "workflow auto-reply message" },
+    );
+    expect(m.senderUserId).toBeNull(); // automation send
+    const conv = await db().conversation.findUnique({ where: { id: m.conversationId }, select: { contactId: true } });
+    if (conv?.contactId) createdContactIds.add(conv.contactId);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("automation: outbound webhook fires for a webchatwidget message with the channel identified", async ({ browser, request }) => {
+  const wh = await createOutboundWebhook(request, {
+    name: `E2E widget wh ${RUN}`,
+    url: "https://webhook.invalid/ccp-e2e", // unreachable — we assert on the stored delivery payload, not receipt
+    eventTypes: ["message.received"],
+  });
+
+  const body = `webhook probe ${RUN}`;
+  const ctx = await browser.newContext();
+  const v = await ctx.newPage();
+  try {
+    await mountWidget(v, PUBLIC_KEY);
+    await pastPreChat(v);
+    await v.locator(".composer textarea").fill(body);
+    await v.locator(".composer textarea").press("Enter");
+
+    // A delivery row is recorded (verbatim wire payload) even though the POST
+    // fails. It must identify the channel as webchatwidget — the fix that
+    // synthesizes a channel block for connection-less first-party channels.
+    const delivery = await pollUntil(
+      async () =>
+        db().outboundWebhookDelivery.findFirst({
+          where: { webhookId: wh.id, eventType: "message.received" },
+          orderBy: { createdAt: "desc" },
+          select: { payload: true },
+        }),
+      { timeoutMs: 25_000, label: "outbound webhook delivery for webchatwidget" },
+    );
+    const json = JSON.stringify(delivery.payload);
+    expect(json).toContain("webchatwidget"); // channel block is populated, not null
+    expect(json).toContain(body); // and it's our message
+
+    const inbound = await db().message.findFirst({
+      where: { teamId, channel: CHANNEL, direction: "in", body },
+      select: { conversationId: true },
+    });
+    const conv = inbound && (await db().conversation.findUnique({ where: { id: inbound.conversationId }, select: { contactId: true } }));
+    if (conv?.contactId) createdContactIds.add(conv.contactId);
   } finally {
     await ctx.close();
   }

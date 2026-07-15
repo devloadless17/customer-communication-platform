@@ -172,10 +172,34 @@ const INSTAGRAM_MEDIA_POLICY: ChannelMediaPolicy = {
   documentMime: INSTAGRAM_DOCUMENT_MIME,
 };
 
+// Website widget: first-party, both ends are ours, so it's permissive — the
+// browser renders any common web format. Caps come from the shared 25 MB
+// webchatwidget entry (media-caps.ts), NOT WhatsApp's 5 MB. Without this a media
+// reply to a widget visitor would fall back to WHATSAPP_MEDIA_POLICY and reject
+// a valid webp/gif/mov or a 20 MB video with a misleading "WhatsApp" error.
+const WEBCHATWIDGET_AUDIO_MIME: ReadonlySet<string> = new Set([
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/ogg",
+  "audio/wav",
+  "audio/webm",
+  "audio/aac",
+  "audio/x-m4a",
+]);
+const WEBCHATWIDGET_MEDIA_POLICY: ChannelMediaPolicy = {
+  label: "Website widget",
+  caps: mediaSizeCaps("webchatwidget"),
+  imageMime: PERMISSIVE_IMAGE_MIME,
+  audioMime: WEBCHATWIDGET_AUDIO_MIME,
+  videoMime: PERMISSIVE_VIDEO_MIME,
+  documentMime: META_DOCUMENT_MIME_ALLOWED,
+};
+
 const CHANNEL_MEDIA_POLICY: Partial<Record<Channel, ChannelMediaPolicy>> = {
   whatsapp: WHATSAPP_MEDIA_POLICY,
   messenger: MESSENGER_MEDIA_POLICY,
   instagram: INSTAGRAM_MEDIA_POLICY,
+  webchatwidget: WEBCHATWIDGET_MEDIA_POLICY,
 };
 
 /**

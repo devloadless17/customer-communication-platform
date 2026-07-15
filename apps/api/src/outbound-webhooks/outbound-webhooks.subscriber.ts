@@ -761,7 +761,26 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
           orderBy: { createdAt: "asc" },
           select: { id: true, channel: true, createdAt: true },
         });
-    if (!conn) return null;
+    if (!conn) {
+      // A KNOWN medium with no `ChannelConnection` row — first-party channels
+      // (webchatwidget) keep their config in a dedicated table, not
+      // ChannelConnection. Still emit a channel block so the wire payload
+      // identifies the medium (id/created_at legitimately null — the channel has
+      // no single connection) instead of a null `channel`, matching every other
+      // live channel. Only a genuinely channel-less event (channel == null with
+      // no primary connection at all) stays null.
+      if (channel) {
+        const synthetic: WireChannelBase = {
+          id: null,
+          name: channel,
+          source: channelSourceFor(channel),
+          created_at: null,
+        };
+        this.channelCache.set(key, synthetic);
+        return synthetic;
+      }
+      return null;
+    }
 
     const base: WireChannelBase = {
       id: conn.id,

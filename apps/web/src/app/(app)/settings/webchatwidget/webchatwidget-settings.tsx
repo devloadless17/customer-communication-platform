@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Check, Copy, Plus, Trash2 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
@@ -17,6 +17,9 @@ function contrastOn(hex: string): string {
     b = parseInt(hex.slice(5, 7), 16);
   return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.6 ? "#0d1220" : "#fff";
 }
+
+const inputCls =
+  "w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20";
 
 export function WebchatWidgetSettings({
   widgets: initial,
@@ -38,9 +41,7 @@ export function WebchatWidgetSettings({
     setWidgets((ws) => ws.map((w) => (w.id === id ? { ...w, ...patch } : w)));
   }
   function patchConfig(id: string, patch: Partial<WebchatWidgetView["config"]>) {
-    setWidgets((ws) =>
-      ws.map((w) => (w.id === id ? { ...w, config: { ...w.config, ...patch } } : w)),
-    );
+    setWidgets((ws) => ws.map((w) => (w.id === id ? { ...w, config: { ...w.config, ...patch } } : w)));
   }
 
   async function createWidget() {
@@ -125,7 +126,7 @@ export function WebchatWidgetSettings({
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
+    <div className="mx-auto flex w-full max-w-5xl min-w-0 flex-col gap-6">
       <PageHeader
         title="Website chat"
         description="Embed a chat widget on any website. Each site gets its own named widget so you always know where a chat came from."
@@ -133,7 +134,7 @@ export function WebchatWidgetSettings({
           <button
             onClick={createWidget}
             disabled={busy}
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-50"
           >
             <Plus className="size-4" /> New widget
           </button>
@@ -141,39 +142,36 @@ export function WebchatWidgetSettings({
       />
 
       {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+        <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
           {error}
         </div>
       )}
 
       {widgets.length === 0 ? (
-        <div className="rounded-xl border bg-card p-8 text-center text-sm text-muted-foreground">
+        <div className="rounded-xl border bg-card p-10 text-center text-sm text-muted-foreground">
           No widgets yet. Create one to get an embed snippet for your website.
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-[220px_1fr]">
-          {/* widget list */}
-          <div className="flex flex-col gap-1">
-            {widgets.map((w) => (
-              <button
-                key={w.id}
-                onClick={() => setSelectedId(w.id)}
-                className={`flex flex-col items-start rounded-lg border px-3 py-2 text-left transition ${
-                  w.id === selectedId ? "border-primary bg-primary/5" : "hover:bg-muted/50"
-                }`}
-              >
-                <span className="flex w-full items-center justify-between gap-2 text-sm font-medium">
-                  <span className="truncate">{w.name}</span>
-                  {!w.isActive && <span className="text-2xs text-muted-foreground">off</span>}
-                </span>
-                <span className="text-2xs text-muted-foreground">
-                  {w.conversationCount} chat{w.conversationCount === 1 ? "" : "s"}
-                </span>
-              </button>
-            ))}
-          </div>
+        <div className="flex min-w-0 flex-col gap-6">
+          {/* widget tabs */}
+          {widgets.length > 1 && (
+            <div className="flex flex-wrap gap-2">
+              {widgets.map((w) => (
+                <button
+                  key={w.id}
+                  onClick={() => setSelectedId(w.id)}
+                  className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-sm transition ${
+                    w.id === selectedId ? "border-primary bg-primary/5 font-medium shadow-sm" : "text-muted-foreground hover:bg-muted/50"
+                  }`}
+                >
+                  <span className="max-w-[180px] truncate">{w.name}</span>
+                  <span className="text-2xs opacity-70">{w.conversationCount}</span>
+                  {!w.isActive && <span className="rounded bg-muted px-1 text-2xs">off</span>}
+                </button>
+              ))}
+            </div>
+          )}
 
-          {/* editor + preview */}
           {selected && (
             <Editor
               key={selected.id}
@@ -222,121 +220,97 @@ function Editor({
   const scriptTag = buildScript(origin, widget.publicKey, c);
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* left: form */}
-        <div className="flex flex-col gap-4">
-          <Labeled label="Widget name">
-            <input
-              value={widget.name}
-              onChange={(e) => onName(e.target.value)}
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-            />
-          </Labeled>
+    <div className="flex min-w-0 flex-col gap-6">
+      <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
+        {/* form */}
+        <div className="flex min-w-0 flex-col gap-5">
+          <Section title="Content">
+            <Field label="Widget name" hint="Internal — how you identify this site.">
+              <input value={widget.name} onChange={(e) => onName(e.target.value)} className={inputCls} />
+            </Field>
+            <Field label="Header title" hint="Shown to visitors at the top of the chat.">
+              <input value={c.headerTitle ?? ""} placeholder={widget.name} onChange={(e) => onConfig({ headerTitle: e.target.value })} className={inputCls} />
+            </Field>
+            <Field label="Header subtitle">
+              <input value={c.headerSubtitle ?? ""} placeholder="Typically replies in a few minutes" onChange={(e) => onConfig({ headerSubtitle: e.target.value })} className={inputCls} />
+            </Field>
+            <Field label="Welcome message">
+              <textarea value={c.welcomeMessage ?? ""} onChange={(e) => onConfig({ welcomeMessage: e.target.value })} rows={2} className={`${inputCls} resize-y`} />
+            </Field>
+            <Field label="Suggested questions" hint="One per line, up to 6.">
+              <textarea
+                value={(c.suggestedQuestions ?? []).join("\n")}
+                onChange={(e) => onConfig({ suggestedQuestions: e.target.value.split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 6) })}
+                rows={3}
+                className={`${inputCls} resize-y`}
+              />
+            </Field>
+          </Section>
 
-          <Labeled label="Header title (shown to visitors)">
-            <input
-              value={c.headerTitle ?? ""}
-              placeholder={widget.name}
-              onChange={(e) => onConfig({ headerTitle: e.target.value })}
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-            />
-          </Labeled>
-
-          <Labeled label="Welcome message">
-            <textarea
-              value={c.welcomeMessage ?? ""}
-              onChange={(e) => onConfig({ welcomeMessage: e.target.value })}
-              rows={2}
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-            />
-          </Labeled>
-
-          <Labeled label="Header subtitle (under the title)">
-            <input
-              value={c.headerSubtitle ?? ""}
-              placeholder="Typically replies in a few minutes"
-              onChange={(e) => onConfig({ headerSubtitle: e.target.value })}
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-            />
-          </Labeled>
-
-          <div className="grid grid-cols-3 gap-3">
-            <ColorField label="Primary" value={theme.primaryColor} onChange={(v) => onConfig({ theme: { ...theme, primaryColor: v } })} />
-            <ColorField label="Launcher" value={theme.launcherColor} onChange={(v) => onConfig({ theme: { ...theme, launcherColor: v } })} />
-            <ColorField label="Your bubble" value={theme.userBubbleColor} onChange={(v) => onConfig({ theme: { ...theme, userBubbleColor: v } })} />
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <Labeled label="Font">
-              <select value={c.fontFamily ?? "system"} onChange={(e) => onConfig({ fontFamily: e.target.value as "system" | "rounded" | "serif" })} className="w-full rounded-md border bg-background px-3 py-2 text-sm">
-                <option value="system">System</option>
-                <option value="rounded">Rounded</option>
-                <option value="serif">Serif</option>
-              </select>
-            </Labeled>
-            <Labeled label="Theme">
-              <select value={c.themeMode ?? "light"} onChange={(e) => onConfig({ themeMode: e.target.value as "light" | "dark" | "auto" })} className="w-full rounded-md border bg-background px-3 py-2 text-sm">
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-                <option value="auto">Auto (system)</option>
-              </select>
-            </Labeled>
-          </div>
-
-          <div className="rounded-lg border p-3">
-            <p className="mb-2 text-xs font-semibold">Branding</p>
+          <Section title="Appearance">
+            <div className="grid grid-cols-3 gap-3">
+              <ColorField label="Primary" value={theme.primaryColor} onChange={(v) => onConfig({ theme: { ...theme, primaryColor: v } })} />
+              <ColorField label="Launcher" value={theme.launcherColor} onChange={(v) => onConfig({ theme: { ...theme, launcherColor: v } })} />
+              <ColorField label="Your bubble" value={theme.userBubbleColor} onChange={(v) => onConfig({ theme: { ...theme, userBubbleColor: v } })} />
+            </div>
             <div className="grid grid-cols-2 gap-3">
+              <Field label="Font">
+                <select value={c.fontFamily ?? "system"} onChange={(e) => onConfig({ fontFamily: e.target.value as "system" | "rounded" | "serif" })} className={inputCls}>
+                  <option value="system">System</option>
+                  <option value="rounded">Rounded</option>
+                  <option value="serif">Serif</option>
+                </select>
+              </Field>
+              <Field label="Theme">
+                <select value={c.themeMode ?? "light"} onChange={(e) => onConfig({ themeMode: e.target.value as "light" | "dark" | "auto" })} className={inputCls}>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                  <option value="auto">Auto (system)</option>
+                </select>
+              </Field>
+            </div>
+          </Section>
+
+          <Section title="Branding">
+            <div className="grid grid-cols-2 gap-4">
               <ImageUpload label="Logo" value={c.logoDataUrl} maxKb={64} onChange={(v) => onConfig({ logoDataUrl: v })} />
               <ImageUpload label="Agent avatar" value={c.agentAvatarDataUrl} maxKb={40} onChange={(v) => onConfig({ agentAvatarDataUrl: v })} />
             </div>
-          </div>
+          </Section>
 
-          <div className="rounded-lg border p-3">
-            <p className="mb-2 text-xs font-semibold">Launcher &amp; placement</p>
+          <Section title="Launcher & placement">
             <div className="grid grid-cols-2 gap-3">
-              <Labeled label="Launcher">
-                <select value={c.launcher ?? "bubble"} onChange={(e) => onConfig({ launcher: e.target.value as "bubble" | "off" })} className="w-full rounded-md border bg-background px-3 py-2 text-sm">
+              <Field label="Launcher">
+                <select value={c.launcher ?? "bubble"} onChange={(e) => onConfig({ launcher: e.target.value as "bubble" | "off" })} className={inputCls}>
                   <option value="bubble">Floating bubble</option>
-                  <option value="off">Hidden (open via your own link)</option>
+                  <option value="off">Hidden (open from a link)</option>
                 </select>
-              </Labeled>
-              <Labeled label="Position">
-                <select value={c.position ?? "right"} onChange={(e) => onConfig({ position: e.target.value as "right" | "left" })} className="w-full rounded-md border bg-background px-3 py-2 text-sm">
+              </Field>
+              <Field label="Position">
+                <select value={c.position ?? "right"} onChange={(e) => onConfig({ position: e.target.value as "right" | "left" })} className={inputCls}>
                   <option value="right">Bottom right</option>
                   <option value="left">Bottom left</option>
                 </select>
-              </Labeled>
+              </Field>
             </div>
-            <Labeled label="Bubble label (optional)">
-              <input value={c.launcherLabel ?? ""} placeholder="e.g. Chat with us" onChange={(e) => onConfig({ launcherLabel: e.target.value })} className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm" />
-            </Labeled>
-          </div>
+            <Field label="Bubble label" hint="Optional text beside the bubble.">
+              <input value={c.launcherLabel ?? ""} placeholder="e.g. Chat with us" onChange={(e) => onConfig({ launcherLabel: e.target.value })} className={inputCls} />
+            </Field>
+          </Section>
 
-          <Labeled label="Suggested questions (one per line, max 6)">
-            <textarea
-              value={(c.suggestedQuestions ?? []).join("\n")}
-              onChange={(e) =>
-                onConfig({
-                  suggestedQuestions: e.target.value.split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 6),
-                })
-              }
-              rows={3}
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-            />
-          </Labeled>
+          <Section title="Pre-chat form" desc="Optionally ask for a few details before the chat starts.">
+            <PreChatEditor fields={c.preChatFields ?? []} onChange={(preChatFields) => onConfig({ preChatFields })} />
+          </Section>
 
-          <PreChatEditor
-            fields={c.preChatFields ?? []}
-            onChange={(preChatFields) => onConfig({ preChatFields })}
-          />
-
-          <Labeled label="Allowed website domains">
+          <Section title="Allowed domains" desc="Only these sites may embed the widget. localhost is always allowed for testing.">
             <div className="flex flex-wrap gap-1.5">
+              {widget.allowedOrigins.length === 0 && (
+                <span className="text-xs text-muted-foreground">Any site (not recommended) — add your domains below.</span>
+              )}
               {widget.allowedOrigins.map((o) => (
-                <span key={o} className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs">
+                <span key={o} className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1 text-xs">
                   {o}
-                  <button onClick={() => onOrigins(widget.allowedOrigins.filter((x) => x !== o))} className="text-muted-foreground hover:text-foreground">
+                  <button onClick={() => onOrigins(widget.allowedOrigins.filter((x) => x !== o))} className="text-muted-foreground hover:text-foreground" aria-label={`Remove ${o}`}>
                     ×
                   </button>
                 </span>
@@ -353,77 +327,103 @@ function Editor({
                   setOriginDraft("");
                 }
               }}
-              placeholder="example.com or *.example.com — Enter to add"
-              className="mt-2 w-full rounded-md border bg-background px-3 py-2 text-sm"
+              placeholder="example.com or *.example.com — press Enter to add"
+              className={inputCls}
             />
-            <p className="mt-1 text-2xs text-muted-foreground">
-              Leave empty to allow any site (not recommended). localhost is always allowed for testing.
-            </p>
-          </Labeled>
+          </Section>
 
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={c.showBranding !== false} onChange={(e) => onConfig({ showBranding: e.target.checked })} />
-            Show “Powered by” footer
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={widget.isActive} onChange={(e) => onActive(e.target.checked)} />
-            Active
-          </label>
+          <Section title="Behavior">
+            <Toggle checked={c.showBranding !== false} onChange={(v) => onConfig({ showBranding: v })} label="Show “Powered by” footer" />
+            <Toggle checked={widget.isActive} onChange={onActive} label="Active" hint="Inactive widgets stop accepting new chats." />
+          </Section>
         </div>
 
-        {/* right: live preview */}
-        <div className="flex flex-col gap-3">
-          <p className="text-xs font-medium text-muted-foreground">Live preview</p>
-          <Preview widget={widget} />
+        {/* sticky preview — fits its column, never overflows */}
+        <div className="min-w-0">
+          <div className="flex flex-col gap-2.5 xl:sticky xl:top-4">
+            <p className="text-xs font-medium text-muted-foreground">Live preview</p>
+            <div className="flex justify-center overflow-hidden rounded-2xl border bg-muted/40 p-4">
+              <Preview widget={widget} />
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* embed snippets — one per deploy mode */}
-      <div className="flex flex-col gap-4 rounded-xl border bg-card p-4">
-        <div>
-          <p className="text-sm font-medium">Install on your website</p>
-          <p className="text-xs text-muted-foreground">
-            Public key: <code>{widget.publicKey}</code>
-          </p>
-        </div>
-
+      {/* install */}
+      <Section title="Install on your website" desc={`Public key: ${widget.publicKey}`}>
         {(c.launcher ?? "bubble") === "off" ? (
           <>
-            <CopyBox
-              title="1) Add the widget (bubble hidden)"
-              hint="Paste before &lt;/body&gt; on every page."
-              code={scriptTag}
-            />
-            <CopyBox
-              title="2) Open it from any link or button"
-              hint="Wire your own element to the widget."
-              code={`<a href="#" onclick="CCPWebchat.open();return false">Chat with us</a>`}
-            />
+            <CopyBox title="1) Add the widget (bubble hidden)" hint="Paste before &lt;/body&gt; on every page." code={scriptTag} />
+            <CopyBox title="2) Open it from any link or button" hint="Wire your own element to the widget." code={`<a href="#" onclick="CCPWebchat.open();return false">Chat with us</a>`} />
           </>
         ) : (
-          <CopyBox
-            title="Floating bubble"
-            hint="Paste before &lt;/body&gt; on every page — a chat bubble appears."
-            code={scriptTag}
-          />
+          <CopyBox title="Floating bubble" hint="Paste before &lt;/body&gt; on every page — a chat bubble appears." code={scriptTag} />
         )}
-
         <CopyBox
           title="Inline — embed inside a page section"
           hint="Renders the chat inside your container (always open)."
           code={`<div id="ccp-chat" style="height:600px;max-width:440px"></div>\n<script src="${origin}/widget.js" data-webchat-key="${widget.publicKey}" data-webchat-target="#ccp-chat" defer></script>`}
         />
-      </div>
+      </Section>
 
       <div className="flex items-center justify-between">
-        <button onClick={onDelete} disabled={busy} className="inline-flex items-center gap-1.5 rounded-md border border-destructive/40 px-3 py-1.5 text-sm text-destructive disabled:opacity-50">
+        <button onClick={onDelete} disabled={busy} className="inline-flex items-center gap-1.5 rounded-lg border border-destructive/40 px-3 py-2 text-sm text-destructive transition hover:bg-destructive/5 disabled:opacity-50">
           <Trash2 className="size-4" /> Delete
         </button>
-        <button onClick={onSave} disabled={busy} className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50">
+        <button onClick={onSave} disabled={busy} className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-50">
           {busy ? "Saving…" : "Save changes"}
         </button>
       </div>
     </div>
+  );
+}
+
+// ── small building blocks ────────────────────────────────────────────────────
+
+function Section({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
+  return (
+    <section className="min-w-0 rounded-2xl border bg-card p-4 sm:p-5">
+      <h3 className="text-sm font-semibold">{title}</h3>
+      {desc && <p className="mt-0.5 text-xs text-muted-foreground">{desc}</p>}
+      <div className="mt-4 flex flex-col gap-4">{children}</div>
+    </section>
+  );
+}
+
+function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  return (
+    <label className="flex min-w-0 flex-col gap-1.5">
+      <span className="text-xs font-medium">{label}</span>
+      {children}
+      {hint && <span className="text-2xs text-muted-foreground">{hint}</span>}
+    </label>
+  );
+}
+
+function Toggle({ checked, onChange, label, hint }: { checked: boolean; onChange: (v: boolean) => void; label: string; hint?: string }) {
+  return (
+    <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)} className="flex w-full items-center justify-between gap-3 text-left">
+      <span className="flex flex-col">
+        <span className="text-sm">{label}</span>
+        {hint && <span className="text-2xs text-muted-foreground">{hint}</span>}
+      </span>
+      <span className={`relative h-5 w-9 shrink-0 rounded-full transition ${checked ? "bg-primary" : "bg-muted-foreground/30"}`}>
+        <span className={`absolute top-0.5 size-4 rounded-full bg-white shadow transition ${checked ? "left-[18px]" : "left-0.5"}`} />
+      </span>
+    </button>
+  );
+}
+
+function ColorField({ label, value, onChange }: { label: string; value?: string; onChange: (v: string) => void }) {
+  const v = value && /^#[0-9a-f]{6}$/i.test(value) ? value : BRAND;
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-2xs font-medium text-muted-foreground">{label}</span>
+      <div className="flex items-center gap-2 rounded-lg border bg-background px-2 py-1.5">
+        <input type="color" value={v} onChange={(e) => onChange(e.target.value)} className="size-6 cursor-pointer rounded border-0 bg-transparent p-0" />
+        <span className="truncate text-2xs uppercase text-muted-foreground">{v}</span>
+      </div>
+    </label>
   );
 }
 
@@ -439,18 +439,20 @@ function buildScript(origin: string, key: string, c: WebchatWidgetView["config"]
 function CopyBox({ title, hint, code }: { title: string; hint: string; code: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex min-w-0 flex-col gap-1.5">
       <p className="text-xs font-semibold">{title}</p>
       <p className="text-2xs text-muted-foreground">{hint}</p>
-      <div className="flex items-start gap-2">
-        <code className="flex-1 overflow-x-auto whitespace-pre rounded-md bg-muted px-3 py-2 text-2xs">{code}</code>
+      <div className="flex min-w-0 items-stretch gap-2">
+        <code className="min-w-0 flex-1 overflow-x-auto whitespace-pre rounded-lg bg-muted px-3 py-2.5 text-2xs leading-relaxed">
+          {code}
+        </code>
         <button
           onClick={() => {
             void navigator.clipboard.writeText(code);
             setCopied(true);
             setTimeout(() => setCopied(false), 1500);
           }}
-          className="inline-flex shrink-0 items-center gap-1 rounded-md border px-2.5 py-2 text-xs"
+          className="inline-flex shrink-0 items-center gap-1 self-start rounded-lg border px-2.5 py-2 text-xs transition hover:bg-muted"
         >
           {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
           {copied ? "Copied" : "Copy"}
@@ -465,8 +467,8 @@ function ImageUpload({ label, value, maxKb, onChange }: { label: string; value?:
   const [err, setErr] = useState<string | null>(null);
   function pick(file: File) {
     setErr(null);
-    if (file.size > maxKb * 1024) { setErr(`Max ${maxKb} KB`); return; }
-    if (!/^image\//.test(file.type)) { setErr("Images only"); return; }
+    if (file.size > maxKb * 1024) return setErr(`Max ${maxKb} KB`);
+    if (!/^image\//.test(file.type)) return setErr("Images only");
     const r = new FileReader();
     r.onload = () => onChange(String(r.result || ""));
     r.readAsDataURL(file);
@@ -477,16 +479,18 @@ function ImageUpload({ label, value, maxKb, onChange }: { label: string; value?:
       <div className="flex items-center gap-2">
         {value ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={value} alt="" className="size-9 rounded-md border object-cover" />
+          <img src={value} alt="" className="size-9 shrink-0 rounded-lg border object-cover" />
         ) : (
-          <div className="flex size-9 items-center justify-center rounded-md border bg-muted text-2xs text-muted-foreground">—</div>
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border bg-muted text-2xs text-muted-foreground">—</div>
         )}
-        <label className="cursor-pointer rounded-md border px-2.5 py-1.5 text-xs hover:bg-muted">
+        <label className="cursor-pointer rounded-lg border px-2.5 py-1.5 text-xs transition hover:bg-muted">
           Upload
           <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) pick(f); e.target.value = ""; }} />
         </label>
         {value && (
-          <button onClick={() => onChange("")} className="text-xs text-muted-foreground hover:text-destructive">Remove</button>
+          <button onClick={() => onChange("")} className="text-xs text-muted-foreground hover:text-destructive">
+            Remove
+          </button>
         )}
       </div>
       {err && <span className="text-2xs text-destructive">{err}</span>}
@@ -494,65 +498,41 @@ function ImageUpload({ label, value, maxKb, onChange }: { label: string; value?:
   );
 }
 
-function Labeled({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-xs font-medium text-muted-foreground">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-function ColorField({ label, value, onChange }: { label: string; value?: string; onChange: (v: string) => void }) {
-  const v = value && /^#[0-9a-f]{6}$/i.test(value) ? value : BRAND;
-  return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-2xs font-medium text-muted-foreground">{label}</span>
-      <input type="color" value={v} onChange={(e) => onChange(e.target.value)} className="h-9 w-full cursor-pointer rounded-md border bg-background" />
-    </label>
-  );
-}
-
 function PreChatEditor({ fields, onChange }: { fields: Field[]; onChange: (f: Field[]) => void }) {
   return (
     <div className="flex flex-col gap-2">
-      <span className="text-xs font-medium text-muted-foreground">Pre-chat form (optional — ask before chat)</span>
+      {fields.length === 0 && <span className="text-xs text-muted-foreground">No fields — visitors chat right away.</span>}
       {fields.map((f, i) => (
-        <div key={f.id ?? i} className="flex items-center gap-2">
+        <div key={f.id ?? i} className="flex min-w-0 items-center gap-2">
           <input
             value={f.label}
             onChange={(e) => onChange(fields.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))}
             placeholder="Label"
-            className="flex-1 rounded-md border bg-background px-2 py-1.5 text-sm"
+            className="min-w-0 flex-1 rounded-lg border bg-background px-2.5 py-1.5 text-sm"
           />
           <select
             value={f.type}
             onChange={(e) => onChange(fields.map((x, j) => (j === i ? { ...x, type: e.target.value as Field["type"] } : x)))}
-            className="rounded-md border bg-background px-2 py-1.5 text-sm"
+            className="shrink-0 rounded-lg border bg-background px-2 py-1.5 text-sm"
           >
             <option value="name">Name</option>
             <option value="email">Email</option>
             <option value="phone">Phone</option>
             <option value="text">Text</option>
           </select>
-          <label className="flex items-center gap-1 text-xs">
+          <label className="flex shrink-0 items-center gap-1 text-xs">
             <input type="checkbox" checked={f.required} onChange={(e) => onChange(fields.map((x, j) => (j === i ? { ...x, required: e.target.checked } : x)))} />
             req
           </label>
-          <button onClick={() => onChange(fields.filter((_, j) => j !== i))} className="text-muted-foreground hover:text-destructive">
+          <button onClick={() => onChange(fields.filter((_, j) => j !== i))} className="shrink-0 text-muted-foreground hover:text-destructive" aria-label="Remove field">
             ×
           </button>
         </div>
       ))}
       {fields.length < 6 && (
         <button
-          onClick={() =>
-            onChange([
-              ...fields,
-              { id: `f_${Math.random().toString(36).slice(2)}`, label: "Email", type: "email", required: false },
-            ])
-          }
-          className="self-start text-xs text-primary"
+          onClick={() => onChange([...fields, { id: `f_${Math.random().toString(36).slice(2)}`, label: "Email", type: "email", required: false }])}
+          className="self-start text-xs font-medium text-primary"
         >
           + Add field
         </button>
@@ -580,9 +560,9 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
   const font = c.fontFamily === "serif" ? "Georgia, serif" : c.fontFamily === "rounded" ? "ui-rounded, system-ui, sans-serif" : undefined;
   const qs = useMemo(() => (c.suggestedQuestions ?? []).slice(0, 3), [c.suggestedQuestions]);
   return (
-    <div className="w-[330px] overflow-hidden rounded-[20px] shadow-xl" style={{ background: surface, border: `1px solid ${border}`, fontFamily: font, color: ink }}>
+    <div className="w-full max-w-[300px] overflow-hidden rounded-[20px] shadow-xl" style={{ background: surface, border: `1px solid ${border}`, fontFamily: font, color: ink }}>
       <div className="flex items-center gap-2.5 px-4 py-3.5" style={{ background: `linear-gradient(135deg, ${primary}, ${primary}cc)`, color: contrastOn(primary) }}>
-        <span className="relative flex size-9 items-center justify-center overflow-hidden rounded-[11px] bg-white/20 text-sm font-bold">
+        <span className="relative flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-[11px] bg-white/20 text-sm font-bold">
           {c.logoDataUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={c.logoDataUrl} alt="" className="size-full object-cover" />
@@ -596,7 +576,7 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
           {c.headerSubtitle && <div className="truncate text-[11px] opacity-90">{c.headerSubtitle}</div>}
         </div>
       </div>
-      <div className="flex min-h-[220px] flex-col gap-2 p-3.5" style={{ background: surface2 }}>
+      <div className="flex min-h-[210px] flex-col gap-2 p-3.5" style={{ background: surface2 }}>
         {c.welcomeMessage && (
           <div className="max-w-[82%] self-start rounded-2xl rounded-bl-md px-3 py-2 text-sm" style={{ background: inb, border: `1px solid ${border}`, color: ink }}>
             {c.welcomeMessage}
@@ -617,12 +597,17 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
       </div>
       <div className="p-3" style={{ background: surface }}>
         <div className="flex items-center gap-1.5 rounded-3xl px-2 py-1.5" style={{ background: surface2, border: `1.5px solid ${border}` }}>
-          <span className="flex-1 px-2 text-xs" style={{ color: ink2 }}>Type a message…</span>
-          <span className="flex size-8 items-center justify-center rounded-full text-sm" style={{ background: primary, color: contrastOn(primary) }}>➤</span>
+          <span className="flex-1 truncate px-2 text-xs" style={{ color: ink2 }}>Type a message…</span>
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-full" style={{ background: primary, color: contrastOn(primary) }}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4">
+              <line x1="22" y1="2" x2="11" y2="13" />
+              <polygon points="22 2 15 22 11 13 2 9 22 2" />
+            </svg>
+          </span>
         </div>
       </div>
       {c.showBranding !== false && (
-        <div className="pb-2 text-center text-[11px]" style={{ background: surface, color: ink2 }}>⚡ Powered by chat</div>
+        <div className="pb-2 text-center text-[11px]" style={{ background: surface, color: ink2 }}>Powered by chat</div>
       )}
     </div>
   );

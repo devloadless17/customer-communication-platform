@@ -862,7 +862,11 @@ export class ExternalV1MessagingService {
       }
       if (err instanceof ProviderNotConfiguredError) {
         throw new ConflictException({
-          error: "whatsapp_not_connected",
+          // Preserve the historical `whatsapp_not_connected` code for WhatsApp
+          // (partners match on it); other channels (messenger/instagram/
+          // webchatwidget) get the generic code the interactive path already
+          // uses, instead of a WhatsApp-specific mislabel.
+          error: err.channel === "whatsapp" ? "whatsapp_not_connected" : "channel_not_connected",
           detail: err.message,
         });
       }
