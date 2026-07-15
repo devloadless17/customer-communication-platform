@@ -6,8 +6,10 @@ import {
   Param,
   Patch,
   Post,
+  Res,
   UseGuards,
 } from "@nestjs/common";
+import type { Response } from "express";
 
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
@@ -63,8 +65,25 @@ export class AiInboxController {
       id,
       body.action,
       body.editedText,
+      body.sendAs,
     );
     return { suggestion };
+  }
+
+  @Get("suggestions/:id/audio")
+  async suggestionAudio(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Res() res: Response,
+  ) {
+    const obj = await this.svc.getSuggestionAudio(session.teamId, id);
+    if (!obj) {
+      res.status(404).json({ error: "no_audio" });
+      return;
+    }
+    res.setHeader("Content-Type", obj.contentType);
+    res.setHeader("Cache-Control", "private, max-age=60");
+    obj.body.pipe(res);
   }
 
   @Post("suggestions/:id/regenerate")

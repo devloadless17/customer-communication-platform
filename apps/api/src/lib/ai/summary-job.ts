@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
 
 import { resolveModel } from "./models";
 import { chatJson } from "./openai-client";
@@ -150,4 +151,6 @@ export async function runSessionSummary(conversationId: string): Promise<void> {
       },
     });
   }
+
+  void publish({ type: "ai.summary_changed", teamId: conv.teamId, conversationId }).catch(() => {});
 }

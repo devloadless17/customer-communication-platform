@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
+import { getClientSocket } from "@/lib/socket-client";
 
 /**
  * Conversation-header AI state chip + actions (placement map §4):
@@ -43,6 +44,18 @@ export function AiStateControl({ conversationId }: { conversationId: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Realtime: reflect state changes made elsewhere (ai.state_changed).
+  useEffect(() => {
+    const socket = getClientSocket();
+    const onState = (p: { teamId: string; conversationId: string; state: string }) => {
+      if (p.conversationId === conversationId) setState(p.state as State);
+    };
+    socket.on("ai:state", onState);
+    return () => {
+      socket.off("ai:state", onState);
+    };
+  }, [conversationId]);
 
   useEffect(() => {
     if (!open) return;

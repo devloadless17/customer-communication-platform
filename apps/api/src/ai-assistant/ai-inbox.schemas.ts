@@ -9,6 +9,8 @@ export const SuggestionDecisionSchema = z
   .object({
     action: z.enum(["accept", "reject"]),
     editedText: z.string().max(20000).optional(),
+    // "Send as Voice" vs "Send as Text" for a draft (default text).
+    sendAs: z.enum(["text", "voice"]).optional(),
   })
   .strict();
 export type SuggestionDecisionInput = z.infer<typeof SuggestionDecisionSchema>;

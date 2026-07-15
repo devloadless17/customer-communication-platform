@@ -630,6 +630,45 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
+  // ---- Native AI Assistant (conversation-room scoped) --------------------
+  // Panel/suggestion-level signals; the inbox AI surfaces refetch on receipt.
+  "ai.suggestion_changed": (e, emitter) => {
+    emitter.emitToConversation(e.conversationId, "ai:suggestion", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      suggestionId: e.suggestionId,
+      state: e.state,
+    });
+  },
+  "ai.summary_changed": (e, emitter) => {
+    emitter.emitToConversation(e.conversationId, "ai:summary", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+    });
+  },
+  "ai.memory_changed": (e, emitter) => {
+    emitter.emitToConversation(e.conversationId, "ai:memory", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      customerId: e.customerId,
+    });
+  },
+  "ai.state_changed": (e, emitter) => {
+    emitter.emitToConversation(e.conversationId, "ai:state", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      state: e.state,
+    });
+  },
+  "ai.transcription_changed": (e, emitter) => {
+    emitter.emitToConversation(e.conversationId, "ai:transcription", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      messageId: e.messageId,
+      status: e.status,
+    });
+  },
+
   // ---- WhatsApp Business Calling -----------------------------------------
   // Room-scoping rules per call phase (mirrors the locked availability:*
   // split decision — each phase rides its own frame for narrowest payload).

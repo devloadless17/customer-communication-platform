@@ -5,13 +5,15 @@ import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { BROWSER_API_BASE } from "@/lib/api/browser-base";
+import { getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
 
 /**
  * Persisted AI draft, rendered directly ABOVE the composer (placement map §5).
- * Survives refresh/reconnect because it lives server-side (AiReplySuggestion).
- * Actions: Edit (inline), Send, Reject, Take over. Shows an expandable
- * "Used N company knowledge sources" line (chunk count only — never the chunks).
+ * Survives refresh/reconnect (server-persisted). Actions: Edit, Send (text),
+ * Send as Voice / Send as Text (voice modes), Regenerate, Reject, Take over.
+ * Voice drafts show an audio preview of the pre-rendered TTS.
  */
 
 interface Suggestion {
@@ -19,7 +21,11 @@ interface Suggestion {
   text: string;
   channelMode: string;
   usedChunkIds: string[];
+  audioR2Key?: string | null;
+  attempt?: number;
 }
+
+const VOICE_MODES = new Set(["voice", "text_and_voice", "match_customer"]);
 
 export function AiSuggestionBar({ conversationId }: { conversationId: string }) {
   const [sugg, setSugg] = useState<Suggestion | null>(null);
@@ -39,26 +45,67 @@ export function AiSuggestionBar({ conversationId }: { conversationId: string }) 
     void load();
   }, [load]);
 
+  // Realtime: a new/updated/resolved draft (ai.suggestion_changed).
+  useEffect(() => {
+    const socket = getClientSocket();
+    const onSuggestion = (p: {
+      teamId: string;
+      conversationId: string;
+      suggestionId: string | null;
+      state: string;
+    }) => {
+      if (p.conversationId === conversationId) void load();
+    };
+    socket.on("ai:suggestion", onSuggestion);
+    return () => {
+      socket.off("ai:suggestion", onSuggestion);
+    };
+  }, [conversationId, load]);
+
   if (!sugg) return null;
 
   const edited = text.trim() !== sugg.text.trim();
   const sourceCount = sugg.usedChunkIds?.length ?? 0;
-  const isVoice = sugg.channelMode === "voice" || sugg.channelMode === "text_and_voice";
+  const isVoice = VOICE_MODES.has(sugg.channelMode);
+  const hasAudio = isVoice && !!sugg.audioR2Key;
 
-  async function decide(action: "accept" | "reject") {
+  async function decide(action: "accept" | "reject", sendAs?: "text" | "voice") {
     setBusy(true);
     try {
       const res = await apiFetch(`/api/ai-assistant/suggestions/${sugg!.id}/decision`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action, ...(action === "accept" && edited ? { editedText: text } : {}) }),
+        body: JSON.stringify({
+          action,
+          ...(action === "accept" && edited ? { editedText: text } : {}),
+          ...(sendAs ? { sendAs } : {}),
+        }),
       });
       if (!res.ok) {
         toast.error(action === "accept" ? "Send failed" : "Failed");
         return;
       }
       setSugg(null);
-      if (action === "accept") toast.success("Sent");
+      if (action === "accept") toast.success(sendAs === "voice" ? "Sent as voice" : "Sent");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function regenerate() {
+    setBusy(true);
+    try {
+      const res = await apiFetch(`/api/ai-assistant/suggestions/${sugg!.id}/regenerate`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        toast.error("Regenerate failed");
+        return;
+      }
+      const data = (await res.json()) as { suggestion: Suggestion };
+      setSugg(data.suggestion);
+      setText(data.suggestion.text);
+      toast.success("Regenerated");
     } finally {
       setBusy(false);
     }
@@ -88,6 +135,7 @@ export function AiSuggestionBar({ conversationId }: { conversationId: string }) 
       <div className="mb-1.5 flex items-center justify-between">
         <span className="text-xs font-medium text-primary">
           AI suggested reply{isVoice ? " (voice)" : ""}
+          {sugg.attempt && sugg.attempt > 1 ? ` · attempt ${sugg.attempt}` : ""}
         </span>
         {sourceCount > 0 && (
           <button
@@ -100,17 +148,35 @@ export function AiSuggestionBar({ conversationId }: { conversationId: string }) 
       </div>
       {showSources && (
         <p className="mb-1.5 text-xs text-muted-foreground">
-          {sourceCount} knowledge chunk(s) were used to ground this reply. (Sources are never shown
-          to the customer.)
+          {sourceCount} knowledge chunk(s) grounded this reply. Sources are never shown to the
+          customer.
         </p>
       )}
       <Textarea rows={3} value={text} onChange={(e) => setText(e.target.value)} className="mb-2" />
+      {hasAudio && !edited && (
+        <audio
+          controls
+          className="mb-2 h-8 w-full"
+          src={`${BROWSER_API_BASE}/api/ai-assistant/suggestions/${sugg.id}/audio`}
+        />
+      )}
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" disabled={busy || !text.trim()} onClick={() => void decide("accept")}>
-          {edited ? "Edit & Send" : "Send"}
-        </Button>
-        <Button size="sm" variant="secondary" disabled={busy} onClick={() => void load()}>
-          Reset
+        {isVoice ? (
+          <>
+            <Button size="sm" disabled={busy || !text.trim()} onClick={() => void decide("accept", "voice")}>
+              Send as Voice
+            </Button>
+            <Button size="sm" variant="secondary" disabled={busy || !text.trim()} onClick={() => void decide("accept", "text")}>
+              Send as Text
+            </Button>
+          </>
+        ) : (
+          <Button size="sm" disabled={busy || !text.trim()} onClick={() => void decide("accept", "text")}>
+            {edited ? "Edit & Send" : "Send"}
+          </Button>
+        )}
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void regenerate()}>
+          Regenerate
         </Button>
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void decide("reject")}>
           Reject
@@ -118,11 +184,6 @@ export function AiSuggestionBar({ conversationId }: { conversationId: string }) 
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void takeOver()}>
           Take over
         </Button>
-        {isVoice && (
-          <span className="text-xs text-muted-foreground">
-            voice delivery falls back to text
-          </span>
-        )}
       </div>
     </div>
   );

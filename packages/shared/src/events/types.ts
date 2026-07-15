@@ -1092,6 +1092,38 @@ export interface CallSdpOfferEvent {
   sdp: { type: "offer" | "answer"; sdp: string };
 }
 
+// Native AI Assistant realtime events (panel/suggestion-level). Payloads are
+// thin signals — the inbox AI surfaces refetch the authoritative row on receipt.
+export interface AiSuggestionChangedEvent {
+  teamId: string;
+  conversationId: string;
+  suggestionId: string | null;
+  // pending (created/updated) | accepted | edited | rejected | superseded | expired
+  state: string;
+}
+export interface AiSummaryChangedEvent {
+  teamId: string;
+  conversationId: string;
+}
+export interface AiMemoryChangedEvent {
+  teamId: string;
+  conversationId: string;
+  customerId: string;
+}
+export interface AiStateChangedEvent {
+  teamId: string;
+  conversationId: string;
+  // ai_active | human_active | ai_paused | disabled
+  state: string;
+}
+export interface AiTranscriptionChangedEvent {
+  teamId: string;
+  conversationId: string;
+  messageId: string;
+  // ready | failed
+  status: string;
+}
+
 // ---------------------------------------------------------------------------
 // Event map — discriminated union by `type`. Use `DomainEventOf<K>` to grab
 // the strongly-typed envelope for a single type.
@@ -1136,6 +1168,13 @@ export interface DomainEventMap {
   "team.renamed": TeamRenamedEvent;
   "webhook.subscription_disabled": WebhookSubscriptionDisabledEvent;
   "webhook.subscription_recovered": WebhookSubscriptionRecoveredEvent;
+  // Native AI Assistant (fan out to the conversation room; consumed by the
+  // inbox AI surfaces via direct socket.on, NOT thread-reducers).
+  "ai.suggestion_changed": AiSuggestionChangedEvent;
+  "ai.summary_changed": AiSummaryChangedEvent;
+  "ai.memory_changed": AiMemoryChangedEvent;
+  "ai.state_changed": AiStateChangedEvent;
+  "ai.transcription_changed": AiTranscriptionChangedEvent;
   // WhatsApp Business Calling. Per-phase split so subscribers can attach
   // to just the phase they care about (audit on terminal, outbound webhooks
   // on ended/missed/rejected, fanout has its own per-phase room scoping).

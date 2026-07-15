@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
 
 import { resolveModel } from "./models";
 import { chatJson } from "./openai-client";
@@ -24,6 +25,16 @@ const KINDS = [
 ] as const;
 type MemoryKind = (typeof KINDS)[number];
 const KIND_SET = new Set<string>(KINDS);
+
+// Kinds that hold at most ONE active value per person (a newer value supersedes
+// the prior one). The rest accumulate as independent items.
+const SINGLETON_KINDS = new Set<MemoryKind>([
+  "preferred_language",
+  "dialect",
+  "script",
+  "tone",
+  "communication_style",
+]);
 
 const MIN_CONFIDENCE = 0.5;
 const CONFIRM_CONFIDENCE = 0.8;
@@ -99,37 +110,67 @@ export async function runMemoryExtraction(
     const value = it.value.trim().slice(0, 500);
     const status = it.confidence >= CONFIRM_CONFIDENCE ? "confirmed" : "candidate";
 
-    // Dedup on (customer, kind, value). Never resurrect a human-rejected item.
-    const existing = await db.aiCustomerMemory.findFirst({
-      where: { teamId: meta.teamId, customerId, kind, value },
+    // Dedup on (teamId, customerId, kind, value) — the DB unique. Never
+    // resurrect a human-rejected item.
+    const existing = await db.aiCustomerMemory.findUnique({
+      where: { teamId_customerId_kind_value: { teamId: meta.teamId, customerId, kind, value } },
     });
+    if (existing?.status === "rejected") continue;
+
+    let saved: { id: string };
     if (existing) {
-      if (existing.status === "rejected") continue;
-      await db.aiCustomerMemory.update({
+      saved = await db.aiCustomerMemory.update({
         where: { id: existing.id },
         data: {
           confidence: Math.max(existing.confidence, it.confidence),
+          // Upgrade to confirmed when now confident; a superseded row that
+          // recurs is reactivated to its current status.
           status: existing.status === "confirmed" ? "confirmed" : status,
           sourceConversationId: conversationId,
           sourceMessageId: latestMessageId ?? existing.sourceMessageId,
         },
+        select: { id: true },
       });
-      continue;
+    } else {
+      if (room <= 0) continue;
+      saved = await db.aiCustomerMemory.create({
+        data: {
+          teamId: meta.teamId,
+          customerId,
+          kind,
+          value,
+          confidence: it.confidence,
+          status,
+          source: "system",
+          sourceConversationId: conversationId,
+          sourceMessageId: latestMessageId ?? null,
+        },
+        select: { id: true },
+      });
+      room -= 1;
     }
-    if (room <= 0) break;
-    await db.aiCustomerMemory.create({
-      data: {
-        teamId: meta.teamId,
-        customerId,
-        kind,
-        value,
-        confidence: it.confidence,
-        status,
-        source: "system",
-        sourceConversationId: conversationId,
-        sourceMessageId: latestMessageId ?? null,
-      },
-    });
-    room -= 1;
+
+    // Singleton kinds hold ONE active value per person: supersede the others
+    // (e.g. preferred_language English -> French). Multi-valued kinds
+    // (interest / recurring_need / preference) accumulate.
+    if (SINGLETON_KINDS.has(kind)) {
+      await db.aiCustomerMemory.updateMany({
+        where: {
+          teamId: meta.teamId,
+          customerId,
+          kind,
+          id: { not: saved.id },
+          status: { in: ["candidate", "confirmed"] },
+        },
+        data: { status: "superseded" },
+      });
+    }
   }
+
+  void publish({
+    type: "ai.memory_changed",
+    teamId: meta.teamId,
+    conversationId,
+    customerId,
+  }).catch(() => {});
 }

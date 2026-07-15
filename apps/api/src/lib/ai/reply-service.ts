@@ -30,6 +30,7 @@ export interface GeneratedReply {
   payload: ReplyPayload;
   model: string;
   usedChunkIds: string[];
+  usedDocumentIds: string[];
   usage: { inputTokens?: number; outputTokens?: number; cachedTokens?: number };
   rawContent: string;
 }
@@ -69,6 +70,7 @@ export async function generateReply(input: GenerateReplyInput): Promise<Generate
     payload: normalize(res.data),
     model: res.model ?? model,
     usedChunkIds: chunks.map((c) => c.id),
+    usedDocumentIds: [...new Set(chunks.map((c) => c.documentId))],
     usage: {
       inputTokens: res.usage?.prompt_tokens,
       outputTokens: res.usage?.completion_tokens,

@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
 
 /**
  * Per-conversation native-AI state machine (correction #2).
@@ -23,6 +24,11 @@ export interface AiConvStateRow {
   pausedByUserId: string | null;
   pausedAt: Date | null;
   autoReplyCount: number;
+}
+
+/** Fire-and-forget realtime signal that a conversation's AI state changed. */
+function emitState(teamId: string, conversationId: string, state: AiConvState): void {
+  void publish({ type: "ai.state_changed", teamId, conversationId, state }).catch(() => {});
 }
 
 async function ensureState(teamId: string, conversationId: string): Promise<AiConvStateRow> {
@@ -59,7 +65,7 @@ export async function onHumanReply(
 ): Promise<AiConvStateRow> {
   const s = await ensureState(teamId, conversationId);
   if (s.state === "ai_active") {
-    return (await db.aiConversationState.update({
+    const row = (await db.aiConversationState.update({
       where: { conversationId },
       data: {
         state: "human_active",
@@ -68,6 +74,8 @@ export async function onHumanReply(
         pausedByUserId: userId ?? null,
       },
     })) as AiConvStateRow;
+    emitState(teamId, conversationId, "human_active");
+    return row;
   }
   // human_active / ai_paused / disabled: just reset the auto-reply counter.
   return (await db.aiConversationState.update({
@@ -86,10 +94,12 @@ export async function onCustomerInbound(
 ): Promise<AiConvStateRow> {
   const s = await ensureState(teamId, conversationId);
   if (s.state === "human_active") {
-    return (await db.aiConversationState.update({
+    const row = (await db.aiConversationState.update({
       where: { conversationId },
       data: { state: "ai_active", stateChangedAt: new Date(), autoReplyCount: 0 },
     })) as AiConvStateRow;
+    emitState(teamId, conversationId, "ai_active");
+    return row;
   }
   return s;
 }
@@ -98,35 +108,44 @@ export async function onCustomerInbound(
 
 export async function pauseByAgent(teamId: string, conversationId: string, userId: string) {
   await ensureState(teamId, conversationId);
-  return db.aiConversationState.update({
+  const row = await db.aiConversationState.update({
     where: { conversationId },
     data: { state: "ai_paused", pausedByUserId: userId, pausedAt: new Date(), stateChangedAt: new Date() },
   });
+  emitState(teamId, conversationId, "ai_paused");
+  return row;
 }
 
 export async function resumeByAgent(teamId: string, conversationId: string) {
   await ensureState(teamId, conversationId);
-  return db.aiConversationState.update({
+  const row = await db.aiConversationState.update({
     where: { conversationId },
     data: { state: "ai_active", pausedByUserId: null, pausedAt: null, stateChangedAt: new Date(), autoReplyCount: 0 },
   });
+  emitState(teamId, conversationId, "ai_active");
+  return row;
 }
 
 /** "Take over" = agent grabs the thread (human_active). */
 export async function takeOverByAgent(teamId: string, conversationId: string, userId: string) {
   await ensureState(teamId, conversationId);
-  return db.aiConversationState.update({
+  const row = await db.aiConversationState.update({
     where: { conversationId },
     data: { state: "human_active", pausedByUserId: userId, stateChangedAt: new Date() },
   });
+  emitState(teamId, conversationId, "human_active");
+  return row;
 }
 
 export async function setDisabled(teamId: string, conversationId: string, disabled: boolean) {
   await ensureState(teamId, conversationId);
-  return db.aiConversationState.update({
+  const nextState: AiConvState = disabled ? "disabled" : "ai_active";
+  const row = await db.aiConversationState.update({
     where: { conversationId },
-    data: { state: disabled ? "disabled" : "ai_active", stateChangedAt: new Date() },
+    data: { state: nextState, stateChangedAt: new Date() },
   });
+  emitState(teamId, conversationId, nextState);
+  return row;
 }
 
 export async function incrementAutoReply(conversationId: string) {

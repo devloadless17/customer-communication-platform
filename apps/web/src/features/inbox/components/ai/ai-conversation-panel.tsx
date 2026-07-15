@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
+import { getClientSocket } from "@/lib/socket-client";
 
 import { Section } from "../contact-panel/section";
 
@@ -64,6 +65,24 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Realtime: refetch when the system updates this conversation's summary or the
+  // customer's memory (ai.summary_changed / ai.memory_changed domain events).
+  useEffect(() => {
+    const socket = getClientSocket();
+    const onSummary = (p: { teamId: string; conversationId: string }) => {
+      if (p.conversationId === conversationId) void load();
+    };
+    const onMemory = (p: { teamId: string; conversationId: string; customerId: string }) => {
+      if (p.conversationId === conversationId) void load();
+    };
+    socket.on("ai:summary", onSummary);
+    socket.on("ai:memory", onMemory);
+    return () => {
+      socket.off("ai:summary", onSummary);
+      socket.off("ai:memory", onMemory);
+    };
+  }, [conversationId, load]);
 
   const memory = (data?.memory ?? []).filter((m) => m.status !== "rejected");
   const summary = data?.summary ?? null;

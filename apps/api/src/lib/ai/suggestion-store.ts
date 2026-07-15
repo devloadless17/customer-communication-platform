@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
 
 import type { ReplyPayload } from "./reply-schema";
 
@@ -26,7 +27,7 @@ export async function persistSuggestion(args: PersistSuggestionArgs) {
   const { teamId, conversationId, inboundMessageId } = args;
   const expiresAt = new Date(Date.now() + SUGGESTION_TTL_MS);
 
-  return db.$transaction(async (tx) => {
+  const created = await db.$transaction(async (tx) => {
     const current = await tx.aiReplySuggestion.findFirst({
       where: { teamId, inboundMessageId, state: "pending" },
     });
@@ -59,6 +60,16 @@ export async function persistSuggestion(args: PersistSuggestionArgs) {
       },
     });
   });
+
+  void publish({
+    type: "ai.suggestion_changed",
+    teamId,
+    conversationId,
+    suggestionId: created.id,
+    state: "pending",
+  }).catch(() => {});
+
+  return created;
 }
 
 export async function getPendingSuggestion(teamId: string, conversationId: string) {

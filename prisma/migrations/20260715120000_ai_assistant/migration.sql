@@ -13,7 +13,7 @@ CREATE TYPE "AiContextDocStatus" AS ENUM ('processing', 'ready', 'failed', 'disa
 CREATE TYPE "AiConvAutomationState" AS ENUM ('ai_active', 'human_active', 'ai_paused', 'disabled');
 CREATE TYPE "AiAutomationOwner" AS ENUM ('native_ai', 'autopilot', 'workflow');
 CREATE TYPE "AiMemoryKind" AS ENUM ('preferred_language', 'dialect', 'script', 'tone', 'communication_style', 'interest', 'recurring_need', 'preference');
-CREATE TYPE "AiMemoryStatus" AS ENUM ('candidate', 'confirmed', 'rejected');
+CREATE TYPE "AiMemoryStatus" AS ENUM ('candidate', 'confirmed', 'rejected', 'superseded');
 CREATE TYPE "AiMemorySource" AS ENUM ('system', 'agent');
 CREATE TYPE "AiInteractionDecision" AS ENUM ('replied', 'suggested', 'skipped', 'escalated', 'cancelled', 'failed');
 CREATE TYPE "AiSuggestionState" AS ENUM ('pending', 'accepted', 'edited', 'rejected', 'expired', 'superseded');

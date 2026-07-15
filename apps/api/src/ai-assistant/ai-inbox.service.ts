@@ -16,6 +16,13 @@ import { getInboundText, loadReplyContext } from "@/lib/ai/reply-context";
 import { generateReply } from "@/lib/ai/reply-service";
 import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
 import { persistSuggestion } from "@/lib/ai/suggestion-store";
+import {
+  renderDraftAudio,
+  sendSuggestionAsVoice,
+  wantsVoiceDraft,
+} from "@/lib/ai/voice-delivery";
+import { blobStorage } from "@/lib/blob-storage";
+import { publish } from "@/lib/events/bus";
 
 import { DbService } from "../db/db.service";
 import type { StateActionInput } from "./ai-inbox.schemas";
@@ -102,6 +109,7 @@ export class AiInboxService {
     id: string,
     action: "accept" | "reject",
     editedText?: string,
+    sendAs: "text" | "voice" = "text",
   ) {
     const s = await this.db.aiReplySuggestion.findFirst({ where: { id, teamId } });
     if (!s) throw new NotFoundException({ error: "suggestion_not_found" });
@@ -110,24 +118,51 @@ export class AiInboxService {
     }
 
     if (action === "reject") {
-      return this.db.aiReplySuggestion.update({
+      const rejected = await this.db.aiReplySuggestion.update({
         where: { id },
         data: { state: "rejected", decidedByUserId: userId, decidedAt: new Date() },
       });
+      void publish({
+        type: "ai.suggestion_changed",
+        teamId,
+        conversationId: s.conversationId,
+        suggestionId: id,
+        state: "rejected",
+      }).catch(() => {});
+      return rejected;
     }
 
     const edited = (editedText ?? "").trim();
     const body = edited || s.text;
-    const result = await sendTextInternal({
-      teamId,
-      conversationId: s.conversationId,
-      body,
-      sentVia: "ai-assistant/suggestion",
-    });
-    await this.db.aiMessageMetadata.create({
-      data: { teamId, messageId: result.messageId, aiGenerated: true },
-    });
-    return this.db.aiReplySuggestion.update({
+
+    let messageId: string;
+    if (sendAs === "voice") {
+      const config = await loadAiConfig(teamId);
+      const out = await sendSuggestionAsVoice({
+        teamId,
+        conversationId: s.conversationId,
+        inboundMessageId: s.inboundMessageId,
+        text: body,
+        audioR2Key: s.audioR2Key,
+        reuseAudio: !edited, // reuse the pre-rendered draft only when unchanged
+        config,
+      });
+      messageId = out.messageId;
+    } else {
+      const result = await sendTextInternal({
+        teamId,
+        conversationId: s.conversationId,
+        body,
+        sentVia: "ai-assistant/suggestion",
+      });
+      messageId = result.messageId;
+    }
+
+    await this.db.aiMessageMetadata
+      .create({ data: { teamId, messageId, aiGenerated: true } })
+      .catch(() => {});
+
+    const accepted = await this.db.aiReplySuggestion.update({
       where: { id },
       data: {
         state: edited ? "edited" : "accepted",
@@ -136,6 +171,14 @@ export class AiInboxService {
         decidedAt: new Date(),
       },
     });
+    void publish({
+      type: "ai.suggestion_changed",
+      teamId,
+      conversationId: s.conversationId,
+      suggestionId: id,
+      state: edited ? "edited" : "accepted",
+    }).catch(() => {});
+    return accepted;
   }
 
   /**
@@ -163,6 +206,10 @@ export class AiInboxService {
       recentMessages,
     });
 
+    const audioR2Key = wantsVoiceDraft(config.replyChannelMode, inbound.isVoice)
+      ? await renderDraftAudio(teamId, s.inboundMessageId, generated.payload, config)
+      : null;
+
     const suggestion = await persistSuggestion({
       teamId,
       conversationId: s.conversationId,
@@ -170,6 +217,7 @@ export class AiInboxService {
       payload: generated.payload,
       usedChunkIds: generated.usedChunkIds,
       channelMode: config.replyChannelMode,
+      audioR2Key,
     });
 
     await this.db.aiAssistantInteraction.create({
@@ -184,7 +232,7 @@ export class AiInboxService {
         language: generated.payload.replyLanguage,
         intent: generated.payload.intent,
         confidence: generated.payload.confidence,
-        selectedChunkIds: generated.usedChunkIds,
+        selectedChunkIds: { chunks: generated.usedChunkIds, documents: generated.usedDocumentIds },
       },
     });
 
@@ -240,5 +288,15 @@ export class AiInboxService {
       where: { messageId },
       data: { correctedText: correctedText.trim().slice(0, 20000), correctedByUserId: userId },
     });
+  }
+
+  /** Stream a draft suggestion's pre-rendered voice preview (teamId-scoped). */
+  async getSuggestionAudio(teamId: string, id: string) {
+    const s = await this.db.aiReplySuggestion.findFirst({
+      where: { id, teamId },
+      select: { audioR2Key: true },
+    });
+    if (!s?.audioR2Key) return null;
+    return blobStorage.getObject(s.audioR2Key);
   }
 }

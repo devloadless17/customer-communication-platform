@@ -1,5 +1,4 @@
 import { db } from "@/lib/db";
-import { sendTextInternal } from "@/lib/messaging/send-text-internal";
 
 import { claimInbound, legacyAutopilotOwnsTeam } from "./automation-claim";
 import { getState, incrementAutoReply, onCustomerInbound } from "./conversation-state";
@@ -12,6 +11,7 @@ import { loadReplyContext } from "./reply-context";
 import { generateReply } from "./reply-service";
 import { configEnabled, loadAiConfig } from "./runtime-config";
 import { persistSuggestion } from "./suggestion-store";
+import { deliverReply, renderDraftAudio, wantsVoiceDraft } from "./voice-delivery";
 
 /**
  * The reply orchestrator. Runs on the `ai-replies` worker for a `reply` job.
@@ -115,19 +115,23 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
     language: payload.replyLanguage,
     intent: payload.intent,
     confidence: payload.confidence,
-    selectedChunkIds: generated.usedChunkIds,
+    selectedChunkIds: { chunks: generated.usedChunkIds, documents: generated.usedDocumentIds },
     latencyMs: Date.now() - startedAt,
     ...usage,
   };
 
   if (mode === "send") {
-    let result: { messageId: string };
+    // deliverReply honors the channel mode (text/voice/both/match) and always
+    // guarantees the canonical text on any TTS/media failure.
+    let delivery;
     try {
-      result = await sendTextInternal({
+      delivery = await deliverReply({
         teamId,
         conversationId,
-        body: payload.replyText,
-        sentVia: "ai-assistant/reply",
+        inboundMessageId,
+        payload,
+        config,
+        inboundWasVoice: job.isVoice,
       });
     } catch (err) {
       await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
@@ -137,28 +141,39 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       });
       return;
     }
-    await db.aiMessageMetadata.create({
-      data: {
-        teamId,
-        messageId: result.messageId,
-        aiGenerated: true,
-        model: generated.model,
-        language: payload.replyLanguage,
-        script: payload.replyScript,
-        intent: payload.intent,
-        confidence: payload.confidence,
-      },
-    });
+    const outIds = [delivery.textMessageId, delivery.voiceMessageId].filter(
+      (x): x is string => typeof x === "string",
+    );
+    for (const mid of outIds) {
+      // Mark each AI-authored outbound (loop guard). Unique on messageId; a
+      // benign dup is swallowed.
+      await db.aiMessageMetadata
+        .create({
+          data: {
+            teamId,
+            messageId: mid,
+            aiGenerated: true,
+            model: generated.model,
+            language: payload.replyLanguage,
+            script: payload.replyScript,
+            intent: payload.intent,
+            confidence: payload.confidence,
+          },
+        })
+        .catch(() => {});
+    }
     await incrementAutoReply(conversationId);
     await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
       ...auditBase,
       decision: "replied",
-      outboundMessageId: result.messageId,
+      outboundMessageId: delivery.voiceMessageId ?? delivery.textMessageId,
     });
-    // NOTE: voice OUTBOUND delivery (render ttsText -> store -> send audio) is
-    // wired in the voice module; on any TTS/media failure it falls back to this
-    // text send, which has already gone out here (correction #12).
   } else {
+    // Draft: pre-render a voice preview when the mode wants voice (null on any
+    // TTS failure — the draft still ships as text).
+    const audioR2Key = wantsVoiceDraft(config.replyChannelMode, job.isVoice)
+      ? await renderDraftAudio(teamId, inboundMessageId, payload, config)
+      : null;
     const suggestion = await persistSuggestion({
       teamId,
       conversationId,
@@ -166,6 +181,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       payload,
       usedChunkIds: generated.usedChunkIds,
       channelMode: config.replyChannelMode,
+      audioR2Key,
     });
     await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
       ...auditBase,
@@ -187,7 +203,7 @@ interface AuditExtra {
   intent?: string;
   confidence?: number;
   skipReason?: string;
-  selectedChunkIds?: string[];
+  selectedChunkIds?: { chunks: string[]; documents: string[] };
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;

@@ -2783,6 +2783,10 @@ enum AiMemoryStatus {
   candidate // extracted, below the auto-confirm bar; needs confidence/review
   confirmed // surfaced in the panel + fed back into prompts
   rejected // an agent dismissed it; never resurfaced
+  // Replaced by a newer value of the same SINGLETON kind (e.g. preferred_language
+  // English -> French). Kept for history/provenance; hidden from the panel and
+  // never fed back into prompts. Only singleton kinds are superseded this way.
+  superseded
 }
 
 enum AiMemorySource {

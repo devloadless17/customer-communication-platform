@@ -1,5 +1,6 @@
 import { blobStorage } from "@/lib/blob-storage";
 import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
 
 import { configEnabled, loadAiConfig } from "./runtime-config";
 import { transcribeInboundAudio } from "./voice";
@@ -24,6 +25,7 @@ export async function ensureTranscription(
   const msg = await db.message.findUnique({
     where: { id: messageId },
     select: {
+      conversationId: true,
       direction: true,
       mediaKind: true,
       mediaKey: true,
@@ -67,6 +69,13 @@ export async function ensureTranscription(
         model,
       },
     });
+    void publish({
+      type: "ai.transcription_changed",
+      teamId,
+      conversationId: msg.conversationId,
+      messageId,
+      status: "ready",
+    }).catch(() => {});
     return transcript || null;
   } catch (err) {
     await db.aiMessageTranscription
@@ -75,6 +84,13 @@ export async function ensureTranscription(
         data: { status: "failed", error: (err instanceof Error ? err.message : String(err)).slice(0, 500) },
       })
       .catch(() => {});
+    void publish({
+      type: "ai.transcription_changed",
+      teamId,
+      conversationId: msg.conversationId,
+      messageId,
+      status: "failed",
+    }).catch(() => {});
     return null;
   }
 }

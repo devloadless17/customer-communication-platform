@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
+import { getClientSocket } from "@/lib/socket-client";
 
 /**
  * Voice-note transcript, rendered directly BELOW an inbound voice bubble
@@ -22,18 +23,28 @@ export function AiTranscript({ messageId }: { messageId: string }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const res = await apiFetch(`/api/ai-assistant/transcriptions/${messageId}`);
-      if (!res.ok || cancelled) return;
-      const data = (await res.json()) as { transcription: Transcription | null };
-      if (!cancelled) setT(data.transcription);
-    })();
-    return () => {
-      cancelled = true;
-    };
+  const load = useCallback(async () => {
+    const res = await apiFetch(`/api/ai-assistant/transcriptions/${messageId}`);
+    if (!res.ok) return;
+    const data = (await res.json()) as { transcription: Transcription | null };
+    setT(data.transcription);
   }, [messageId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Realtime: transcription completed/failed (ai.transcription_changed).
+  useEffect(() => {
+    const socket = getClientSocket();
+    const onTx = (p: { teamId: string; conversationId: string; messageId: string; status: string }) => {
+      if (p.messageId === messageId) void load();
+    };
+    socket.on("ai:transcription", onTx);
+    return () => {
+      socket.off("ai:transcription", onTx);
+    };
+  }, [messageId, load]);
 
   if (!t || t.status !== "ready") return null;
   const text = t.correctedText || t.transcript || "";
