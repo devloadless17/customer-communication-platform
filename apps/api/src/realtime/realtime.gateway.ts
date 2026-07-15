@@ -84,6 +84,18 @@ export class RealtimeGateway
   private readonly presenceSeq = new Map<string, number>();
   private readonly presenceEmittedSeq = new Map<string, number>();
 
+  // Optional relay so agent typing in a conversation reaches a website-widget
+  // visitor (bound by WebchatwidgetGateway at init). Called for EVERY
+  // conversation's typing change; the relay emits to that conversation's widget
+  // room, a no-op for non-webchatwidget threads — so no channel lookup here.
+  private widgetTypingRelay: ((conversationId: string, on: boolean) => void) | null = null;
+  bindWidgetTypingRelay(fn: (conversationId: string, on: boolean) => void): void {
+    this.widgetTypingRelay = fn;
+  }
+  private relayWidgetTyping(conversationId: string): void {
+    this.widgetTypingRelay?.(conversationId, this.typing.snapshotConv(conversationId).length > 0);
+  }
+
   constructor(
     private readonly db: DbService,
     private readonly auth: SocketAuthService,
@@ -542,6 +554,7 @@ export class RealtimeGateway
           conversationId,
           typingUserIds: this.typing.snapshotConv(conversationId),
         });
+        this.relayWidgetTyping(conversationId);
       }
       typingIn.clear();
     }
@@ -808,6 +821,7 @@ export class RealtimeGateway
           conversationId: body.conversationId,
           typingUserIds: this.typing.snapshotConv(body.conversationId),
         });
+      this.relayWidgetTyping(body.conversationId);
     }
   }
 
@@ -829,6 +843,7 @@ export class RealtimeGateway
         conversationId: body.conversationId,
         typingUserIds: this.typing.snapshotConv(body.conversationId),
       });
+    this.relayWidgetTyping(body.conversationId);
   }
 
   // ---- team-chat channel rooms -------------------------------------------

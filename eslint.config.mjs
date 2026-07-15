@@ -24,6 +24,11 @@ export default tseslint.config(
       "**/coverage/**",
       "**/*.tsbuildinfo",
       "apps/web/next-env.d.ts",
+      // Browser/vendored static assets served as-is (the embeddable widget
+      // bundle + its vendored socket.io build). They target the browser global
+      // scope, not the Node/TS lint environment, so `eslint .` flags every
+      // `document`/`window`/`self` as no-undef. Not app source — don't lint.
+      "apps/web/public/**",
       // Claude Code tooling, not app source. Persisted Workflow scripts (.mjs)
       // use runtime-injected globals (agent/parallel/log/phase) that aren't
       // real JS, so `eslint .` would flag them as no-undef. The committed

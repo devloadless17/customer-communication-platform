@@ -45,9 +45,23 @@ export interface WebchatwidgetConfig {
   theme?: WebchatwidgetTheme;
   welcomeMessage?: string;
   headerTitle?: string;
+  /** Line under the title, e.g. "Typically replies in a few minutes". */
+  headerSubtitle?: string;
   suggestedQuestions?: string[];
   preChatFields?: WebchatwidgetPreChatField[];
   showBranding?: boolean;
+  // ---- full theming (delivered to the widget on `ready`) ----
+  /** Header logo — a small size-capped data: URI (no external host). */
+  logoDataUrl?: string;
+  /** Default agent avatar shown on inbound bubbles — a size-capped data: URI. */
+  agentAvatarDataUrl?: string;
+  fontFamily?: "system" | "rounded" | "serif";
+  themeMode?: "light" | "dark" | "auto";
+  // ---- launcher / placement defaults (used by the settings UI to generate the
+  //      embed snippet; the widget itself reads these from data-* attributes) ----
+  launcher?: "bubble" | "off";
+  position?: "right" | "left";
+  launcherLabel?: string;
 }
 
 /** Send-side config. Empty — the provider does no vendor I/O. */

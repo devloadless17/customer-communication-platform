@@ -12,6 +12,7 @@ import {
 import {
   CANCEL_RECIPIENT_MARKER,
   MAX_RECIPIENTS_IN_PROCESS,
+  SYNC_MATERIALIZE_MAX,
   getInFlightRunPromises,
   pruneBroadcastInMemoryStateForTerminalRows,
   reconcileOrphanedBroadcasts,
@@ -22,6 +23,15 @@ import {
   enqueueScheduledBroadcast,
   removeScheduledBroadcast,
 } from "@/lib/broadcasts/schedule-queue";
+import {
+  enqueueBroadcastMaterialize,
+  removeBroadcastMaterialize,
+} from "@/lib/broadcasts/materialize-queue";
+import {
+  checkBroadcastEligibility,
+  fetchWhatsappHealthFromGraph,
+  getWhatsappHealth,
+} from "@/lib/providers/meta-health";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
 import { teamConnectedChannels } from "@/lib/providers";
 import { pickBestChannel, type RankableContact } from "@/lib/identity/best-channel";
@@ -586,11 +596,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
-    // Enforce the in-process recipient cap HERE, before writing any rows. The
-    // runner also checks it, but only after the recipient rows are persisted —
-    // so an "all contacts" send on a 50k-contact team would build a 50k-row
-    // nested INSERT and a 50k-id array in memory just to be rejected. Refuse
-    // early with an actionable message instead.
+    // Enforce the recipient ceiling HERE, before writing any rows. This is the
+    // policy cap (BROADCAST_MAX_RECIPIENTS, default 100k) — bound a single team's
+    // blast radius / Meta spend. Reaching it ALSO requires the number's messaging
+    // tier to allow it (the eligibility gate, checked below), but the hard ceiling
+    // is enforced regardless.
     if (recipientRows.length > MAX_RECIPIENTS_IN_PROCESS) {
       throw new BadRequestException({
         error: "audience too large",
@@ -598,41 +608,103 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
-    // Create the broadcast row + recipients in ONE transaction, but write the
-    // recipients via CHUNKED createMany rather than a nested create. A single
-    // nested-create of N recipients ships one unbounded INSERT with N value
-    // tuples — fine at 100, a multi-MB statement at the 10k cap. Chunked
-    // createMany keeps each statement bounded and Postgres-plannable; the
-    // transaction keeps it all-or-nothing so a mid-write crash can't leave a
-    // broadcast whose totalCount disagrees with its recipient rows (the runner
-    // would then under-send and mark complete). At the 10k cap that's ≤10
-    // bounded inserts in the tx — short-lived.
+    // Pre-send eligibility gate (WhatsApp template broadcasts only): refuse — with
+    // an actionable message — an audience the number's messaging-limit TIER can't
+    // deliver to in 24h, BEFORE any row is written or Meta call made. Advisory
+    // only when we have no tier snapshot (null → ungated). Skipped for freeform /
+    // customer-mode (social windows, not a WhatsApp 24h unique-recipient tier).
+    if (effectiveKind === "template" && !isCustomerMode) {
+      let gate = await checkBroadcastEligibility(teamId, recipientRows.length);
+      if (!gate.allowed) {
+        // The cached tier may be stale (a missed quality webhook on a number Meta
+        // already upgraded) — hard-blocking on it would refuse a send Meta would
+        // accept. Re-poll Graph ONCE (only on the block path, so it's rare) and
+        // re-check before failing. A poll failure falls back to the stale block.
+        await fetchWhatsappHealthFromGraph(teamId).catch(() => undefined);
+        gate = await checkBroadcastEligibility(teamId, recipientRows.length);
+      }
+      if (!gate.allowed) {
+        throw new BadRequestException({
+          error: "over_messaging_limit",
+          detail: gate.reason,
+        });
+      }
+    }
+
+    // Fields shared by both the synchronous and asynchronous create paths.
+    const commonData = {
+      teamId,
+      createdById: userId,
+      name,
+      scheduledAt: scheduledAtDate,
+      kind: effectiveKind,
+      targetMode: input.targetMode,
+      // customer-mode routes per recipient, so the broadcast's own channel is
+      // unused — store whatsapp as an inert default.
+      channel: isCustomerMode ? "whatsapp" : filterChannel,
+      templateId: template?.id ?? null,
+      templateName: template?.name ?? null,
+      templateLanguage: template?.language ?? null,
+      bodyText: template ? null : input.bodyText,
+      variables: variables as unknown as Prisma.InputJsonValue,
+      audienceMode: audience.mode,
+      audienceTagIds: validatedTagIds,
+      audienceGroupId: resolvedGroupId,
+      audienceGroupName: resolvedGroupName,
+      totalCount: recipientRows.length,
+    };
+
+    // LARGE audience → async materialization. Inserting tens of thousands of
+    // recipient rows inside the create transaction blows Prisma's interactive-tx
+    // budget (P2028) and rolls the whole broadcast back. Instead, stage the
+    // resolved recipients on the row (locking the snapshot at creation) in status
+    // `materializing`, and let the broadcast-materialize worker chunk-insert them
+    // off the request path, then flip to `queued`/`scheduled` and fire. Only
+    // all/by_tag/group audiences reach here (hand-picked lists are capped at 5k).
+    if (recipientRows.length > SYNC_MATERIALIZE_MAX) {
+      const created = await this.db.broadcast.create({
+        data: {
+          ...commonData,
+          status: "materializing",
+          materializeRecipients: recipientRows as unknown as Prisma.InputJsonValue,
+        },
+        select: { id: true, totalCount: true },
+      });
+      try {
+        await enqueueBroadcastMaterialize(created.id);
+      } catch (err) {
+        // Redis briefly down — the row stays `materializing` and the
+        // materialize-drift sweeper + boot reconciler re-enqueue it.
+        this.logger.error(
+          `failed to enqueue materialize job for broadcast ${created.id} — sweeper will retry`,
+          err,
+        );
+      }
+      await this.bus.publish({
+        type: "broadcast.status_changed",
+        teamId,
+        broadcastId: created.id,
+        status: "materializing",
+      });
+      return {
+        broadcastId: created.id,
+        totalCount: created.totalCount,
+        scheduled: isFutureSchedule,
+      };
+    }
+
+    // SMALL audience → synchronous path (unchanged): create the broadcast row +
+    // recipients in ONE transaction via CHUNKED createMany (bounded, Postgres-
+    // plannable; all-or-nothing so a mid-write crash can't leave totalCount
+    // disagreeing with the recipient rows). ≤5k recipients = ≤5 bounded inserts.
     const RECIPIENT_CHUNK = 1_000;
     const broadcast = await this.db.$transaction(async (tx) => {
       const created = await tx.broadcast.create({
         data: {
-          teamId,
-          createdById: userId,
-          // Scheduled → the delayed job will flip it to queued + run at time.
+          ...commonData,
+          // Scheduled → the delayed job flips it to queued + runs at time.
           // Otherwise queued → runs immediately below.
           status: isFutureSchedule ? "scheduled" : "queued",
-          name,
-          scheduledAt: scheduledAtDate,
-          kind: effectiveKind,
-          targetMode: input.targetMode,
-          // customer-mode routes per recipient, so the broadcast's own channel is
-          // unused — store whatsapp as an inert default.
-          channel: isCustomerMode ? "whatsapp" : filterChannel,
-          templateId: template?.id ?? null,
-          templateName: template?.name ?? null,
-          templateLanguage: template?.language ?? null,
-          bodyText: template ? null : input.bodyText,
-          variables: variables as unknown as Prisma.InputJsonValue,
-          audienceMode: audience.mode,
-          audienceTagIds: validatedTagIds,
-          audienceGroupId: resolvedGroupId,
-          audienceGroupName: resolvedGroupName,
-          totalCount: recipientRows.length,
         },
         select: { id: true, totalCount: true },
       });
@@ -649,12 +721,10 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       }
       return created;
     }, {
-      // Prisma's default interactive-tx timeout is 5s (wall-clock BEGIN→COMMIT
-      // across every await). At the 10k-recipient cap this tx does 1 create +
-      // up to 10 sequential 1k-row createMany round-trips; under pool contention
-      // that can exceed 5s and roll back the ENTIRE broadcast create (P2028 →
-      // opaque 500, no row). Give it the same 30s headroom as the statement
-      // timeout ceiling. maxWait bumped so it can also wait for a pool slot.
+      // Prisma's default interactive-tx timeout is 5s; at ≤5k this tx does 1
+      // create + ≤5 sequential 1k-row createMany round-trips, but under pool
+      // contention that can still exceed 5s and roll back the whole create
+      // (P2028). 30s headroom + a longer maxWait for a pool slot.
       timeout: 30_000,
       maxWait: 5_000,
     });
@@ -909,6 +979,28 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Secret-free WhatsApp messaging-limit snapshot for the composer's pre-send
+   * eligibility hint. The composer compares the (known) audience size against
+   * `messagingDailyCap` to warn before submitting; the hard gate lives in
+   * create(). `hasSnapshot` is false when we've never polled the number's tier
+   * (advisory-only, ungated).
+   */
+  async getMessagingHealth(teamId: string): Promise<{
+    messagingTier: string | null;
+    messagingDailyCap: number | null;
+    qualityRating: string | null;
+    hasSnapshot: boolean;
+  }> {
+    const health = await getWhatsappHealth(teamId);
+    return {
+      messagingTier: health?.messagingTier ?? null,
+      messagingDailyCap: health?.messagingDailyCap ?? null,
+      qualityRating: health?.qualityRating ?? null,
+      hasSnapshot: !!health && health.messagingHealthUpdatedAt !== null,
+    };
+  }
+
   async list(teamId: string, query?: BroadcastListQuery) {
     const where: Prisma.BroadcastWhereInput = { teamId };
     if (query?.status && query.status !== "all") {
@@ -1161,17 +1253,18 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     if (!row) throw new NotFoundException({ error: "not found" });
     if (
       row.status !== "scheduled" &&
+      row.status !== "materializing" &&
       row.status !== "queued" &&
       row.status !== "running" &&
       row.status !== "paused"
     ) {
       throw new ConflictException({
         error: "broadcast not cancelable",
-        detail: `Broadcast is already ${row.status}; cancel is only valid while scheduled, queued, running, or paused.`,
+        detail: `Broadcast is already ${row.status}; cancel is only valid while scheduled, materializing, queued, running, or paused.`,
       });
     }
     const updated = await this.db.broadcast.updateMany({
-      where: { id, status: { in: ["scheduled", "queued", "running", "paused"] } },
+      where: { id, status: { in: ["scheduled", "materializing", "queued", "running", "paused"] } },
       data: { status: "canceled" },
     });
     if (updated.count === 0) {
@@ -1239,6 +1332,20 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         ),
       );
     }
+    // Cancel-while-materializing: pull the materialize job so a retry can't
+    // resume inserting, and clear the (now-moot) staging blob to reclaim space.
+    // The worker also checks the row status between chunks and stops on its own,
+    // so any rows it already inserted were finalized queued→failed above.
+    if (row.status === "materializing") {
+      await removeBroadcastMaterialize(id).catch((err) =>
+        this.logger.warn(
+          `removeBroadcastMaterialize(${id}) failed: ${err instanceof Error ? err.message : err}`,
+        ),
+      );
+      await this.db.broadcast
+        .update({ where: { id }, data: { materializeRecipients: Prisma.DbNull } })
+        .catch(() => undefined);
+    }
     // Announce the cancel. The runner's canceled-exit branch deliberately skips
     // its own emit ("cancel endpoint already published the status change"), so
     // THIS is the only path that tells other tabs — without it a teammate's
@@ -1265,7 +1372,12 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       select: { id: true, status: true, failedCount: true },
     });
     if (!row) throw new NotFoundException({ error: "not found" });
-    if (row.status === "running" || row.status === "queued" || row.status === "scheduled") {
+    if (
+      row.status === "running" ||
+      row.status === "queued" ||
+      row.status === "scheduled" ||
+      row.status === "materializing"
+    ) {
       throw new ConflictException({
         error: "broadcast in progress",
         detail: "Wait for the broadcast to finish before retrying failed recipients.",
@@ -1373,7 +1485,8 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     if (
       row.status === "running" ||
       row.status === "queued" ||
-      row.status === "paused"
+      row.status === "paused" ||
+      row.status === "materializing"
     ) {
       throw new ConflictException({
         error: "broadcast in progress",

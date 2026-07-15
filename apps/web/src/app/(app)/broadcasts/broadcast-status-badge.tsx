@@ -53,6 +53,15 @@ function mapStatus(status: string, failedCount: number, totalCount: number) {
         label: "Scheduled",
         spin: false,
       };
+    case "materializing":
+      // Large audience being resolved + inserted asynchronously before send.
+      // Spinner + "Preparing" so the operator sees progress rather than a stall.
+      return {
+        Icon: Loader2,
+        tone: "border-info-border bg-info-bg text-info-fg",
+        label: "Preparing recipients",
+        spin: true,
+      };
     case "queued":
       return {
         Icon: ClockArrowUp,

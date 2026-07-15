@@ -127,7 +127,17 @@ export type PreviewMissingFieldsInput = z.infer<typeof PreviewMissingFieldsSchem
 /** Status filter for the list page rail. `all` = no filter. */
 export const BroadcastListQuerySchema = z.object({
   status: z
-    .enum(["all", "scheduled", "queued", "running", "completed", "failed", "canceled", "paused"])
+    .enum([
+      "all",
+      "scheduled",
+      "materializing",
+      "queued",
+      "running",
+      "completed",
+      "failed",
+      "canceled",
+      "paused",
+    ])
     .optional(),
   search: z.string().trim().max(120).optional(),
   // Keyset pagination. `cursor` is the opaque `<createdAtMs>_<id>` of the last

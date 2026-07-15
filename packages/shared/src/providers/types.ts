@@ -486,6 +486,28 @@ export interface NormalizedContactNumberChange {
   rawPayload: Record<string, unknown>;
 }
 
+/**
+ * The messaging-health of a business phone number changed (WhatsApp only). Meta
+ * pushes these via the `phone_number_quality_update`, `account_alerts`, and
+ * `business_capability_update` webhook fields: the number's messaging-limit TIER
+ * (how many unique customers it may message per rolling 24h), quality rating
+ * band, and throughput level. Ingest persists whichever fields are present onto
+ * the team's WhatsApp `ChannelConnection`, so large template broadcasts can be
+ * gated on the number's real capacity BEFORE sending and the composer can show
+ * the operator their remaining daily allowance. Every field optional — a given
+ * webhook only carries the field(s) that changed; ingest merges partial updates.
+ */
+export interface NormalizedChannelHealth {
+  kind: "channel_health";
+  /** Raw Meta messaging_limit tier, e.g. "TIER_1K" | "TIER_10K" | "TIER_100K" | "TIER_UNLIMITED". */
+  messagingTier?: string;
+  /** Quality band: "GREEN" | "YELLOW" | "RED". */
+  qualityRating?: string;
+  /** Throughput level: "STANDARD" | "HIGH". */
+  throughputLevel?: string;
+  rawPayload: Record<string, unknown>;
+}
+
 export type NormalizedEvent =
   | NormalizedInboundMessage
   | NormalizedContactNumberChange
@@ -498,7 +520,8 @@ export type NormalizedEvent =
   | NormalizedOutboundEcho
   | NormalizedContactSync
   | NormalizedMessageCorrection
-  | NormalizedMessageFeedback;
+  | NormalizedMessageFeedback
+  | NormalizedChannelHealth;
 
 export interface SendTextArgs {
   /** E.164 digits, no '+'. */

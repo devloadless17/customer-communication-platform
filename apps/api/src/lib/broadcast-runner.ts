@@ -20,6 +20,8 @@ import type { MessagingProvider } from "@ccp/shared/providers/types";
 import type { Channel } from "@ccp/shared/types";
 import { LIVE_CHANNELS, isPhoneChannel } from "@ccp/shared/providers/capabilities";
 import { flagChannelNeedsReconnect } from "@/lib/providers/channel-health";
+import { enqueueBroadcastMaterialize } from "@/lib/broadcasts/materialize-queue";
+import { getWhatsappHealth } from "@/lib/providers/meta-health";
 
 /** Resolved send binding for one channel — the provider + its per-team config. */
 type ChannelBinding = { provider: MessagingProvider; config: unknown };
@@ -112,24 +114,93 @@ import type { Message } from "@ccp/shared/types";
  * leave them dangling — but in-flight Meta sends from the dead process are
  * not retried (we don't know if they landed).
  *
- * Rate: SEND_CONCURRENCY workers, each leaving a 200ms gap between its
- * own sends → ~25 msg/sec aggregate, well under Meta's 80 msg/sec hard cap.
- * Earlier versions were single-threaded at ~5/sec, which made a 1k-recipient
- * broadcast take ~3 minutes; concurrency cuts that to under a minute without
- * risking rate-limit responses.
+ * Rate: `resolveSendPacing` picks `lanes` workers each leaving `gapMs` between
+ * its own sends, adaptively from the WhatsApp number's throughput level —
+ * baseline ~25 msg/s (unknown level / social), STANDARD ~64 msg/s, HIGH
+ * ~266 msg/s — always deliberately UNDER Meta's per-number ceiling so a burst
+ * can't drag the number's quality rating down. All knobs are env-tunable.
  */
 
-const SEND_GAP_MS = 200;
-const SEND_CONCURRENCY = 5;
 /**
- * Hard cap on recipients processed in-process. CLAUDE.md notes the
- * scaling cliff at ~10k: the recipients list is loaded into memory once at
- * the top of `runBroadcast`, and the worker pool holds per-task closures.
- * Past this size, move to a separate worker / BullMQ. Enforce here so a
- * config drift (audience-group blow-up, accidental "send to all") can't
- * OOM the Next.js server.
+ * Send pacing. A broadcast runs `lanes` workers, each pausing `gapMs` between
+ * its own sends, so aggregate throughput ≈ lanes ÷ (gapMs/1000). The defaults
+ * (5 lanes, 200ms → ~25 msg/s) are the historical conservative baseline, used
+ * whenever the number's throughput level is unknown or for social channels.
+ *
+ * WhatsApp exposes a per-number THROUGHPUT LEVEL (STANDARD ~80 msg/s, HIGH up to
+ * ~1000 msg/s). When we know it (meta-health snapshot), a large broadcast paces
+ * UP toward — but deliberately under — that ceiling: STANDARD → ~64 msg/s, HIGH →
+ * ~266 msg/s. Staying under the ceiling is what protects the number's quality
+ * rating (over-driving triggers 130429s that drag quality → a tier downgrade).
+ * All four knobs are env-tunable so ops can retune without a deploy.
  */
-export const MAX_RECIPIENTS_IN_PROCESS = 10_000;
+function envInt(name: string, def: number, min: number, max: number): number {
+  const raw = Number.parseInt(process.env[name] ?? "", 10);
+  if (!Number.isFinite(raw) || raw < min || raw > max) return def;
+  return raw;
+}
+interface SendPacing {
+  lanes: number;
+  gapMs: number;
+}
+/**
+ * Resolve pacing for a run from the channel + the number's throughput level.
+ * `throughputLevel` is null for social channels and for a WhatsApp number we've
+ * never polled — both fall to the conservative baseline.
+ */
+function resolveSendPacing(channel: Channel, throughputLevel: string | null): SendPacing {
+  if (channel === "whatsapp" && throughputLevel === "HIGH") {
+    return {
+      lanes: envInt("BROADCAST_SEND_CONCURRENCY_HIGH", 16, 1, 64),
+      gapMs: envInt("BROADCAST_SEND_GAP_MS_HIGH", 60, 0, 5_000),
+    };
+  }
+  if (channel === "whatsapp" && throughputLevel === "STANDARD") {
+    return {
+      lanes: envInt("BROADCAST_SEND_CONCURRENCY_STANDARD", 8, 1, 64),
+      gapMs: envInt("BROADCAST_SEND_GAP_MS_STANDARD", 125, 0, 5_000),
+    };
+  }
+  return {
+    lanes: envInt("BROADCAST_SEND_CONCURRENCY", 5, 1, 64),
+    gapMs: envInt("BROADCAST_SEND_GAP_MS", 200, 0, 5_000),
+  };
+}
+/**
+ * Hard cap on recipients per broadcast. Historically 10k because the whole
+ * recipient list was loaded into memory in the create request. That constraint
+ * is gone: recipients are cursor-paged in `runBroadcast` (only ~PAGE_SIZE rows
+ * live at once) and, for a LARGE audience, inserted asynchronously by the
+ * broadcast-materialize worker rather than in the create transaction. So the cap
+ * is now a policy ceiling (bound a single team's blast radius / Meta spend), not
+ * a memory limit — configurable via BROADCAST_MAX_RECIPIENTS (default 100k), and
+ * clamped to a hard ceiling so a config typo can't uncap it. The runner + the
+ * create path both read this.
+ *
+ * NOTE: reaching 100k unique customers/24h ALSO requires the WhatsApp number to
+ * be at the 100K/Unlimited messaging-limit tier — enforced separately by the
+ * pre-send eligibility gate (see meta-health.ts). This cap is our side; the tier
+ * is Meta's side.
+ */
+const MAX_RECIPIENTS_HARD_CEILING = 250_000;
+export const MAX_RECIPIENTS_IN_PROCESS: number = (() => {
+  const raw = Number.parseInt(process.env.BROADCAST_MAX_RECIPIENTS ?? "100000", 10);
+  if (!Number.isFinite(raw) || raw <= 0) return 100_000;
+  return Math.min(raw, MAX_RECIPIENTS_HARD_CEILING);
+})();
+
+/**
+ * Audiences at or below this size are materialized SYNCHRONOUSLY inside the
+ * create request (one bounded transaction) and the runner fires immediately —
+ * the fast path for the overwhelming majority of broadcasts, unchanged from
+ * before. Larger audiences are staged on the row and their BroadcastRecipient
+ * rows are inserted by the broadcast-materialize worker, because a create-time
+ * transaction inserting tens of thousands of rows exceeds Prisma's interactive-
+ * tx budget and rolls the whole broadcast back. Hand-picked audiences
+ * (selected/custom) are capped at MAX_AUDIENCE_IDS (5k) upstream, so only
+ * all/by_tag/group audiences ever cross this line.
+ */
+export const SYNC_MATERIALIZE_MAX = 5_000;
 
 /**
  * Per-broadcast 429 streak tracking. Keyed by broadcast id; bumped on
@@ -313,19 +384,24 @@ function releaseBroadcastTeamSlot(teamId: string): void {
  * starved lane eventually makes progress; a depth-threshold warn log surfaces
  * a team that's chronically waiting (slow Meta, undersized cap, etc.).
  *
- * Tunable via BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY (default 5; matches the
- * global SEND_CONCURRENCY so a single team running one broadcast is unaffected,
- * but a second concurrent broadcast can't double its in-flight count).
+ * Tunable via BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY (default 16 — at least the
+ * HIGH-throughput lane count so a single large broadcast on a HIGH-throughput
+ * number isn't throttled below its resolved pacing; a team running several
+ * broadcasts still can't exceed this shared in-flight ceiling). The effective
+ * per-run rate is min(pacing.lanes, this cap), so this must be ≥ the largest
+ * pacing.lanes (16) or it silently caps throughput.
  *
  * Keyed by teamId. Entry is dropped when the team has zero active + zero
  * waiters so the Map stays bounded with one entry per actively-sending team.
  */
 function perTeamRecipientConcurrency(): number {
   const raw = Number.parseInt(
-    process.env.BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY ?? "5",
+    process.env.BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY ?? "16",
     10,
   );
-  return Number.isFinite(raw) && raw > 0 && raw <= 50 ? raw : 5;
+  // Upper clamp matches resolveSendPacing's lane clamp (64) so an operator who
+  // raises BROADCAST_SEND_CONCURRENCY_HIGH above 50 isn't silently throttled here.
+  return Number.isFinite(raw) && raw > 0 && raw <= 64 ? raw : 16;
 }
 
 /** Wait queue depth that triggers a structured warn log ("this team is starving"). */
@@ -858,7 +934,15 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     }));
 
   await refill();
-  const lanes = Math.min(SEND_CONCURRENCY, queue.length);
+  // Resolve send pacing from the number's throughput level (WhatsApp only; social
+  // + customer-mode + never-polled numbers fall to the conservative baseline).
+  // One health read per run — cheap, and the level rarely changes mid-run.
+  const throughputLevel =
+    !isCustomerMode && broadcast.channel === "whatsapp"
+      ? (await getWhatsappHealth(broadcast.teamId).catch(() => null))?.throughputLevel ?? null
+      : null;
+  const pacing = resolveSendPacing(broadcast.channel, throughputLevel);
+  const lanes = Math.min(pacing.lanes, queue.length);
 
   // Cooperative cancel — operators flip the broadcast row to `canceled`
   // via POST /api/broadcasts/:id/cancel; the lanes check this flag at the
@@ -954,7 +1038,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         } finally {
           releaseTeamRecipientSlot(broadcast.teamId);
         }
-        if (SEND_GAP_MS > 0) await sleep(SEND_GAP_MS);
+        if (pacing.gapMs > 0) await sleep(pacing.gapMs);
       }
     }),
   );
@@ -1801,26 +1885,43 @@ function isPermanentCredentialError(err: unknown): boolean {
 }
 
 /**
+ * A template that's paused / disabled / no longer approved fails EVERY recipient
+ * of the broadcast identically (they all share one template) — run-fatal, like a
+ * dead credential, so it feeds the same breaker instead of burning the audience
+ * as false per-recipient failures. Distinct from credential errors so the reason
+ * copy + recovery guidance are template-specific (fix/unpause the template, then
+ * retry) rather than "reconnect WhatsApp".
+ */
+function isFatalTemplateError(err: unknown): boolean {
+  return normalizeMetaSendError(err)?.code === "template_unavailable";
+}
+
+/**
  * Permanent-error breaker. Called from the non-rate-limited failure branch.
  * Bumps the consecutive permanent-error streak; when it crosses the threshold,
  * CAS the broadcast `running → paused`, set the in-memory FATAL_PAUSE signal so
- * every lane stops pulling, and publish the paused status so the UI surfaces
- * "paused — WhatsApp connection error". The boot reconciler resumes a `paused`
- * broadcast (re-resolving the send config) once the credential is fixed.
+ * every lane stops pulling, and publish the paused status. Two run-fatal classes
+ * feed it: a dead credential (expired/revoked token, deconfigured number) and an
+ * unavailable template (paused/disabled/unapproved). The boot reconciler resumes
+ * a `paused` broadcast once the underlying issue is fixed; per-recipient CAS
+ * keeps resume double-send-safe.
  */
 async function maybeTripPermanentBreaker(
   broadcast: { id: string; teamId: string; channel: Channel },
   err: unknown,
 ): Promise<void> {
-  if (!isPermanentCredentialError(err)) {
-    // A non-permanent rejection (bad number, unsupported message) breaks any
-    // accumulating permanent streak — those are isolated, not a dead credential.
+  const credentialFatal = isPermanentCredentialError(err);
+  const templateFatal = isFatalTemplateError(err);
+  if (!credentialFatal && !templateFatal) {
+    // A per-recipient rejection (bad number, unsupported content) breaks any
+    // accumulating streak — those are isolated, not a run-fatal fault.
     resetPermanentStreak(broadcast.id);
     return;
   }
   // Light the Settings "reconnect" banner on the FIRST expired-token hit — a
   // broadcast bypasses the send-worker's flag, so otherwise a token dying
-  // mid-broadcast pauses the broadcast but leaves the reconnect CTA dark.
+  // mid-broadcast pauses the broadcast but leaves the reconnect CTA dark. (Not
+  // for a template fault — that's not a connection problem.)
   if (normalizeMetaSendError(err)?.code === "auth_expired") {
     void flagChannelNeedsReconnect(broadcast.teamId, broadcast.channel);
   }
@@ -1830,9 +1931,11 @@ async function maybeTripPermanentBreaker(
   // Claim the trip atomically in-memory before the DB write so two lanes
   // crossing the threshold in the same tick don't both pause/publish.
   FATAL_PAUSE.add(broadcast.id);
-  const reason = isProviderNotConfigured(err)
-    ? "WhatsApp connection error — the number is no longer configured."
-    : "WhatsApp connection error — the access token expired or was revoked.";
+  const reason = templateFatal
+    ? "Template paused/disabled at Meta — fix or unpause the template, then retry the broadcast."
+    : isProviderNotConfigured(err)
+      ? "WhatsApp connection error — the number is no longer configured."
+      : "WhatsApp connection error — the access token expired or was revoked.";
   const paused = await db.broadcast.updateMany({
     where: { id: broadcast.id, status: "running" },
     data: { status: "paused", lastError: reason },
@@ -2247,6 +2350,29 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
       `[broadcast-reconciler] resuming orphaned queued broadcast ${row.id}`,
     );
     void startBroadcast(row.id);
+  }
+
+  // 3b) Re-enqueue `materializing` orphans — a large broadcast whose materialize
+  // job was lost (Redis eviction, crash before the worker finished inserting).
+  // The materialize worker is idempotent (status-CAS + createMany skipDuplicates),
+  // so a re-enqueue safely resumes insertion and then flips the row to
+  // queued/scheduled. Without this, a crash mid-materialize strands a large
+  // broadcast forever (the materialize-drift sweeper is the runtime backstop; this
+  // is the boot-time one).
+  const materializingOrphans = await db.broadcast.findMany({
+    where: { status: "materializing" },
+    select: { id: true },
+  });
+  for (const row of materializingOrphans) {
+    console.warn(
+      `[broadcast-reconciler] re-enqueuing orphaned materializing broadcast ${row.id}`,
+    );
+    void enqueueBroadcastMaterialize(row.id).catch((err) => {
+      console.warn(
+        `[broadcast-reconciler] materialize re-enqueue failed for ${row.id}:`,
+        err instanceof Error ? err.message : err,
+      );
+    });
   }
 
   // 4) Crash-window closer for the cancel-race reconcile. The live reconcile

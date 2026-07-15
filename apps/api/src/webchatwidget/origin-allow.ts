@@ -26,6 +26,18 @@ export function originAllowed(origin: string | null, allowedOrigins: string[]): 
   }
   if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") return true;
 
+  // Always allow our OWN app origin — the inline-embed / any first-party host page
+  // (e.g. a page on this app's domain) must pass even when the org locked its
+  // allow-list to just their marketing site.
+  const appOrigin = (process.env.APP_PUBLIC_URL || process.env.NEXT_PUBLIC_APP_URL || "").trim();
+  if (appOrigin) {
+    try {
+      if (host === new URL(appOrigin).hostname.toLowerCase()) return true;
+    } catch {
+      /* ignore a malformed env */
+    }
+  }
+
   const list = (allowedOrigins ?? []).map((o) => o.trim().toLowerCase()).filter(Boolean);
   if (list.length === 0) return true; // not configured yet → permissive
 

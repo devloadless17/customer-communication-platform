@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useSearchParams } from "next/navigation";
+import { cn } from "@ccp/shared/utils";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
   AlertTriangle,
@@ -38,6 +39,12 @@ export interface WhatsappCurrent {
   credentialsUndecryptable?: boolean;
   /** Set when a send failed with Graph 190 — the token expired/was revoked. */
   needsReconnect?: boolean;
+  /** WhatsApp messaging-limit tier + health — how many unique customers/24h this
+   *  number may message, its quality band, and throughput level. Null until polled. */
+  messagingTier?: string | null;
+  messagingDailyCap?: number | null;
+  qualityRating?: string | null;
+  throughputLevel?: string | null;
 }
 
 export function WhatsappSettings({
@@ -291,6 +298,31 @@ function ConnectionStatus({
           <>
             <dt>App id</dt>
             <dd className="min-w-0 break-all font-mono">{current.appId}</dd>
+          </>
+        )}
+        {current.messagingTier && (
+          <>
+            <dt>Messaging limit</dt>
+            <dd className="min-w-0 text-foreground">
+              {current.messagingDailyCap != null
+                ? `${current.messagingDailyCap.toLocaleString()} customers / 24h`
+                : "Unlimited"}
+              {current.qualityRating && (
+                <span
+                  className={cn(
+                    "ml-2 rounded-full border px-1.5 py-0.5 text-2xs font-medium",
+                    current.qualityRating === "GREEN" &&
+                      "border-success-border bg-success-bg text-success-fg",
+                    current.qualityRating === "YELLOW" &&
+                      "border-warning-border bg-warning-bg text-warning-fg",
+                    current.qualityRating === "RED" &&
+                      "border-destructive/30 bg-destructive/10 text-destructive",
+                  )}
+                >
+                  {current.qualityRating} quality
+                </span>
+              )}
+            </dd>
           </>
         )}
       </dl>

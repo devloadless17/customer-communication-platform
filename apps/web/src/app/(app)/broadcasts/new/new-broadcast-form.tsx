@@ -601,6 +601,59 @@ export function NewBroadcastForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTemplate?.id, audiencePayload, bodyVars, headerVar, bodyVarCount, headerVarCount]);
 
+  // WhatsApp messaging-limit snapshot for the pre-send eligibility hint. Fetched
+  // once (secret-free endpoint); the composer compares the audience size against
+  // the number's 24h tier cap locally. The hard gate lives server-side in create().
+  const [messagingHealth, setMessagingHealth] = useState<{
+    messagingTier: string | null;
+    messagingDailyCap: number | null;
+    qualityRating: string | null;
+    hasSnapshot: boolean;
+  } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await apiFetch("/api/broadcasts/messaging-health");
+        if (!res.ok) return;
+        if (alive) setMessagingHealth(await res.json());
+      } catch {
+        // Advisory only — a fetch failure just hides the hint.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Eligibility hint: template sends only (WhatsApp tier is a template concept).
+  // Over-cap → a blocking-styled warning (server enforces); RED quality → advisory.
+  const eligibilityWarning = useMemo<
+    { level: "error" | "warn"; text: string } | null
+  >(() => {
+    if (messageKind !== "template" || !messagingHealth) return null;
+    const cap = messagingHealth.messagingDailyCap;
+    if (cap !== null && audienceCount > cap) {
+      return {
+        level: "error",
+        text:
+          `This number can message ${cap.toLocaleString()} unique customers per 24h ` +
+          `(${messagingHealth.messagingTier ?? "current"} tier), but this audience is ` +
+          `${audienceCount.toLocaleString()}. Meta will reject the excess — split the send ` +
+          `across days or raise your messaging limit with Meta first.`,
+      };
+    }
+    if (messagingHealth.qualityRating === "RED") {
+      return {
+        level: "warn",
+        text:
+          "This number's quality rating is RED — a large marketing blast now risks a " +
+          "further downgrade or block. Consider warming up with a smaller send first.",
+      };
+    }
+    return null;
+  }, [messageKind, messagingHealth, audienceCount]);
+
   const filteredTemplates = useMemo(() => {
     const q = templateQuery.trim().toLowerCase();
     if (!q) return templates;
@@ -1100,6 +1153,24 @@ export function NewBroadcastForm({
           >
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
             <span className="wrap-break-word">{sendError}</span>
+          </div>
+        )}
+        {/* Pre-send eligibility: audience vs the number's WhatsApp messaging-limit
+            tier. An over-cap audience is a hard error (create() rejects it too);
+            a RED quality band is advisory. Only shown when we have a tier snapshot. */}
+        {eligibilityWarning && (
+          <div
+            className={cn(
+              "mb-3 rounded-md border px-3 py-2 text-xs",
+              eligibilityWarning.level === "error"
+                ? "border-destructive/30 bg-destructive/10 text-destructive"
+                : "border-warning-border bg-warning-bg text-warning-fg",
+            )}
+          >
+            <div className="flex items-start gap-1.5">
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+              <span className="wrap-break-word">{eligibilityWarning.text}</span>
+            </div>
           </div>
         )}
         {/* Pre-send warning: recipients missing a mapped template field. Advisory

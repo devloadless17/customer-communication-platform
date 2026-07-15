@@ -459,9 +459,17 @@ export interface WebchatWidgetView {
     theme?: { primaryColor?: string; launcherColor?: string; userBubbleColor?: string };
     welcomeMessage?: string;
     headerTitle?: string;
+    headerSubtitle?: string;
     suggestedQuestions?: string[];
     preChatFields?: { id: string; label: string; type: "text" | "name" | "email" | "phone"; required: boolean }[];
     showBranding?: boolean;
+    logoDataUrl?: string;
+    agentAvatarDataUrl?: string;
+    fontFamily?: "system" | "rounded" | "serif";
+    themeMode?: "light" | "dark" | "auto";
+    launcher?: "bubble" | "off";
+    position?: "right" | "left";
+    launcherLabel?: string;
   };
   isActive: boolean;
   conversationCount: number;

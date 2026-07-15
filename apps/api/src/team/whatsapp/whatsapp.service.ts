@@ -23,6 +23,7 @@ import {
   ProviderNotConfiguredError,
 } from "@/lib/providers/config";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
+import { fetchWhatsappHealthFromGraph } from "@/lib/providers/meta-health";
 import {
   MetaSendError,
   MissingAppIdError,
@@ -103,7 +104,15 @@ export class WhatsappService {
   async getConfig(teamId: string): Promise<WhatsappConfigView> {
     const conn = await this.db.channelConnection.findUnique({
       where: { teamId_channel: { teamId, channel: META_PROVIDER } },
-      select: { config: true, secrets: true, needsReconnect: true },
+      select: {
+        config: true,
+        secrets: true,
+        needsReconnect: true,
+        messagingTier: true,
+        messagingDailyCap: true,
+        qualityRating: true,
+        throughputLevel: true,
+      },
     });
     const config = (conn?.config ?? {}) as MetaChannelConfig;
     const secrets = (conn?.secrets ?? {}) as MetaChannelSecrets;
@@ -157,6 +166,10 @@ export class WhatsappService {
       appSecret,
       credentialsUndecryptable,
       needsReconnect: conn?.needsReconnect ?? false,
+      messagingTier: conn?.messagingTier ?? null,
+      messagingDailyCap: conn?.messagingDailyCap ?? null,
+      qualityRating: conn?.qualityRating ?? null,
+      throughputLevel: conn?.throughputLevel ?? null,
     };
   }
 
@@ -353,6 +366,18 @@ export class WhatsappService {
     void resumePausedBroadcastsForTeam(teamId).catch((err) => {
       this.logger.warn(
         `failed to resume paused broadcasts after WhatsApp settings save for team ${teamId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+
+    // Pull the number's messaging-limit tier / quality / throughput now so a
+    // large template broadcast can be gated on real capacity immediately after
+    // connecting (before the first quality webhook arrives). Fire-and-forget +
+    // best-effort — a fetch failure just leaves the snapshot null (ungated).
+    void fetchWhatsappHealthFromGraph(teamId).catch((err) => {
+      this.logger.warn(
+        `failed to fetch WhatsApp messaging health after settings save for team ${teamId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );

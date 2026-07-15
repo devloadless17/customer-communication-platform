@@ -349,6 +349,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
   useEffect(() => {
     cancelledRef.current = false;
     if (
+      data.status !== "materializing" &&
       data.status !== "queued" &&
       data.status !== "running" &&
       data.status !== "paused"
@@ -389,6 +390,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                 scheduled (not fired yet), queued/running (mid-send), or paused
                 (will auto-resume). The backend allows cancel in all of these. */}
             {(data.status === "scheduled" ||
+              data.status === "materializing" ||
               data.status === "queued" ||
               data.status === "running" ||
               data.status === "paused") && (
@@ -521,7 +523,9 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
         </motion.div>
       </div>
       <div className="text-2xs text-muted-foreground">
-        {progressPct}% processed
+        {data.status === "materializing"
+          ? `Preparing ${data.totalCount.toLocaleString()} recipients — sending starts automatically`
+          : `${progressPct}% processed`}
         {(data.status === "queued" || data.status === "running") && " · updates live"}
         {data.status === "paused" &&
           (data.lastError

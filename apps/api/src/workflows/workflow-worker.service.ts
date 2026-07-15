@@ -22,6 +22,21 @@ import {
   stopBroadcastScheduleDriftSweeper,
 } from "@/lib/sweepers/broadcast-schedule-drift";
 import {
+  startBroadcastMaterializeWorker,
+  stopBroadcastMaterializeWorker,
+} from "@/lib/broadcasts/materialize-worker";
+import {
+  closeBroadcastMaterializeQueue,
+} from "@/lib/broadcasts/materialize-queue";
+import {
+  startBroadcastMaterializeDriftSweeper,
+  stopBroadcastMaterializeDriftSweeper,
+} from "@/lib/sweepers/broadcast-materialize-drift";
+import {
+  startWhatsappHealthRefreshSweeper,
+  stopWhatsappHealthRefreshSweeper,
+} from "@/lib/sweepers/whatsapp-health-refresh";
+import {
   startContactDriftSweeper,
   stopContactDriftSweeper,
 } from "@/lib/sweepers/contact-last-inbound-drift";
@@ -123,6 +138,9 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private messageRawPayloadRetentionStarted = false;
   private broadcastScheduleWorkerStarted = false;
   private broadcastScheduleDriftSweeperStarted = false;
+  private broadcastMaterializeWorkerStarted = false;
+  private broadcastMaterializeDriftSweeperStarted = false;
+  private whatsappHealthRefreshSweeperStarted = false;
 
   onModuleInit(): void {
     const inline = process.env.RUN_WORKER_INLINE !== "0";
@@ -315,6 +333,34 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start broadcast-schedule-drift sweeper", err);
     }
+    try {
+      // Materializes large broadcast audiences off the create HTTP path
+      // (resolve audience + chunk-insert BroadcastRecipient rows → flip
+      // materializing→queued → startBroadcast). Shares the inline-worker gate.
+      startBroadcastMaterializeWorker();
+      this.broadcastMaterializeWorkerStarted = true;
+      this.logger.log("Broadcast materialize worker started");
+    } catch (err) {
+      this.logger.error("Failed to start broadcast-materialize worker", err);
+    }
+    try {
+      // Backstop for `materializing` broadcasts whose materialize job stranded
+      // (Redis job loss, worker crash mid-batch). Re-enqueues idempotently.
+      startBroadcastMaterializeDriftSweeper();
+      this.broadcastMaterializeDriftSweeperStarted = true;
+      this.logger.log("Broadcast materialize-drift sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start broadcast-materialize-drift sweeper", err);
+    }
+    try {
+      // Periodically re-syncs each team's WhatsApp messaging-limit tier / quality
+      // / throughput from Graph so large broadcasts are gated on fresh capacity.
+      startWhatsappHealthRefreshSweeper();
+      this.whatsappHealthRefreshSweeperStarted = true;
+      this.logger.log("WhatsApp health-refresh sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start whatsapp-health-refresh sweeper", err);
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -324,6 +370,22 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(
         `stopBroadcastScheduleDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.broadcastMaterializeDriftSweeperStarted)
+        stopBroadcastMaterializeDriftSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopBroadcastMaterializeDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.whatsappHealthRefreshSweeperStarted)
+        stopWhatsappHealthRefreshSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopWhatsappHealthRefreshSweeper threw: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {
@@ -428,6 +490,11 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(`stopBroadcastScheduleWorker threw: ${err instanceof Error ? err.message : err}`);
     }
+    try {
+      if (this.broadcastMaterializeWorkerStarted) await stopBroadcastMaterializeWorker();
+    } catch (err) {
+      this.logger.warn(`stopBroadcastMaterializeWorker threw: ${err instanceof Error ? err.message : err}`);
+    }
     // ALWAYS close the queues — both this process's worker AND any HTTP path
     // (create/cancel) opens them via get*Queue.
     try {
@@ -439,6 +506,11 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       await closeBroadcastScheduleQueue();
     } catch (err) {
       this.logger.warn(`closeBroadcastScheduleQueue threw: ${err instanceof Error ? err.message : err}`);
+    }
+    try {
+      await closeBroadcastMaterializeQueue();
+    } catch (err) {
+      this.logger.warn(`closeBroadcastMaterializeQueue threw: ${err instanceof Error ? err.message : err}`);
     }
   }
 }

@@ -77,9 +77,17 @@ export function WebchatWidgetSettings({
           theme: w.config.theme ?? {},
           welcomeMessage: w.config.welcomeMessage ?? "",
           headerTitle: w.config.headerTitle ?? "",
+          headerSubtitle: w.config.headerSubtitle ?? "",
           suggestedQuestions: w.config.suggestedQuestions ?? [],
           preChatFields: w.config.preChatFields ?? [],
           showBranding: w.config.showBranding ?? true,
+          logoDataUrl: w.config.logoDataUrl ?? "",
+          agentAvatarDataUrl: w.config.agentAvatarDataUrl ?? "",
+          fontFamily: w.config.fontFamily ?? "system",
+          themeMode: w.config.themeMode ?? "light",
+          launcher: w.config.launcher ?? "bubble",
+          position: w.config.position ?? "right",
+          launcherLabel: w.config.launcherLabel ?? "",
         }),
       });
       const data = (await res.json()) as { widget?: WebchatWidgetView; error?: string };
@@ -210,9 +218,8 @@ function Editor({
   const c = widget.config;
   const theme = c.theme ?? {};
   const [originDraft, setOriginDraft] = useState("");
-  const [copied, setCopied] = useState(false);
-
-  const snippet = `<script src="${appOrigin || "https://YOUR-APP"}/widget.js" data-webchat-key="${widget.publicKey}" defer></script>`;
+  const origin = appOrigin || "https://YOUR-APP";
+  const scriptTag = buildScript(origin, widget.publicKey, c);
 
   return (
     <div className="flex flex-col gap-6">
@@ -245,10 +252,65 @@ function Editor({
             />
           </Labeled>
 
+          <Labeled label="Header subtitle (under the title)">
+            <input
+              value={c.headerSubtitle ?? ""}
+              placeholder="Typically replies in a few minutes"
+              onChange={(e) => onConfig({ headerSubtitle: e.target.value })}
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+            />
+          </Labeled>
+
           <div className="grid grid-cols-3 gap-3">
             <ColorField label="Primary" value={theme.primaryColor} onChange={(v) => onConfig({ theme: { ...theme, primaryColor: v } })} />
             <ColorField label="Launcher" value={theme.launcherColor} onChange={(v) => onConfig({ theme: { ...theme, launcherColor: v } })} />
             <ColorField label="Your bubble" value={theme.userBubbleColor} onChange={(v) => onConfig({ theme: { ...theme, userBubbleColor: v } })} />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Labeled label="Font">
+              <select value={c.fontFamily ?? "system"} onChange={(e) => onConfig({ fontFamily: e.target.value as "system" | "rounded" | "serif" })} className="w-full rounded-md border bg-background px-3 py-2 text-sm">
+                <option value="system">System</option>
+                <option value="rounded">Rounded</option>
+                <option value="serif">Serif</option>
+              </select>
+            </Labeled>
+            <Labeled label="Theme">
+              <select value={c.themeMode ?? "light"} onChange={(e) => onConfig({ themeMode: e.target.value as "light" | "dark" | "auto" })} className="w-full rounded-md border bg-background px-3 py-2 text-sm">
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+                <option value="auto">Auto (system)</option>
+              </select>
+            </Labeled>
+          </div>
+
+          <div className="rounded-lg border p-3">
+            <p className="mb-2 text-xs font-semibold">Branding</p>
+            <div className="grid grid-cols-2 gap-3">
+              <ImageUpload label="Logo" value={c.logoDataUrl} maxKb={64} onChange={(v) => onConfig({ logoDataUrl: v })} />
+              <ImageUpload label="Agent avatar" value={c.agentAvatarDataUrl} maxKb={40} onChange={(v) => onConfig({ agentAvatarDataUrl: v })} />
+            </div>
+          </div>
+
+          <div className="rounded-lg border p-3">
+            <p className="mb-2 text-xs font-semibold">Launcher &amp; placement</p>
+            <div className="grid grid-cols-2 gap-3">
+              <Labeled label="Launcher">
+                <select value={c.launcher ?? "bubble"} onChange={(e) => onConfig({ launcher: e.target.value as "bubble" | "off" })} className="w-full rounded-md border bg-background px-3 py-2 text-sm">
+                  <option value="bubble">Floating bubble</option>
+                  <option value="off">Hidden (open via your own link)</option>
+                </select>
+              </Labeled>
+              <Labeled label="Position">
+                <select value={c.position ?? "right"} onChange={(e) => onConfig({ position: e.target.value as "right" | "left" })} className="w-full rounded-md border bg-background px-3 py-2 text-sm">
+                  <option value="right">Bottom right</option>
+                  <option value="left">Bottom left</option>
+                </select>
+              </Labeled>
+            </div>
+            <Labeled label="Bubble label (optional)">
+              <input value={c.launcherLabel ?? ""} placeholder="e.g. Chat with us" onChange={(e) => onConfig({ launcherLabel: e.target.value })} className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm" />
+            </Labeled>
           </div>
 
           <Labeled label="Suggested questions (one per line, max 6)">
@@ -316,27 +378,41 @@ function Editor({
         </div>
       </div>
 
-      {/* embed snippet */}
-      <div className="flex flex-col gap-2 rounded-xl border bg-card p-4">
-        <p className="text-sm font-medium">Embed on your website</p>
-        <p className="text-xs text-muted-foreground">Paste this before &lt;/body&gt; on every page.</p>
-        <div className="flex items-start gap-2">
-          <code className="flex-1 overflow-x-auto rounded-md bg-muted px-3 py-2 text-2xs">{snippet}</code>
-          <button
-            onClick={() => {
-              void navigator.clipboard.writeText(snippet);
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1500);
-            }}
-            className="inline-flex items-center gap-1 rounded-md border px-2.5 py-2 text-xs"
-          >
-            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-            {copied ? "Copied" : "Copy"}
-          </button>
+      {/* embed snippets — one per deploy mode */}
+      <div className="flex flex-col gap-4 rounded-xl border bg-card p-4">
+        <div>
+          <p className="text-sm font-medium">Install on your website</p>
+          <p className="text-xs text-muted-foreground">
+            Public key: <code>{widget.publicKey}</code>
+          </p>
         </div>
-        <p className="text-2xs text-muted-foreground">
-          Public key: <code>{widget.publicKey}</code>
-        </p>
+
+        {(c.launcher ?? "bubble") === "off" ? (
+          <>
+            <CopyBox
+              title="1) Add the widget (bubble hidden)"
+              hint="Paste before &lt;/body&gt; on every page."
+              code={scriptTag}
+            />
+            <CopyBox
+              title="2) Open it from any link or button"
+              hint="Wire your own element to the widget."
+              code={`<a href="#" onclick="CCPWebchat.open();return false">Chat with us</a>`}
+            />
+          </>
+        ) : (
+          <CopyBox
+            title="Floating bubble"
+            hint="Paste before &lt;/body&gt; on every page — a chat bubble appears."
+            code={scriptTag}
+          />
+        )}
+
+        <CopyBox
+          title="Inline — embed inside a page section"
+          hint="Renders the chat inside your container (always open)."
+          code={`<div id="ccp-chat" style="height:600px;max-width:440px"></div>\n<script src="${origin}/widget.js" data-webchat-key="${widget.publicKey}" data-webchat-target="#ccp-chat" defer></script>`}
+        />
       </div>
 
       <div className="flex items-center justify-between">
@@ -347,6 +423,73 @@ function Editor({
           {busy ? "Saving…" : "Save changes"}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** Build the `<script>` embed tag with the org's launcher/position/label choices. */
+function buildScript(origin: string, key: string, c: WebchatWidgetView["config"]): string {
+  const attrs = [`data-webchat-key="${key}"`];
+  if ((c.position ?? "right") === "left") attrs.push(`data-webchat-position="left"`);
+  if (c.launcherLabel) attrs.push(`data-webchat-label="${c.launcherLabel}"`);
+  if ((c.launcher ?? "bubble") === "off") attrs.push(`data-webchat-launcher="off"`);
+  return `<script src="${origin}/widget.js" ${attrs.join(" ")} defer></script>`;
+}
+
+function CopyBox({ title, hint, code }: { title: string; hint: string; code: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <p className="text-xs font-semibold">{title}</p>
+      <p className="text-2xs text-muted-foreground">{hint}</p>
+      <div className="flex items-start gap-2">
+        <code className="flex-1 overflow-x-auto whitespace-pre rounded-md bg-muted px-3 py-2 text-2xs">{code}</code>
+        <button
+          onClick={() => {
+            void navigator.clipboard.writeText(code);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }}
+          className="inline-flex shrink-0 items-center gap-1 rounded-md border px-2.5 py-2 text-xs"
+        >
+          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Upload a small image → data URL (no server infra). Size-capped. */
+function ImageUpload({ label, value, maxKb, onChange }: { label: string; value?: string; maxKb: number; onChange: (v: string) => void }) {
+  const [err, setErr] = useState<string | null>(null);
+  function pick(file: File) {
+    setErr(null);
+    if (file.size > maxKb * 1024) { setErr(`Max ${maxKb} KB`); return; }
+    if (!/^image\//.test(file.type)) { setErr("Images only"); return; }
+    const r = new FileReader();
+    r.onload = () => onChange(String(r.result || ""));
+    r.readAsDataURL(file);
+  }
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-2xs font-medium text-muted-foreground">{label}</span>
+      <div className="flex items-center gap-2">
+        {value ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={value} alt="" className="size-9 rounded-md border object-cover" />
+        ) : (
+          <div className="flex size-9 items-center justify-center rounded-md border bg-muted text-2xs text-muted-foreground">—</div>
+        )}
+        <label className="cursor-pointer rounded-md border px-2.5 py-1.5 text-xs hover:bg-muted">
+          Upload
+          <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) pick(f); e.target.value = ""; }} />
+        </label>
+        {value && (
+          <button onClick={() => onChange("")} className="text-xs text-muted-foreground hover:text-destructive">Remove</button>
+        )}
+      </div>
+      {err && <span className="text-2xs text-destructive">{err}</span>}
     </div>
   );
 }
@@ -425,42 +568,61 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
   const primary = /^#[0-9a-f]{6}$/i.test(theme.primaryColor ?? "") ? theme.primaryColor! : BRAND;
   const user = /^#[0-9a-f]{6}$/i.test(theme.userBubbleColor ?? "") ? theme.userBubbleColor! : primary;
   const title = c.headerTitle || widget.name || "Chat";
+  const dark =
+    c.themeMode === "dark" ||
+    (c.themeMode === "auto" && typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+  const surface = dark ? "#0f172a" : "#fff";
+  const surface2 = dark ? "#0b1220" : "#f5f7fb";
+  const inb = dark ? "#1e293b" : "#fff";
+  const ink = dark ? "#e8edf6" : "#0f1729";
+  const ink2 = dark ? "#93a1b8" : "#66748c";
+  const border = dark ? "#243244" : "#e6e9f0";
+  const font = c.fontFamily === "serif" ? "Georgia, serif" : c.fontFamily === "rounded" ? "ui-rounded, system-ui, sans-serif" : undefined;
   const qs = useMemo(() => (c.suggestedQuestions ?? []).slice(0, 3), [c.suggestedQuestions]);
   return (
-    <div className="w-[320px] overflow-hidden rounded-2xl border shadow-lg">
-      <div className="flex items-center gap-2 px-4 py-3" style={{ background: primary, color: contrastOn(primary) }}>
-        <span className="flex size-7 items-center justify-center rounded-full bg-white/20 text-xs font-semibold">
-          {(title.trim()[0] || "C").toUpperCase()}
+    <div className="w-[330px] overflow-hidden rounded-[20px] shadow-xl" style={{ background: surface, border: `1px solid ${border}`, fontFamily: font, color: ink }}>
+      <div className="flex items-center gap-2.5 px-4 py-3.5" style={{ background: `linear-gradient(135deg, ${primary}, ${primary}cc)`, color: contrastOn(primary) }}>
+        <span className="relative flex size-9 items-center justify-center overflow-hidden rounded-[11px] bg-white/20 text-sm font-bold">
+          {c.logoDataUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={c.logoDataUrl} alt="" className="size-full object-cover" />
+          ) : (
+            (title.trim()[0] || "C").toUpperCase()
+          )}
+          <span className="absolute -bottom-0.5 -right-0.5 size-3 rounded-full bg-emerald-400" style={{ boxShadow: `0 0 0 2px ${primary}` }} />
         </span>
-        <span className="text-sm font-semibold">{title}</span>
+        <div className="min-w-0">
+          <div className="truncate text-[15px] font-bold leading-tight">{title}</div>
+          {c.headerSubtitle && <div className="truncate text-[11px] opacity-90">{c.headerSubtitle}</div>}
+        </div>
       </div>
-      <div className="flex min-h-[240px] flex-col gap-2 bg-[#f4f6fa] p-3">
+      <div className="flex min-h-[220px] flex-col gap-2 p-3.5" style={{ background: surface2 }}>
         {c.welcomeMessage && (
-          <div className="max-w-[80%] self-start rounded-2xl rounded-bl-md border bg-white px-3 py-2 text-sm text-slate-800">
+          <div className="max-w-[82%] self-start rounded-2xl rounded-bl-md px-3 py-2 text-sm" style={{ background: inb, border: `1px solid ${border}`, color: ink }}>
             {c.welcomeMessage}
           </div>
         )}
-        <div className="max-w-[80%] self-end rounded-2xl rounded-br-md px-3 py-2 text-sm" style={{ background: user, color: contrastOn(user) }}>
+        <div className="max-w-[82%] self-end rounded-2xl rounded-br-md px-3 py-2 text-sm" style={{ background: `linear-gradient(145deg, ${user}, ${user}e0)`, color: contrastOn(user) }}>
           Hi! I have a question.
         </div>
         {qs.length > 0 && (
           <div className="mt-1 flex flex-wrap gap-1.5">
             {qs.map((q, i) => (
-              <span key={i} className="rounded-full border bg-white px-2.5 py-1 text-xs" style={{ color: primary }}>
+              <span key={i} className="rounded-full px-2.5 py-1 text-xs" style={{ background: surface, border: `1px solid ${border}`, color: primary }}>
                 {q}
               </span>
             ))}
           </div>
         )}
       </div>
-      <div className="flex items-center gap-2 border-t bg-white px-3 py-2">
-        <div className="flex-1 rounded-md border px-3 py-1.5 text-xs text-slate-400">Type a message…</div>
-        <div className="flex size-8 items-center justify-center rounded-md" style={{ background: primary, color: contrastOn(primary) }}>
-          ➤
+      <div className="p-3" style={{ background: surface }}>
+        <div className="flex items-center gap-1.5 rounded-3xl px-2 py-1.5" style={{ background: surface2, border: `1.5px solid ${border}` }}>
+          <span className="flex-1 px-2 text-xs" style={{ color: ink2 }}>Type a message…</span>
+          <span className="flex size-8 items-center justify-center rounded-full text-sm" style={{ background: primary, color: contrastOn(primary) }}>➤</span>
         </div>
       </div>
       {c.showBranding !== false && (
-        <div className="bg-white py-1.5 text-center text-2xs text-slate-400">Powered by our team</div>
+        <div className="pb-2 text-center text-[11px]" style={{ background: surface, color: ink2 }}>⚡ Powered by chat</div>
       )}
     </div>
   );

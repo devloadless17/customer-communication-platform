@@ -10,11 +10,13 @@ import {
 } from "@nestjs/websockets";
 import type { Namespace, Socket } from "socket.io";
 
-import type { MediaKind } from "@ccp/shared/types";
+import type { MediaKind, MessageStatus } from "@ccp/shared/types";
 import type { NormalizedInboundMessage } from "@ccp/shared/providers/types";
 
 import { DbService } from "../db/db.service";
+import { RealtimeGateway } from "../realtime/realtime.gateway";
 import { ingestEvents } from "@/lib/providers/ingest";
+import { publish } from "@/lib/events/bus";
 import { mapMessage } from "@/lib/queries/_shared";
 import { REPLY_TO_INCLUDE } from "@/lib/queries/_shared";
 import { applyWebchatPreChatIdentity } from "@/lib/identity/webchat-prechat";
@@ -89,9 +91,19 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
   @WebSocketServer()
   server!: Namespace;
 
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly realtime: RealtimeGateway,
+  ) {}
 
   afterInit(server: Namespace): void {
+    // Bridge agent typing → the visitor's widget. The agent gateway calls this
+    // relay for EVERY conversation's typing; we just emit to that conversation's
+    // widget room, which is a no-op for non-webchatwidget threads (nobody's in
+    // the room) — so no channel lookup on the typing hot path.
+    this.realtime.bindWidgetTypingRelay((conversationId, on) =>
+      this.deliverToVisitor(conversationId, "typing", { on }),
+    );
     // Handshake auth runs as namespace middleware so a rejection delivers a typed
     // `connect_error` to the widget. The site key + origin allow-list IS the auth
     // (no cookies). Per-IP token bucket bounds a hostile reconnect loop.
@@ -271,6 +283,61 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
     this.server.to(widgetRoom(conversationId)).emit(event, payload);
   }
 
+  // The visitor's browser received an agent message → mark outbound `delivered`.
+  @SubscribeMessage("visitor:received")
+  async onReceived(@ConnectedSocket() client: Socket): Promise<void> {
+    const data = client.data as WidgetSocketData | undefined;
+    if (data?.conversationId) await this.markOutbound(data.teamId, data.conversationId, "delivered");
+  }
+
+  // The panel is open + tab visible → mark outbound `read` (agent sees "Seen").
+  @SubscribeMessage("visitor:read")
+  async onRead(@ConnectedSocket() client: Socket): Promise<void> {
+    const data = client.data as WidgetSocketData | undefined;
+    if (data?.conversationId) await this.markOutbound(data.teamId, data.conversationId, "read");
+  }
+
+  /**
+   * Advance outbound messages' status and publish `message.status_changed` so the
+   * agent inbox shows ✓✓ / Seen. A DIRECT mirror of ingestReadWatermark /
+   * ingestDeliveredWatermark (ingest.ts): the `status in (...)` predicate keeps the
+   * transition forward-only + idempotent (a re-fire matches 0 rows).
+   */
+  private async markOutbound(
+    teamId: string,
+    conversationId: string,
+    status: "delivered" | "read",
+  ): Promise<void> {
+    const from: MessageStatus[] = status === "read" ? ["sent", "delivered"] : ["sent"];
+    const msgs = await this.db.message.findMany({
+      where: { teamId, conversationId, channel: CHANNEL, direction: "out", status: { in: from } },
+      select: { id: true },
+    });
+    if (msgs.length === 0) return;
+    await this.db.message.updateMany({
+      where: { id: { in: msgs.map((m) => m.id) } },
+      data: { status },
+    });
+    const conv = await this.db.conversation.findUnique({
+      where: { id: conversationId },
+      select: { contactId: true },
+    });
+    if (!conv) return;
+    const occurredAt = new Date().toISOString();
+    for (const m of msgs) {
+      await publish({
+        type: "message.status_changed",
+        teamId,
+        channel: CHANNEL,
+        conversationId,
+        contactId: conv.contactId,
+        messageId: m.id,
+        status,
+        occurredAt,
+      });
+    }
+  }
+
   private async findConversationId(
     teamId: string,
     externalContactId: string,
@@ -303,8 +370,24 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: HISTORY_LIMIT,
     });
-    return rows
-      .reverse()
-      .map((r) => frameFromMessage(mapMessage(r)));
+    const asc = rows.reverse();
+    // Batch-resolve agent names for outbound messages so the widget shows who
+    // replied — one query for the distinct senders on the page.
+    const senderIds = [
+      ...new Set(asc.filter((r) => r.direction === "out" && r.senderUserId).map((r) => r.senderUserId!)),
+    ];
+    const names = new Map<string, string>();
+    if (senderIds.length > 0) {
+      const users = await this.db.user.findMany({
+        where: { id: { in: senderIds } },
+        select: { id: true, name: true },
+      });
+      for (const u of users) names.set(u.id, u.name);
+    }
+    return asc.map((r) =>
+      frameFromMessage(mapMessage(r), {
+        senderName: r.senderUserId ? (names.get(r.senderUserId) ?? null) : null,
+      }),
+    );
   }
 }

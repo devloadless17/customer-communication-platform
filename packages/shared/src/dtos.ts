@@ -287,6 +287,16 @@ export interface WhatsappConfigView {
   /** True when a send failed with Graph 190 (token expired/revoked) — drives the
    *  Settings "reconnect" banner, consistent with Messenger/Instagram. */
   needsReconnect: boolean;
+  /** WhatsApp messaging-limit tier (e.g. "TIER_10K") — how many unique customers
+   *  the number may message per 24h. Null when not yet known. Drives the composer
+   *  "remaining daily allowance" hint + Settings health row. */
+  messagingTier: string | null;
+  /** Derived numeric 24h unique-recipient cap for the tier (null = unlimited/unknown). */
+  messagingDailyCap: number | null;
+  /** Quality band: "GREEN" | "YELLOW" | "RED" | null. */
+  qualityRating: string | null;
+  /** Throughput level: "STANDARD" | "HIGH" | null. */
+  throughputLevel: string | null;
 }
 
 // Re-export commonly co-imported types so callers can grab everything from

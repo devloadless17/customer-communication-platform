@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { runWithConcurrency } from "@/common/concurrency";
 import { captureRemoteContactAvatar } from "@/lib/blob-storage/avatar";
 import { getProviderBinding } from "@/lib/providers";
+import { persistWhatsappHealth } from "@/lib/providers/meta-health";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { publish } from "@/lib/events/bus";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
@@ -148,6 +149,15 @@ export async function ingestEvents(
         await ingestContactNumberChange(teamId, channel, evt);
       } else if (evt.kind === "template_status") {
         await ingestTemplateStatusUpdate(teamId, evt);
+      } else if (evt.kind === "channel_health") {
+        // WhatsApp number messaging-limit tier / quality / throughput changed.
+        await persistWhatsappHealth(teamId, {
+          ...(evt.messagingTier !== undefined ? { messagingTier: evt.messagingTier } : {}),
+          ...(evt.qualityRating !== undefined ? { qualityRating: evt.qualityRating } : {}),
+          ...(evt.throughputLevel !== undefined
+            ? { throughputLevel: evt.throughputLevel }
+            : {}),
+        });
       } else if (evt.kind === "call") {
         // Kill-switch: calling (WhatsApp + Messenger) reaches browsers via
         // realtime WebRTC signaling. DISABLE_CALLING=1 (wired in docker-compose

@@ -158,6 +158,13 @@ enum BroadcastStatus {
   // broadcast id) flips it `scheduled` → `queued` and starts the runner at
   // that time. Cancelable while scheduled (removes the delayed job).
   scheduled
+  // Recipients are being resolved + inserted asynchronously by the
+  // broadcast-materialize worker (large audiences up to the 100k cap can't be
+  // built inside the create HTTP request without blowing the tx budget). The
+  // worker chunk-inserts BroadcastRecipient rows, then CAS-flips
+  // `materializing` → `queued` and kicks the runner. Cancelable while
+  // materializing (the worker checks the row status between batches).
+  materializing
   queued
   running
   completed
@@ -499,6 +506,34 @@ model ChannelConnection {
   // the token — per Meta's access-token best practice. Cleared on reconnect.
   needsReconnect  Boolean   @default(false)
   lastAuthErrorAt DateTime?
+
+  // ── WhatsApp messaging-health snapshot (whatsapp channel only) ────────────
+  // Cached from Meta so large broadcasts can be gated BEFORE sending: WhatsApp
+  // limits how many UNIQUE customers a business phone number may message in a
+  // rolling 24h to its messaging-limit TIER, and quality/throughput govern how
+  // fast and whether the number is healthy. Populated two ways (both best-effort,
+  // both idempotent): (1) the `phone_number_quality_update` / `account_alerts` /
+  // `business_capability_update` webhooks Meta pushes; (2) a periodic GET on the
+  // phone-number node. All nullable — a connection with no snapshot yet is simply
+  // ungated (the runner + Meta still enforce the real limit; the snapshot only
+  // powers the pre-send warning + composer display). Stored as raw strings (not
+  // enums) because Meta's tier/quality vocab churns and we never want a migration
+  // just to track a new vendor value.
+  //
+  // Raw Meta messaging_limit tier, e.g. "TIER_1K" | "TIER_10K" | "TIER_100K" | "TIER_UNLIMITED".
+  messagingTier            String?
+  // Derived numeric 24h unique-recipient cap for the tier above (1000, 10000,
+  // 100000, …). Null for UNLIMITED (or unknown). Drives the pre-send gate math.
+  messagingDailyCap        Int?
+  // Quality rating band: "GREEN" | "YELLOW" | "RED". RED = degraded, at risk of
+  // a tier downgrade — surfaced as a composer warning.
+  qualityRating            String?
+  // Throughput level: "STANDARD" (~80 msg/s) | "HIGH" (up to ~1000 msg/s). Drives
+  // the runner's adaptive send pacing.
+  throughputLevel          String?
+  // When the snapshot above was last refreshed (webhook or poll).
+  messagingHealthUpdatedAt DateTime?
+
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
   team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
@@ -1638,6 +1673,16 @@ model Broadcast {
   // Free-form last-error captured if the whole runner crashed (not per-
   // recipient errors, those live on the BroadcastRecipient row).
   lastError         String?
+  // Staging area for a LARGE broadcast's recipients while it is `materializing`.
+  // Audience is resolved to `{ contactId, customerId? }[]` in the create request
+  // (so the snapshot is locked at creation), but the actual BroadcastRecipient
+  // rows are chunk-inserted asynchronously by the materialize worker — inserting
+  // 100k rows inside the create HTTP transaction blows the tx budget. The worker
+  // reads this, inserts in batches, then NULLs it (reclaims the ~MBs) and flips
+  // `materializing` → `queued`. Null for small broadcasts (built synchronously)
+  // and for every terminal/queued row. Shape: Array<{ contactId: string;
+  // customerId?: string | null }>.
+  materializeRecipients Json?
   createdAt         DateTime        @default(now())
   startedAt         DateTime?
   completedAt       DateTime?

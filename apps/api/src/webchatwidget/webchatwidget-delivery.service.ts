@@ -2,6 +2,7 @@ import { Injectable, type OnModuleDestroy, type OnModuleInit } from "@nestjs/com
 
 import { SubscriberPriority } from "@/lib/events/bus";
 
+import { DbService } from "../db/db.service";
 import { EventBus } from "../events/event-bus.module";
 import { WebchatwidgetGateway } from "./webchatwidget.gateway";
 import { frameFromMessage } from "./webchatwidget-frame";
@@ -16,7 +17,8 @@ const CHANNEL = "webchatwidget";
  * reaches teammates. It only reacts to events on a `webchatwidget` conversation;
  * everything else is a cheap channel check and skip. No new event types, no bus
  * changes: it consumes the existing `message.received` / `message.sent` /
- * `message.status_changed` the outbound pipeline already publishes.
+ * `message.status_changed` / `conversation.status_changed` the pipeline already
+ * publishes.
  *
  * The visitor's OWN inbound (`message.received`) is echoed back so a second tab
  * syncs and the widget can reconcile its optimistic bubble by matching the
@@ -25,11 +27,29 @@ const CHANNEL = "webchatwidget";
 @Injectable()
 export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestroy {
   private offs: Array<() => void> = [];
+  // userId → display name. Grow-only, tiny (team size); names change rarely and
+  // a stale one self-heals on the next process boot. Keeps the realtime frame off
+  // a DB read per agent message once warm.
+  private readonly nameCache = new Map<string, string>();
 
   constructor(
     private readonly bus: EventBus,
+    private readonly db: DbService,
     private readonly gateway: WebchatwidgetGateway,
   ) {}
+
+  private async nameFor(userId: string): Promise<string | null> {
+    const hit = this.nameCache.get(userId);
+    if (hit !== undefined) return hit;
+    try {
+      const u = await this.db.user.findUnique({ where: { id: userId }, select: { name: true } });
+      const name = u?.name ?? "";
+      this.nameCache.set(userId, name);
+      return name || null;
+    } catch {
+      return null;
+    }
+  }
 
   onModuleInit(): void {
     this.offs.push(
@@ -43,18 +63,25 @@ export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestr
       ),
       this.bus.subscribe(
         "message.sent",
-        (e) => {
+        async (e) => {
           if (e.message.channel !== CHANNEL) return;
-          this.gateway.deliverToVisitor(e.conversationId, "message", frameFromMessage(e.message));
+          // Attribute the reply to the agent (skip system/automation sends).
+          const senderName = e.senderUserId ? await this.nameFor(e.senderUserId) : null;
+          this.gateway.deliverToVisitor(
+            e.conversationId,
+            "message",
+            frameFromMessage(e.message, { senderName }),
+          );
         },
         SubscriberPriority.REALTIME,
       ),
       this.bus.subscribe(
         "message.status_changed",
         (e) => {
-          // `channel` is carried on the event for webchatwidget/social sends; when
-          // absent (undefined) it can't be ours, so the cheap check skips without a
-          // DB read. Delivers e.g. a "sent → delivered" tick to the visitor.
+          // `channel` is carried for webchatwidget/social sends; absent → not ours,
+          // so the cheap check skips without a DB read. This mostly forwards the
+          // visitor's OWN read/delivered receipts (they don't need them), but it's
+          // harmless and keeps the widget's tick state exact.
           if (e.channel !== CHANNEL) return;
           this.gateway.deliverToVisitor(e.conversationId, "message:status", {
             id: e.messageId,
@@ -63,12 +90,20 @@ export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestr
         },
         SubscriberPriority.REALTIME,
       ),
+      this.bus.subscribe(
+        "conversation.status_changed",
+        (e) => {
+          // The event's conversation snapshot already carries the channel — a
+          // cheap check, no DB read. Lets the widget show a "chat closed" /
+          // reopened notice.
+          if (e.conversation.channel !== CHANNEL) return;
+          this.gateway.deliverToVisitor(e.conversationId, "conversation:status", {
+            status: e.newStatus,
+          });
+        },
+        SubscriberPriority.REALTIME,
+      ),
     );
-    // NOTE: no `message.media_ready` / `conversation.status_changed` handlers —
-    // webchatwidget inbound media is created media-ready (bytes are in R2 at
-    // upload time, no async download), so media_ready never fires for it; and the
-    // status event carries no `channel`, so filtering it would cost a DB read on
-    // every channel's status change. A "chat ended" banner is a phase-2 polish.
   }
 
   onModuleDestroy(): void {

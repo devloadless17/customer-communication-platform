@@ -16,6 +16,10 @@ export interface WidgetMessageFrame {
   body: string;
   status: string;
   createdAt: string;
+  /** Display name of the agent who sent an outbound message (null for the
+   *  visitor's own messages and for system/automation sends). Lets the widget
+   *  render "Sarah replied" with an initial avatar. */
+  senderName?: string | null;
   media?: {
     kind: string;
     mimeType: string;
@@ -37,8 +41,13 @@ export interface WidgetMessageFrame {
   editedAt?: string | null;
 }
 
-/** Map an internal domain `Message` to the sanitized visitor frame. */
-export function frameFromMessage(m: Message): WidgetMessageFrame {
+/** Map an internal domain `Message` to the sanitized visitor frame. `senderName`
+ *  is resolved by the caller (it's not on the domain Message) and only set for
+ *  agent-authored outbound messages. */
+export function frameFromMessage(
+  m: Message,
+  opts?: { senderName?: string | null },
+): WidgetMessageFrame {
   const frame: WidgetMessageFrame = {
     id: m.id,
     externalId: m.externalId,
@@ -47,6 +56,7 @@ export function frameFromMessage(m: Message): WidgetMessageFrame {
     status: m.status,
     createdAt: m.timestamp,
   };
+  if (m.direction === "out" && opts?.senderName) frame.senderName = opts.senderName;
   if (m.media) {
     frame.media = {
       kind: m.media.kind,

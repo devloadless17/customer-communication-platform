@@ -642,6 +642,7 @@ export interface BroadcastStatusChangedEvent {
    */
   status:
     | "scheduled"
+    | "materializing"
     | "queued"
     | "running"
     | "completed"

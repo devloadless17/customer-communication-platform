@@ -24,6 +24,7 @@ import type {
   FetchedMedia,
   MessagingProvider,
   NormalizedCallEvent,
+  NormalizedChannelHealth,
   NormalizedContactSync,
   NormalizedEvent,
   NormalizedInboundMessage,
@@ -239,6 +240,15 @@ interface MetaChangeValue {
   // pause arrives separately as a `message_template_status_update` (PAUSED).
   new_quality_score?: string;
   previous_quality_score?: string;
+  // Number messaging-health webhook fields:
+  //   phone_number_quality_update → `event` (ONBOARDING|FLAGGED|UPGRADE|…) +
+  //     `current_limit` (the messaging-limit TIER, e.g. "TIER_1K").
+  //   business_capability_update → `max_daily_conversation_per_phone` (the tier
+  //     cap as a number).
+  //   account_alerts → generic alert envelope (no reliable tier — we re-poll).
+  current_limit?: string;
+  max_daily_conversation_per_phone?: number | string;
+  max_phone_numbers_per_business?: number | string;
   // WhatsApp Coexistence webhook fields (one number on both the Business App +
   // Cloud API). Each arrives under its own `change.field`, keyed as its own
   // array on `value` — parallel to `messages[]`.
@@ -980,6 +990,33 @@ function parseTemplateCategoryUpdate(
   };
 }
 
+/**
+ * Parse a number-health webhook (`phone_number_quality_update`,
+ * `business_capability_update`, or `account_alerts`) into a NormalizedChannelHealth
+ * carrying whichever of tier/quality/throughput the payload actually contains.
+ * Ingest merges the partial onto the WhatsApp ChannelConnection. Returns null
+ * when nothing usable is present (e.g. a generic account_alerts envelope), so a
+ * pure alert doesn't blank a stored snapshot. Field mapping:
+ *   - phone_number_quality_update: `current_limit` → messaging tier.
+ *   - business_capability_update: `max_daily_conversation_per_phone` (number) → tier.
+ */
+function parseChannelHealthUpdate(
+  field: string,
+  value: MetaChangeValue,
+  rawPayload: Record<string, unknown>,
+): NormalizedChannelHealth | null {
+  let messagingTier: string | undefined;
+  if (field === "phone_number_quality_update") {
+    if (value.current_limit) messagingTier = value.current_limit;
+  } else if (field === "business_capability_update") {
+    if (value.max_daily_conversation_per_phone != null) {
+      messagingTier = String(value.max_daily_conversation_per_phone);
+    }
+  }
+  if (messagingTier === undefined) return null;
+  return { kind: "channel_health", messagingTier, rawPayload };
+}
+
 export const metaProvider: MessagingProvider<MetaSendConfig> = {
   name: "whatsapp",
 
@@ -1019,6 +1056,29 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // than showing a stale category until the next manual Sync.
         if (change.field === "template_category_update") {
           const evt = parseTemplateCategoryUpdate(value, payload as Record<string, unknown>);
+          if (evt) events.push(evt);
+          continue;
+        }
+
+        // Number messaging-health: Meta pushes the phone number's messaging-limit
+        // TIER (how many unique customers it may message per 24h) via
+        // `phone_number_quality_update` (`current_limit`) and
+        // `business_capability_update` (`max_daily_conversation_per_phone`).
+        // Ingesting them keeps the cached snapshot fresh so a large template
+        // broadcast is gated on the number's real capacity. `account_alerts` is
+        // a generic envelope with no reliable tier — the periodic Graph poll
+        // covers that. All three fell through the gate below (silently dropped)
+        // before this block.
+        if (
+          change.field === "phone_number_quality_update" ||
+          change.field === "business_capability_update" ||
+          change.field === "account_alerts"
+        ) {
+          const evt = parseChannelHealthUpdate(
+            change.field,
+            value,
+            payload as Record<string, unknown>,
+          );
           if (evt) events.push(evt);
           continue;
         }

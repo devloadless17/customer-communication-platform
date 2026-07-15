@@ -37,13 +37,35 @@ const OriginSchema = z
   .max(255)
   .transform((s) => s.replace(/^https?:\/\//, "").replace(/\/.*$/, "").toLowerCase());
 
+/** A small inline image (data: URI) or empty string to clear it. Capped so the
+ *  config JSON (delivered on every widget connect) stays lean. */
+const ImageDataUrl = (maxLen: number) =>
+  z
+    .string()
+    .trim()
+    .max(maxLen)
+    .refine((v) => v === "" || /^data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,/.test(v), {
+      message: "must be an inline image (data:image/…)",
+    })
+    .optional();
+
 const AppearanceSchema = z.object({
   theme: ThemeSchema.optional(),
   welcomeMessage: z.string().trim().max(1000).optional(),
   headerTitle: z.string().trim().max(80).optional(),
+  headerSubtitle: z.string().trim().max(120).optional(),
   suggestedQuestions: z.array(z.string().trim().min(1).max(200)).max(6).optional(),
   preChatFields: z.array(PreChatFieldSchema).max(6).optional(),
   showBranding: z.boolean().optional(),
+  // full theming
+  logoDataUrl: ImageDataUrl(100_000),
+  agentAvatarDataUrl: ImageDataUrl(60_000),
+  fontFamily: z.enum(["system", "rounded", "serif"]).optional(),
+  themeMode: z.enum(["light", "dark", "auto"]).optional(),
+  // launcher / placement (settings-only — the widget reads these from data-* attrs)
+  launcher: z.enum(["bubble", "off"]).optional(),
+  position: z.enum(["right", "left"]).optional(),
+  launcherLabel: z.string().trim().max(40).optional(),
 });
 
 export const CreateWidgetSchema = AppearanceSchema.extend({

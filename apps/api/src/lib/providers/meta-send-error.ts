@@ -44,6 +44,8 @@ export type MetaErrorCode =
   | "outside_24h_window"   // WA 131047 · social 10/2018278 · 2534022 — messaging window closed
   | "invalid_recipient"    // WA 131026/131051 · IG linkage 2534013/14/29/41 — recipient invalid/unreachable
   | "rate_limited"         // WA 4/80007/130429/131048/131056 · social 613/80006 — rate/throughput limit
+  | "per_user_marketing_cap" // WA 131049 — Meta's per-USER marketing frequency cap (not our rate limit)
+  | "template_unavailable" // WA 132001/132007/132015/132016 — template paused/disabled/not-approved (run-fatal)
   | "auth_expired"         // 190 — access token expired
   | "recipient_unavailable" // social 551/1545041 — person can't be messaged (blocked / deactivated)
   | "message_unavailable"  // social 10900/9000001 — referenced message deleted/unavailable
@@ -115,6 +117,25 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
       httpStatus,
     };
   }
+  // ── Per-user marketing frequency cap ─────────────────────────────────────
+  // WhatsApp 131049 — "This message was not delivered to maintain healthy
+  // ecosystem engagement." Meta caps how many MARKETING template messages a
+  // given user receives across ALL businesses in a rolling window; when a
+  // recipient is over that cap this send is dropped. This is NOT our account's
+  // throughput/rate limit — retrying or backing off the whole broadcast does
+  // nothing (the cap is per-user, not per-number), so it must NOT fold into
+  // `rate_limited` (which engages the 429 streak + cross-lane pause). Treat it
+  // as a per-recipient permanent skip with an actionable reason. Checked BEFORE
+  // the rate-limited family so the shared body-regex can't misroute it.
+  if (numericCode === 131049) {
+    return {
+      code: "per_user_marketing_cap",
+      message:
+        "Meta didn't deliver this marketing message — the recipient is over WhatsApp's per-user marketing frequency cap right now.",
+      detail,
+      httpStatus,
+    };
+  }
   // ── Rate / throughput / messaging-limit family ───────────────────────────
   // WhatsApp 4/80007/130429/131048/131056; social 613 ("Calls to this API
   // exceeded the rate limit") + 80006. All normalize to `rate_limited` so the
@@ -140,6 +161,28 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
     return {
       code: "auth_expired",
       message: "The Meta access token expired — reconnect the channel in Settings.",
+      detail,
+      httpStatus,
+    };
+  }
+  // ── Template paused / disabled / not-approved — run-fatal for a broadcast ─
+  // 132001 (template doesn't exist / not approved in this language), 132007
+  // (paused for a policy/quality violation), 132015 (paused), 132016 (disabled).
+  // Every recipient of a broadcast shares ONE template, so any of these fails
+  // ALL of them identically. The broadcast runner treats this as fatal for the
+  // whole run (pause + operator notice) instead of burning the audience as
+  // false per-recipient failures. (Content/param codes like 132000/132005/132012
+  // stay `provider_rejected` — those can be per-recipient.)
+  if (
+    numericCode === 132001 ||
+    numericCode === 132007 ||
+    numericCode === 132015 ||
+    numericCode === 132016
+  ) {
+    return {
+      code: "template_unavailable",
+      message:
+        "This WhatsApp template is paused, disabled, or no longer approved — the send was stopped so you can fix the template and retry.",
       detail,
       httpStatus,
     };

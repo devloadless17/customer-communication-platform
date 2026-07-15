@@ -38,6 +38,10 @@ export default async function WhatsappSettingsPage() {
       appSecret: config.appSecret,
       credentialsUndecryptable: config.credentialsUndecryptable,
       needsReconnect: config.needsReconnect,
+      messagingTier: config.messagingTier,
+      messagingDailyCap: config.messagingDailyCap,
+      qualityRating: config.qualityRating,
+      throughputLevel: config.throughputLevel,
     };
   } else {
     const { connected } = await listWhatsappTemplates();

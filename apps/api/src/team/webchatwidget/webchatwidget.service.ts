@@ -45,8 +45,16 @@ function buildConfig(
   if (input.theme !== undefined) next.theme = input.theme;
   if (input.welcomeMessage !== undefined) next.welcomeMessage = input.welcomeMessage;
   if (input.headerTitle !== undefined) next.headerTitle = input.headerTitle;
+  if (input.headerSubtitle !== undefined) next.headerSubtitle = input.headerSubtitle;
   if (input.suggestedQuestions !== undefined) next.suggestedQuestions = input.suggestedQuestions;
   if (input.showBranding !== undefined) next.showBranding = input.showBranding;
+  if (input.logoDataUrl !== undefined) next.logoDataUrl = input.logoDataUrl || undefined;
+  if (input.agentAvatarDataUrl !== undefined) next.agentAvatarDataUrl = input.agentAvatarDataUrl || undefined;
+  if (input.fontFamily !== undefined) next.fontFamily = input.fontFamily;
+  if (input.themeMode !== undefined) next.themeMode = input.themeMode;
+  if (input.launcher !== undefined) next.launcher = input.launcher;
+  if (input.position !== undefined) next.position = input.position;
+  if (input.launcherLabel !== undefined) next.launcherLabel = input.launcherLabel;
   if (input.preChatFields !== undefined) {
     next.preChatFields = input.preChatFields.map(
       (f): WebchatwidgetPreChatField => ({

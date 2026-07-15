@@ -424,6 +424,7 @@ export interface ServerToClientEvents {
     // BroadcastStatusChangedEvent in events/types.ts.
     status:
       | "scheduled"
+      | "materializing"
       | "queued"
       | "running"
       | "completed"

@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 
 import { db, appAdmin, pollUntil } from "../_helpers/db";
+import { setConversationStatus } from "../_helpers/api";
 
 /**
  * End-to-end for the website chat-widget channel (`webchatwidget`).
@@ -94,9 +95,27 @@ async function mountWidget(page: Page, publicKey: string): Promise<void> {
   // as hidden; wait on the launcher inside the (open) shadow root instead —
   // Playwright pierces open shadow DOM for CSS selectors.
   await page.waitForSelector("#ccp-webchat-root", { state: "attached", timeout: 15_000 });
-  const launcher = page.locator("button.launcher");
-  await launcher.waitFor({ state: "visible", timeout: 15_000 });
-  await launcher.click();
+  const launcher = page.locator("button.launch");
+  await launcher.waitFor({ state: "attached", timeout: 15_000 });
+  // Open the panel — unless it auto-reopened from a persisted open-state (then
+  // the launcher is hidden). Wait until either the composer or the pre-chat form
+  // is visible so callers can interact immediately.
+  if (await launcher.isVisible().catch(() => false)) {
+    await launcher.click().catch(() => undefined);
+  }
+  await page
+    .locator(".composer textarea, .form input")
+    .first()
+    .waitFor({ state: "visible", timeout: 15_000 });
+}
+
+/** Fill/dismiss the optional pre-chat form if it's showing. */
+async function pastPreChat(page: Page, email?: string): Promise<void> {
+  const start = page.getByText("Start chat");
+  if (await start.isVisible().catch(() => false)) {
+    if (email) await page.locator(".form input").first().fill(email);
+    await start.click();
+  }
 }
 
 test("settings UI: create, list, and show the embed snippet", async ({ page }) => {
@@ -107,9 +126,9 @@ test("settings UI: create, list, and show the embed snippet", async ({ page }) =
   // Create a second widget via the UI (exercises the admin POST).
   await page.getByRole("button", { name: /New widget/i }).click();
   // The embed snippet renders a public key for the newly-selected widget.
-  const snippet = page.locator("code", { hasText: "data-webchat-key" });
+  const snippet = page.locator("code", { hasText: "data-webchat-key" }).first();
   await expect(snippet).toBeVisible({ timeout: 15_000 });
-  const text = (await snippet.first().innerText()) ?? "";
+  const text = (await snippet.innerText()) ?? "";
   expect(text).toMatch(/wc_pk_[a-z0-9]+/);
 
   // Track the UI-created widget for cleanup (find the newest for this team).
@@ -137,7 +156,7 @@ test("visitor → inbox → agent reply, with pre-chat identity + widget attribu
     await visitor.getByText("Start chat").click();
 
     // Send a message.
-    const input = visitor.locator(".composer input[type=text]");
+    const input = visitor.locator(".composer textarea");
     await expect(input).toBeVisible();
     await input.fill(VISITOR_MSG);
     await input.press("Enter");
@@ -223,6 +242,199 @@ test("visitor can send an image (media round-trip)", async ({ browser }) => {
       select: { contactId: true },
     });
     if (c?.contactId) createdContactIds.add(c.contactId);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("refresh mid-chat restores the thread and reopens the panel", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const visitor = await ctx.newPage();
+  try {
+    await mountWidget(visitor, PUBLIC_KEY);
+    await pastPreChat(visitor);
+    const msg = `refresh survives ${RUN}`;
+    await visitor.locator(".composer textarea").fill(msg);
+    await visitor.locator(".composer textarea").press("Enter");
+    const landed = await pollUntil(
+      async () =>
+        db().message.findFirst({
+          where: { teamId, channel: CHANNEL, direction: "in", body: msg },
+          select: { conversationId: true },
+        }),
+      { timeoutMs: 20_000, label: "message before refresh" },
+    );
+    const conv = await db().conversation.findUnique({
+      where: { id: landed.conversationId },
+      select: { contactId: true },
+    });
+    if (conv?.contactId) createdContactIds.add(conv.contactId);
+
+    // Reload the page (localStorage keeps visitorId + open-state) and re-mount:
+    // the conversation resumes from server history and the panel auto-reopens.
+    await mountWidget(visitor, PUBLIC_KEY);
+    await expect(visitor.locator(".bubble", { hasText: msg })).toBeVisible({ timeout: 15_000 });
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("agent reply shows the agent's name and is marked read", async ({ browser, request }) => {
+  const ctx = await browser.newContext();
+  const visitor = await ctx.newPage();
+  try {
+    await mountWidget(visitor, PUBLIC_KEY);
+    await pastPreChat(visitor);
+    const msg = `receipts ${RUN}`;
+    await visitor.locator(".composer textarea").fill(msg);
+    await visitor.locator(".composer textarea").press("Enter");
+    const landed = await pollUntil(
+      async () =>
+        db().message.findFirst({
+          where: { teamId, channel: CHANNEL, direction: "in", body: msg },
+          select: { conversationId: true },
+        }),
+      { timeoutMs: 20_000, label: "receipts inbound" },
+    );
+    const conv = await db().conversation.findUnique({
+      where: { id: landed.conversationId },
+      select: { contactId: true },
+    });
+    if (conv?.contactId) createdContactIds.add(conv.contactId);
+
+    const reply = `named reply ${RUN}`;
+    const resp = await request.post(`${WEB_ORIGIN}/api/messages`, {
+      data: { conversationId: landed.conversationId, body: reply },
+    });
+    expect(resp.ok()).toBeTruthy();
+
+    // The widget attributes the reply to the agent (ensureAppAdmin → "E2E Admin").
+    await expect(visitor.locator(".sname", { hasText: "E2E Admin" })).toBeVisible({ timeout: 15_000 });
+    await expect(visitor.locator(".bubble", { hasText: reply })).toBeVisible();
+
+    // Panel is open + visible → the widget reports read → agent-side "Seen".
+    await pollUntil(
+      async () => {
+        const m = await db().message.findFirst({
+          where: { conversationId: landed.conversationId, direction: "out", body: reply },
+          select: { status: true },
+        });
+        return m?.status === "read" ? m : null;
+      },
+      { timeoutMs: 15_000, label: "outbound read receipt" },
+    );
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("closing shows a notice; a new message reopens the thread", async ({ browser, request }) => {
+  const ctx = await browser.newContext();
+  const visitor = await ctx.newPage();
+  try {
+    await mountWidget(visitor, PUBLIC_KEY);
+    await pastPreChat(visitor);
+    const msg = `closing ${RUN}`;
+    await visitor.locator(".composer textarea").fill(msg);
+    await visitor.locator(".composer textarea").press("Enter");
+    const landed = await pollUntil(
+      async () =>
+        db().message.findFirst({
+          where: { teamId, channel: CHANNEL, direction: "in", body: msg },
+          select: { conversationId: true },
+        }),
+      { timeoutMs: 20_000, label: "closing inbound" },
+    );
+    const conv = await db().conversation.findUnique({
+      where: { id: landed.conversationId },
+      select: { contactId: true },
+    });
+    if (conv?.contactId) createdContactIds.add(conv.contactId);
+
+    await setConversationStatus(request, landed.conversationId, "closed");
+    await expect(visitor.locator(".sys.closed")).toBeVisible({ timeout: 15_000 });
+
+    // A new message reopens the conversation server-side.
+    await visitor.locator(".composer textarea").fill(`reopen ${RUN}`);
+    await visitor.locator(".composer textarea").press("Enter");
+    await pollUntil(
+      async () => {
+        const c = await db().conversation.findUnique({
+          where: { id: landed.conversationId },
+          select: { status: true },
+        });
+        return c && c.status !== "closed" ? c : null;
+      },
+      { timeoutMs: 15_000, label: "reopened after new message" },
+    );
+  } finally {
+    await ctx.close();
+  }
+});
+
+/** Inject the widget with custom data-* attributes (deploy modes). */
+async function injectWidget(page: Page, extra: Record<string, string>): Promise<void> {
+  await page.goto(`${WEB_ORIGIN}/webchat/test.html`);
+  await page.evaluate(
+    ({ key, api, base, extra }) => {
+      const s = document.createElement("script");
+      s.src = `${base}/widget.js`;
+      s.setAttribute("data-webchat-key", key);
+      s.setAttribute("data-webchat-api", api);
+      for (const k in extra) s.setAttribute(k, extra[k]);
+      document.body.appendChild(s);
+    },
+    { key: PUBLIC_KEY, api: API_ORIGIN, base: WEB_ORIGIN, extra },
+  );
+  await page.waitForSelector("#ccp-webchat-root", { state: "attached", timeout: 15_000 });
+}
+
+test("deploy mode: launcher off + JS API opens the chat", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const v = await ctx.newPage();
+  try {
+    await injectWidget(v, { "data-webchat-launcher": "off" });
+    // No launcher bubble, and the panel isn't open yet.
+    expect(await v.locator("button.launch").count()).toBe(0);
+    await expect(v.locator(".composer textarea")).toBeHidden();
+    // Any link/button can open it via the JS API.
+    await v.waitForFunction(() => !!(window as unknown as { CCPWebchat?: { open?: () => void } }).CCPWebchat?.open, null, { timeout: 15_000 });
+    await v.evaluate(() => (window as unknown as { CCPWebchat: { open: () => void } }).CCPWebchat.open());
+    // Opens the panel; the pre-chat form (or composer) becomes visible.
+    await expect(v.locator(".form input, .composer textarea").first()).toBeVisible({ timeout: 15_000 });
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("deploy mode: inline embed renders in a container (always open, no launcher)", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const v = await ctx.newPage();
+  try {
+    await v.goto(`${WEB_ORIGIN}/webchat/test.html`);
+    await v.evaluate(
+      ({ key, api, base }) => {
+        const d = document.createElement("div");
+        d.id = "ccp-inline";
+        d.style.height = "520px";
+        d.style.maxWidth = "440px";
+        document.body.appendChild(d);
+        const s = document.createElement("script");
+        s.src = `${base}/widget.js`;
+        s.setAttribute("data-webchat-key", key);
+        s.setAttribute("data-webchat-api", api);
+        s.setAttribute("data-webchat-target", "#ccp-inline");
+        document.body.appendChild(s);
+      },
+      { key: PUBLIC_KEY, api: API_ORIGIN, base: WEB_ORIGIN },
+    );
+    await v.waitForSelector("#ccp-webchat-root", { state: "attached", timeout: 15_000 });
+    // No launcher; the panel is mounted inside the container and open immediately.
+    expect(await v.locator("button.launch").count()).toBe(0);
+    await expect(v.locator(".composer textarea, .form input").first()).toBeVisible({ timeout: 15_000 });
+    // The shadow host moved into our container.
+    const inside = await v.evaluate(() => !!document.getElementById("ccp-inline")?.querySelector("#ccp-webchat-root"));
+    expect(inside).toBe(true);
   } finally {
     await ctx.close();
   }
