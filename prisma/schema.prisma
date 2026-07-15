@@ -2805,6 +2805,7 @@ enum AiSuggestionState {
   edited // sent after an agent edit
   rejected
   expired
+  superseded // replaced by a newer Regenerate attempt (kept for history)
 }
 
 enum AiTranscriptionStatus {
@@ -3027,7 +3028,8 @@ model AiCustomerMemory {
   team                 Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
   customerId           String
   kind                 AiMemoryKind
-  value                String         @db.Text
+  // VarChar(500) (not Text) so the dedup unique below is a safe btree key.
+  value                String         @db.VarChar(500)
   confidence           Float          @default(0)
   status               AiMemoryStatus @default(candidate)
   source               AiMemorySource @default(system)
@@ -3037,6 +3039,11 @@ model AiCustomerMemory {
   createdAt            DateTime       @default(now())
   updatedAt            DateTime       @updatedAt
 
+  // DB-level dedup of a person's memory items. NOTE: this is
+  // (teamId, customerId, kind, value) — NOT unique(teamId, customerId), which
+  // would force one row per customer and contradicts the approved
+  // structured-candidates design (multiple kind/value items per person).
+  @@unique([teamId, customerId, kind, value])
   @@index([teamId, customerId, status])
   @@index([teamId, customerId, kind])
 }
@@ -3129,6 +3136,10 @@ model AiReplySuggestion {
   audioR2Key       String?
   usedChunkIds     Json              @default("[]")
   state            AiSuggestionState @default(pending)
+  // Regenerate version (correction: deterministic attempt/version number). The
+  // first draft is attempt 1; each Regenerate supersedes the current pending
+  // draft and creates attempt+1, preserving prior attempts as history rows.
+  attempt          Int               @default(1)
   editedText       String?           @db.Text
   decidedByUserId  String?
   decidedAt        DateTime?
@@ -3136,6 +3147,10 @@ model AiReplySuggestion {
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
 
-  @@unique([teamId, inboundMessageId])
+  // NO full @@unique([teamId, inboundMessageId]) — Regenerate keeps superseded
+  // history rows. "Only one UNRESOLVED (pending) suggestion per inbound" is
+  // enforced by a PARTIAL unique index (WHERE state = 'pending') added in raw
+  // SQL in the migration (Prisma can't express partial uniques).
+  @@index([teamId, inboundMessageId, attempt])
   @@index([teamId, conversationId, state])
 }

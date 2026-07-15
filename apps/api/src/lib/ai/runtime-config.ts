@@ -39,7 +39,7 @@ export interface AiConfigRow {
 
   supportedLanguages: unknown;
   defaultLanguage: string;
-  languagePolicy: string;
+  languagePolicy: "match_customer" | "default_language" | "specific";
   specificLanguage: string | null;
   lebaneseDialect: boolean;
   lebaneseStyle: string | null;
@@ -52,14 +52,14 @@ export interface AiConfigRow {
   matchCustomerTone: boolean;
   replyLength: string;
   customInstructions: string | null;
-  autoReplyMode: string;
+  autoReplyMode: "auto_send" | "draft" | "hybrid";
   confidenceThreshold: number;
   maxAutoRepliesPerConv: number;
   humanTakeoverBehavior: string;
 
   incomingTranscription: boolean;
   saveTranscript: boolean;
-  replyChannelMode: string;
+  replyChannelMode: "text" | "voice" | "match_customer" | "text_and_voice";
   voiceId: string | null;
   voiceLanguage: string;
   voiceSpeed: number;

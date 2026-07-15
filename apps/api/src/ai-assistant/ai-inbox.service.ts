@@ -12,6 +12,10 @@ import {
   setDisabled,
   takeOverByAgent,
 } from "@/lib/ai/conversation-state";
+import { getInboundText, loadReplyContext } from "@/lib/ai/reply-context";
+import { generateReply } from "@/lib/ai/reply-service";
+import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
+import { persistSuggestion } from "@/lib/ai/suggestion-store";
 
 import { DbService } from "../db/db.service";
 import type { StateActionInput } from "./ai-inbox.schemas";
@@ -132,6 +136,59 @@ export class AiInboxService {
         decidedAt: new Date(),
       },
     });
+  }
+
+  /**
+   * Regenerate (P4): supersede the current pending draft and produce a fresh
+   * attempt on the same inbound message + context. persistSuggestion bumps the
+   * deterministic `attempt` number and keeps the prior draft as history. Never
+   * auto-sends — the new draft is `pending` and still requires an explicit send.
+   */
+  async regenerateSuggestion(teamId: string, _userId: string, suggestionId: string) {
+    const s = await this.db.aiReplySuggestion.findFirst({ where: { id: suggestionId, teamId } });
+    if (!s) throw new NotFoundException({ error: "suggestion_not_found" });
+
+    const config = await loadAiConfig(teamId);
+    if (!configEnabled(config)) throw new BadRequestException({ error: "ai_disabled" });
+
+    const inbound = await getInboundText(s.inboundMessageId);
+    if (!inbound || !inbound.text) throw new BadRequestException({ error: "no_inbound_text" });
+
+    const { memory, recentMessages } = await loadReplyContext(teamId, s.conversationId);
+    const generated = await generateReply({
+      config,
+      latestText: inbound.text,
+      isVoice: inbound.isVoice,
+      memory,
+      recentMessages,
+    });
+
+    const suggestion = await persistSuggestion({
+      teamId,
+      conversationId: s.conversationId,
+      inboundMessageId: s.inboundMessageId,
+      payload: generated.payload,
+      usedChunkIds: generated.usedChunkIds,
+      channelMode: config.replyChannelMode,
+    });
+
+    await this.db.aiAssistantInteraction.create({
+      data: {
+        teamId,
+        conversationId: s.conversationId,
+        inboundMessageId: s.inboundMessageId,
+        configVersion: config.configVersion,
+        decision: "suggested",
+        suggestionId: suggestion.id,
+        model: generated.model,
+        language: generated.payload.replyLanguage,
+        intent: generated.payload.intent,
+        confidence: generated.payload.confidence,
+        selectedChunkIds: generated.usedChunkIds,
+      },
+    });
+
+    return suggestion;
   }
 
   async listMemory(teamId: string, customerId: string) {

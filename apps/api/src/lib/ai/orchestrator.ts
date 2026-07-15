@@ -8,10 +8,10 @@ import { aiGloballyEnabled } from "./models";
 import { openaiConfigured } from "./openai-client";
 import { openingStatus } from "./prompt-builder";
 import { enqueueAiPost } from "./queue";
+import { loadReplyContext } from "./reply-context";
 import { generateReply } from "./reply-service";
-import type { ReplyPayload } from "./reply-schema";
 import { configEnabled, loadAiConfig } from "./runtime-config";
-import { loadConversationMeta, loadRecentMessages } from "./thread";
+import { persistSuggestion } from "./suggestion-store";
 
 /**
  * The reply orchestrator. Runs on the `ai-replies` worker for a `reply` job.
@@ -27,8 +27,6 @@ import { loadConversationMeta, loadRecentMessages } from "./thread";
  * retrigger the assistant (correction #15, last case) — though structurally an
  * outbound message never fires message.received anyway.
  */
-
-const SUGGESTION_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface AiReplyJob {
   teamId: string;
@@ -73,18 +71,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
   if (!won) return; // already claimed → no double reply
 
   const startedAt = Date.now();
-  const meta = await loadConversationMeta(conversationId);
-  const memory = meta?.customerId
-    ? (
-        await db.aiCustomerMemory.findMany({
-          where: { teamId, customerId: meta.customerId, status: "confirmed" },
-          orderBy: { updatedAt: "desc" },
-          take: 40,
-          select: { kind: true, value: true },
-        })
-      ).map((m) => ({ kind: m.kind as string, value: m.value }))
-    : [];
-  const recent = await loadRecentMessages(conversationId, 20);
+  const { memory, recentMessages: recent } = await loadReplyContext(teamId, conversationId);
 
   let generated;
   try {
@@ -172,14 +159,14 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
     // wired in the voice module; on any TTS/media failure it falls back to this
     // text send, which has already gone out here (correction #12).
   } else {
-    const suggestion = await upsertSuggestion(
+    const suggestion = await persistSuggestion({
       teamId,
       conversationId,
       inboundMessageId,
       payload,
-      generated.usedChunkIds,
-      config.replyChannelMode,
-    );
+      usedChunkIds: generated.usedChunkIds,
+      channelMode: config.replyChannelMode,
+    });
     await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
       ...auditBase,
       decision: mode === "escalate" ? "escalated" : "suggested",
@@ -189,34 +176,6 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
 
   // Post-reply jobs — separate + idempotent, must never block the reply (#14).
   await enqueueAiPost(conversationId, inboundMessageId).catch(() => {});
-}
-
-async function upsertSuggestion(
-  teamId: string,
-  conversationId: string,
-  inboundMessageId: string,
-  payload: ReplyPayload,
-  usedChunkIds: string[],
-  channelMode: string,
-) {
-  const expiresAt = new Date(Date.now() + SUGGESTION_TTL_MS);
-  const data = {
-    text: payload.replyText,
-    replyLanguage: payload.replyLanguage,
-    replyScript: payload.replyScript,
-    channelMode: channelMode as never,
-    usedChunkIds,
-    state: "pending" as never,
-    editedText: null,
-    decidedByUserId: null,
-    decidedAt: null,
-    expiresAt,
-  };
-  return db.aiReplySuggestion.upsert({
-    where: { teamId_inboundMessageId: { teamId, inboundMessageId } },
-    create: { teamId, conversationId, inboundMessageId, ...data },
-    update: data,
-  });
 }
 
 interface AuditExtra {
@@ -250,7 +209,7 @@ async function audit(
         conversationId,
         inboundMessageId,
         configVersion,
-        decision: extra.decision as never,
+        decision: extra.decision,
         outboundMessageId: extra.outboundMessageId ?? null,
         suggestionId: extra.suggestionId ?? null,
         model: extra.model ?? null,

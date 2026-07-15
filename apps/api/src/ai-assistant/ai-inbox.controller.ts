@@ -67,6 +67,12 @@ export class AiInboxController {
     return { suggestion };
   }
 
+  @Post("suggestions/:id/regenerate")
+  async regenerateSuggestion(@CurrentSession() session: ApiSession, @Param("id") id: string) {
+    const suggestion = await this.svc.regenerateSuggestion(session.teamId, session.userId, id);
+    return { suggestion };
+  }
+
   @Get("customers/:id/memory")
   async listMemory(@CurrentSession() session: ApiSession, @Param("id") id: string) {
     const memory = await this.svc.listMemory(session.teamId, id);

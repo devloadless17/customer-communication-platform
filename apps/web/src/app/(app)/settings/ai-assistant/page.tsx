@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 
-import { api } from "@/lib/api/api-client";
+import { api } from "@/lib/api-client";
 import { getSession } from "@/lib/auth/current-user";
 
 import { AiAssistantSettings, type AiConfig, type AiDocument } from "./ai-assistant-settings";

@@ -16,7 +16,7 @@ CREATE TYPE "AiMemoryKind" AS ENUM ('preferred_language', 'dialect', 'script', '
 CREATE TYPE "AiMemoryStatus" AS ENUM ('candidate', 'confirmed', 'rejected');
 CREATE TYPE "AiMemorySource" AS ENUM ('system', 'agent');
 CREATE TYPE "AiInteractionDecision" AS ENUM ('replied', 'suggested', 'skipped', 'escalated', 'cancelled', 'failed');
-CREATE TYPE "AiSuggestionState" AS ENUM ('pending', 'accepted', 'edited', 'rejected', 'expired');
+CREATE TYPE "AiSuggestionState" AS ENUM ('pending', 'accepted', 'edited', 'rejected', 'expired', 'superseded');
 CREATE TYPE "AiTranscriptionStatus" AS ENUM ('pending', 'ready', 'failed');
 
 -- CreateTable AiAssistantConfig
@@ -171,6 +171,8 @@ CREATE TABLE "ConversationSessionSummary" (
     CONSTRAINT "ConversationSessionSummary_pkey" PRIMARY KEY ("id")
 );
 CREATE INDEX "ConversationSessionSummary_teamId_conversationId_sessionStartAt_idx" ON "ConversationSessionSummary"("teamId", "conversationId", "sessionStartAt" DESC);
+-- Only one OPEN session (sessionEndAt IS NULL) per conversation (partial unique).
+CREATE UNIQUE INDEX "ConversationSessionSummary_one_open_per_conversation" ON "ConversationSessionSummary"("conversationId") WHERE "sessionEndAt" IS NULL;
 
 -- CreateTable AiCustomerMemory
 CREATE TABLE "AiCustomerMemory" (
@@ -178,7 +180,7 @@ CREATE TABLE "AiCustomerMemory" (
     "teamId" TEXT NOT NULL,
     "customerId" TEXT NOT NULL,
     "kind" "AiMemoryKind" NOT NULL,
-    "value" TEXT NOT NULL,
+    "value" VARCHAR(500) NOT NULL,
     "confidence" DOUBLE PRECISION NOT NULL DEFAULT 0,
     "status" "AiMemoryStatus" NOT NULL DEFAULT 'candidate',
     "source" "AiMemorySource" NOT NULL DEFAULT 'system',
@@ -191,6 +193,8 @@ CREATE TABLE "AiCustomerMemory" (
 );
 CREATE INDEX "AiCustomerMemory_teamId_customerId_status_idx" ON "AiCustomerMemory"("teamId", "customerId", "status");
 CREATE INDEX "AiCustomerMemory_teamId_customerId_kind_idx" ON "AiCustomerMemory"("teamId", "customerId", "kind");
+-- Dedup of a person's memory items (teamId, customerId, kind, value).
+CREATE UNIQUE INDEX "AiCustomerMemory_teamId_customerId_kind_value_key" ON "AiCustomerMemory"("teamId", "customerId", "kind", "value");
 
 -- CreateTable AiMessageMetadata
 CREATE TABLE "AiMessageMetadata" (
@@ -272,6 +276,7 @@ CREATE TABLE "AiReplySuggestion" (
     "audioR2Key" TEXT,
     "usedChunkIds" JSONB NOT NULL DEFAULT '[]',
     "state" "AiSuggestionState" NOT NULL DEFAULT 'pending',
+    "attempt" INTEGER NOT NULL DEFAULT 1,
     "editedText" TEXT,
     "decidedByUserId" TEXT,
     "decidedAt" TIMESTAMP(3),
@@ -280,8 +285,10 @@ CREATE TABLE "AiReplySuggestion" (
     "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "AiReplySuggestion_pkey" PRIMARY KEY ("id")
 );
-CREATE UNIQUE INDEX "AiReplySuggestion_teamId_inboundMessageId_key" ON "AiReplySuggestion"("teamId", "inboundMessageId");
+CREATE INDEX "AiReplySuggestion_teamId_inboundMessageId_attempt_idx" ON "AiReplySuggestion"("teamId", "inboundMessageId", "attempt");
 CREATE INDEX "AiReplySuggestion_teamId_conversationId_state_idx" ON "AiReplySuggestion"("teamId", "conversationId", "state");
+-- Only one UNRESOLVED (pending) suggestion per inbound; superseded/history rows are unconstrained.
+CREATE UNIQUE INDEX "AiReplySuggestion_one_pending_per_inbound" ON "AiReplySuggestion"("teamId", "inboundMessageId") WHERE "state" = 'pending';
 
 -- AddForeignKey (all cascade from Team; AiContextChunk also cascades from its document)
 ALTER TABLE "AiAssistantConfig" ADD CONSTRAINT "AiAssistantConfig_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
