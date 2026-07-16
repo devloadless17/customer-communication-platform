@@ -2,6 +2,8 @@
 
 import { memo, type ReactNode } from "react";
 import { motion } from "framer-motion";
+
+import { AiTranscript } from "./ai/ai-transcript";
 import { Ban, Check, Megaphone, Paperclip, User, X } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -588,6 +590,9 @@ function BubbleContent({
                   isOut={isOut}
                   pending={message.mediaPending}
                 />
+              )}
+              {!isOut && media?.kind === "audio" && (
+                <AiTranscript messageId={message.id} />
               )}
               {message.body && (
                 <p

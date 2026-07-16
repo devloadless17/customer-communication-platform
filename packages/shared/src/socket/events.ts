@@ -218,6 +218,28 @@ export interface ServerToClientEvents {
     optimistic?: boolean;
   }) => void;
 
+  // --- Native AI Assistant (panel/suggestion-level; consumed by the inbox AI
+  // surfaces via direct socket.on, not thread-reducers). ---
+  "ai:suggestion": (payload: {
+    teamId: string;
+    conversationId: string;
+    suggestionId: string | null;
+    state: string;
+  }) => void;
+  "ai:summary": (payload: { teamId: string; conversationId: string }) => void;
+  "ai:memory": (payload: {
+    teamId: string;
+    conversationId: string;
+    customerId: string;
+  }) => void;
+  "ai:state": (payload: { teamId: string; conversationId: string; state: string }) => void;
+  "ai:transcription": (payload: {
+    teamId: string;
+    conversationId: string;
+    messageId: string;
+    status: string;
+  }) => void;
+
   /**
    * Conversation was hard-deleted by an agent. Every client splices it out
    * of its list; an open detail view should bounce back to /inbox.

@@ -85,6 +85,20 @@ export interface BlobStorageProvider {
   /** Upload bytes; returns the key + stable object url. */
   upload(input: UploadInput): Promise<UploadResult>;
   /**
+   * Put bytes at a CALLER-SUPPLIED key (private, team-prefixed) without the
+   * media magic-byte sniff `upload` applies. For first-party artifacts whose
+   * type is validated by the caller (AI knowledge documents, generated TTS
+   * audio) rather than sniffed from an untrusted sender. The key namespace is
+   * the caller's responsibility — always prefix with the tenant (`<area>/<teamId>/…`)
+   * so listing/cleanup stays tenant-scoped. Lifecycle (`getObject`/`fetch`/
+   * `delete`/`presignGetUrl`) works on the returned key like any other object.
+   */
+  putObject(input: {
+    key: string;
+    bytes: Uint8Array;
+    contentType: string;
+  }): Promise<UploadResult>;
+  /**
    * Stream a stored object back for a same-origin proxy response (how browsers
    * fetch media — we never hand the browser a storage URL). Accepts a key or
    * one of our own stable object URLs. `range` forwards the client's Range

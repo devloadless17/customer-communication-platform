@@ -152,6 +152,33 @@ export const r2Provider: BlobStorageProvider = {
     return { key, url: stableObjectUrl(key), sizeBytes: input.bytes.length };
   },
 
+  async putObject(input): Promise<UploadResult> {
+    // No magic-byte sniff here (unlike `upload`): these are first-party
+    // artifacts (AI knowledge docs, generated TTS audio) whose type the caller
+    // has already validated. The key is caller-supplied and MUST be
+    // tenant-prefixed. Same private bucket, same timeout budget as `upload`.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
+    try {
+      await getClient().send(
+        new PutObjectCommand({
+          Bucket: bucket(),
+          Key: input.key,
+          Body: input.bytes,
+          ContentType: input.contentType,
+        }),
+        { abortSignal: controller.signal },
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+    return {
+      key: input.key,
+      url: stableObjectUrl(input.key),
+      sizeBytes: input.bytes.length,
+    };
+  },
+
   async getObject(keyOrUrl, opts): Promise<import("./types").BlobObjectStream> {
     let key: string | null = keyOrUrl;
     if (keyOrUrl.startsWith("http")) {

@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 
 import { AdminModule } from "./admin/admin.module";
+import { AiAssistantRuntimeModule } from "./ai-assistant/ai-assistant-runtime.module";
 import { AuthModule } from "./auth/auth.module";
 import { BroadcastsModule } from "./broadcasts/broadcasts.module";
 import { CallsModule } from "./calls/calls.module";
@@ -61,6 +62,10 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     MediaModule,
     ExternalV1Module,
     OutboundWebhooksModule,
+    // Native AI Assistant runtime (subscriber + worker + inbox ops). The
+    // settings side is under TeamModule (team/ai-assistant/). Fully separate
+    // from the legacy n8n autopilot.
+    AiAssistantRuntimeModule,
     // Public visitor surface for the website chat widget (/widget socket
     // namespace + /api/widget media endpoints). Admin onboarding lives under
     // TeamModule (team/webchatwidget/).

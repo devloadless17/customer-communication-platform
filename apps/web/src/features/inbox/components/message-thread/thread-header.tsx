@@ -3,6 +3,8 @@
 import { memo } from "react";
 import { ChevronLeft, Info, Phone, Search as SearchIcon } from "lucide-react";
 
+import { AiStateControl } from "../ai/ai-state-control";
+
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { useCallApi } from "@/features/calls/call-provider";
@@ -239,6 +241,7 @@ function ThreadHeaderImpl({
             <Phone className="size-4" />
           </Button>
         )}
+        <AiStateControl conversationId={conversationId} />
         <AssignmentDropdown
           teamId={teamId}
           conversationId={conversationId}

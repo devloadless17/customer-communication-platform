@@ -2,6 +2,8 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+
+import { AiSuggestionBar } from "./ai/ai-suggestion-bar";
 import { ArrowDown, Loader2, MessageSquareDashed, X } from "lucide-react";
 
 import { dispatchLocalSocketEvent, dispatchLocalSocketEvents } from "@/lib/socket-client";
@@ -1972,6 +1974,7 @@ function MessageThreadImpl({
             typingUserIds={typingUserIds}
             memberById={memberById}
           />
+          <AiSuggestionBar conversationId={conversation.id} />
           <ReplyBox
             conversationId={conversation.id}
             currentUser={currentUser}
