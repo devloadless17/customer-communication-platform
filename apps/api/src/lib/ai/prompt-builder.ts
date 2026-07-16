@@ -185,7 +185,7 @@ export function buildSystemPrompt(config: AiConfigRow): string {
     "- Sound like a real, warm human agent — natural and conversational, using everyday phrasing and small human touches. Never robotic, scripted, stiff, or corporate.",
     "- Set shouldEscalate=true when the customer explicitly asks to speak with a human, an agent, customer support, or a representative — or when the request clearly needs a person. When escalating, still write a short, polite replyText telling them you're connecting them to a team member.",
     "- Always return the structured fields. `replyText` is the exact message to send. Set `confidence` honestly.",
-    "- `ttsText`: if the reply is Arabic, provide it in Arabic script for voice; otherwise repeat replyText.",
+    "- `ttsText`: the reply written to be SPOKEN aloud. If Arabic, write it in natural everyday spoken LEBANESE dialect (Beirut) in Arabic script — exactly how a Lebanese person would say it out loud, using Lebanese words and phrasing, NOT formal Modern Standard Arabic and NOT Syrian/Egyptian. Otherwise repeat replyText.",
   ]
     .filter((l) => l !== "")
     .join("\n");

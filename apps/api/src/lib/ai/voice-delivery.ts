@@ -67,10 +67,10 @@ function voiceInstructions(
 ): string {
   const tone = (config?.tone || "friendly").trim();
   const lebanese = config?.lebaneseDialect ?? true;
-  const lead = lebanese
-    ? "Speak in natural, spoken Lebanese Arabic"
-    : "Speak naturally";
-  return `${lead}, like a real human customer-service agent chatting on the phone: warm, ${tone}, and personable, with relaxed conversational pacing, natural intonation, and small human pauses. Sound like a real person, never robotic, monotone, flat, or like reading a script.`;
+  if (lebanese) {
+    return `Speak with an AUTHENTIC LEBANESE accent — the everyday Beirut dialect a young Lebanese customer-service rep uses on the phone. Do NOT sound Syrian, Egyptian, Gulf, or Modern Standard Arabic: use Lebanese pronunciation, Lebanese vowel sounds (e.g. the soft 'é'/'a' endings), and Lebanese intonation and rhythm. Warm, ${tone}, and personable, with relaxed conversational pacing, natural melody, light emphasis, and small human pauses and breaths — like a real person chatting, never robotic, monotone, flat, or reading a script.`;
+  }
+  return `Speak like a real, warm human agent — ${tone}, conversational pacing, natural intonation and small human pauses. Never robotic, monotone, or scripted.`;
 }
 
 export async function deliverReply(args: DeliverArgs): Promise<DeliverResult> {
