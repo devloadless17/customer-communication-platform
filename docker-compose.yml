@@ -388,6 +388,21 @@ services:
       # (/api/messages/translate). Empty = feature returns a clean 503
       # "Translation isn't configured" instead of silently 500ing.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Native AI Assistant (OpenAI): replies + per-session summaries + durable
+      # memory + inbound STT + outbound TTS. WITHOUT OPENAI_API_KEY the whole
+      # subsystem silently no-ops — no reply, not even an audit row — so it MUST
+      # be set here (and in .env) for the assistant to work in prod.
+      # AI_ASSISTANT_ENABLED is a global kill switch (default on). The model ids
+      # fall back to code defaults (gpt-4o / gpt-4o-mini / gpt-4o-transcribe /
+      # gpt-4o-mini-tts) when unset, so leave them blank unless overriding.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AI_ASSISTANT_ENABLED: ${AI_ASSISTANT_ENABLED:-1}
+      AI_MODEL_REPLY: ${AI_MODEL_REPLY:-}
+      AI_MODEL_REPLY_HARD: ${AI_MODEL_REPLY_HARD:-}
+      AI_MODEL_CHEAP: ${AI_MODEL_CHEAP:-}
+      AI_MODEL_SUMMARY: ${AI_MODEL_SUMMARY:-}
+      AI_STT_MODEL: ${AI_STT_MODEL:-}
+      AI_TTS_MODEL: ${AI_TTS_MODEL:-}
       # Orphan-blob sweeper cadence (R2 objects referenced by no live
       # Message row). Default 6h — bumps to hourly on high-churn deploys.
       BLOB_ORPHAN_SWEEP_INTERVAL_MS: ${BLOB_ORPHAN_SWEEP_INTERVAL_MS:-21600000}
