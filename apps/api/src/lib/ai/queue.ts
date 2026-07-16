@@ -21,7 +21,7 @@ export type AiJob =
       isVoice: boolean;
     }
   | { kind: "summary"; conversationId: string; inboundMessageId: string }
-  | { kind: "memory"; conversationId: string; inboundMessageId: string };
+  | { kind: "memory"; conversationId: string; inboundMessageId: string | null };
 
 const g = globalThis as unknown as { __ccpAiQueue?: Queue<AiJob> };
 
@@ -67,6 +67,20 @@ export async function enqueueAiPost(
     "memory",
     { kind: "memory", conversationId, inboundMessageId },
     { jobId: `ai-memory-${inboundMessageId}` },
+  );
+}
+
+/**
+ * Final memory-extraction pass when a chat closes (session end). Consolidates
+ * durable interests/preferences for the person so they seed FUTURE chats.
+ * Idempotent: the memory job dedups on (teamId, customerId, kind, value), and
+ * the per-conversation jobId collapses repeated close events.
+ */
+export async function enqueueAiMemoryOnClose(conversationId: string): Promise<void> {
+  await getAiQueue().add(
+    "memory",
+    { kind: "memory", conversationId, inboundMessageId: null },
+    { jobId: `ai-memory-close-${conversationId}` },
   );
 }
 

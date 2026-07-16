@@ -119,3 +119,13 @@ export const PatchDocumentSchema = z
   .object({ enabled: z.boolean() })
   .strict();
 export type PatchDocumentInput = z.infer<typeof PatchDocumentSchema>;
+
+// Synthesize a short sample line so an admin can hear a voice before saving.
+export const VoicePreviewSchema = z
+  .object({
+    voiceId: z.string().min(1).max(40),
+    voiceLanguage: z.string().max(16).optional(),
+    voiceSpeed: z.number().min(0.25).max(4).optional(),
+  })
+  .strict();
+export type VoicePreviewInput = z.infer<typeof VoicePreviewSchema>;

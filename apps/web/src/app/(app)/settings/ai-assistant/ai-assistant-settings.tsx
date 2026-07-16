@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
 import { PageHeader } from "@/components/layouts/page-header";
 import { Button } from "@/components/ui/button";
@@ -51,7 +51,62 @@ const DAYS: Array<[string, string]> = [
   ["sat", "Saturday"],
   ["sun", "Sunday"],
 ];
-const OPENAI_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"];
+// OpenAI TTS voices. Descriptions are the commonly PERCEIVED character — OpenAI
+// does not officially assign gender; use "Preview" on the OpenAI docs to confirm
+// a fit before committing. Value = the voice id the API expects.
+const OPENAI_VOICES: Array<[string, string]> = [
+  ["alloy", "Alloy — neutral, balanced"],
+  ["ash", "Ash — male, expressive"],
+  ["ballad", "Ballad — male, warm & emotive"],
+  ["coral", "Coral — female, warm & friendly"],
+  ["echo", "Echo — male, calm & clear"],
+  ["fable", "Fable — male, British, storytelling"],
+  ["onyx", "Onyx — male, deep & authoritative"],
+  ["nova", "Nova — female, bright & energetic"],
+  ["sage", "Sage — female, calm & gentle"],
+  ["shimmer", "Shimmer — female, soft & warm"],
+];
+
+// Broad language set so the assistant can be told it speaks more than ar/en —
+// the selected codes are injected verbatim into the model prompt
+// ("Supported languages: …", see prompt-builder). Codes are ISO 639-1.
+const LANGUAGES: Array<[string, string]> = [
+  ["ar", "Arabic"], ["en", "English"], ["fr", "French"], ["es", "Spanish"],
+  ["de", "German"], ["it", "Italian"], ["pt", "Portuguese"], ["nl", "Dutch"],
+  ["ru", "Russian"], ["tr", "Turkish"], ["fa", "Persian (Farsi)"], ["ur", "Urdu"],
+  ["hi", "Hindi"], ["bn", "Bengali"], ["zh", "Chinese"], ["ja", "Japanese"],
+  ["ko", "Korean"], ["id", "Indonesian"], ["ms", "Malay"], ["th", "Thai"],
+  ["vi", "Vietnamese"], ["he", "Hebrew"], ["el", "Greek"], ["pl", "Polish"],
+  ["uk", "Ukrainian"], ["ro", "Romanian"], ["sv", "Swedish"], ["da", "Danish"],
+  ["fi", "Finnish"], ["no", "Norwegian"], ["cs", "Czech"], ["hu", "Hungarian"],
+  ["sw", "Swahili"], ["ha", "Hausa"], ["am", "Amharic"], ["tl", "Tagalog"],
+];
+const VOICE_SPEEDS: Array<[string, string]> = [
+  ["0.5", "0.5× (slow)"], ["0.75", "0.75×"], ["1", "1× (normal)"],
+  ["1.25", "1.25×"], ["1.5", "1.5×"], ["2", "2× (fast)"],
+];
+const TONES: Array<[string, string]> = [
+  ["friendly", "Friendly"], ["professional", "Professional"], ["casual", "Casual"],
+  ["formal", "Formal"], ["warm", "Warm"], ["empathetic", "Empathetic"],
+  ["enthusiastic", "Enthusiastic"], ["playful", "Playful"], ["concise", "Concise & direct"],
+];
+const TAKEOVER: Array<[string, string]> = [
+  ["cancel_and_yield", "Cancel the AI turn and hand off to the human"],
+];
+// Full IANA zone list when the runtime supports it (all modern browsers do),
+// with a small MENA/EU/US fallback for older engines. Typed access avoids `any`.
+const TIMEZONES: string[] = (() => {
+  const sv = (Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf;
+  const all = sv ? sv("timeZone") : [];
+  return all.length
+    ? all
+    : [
+        "UTC", "Asia/Beirut", "Asia/Dubai", "Asia/Riyadh", "Asia/Amman", "Asia/Baghdad",
+        "Africa/Cairo", "Europe/Istanbul", "Europe/London", "Europe/Paris", "Europe/Berlin",
+        "America/New_York", "America/Chicago", "America/Los_Angeles",
+      ];
+})();
+const TIMEZONE_OPTS: Array<[string, string]> = TIMEZONES.map((t) => [t, t]);
 
 export function AiAssistantSettings({
   initialConfig,
@@ -184,7 +239,7 @@ export function AiAssistantSettings({
 
         {tab === "hours" && (
           <Grid>
-            <Field label="Timezone"><TextInput value={str("timezone") || "Asia/Beirut"} onChange={(v) => set("timezone", v)} /></Field>
+            <Field label="Timezone"><SelectInput value={str("timezone") || "Asia/Beirut"} onChange={(v) => set("timezone", v)} options={TIMEZONE_OPTS} /></Field>
             <Field label="After-hours behavior" full><Textarea rows={2} value={str("afterHoursBehavior")} onChange={(e) => set("afterHoursBehavior", e.target.value)} /></Field>
             <Field label="Weekly schedule" full>
               <WeeklySchedule value={(form.weeklySchedule as Record<string, Array<{ open: string; close: string }>>) ?? {}} onChange={(v) => set("weeklySchedule", v)} />
@@ -200,18 +255,20 @@ export function AiAssistantSettings({
 
         {tab === "languages" && (
           <Grid>
-            <Field label="Supported languages (comma-separated codes)" full>
-              <TextInput
-                value={(Array.isArray(form.supportedLanguages) ? (form.supportedLanguages as string[]) : []).join(", ")}
-                onChange={(v) => set("supportedLanguages", v.split(",").map((s) => s.trim()).filter(Boolean))}
+            <Field label="Supported languages (pick up to 12 — the assistant is told it speaks these)" full>
+              <MultiSelect
+                value={Array.isArray(form.supportedLanguages) ? (form.supportedLanguages as string[]) : []}
+                options={LANGUAGES}
+                max={12}
+                onChange={(v) => set("supportedLanguages", v)}
               />
             </Field>
-            <Field label="Default language"><TextInput value={str("defaultLanguage") || "ar"} onChange={(v) => set("defaultLanguage", v)} /></Field>
+            <Field label="Default language"><SelectInput value={str("defaultLanguage") || "ar"} onChange={(v) => set("defaultLanguage", v)} options={LANGUAGES} /></Field>
             <Field label="Language policy">
               <SelectInput value={str("languagePolicy") || "match_customer"} onChange={(v) => set("languagePolicy", v)} options={[["match_customer", "Match customer"], ["default_language", "Always default"], ["specific", "Specific language"]]} />
             </Field>
             {str("languagePolicy") === "specific" && (
-              <Field label="Specific language"><TextInput value={str("specificLanguage")} onChange={(v) => set("specificLanguage", v)} /></Field>
+              <Field label="Specific language"><SelectInput value={str("specificLanguage") || "ar"} onChange={(v) => set("specificLanguage", v)} options={LANGUAGES} /></Field>
             )}
             <Field label="Script policy">
               <SelectInput value={str("scriptPolicy") || "match_customer"} onChange={(v) => set("scriptPolicy", v)} options={[["match_customer", "Match customer"], ["arabic", "Arabic script"], ["latin", "Latin script"]]} />
@@ -228,7 +285,7 @@ export function AiAssistantSettings({
 
         {tab === "tone" && (
           <Grid>
-            <Field label="Tone"><TextInput value={str("tone") || "friendly"} onChange={(v) => set("tone", v)} /></Field>
+            <Field label="Tone"><SelectInput value={str("tone") || "friendly"} onChange={(v) => set("tone", v)} options={TONES} /></Field>
             <Field label="Reply length">
               <SelectInput value={str("replyLength") || "balanced"} onChange={(v) => set("replyLength", v)} options={[["short", "Short"], ["balanced", "Balanced"], ["detailed", "Detailed"]]} />
             </Field>
@@ -237,7 +294,7 @@ export function AiAssistantSettings({
             </Field>
             <Field label="Confidence threshold (0–1)"><NumberInput value={num("confidenceThreshold", 0.55)} step={0.05} min={0} max={1} onChange={(v) => set("confidenceThreshold", v)} /></Field>
             <Field label="Max auto-replies per conversation (0 = unlimited)"><NumberInput value={num("maxAutoRepliesPerConv", 0)} step={1} min={0} onChange={(v) => set("maxAutoRepliesPerConv", v)} /></Field>
-            <Field label="Human takeover behavior"><TextInput value={str("humanTakeoverBehavior") || "cancel_and_yield"} onChange={(v) => set("humanTakeoverBehavior", v)} /></Field>
+            <Field label="Human takeover behavior"><SelectInput value={str("humanTakeoverBehavior") || "cancel_and_yield"} onChange={(v) => set("humanTakeoverBehavior", v)} options={TAKEOVER} /></Field>
             <SwitchRow label="Match customer tone" checked={bool("matchCustomerTone")} onChange={(v) => set("matchCustomerTone", v)} />
             <Field label="Custom instructions" full><Textarea rows={4} value={str("customInstructions")} onChange={(e) => set("customInstructions", e.target.value)} /></Field>
           </Grid>
@@ -251,10 +308,19 @@ export function AiAssistantSettings({
               <SelectInput value={str("replyChannelMode") || "text"} onChange={(v) => set("replyChannelMode", v)} options={[["text", "Text only"], ["voice", "Voice only"], ["match_customer", "Match customer"], ["text_and_voice", "Text + voice"]]} />
             </Field>
             <Field label="Voice">
-              <SelectInput value={str("voiceId") || "alloy"} onChange={(v) => set("voiceId", v)} options={OPENAI_VOICES.map((v) => [v, v] as [string, string])} />
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <SelectInput value={str("voiceId") || "alloy"} onChange={(v) => set("voiceId", v)} options={OPENAI_VOICES} />
+                </div>
+                <VoicePreviewButton
+                  voiceId={str("voiceId") || "alloy"}
+                  voiceLanguage={str("voiceLanguage") || "ar"}
+                  voiceSpeed={num("voiceSpeed", 1)}
+                />
+              </div>
             </Field>
-            <Field label="Voice language"><TextInput value={str("voiceLanguage") || "ar"} onChange={(v) => set("voiceLanguage", v)} /></Field>
-            <Field label="Voice speed"><NumberInput value={num("voiceSpeed", 1)} step={0.05} min={0.25} max={4} onChange={(v) => set("voiceSpeed", v)} /></Field>
+            <Field label="Voice language"><SelectInput value={str("voiceLanguage") || "ar"} onChange={(v) => set("voiceLanguage", v)} options={LANGUAGES} /></Field>
+            <Field label="Voice speed"><SelectInput value={String(num("voiceSpeed", 1))} onChange={(v) => set("voiceSpeed", Number(v))} options={VOICE_SPEEDS} /></Field>
             <Field label="Max voice duration (sec)"><NumberInput value={num("maxVoiceDurationSec", 60)} step={5} min={1} max={600} onChange={(v) => set("maxVoiceDurationSec", v)} /></Field>
             <SwitchRow label="Fall back to text on any voice failure" checked={bool("voiceTextFallback")} onChange={(v) => set("voiceTextFallback", v)} />
             <p className="col-span-2 text-xs text-muted-foreground">
@@ -308,6 +374,92 @@ function SelectInput({ value, onChange, options }: { value: string; onChange: (v
         </option>
       ))}
     </Select>
+  );
+}
+function VoicePreviewButton({
+  voiceId,
+  voiceLanguage,
+  voiceSpeed,
+}: {
+  voiceId: string;
+  voiceLanguage: string;
+  voiceSpeed: number;
+}) {
+  const [loading, setLoading] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const urlRef = useRef<string | null>(null);
+
+  async function preview() {
+    setLoading(true);
+    try {
+      const res = await apiFetch("/api/team/ai-assistant/voice-preview", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ voiceId, voiceLanguage, voiceSpeed }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
+        toast.error(data.detail || data.error || "Voice preview failed");
+        return;
+      }
+      const blob = await res.blob();
+      // Stop + free any previous clip before playing the new one.
+      audioRef.current?.pause();
+      if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+      const url = URL.createObjectURL(blob);
+      urlRef.current = url;
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      await audio.play();
+    } catch {
+      toast.error("Voice preview failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Button type="button" variant="secondary" size="sm" disabled={loading} onClick={() => void preview()}>
+      {loading ? "…" : "▶ Preview"}
+    </Button>
+  );
+}
+function MultiSelect({
+  value,
+  options,
+  onChange,
+  max,
+}: {
+  value: string[];
+  options: Array<[string, string]>;
+  onChange: (v: string[]) => void;
+  max?: number;
+}) {
+  const selected = new Set(value);
+  const atMax = max != null && value.length >= max;
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map(([v, label]) => {
+        const on = selected.has(v);
+        const disabled = !on && atMax;
+        return (
+          <button
+            key={v}
+            type="button"
+            disabled={disabled}
+            aria-pressed={on}
+            onClick={() => onChange(on ? value.filter((x) => x !== v) : [...value, v])}
+            className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
+              on
+                ? "border-primary bg-primary/10 text-primary"
+                : "border-border text-muted-foreground hover:text-foreground"
+            } ${disabled ? "cursor-not-allowed opacity-40" : ""}`}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 function SwitchRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
@@ -367,7 +519,10 @@ function WeeklySchedule({
   const get = (day: string) => value?.[day]?.[0] ?? { open: "", close: "" };
   const setDay = (day: string, range: { open: string; close: string }) => {
     const next = { ...(value ?? {}) };
-    if (range.open && range.close) next[day] = [range];
+    // Keep the row as soon as EITHER end is set so partial entry (pick open,
+    // then close) isn't discarded mid-edit. A day counts as closed only when
+    // both ends are empty.
+    if (range.open || range.close) next[day] = [range];
     else delete next[day];
     onChange(next);
   };

@@ -12,15 +12,20 @@ import {
   Patch,
   Post,
   Put,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
+import type { Response } from "express";
 import { diskStorage } from "multer";
 import { randomUUID } from "node:crypto";
 
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
+
+import { ttsModel } from "@/lib/ai/models";
+import { openaiConfigured, speak } from "@/lib/ai/openai-client";
 
 import { CurrentSession } from "../../auth/current-session.decorator";
 import { SessionGuard } from "../../auth/session.guard";
@@ -32,9 +37,22 @@ import { AiKnowledgeService } from "./ai-knowledge.service";
 import {
   PatchDocumentSchema,
   UpdateAiConfigSchema,
+  VoicePreviewSchema,
   type PatchDocumentInput,
   type UpdateAiConfigInput,
+  type VoicePreviewInput,
 } from "./ai-assistant.schemas";
+
+// Short sample line per language so the voice preview says something natural in
+// the language the admin picked (falls back to English).
+function voiceSampleLine(lang: string | undefined): string {
+  const l = (lang ?? "").toLowerCase();
+  if (l.startsWith("ar")) return "مرحبا! أنا المساعد الآلي، بخدمتك بأي وقت. كيف فيني ساعدك اليوم؟";
+  if (l.startsWith("fr")) return "Bonjour ! Je suis votre assistant. Comment puis-je vous aider aujourd'hui ?";
+  if (l.startsWith("es")) return "¡Hola! Soy tu asistente. ¿En qué puedo ayudarte hoy?";
+  if (l.startsWith("de")) return "Hallo! Ich bin dein Assistent. Wie kann ich dir heute helfen?";
+  return "Hi! I'm your AI assistant. How can I help you today?";
+}
 
 /**
  * AI Assistant settings surface.
@@ -81,6 +99,36 @@ export class AiAssistantController {
     this.assertManage(session);
     const config = await this.config.updateConfig(session.teamId, true, body);
     return { config };
+  }
+
+  @Post("voice-preview")
+  @RateLimit({ perMinute: 30 })
+  async voicePreview(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(VoicePreviewSchema)) body: VoicePreviewInput,
+    @Res() res: Response,
+  ): Promise<void> {
+    this.assertManage(session);
+    if (!openaiConfigured()) {
+      throw new BadRequestException({ error: "openai_not_configured" });
+    }
+    let audio: { bytes: Uint8Array; contentType: string };
+    try {
+      audio = await speak({
+        model: ttsModel(),
+        voice: body.voiceId,
+        text: voiceSampleLine(body.voiceLanguage),
+        speed: body.voiceSpeed,
+      });
+    } catch (err) {
+      throw new BadRequestException({
+        error: "voice_preview_failed",
+        detail: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+      });
+    }
+    res.setHeader("content-type", audio.contentType);
+    res.setHeader("cache-control", "no-store");
+    res.end(Buffer.from(audio.bytes));
   }
 
   @Get("documents")

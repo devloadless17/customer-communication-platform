@@ -5,7 +5,8 @@ import type { DomainEventOf } from "@ccp/shared/events/types";
 import { onHumanReply } from "@/lib/ai/conversation-state";
 import { aiGloballyEnabled } from "@/lib/ai/models";
 import { openaiConfigured } from "@/lib/ai/openai-client";
-import { enqueueAiReply } from "@/lib/ai/queue";
+import { enqueueAiMemoryOnClose, enqueueAiReply } from "@/lib/ai/queue";
+import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
 import { ensureTranscription } from "@/lib/ai/voice-ingest";
 import { subscribe, SubscriberPriority } from "@/lib/events/bus";
 
@@ -51,6 +52,13 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
       subscribe(
         "message.sent",
         (e) => void this.onSent(e).catch((err) => this.logError("sent", err)),
+        SubscriberPriority.DEFAULT,
+      ),
+    );
+    this.offs.push(
+      subscribe(
+        "conversation.status_changed",
+        (e) => void this.onStatusChanged(e).catch((err) => this.logError("status_changed", err)),
         SubscriberPriority.DEFAULT,
       ),
     );
@@ -110,6 +118,20 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
     if (e.silent) return;
     if (!e.senderUserId) return; // system / automation / AI send → not a human takeover
     await onHumanReply(e.teamId, e.conversationId, e.senderUserId);
+  }
+
+  /**
+   * Session end. When a chat is CLOSED, run a final durable-memory pass so the
+   * person's interests/preferences from this session are consolidated and
+   * (being person-level) seed FUTURE conversations' prompts. Gated on the team
+   * actually using the assistant so we never spend tokens for teams that don't.
+   */
+  private async onStatusChanged(e: DomainEventOf<"conversation.status_changed">): Promise<void> {
+    if (e.newStatus !== "closed") return;
+    if (!aiGloballyEnabled() || !openaiConfigured()) return;
+    const config = await loadAiConfig(e.teamId);
+    if (!configEnabled(config)) return;
+    await enqueueAiMemoryOnClose(e.conversationId);
   }
 
   private logError(where: string, err: unknown): void {

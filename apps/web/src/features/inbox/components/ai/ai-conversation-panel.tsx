@@ -53,6 +53,11 @@ const KIND_LABEL: Record<string, string> = {
   preference: "Preference",
 };
 
+// Multi-valued, accumulating memory kinds shown as tag chips (the rest are
+// single-value attributes shown as labeled rows). Interests etc. are durable +
+// person-level, so they seed future chats' prompts.
+const TAG_KINDS = new Set(["interest", "recurring_need", "preference"]);
+
 export function AiConversationPanel({ conversationId }: { conversationId: string }) {
   const [data, setData] = useState<Overview | null>(null);
 
@@ -85,6 +90,8 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
   }, [conversationId, load]);
 
   const memory = (data?.memory ?? []).filter((m) => m.status !== "rejected");
+  const attributes = memory.filter((m) => !TAG_KINDS.has(m.kind));
+  const tagItems = memory.filter((m) => TAG_KINDS.has(m.kind));
   const summary = data?.summary ?? null;
 
   async function confirm(id: string) {
@@ -106,32 +113,64 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
         {memory.length === 0 ? (
           <p className="text-xs text-muted-foreground">Nothing learned yet.</p>
         ) : (
-          <ul className="space-y-1.5">
-            {memory.map((m) => (
-              <li key={m.id} className="flex items-start gap-2 text-sm">
-                <span className="mt-0.5 min-w-28 text-xs text-muted-foreground">
-                  {KIND_LABEL[m.kind] ?? m.kind}
-                </span>
-                <span className="flex-1">{m.value}</span>
-                {m.status === "candidate" && (
-                  <button
-                    className="text-xs text-green-600 hover:underline"
-                    onClick={() => void confirm(m.id)}
-                    title="Confirm"
-                  >
-                    ✓
-                  </button>
-                )}
-                <button
-                  className="text-xs text-muted-foreground hover:text-red-600"
-                  onClick={() => void remove(m.id)}
-                  title="Remove"
-                >
-                  ✕
-                </button>
-              </li>
-            ))}
-          </ul>
+          <div className="space-y-3">
+            {attributes.length > 0 && (
+              <ul className="space-y-1.5">
+                {attributes.map((m) => (
+                  <li key={m.id} className="flex items-start gap-2 text-sm">
+                    <span className="mt-0.5 min-w-28 text-xs text-muted-foreground">
+                      {KIND_LABEL[m.kind] ?? m.kind}
+                    </span>
+                    <span className="flex-1">{m.value}</span>
+                    {m.status === "candidate" && (
+                      <button
+                        className="text-xs text-green-600 hover:underline"
+                        onClick={() => void confirm(m.id)}
+                        title="Confirm"
+                      >
+                        ✓
+                      </button>
+                    )}
+                    <button
+                      className="text-xs text-muted-foreground hover:text-red-600"
+                      onClick={() => void remove(m.id)}
+                      title="Remove"
+                    >
+                      ✕
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {tagItems.length > 0 && (
+              <div>
+                <p className="mb-1.5 text-xs font-medium text-muted-foreground">Interests</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {tagItems.map((m) => (
+                    <span
+                      key={m.id}
+                      title={m.status === "candidate" ? "AI-suggested — confirm to keep" : KIND_LABEL[m.kind] ?? m.kind}
+                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs ${
+                        m.status === "candidate"
+                          ? "border-dashed border-border text-muted-foreground"
+                          : "border-primary/30 bg-primary/10 text-primary"
+                      }`}
+                    >
+                      {m.value}
+                      {m.status === "candidate" && (
+                        <button className="hover:text-green-600" onClick={() => void confirm(m.id)} title="Confirm">
+                          ✓
+                        </button>
+                      )}
+                      <button className="hover:text-red-600" onClick={() => void remove(m.id)} title="Remove">
+                        ✕
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </Section>
 
