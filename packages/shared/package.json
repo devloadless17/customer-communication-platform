@@ -35,7 +35,7 @@
     "./utils/window": "./src/utils/window.ts"
   },
   "dependencies": {
-    "better-auth": "^1.6.11",
+    "better-auth": "^1.6.13",
     "clsx": "^2.1.1",
     "libphonenumber-js": "^1.12.43",
     "tailwind-merge": "^3.6.0",
