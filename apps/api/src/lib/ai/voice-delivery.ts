@@ -57,6 +57,22 @@ function replyAudioKey(teamId: string, inboundMessageId: string): string {
   return `ai-voice/${teamId}/${inboundMessageId}.mp3`;
 }
 
+/**
+ * Natural-language delivery steering for gpt-4o-mini-tts so the voice note
+ * sounds like a real person, not a robot. Tone comes from config; defaults keep
+ * it warm + Lebanese when the caller only has a partial config.
+ */
+function voiceInstructions(
+  config: { tone?: string | null; lebaneseDialect?: boolean | null } | null,
+): string {
+  const tone = (config?.tone || "friendly").trim();
+  const lebanese = config?.lebaneseDialect ?? true;
+  const lead = lebanese
+    ? "Speak in natural, spoken Lebanese Arabic"
+    : "Speak naturally";
+  return `${lead}, like a real human customer-service agent chatting on the phone: warm, ${tone}, and personable, with relaxed conversational pacing, natural intonation, and small human pauses. Sound like a real person, never robotic, monotone, flat, or like reading a script.`;
+}
+
 export async function deliverReply(args: DeliverArgs): Promise<DeliverResult> {
   const { teamId, conversationId, inboundMessageId, payload, config } = args;
   const plan = channelPlan(config.replyChannelMode, args.inboundWasVoice);
@@ -68,6 +84,7 @@ export async function deliverReply(args: DeliverArgs): Promise<DeliverResult> {
         text: payload.ttsText || payload.replyText,
         voiceId: config.voiceId,
         speed: config.voiceSpeed,
+        instructions: voiceInstructions(config),
       });
       const sent = await sendMediaInternal({
         teamId,
@@ -118,6 +135,7 @@ export async function renderDraftAudio(
       text: payload.ttsText || payload.replyText,
       voiceId: config.voiceId,
       speed: config.voiceSpeed,
+      instructions: voiceInstructions(config),
     });
     const key = draftAudioKey(teamId, inboundMessageId);
     await blobStorage.putObject({ key, bytes: rendered.bytes, contentType: rendered.contentType });
@@ -148,7 +166,7 @@ export async function sendSuggestionAsVoice(args: {
   text: string;
   audioR2Key: string | null;
   reuseAudio: boolean;
-  config: Pick<AiConfigRow, "voiceId" | "voiceSpeed"> | null;
+  config: Pick<AiConfigRow, "voiceId" | "voiceSpeed" | "tone" | "lebaneseDialect"> | null;
 }): Promise<{ messageId: string; usedVoice: boolean }> {
   try {
     let bytes: Uint8Array;
@@ -162,6 +180,7 @@ export async function sendSuggestionAsVoice(args: {
         text: args.text,
         voiceId: args.config?.voiceId ?? null,
         speed: args.config?.voiceSpeed,
+        instructions: voiceInstructions(args.config),
       });
       bytes = r.bytes;
       contentType = r.contentType;
