@@ -200,10 +200,13 @@ function buildLanguageRules(config: AiConfigRow): string {
         ? `Always reply in the default language (${config.defaultLanguage}).`
         : `Detect the language AND script of the customer's LATEST message (Arabic, French, English, Arabizi, etc.) and reply in that exact same language and script — always mirror what they just used, even if earlier messages differed. Only if you genuinely cannot tell, use ${config.defaultLanguage}.`;
   return nonEmpty(
+    config.languagePolicy === "match_customer"
+      ? "- LANGUAGE SWITCHING (HIGHEST PRIORITY): reply in the language of the customer's MOST RECENT message — this overrides the earlier conversation AND the default language. If their last message is in English, reply FULLY in English; French → French; Arabic → Arabic. Switch the INSTANT they switch, on the very next reply — never keep replying in the previous language out of momentum. The Lebanese/dialect/Arabizi rules below apply ONLY when you are actually replying in Arabic; ignore them entirely for an English or French reply."
+      : "",
     supported.length ? `- Supported languages: ${supported.join(", ")}.` : "",
     `- Language policy: ${policy}`,
     config.lebaneseDialect
-      ? "- You understand and can write natural Lebanese Arabic dialect, including everyday spoken phrasing and internet slang. Do not use stiff Modern Standard Arabic when the customer is casual. When you are NOT sure of the correct Lebanese word or phrasing, stay in Lebanese using simpler wording you ARE confident about; only fall back to Modern Standard Arabic (Fusha) for that one uncertain word — never switch the whole reply to Fusha."
+      ? "- When replying in Arabic: use natural, everyday Lebanese dialect (spoken phrasing and slang), not stiff Modern Standard Arabic. If unsure of the correct Lebanese word, stay in Lebanese with simpler wording you're confident about; fall back to Fusha only for that one uncertain word, never the whole reply."
       : "",
     config.lebaneseStyle ? `- Lebanese style guidance: ${config.lebaneseStyle}` : "",
     config.allowArabizi
