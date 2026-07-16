@@ -110,7 +110,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
 
   const payload = generated.payload;
   const openNow = openingStatus(config, new Date()).open;
-  const mode = decideMode(config, payload, openNow);
+  const mode = decideMode(config, payload, openNow, job.isVoice);
 
   const usage = usageFields(generated.usage);
   const auditBase = {
@@ -123,9 +123,11 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
     ...usage,
   };
 
-  if (mode === "send") {
+  if (mode === "send" || mode === "escalate") {
     // deliverReply honors the channel mode (text/voice/both/match) and always
-    // guarantees the canonical text on any TTS/media failure.
+    // guarantees the canonical text on any TTS/media failure. On escalate the
+    // payload.replyText is the brief hand-off line ("connecting you to an
+    // agent") — we SEND it (not draft) before assigning.
     let delivery;
     try {
       delivery = await deliverReply({
@@ -165,39 +167,12 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
         })
         .catch(() => {});
     }
-    await incrementAutoReply(conversationId);
-    await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
-      ...auditBase,
-      decision: "replied",
-      outboundMessageId: delivery.voiceMessageId ?? delivery.textMessageId,
-    });
-  } else {
-    // Draft: pre-render a voice preview when the mode wants voice (null on any
-    // TTS failure — the draft still ships as text).
-    const audioR2Key = wantsVoiceDraft(config.replyChannelMode, job.isVoice)
-      ? await renderDraftAudio(teamId, inboundMessageId, payload, config)
-      : null;
-    const suggestion = await persistSuggestion({
-      teamId,
-      conversationId,
-      inboundMessageId,
-      payload,
-      usedChunkIds: generated.usedChunkIds,
-      channelMode: config.replyChannelMode,
-      audioR2Key,
-    });
-    await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
-      ...auditBase,
-      decision: mode === "escalate" ? "escalated" : "suggested",
-      suggestionId: suggestion.id,
-    });
 
-    // Escalation = the customer asked for a human. Auto-assign to an available
-    // agent (round-robin: online + available tiers) and hand the thread off —
-    // a STICKY pause so the assistant won't resume on the next inbound. The
-    // drafted reply above stays as a suggestion the agent can use. Best-effort:
-    // a failure here must not lose the draft/audit.
     if (mode === "escalate") {
+      // Support hand-off: after SENDING the acknowledgment, auto-assign to an
+      // available agent (round-robin: online + available tiers) and hand the
+      // thread off — a STICKY pause so the assistant won't resume on the next
+      // inbound. Best-effort: a failure here must not lose the sent reply/audit.
       try {
         const agentId = await pickRoundRobinAssignee({ db, teamId });
         if (agentId) {
@@ -213,9 +188,41 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
         }
         await handoffToHuman(teamId, conversationId, agentId);
       } catch {
-        // Leave the draft + audit; the agent can still take over manually.
+        // The agent can still take over manually.
       }
+      await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+        ...auditBase,
+        decision: "escalated",
+        outboundMessageId: delivery.voiceMessageId ?? delivery.textMessageId,
+      });
+    } else {
+      await incrementAutoReply(conversationId);
+      await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+        ...auditBase,
+        decision: "replied",
+        outboundMessageId: delivery.voiceMessageId ?? delivery.textMessageId,
+      });
     }
+  } else {
+    // Draft (suggest): pre-render a voice preview when the mode wants voice
+    // (null on any TTS failure — the draft still ships as text).
+    const audioR2Key = wantsVoiceDraft(config.replyChannelMode, job.isVoice)
+      ? await renderDraftAudio(teamId, inboundMessageId, payload, config)
+      : null;
+    const suggestion = await persistSuggestion({
+      teamId,
+      conversationId,
+      inboundMessageId,
+      payload,
+      usedChunkIds: generated.usedChunkIds,
+      channelMode: config.replyChannelMode,
+      audioR2Key,
+    });
+    await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+      ...auditBase,
+      decision: "suggested",
+      suggestionId: suggestion.id,
+    });
   }
 
   // Post-reply jobs — separate + idempotent, must never block the reply (#14).

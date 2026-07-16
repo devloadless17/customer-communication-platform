@@ -294,6 +294,7 @@ export function AiAssistantSettings({
             </Field>
             <Field label="Confidence threshold (0–1)"><NumberInput value={num("confidenceThreshold", 0.55)} step={0.05} min={0} max={1} onChange={(v) => set("confidenceThreshold", v)} /></Field>
             <Field label="Max auto-replies per conversation (0 = unlimited)"><NumberInput value={num("maxAutoRepliesPerConv", 0)} step={1} min={0} onChange={(v) => set("maxAutoRepliesPerConv", v)} /></Field>
+            <Field label="Wait for customer to finish (seconds, 0 = reply instantly)"><NumberInput value={num("replyWaitSeconds", 0)} step={1} min={0} max={120} onChange={(v) => set("replyWaitSeconds", v)} /></Field>
             <Field label="Human takeover behavior"><SelectInput value={str("humanTakeoverBehavior") || "cancel_and_yield"} onChange={(v) => set("humanTakeoverBehavior", v)} options={TAKEOVER} /></Field>
             <SwitchRow label="Match customer tone" checked={bool("matchCustomerTone")} onChange={(v) => set("matchCustomerTone", v)} />
             <Field label="Custom instructions" full><Textarea rows={4} value={str("customInstructions")} onChange={(e) => set("customInstructions", e.target.value)} /></Field>

@@ -77,12 +77,15 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
     if (m.mediaPending) return; // wait for media_ready
     const text = (m.body ?? "").trim();
     if (!text) return; // voice notes have empty body → handled on media_ready
+    const config = await loadAiConfig(e.teamId);
+    if (!configEnabled(config)) return;
     await enqueueAiReply({
       teamId: e.teamId,
       conversationId: e.conversationId,
       inboundMessageId: m.id,
       text,
       isVoice: false,
+      waitSeconds: config.replyWaitSeconds,
     });
   }
 
@@ -92,24 +95,28 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
     if (kind === "audio") {
       const transcript = await ensureTranscription(e.teamId, e.messageId);
       if (transcript) {
+        const config = await loadAiConfig(e.teamId);
         await enqueueAiReply({
           teamId: e.teamId,
           conversationId: e.conversationId,
           inboundMessageId: e.messageId,
           text: transcript,
           isVoice: true,
+          waitSeconds: config?.replyWaitSeconds ?? 0,
         });
       }
       return;
     }
     const caption = (e.media?.caption ?? "").trim();
     if (caption) {
+      const config = await loadAiConfig(e.teamId);
       await enqueueAiReply({
         teamId: e.teamId,
         conversationId: e.conversationId,
         inboundMessageId: e.messageId,
         text: caption,
         isVoice: false,
+        waitSeconds: config?.replyWaitSeconds ?? 0,
       });
     }
   }

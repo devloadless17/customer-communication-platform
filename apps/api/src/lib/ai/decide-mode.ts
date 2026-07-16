@@ -14,9 +14,14 @@ export function decideMode(
   config: Pick<AiConfigRow, "autoReplyMode" | "confidenceThreshold">,
   payload: Pick<ReplyPayload, "shouldEscalate" | "confidence">,
   openNow: boolean,
+  isVoice = false,
 ): "send" | "suggest" | "escalate" {
   if (payload.shouldEscalate) return "escalate";
-  if (payload.confidence < config.confidenceThreshold) return "suggest";
+  // Voice inbound auto-answers off the auto-transcript even below the confidence
+  // threshold: the customer sent audio and expects an immediate spoken reply,
+  // and transcribed speech naturally reads as lower-confidence — so we do NOT
+  // hold voice replies for manual approval. Draft/hybrid modes still draft.
+  if (!isVoice && payload.confidence < config.confidenceThreshold) return "suggest";
   if (config.autoReplyMode === "draft") return "suggest";
   if (config.autoReplyMode === "hybrid") return openNow ? "suggest" : "send";
   return "send";
