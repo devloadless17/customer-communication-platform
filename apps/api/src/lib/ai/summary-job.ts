@@ -27,6 +27,7 @@ interface SummaryPayload {
   language: string;
   tone: string;
   latestStatus: string;
+  overallBrief: string;
 }
 
 const strArr = { type: "array", items: { type: "string" } };
@@ -45,6 +46,7 @@ const SUMMARY_SCHEMA: Record<string, unknown> = {
     "language",
     "tone",
     "latestStatus",
+    "overallBrief",
   ],
   properties: {
     customerGoal: { type: "string" },
@@ -58,6 +60,10 @@ const SUMMARY_SCHEMA: Record<string, unknown> = {
     language: { type: "string" },
     tone: { type: "string" },
     latestStatus: { type: "string" },
+    overallBrief: {
+      type: "string",
+      description: "1-2 sentence brief of the WHOLE conversation/relationship across all sessions.",
+    },
   },
 };
 
@@ -110,14 +116,16 @@ export async function runSessionSummary(conversationId: string): Promise<void> {
   );
   const scoped = scopedAll.length ? scopedAll : messages;
 
-  const transcript = scoped
-    .map((m) => `${m.direction === "in" ? "Customer" : m.aiGenerated ? "AI" : "Agent"}: ${m.body}`)
-    .join("\n")
-    .slice(0, 12000);
+  const label = (m: (typeof scoped)[number]) =>
+    `${m.direction === "in" ? "Customer" : m.aiGenerated ? "AI" : "Agent"}: ${m.body}`;
+  const transcript = scoped.map(label).join("\n").slice(0, 12000);
+  // The WHOLE conversation (all sessions in the recent window) — used ONLY for
+  // the short overallBrief, not the session fields.
+  const fullTranscript = messages.map(label).join("\n").slice(0, 8000);
 
   const system =
-    "You maintain a VERY SHORT, factual running summary of ONE customer-support session. Update the prior summary with any new information. Be terse: each text field is a single short phrase (customerGoal ideally under 12 words), and every list holds AT MOST 2 items — keep only what an agent glancing at the panel truly needs. Keep transient specifics (a particular order number, a one-off complaint detail) here — they are NOT permanent customer facts. Return the structured fields; use empty strings/arrays where nothing applies.";
-  const user = `Prior session summary (JSON, may be empty):\n${prior ? JSON.stringify(prior) : "(none)"}\n\nConversation so far:\n${transcript}\n\nProduce the updated session summary.`;
+    "You maintain a VERY SHORT, factual running summary of ONE customer-support session, PLUS a brief of the whole relationship. Be terse: each session text field is a single short phrase (customerGoal ideally under 12 words), and every list holds AT MOST 2 items — keep only what an agent glancing at the panel truly needs. The session fields describe the CURRENT session only; keep transient specifics (an order number, a one-off complaint detail) there. Separately, `overallBrief` is a 1-2 sentence brief of the WHOLE conversation/relationship across all sessions (who this customer is and what they generally want/need). Return the structured fields; use empty strings/arrays where nothing applies.";
+  const user = `Prior session summary (JSON, may be empty):\n${prior ? JSON.stringify(prior) : "(none)"}\n\nCURRENT session (summarize into the session fields):\n${transcript}\n\nWHOLE conversation across all sessions (for overallBrief ONLY):\n${fullTranscript}\n\nProduce the updated current-session summary AND the overall brief.`;
 
   const res = await chatJson<SummaryPayload>({
     model: resolveModel("summary"),
@@ -127,7 +135,7 @@ export async function runSessionSummary(conversationId: string): Promise<void> {
     ],
     schemaName: "session_summary",
     schema: SUMMARY_SCHEMA,
-    maxTokens: 450,
+    maxTokens: 550,
   });
   if (!res.data) return;
   const p = res.data;
@@ -145,6 +153,7 @@ export async function runSessionSummary(conversationId: string): Promise<void> {
     language: p.language || null,
     tone: p.tone || null,
     latestStatus: p.latestStatus || null,
+    overallBrief: p.overallBrief || null,
     lastSummarizedMessageId: lastMessageId,
   };
 
