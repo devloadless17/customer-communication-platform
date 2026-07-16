@@ -2,21 +2,21 @@
 # Push to main → typecheck + lint ONLY (main is the integration branch; a push
 #                here NEVER deploys). Bring changes to prod by fast-forwarding
 #                main → production and pushing production.
-# Push to production → typecheck + (changes-detect + conditional builds + smoke +
+# Push to production → typecheck + (validate secrets + build web + api + smoke +
 #                ship + external health + auto-rollback on failure).
 #
 # Job graph (push to production):
 #
 #   typecheck ──────────────────────────────────────────┐
-#   changes ─┬─→ build-web (if web changed) ─┐          │
-#            └─→ build-api (if api changed) ─┴─→ smoke ─→ ship → wait-for-health → (rollback if red)
+#   changes ─┬─→ build-web ─┐                            │
+#            └─→ build-api ─┴─→ smoke ─→ ship → wait-for-health → (rollback if red)
 #
 # Why this shape:
-# - `changes` runs paths-filter to decide which images need rebuilding.
-#   When only one app changed, the other build job is SKIPPED entirely —
-#   the dominant time cost of a deploy is `next build`, so skipping it on
-#   an api-only push saves ~3–5 minutes.
-# - `changes` also handles fail-fast secret validation.
+# - `changes` validates secrets, computes the buildx cache scope, and flags
+#   BOTH images for rebuild. A production push is a deliberate "ship this ref"
+#   event, so it always rebuilds web + api (the buildx layer cache keeps an
+#   unchanged app cheap). It does NOT path-diff: production tracks main, so a
+#   path-diff finds 0 files and would wrongly skip the whole deploy.
 # - :previous-{web,api} is written at the END of `ship`, AFTER the health gate
 #   proves the new images live (the "Promote shipped image to :previous" step).
 #   It used to be retagged at the START of `changes` from registry :latest-*,
@@ -24,7 +24,7 @@
 #   could leave :previous-* pointing at an image that never served traffic,
 #   poisoning the auto-rollback target. Promote-after-health makes :previous-*
 #   always mean "last image that actually passed health".
-# - `workflow_dispatch` forces a full rebuild (paths-filter is bypassed).
+# - `workflow_dispatch` behaves exactly like a production push (full rebuild).
 name: Deploy
 
 on:
@@ -85,11 +85,9 @@ jobs:
       scope: ${{ steps.cache.outputs.scope }}
       prev: ${{ steps.cache.outputs.prev }}
     steps:
-      # fetch-depth: 2 gives paths-filter the parent commit it diffs against
-      # on push events. PRs use the merge base via GH API and don't need it.
+      # Shallow checkout is fine — this job no longer diffs paths; it validates
+      # secrets, computes the cache scope, and always forces a full rebuild.
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-        with:
-          fetch-depth: 2
 
       # Fail-fast on missing secrets. GH Actions exports unset secrets as
       # EMPTY strings (not unset), so `set -u` won't catch a typo'd secret
@@ -158,71 +156,26 @@ jobs:
       # :previous-* always means "last image that actually served traffic".
       # See the "Promote shipped image to :previous" step on the ship job.
 
-      # paths-filter decides which images need rebuilding. The `shared`
-      # block uses a YAML anchor so both filters pick up monorepo-level
-      # changes (deps, prisma, configs, the workflow itself, the
-      # docker-compose file, etc.).
-      - id: filter
-        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
-        with:
-          filters: |
-            web:
-              - 'apps/web/**'
-              - 'packages/**'
-              - 'prisma/**'
-              - 'pnpm-lock.yaml'
-              - 'package.json'
-              - 'pnpm-workspace.yaml'
-              - 'tsconfig.json'
-              - 'prisma.config.ts'
-              - 'docker-compose.yml'
-              - 'deploy/**'
-              # scripts/ is a build input of the api image (Dockerfile
-              # `COPY scripts ./scripts` — envelope key-rotation runbook) AND
-              # a payload of the deploy bundle (smoke bundles pg-backup.sh).
-              # A scripts-only push must rebuild+ship, else the VPS keeps the
-              # stale backup/rotation script until an unrelated app change.
-              - 'scripts/**'
-              - '.github/workflows/deploy.yml'
-            api:
-              - 'apps/api/**'
-              - 'packages/**'
-              - 'prisma/**'
-              - 'pnpm-lock.yaml'
-              - 'package.json'
-              - 'pnpm-workspace.yaml'
-              - 'tsconfig.json'
-              - 'prisma.config.ts'
-              - 'docker-compose.yml'
-              - 'deploy/**'
-              # See the web filter above — scripts/ is a COPY'd api build
-              # input and part of the deploy bundle.
-              - 'scripts/**'
-              - '.github/workflows/deploy.yml'
-
-      # workflow_dispatch should force full rebuild — operator explicitly
-      # asked for it. Otherwise propagate paths-filter outputs.
+      # Every run of this job is a deliberate FULL deploy: it only runs on a
+      # push to `production` or a manual workflow_dispatch (see the job `if:`
+      # above), never on an incremental main push. So we always rebuild BOTH
+      # images instead of path-diffing which app changed.
+      #
+      # Why not paths-filter here any more: under the production-branch model,
+      # `production` tracks `main`, so on a production push the two refs point
+      # at the same commit. paths-filter's push heuristic diffs the pushed
+      # branch against the default branch (`main`) via merge-base — which is
+      # then IDENTICAL — so it detected 0 changed files and silently skipped
+      # build/smoke/ship while the run still reported green. A production push
+      # means "ship this ref", full stop. The buildx layer cache keeps an
+      # unchanged app's rebuild cheap, so forcing both costs little.
       - id: flags
-        env:
-          FILTER_WEB: ${{ steps.filter.outputs.web }}
-          FILTER_API: ${{ steps.filter.outputs.api }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "web=true" >> "$GITHUB_OUTPUT"
-            echo "api=true" >> "$GITHUB_OUTPUT"
-            echo "any=true" >> "$GITHUB_OUTPUT"
-            echo "→ workflow_dispatch: forcing full rebuild"
-          else
-            echo "web=$FILTER_WEB" >> "$GITHUB_OUTPUT"
-            echo "api=$FILTER_API" >> "$GITHUB_OUTPUT"
-            if [ "$FILTER_WEB" = "true" ] || [ "$FILTER_API" = "true" ]; then
-              echo "any=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "any=false" >> "$GITHUB_OUTPUT"
-            fi
-            echo "→ web=$FILTER_WEB api=$FILTER_API"
-          fi
+          echo "web=true" >> "$GITHUB_OUTPUT"
+          echo "api=true" >> "$GITHUB_OUTPUT"
+          echo "any=true" >> "$GITHUB_OUTPUT"
+          echo "→ full deploy: rebuilding web + api"
 
       # Rotate buildx cache scope weekly. GHA cache is capped at 10GB per
       # repo with LRU eviction; without rotation the .next/cache mount
