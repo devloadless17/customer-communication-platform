@@ -50,7 +50,10 @@ export async function ensureTranscription(
 
   try {
     const fetched = await blobStorage.fetch(msg.mediaKey);
-    const { text, language, provider, model } = await transcribeInboundAudio({
+    // `model` is returned for logging but is NOT a column on
+    // AiMessageTranscription — writing it made every save throw an "Unknown
+    // argument `model`" Prisma error, which silently killed voice-note replies.
+    const { text, language, provider } = await transcribeInboundAudio({
       bytes: fetched.bytes,
       filename: msg.mediaFilename || `voice-${messageId}.ogg`,
       mimeType: msg.mediaMimeType || fetched.mimeType || "audio/ogg",
@@ -66,7 +69,6 @@ export async function ensureTranscription(
         transcript: config.saveTranscript ? transcript : null,
         language,
         provider,
-        model,
       },
     });
     void publish({
