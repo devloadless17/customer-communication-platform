@@ -578,13 +578,16 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          # Optional: empty if the OPENAI_API_KEY secret isn't set — the AI
+          # Assistant simply no-ops (no boot crash), same as ANTHROPIC_API_KEY.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,DOCKER_USERNAME,DOCKER_PASSWORD
+          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,OPENAI_API_KEY,DOCKER_USERNAME,DOCKER_PASSWORD
           script: |
             set -euo pipefail
             rm -rf /tmp/ccp-deploy
@@ -618,6 +621,18 @@ jobs:
             R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
             R2_BUCKET=${R2_BUCKET}
             META_GRAPH_VERSION=v25.0
+            # AI Assistant (OpenAI). OPENAI_API_KEY is the only hard gate —
+            # empty = the assistant no-ops. The model ids match the code
+            # defaults; they live here so the whole subsystem is tunable from
+            # /opt/ccp/.env without a redeploy. AI_ASSISTANT_ENABLED=0 is the
+            # global kill switch. This block is rendered on EVERY deploy, so
+            # edit it here (not by hand on the VPS — hand edits get overwritten).
+            OPENAI_API_KEY=${OPENAI_API_KEY}
+            AI_ASSISTANT_ENABLED=1
+            AI_MODEL_REPLY=gpt-4o
+            AI_MODEL_SUMMARY=gpt-4o-mini
+            AI_STT_MODEL=gpt-4o-transcribe
+            AI_TTS_MODEL=gpt-4o-mini-tts
             # NEXT_PUBLIC_API_URL intentionally empty — Caddy fronts both
             # processes on a single origin so the browser falls back to
             # window.location for Socket.io.
