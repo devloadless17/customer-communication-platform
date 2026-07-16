@@ -1,7 +1,10 @@
+import { assignConversation } from "@/lib/conversations/mutations";
+import { pickRoundRobinAssignee } from "@/lib/conversations/round-robin";
 import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
 
 import { claimInbound, legacyAutopilotOwnsTeam } from "./automation-claim";
-import { getState, incrementAutoReply, onCustomerInbound } from "./conversation-state";
+import { getState, handoffToHuman, incrementAutoReply, onCustomerInbound } from "./conversation-state";
 import { decideMode } from "./decide-mode";
 import { aiGloballyEnabled } from "./models";
 import { openaiConfigured } from "./openai-client";
@@ -188,6 +191,31 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       decision: mode === "escalate" ? "escalated" : "suggested",
       suggestionId: suggestion.id,
     });
+
+    // Escalation = the customer asked for a human. Auto-assign to an available
+    // agent (round-robin: online + available tiers) and hand the thread off —
+    // a STICKY pause so the assistant won't resume on the next inbound. The
+    // drafted reply above stays as a suggestion the agent can use. Best-effort:
+    // a failure here must not lose the draft/audit.
+    if (mode === "escalate") {
+      try {
+        const agentId = await pickRoundRobinAssignee({ db, teamId });
+        if (agentId) {
+          await assignConversation({
+            db,
+            publish,
+            teamId,
+            conversationId,
+            targetUserId: agentId,
+            changedByUserId: null,
+            silent: true,
+          });
+        }
+        await handoffToHuman(teamId, conversationId, agentId);
+      } catch {
+        // Leave the draft + audit; the agent can still take over manually.
+      }
+    }
   }
 
   // Post-reply jobs — separate + idempotent, must never block the reply (#14).

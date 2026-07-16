@@ -91,7 +91,11 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
 
   const memory = (data?.memory ?? []).filter((m) => m.status !== "rejected");
   const attributes = memory.filter((m) => !TAG_KINDS.has(m.kind));
-  const tagItems = memory.filter((m) => TAG_KINDS.has(m.kind));
+  // Only the most recent, SURE (confirmed) interests — capped so the panel stays
+  // scannable. The overview returns memory most-recently-updated first.
+  const tagItems = memory
+    .filter((m) => TAG_KINDS.has(m.kind) && m.status === "confirmed")
+    .slice(0, 6);
   const summary = data?.summary ?? null;
 
   async function confirm(id: string) {

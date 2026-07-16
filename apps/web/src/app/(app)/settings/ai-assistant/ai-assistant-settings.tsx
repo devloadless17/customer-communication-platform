@@ -76,7 +76,7 @@ const LANGUAGES: Array<[string, string]> = [
   ["ru", "Russian"], ["tr", "Turkish"], ["fa", "Persian (Farsi)"], ["ur", "Urdu"],
   ["hi", "Hindi"], ["bn", "Bengali"], ["zh", "Chinese"], ["ja", "Japanese"],
   ["ko", "Korean"], ["id", "Indonesian"], ["ms", "Malay"], ["th", "Thai"],
-  ["vi", "Vietnamese"], ["he", "Hebrew"], ["el", "Greek"], ["pl", "Polish"],
+  ["vi", "Vietnamese"], ["el", "Greek"], ["pl", "Polish"],
   ["uk", "Ukrainian"], ["ro", "Romanian"], ["sv", "Swedish"], ["da", "Danish"],
   ["fi", "Finnish"], ["no", "Norwegian"], ["cs", "Czech"], ["hu", "Hungarian"],
   ["sw", "Swahili"], ["ha", "Hausa"], ["am", "Amharic"], ["tl", "Tagalog"],

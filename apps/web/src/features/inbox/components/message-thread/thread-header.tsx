@@ -1,6 +1,6 @@
 "use client";
 
-import { memo } from "react";
+import { memo, useState } from "react";
 import { ChevronLeft, Info, Phone, Search as SearchIcon } from "lucide-react";
 
 import { AiStateControl } from "../ai/ai-state-control";
@@ -167,6 +167,11 @@ function ThreadHeaderImpl({
   // from the optimistic ringing state through teardown. This is the visible
   // affordance backing the synchronous busyRef guard in useCall.initiateOutbound.
   const { liveCall } = useCallApi();
+  // AI state lifted from AiStateControl so the assignee can read "AI Agent"
+  // while the assistant is active (label only — no real user is assigned).
+  const [aiState, setAiState] = useState<
+    "ai_active" | "human_active" | "ai_paused" | "disabled" | null
+  >(null);
   return (
     <header className="@container flex h-15 shrink-0 items-center gap-2 border-b border-border px-3 md:gap-3 md:px-4">
       {onMobileBack && (
@@ -241,7 +246,7 @@ function ThreadHeaderImpl({
             <Phone className="size-4" />
           </Button>
         )}
-        <AiStateControl conversationId={conversationId} />
+        <AiStateControl conversationId={conversationId} onState={setAiState} />
         <AssignmentDropdown
           teamId={teamId}
           conversationId={conversationId}
@@ -252,6 +257,7 @@ function ThreadHeaderImpl({
           teamMembers={teamMembers}
           currentUserName={currentUserName}
           onAlert={onAlert}
+          aiActive={aiState === "ai_active"}
         />
         <StatusDropdown
           teamId={teamId}

@@ -148,6 +148,32 @@ export async function setDisabled(teamId: string, conversationId: string, disabl
   return row;
 }
 
+/**
+ * Escalation handoff: the customer asked for a human, so the assistant yields
+ * the thread and stays quiet. Uses ai_paused (STICKY) rather than human_active
+ * so the AI does NOT auto-resume on the customer's next message — the human now
+ * owns it until an agent explicitly resumes. `agentUserId` is the auto-assigned
+ * agent (recorded as who it was handed to), or null if none was available.
+ */
+export async function handoffToHuman(
+  teamId: string,
+  conversationId: string,
+  agentUserId: string | null,
+) {
+  await ensureState(teamId, conversationId);
+  const row = await db.aiConversationState.update({
+    where: { conversationId },
+    data: {
+      state: "ai_paused",
+      pausedByUserId: agentUserId,
+      pausedAt: new Date(),
+      stateChangedAt: new Date(),
+    },
+  });
+  emitState(teamId, conversationId, "ai_paused");
+  return row;
+}
+
 export async function incrementAutoReply(conversationId: string) {
   return db.aiConversationState.update({
     where: { conversationId },
