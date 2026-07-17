@@ -3,6 +3,7 @@ import { pickRoundRobinAssignee } from "@/lib/conversations/round-robin";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 
+import { arabicToArabizi } from "./arabizi";
 import { claimInbound, legacyAutopilotOwnsTeam } from "./automation-claim";
 import { getState, handoffToHuman, incrementAutoReply, onCustomerInbound } from "./conversation-state";
 import { decideMode } from "./decide-mode";
@@ -109,6 +110,12 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
   }
 
   const payload = generated.payload;
+  // The model writes Arabic SCRIPT even when the customer used Arabizi (it can't
+  // spell Arabizi coherently). Transliterate the SENT text to Arabizi here;
+  // ttsText stays Arabic script for correct voice pronunciation.
+  if (payload.replyScript === "latin" && /^ar/i.test(payload.replyLanguage)) {
+    payload.replyText = arabicToArabizi(payload.replyText);
+  }
   const openNow = openingStatus(config, new Date()).open;
   const mode = decideMode(config, payload, openNow, job.isVoice);
 
