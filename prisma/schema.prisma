@@ -3020,6 +3020,9 @@ model ConversationSessionSummary {
   language              String?
   tone                  String?
   latestStatus          String?   @db.Text
+  // A 1-2 sentence brief of the WHOLE conversation/relationship (across all
+  // sessions), distinct from the current-session fields above.
+  overallBrief          String?   @db.Text
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
