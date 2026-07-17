@@ -1,7 +1,14 @@
 import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
+import { runHandoffPolicy } from "@/lib/conversations/handoff";
 
 import { claimInbound, legacyAutopilotOwnsTeam } from "./automation-claim";
-import { getState, incrementAutoReply, onCustomerInbound } from "./conversation-state";
+import {
+  escalateToHuman,
+  getState,
+  incrementAutoReply,
+  onCustomerInbound,
+} from "./conversation-state";
 import { decideMode } from "./decide-mode";
 import { aiGloballyEnabled } from "./models";
 import { openaiConfigured } from "./openai-client";
@@ -188,6 +195,27 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       decision: mode === "escalate" ? "escalated" : "suggested",
       suggestionId: suggestion.id,
     });
+
+    // Escalation = hand the thread to a human. Pause the assistant (sticky, so
+    // it stays quiet until an agent resumes) and apply the team's configured
+    // handoff assignment — the same policy the n8n "say human" branch runs, via
+    // the shared helper. The suggestion is kept as a starting draft for whoever
+    // picks it up. Best-effort: the customer-facing pause already committed, so
+    // an assignment failure degrades to "paused but unassigned", never throws.
+    if (mode === "escalate") {
+      await escalateToHuman(teamId, conversationId).catch((err) => {
+        console.warn(`[ai] escalate pause failed for ${conversationId}: ${errText(err)}`);
+      });
+      await runHandoffPolicy({
+        db,
+        publish,
+        teamId,
+        conversationId,
+        onError: (m) => console.warn(`[ai] ${m}`),
+      }).catch((err) => {
+        console.warn(`[ai] escalate handoff failed for ${conversationId}: ${errText(err)}`);
+      });
+    }
   }
 
   // Post-reply jobs — separate + idempotent, must never block the reply (#14).

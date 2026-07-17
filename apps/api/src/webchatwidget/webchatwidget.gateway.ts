@@ -3,6 +3,7 @@ import {
   ConnectedSocket,
   MessageBody,
   OnGatewayConnection,
+  OnGatewayDisconnect,
   OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
@@ -49,6 +50,8 @@ interface WidgetSocketData {
   externalContactId: string;
   resolved: WebchatwidgetResolved;
   conversationId: string | null;
+  /** Whether we've last relayed a typing-on to the agents (so disconnect can clear it). */
+  typingOn?: boolean;
 }
 
 /** Body of a `visitor:message` frame. `body` is text or a media caption. */
@@ -85,7 +88,9 @@ interface VisitorMessageBody {
  * the public HTTP endpoint and referenced by key.
  */
 @WebSocketGateway({ namespace: "/widget" })
-export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection {
+export class WebchatwidgetGateway
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+{
   private readonly logger = new Logger(WebchatwidgetGateway.name);
 
   @WebSocketServer()
@@ -180,13 +185,13 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
       if (conversationId) {
         data.conversationId = conversationId;
         await client.join(widgetRoom(conversationId));
-        client.emit("history", { messages: await this.history(data.teamId, conversationId) });
+        client.emit("history", await this.history(data.teamId, conversationId));
       } else {
-        client.emit("history", { messages: [] });
+        client.emit("history", { messages: [], hasMore: false });
       }
     } catch (err) {
       this.logger.error(`widget connect resume failed: ${err instanceof Error ? err.message : err}`);
-      client.emit("history", { messages: [] });
+      client.emit("history", { messages: [], hasMore: false });
     }
   }
 
@@ -270,6 +275,33 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
       }
     }
     return { ok: true, conversationId };
+  }
+
+  /**
+   * Visitor typing → relay to the agent inbox. Only meaningful once the visitor
+   * has a conversation (first message sent). We stash the last state so the
+   * disconnect handler can clear a stuck indicator when the tab vanishes.
+   */
+  @SubscribeMessage("visitor:typing")
+  onVisitorTyping(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { on?: unknown },
+  ): void {
+    const data = client.data as WidgetSocketData | undefined;
+    if (!data?.conversationId) return;
+    const on = body?.on === true;
+    if (on === (data.typingOn ?? false)) return;
+    data.typingOn = on;
+    this.realtime.notifyVisitorTyping(data.conversationId, on);
+  }
+
+  /** Clear a lingering "customer is typing…" if the visitor drops mid-type. */
+  handleDisconnect(client: Socket): void {
+    const data = client.data as WidgetSocketData | undefined;
+    if (data?.conversationId && data.typingOn) {
+      data.typingOn = false;
+      this.realtime.notifyVisitorTyping(data.conversationId, false);
+    }
   }
 
   /**
@@ -362,15 +394,31 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
     return contact?.id ?? null;
   }
 
-  private async history(teamId: string, conversationId: string): Promise<WidgetMessageFrame[]> {
+  /**
+   * A page of history, newest-batch-first. `before` (keyset cursor) pages
+   * BACKWARD for "load earlier". Returns `hasMore` so the widget knows whether to
+   * keep offering "load earlier". Fetches LIMIT+1 to detect more without a count.
+   */
+  private async history(
+    teamId: string,
+    conversationId: string,
+    before?: { ts: Date; id: string },
+  ): Promise<{ messages: WidgetMessageFrame[]; hasMore: boolean }> {
     const rows = await this.db.message.findMany({
       omit: { rawPayload: true },
       include: { replyTo: REPLY_TO_INCLUDE },
-      where: { teamId, conversationId },
+      where: {
+        teamId,
+        conversationId,
+        ...(before
+          ? { OR: [{ timestamp: { lt: before.ts } }, { timestamp: before.ts, id: { lt: before.id } }] }
+          : {}),
+      },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
-      take: HISTORY_LIMIT,
+      take: HISTORY_LIMIT + 1,
     });
-    const asc = rows.reverse();
+    const hasMore = rows.length > HISTORY_LIMIT;
+    const asc = (hasMore ? rows.slice(0, HISTORY_LIMIT) : rows).reverse();
     // Batch-resolve agent names for outbound messages so the widget shows who
     // replied — one query for the distinct senders on the page.
     const senderIds = [
@@ -384,10 +432,26 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
       });
       for (const u of users) names.set(u.id, u.name);
     }
-    return asc.map((r) =>
+    const messages = asc.map((r) =>
       frameFromMessage(mapMessage(r), {
         senderName: r.senderUserId ? (names.get(r.senderUserId) ?? null) : null,
       }),
     );
+    return { messages, hasMore };
+  }
+
+  /** "Load earlier" — a page of messages older than the widget's oldest, keyed
+   *  off the (createdAt, id) cursor it holds. */
+  @SubscribeMessage("visitor:loadOlder")
+  async onLoadOlder(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { before?: { ts?: string; id?: string } },
+  ): Promise<{ messages: WidgetMessageFrame[]; hasMore: boolean }> {
+    const data = client.data as WidgetSocketData | undefined;
+    const cur = body?.before;
+    if (!data?.conversationId || !cur || typeof cur.ts !== "string" || typeof cur.id !== "string") {
+      return { messages: [], hasMore: false };
+    }
+    return this.history(data.teamId, data.conversationId, { ts: new Date(cur.ts), id: cur.id });
   }
 }

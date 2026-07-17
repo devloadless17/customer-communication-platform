@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isChannelLive } from "@ccp/shared/providers/capabilities";
+import { isBroadcastable, isChannelLive } from "@ccp/shared/providers/capabilities";
 import type { Channel } from "@ccp/shared/types";
 
 /**
@@ -18,5 +18,18 @@ export function zLiveChannel() {
   return z.custom<Channel>(
     (v) => typeof v === "string" && isChannelLive(v as Channel),
     { message: "unsupported channel" },
+  );
+}
+
+/**
+ * Like `zLiveChannel` but restricted to channels a BROADCAST can target
+ * (`BROADCASTABLE_CHANNELS`). Excludes `webchatwidget` — a website visitor has
+ * no durable push address, so it can never be a broadcast channel. Use for the
+ * broadcast composer's freeform `channel` field.
+ */
+export function zBroadcastableChannel() {
+  return z.custom<Channel>(
+    (v) => typeof v === "string" && isBroadcastable(v as Channel),
+    { message: "channel does not support broadcasts" },
   );
 }

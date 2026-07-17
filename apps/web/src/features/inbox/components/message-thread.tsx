@@ -1300,7 +1300,7 @@ function MessageThreadImpl({
     [alert, confirm, conversation.id, conversation.teamId, softRefresh],
   );
 
-  const { typingUserIds, notifyTyping, stopTyping } = useTyping(
+  const { typingUserIds, visitorTyping, notifyTyping, stopTyping } = useTyping(
     conversation.id,
     currentUser.id,
   );
@@ -1973,6 +1973,8 @@ function MessageThreadImpl({
           <TypingIndicator
             typingUserIds={typingUserIds}
             memberById={memberById}
+            visitorTyping={visitorTyping}
+            visitorName={contact.name}
           />
           <AiSuggestionBar conversationId={conversation.id} />
           <ReplyBox

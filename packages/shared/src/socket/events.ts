@@ -411,6 +411,19 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * A website-widget VISITOR is typing in this conversation. Distinct from
+   * `typing:update` (that carries teammate userIds; a visitor is not a user).
+   * The widget gateway relays the visitor's `visitor:typing {on}` to the agent
+   * conversation room so the inbox can show "the customer is typing…". Only
+   * `webchatwidget` threads ever emit this. Scoped to the conversation room
+   * (not team-wide) — same fanout scope as `typing:update`.
+   */
+  "conversation:visitor_typing": (payload: {
+    conversationId: string;
+    on: boolean;
+  }) => void;
+
+  /**
    * Snapshot of which teammates currently have this conversation OPEN in
    * their inbox UI. Different from `typing:update` — that fires on every
    * keystroke transition; this fires on subscribe/unsubscribe.

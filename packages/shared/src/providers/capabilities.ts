@@ -167,6 +167,27 @@ export function isChannelLive(channel: Channel): boolean {
 }
 
 /**
+ * Channels a broadcast can target. A broadcast is PROACTIVE bulk outbound to a
+ * stored address, so it needs a channel we can push to at any time — the Meta
+ * channels (WhatsApp via templates, Messenger/Instagram via their reopen rules).
+ *
+ * `webchatwidget` is deliberately EXCLUDED: a website visitor is reachable only
+ * while their browser tab holds a live socket — there's no durable push address
+ * to send a campaign to. So widget contacts never appear as broadcast recipients
+ * and `webchatwidget` is not a selectable broadcast channel. Must stay a SUBSET
+ * of LIVE_CHANNELS.
+ */
+export const BROADCASTABLE_CHANNELS: ReadonlySet<Channel> = new Set<Channel>([
+  "whatsapp",
+  "messenger",
+  "instagram",
+]);
+
+export function isBroadcastable(channel: Channel): boolean {
+  return BROADCASTABLE_CHANNELS.has(channel);
+}
+
+/**
  * How a channel identifies a contact. `phone` channels resolve/create contacts
  * by `Contact.phoneNumber`; `external` channels use the opaque provider id
  * (`Contact.externalContactId`) via the `(teamId, identityChannel,

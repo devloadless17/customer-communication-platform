@@ -467,6 +467,7 @@ export interface WebchatWidgetView {
     agentAvatarDataUrl?: string;
     fontFamily?: "system" | "rounded" | "serif";
     themeMode?: "light" | "dark" | "auto";
+    soundEnabled?: boolean;
     launcher?: "bubble" | "off";
     position?: "right" | "left";
     launcherLabel?: string;

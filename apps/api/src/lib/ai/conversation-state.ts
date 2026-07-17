@@ -148,6 +148,27 @@ export async function setDisabled(teamId: string, conversationId: string, disabl
   return row;
 }
 
+/**
+ * The assistant itself decided the customer needs a human (reply payload
+ * `shouldEscalate`). Pause the thread (sticky `ai_paused`, system-initiated so
+ * `pausedByUserId` is null) so it stops auto-replying until an agent resumes —
+ * the customer-facing counterpart of the n8n "say human" branch. Idempotent:
+ * skips the write when already paused/disabled so a redelivery doesn't churn.
+ */
+export async function escalateToHuman(
+  teamId: string,
+  conversationId: string,
+): Promise<AiConvStateRow> {
+  const s = await ensureState(teamId, conversationId);
+  if (s.state === "ai_paused" || s.state === "disabled") return s;
+  const row = (await db.aiConversationState.update({
+    where: { conversationId },
+    data: { state: "ai_paused", pausedByUserId: null, pausedAt: new Date(), stateChangedAt: new Date() },
+  })) as AiConvStateRow;
+  emitState(teamId, conversationId, "ai_paused");
+  return row;
+}
+
 export async function incrementAutoReply(conversationId: string) {
   return db.aiConversationState.update({
     where: { conversationId },

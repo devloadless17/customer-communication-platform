@@ -530,3 +530,73 @@ test("automation: outbound webhook fires for a webchatwidget message with the ch
     await ctx.close();
   }
 });
+
+test("history pagination: >50 messages replays the latest page + 'Load earlier' fetches older", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const v = await ctx.newPage();
+  try {
+    await mountWidget(v, PUBLIC_KEY);
+    await pastPreChat(v);
+    // One live message creates the conversation we can then backfill.
+    const seed = `pagination seed ${RUN}`;
+    await v.locator(".composer textarea").fill(seed);
+    await v.locator(".composer textarea").press("Enter");
+    const landed = await pollUntil(
+      async () =>
+        db().message.findFirst({
+          where: { teamId, channel: CHANNEL, direction: "in", body: seed },
+          select: { conversationId: true },
+        }),
+      { timeoutMs: 20_000, label: "pagination seed message" },
+    );
+    const conversationId = landed.conversationId;
+    const conv = await db().conversation.findUnique({
+      where: { id: conversationId },
+      select: { contactId: true },
+    });
+    if (conv?.contactId) createdContactIds.add(conv.contactId);
+
+    // Backfill 60 OLDER outbound messages (distinct timestamps in the past) so the
+    // conversation has 61 total — more than one HISTORY_LIMIT (50) page.
+    const base = Date.now() - 3_600_000;
+    await db().message.createMany({
+      data: Array.from({ length: 60 }, (_, i) => ({
+        teamId,
+        conversationId,
+        channel: CHANNEL as never,
+        direction: "out" as never,
+        externalId: `older-${RUN}-${i}`,
+        body: `older ${i} ${RUN}`,
+        timestamp: new Date(base + i * 1000),
+      })),
+    });
+
+    // Reconnect: the gateway replays the newest 50 and flags hasMore, so the
+    // oldest messages are absent and the "Load earlier" bar appears.
+    await mountWidget(v, PUBLIC_KEY);
+    const earlier = v.locator(".earlierbtn");
+    await expect(earlier).toBeVisible({ timeout: 15_000 });
+    await expect(v.locator(".bubble", { hasText: `older 0 ${RUN}` })).toHaveCount(0);
+
+    // Fetch the older page → the oldest message prepends into the thread.
+    await earlier.click();
+    await expect(v.locator(".bubble", { hasText: `older 0 ${RUN}` })).toBeVisible({ timeout: 15_000 });
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("broadcasts reject webchatwidget as a channel (not broadcastable)", async ({ request }) => {
+  // A freeform broadcast on `webchatwidget` must fail validation — a website
+  // visitor has no durable push address, so the channel isn't broadcastable.
+  const resp = await request.post(`${WEB_ORIGIN}/api/broadcasts`, {
+    data: {
+      kind: "freeform",
+      channel: "webchatwidget",
+      bodyText: `should never send ${RUN}`,
+      audience: { mode: "all" },
+    },
+  });
+  expect(resp.status()).toBe(400);
+  expect(JSON.stringify(await resp.json())).toContain("channel");
+});

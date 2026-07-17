@@ -86,6 +86,7 @@ export function WebchatWidgetSettings({
           agentAvatarDataUrl: w.config.agentAvatarDataUrl ?? "",
           fontFamily: w.config.fontFamily ?? "system",
           themeMode: w.config.themeMode ?? "light",
+          soundEnabled: w.config.soundEnabled ?? false,
           launcher: w.config.launcher ?? "bubble",
           position: w.config.position ?? "right",
           launcherLabel: w.config.launcherLabel ?? "",
@@ -333,6 +334,7 @@ function Editor({
           </Section>
 
           <Section title="Behavior">
+            <Toggle checked={c.soundEnabled === true} onChange={(v) => onConfig({ soundEnabled: v })} label="Play a chime on new messages" hint="A subtle sound when an agent replies." />
             <Toggle checked={c.showBranding !== false} onChange={(v) => onConfig({ showBranding: v })} label="Show “Powered by” footer" />
             <Toggle checked={widget.isActive} onChange={onActive} label="Active" hint="Inactive widgets stop accepting new chats." />
           </Section>

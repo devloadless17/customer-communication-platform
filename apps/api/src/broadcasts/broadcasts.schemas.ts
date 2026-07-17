@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zLiveChannel } from "@/common/channel-schema";
+import { zBroadcastableChannel } from "@/common/channel-schema";
 
 // Matches contacts.schemas `MAX_IDS` — the cap the count/preview resolver
 // enforces. Without it here, a >5000-id custom audience passes broadcast
@@ -84,7 +84,7 @@ export const CreateBroadcastSchema = z
     templateId: z.string().min(1).optional(),
     variables: BroadcastVariablesSchema.default({ body: [] }),
     // freeform kind:
-    channel: zLiveChannel().optional(),
+    channel: zBroadcastableChannel().optional(),
     bodyText: z.string().trim().min(1).max(2000).optional(),
     audience: AudienceSchema,
     // Optional operator label (falls back to template name in the UI).

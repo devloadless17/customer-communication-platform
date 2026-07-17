@@ -56,6 +56,7 @@
     formDone: false, closed: false, cfg: null, preChat: null, replyTo: null,
     byId: {}, pending: {}, unread: 0, lastSeenTs: Number(lsGet(K.seen) || 0),
     lastGroup: null, stick: true, readTimer: null,
+    hasMore: false, oldestCursor: null, loadingOlder: false, typingOn: false, recording: null,
     visitorId: lsGet(K.visitor) || ("vis_" + Math.random().toString(36).slice(2) + Date.now().toString(36)),
   };
   lsSet(K.visitor, S.visitorId);
@@ -144,6 +145,9 @@
     ".rbtn{width:38px;height:38px;flex:0 0 auto;border:0;border-radius:9999px;cursor:pointer;display:flex;align-items:center;justify-content:center;background:transparent;color:var(--ink2);transition:.12s}.rbtn:hover{background:color-mix(in srgb,var(--ink2) 14%,transparent);color:var(--ink)}.rbtn svg{width:19px;height:19px}",
     ".sbtn{background:var(--c);color:var(--ct)}.sbtn:hover{filter:brightness(1.06);background:var(--c)}.sbtn:disabled{opacity:.4;cursor:not-allowed;filter:none}",
     ".foot{font-size:11px;color:var(--ink2);text-align:center;padding:2px 0 0;flex:0 0 auto}.foot a{color:inherit;text-decoration:none;font-weight:600}",
+    ".earlier{display:flex;justify-content:center;padding:2px 0 8px}.earlierbtn{background:var(--surface);color:var(--ink2);border:1px solid var(--border);border-radius:9999px;padding:5px 14px;font-size:12px;cursor:pointer;transition:.12s}.earlierbtn:hover{background:var(--surface2);color:var(--ink)}.earlierbtn:disabled{opacity:.6;cursor:default}",
+    ".rbtn.rec{background:#ef4444;color:#fff}",
+    ".recbar{display:flex;align-items:center;gap:9px;flex:1;color:var(--ink);font-size:13px;padding:0 6px}.recbar .rd{width:9px;height:9px;border-radius:9999px;background:#ef4444;animation:rpulse 1.1s infinite}@keyframes rpulse{0%,100%{opacity:1}50%{opacity:.35}}.recbar .rt{flex:1;font-variant-numeric:tabular-nums}.recbar button{border:0;background:transparent;cursor:pointer;color:var(--ink2);font-size:16px;padding:2px 4px}.recbar .snd{color:var(--c);font-weight:700}",
     ".drop{position:absolute;inset:8px;background:color-mix(in srgb,var(--c) 10%,transparent);border:2px dashed var(--c);border-radius:14px;display:none;align-items:center;justify-content:center;color:var(--c);font-weight:700;z-index:5}.drop.on{display:flex}",
     ".toast{position:absolute;left:14px;right:14px;bottom:74px;background:#111827;color:#fff;font-size:13px;padding:10px 13px;border-radius:12px;opacity:0;transition:opacity .2s;pointer-events:none;text-align:center;z-index:6}.toast.on{opacity:.97}",
     ".lb{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:2147483647;display:none;align-items:center;justify-content:center;padding:24px;cursor:zoom-out}.lb.on{display:flex}.lb img{max-width:100%;max-height:100%;border-radius:10px}",
@@ -176,7 +180,10 @@
   var newPill = el("button", { class: "newp" }, "↓ New messages");
   var dropEl = el("div", { class: "drop" }, "Drop to send");
   var toastEl = el("div", { class: "toast", role: "status" });
-  bodyEl.appendChild(newPill); bodyEl.appendChild(dropEl); bodyEl.appendChild(toastEl);
+  var earlierBar = el("div", { class: "earlier" });
+  var earlierBtn = el("button", { class: "earlierbtn", onclick: function () { loadOlder(); } }, "Load earlier messages");
+  earlierBar.appendChild(earlierBtn); earlierBar.style.display = "none";
+  bodyEl.appendChild(newPill); bodyEl.appendChild(dropEl); bodyEl.appendChild(toastEl); bodyEl.appendChild(earlierBar);
   panel.appendChild(bodyEl);
   var replyBar = el("div", { class: "rc" }); var replyQt = el("div", { class: "qt" });
   replyBar.appendChild(el("span", null, "Reply:")); replyBar.appendChild(replyQt);
@@ -186,7 +193,8 @@
   var attachBtn = el("button", { class: "rbtn", "aria-label": "Attach a file", title: "Attach", html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>' });
   var ta = el("textarea", { rows: "1", placeholder: "Type a message…", "aria-label": "Message", dir: "auto" });
   var sendBtn = el("button", { class: "rbtn sbtn", "aria-label": "Send message", html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>' });
-  var ibar = el("div", { class: "ibar" }, [attachBtn, ta, sendBtn]);
+  var micBtn = el("button", { class: "rbtn", "aria-label": "Record a voice message", title: "Voice message", html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>' });
+  var ibar = el("div", { class: "ibar" }, [attachBtn, micBtn, ta, sendBtn]);
   var composer = el("div", { class: "composer" }, [ibar, fileInput]);
   panel.appendChild(composer);
   var footEl = el("div", { class: "foot" }); footEl.style.display = "none"; panel.appendChild(footEl);
@@ -313,6 +321,24 @@
     return "";
   }
   function metaHtml(m, isVisitor) { return esc(fmtTime(m.createdAt)) + (isVisitor ? " " + tickHtml(m.status) : ""); }
+  // Build a message row element (no placement/grouping) — reused by append + prepend.
+  function mkRow(m, grouped, anim) {
+    var isVisitor = m.direction === "in";
+    var row = el("div", { class: "mr " + (isVisitor ? "out" : "in") + (grouped ? " grp" : "") });
+    if (!isVisitor) {
+      var av = el("div", { class: "av" }); var avImg = agentAvatar();
+      if (avImg) av.appendChild(el("img", { src: avImg, alt: "" })); else av.appendChild(document.createTextNode(initials(m.senderName)));
+      row.appendChild(av);
+    }
+    var bub = el("div", { class: "bubble" + (anim ? " anim" : ""), html: bubbleHtml(m) });
+    var meta = el("div", { class: "meta", html: metaHtml(m, isVisitor) });
+    row.appendChild(el("div", { class: "col" }, [bub, meta]));
+    if (!m._local && m.externalId) row.appendChild(el("button", { class: "rep", title: "Reply", "aria-label": "Reply", onclick: function () { setReply(m); } }, "↩"));
+    row._meta = meta; row._bub = bub;
+    wireMedia(bub);
+    if (m.id) S.byId[m.id] = { el: row, msg: m };
+    return row;
+  }
   function appendBubble(m, opts) {
     opts = opts || {};
     var isVisitor = m.direction === "in";
@@ -322,23 +348,40 @@
     var grouped = S.lastGroup && S.lastGroup.sender === senderKey && S.lastGroup.day === day;
     if (!isVisitor && m.senderName && !grouped) bodyEl.appendChild(el("div", { class: "sname" }, m.senderName));
     S.lastGroup = { sender: senderKey, day: day };
-
-    var row = el("div", { class: "mr " + (isVisitor ? "out" : "in") + (grouped ? " grp" : "") });
-    if (!isVisitor) {
-      var av = el("div", { class: "av" }); var avImg = agentAvatar();
-      if (avImg) av.appendChild(el("img", { src: avImg, alt: "" })); else av.appendChild(document.createTextNode(initials(m.senderName)));
-      row.appendChild(av);
-    }
-    var bub = el("div", { class: "bubble" + (opts.anim ? " anim" : ""), html: bubbleHtml(m) });
-    var meta = el("div", { class: "meta", html: metaHtml(m, isVisitor) });
-    var col = el("div", { class: "col" }, [bub, meta]);
-    row.appendChild(col);
-    if (!m._local && m.externalId) row.appendChild(el("button", { class: "rep", title: "Reply", "aria-label": "Reply", onclick: function () { setReply(m); } }, "↩"));
-    row._meta = meta; row._bub = bub;
-    bodyEl.appendChild(row); wireMedia(bub);
-    if (m.id) S.byId[m.id] = { el: row, msg: m };
+    var row = mkRow(m, grouped, !!opts.anim);
+    bodyEl.appendChild(row);
     onNewRow(isVisitor);
     return row;
+  }
+  // "Load earlier" — prepend an older batch above the thread, preserving scroll.
+  function prependOlder(msgs) {
+    if (!msgs.length) return;
+    var anchor = null, kids = bodyEl.children;
+    for (var i = 0; i < kids.length; i++) { var k = kids[i]; if (k !== newPill && k !== dropEl && k !== toastEl && k !== earlierBar) { anchor = k; break; } }
+    var frag = document.createDocumentFragment(), grp = null;
+    msgs.forEach(function (m) {
+      var isVisitor = m.direction === "in", day = fmtDay(m.createdAt);
+      if (!grp || grp.day !== day) frag.appendChild(el("div", { class: "day" }, day));
+      var senderKey = isVisitor ? "v" : (m.senderName || "agent");
+      var grouped = grp && grp.sender === senderKey && grp.day === day;
+      if (!isVisitor && m.senderName && !grouped) frag.appendChild(el("div", { class: "sname" }, m.senderName));
+      grp = { sender: senderKey, day: day };
+      frag.appendChild(mkRow(m, grouped, false));
+    });
+    var prevH = bodyEl.scrollHeight, prevTop = bodyEl.scrollTop;
+    bodyEl.insertBefore(frag, anchor);
+    bodyEl.scrollTop = prevTop + (bodyEl.scrollHeight - prevH);
+  }
+  function showEarlier(on) { earlierBar.style.display = on ? "" : "none"; }
+  function loadOlder() {
+    if (S.loadingOlder || !S.hasMore || !S.oldestCursor || !S.socket || !S.socket.connected) return;
+    S.loadingOlder = true; earlierBtn.textContent = "Loading…"; earlierBtn.disabled = true;
+    S.socket.emit("visitor:loadOlder", { before: S.oldestCursor }, function (p) {
+      S.loadingOlder = false; earlierBtn.textContent = "Load earlier messages"; earlierBtn.disabled = false;
+      var msgs = (p && p.messages) || [];
+      if (msgs.length) { prependOlder(msgs); S.oldestCursor = { ts: msgs[0].createdAt, id: msgs[0].id }; }
+      S.hasMore = !!(p && p.hasMore); showEarlier(S.hasMore);
+    });
   }
   function appendSys(text) { bodyEl.appendChild(el("div", { class: "sys", dir: "auto" }, text)); }
 
@@ -346,7 +389,7 @@
     if (m.externalId) for (var cid in S.pending) { if (m.externalId.slice(-cid.length) === cid) { removePending(cid); break; } }
     if (m.id && S.byId[m.id]) { var e = S.byId[m.id]; e.msg = m; if (e.el._bub) e.el._bub.innerHTML = bubbleHtml(m); if (e.el._meta) e.el._meta.innerHTML = metaHtml(m, m.direction === "in"); wireMedia(e.el._bub); return; }
     appendBubble(m, { anim: !quiet });
-    if (!quiet && m.direction === "out") { hideTyping(); if (S.socket && S.socket.connected) S.socket.emit("visitor:received"); if (!S.open || document.hidden) bumpUnread(); else markRead(); }
+    if (!quiet && m.direction === "out") { hideTyping(); if (S.socket && S.socket.connected) S.socket.emit("visitor:received"); if (!S.open || document.hidden) { bumpUnread(); playPing(); } else markRead(); }
   }
   function applyStatus(id, s) { var e = S.byId[id]; if (e) { e.msg.status = s; if (e.msg.direction === "in" && e.el._meta) e.el._meta.innerHTML = metaHtml(e.msg, true); } }
 
@@ -356,7 +399,7 @@
   document.addEventListener("keydown", function (e) { if (e.key === "Escape" && lightbox.classList.contains("on")) lightbox.classList.remove("on"); });
 
   // ── scroll + unread ─────────────────────────────────────────────────────────
-  bodyEl.addEventListener("scroll", function () { S.stick = bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight < 90; if (S.stick) newPill.classList.remove("on"); });
+  bodyEl.addEventListener("scroll", function () { S.stick = bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight < 90; if (S.stick) newPill.classList.remove("on"); if (bodyEl.scrollTop < 48 && S.hasMore && !S.loadingOlder) loadOlder(); });
   newPill.addEventListener("click", function () { S.stick = true; scrollToBottom(true); });
   function scrollToBottom(force) { if (force || S.stick) { bodyEl.scrollTop = bodyEl.scrollHeight; newPill.classList.remove("on"); } }
   function onNewRow(isVisitor) { if (isVisitor || S.stick) scrollToBottom(true); else newPill.classList.add("on"); }
@@ -413,7 +456,7 @@
   function retry(cid) { var p = S.pending[cid]; if (!p) return; markPending(cid, "queued"); if (p.file) doUpload(cid); else sendPayload(cid); }
   function onSend() {
     if (!S.formDone) return; var text = ta.value.replace(/\s+$/, ""); if (!text.trim()) return;
-    ta.value = ""; autogrow(); updateSend(); lsDel(K.draft); dropPills();
+    ta.value = ""; autogrow(); updateSend(); lsDel(K.draft); dropPills(); emitTyping(false);
     var cid = newCid(); var payload = { clientMsgId: cid, body: text.slice(0, 4096) };
     if (S.replyTo) payload.replyToExternalId = S.replyTo.externalId;
     if (S.preChat) { payload.preChat = S.preChat; S.preChat = null; }
@@ -423,15 +466,16 @@
 
   // ── media ─────────────────────────────────────────────────────────────────────
   var OK_MIME = /^(image\/(jpeg|png|gif|webp)|video\/(mp4|webm|quicktime|3gpp)|audio\/(mpeg|mp4|ogg|wav|webm|aac)|application\/pdf|text\/(plain|csv)|application\/(msword|vnd\.openxmlformats-officedocument.*|vnd\.ms-excel|vnd\.ms-powerpoint|zip))$/i;
-  function uploadFile(file) {
+  function uploadFile(file, opts) {
     if (!S.formDone) return;
     if (file.size > MAX_BYTES) return toast("File is too large (max 25 MB).");
     if (file.type && !OK_MIME.test(file.type)) return toast("That file type isn't supported.");
     dropPills(); var cid = newCid(); var kind = (file.type || "").split("/")[0]; kind = kind === "image" || kind === "video" || kind === "audio" ? kind : "document";
+    var voice = !!(opts && opts.voice);
     var payload = { clientMsgId: cid, body: "" };
     if (S.replyTo) payload.replyToExternalId = S.replyTo.externalId; if (S.preChat) { payload.preChat = S.preChat; S.preChat = null; } clearReply();
-    var m = { direction: "in", body: "📎 " + kind, media: null, status: "queued", createdAt: new Date().toISOString(), _local: true };
-    var row = appendBubble(m, { anim: true }); S.pending[cid] = { el: row, payload: payload, status: "queued", file: file, kind: kind }; renderPending(cid); doUpload(cid);
+    var m = { direction: "in", body: (voice ? "🎤 voice message" : "📎 " + kind), media: null, status: "queued", createdAt: new Date().toISOString(), _local: true };
+    var row = appendBubble(m, { anim: true }); S.pending[cid] = { el: row, payload: payload, status: "queued", file: file, kind: kind, voice: voice }; renderPending(cid); doUpload(cid);
   }
   function doUpload(cid) {
     var p = S.pending[cid]; if (!p || !p.file) return; if (!S.socket || !S.socket.connected) { markPending(cid, "queued"); return; }
@@ -441,6 +485,7 @@
     xhr.onload = function () {
       if (xhr.status >= 200 && xhr.status < 300) { var media; try { media = JSON.parse(xhr.responseText); } catch (_e) { return markPending(cid, "failed"); }
         p.payload.media = { mediaKey: media.mediaKey, mediaUrl: media.mediaUrl, kind: media.kind, mimeType: media.mimeType, sizeBytes: media.sizeBytes, filename: media.filename };
+        if (p.voice) p.payload.media.voice = true;
         p.file = null; if (p._prog && p._prog.parentNode) p._prog.parentNode.removeChild(p._prog); sendPayload(cid); }
       else { markPending(cid, "failed"); toast("Upload failed."); }
     };
@@ -462,6 +507,71 @@
   function hideTyping() { if (typingRow) { if (typingRow.parentNode) typingRow.parentNode.removeChild(typingRow); typingRow = null; } }
   function markRead() { if (!S.socket || !S.socket.connected || !S.open || document.hidden) return; if (S.readTimer) return; S.readTimer = setTimeout(function () { S.readTimer = null; if (S.socket && S.socket.connected) S.socket.emit("visitor:read"); }, 400); }
 
+  // Visitor → agent typing (throttled; the agent inbox shows "customer is typing").
+  var typingStopTimer = null;
+  function emitTyping(on) { if (!S.socket || !S.socket.connected || on === S.typingOn) return; S.typingOn = on; S.socket.emit("visitor:typing", { on: on }); }
+  ta.addEventListener("input", function () { emitTyping(true); if (typingStopTimer) clearTimeout(typingStopTimer); typingStopTimer = setTimeout(function () { emitTyping(false); }, 2500); });
+
+  // ── notification sound (opt-in via config.soundEnabled) ──────────────────────
+  var audioCtx = null;
+  function playPing() {
+    var cfg = (S.cfg && S.cfg.config) || {};
+    if (!cfg.soundEnabled) return;
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      var t = audioCtx.currentTime;
+      [880, 1175].forEach(function (f, i) {
+        var o = audioCtx.createOscillator(), g = audioCtx.createGain(), at = t + i * 0.11;
+        o.type = "sine"; o.frequency.value = f;
+        g.gain.setValueAtTime(0.0001, at);
+        g.gain.exponentialRampToValueAtTime(0.13, at + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, at + 0.17);
+        o.connect(g); g.connect(audioCtx.destination); o.start(at); o.stop(at + 0.19);
+      });
+    } catch (_e) {}
+  }
+
+  // ── voice recording (MediaRecorder → upload as audio) ────────────────────────
+  var recBar = null, recTimer = null, recStart = 0;
+  function toggleRecord() {
+    if (S.recording) return stopRecord(true);
+    if (!S.formDone) return;
+    if (!navigator.mediaDevices || !window.MediaRecorder) return toast("Voice recording isn't supported here.");
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      var mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : (MediaRecorder.isTypeSupported("audio/ogg") ? "audio/ogg" : "");
+      var mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      var chunks = [];
+      mr.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+      mr.onstop = function () {
+        stream.getTracks().forEach(function (t) { t.stop(); });
+        var blob = new Blob(chunks, { type: mr.mimeType || "audio/webm" });
+        var send = S.recording && S.recording.send;
+        teardownRec();
+        if (send && blob.size > 0) {
+          var ext = blob.type.indexOf("ogg") >= 0 ? "ogg" : "webm";
+          uploadFile(new File([blob], "voice." + ext, { type: blob.type }), { voice: true });
+        }
+      };
+      S.recording = { mr: mr, send: false };
+      mr.start(); recStart = Date.now(); micBtn.classList.add("rec"); showRecBar();
+    }).catch(function () { toast("Microphone access denied."); });
+  }
+  function stopRecord(send) { if (!S.recording) return; S.recording.send = send; try { S.recording.mr.stop(); } catch (_e) { teardownRec(); } }
+  function teardownRec() { S.recording = null; micBtn.classList.remove("rec"); if (recTimer) { clearInterval(recTimer); recTimer = null; } if (recBar && recBar.parentNode) recBar.parentNode.removeChild(recBar); recBar = null; ibar.style.display = ""; }
+  function showRecBar() {
+    ibar.style.display = "none";
+    var t = el("span", { class: "rt" }, "0:00");
+    recBar = el("div", { class: "recbar" }, [
+      el("span", { class: "rd", "aria-hidden": "true" }), t,
+      el("button", { title: "Cancel", "aria-label": "Cancel recording", onclick: function () { stopRecord(false); } }, "✕"),
+      el("button", { class: "snd", title: "Send", "aria-label": "Send voice message", onclick: function () { stopRecord(true); } }, "Send"),
+    ]);
+    composer.insertBefore(recBar, fileInput);
+    recTimer = setInterval(function () { var s = Math.floor((Date.now() - recStart) / 1000); t.textContent = Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2); }, 250);
+  }
+  micBtn.addEventListener("click", toggleRecord);
+
   // ── connection ──────────────────────────────────────────────────────────────────
   function setConn(c) {
     S.conn = c; hdot.className = "hdot" + (c === "online" ? "" : c === "reconnecting" ? " re" : " off");
@@ -478,7 +588,11 @@
     socket.on("connect_error", function () { setConn("reconnecting"); });
     socket.on("ready", onReady);
     socket.on("history", function (p) {
-      var msgs = (p && p.messages) || []; if (!msgs.length) return;
+      var msgs = (p && p.messages) || [];
+      // "load earlier" availability travels with every history batch.
+      if (!S.oldestCursor && msgs.length) S.oldestCursor = { ts: msgs[0].createdAt, id: msgs[0].id };
+      S.hasMore = !!(p && p.hasMore); showEarlier(S.hasMore);
+      if (!msgs.length) return;
       S.lastGroup = null; var unseen = 0;
       msgs.forEach(function (m) { var isNew = !(m.id && S.byId[m.id]); upsert(m, true); if (isNew && m.direction === "out" && new Date(m.createdAt).getTime() > S.lastSeenTs) unseen++; });
       S.formDone = true; composer.style.display = ""; dropPills();

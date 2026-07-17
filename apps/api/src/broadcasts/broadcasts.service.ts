@@ -41,7 +41,11 @@ import {
   templateNamedPlaceholders,
 } from "@ccp/shared/template-render";
 import type { Channel } from "@ccp/shared/types";
-import { CHANNEL_CAPABILITIES, LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
+import {
+  BROADCASTABLE_CHANNELS,
+  CHANNEL_CAPABILITIES,
+  isBroadcastable,
+} from "@ccp/shared/providers/capabilities";
 import { checkTextCap } from "../lib/messaging/text-cap";
 import { resolveAudienceGroupMembers } from "@/lib/queries";
 import {
@@ -223,8 +227,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
 
     // Which channels can this team actually SEND on right now? A channel with a
     // registered provider but no/expired connection would otherwise be ranked
-    // "best" for a person and then dropped at send — reaching nobody.
-    const connected = await teamConnectedChannels(teamId);
+    // "best" for a person and then dropped at send — reaching nobody. Also gate
+    // on `isBroadcastable` so a person whose only live channel is the website
+    // widget (no durable push address) is never picked as a broadcast recipient.
+    const connectedAll = await teamConnectedChannels(teamId);
+    const connected = new Set([...connectedAll].filter(isBroadcastable));
 
     // One entry per person: keyed by customerId, or the contact id for singletons.
     const persons = new Map<
@@ -441,7 +448,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // a channel per recipient, so we check EVERY live channel and raise on the
     // first (strictest, byte-aware) bound any recipient could hit.
     if (effectiveKind === "freeform" && input.bodyText) {
-      const capChannels = freeformChannel ? [freeformChannel] : [...LIVE_CHANNELS];
+      const capChannels = freeformChannel ? [freeformChannel] : [...BROADCASTABLE_CHANNELS];
       for (const c of capChannels) {
         const over = checkTextCap(input.bodyText, CHANNEL_CAPABILITIES[c], c);
         if (over) {

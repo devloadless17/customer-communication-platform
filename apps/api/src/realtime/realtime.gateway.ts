@@ -96,6 +96,16 @@ export class RealtimeGateway
     this.widgetTypingRelay?.(conversationId, this.typing.snapshotConv(conversationId).length > 0);
   }
 
+  // Reverse direction: a website-widget visitor is typing → tell the agents.
+  // Called by WebchatwidgetGateway when it receives a `visitor:typing` frame.
+  // Emits to the agent conversation room only (same scope as `typing:update`).
+  notifyVisitorTyping(conversationId: string, on: boolean): void {
+    this.emitter.emitToConversation(conversationId, "conversation:visitor_typing", {
+      conversationId,
+      on,
+    });
+  }
+
   constructor(
     private readonly db: DbService,
     private readonly auth: SocketAuthService,
