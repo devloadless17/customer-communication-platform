@@ -201,7 +201,7 @@ function buildLanguageRules(config: AiConfigRow): string {
         : `Detect the language AND script of the customer's LATEST message (Arabic, French, English, Arabizi, etc.) and reply in that exact same language and script — always mirror what they just used, even if earlier messages differed. Only if you genuinely cannot tell, use ${config.defaultLanguage}.`;
   return nonEmpty(
     config.languagePolicy === "match_customer"
-      ? "- LANGUAGE SWITCHING (HIGHEST PRIORITY): reply in the language of the customer's MOST RECENT message. This OVERRIDES everything else — the earlier conversation, the default language, AND anything in the customer's memory/profile such as a stored 'preferred language'. If their last message is in English, reply FULLY in English EVEN IF memory says they usually prefer Arabic; French → French; Arabic → Arabic. The stored preferred language is only a fallback for when the customer hasn't written anything yet. Switch the INSTANT they switch, on the very next reply — never keep replying in the previous language out of momentum. The Lebanese/dialect/Arabizi rules below apply ONLY when you are actually replying in Arabic; ignore them entirely for an English or French reply."
+      ? "- LANGUAGE & SCRIPT MATCHING (HIGHEST PRIORITY): reply in the EXACT language AND script of the customer's MOST RECENT message. This OVERRIDES everything else — the earlier conversation, the default language, AND anything in the customer's memory/profile (a stored 'preferred_language', 'script', or 'dialect'). Rules: English last message → reply fully in English even if memory says they prefer Arabic; French → French; Arabic SCRIPT → Arabic script; ARABIZI (Lebanese written in Latin letters/numbers, e.g. 'kifak', 'Rawa2', 'shu bdna') → reply in ARABIZI, NOT Arabic script. Stored preferences are only a fallback for before the customer has written anything. Switch the INSTANT they switch, on the very next reply — never keep replying in the previous language/script out of momentum. The Lebanese/dialect rules below apply only when replying in Arabic (script OR Arabizi); ignore them for English/French."
       : "",
     supported.length ? `- Supported languages: ${supported.join(", ")}.` : "",
     `- Language policy: ${policy}`,
@@ -210,9 +210,13 @@ function buildLanguageRules(config: AiConfigRow): string {
       : "",
     config.lebaneseStyle ? `- Lebanese style guidance: ${config.lebaneseStyle}` : "",
     config.allowArabizi
-      ? "- Arabizi = Lebanese in Latin letters/numbers ('3'=ع, '7'=ح). ONLY use it when the customer's CURRENT message is itself in Arabizi — never default to it. If they wrote in Arabic script, French, or English, reply in THAT, not Arabizi. When you do mirror Arabizi: use ONLY plain a-z and the digits 2/3/5/6/7/9 — NEVER accented or foreign letters (é è ê ü ö ç à ñ), which are ALWAYS wrong. Clean Arabic script beats shaky Arabizi: if you're not fully confident spelling a word in Arabizi, write that whole reply in Arabic script instead. Never send broken or half-invented Arabizi."
+      ? "- Arabizi = Lebanese in Latin letters/numbers ('3'=ع, '7'=ح). Use it ONLY when the customer's CURRENT message is in Arabizi (if they wrote Arabic script / French / English, reply in THAT). When the customer DOES write Arabizi, you MUST reply in Arabizi to match them — do NOT switch to Arabic script. Write clean, standard Arabizi: only plain a-z and the digits 2/3/5/6/7/9, NEVER accented or foreign letters (é è ê ü ö ç à ñ). Only for a SINGLE word you genuinely cannot spell in Arabizi may you write that one word in Arabic script — never the whole reply. Keep it natural and Lebanese."
       : "- Do not use Arabizi; write Arabic in Arabic script.",
-    `- Script policy: ${config.scriptPolicy}.`,
+    config.scriptPolicy === "arabic"
+      ? "- Script policy: when replying in Arabic, ALWAYS use Arabic script (admin override — do not use Arabizi even if the customer does)."
+      : config.scriptPolicy === "latin"
+        ? "- Script policy: when replying in Arabic, ALWAYS use Latin-letter Arabizi (admin override)."
+        : "- Script policy: mirror the customer's script exactly — Arabic script when they use Arabic script, Arabizi when they use Arabizi (per the matching rule above).",
     config.codeSwitching
       ? "- Code-switching (mixing Arabic/French/English as Lebanese customers often do) is fine when it matches the customer."
       : "- Avoid mixing languages within a reply.",
