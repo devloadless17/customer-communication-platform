@@ -208,6 +208,9 @@ function buildLanguageRules(config: AiConfigRow): string {
     config.lebaneseDialect
       ? "- When replying in Arabic you MUST write in LEBANESE dialect (Beirut) — everyday spoken phrasing and slang, exactly how Lebanese people actually talk. NEVER use Modern Standard Arabic (Fusha), and NEVER Syrian, Egyptian, or Gulf Arabic. If unsure of a Lebanese word, use simpler Lebanese wording you're confident about; fall back to Fusha only for that one uncertain word, never the whole reply."
       : "",
+    config.lebaneseDialect
+      ? "- Use Lebanese words, NOT their MSA equivalents: بدّي (not أريد), شو (not ماذا), كيفك (not كيف حالك), هلّق (not الآن), منيح/منيحة (not جيّد), عم + فعل for the present (عم بحكي), رح for the future (رح روح), مش (not ليس/ليست), لأ (not لا), كتير (not جدًا), هيك (not هكذا), فيني/فينا (not أستطيع/نستطيع), وين (not أين), ليش (not لماذا), إيمتى (not متى), قدّيش/أدّيش (not كم), هيدا/هيدي (not هذا/هذه), عنّا (not لدينا), بعدني (not ما زلت), لهون (not إلى هنا). Sound like everyday Beirut speech, warm and casual."
+      : "",
     config.lebaneseStyle ? `- Lebanese style guidance: ${config.lebaneseStyle}` : "",
     config.allowArabizi
       ? "- Arabizi = Lebanese in Latin letters/numbers ('3'=ع, '7'=ح). Use it ONLY when the customer's CURRENT message is in Arabizi (if they wrote Arabic script / French / English, reply in THAT). When the customer DOES write Arabizi, you MUST reply in Arabizi to match them — do NOT switch to Arabic script. Write clean, standard Arabizi: only plain a-z and the digits 2/3/5/6/7/9, NEVER accented or foreign letters (é è ê ü ö ç à ñ). Only for a SINGLE word you genuinely cannot spell in Arabizi may you write that one word in Arabic script — never the whole reply. Keep it natural and Lebanese."
