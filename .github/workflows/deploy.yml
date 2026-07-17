@@ -581,13 +581,18 @@ jobs:
           # Optional: empty if the OPENAI_API_KEY secret isn't set — the AI
           # Assistant simply no-ops (no boot crash), same as ANTHROPIC_API_KEY.
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Optional: Azure Speech TTS (authentic ar-LB Lebanese voices). Empty =
+          # the assistant just uses OpenAI voices; picking an ar-LB voice falls
+          # back to text. No boot gate — same optional posture as OPENAI_API_KEY.
+          AZURE_SPEECH_KEY: ${{ secrets.AZURE_SPEECH_KEY }}
+          AZURE_SPEECH_REGION: ${{ secrets.AZURE_SPEECH_REGION }}
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,OPENAI_API_KEY,DOCKER_USERNAME,DOCKER_PASSWORD
+          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,OPENAI_API_KEY,AZURE_SPEECH_KEY,AZURE_SPEECH_REGION,DOCKER_USERNAME,DOCKER_PASSWORD
           script: |
             set -euo pipefail
             rm -rf /tmp/ccp-deploy
@@ -633,6 +638,12 @@ jobs:
             AI_MODEL_SUMMARY=gpt-4o-mini
             AI_STT_MODEL=gpt-4o-transcribe
             AI_TTS_MODEL=gpt-4o-mini-tts
+            # Azure Speech TTS — authentic Lebanese (ar-LB Layla/Rami) voices.
+            # Optional: empty = OpenAI voices only. Rendered every deploy, so set
+            # the values via the AZURE_SPEECH_KEY / AZURE_SPEECH_REGION GH secrets
+            # (not by hand on the VPS — hand edits get overwritten).
+            AZURE_SPEECH_KEY=${AZURE_SPEECH_KEY}
+            AZURE_SPEECH_REGION=${AZURE_SPEECH_REGION}
             # NEXT_PUBLIC_API_URL intentionally empty — Caddy fronts both
             # processes on a single origin so the browser falls back to
             # window.location for Socket.io.
