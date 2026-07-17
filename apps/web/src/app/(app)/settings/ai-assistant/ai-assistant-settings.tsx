@@ -51,20 +51,24 @@ const DAYS: Array<[string, string]> = [
   ["sat", "Saturday"],
   ["sun", "Sunday"],
 ];
-// OpenAI TTS voices. Descriptions are the commonly PERCEIVED character — OpenAI
-// does not officially assign gender; use "Preview" on the OpenAI docs to confirm
-// a fit before committing. Value = the voice id the API expects.
+// TTS voices. The ar-LB (Azure) voices are the ONLY authentically Lebanese
+// options — they need AZURE_SPEECH_KEY set on the server; if it isn't, picking
+// one falls back to text. The OpenAI voices are English-first (not truly
+// Lebanese); their descriptions are the commonly PERCEIVED character (OpenAI
+// doesn't officially assign gender). Value = the voice id the API expects.
 const OPENAI_VOICES: Array<[string, string]> = [
-  ["alloy", "Alloy — neutral, balanced"],
-  ["ash", "Ash — male, expressive"],
-  ["ballad", "Ballad — male, warm & emotive"],
-  ["coral", "Coral — female, warm & friendly"],
-  ["echo", "Echo — male, calm & clear"],
-  ["fable", "Fable — male, British, storytelling"],
-  ["onyx", "Onyx — male, deep & authoritative"],
-  ["nova", "Nova — female, bright & energetic"],
-  ["sage", "Sage — female, calm & gentle"],
-  ["shimmer", "Shimmer — female, soft & warm"],
+  ["ar-LB-LaylaNeural", "🇱🇧 Layla — Lebanese, female (Azure)"],
+  ["ar-LB-RamiNeural", "🇱🇧 Rami — Lebanese, male (Azure)"],
+  ["alloy", "Alloy — neutral, balanced (OpenAI)"],
+  ["ash", "Ash — male, expressive (OpenAI)"],
+  ["ballad", "Ballad — male, warm & emotive (OpenAI)"],
+  ["coral", "Coral — female, warm & friendly (OpenAI)"],
+  ["echo", "Echo — male, calm & clear (OpenAI)"],
+  ["fable", "Fable — male, British, storytelling (OpenAI)"],
+  ["onyx", "Onyx — male, deep & authoritative (OpenAI)"],
+  ["nova", "Nova — female, bright & energetic (OpenAI)"],
+  ["sage", "Sage — female, calm & gentle (OpenAI)"],
+  ["shimmer", "Shimmer — female, soft & warm (OpenAI)"],
 ];
 
 // Broad language set so the assistant can be told it speaks more than ar/en —
