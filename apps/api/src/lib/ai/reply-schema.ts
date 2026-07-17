@@ -59,7 +59,8 @@ export const REPLY_SCHEMA: Record<string, unknown> = {
     replyScript: {
       type: "string",
       enum: ["arabic", "latin"],
-      description: "Script the reply text is written in.",
+      description:
+        "Set 'latin' when the customer wrote in Arabizi — you STILL write replyText in Arabic script; the system transliterates it to Arabizi. Set 'arabic' otherwise.",
     },
     detectedCustomerLanguage: {
       type: "string",
