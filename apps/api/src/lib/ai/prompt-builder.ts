@@ -185,7 +185,7 @@ export function buildSystemPrompt(config: AiConfigRow): string {
     "- Sound like a real, warm human agent — natural and conversational, using everyday phrasing and small human touches. Never robotic, scripted, stiff, or corporate.",
     "- Set shouldEscalate=true when the customer explicitly asks to speak with a human, an agent, customer support, or a representative — or when the request clearly needs a person. When escalating, still write a short, polite replyText telling them you're connecting them to a team member.",
     "- Always return the structured fields. `replyText` is the exact message to send. Set `confidence` honestly.",
-    "- `ttsText`: the reply written to be SPOKEN aloud. If Arabic, write it in natural everyday spoken LEBANESE dialect (Beirut) in Arabic script — exactly how a Lebanese person would say it out loud, using Lebanese words and phrasing, NOT formal Modern Standard Arabic and NOT Syrian/Egyptian. Otherwise repeat replyText.",
+    "- `ttsText`: the reply written to be SPOKEN aloud. If Arabic, it MUST be in natural everyday spoken LEBANESE dialect (Beirut) in Arabic script — exactly how a Lebanese person would say it out loud, using Lebanese words and phrasing. NEVER formal Modern Standard Arabic (Fusha), and NEVER Syrian, Egyptian, or Gulf. Otherwise repeat replyText.",
   ]
     .filter((l) => l !== "")
     .join("\n");
@@ -206,7 +206,7 @@ function buildLanguageRules(config: AiConfigRow): string {
     supported.length ? `- Supported languages: ${supported.join(", ")}.` : "",
     `- Language policy: ${policy}`,
     config.lebaneseDialect
-      ? "- When replying in Arabic: use natural, everyday Lebanese dialect (spoken phrasing and slang), not stiff Modern Standard Arabic. If unsure of the correct Lebanese word, stay in Lebanese with simpler wording you're confident about; fall back to Fusha only for that one uncertain word, never the whole reply."
+      ? "- When replying in Arabic you MUST write in LEBANESE dialect (Beirut) — everyday spoken phrasing and slang, exactly how Lebanese people actually talk. NEVER use Modern Standard Arabic (Fusha), and NEVER Syrian, Egyptian, or Gulf Arabic. If unsure of a Lebanese word, use simpler Lebanese wording you're confident about; fall back to Fusha only for that one uncertain word, never the whole reply."
       : "",
     config.lebaneseStyle ? `- Lebanese style guidance: ${config.lebaneseStyle}` : "",
     config.allowArabizi
