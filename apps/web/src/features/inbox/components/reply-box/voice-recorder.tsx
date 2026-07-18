@@ -47,6 +47,10 @@ const MIME_CANDIDATES = [
  * still hit Send (or Cancel) on the bar.
  */
 const MAX_RECORDING_SEC = 300; // 5 minutes
+/** Minimum gap between committed mic-level samples — ~30Hz, the rate the
+ *  meter's comment always claimed. Enforced because rAF runs at display
+ *  refresh (up to 120Hz) and each sample re-renders the whole composer. */
+const LEVEL_SAMPLE_MS = 33;
 /** Show the remaining-time countdown in the bar once within this window. */
 const COUNTDOWN_FROM_SEC = 15;
 
@@ -105,6 +109,10 @@ export function useVoiceRecorder(opts: {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const mimeRef = useRef<string>("");
+  /** Synchronous "a start() is in flight" latch — see the note in start(). */
+  const startingRef = useRef(false);
+  /** Timestamp of the last committed mic-level sample (see the ~30Hz gate). */
+  const lastSampleRef = useRef(0);
 
   const cleanup = () => {
     if (tickRef.current !== null) {
@@ -180,7 +188,33 @@ export function useVoiceRecorder(opts: {
   };
 
   const start = async (): Promise<void> => {
-    if (isRecording) return;
+    // Re-entrancy guard must be SYNCHRONOUS. `isRecording` is React state and
+    // isn't set until the very end of this function, after an await on
+    // getUserMedia — which can sit for seconds on a permission prompt or a
+    // cold device open. The mic button stays mounted and enabled for that whole
+    // window (the toolbar only swaps to RecordingBar on `isRecording`), so a
+    // second click re-entered here and overwrote streamRef / audioCtxRef /
+    // analyserRef / rafRef. cleanup() can only tear down the LAST set, so the
+    // first stream's tracks were never stopped: the OS mic indicator stayed lit
+    // after recording ended, and an orphaned AudioContext leaked each time.
+    // Chrome hard-caps concurrent AudioContexts around 6, so a handful of
+    // double-taps in a long-lived tab killed voice notes for the session with
+    // the mic left hot.
+    // `streamRef` is checked too, not just the two flags: between startInner()
+    // returning and React flushing setIsRecording(true), the state closure
+    // still reads false and the latch has already been released, so the flags
+    // alone leave a (small) reachable window. A live stream is the synchronous
+    // source of truth for "already recording" — cleanup() nulls it on stop.
+    if (isRecording || startingRef.current || streamRef.current) return;
+    startingRef.current = true;
+    try {
+      await startInner();
+    } finally {
+      startingRef.current = false;
+    }
+  };
+
+  const startInner = async (): Promise<void> => {
     const mime = pickRecorderMime();
     if (!mime) {
       onErrorRef.current(
@@ -218,6 +252,15 @@ export function useVoiceRecorder(opts: {
     // ~30Hz and shift it into a fixed-length ring so the bars animate
     // left-to-right like WhatsApp's recording UI. Cheaper than a real
     // FFT visualizer and visually indistinguishable at this size.
+    //
+    // The ~30Hz is now ENFORCED (see lastSampleRef). The loop is driven by
+    // requestAnimationFrame, so it actually ran at the display's refresh rate —
+    // 60Hz, or 120Hz on a high-refresh screen — and each tick committed a state
+    // update that re-renders the WHOLE composer, TextEncoder byte-count and
+    // capability derivation included. A recording at the 5-minute cap on a
+    // 120Hz display was ~36,000 full composer renders instead of the ~9,000
+    // this comment budgets for. The rAF pump stays (it self-throttles in
+    // background tabs); only the setState is gated.
     const AudioCtxCtor: typeof AudioContext | undefined =
       typeof window !== "undefined"
         ? (window.AudioContext ??
@@ -237,6 +280,12 @@ export function useVoiceRecorder(opts: {
         const data = new Uint8Array(analyser.frequencyBinCount);
         const loop = () => {
           if (!analyserRef.current) return;
+          const now = performance.now();
+          if (now - lastSampleRef.current < LEVEL_SAMPLE_MS) {
+            rafRef.current = requestAnimationFrame(loop);
+            return;
+          }
+          lastSampleRef.current = now;
           analyserRef.current.getByteTimeDomainData(data);
           let sum = 0;
           for (let i = 0; i < data.length; i++) {

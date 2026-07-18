@@ -93,6 +93,14 @@ export function rowMatchesFilterFor(
  */
 const MESSAGE_DEDUP_CAP = 400;
 
+/** Ceiling on conversations retained in the loaded slice — see `loadMore`. */
+const MAX_LOADED_CONVERSATIONS = 3_000;
+
+/** Cap for the latest-known-contact overlay (see `latestContactRef`). Large
+ *  enough to cover any realistic loaded slice plus recent team activity, small
+ *  enough that a day-long tab can't accumulate a tenant's contact book. */
+const LATEST_CONTACT_CAP = 2_000;
+
 /**
  * Holds the list of conversations and folds in incremental Socket.io events
  * so the inbox updates without a refetch.
@@ -205,9 +213,25 @@ export function useTeamEvents(
   // page that still lists a just-moved contact under its OLD stage re-adds the
   // row to the wrong stage filter — the "changed stage fast 2-3 times, header
   // right but sidebar wrong" bug. Server frames are in-order + version-CAS'd,
-  // so the latest write here reflects the latest commit. Grow-only within a
-  // session; one small entry per contact the agent touches — negligible.
-  const latestContactRef = useRef<Map<string, Contact>>(new Map());
+  // so the latest write here reflects the latest commit.
+  //
+  // CAPPED (was grow-only). The original note here read "one small entry per
+  // contact the agent touches — negligible", but the only writer is the
+  // `contact:updated` handler and that frame is `emitToTeam`: this records a
+  // contact for every edit by ANY teammate and every workflow tag/stage change,
+  // on contacts this agent has never opened. In a 50k-contact tenant with 40
+  // agents, an inbox tab left open all day accumulates tens of thousands of
+  // FULL Contact objects (customFields, tags, socialProfile JSON) that nothing
+  // can reclaim short of a reload.
+  //
+  // Every consumer (the two resync overlays and the row-merge below) is a
+  // best-effort correction — a miss just means that row keeps the server's
+  // value, which is the pre-overlay behaviour — so FIFO eviction is safe.
+  // Same shape as `seenMessageIdsRef` below.
+  const latestContactRef = useRef<{ map: Map<string, Contact>; queue: string[] }>({
+    map: new Map(),
+    queue: [],
+  });
 
   // Replay-dedupe for `message:new` (see MESSAGE_DEDUP_CAP). Keyed by the stable
   // message id — NOT by lastMessageAt, which is second-granular for WhatsApp and
@@ -395,10 +419,42 @@ export function useTeamEvents(
   useEffect(() => {
     cursorRef.current = nextCursor;
   }, [nextCursor]);
+  // Mirrors conversations.length so loadMore can check the ceiling without
+  // taking `conversations` as a dep (which would rebuild the callback on every
+  // realtime frame, re-running every effect that lists it).
+  const loadedCountRef = useRef(0);
+  useEffect(() => {
+    loadedCountRef.current = conversations.length;
+  }, [conversations]);
 
   const loadMore = useCallback(() => {
     const cursor = cursorRef.current;
     if (!cursor) return;
+    // Ceiling on the retained slice. Paging appended without any bound, so an
+    // agent triaging a 50k-conversation inbox for a few hours retained every
+    // page as a full ConversationWithRefs (conversation + contact +
+    // assignedUser). Beyond the heap, EVERY accepted realtime frame scans this
+    // array, and in "longest waiting" sort — which persists to localStorage, so
+    // it survives sessions — each change re-sorts a copy of it. At 40 online
+    // agents that is several frames a second doing O(n log n) over a slice with
+    // no ceiling.
+    //
+    // We stop ADDING rather than trimming what is already loaded: trimming the
+    // head would make rows disappear underneath an agent who has scrolled into
+    // that region and would shift the virtualizer's total height under them.
+    // Refusing to grow past the cap has no such effect — the list simply stops
+    // extending, and finding something older is what search and filters are
+    // for. The inbox is the app's highest-quality surface; a bounded list is
+    // worth more here than an unbounded one that eventually stutters.
+    //
+    // Dropping the cursor (rather than just returning) hides the Load-more
+    // affordance instead of leaving a button that silently does nothing —
+    // the same move the thread slice makes when it hits MAX_THREAD_SLICE.
+    if (loadedCountRef.current >= MAX_LOADED_CONVERSATIONS) {
+      cursorRef.current = null;
+      setNextCursor(null);
+      return;
+    }
     setLoadingMore(true);
     const params = filterParams(filterRef.current);
     params.set("cursor", cursor);
@@ -578,7 +634,7 @@ export function useTeamEvents(
         // correcting. Drop also when the page omits the contact entirely yet
         // its rows are all accounted for — handled by the next clean resync.
         {
-          const overlay = latestContactRef.current;
+          const overlay = latestContactRef.current.map;
           if (overlay.size > 0) {
             const pageStageByContact = new Map(
               page.items.map((c) => [c.contact.id, c.contact.stageId ?? null]),
@@ -587,6 +643,9 @@ export function useTeamEvents(
               const pageStage = pageStageByContact.get(contactId);
               if (pageStage !== undefined && pageStage === (c.stageId ?? null)) {
                 overlay.delete(contactId);
+                const q = latestContactRef.current.queue;
+                const qi = q.indexOf(contactId);
+                if (qi >= 0) q.splice(qi, 1);
               }
             }
           }
@@ -594,7 +653,7 @@ export function useTeamEvents(
 
         setConversations((prev) => {
           const freshIds = new Set(page.items.map((c) => c.conversation.id));
-          const overlay = latestContactRef.current;
+          const overlay = latestContactRef.current.map;
 
           // The HTTP resync can be STALE — it may have started before a
           // stage/assign/status change committed server-side, so its rows can
@@ -796,7 +855,7 @@ export function useTeamEvents(
           // Apply the latest-known contact overlay so a stage/name change that
           // landed via socket between request + response isn't clobbered by the
           // fetched copy (same authority rule resyncOnce uses).
-          const latest = latestContactRef.current.get(row.contact.id);
+          const latest = latestContactRef.current.map.get(row.contact.id);
           const reconciled = latest ? { ...row, contact: latest } : row;
           // Suppress the unread badge for the thread the agent is viewing — the
           // server markRead clears it a beat later, so without this it flashes.
@@ -1199,7 +1258,15 @@ export function useTeamEvents(
       // Record the latest-known contact so a later (possibly stale) resync can
       // correct its page rows even for a contact whose row we just spliced OUT.
       // In-order socket frames mean the last write wins = latest commit.
-      latestContactRef.current.set(contact.id, contact);
+      {
+        const overlay = latestContactRef.current;
+        if (!overlay.map.has(contact.id)) overlay.queue.push(contact.id);
+        overlay.map.set(contact.id, contact);
+        if (overlay.queue.length > LATEST_CONTACT_CAP) {
+          const evicted = overlay.queue.shift();
+          if (evicted !== undefined) overlay.map.delete(evicted);
+        }
+      }
       setConversations((prev) => {
         const f = filterRef.current;
         const isStageFilter = f?.kind === "stage";

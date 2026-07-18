@@ -650,6 +650,23 @@ export function useConversationEvents(
         // go further back the user can use search → replaceWithContext,
         // which swaps the slice rather than appending.
         const MAX_THREAD_SLICE = 500;
+        // SCOPE, stated plainly: this cap governs PAGING only. Live
+        // `message:new` appends (and the reconnect recovery merges) have no
+        // ceiling, so a thread parked open on a very chatty conversation can
+        // grow past it, and every subsequent message re-runs the timeline
+        // memo, the day-label pass and the continuation-flag pass over the
+        // whole slice.
+        //
+        // NOT fixed here on purpose. Trimming the head on append would yank
+        // content out from under an agent who has scrolled up to read history —
+        // the same hazard as trimming the conversation list — so a correct fix
+        // needs the "pinned to the bottom" signal that currently lives in
+        // useChatScroll, plus re-arming `reachedSliceCap` so the Load-older
+        // affordance comes back for what was dropped. That is real plumbing
+        // between the component and this hook, not a one-line guard, and the
+        // reachability is low: it needs 500+ messages in a SINGLE live session
+        // on ONE conversation. TRIGGER: an agent reporting the thread getting
+        // sluggish after hours on one busy chat.
         // The caller's `commit` runs `run` synchronously (flushSync), so by
         // the time it returns the DOM reflects the prepend and `added` is set.
         commit(() => {
