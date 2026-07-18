@@ -29,6 +29,7 @@ import {
 import { createTokenBucket } from "../common/token-bucket";
 import { originAllowed } from "./origin-allow";
 import { widgetRoom } from "./rooms";
+import { setWidgetVisitorSocketCounter } from "./widget-metrics";
 import { frameFromMessage, type WidgetMessageFrame } from "./webchatwidget-frame";
 
 const CHANNEL = "webchatwidget" as const;
@@ -189,6 +190,7 @@ export class WebchatwidgetGateway
         }
       })();
     });
+    setWidgetVisitorSocketCounter(() => server.sockets.size);
     this.logger.log('Website-widget gateway ready (namespace "/widget")');
   }
 

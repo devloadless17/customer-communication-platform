@@ -249,7 +249,7 @@ export async function ingestEvents(
 export function isTransientDbError(err: unknown): boolean {
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
     return (
-      err.code === "P2024" /* pool timeout */ ||
+      err.code === "P2024" /* pool timeout (Rust engine only — see below) */ ||
       err.code === "P2034" /* write conflict / deadlock */ ||
       err.code === "P1001" /* server unreachable */ ||
       err.code === "P1002" /* connection timeout */ ||
@@ -258,7 +258,77 @@ export function isTransientDbError(err: unknown): boolean {
   }
   // DB unreachable at connect time surfaces as an init error, not a known
   // request error — also transient.
-  return err instanceof Prisma.PrismaClientInitializationError;
+  if (err instanceof Prisma.PrismaClientInitializationError) return true;
+  return isDriverTransientError(err);
+}
+
+/**
+ * Transient faults raised by the `pg` DRIVER rather than by Prisma.
+ *
+ * This function exists because of a silent regression: pool exhaustion used to
+ * arrive as `PrismaClientKnownRequestError` P2024, emitted by Prisma's own Rust
+ * engine pool. Since the move to driver adapters (`@prisma/adapter-pg`, see
+ * DbService) the pool is `pg-pool`, whose acquisition timeout is a BARE
+ * `Error("timeout exceeded when trying to connect")` — no `.code`, not a Prisma
+ * error class. So the P2024 branch above became unreachable, and a pool timeout
+ * fell through to "permanent poison": the event was swallowed, the webhook
+ * answered 200 {dropped}, and Meta — which has no history sync — never
+ * redelivered. In other words, inbound customer messages were dropped precisely
+ * when the system was busiest, which is the exact failure the surrounding
+ * comments say must never happen.
+ *
+ * Matches on SQLSTATE where the driver provides one, and on message shape for
+ * the pool/socket errors that carry no code. Erring toward "transient" is the
+ * safe direction here: a redelivery is deduped by (teamId, channel, externalId),
+ * whereas a wrong "permanent" verdict loses a customer's message for good.
+ */
+export function isDriverTransientError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+
+  // SQLSTATE from node-postgres, when present.
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === "string") {
+    if (
+      code === "53300" /* too_many_connections */ ||
+      code === "53400" /* configuration_limit_exceeded */ ||
+      code === "57P01" /* admin_shutdown (failover/restart) */ ||
+      code === "57P02" /* crash_shutdown */ ||
+      code === "57P03" /* cannot_connect_now (starting up) */ ||
+      code === "08000" /* connection_exception */ ||
+      code === "08001" /* sqlclient_unable_to_establish_sqlconnection */ ||
+      code === "08003" /* connection_does_not_exist */ ||
+      code === "08004" /* rejected */ ||
+      code === "08006" /* connection_failure */ ||
+      code === "40001" /* serialization_failure */ ||
+      code === "40P01" /* deadlock_detected */ ||
+      code === "55P03" /* lock_not_available */ ||
+      code === "57014" /* query_canceled — our statement_timeout */ ||
+      // Socket-level failures reaching us as errno strings.
+      code === "ECONNREFUSED" ||
+      code === "ECONNRESET" ||
+      code === "ETIMEDOUT" ||
+      code === "EPIPE" ||
+      code === "EHOSTUNREACH" ||
+      code === "ENOTFOUND"
+    ) {
+      return true;
+    }
+  }
+
+  const message = (err as { message?: unknown }).message;
+  if (typeof message !== "string" || message.length === 0) return false;
+  const m = message.toLowerCase();
+  return (
+    // pg-pool acquisition timeout — the regression this function was written for.
+    m.includes("timeout exceeded when trying to connect") ||
+    m.includes("connection terminated due to connection timeout") ||
+    m.includes("connection terminated unexpectedly") ||
+    m.includes("connection ended unexpectedly") ||
+    m.includes("too many clients already") ||
+    m.includes("the database system is starting up") ||
+    m.includes("terminating connection due to administrator command") ||
+    m.includes("cannot use a pool after calling end")
+  );
 }
 
 /**

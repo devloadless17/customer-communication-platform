@@ -10,6 +10,7 @@ import {
   type JobFailureReport,
 } from "../common/job-failure-metrics";
 import { getRedisConnection } from "../lib/workflows/queue";
+import { widgetVisitorSocketCount } from "../webchatwidget/widget-metrics";
 
 interface PgPoolReport {
   max: number;
@@ -42,6 +43,13 @@ interface HealthReport {
     oldestPendingSec: number | null;
     stale: boolean;
   };
+  /** Live website-chat visitor sockets on the "/widget" namespace. The widget is
+   *  embedded on customers' own sites, so when it breaks THEY notice before we do
+   *  and there is otherwise no server-side signal at all — every other probe here
+   *  stays green while the channel is dark. Also the capacity number to watch:
+   *  visitor sockets are the fastest-growing use of this process's memory.
+   *  Reported only; never affects ok/503. */
+  widgetVisitorSockets: number;
 }
 
 /**
@@ -99,6 +107,7 @@ export class HealthController {
       },
       jobFailures: getJobFailureMetrics(),
       outboxLag,
+      widgetVisitorSockets: widgetVisitorSocketCount(),
     };
     if (!dbOk) {
       // 503 ONLY when Postgres — the routing-critical dependency — is down. A

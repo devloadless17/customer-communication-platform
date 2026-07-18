@@ -353,8 +353,15 @@ export class MetaWebhookController implements OnModuleDestroy {
       //     leaves the row dropped, recoverable by replaying the raw payload
       //     manually if it matters.
       if (isTransientDbError(err)) {
+        // Label the actual cause: driver-level faults (pool exhaustion, socket
+        // resets) are neither a Prisma error code nor an init error, and calling
+        // them "init" sent incident triage down the wrong path.
         const code =
-          err instanceof Prisma.PrismaClientKnownRequestError ? err.code : "init";
+          err instanceof Prisma.PrismaClientKnownRequestError
+            ? err.code
+            : err instanceof Prisma.PrismaClientInitializationError
+              ? "init"
+              : `driver:${String((err as { code?: unknown })?.code ?? "timeout")}`;
         this.logger.warn(
           `[${teamId}] transient ingest failure (${code}); asking Meta to retry`,
         );

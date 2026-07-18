@@ -14,9 +14,17 @@
  * is what actually gates which sites may open a widget socket.
  */
 export function originAllowed(origin: string | null, allowedOrigins: string[]): boolean {
-  // No Origin header (native/non-browser client). Allow — the site key already
-  // scoped the team; a headless client can't read a real visitor's data.
-  if (!origin) return true;
+  const configured = (allowedOrigins ?? []).map((o) => o.trim().toLowerCase()).filter(Boolean);
+  const isProd = process.env.NODE_ENV === "production";
+
+  // No Origin header (native/non-browser client). Browsers ALWAYS send Origin on a
+  // WebSocket handshake, so a missing one means a script, not a visitor — and a
+  // script can also set Origin to anything it likes. That means this check only
+  // ever constrains honest browsers, and the escapes below are what a bot uses to
+  // walk around a configured allow-list. So: once an org has actually locked its
+  // list down, honour that and refuse the no-Origin case. An org that has NOT
+  // configured anything keeps the permissive behaviour, so no live widget breaks.
+  if (!origin) return configured.length === 0;
 
   let host: string;
   try {
@@ -24,7 +32,13 @@ export function originAllowed(origin: string | null, allowedOrigins: string[]): 
   } catch {
     return false;
   }
-  if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") return true;
+  // Loopback is a DEV convenience (embed test page, local development). In
+  // production it was a free bypass of any allow-list: `Origin: http://localhost`
+  // is one header on a scripted client.
+  if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") {
+    if (!isProd || configured.length === 0) return true;
+    return configured.some((e) => e === host || e === `*.${host}`);
+  }
 
   // Always allow our OWN app origin — the inline-embed / any first-party host page
   // (e.g. a page on this app's domain) must pass even when the org locked its
@@ -38,10 +52,9 @@ export function originAllowed(origin: string | null, allowedOrigins: string[]): 
     }
   }
 
-  const list = (allowedOrigins ?? []).map((o) => o.trim().toLowerCase()).filter(Boolean);
-  if (list.length === 0) return true; // not configured yet → permissive
+  if (configured.length === 0) return true; // not configured yet → permissive
 
-  return list.some((entry) => {
+  return configured.some((entry) => {
     if (entry.startsWith("*.")) {
       const base = entry.slice(2);
       return host === base || host.endsWith(`.${base}`);
