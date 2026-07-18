@@ -47,12 +47,37 @@ const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
  *     R2 and hand back a media ref the widget then attaches to a `visitor:message`.
  *   - GET  /api/widget/media/:messageId — serve a visitor THEIR OWN conversation's
  *     media (agent replies + their own uploads), scoped by (site key, visitor id).
- * Appearance/pre-chat config is delivered over the socket (`ready` event), not
- * here, so there's no cross-origin config fetch.
+ *   - GET  /api/widget/config — appearance config for first paint (see below).
  */
 @Controller("api/widget")
 export class WebchatwidgetPublicController {
   constructor(private readonly db: DbService) {}
+
+  /**
+   * Appearance config for the launcher's FIRST PAINT.
+   *
+   * This exists so the widget does not have to hold a WebSocket open just to learn
+   * its own colours. `boot()` used to connect on every page load, which meant the
+   * number of live sockets equalled the number of people *browsing* every customer
+   * site — not the number of people chatting — and that is the dominant scaling
+   * cost of this channel. With config over plain HTTP the widget paints correctly
+   * while staying socket-less until the visitor actually opens the chat (or has an
+   * existing thread to receive replies on).
+   *
+   * Returns exactly the shape the socket's `ready` event carries, so the widget has
+   * one code path for both. Same auth boundary as the rest of this controller:
+   * public site key + origin allow-list. Nothing here is visitor-scoped, so there
+   * is no per-visitor data to leak — it is the same config already embedded in
+   * every page that renders the widget.
+   */
+  @Get("config")
+  async getConfig(
+    @Query("key") siteKey: string | undefined,
+    @Headers("origin") origin: string | undefined,
+  ): Promise<{ widgetId: string; name: string; config: unknown }> {
+    const resolved = await this.resolve(siteKey, origin);
+    return { widgetId: resolved.widgetId, name: resolved.name, config: resolved.config };
+  }
 
   @Post("media")
   @UseGuards(WebchatwidgetUploadRateLimitGuard)

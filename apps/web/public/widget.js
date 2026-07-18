@@ -44,10 +44,32 @@
   var K = {
     visitor: "ccp_wc_visitor_" + siteKey, draft: "ccp_wc_draft_" + siteKey,
     seen: "ccp_wc_seen_" + siteKey, outbox: "ccp_wc_outbox_" + siteKey,
+    // "this visitor has chatted before" — drives eager connect on later visits so
+    // agent replies and the unread badge still arrive without opening the panel.
+    chatted: "ccp_wc_chatted_" + siteKey,
   };
-  function lsGet(k) { try { return localStorage.getItem(k); } catch (_e) { return null; } }
-  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (_e) {} }
-  function lsDel(k) { try { localStorage.removeItem(k); } catch (_e) {} }
+  // Storage access itself can THROW (Safari private mode, "block all cookies"), so
+  // every call is guarded. Fall back localStorage → sessionStorage → in-memory:
+  // without the session tier a storage-blocked browser minted a fresh visitorId on
+  // every pageview, so one person browsing five pages created five Contacts and
+  // five Conversations in the client's inbox, and a mid-chat refresh orphaned the
+  // thread. sessionStorage at least holds the identity for the tab's lifetime.
+  var memStore = {};
+  function lsGet(k) {
+    try { var v = localStorage.getItem(k); if (v !== null) return v; } catch (_e) {}
+    try { var s = sessionStorage.getItem(k); if (s !== null) return s; } catch (_e) {}
+    return Object.prototype.hasOwnProperty.call(memStore, k) ? memStore[k] : null;
+  }
+  function lsSet(k, v) {
+    memStore[k] = v;
+    try { localStorage.setItem(k, v); return; } catch (_e) {}
+    try { sessionStorage.setItem(k, v); } catch (_e) {}
+  }
+  function lsDel(k) {
+    delete memStore[k];
+    try { localStorage.removeItem(k); } catch (_e) {}
+    try { sessionStorage.removeItem(k); } catch (_e) {}
+  }
   var reduceMotion = false;
   try { reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (_e) {}
 
@@ -102,7 +124,24 @@
   // ── styles ───────────────────────────────────────────────────────────────
   var host = el("div", { id: "ccp-webchat-root" });
   host.style.all = "initial";
-  document.body.appendChild(host);
+  // Mount on <html>, not <body>, and force `position:fixed` on the host itself.
+  // Two ways a real customer site broke the widget otherwise:
+  //   1. `all:initial` makes the host `display:inline`, so a host page whose body
+  //      is `display:grid|flex` treated it as a track/item — adding a stray empty
+  //      row plus its gap, i.e. a visible layout shift on THEIR page.
+  //   2. Any ancestor with transform/filter/will-change (page-transition wrappers,
+  //      parallax libraries) becomes the containing block for `position:fixed`, so
+  //      the launcher and panel anchored to that element instead of the viewport
+  //      and rendered in the wrong place or off-screen.
+  // Escaping <body> and pinning the host sidesteps both. Inline mode re-parents
+  // into the target element below and clears these.
+  host.style.setProperty("position", "fixed", "important");
+  host.style.setProperty("top", "0", "important");
+  host.style.setProperty("left", "0", "important");
+  host.style.setProperty("width", "0", "important");
+  host.style.setProperty("height", "0", "important");
+  host.style.setProperty("z-index", "2147483647", "important");
+  (document.documentElement || document.body).appendChild(host);
   var shadow = host.attachShadow({ mode: "open" });
   var css = [
     ":host,*{box-sizing:border-box}",
@@ -235,7 +274,16 @@
   root.appendChild(panel); // panel stays inside the shadow root (keeps its styles)
   if (INLINE) {
     var tgt = document.querySelector(A.target);
-    if (tgt) { tgt.appendChild(host); host.style.display = "block"; host.style.width = "100%"; host.style.height = "100%"; root.classList.add("inl"); }
+    if (tgt) {
+      tgt.appendChild(host);
+      // Undo the floating-mode pinning above (set with !important, so these must
+      // be too) — inline embeds fill their container instead of the viewport.
+      host.style.setProperty("position", "static", "important");
+      host.style.setProperty("display", "block", "important");
+      host.style.setProperty("width", "100%", "important");
+      host.style.setProperty("height", "100%", "important");
+      root.classList.add("inl");
+    }
     else console.warn("[webchat] target not found:", A.target);
   }
   var lightbox = el("div", { class: "lb", "aria-hidden": "true" }); root.appendChild(lightbox);
@@ -258,6 +306,8 @@
   if (vv) { vv.addEventListener("resize", syncViewport); vv.addEventListener("scroll", syncViewport); }
   function openPanel() {
     if (INLINE) return;
+    // Opening the chat is the moment a socket is actually needed (see boot()).
+    ensureConnected();
     S.open = true; panel.classList.add("open"); requestAnimationFrame(function () { panel.classList.add("in"); });
     if (launcher) launcher.style.display = "none";
     clearUnread(); if (S.formDone) setTimeout(function () { ta.focus(); }, 40); scrollToBottom(true); markRead();
@@ -417,9 +467,16 @@
       grp = { sender: senderKey, day: day };
       frag.appendChild(mkRow(m, grouped, false));
     });
+    // Anchor the viewport to the message the visitor was reading. `.body` sets
+    // scroll-behavior:smooth, which makes an assignment to scrollTop ANIMATE — so
+    // the restore visibly slid instead of holding position. Force an instant jump
+    // for the restore, then hand smooth scrolling back.
     var prevH = bodyEl.scrollHeight, prevTop = bodyEl.scrollTop;
+    var prevBehavior = bodyEl.style.scrollBehavior;
+    bodyEl.style.scrollBehavior = "auto";
     bodyEl.insertBefore(frag, anchor);
     bodyEl.scrollTop = prevTop + (bodyEl.scrollHeight - prevH);
+    bodyEl.style.scrollBehavior = prevBehavior || "";
   }
   function showEarlier(on) { earlierBar.style.display = on ? "" : "none"; }
   function loadOlder() {
@@ -436,7 +493,18 @@
 
   function upsert(m, quiet) {
     if (m.externalId) for (var cid in S.pending) { if (m.externalId.slice(-cid.length) === cid) { removePending(cid); break; } }
-    if (m.id && S.byId[m.id]) { var e = S.byId[m.id]; e.msg = m; if (e.el._bub) e.el._bub.innerHTML = bubbleHtml(m); if (e.el._meta) e.el._meta.innerHTML = metaHtml(m, m.direction === "in"); wireMedia(e.el._bub); return; }
+    // Re-render only what actually CHANGED. The server replays history on every
+    // reconnect (and mobile tabs reconnect constantly on wake/network flap), so
+    // unconditionally reassigning innerHTML rebuilt every <img>/<video>/<audio> in
+    // the thread — re-downloading images and cutting off a voice note or video
+    // mid-playback. Comparing the rendered string first makes a redundant replay
+    // a no-op, which is the common case.
+    if (m.id && S.byId[m.id]) {
+      var e = S.byId[m.id]; e.msg = m;
+      if (e.el._bub) { var h = bubbleHtml(m); if (e.el._bub.innerHTML !== h) { e.el._bub.innerHTML = h; wireMedia(e.el._bub); } }
+      if (e.el._meta) { var mh = metaHtml(m, m.direction === "in"); if (e.el._meta.innerHTML !== mh) e.el._meta.innerHTML = mh; }
+      return;
+    }
     appendBubble(m, { anim: !quiet });
     if (!quiet && m.direction === "out") { hideTyping(); if (S.socket && S.socket.connected) S.socket.emit("visitor:received"); if (!S.open || document.hidden) { bumpUnread(); playPing(); } else markRead(); }
   }
@@ -454,7 +522,15 @@
   function onNewRow(isVisitor) { if (isVisitor || S.stick) scrollToBottom(true); else newPill.classList.add("on"); }
   function bumpUnread() { S.unread++; if (badge) { badge.textContent = S.unread > 9 ? "9+" : String(S.unread); badge.classList.add("on"); } flashTitle(); }
   function clearUnread() { S.unread = 0; if (badge) badge.classList.remove("on"); S.lastSeenTs = Date.now(); lsSet(K.seen, String(S.lastSeenTs)); stopFlash(); }
-  function flashTitle() { if (titleTimer || !document.hidden) return; var on = false; titleTimer = setInterval(function () { document.title = (on = !on) ? "💬 New message" : baseTitle; }, 1000); }
+  // Capture the title when the flash STARTS, not at script load. On a React/Next/Vue
+  // host that retitles on route change, restoring a load-time snapshot reverted the
+  // customer's page title to a stale value — and it never recovered.
+  function flashTitle() {
+    if (titleTimer || !document.hidden) return;
+    baseTitle = document.title;
+    var on = false;
+    titleTimer = setInterval(function () { document.title = (on = !on) ? "💬 New message" : baseTitle; }, 1000);
+  }
   function stopFlash() { if (titleTimer) { clearInterval(titleTimer); titleTimer = null; document.title = baseTitle; } }
   document.addEventListener("visibilitychange", function () { if (!document.hidden) { stopFlash(); if (S.open) { clearUnread(); markRead(); } } });
 
@@ -515,15 +591,24 @@
     if (S.replyTo) payload.replyToExternalId = S.replyTo.externalId;
     if (S.preChat) { payload.preChat = S.preChat; S.preChat = null; }
     if (S.closed) { S.closed = false; bodyEl.querySelectorAll(".sys.closed").forEach(function (n) { n.remove(); }); }
-    clearReply(); optimistic(cid, payload, null, "queued"); persistOutbox(); flushOutbox();
+    // Remember that this visitor has a thread, so future page loads connect eagerly
+    // and agent replies still reach them without opening the panel first.
+    lsSet(K.chatted, "1");
+    clearReply(); optimistic(cid, payload, null, "queued"); ensureConnected(); persistOutbox(); flushOutbox();
   }
 
   // ── media ─────────────────────────────────────────────────────────────────────
   var OK_MIME = /^(image\/(jpeg|png|gif|webp)|video\/(mp4|webm|quicktime|3gpp)|audio\/(mpeg|mp4|ogg|wav|webm|aac)|application\/pdf|text\/(plain|csv)|application\/(msword|vnd\.openxmlformats-officedocument.*|vnd\.ms-excel|vnd\.ms-powerpoint|zip))$/i;
+  /** MIME without parameters — `audio/webm;codecs=opus` → `audio/webm`. */
+  function baseMime(t) { return String(t || "").split(";")[0].trim().toLowerCase(); }
   function uploadFile(file, opts) {
     if (!S.formDone) return;
     if (file.size > MAX_BYTES) return toast("File is too large (max 25 MB).");
-    if (file.type && !OK_MIME.test(file.type)) return toast("That file type isn't supported.");
+    // Compare the BASE type: OK_MIME is anchored, and MediaRecorder hands back a
+    // parameterised type (Chrome reports `audio/webm;codecs=opus` even when asked
+    // for `audio/webm`), so testing file.type directly rejected every voice note
+    // with "that file type isn't supported".
+    if (file.type && !OK_MIME.test(baseMime(file.type))) return toast("That file type isn't supported.");
     dropPills(); var cid = newCid(); var kind = (file.type || "").split("/")[0]; kind = kind === "image" || kind === "video" || kind === "audio" ? kind : "document";
     var voice = !!(opts && opts.voice);
     var payload = { clientMsgId: cid, body: "" };
@@ -578,7 +663,11 @@
     if (!cfg.soundEnabled) return;
     try {
       audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-      if (audioCtx.state === "suspended") audioCtx.resume();
+      // resume() returns a promise that REJECTS under the autoplay policy when no
+      // user gesture has happened yet (inline embeds and launcher-hidden deploys
+      // hit this on the first agent reply). Unhandled, it logged an error in the
+      // customer's console on every message.
+      if (audioCtx.state === "suspended") { var r = audioCtx.resume(); if (r && r.catch) r.catch(function () {}); }
       var t = audioCtx.currentTime;
       [880, 1175].forEach(function (f, i) {
         var o = audioCtx.createOscillator(), g = audioCtx.createGain(), at = t + i * 0.11;
@@ -608,7 +697,13 @@
         var send = S.recording && S.recording.send;
         teardownRec();
         if (send && blob.size > 0) {
-          var ext = blob.type.indexOf("ogg") >= 0 ? "ogg" : "webm";
+          // Safari supports neither webm nor ogg, so MediaRecorder falls back to
+          // audio/mp4 — naming that file "voice.webm" made the stored filename lie
+          // about its container (the server sniffs bytes, so it ingested fine, but
+          // the agent downloaded a mislabelled file). Derive the extension from the
+          // container the recorder actually produced.
+          var bt = baseMime(blob.type);
+          var ext = bt.indexOf("ogg") >= 0 ? "ogg" : bt.indexOf("mp4") >= 0 ? "m4a" : "webm";
           uploadFile(new File([blob], "voice." + ext, { type: blob.type }), { voice: true });
         }
       };
@@ -636,7 +731,13 @@
     S.conn = c; hdot.className = "hdot" + (c === "online" ? "" : c === "reconnecting" ? " re" : " off");
     reStrip.classList.toggle("on", c === "reconnecting");
     var sub = (S.cfg && S.cfg.config && S.cfg.config.headerSubtitle) || "";
-    if (!sub) { var t = c === "online" ? "" : c === "reconnecting" ? "Reconnecting…" : "Offline"; subEl.textContent = t; subEl.style.display = t ? "" : "none"; }
+    // "idle" (socket not opened yet, by design) and "connecting" are NOT failures —
+    // showing "Offline" for them flashed a scary status the moment a visitor opened
+    // the chat. Only a real reconnect/failure gets copy.
+    if (!sub) {
+      var t = c === "reconnecting" ? "Reconnecting…" : c === "offline" ? "Offline" : "";
+      subEl.textContent = t; subEl.style.display = t ? "" : "none";
+    }
   }
   function connect() {
     var socket = window.io(apiBase + "/widget", { path: "/api/socket", transports: ["websocket"], auth: { siteKey: siteKey, visitorId: S.visitorId }, reconnection: true, reconnectionAttempts: Infinity, reconnectionDelay: 800, reconnectionDelayMax: 8000, timeout: 12000 });
@@ -674,7 +775,7 @@
       if (!msgs.length) return;
       S.lastGroup = null; var unseen = 0;
       msgs.forEach(function (m) { var isNew = !(m.id && S.byId[m.id]); upsert(m, true); if (isNew && m.direction === "out" && new Date(m.createdAt).getTime() > S.lastSeenTs) unseen++; });
-      S.formDone = true; composer.style.display = ""; dropPills();
+      S.formDone = true; composer.style.display = ""; dropPills(); lsSet(K.chatted, "1");
       if (unseen && !S.open) { S.unread = 0; for (var i = 0; i < unseen; i++) bumpUnread(); }
       scrollToBottom(false); markRead();
     });
@@ -696,7 +797,51 @@
   function appendClosed() { if (bodyEl.querySelector(".sys.closed")) return; bodyEl.appendChild(el("div", { class: "sys closed", dir: "auto" }, "This chat was closed. Send a message to continue.")); onNewRow(false); }
 
   // ── boot ──────────────────────────────────────────────────────────────────────
-  function boot() { setConn("connecting"); restoreOutbox(); connect(); }
-  if (window.io) boot();
-  else { var s = document.createElement("script"); s.src = staticBase + "/webchat/socket.io.min.js"; s.async = true; s.onload = boot; s.onerror = function () { console.error("[webchat] failed to load socket.io client"); }; document.head.appendChild(s); }
+  /**
+   * Open the socket if it isn't already. Idempotent — safe to call from every
+   * entry point that needs live delivery.
+   */
+  function ensureConnected() {
+    if (S.socket || S.fatal) return;
+    setConn("connecting");
+    if (window.io) { connect(); return; }
+    if (S.loadingIo) return;
+    S.loadingIo = true;
+    var s = document.createElement("script");
+    s.src = staticBase + "/webchat/socket.io.min.js";
+    s.async = true;
+    s.onload = function () { S.loadingIo = false; connect(); };
+    s.onerror = function () { S.loadingIo = false; setConn("offline"); console.error("[webchat] failed to load socket.io client"); };
+    document.head.appendChild(s);
+  }
+
+  /**
+   * Boot WITHOUT a socket where possible.
+   *
+   * A socket per page load meant concurrent connections tracked total visitors
+   * browsing every customer site, not people chatting — by far the largest load
+   * this channel puts on the server. Appearance now comes from a cheap cacheable
+   * GET, so an idle page view costs one HTTP request and no persistent connection.
+   *
+   * We still connect EAGERLY when the visitor needs live delivery:
+   *   - they've chatted before (agent replies + unread badge must arrive unprompted)
+   *   - queued messages are waiting to flush
+   *   - inline embeds, which are always-open by definition
+   * Otherwise the socket opens the moment they open the chat.
+   */
+  function boot() {
+    restoreOutbox();
+    var hasQueued = false;
+    for (var _cid in S.pending) { hasQueued = true; break; }
+    var needsLive = INLINE || S.open || !!lsGet(K.chatted) || hasQueued;
+    if (needsLive) { ensureConnected(); return; }
+    setConn("idle");
+    // Paint the launcher with the org's real branding without a socket. On failure
+    // we simply connect — correctness never depends on this request succeeding.
+    fetch(apiBase + "/api/widget/config?key=" + encodeURIComponent(siteKey), { credentials: "omit" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (p) { if (p && p.config && !S.socket) applyConfig(p); })
+      .catch(function () { ensureConnected(); });
+  }
+  boot();
 })();
