@@ -470,10 +470,21 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     let resolvedGroupName: string | null = null;
 
     if (audience.mode === "all") {
+      // COUNT BEFORE FETCH. The ceiling is enforced below, but it used to be
+      // checked only AFTER this findMany had already materialised every id — so a
+      // tenant with a large contact table transiently allocated hundreds of MB
+      // inside a plain retryable POST, and a couple of concurrent retries could
+      // OOM-restart the container for ALL tenants. Counting first rejects the
+      // oversized audience for the cost of one index-only scan, and the `take`
+      // bounds the fetch even if the count races an import.
+      await this.assertAudienceWithinCap(
+        this.db.contact.count({ where: { teamId, deletedAt: null } }),
+      );
       recipientIds = (
         await this.db.contact.findMany({
           where: { teamId, deletedAt: null },
           select: { id: true },
+          take: MAX_RECIPIENTS_IN_PROCESS + 1,
         })
       ).map((c) => c.id);
     } else if (audience.mode === "by_tag") {
@@ -496,9 +507,18 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           detail: "None of the selected tags belong to this team.",
         });
       }
+      // Same count-before-fetch guard as `mode: "all"` — a broadly-applied tag
+      // reaches the same size and the same OOM shape.
+      const tagWhere = {
+        teamId,
+        deletedAt: null,
+        tags: { some: { id: { in: validatedTagIds } } },
+      };
+      await this.assertAudienceWithinCap(this.db.contact.count({ where: tagWhere }));
       const taggedContacts = await this.db.contact.findMany({
-        where: { teamId, deletedAt: null, tags: { some: { id: { in: validatedTagIds } } } },
+        where: tagWhere,
         select: { id: true },
+        take: MAX_RECIPIENTS_IN_PROCESS + 1,
       });
       recipientIds = taggedContacts.map((c) => c.id);
     } else if (audience.mode === "group") {
@@ -1513,6 +1533,25 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       broadcastId: id,
       status: row.status,
     });
+  }
+
+  /**
+   * Reject an oversized audience from a COUNT, before any id array is built.
+   *
+   * The same ceiling is re-checked after resolution (that check stays — it also
+   * covers the group/custom modes and any race), but doing it from a count first
+   * is what keeps a large-tenant broadcast from allocating the whole contact
+   * table just to be told "too many". Takes the pending count so callers read as
+   * one statement.
+   */
+  private async assertAudienceWithinCap(countPromise: Promise<number>): Promise<void> {
+    const total = await countPromise;
+    if (total > MAX_RECIPIENTS_IN_PROCESS) {
+      throw new BadRequestException({
+        error: "audience too large",
+        detail: `This audience has ${total} recipients; the limit is ${MAX_RECIPIENTS_IN_PROCESS}. Split it into smaller broadcasts.`,
+      });
+    }
   }
 }
 
