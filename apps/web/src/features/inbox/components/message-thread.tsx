@@ -477,6 +477,11 @@ function MessageThreadImpl({
    *  name/status bar) while the composer stays under the messages only. */
   rightPanel?: React.ReactNode;
 }) {
+  // Declared BEFORE useConversationEvents because it is passed INTO it, and
+  // bound after useChatScroll returns further down (that hook can't run first —
+  // it needs values this one produces). Defaults to "not pinned", so the trim
+  // stays off until the scroll hook has actually reported.
+  const isStuckToBottomRef = useRef<(() => boolean) | null>(null);
   const {
     data,
     hasMoreOlder,
@@ -493,6 +498,11 @@ function MessageThreadImpl({
     onMarkRead,
     onSnapshot,
     initialMayBeStale,
+    // Bound from useChatScroll further down (same idempotent
+    // assignment-in-render pattern as markBenignTailUpdateRef). Lets the live
+    // append trim the thread head ONLY when the viewer is pinned to the
+    // bottom, never while they are scrolled up reading history.
+    isStuckToBottomRef,
   );
   const { conversation, contact, assignedUser, messages, notes } = data;
 
@@ -1670,8 +1680,13 @@ function MessageThreadImpl({
   // misleading "↓ 1 new message" bubble.
   const isActivityTail = lastEntry?.kind === "activity";
 
-  const { unreadBelow, scrollToBottom, markBenignTailUpdate, releaseStickToBottom } =
-    useChatScroll({
+  const {
+    unreadBelow,
+    scrollToBottom,
+    markBenignTailUpdate,
+    releaseStickToBottom,
+    isStuckToBottom,
+  } = useChatScroll({
       viewportRef,
       contentRef,
       topSentinelRef,
@@ -1686,6 +1701,7 @@ function MessageThreadImpl({
   // (declared above this hook call). Assignment in render is idempotent.
   markBenignTailUpdateRef.current = markBenignTailUpdate;
   releaseStickToBottomRef.current = releaseStickToBottom;
+  isStuckToBottomRef.current = isStuckToBottom;
 
   // Note: we deliberately do NOT hide the scroll area until layout effects
   // run. The previous version gated `invisible` on a `scrollReady` boolean

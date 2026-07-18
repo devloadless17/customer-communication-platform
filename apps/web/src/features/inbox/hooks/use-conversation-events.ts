@@ -484,6 +484,17 @@ function scheduleBlobRevoke(url: string): void {
   }, 100);
 }
 
+/**
+ * Hard cap on the in-memory thread slice. The thread is not virtualized (see
+ * message-thread.tsx's render loop), so 500+ bubbles — each with a LocalTime —
+ * hurts scroll perf, and a runaway "Load older" would freeze the tab.
+ *
+ * Enforced on BOTH paths now: paging (which drops the older-cursor when it
+ * crosses the limit) and live `message:new` appends (which trim the head, but
+ * only while the viewer is pinned to the bottom — see the append site).
+ */
+const MAX_THREAD_SLICE = 500;
+
 export function useConversationEvents(
   initial: ConversationWithRefs,
   initialNextOlderCursor: string | null,
@@ -507,6 +518,11 @@ export function useConversationEvents(
   // of the lightweight delta, so stale checkmarks resolve on open. SSR-fresh /
   // cache-MISS opens pass false (their data is already current).
   initialMayBeStale = false,
+  // Live getter for "is the viewport pinned to the newest message". Supplied by
+  // the component, which binds it from useChatScroll AFTER this hook runs — the
+  // same forward-ref pattern it already uses for markBenignTailUpdate. Absent
+  // (or false) means never trim, which is the safe default.
+  isStuckToBottomRef?: { current: (() => boolean) | null },
 ): ConversationEventsState {
   const router = useRouter();
   const [data, setData] = useState<ConversationWithRefs>(initial);
@@ -649,7 +665,8 @@ export function useConversationEvents(
         // cross the limit so the UI hides the "Load older" affordance. To
         // go further back the user can use search → replaceWithContext,
         // which swaps the slice rather than appending.
-        const MAX_THREAD_SLICE = 500;
+        // (module-level MAX_THREAD_SLICE — hoisted so the live-append path can
+        //  enforce the same ceiling; see its declaration for the full rationale.)
         // SCOPE, stated plainly: this cap governs PAGING only. Live
         // `message:new` appends (and the reconnect recovery merges) have no
         // ceiling, so a thread parked open on a very chatty conversation can
@@ -1393,7 +1410,27 @@ export function useConversationEvents(
           tempId && messages.some((m) => m.id === payload.message.id)
             ? sortByTimestamp(messages)
             : appendSorted(messages, payload.message);
-        const reconciled = merged;
+
+        // Bound live growth — but ONLY while the viewer is pinned to the
+        // newest message.
+        //
+        // MAX_THREAD_SLICE caps the PAGING path; live appends had no ceiling,
+        // so a thread parked open on a busy conversation grew past it and each
+        // new message re-ran the timeline decorate+sort, the day-label pass and
+        // the continuation-flag pass over the whole slice, then reconciled that
+        // many DOM rows (this thread is not virtualized).
+        //
+        // The pinned check is the load-bearing part. Trimming the head
+        // unconditionally would delete text out from under someone who has
+        // scrolled up to read history — a far worse bug than the one being
+        // fixed. When pinned, the dropped messages are ones the viewer has
+        // scrolled past, and `reachedSliceCap` re-arms the "Load older"
+        // affordance so they are one click away.
+        const overCap = merged.length > MAX_THREAD_SLICE;
+        const pinned = isStuckToBottomRef?.current?.() ?? false;
+        const trimmed = overCap && pinned;
+        const reconciled = trimmed ? merged.slice(merged.length - MAX_THREAD_SLICE) : merged;
+        if (trimmed) setReachedSliceCap(true);
 
         // Inbound messages reset the 24h customer-service window. Outbound
         // doesn't — but we still bubble lastMessageAt for sort order.
