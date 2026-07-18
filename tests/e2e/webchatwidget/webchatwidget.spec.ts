@@ -174,14 +174,25 @@ test("visitor → inbox → agent reply, with pre-chat identity + widget attribu
       { timeoutMs: 20_000, label: "inbound webchatwidget message" },
     );
 
-    const conv = await db().conversation.findUnique({
-      where: { id: msg.conversationId },
-      select: { webchatWidgetId: true, contactId: true, channel: true },
-    });
-    expect(conv?.channel).toBe(CHANNEL);
     // Attribution: the conversation is stamped with its source widget.
-    expect(conv?.webchatWidgetId).toBe(widgetId);
-    if (conv?.contactId) createdContactIds.add(conv.contactId);
+    // POLL, don't read once. The message row above is committed inside
+    // `ingestEvents`, but the widget stamp is a SEPARATE updateMany that runs
+    // after ingest returns — so the message poll can win the race and observe
+    // `webchatWidgetId` still null. Asserting on a single read made this test
+    // flaky (~1 in 3 locally).
+    const conv = await pollUntil(
+      async () => {
+        const c = await db().conversation.findUnique({
+          where: { id: msg.conversationId },
+          select: { webchatWidgetId: true, contactId: true, channel: true },
+        });
+        return c?.webchatWidgetId ? c : null;
+      },
+      { timeoutMs: 20_000, label: "conversation stamped with webchatWidgetId" },
+    );
+    expect(conv.channel).toBe(CHANNEL);
+    expect(conv.webchatWidgetId).toBe(widgetId);
+    if (conv.contactId) createdContactIds.add(conv.contactId);
 
     // Identity: the self-asserted email folded onto the contact.
     await pollUntil(

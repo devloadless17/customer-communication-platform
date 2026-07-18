@@ -544,6 +544,11 @@
       else { markPending(cid, "failed"); toast("Upload failed."); }
     };
     xhr.onerror = function () { markPending(cid, "failed"); toast("Upload failed — check your connection."); };
+    // Without a timeout a stalled upload (captive portal, dead tunnel) never fires
+    // onerror: the bubble sits at "inflight" with a frozen progress bar forever and
+    // renderPending only offers Retry on "failed", so the visitor has no way out.
+    xhr.timeout = 60000;
+    xhr.ontimeout = function () { markPending(cid, "failed"); toast("Upload timed out — tap Retry."); };
     xhr.send(fd);
   }
   ["dragenter", "dragover"].forEach(function (ev) { panel.addEventListener(ev, function (e) { e.preventDefault(); if (S.formDone) dropEl.classList.add("on"); }); });

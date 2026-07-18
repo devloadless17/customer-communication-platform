@@ -41,6 +41,18 @@ const MAX_BODY_CHARS = 4096;
 const handshakeBucket = createTokenBucket({ perMin: 120 });
 /** Per-visitor inbound message rate limit (a human can't type faster than this). */
 const messageBucket = createTokenBucket({ perMin: 120 });
+/**
+ * Per-IP cap on creating BRAND-NEW conversations. `messageBucket` is keyed by
+ * `${widgetId}:${visitorId}`, but visitorId is chosen by the client — rotating it
+ * on every connect sidesteps that limit entirely, leaving only the 120/min
+ * handshake bucket. That allowed one IP to mint ~120 new Contacts+Conversations a
+ * minute, each firing the full pipeline (message.received, workflow dispatch,
+ * outbound webhooks, agent frames, unread badges) — an inbox-spam and cost DoS
+ * against the tenant. Only the FIRST message of a conversation is charged here, so
+ * a normal visitor pays once and an established chat is untouched. Deliberately
+ * generous so a shared corporate NAT / CGNAT egress isn't blocked.
+ */
+const newConversationBucket = createTokenBucket({ perMin: 15 });
 
 /** What we stash on each visitor socket after a successful handshake. */
 interface WidgetSocketData {
@@ -51,6 +63,9 @@ interface WidgetSocketData {
   externalContactId: string;
   resolved: WebchatwidgetResolved;
   conversationId: string | null;
+  /** Handshake IP — the only visitor-independent key we can rate-limit new
+   *  conversation creation on (visitorId is client-chosen, so it isn't one). */
+  ip: string;
   /** Whether we've last relayed a typing-on to the agents (so disconnect can clear it). */
   typingOn?: boolean;
 }
@@ -164,6 +179,7 @@ export class WebchatwidgetGateway
             externalContactId: `${resolved.widgetId}:${visitorId}`,
             resolved,
             conversationId: null,
+            ip,
           };
           socket.data = data;
           next();
@@ -254,6 +270,18 @@ export class WebchatwidgetGateway
       }
     }
 
+    // Charge the per-IP new-conversation budget only when this socket has no
+    // conversation yet (see newConversationBucket). `data.conversationId` is set
+    // on connect for a returning visitor and after the first send below, so an
+    // ongoing chat never pays.
+    const isNewConversation = data.conversationId === null;
+    if (isNewConversation && !newConversationBucket.consume(data.ip).ok) {
+      this.logger.warn(
+        `widget new-conversation throttled ip=${data.ip} widget=${data.widgetId} team=${data.teamId}`,
+      );
+      return { ok: false, error: "rate_limited" };
+    }
+
     // Dedupe key is stable per (widget, visitor, clientMsgId) so a reconnect
     // resend can't double-insert (the (teamId, channel, externalId) unique gate).
     const evt: NormalizedInboundMessage = {
@@ -313,6 +341,22 @@ export class WebchatwidgetGateway
         await applyWebchatPreChatIdentity(data.teamId, CHANNEL, contactId, body.preChat).catch(
           (err) => this.logger.error(`prechat identity failed: ${err}`),
         );
+      }
+    }
+
+    // First message of a NEW conversation: the room join above happened AFTER
+    // ingestEvents, so the `message.received` fanout raced it and was very likely
+    // emitted into a room this socket hadn't joined yet. The visitor's own first
+    // message therefore never reconciles — most visibly, a first MEDIA message
+    // keeps its local "📎 image" placeholder instead of rendering, until the next
+    // reconnect. Replaying history now that we're in the room closes the gap;
+    // it's idempotent client-side (upsert keys on message id, and the pending
+    // clientMsgId match retires the optimistic bubble).
+    if (isNewConversation) {
+      try {
+        client.emit("history", await this.history(data.teamId, conversationId));
+      } catch (err) {
+        this.logger.error(`widget first-message history replay failed: ${err}`);
       }
     }
     return { ok: true, conversationId };
@@ -385,6 +429,12 @@ export class WebchatwidgetGateway
     const msgs = await this.db.message.findMany({
       where: { teamId, conversationId, channel: CHANNEL, direction: "out", status: { in: from } },
       select: { id: true },
+      // Bounded: each row below costs a publish() (outbox write + full subscriber
+      // chain), so a visitor returning to a long-unread thread could otherwise turn
+      // one `visitor:read` into hundreds of serial publishes. Newest first, since
+      // those are the ones the agent is watching; the rest settle on later fires.
+      orderBy: { timestamp: "desc" },
+      take: 200,
     });
     if (msgs.length === 0) return;
     await this.db.message.updateMany({
@@ -493,6 +543,11 @@ export class WebchatwidgetGateway
     if (!data?.conversationId || !cur || typeof cur.ts !== "string" || typeof cur.id !== "string") {
       return { messages: [], hasMore: false };
     }
-    return this.history(data.teamId, data.conversationId, { ts: new Date(cur.ts), id: cur.id });
+    // An unparseable timestamp makes Prisma throw, so the ack never fires and the
+    // widget's `loadingOlder` latch stays true — "Load earlier" is then stuck on
+    // "Loading…" for the rest of the session. Fail closed with an empty page.
+    const ts = new Date(cur.ts);
+    if (Number.isNaN(ts.getTime())) return { messages: [], hasMore: false };
+    return this.history(data.teamId, data.conversationId, { ts, id: cur.id });
   }
 }
