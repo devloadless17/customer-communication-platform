@@ -56,6 +56,7 @@ export interface AiConfigRow {
   confidenceThreshold: number;
   maxAutoRepliesPerConv: number;
   humanTakeoverBehavior: string;
+  replyWaitSeconds: number;
 
   incomingTranscription: boolean;
   saveTranscript: boolean;

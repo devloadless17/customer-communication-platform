@@ -65,7 +65,8 @@ export class AiInboxService {
       contact?.customerId
         ? this.db.aiCustomerMemory.findMany({
             where: { teamId, customerId: contact.customerId, status: { in: ["confirmed", "candidate"] } },
-            orderBy: [{ status: "asc" }, { confidence: "desc" }],
+            // Most-recent first so the panel can show the freshest interests.
+            orderBy: [{ status: "asc" }, { updatedAt: "desc" }],
             take: 50,
           })
         : Promise.resolve([]),

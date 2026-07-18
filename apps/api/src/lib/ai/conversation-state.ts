@@ -149,11 +149,41 @@ export async function setDisabled(teamId: string, conversationId: string, disabl
 }
 
 /**
+ * Escalation handoff: the customer asked for a human, so the assistant yields
+ * the thread and stays quiet. Uses ai_paused (STICKY) rather than human_active
+ * so the AI does NOT auto-resume on the customer's next message — the human now
+ * owns it until an agent explicitly resumes. `agentUserId` is the auto-assigned
+ * agent (recorded as who it was handed to), or null if none was available.
+ */
+export async function handoffToHuman(
+  teamId: string,
+  conversationId: string,
+  agentUserId: string | null,
+) {
+  await ensureState(teamId, conversationId);
+  const row = await db.aiConversationState.update({
+    where: { conversationId },
+    data: {
+      state: "ai_paused",
+      pausedByUserId: agentUserId,
+      pausedAt: new Date(),
+      stateChangedAt: new Date(),
+    },
+  });
+  emitState(teamId, conversationId, "ai_paused");
+  return row;
+}
+
+/**
  * The assistant itself decided the customer needs a human (reply payload
  * `shouldEscalate`). Pause the thread (sticky `ai_paused`, system-initiated so
  * `pausedByUserId` is null) so it stops auto-replying until an agent resumes —
  * the customer-facing counterpart of the n8n "say human" branch. Idempotent:
  * skips the write when already paused/disabled so a redelivery doesn't churn.
+ *
+ * Distinct from `handoffToHuman` above: that one records the round-robin agent
+ * the thread was handed TO, this one is system-initiated (no assignee yet) and
+ * pairs with `runHandoffPolicy` for the assignment half.
  */
 export async function escalateToHuman(
   teamId: string,

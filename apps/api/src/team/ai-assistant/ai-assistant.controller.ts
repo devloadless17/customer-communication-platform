@@ -24,8 +24,9 @@ import { randomUUID } from "node:crypto";
 
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
 
-import { ttsModel } from "@/lib/ai/models";
-import { openaiConfigured, speak } from "@/lib/ai/openai-client";
+import { azureTtsConfigured, isAzureVoice } from "@/lib/ai/azure-tts";
+import { openaiConfigured } from "@/lib/ai/openai-client";
+import { renderTts } from "@/lib/ai/voice";
 
 import { CurrentSession } from "../../auth/current-session.decorator";
 import { SessionGuard } from "../../auth/session.guard";
@@ -109,15 +110,17 @@ export class AiAssistantController {
     @Res() res: Response,
   ): Promise<void> {
     this.assertManage(session);
-    if (!openaiConfigured()) {
-      throw new BadRequestException({ error: "openai_not_configured" });
+    const azure = isAzureVoice(body.voiceId);
+    if (azure ? !azureTtsConfigured() : !openaiConfigured()) {
+      throw new BadRequestException({
+        error: azure ? "azure_tts_not_configured" : "openai_not_configured",
+      });
     }
     let audio: { bytes: Uint8Array; contentType: string };
     try {
-      audio = await speak({
-        model: ttsModel(),
-        voice: body.voiceId,
+      audio = await renderTts({
         text: voiceSampleLine(body.voiceLanguage),
+        voiceId: body.voiceId,
         speed: body.voiceSpeed,
       });
     } catch (err) {

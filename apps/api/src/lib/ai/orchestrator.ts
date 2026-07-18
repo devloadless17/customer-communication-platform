@@ -1,14 +1,11 @@
+import { assignConversation } from "@/lib/conversations/mutations";
+import { pickRoundRobinAssignee } from "@/lib/conversations/round-robin";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
-import { runHandoffPolicy } from "@/lib/conversations/handoff";
 
+import { arabicToArabizi } from "./arabizi";
 import { claimInbound, legacyAutopilotOwnsTeam } from "./automation-claim";
-import {
-  escalateToHuman,
-  getState,
-  incrementAutoReply,
-  onCustomerInbound,
-} from "./conversation-state";
+import { getState, handoffToHuman, incrementAutoReply, onCustomerInbound } from "./conversation-state";
 import { decideMode } from "./decide-mode";
 import { aiGloballyEnabled } from "./models";
 import { openaiConfigured } from "./openai-client";
@@ -113,8 +110,14 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
   }
 
   const payload = generated.payload;
+  // The model writes Arabic SCRIPT even when the customer used Arabizi (it can't
+  // spell Arabizi coherently). Transliterate the SENT text to Arabizi here;
+  // ttsText stays Arabic script for correct voice pronunciation.
+  if (payload.replyScript === "latin" && /^ar/i.test(payload.replyLanguage)) {
+    payload.replyText = arabicToArabizi(payload.replyText);
+  }
   const openNow = openingStatus(config, new Date()).open;
-  const mode = decideMode(config, payload, openNow);
+  const mode = decideMode(config, payload, openNow, job.isVoice);
 
   const usage = usageFields(generated.usage);
   const auditBase = {
@@ -127,9 +130,11 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
     ...usage,
   };
 
-  if (mode === "send") {
+  if (mode === "send" || mode === "escalate") {
     // deliverReply honors the channel mode (text/voice/both/match) and always
-    // guarantees the canonical text on any TTS/media failure.
+    // guarantees the canonical text on any TTS/media failure. On escalate the
+    // payload.replyText is the brief hand-off line ("connecting you to an
+    // agent") — we SEND it (not draft) before assigning.
     let delivery;
     try {
       delivery = await deliverReply({
@@ -169,15 +174,45 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
         })
         .catch(() => {});
     }
-    await incrementAutoReply(conversationId);
-    await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
-      ...auditBase,
-      decision: "replied",
-      outboundMessageId: delivery.voiceMessageId ?? delivery.textMessageId,
-    });
+
+    if (mode === "escalate") {
+      // Support hand-off: after SENDING the acknowledgment, auto-assign to an
+      // available agent (round-robin: online + available tiers) and hand the
+      // thread off — a STICKY pause so the assistant won't resume on the next
+      // inbound. Best-effort: a failure here must not lose the sent reply/audit.
+      try {
+        const agentId = await pickRoundRobinAssignee({ db, teamId });
+        if (agentId) {
+          await assignConversation({
+            db,
+            publish,
+            teamId,
+            conversationId,
+            targetUserId: agentId,
+            changedByUserId: null,
+            silent: true,
+          });
+        }
+        await handoffToHuman(teamId, conversationId, agentId);
+      } catch {
+        // The agent can still take over manually.
+      }
+      await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+        ...auditBase,
+        decision: "escalated",
+        outboundMessageId: delivery.voiceMessageId ?? delivery.textMessageId,
+      });
+    } else {
+      await incrementAutoReply(conversationId);
+      await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+        ...auditBase,
+        decision: "replied",
+        outboundMessageId: delivery.voiceMessageId ?? delivery.textMessageId,
+      });
+    }
   } else {
-    // Draft: pre-render a voice preview when the mode wants voice (null on any
-    // TTS failure — the draft still ships as text).
+    // Draft (suggest): pre-render a voice preview when the mode wants voice
+    // (null on any TTS failure — the draft still ships as text).
     const audioR2Key = wantsVoiceDraft(config.replyChannelMode, job.isVoice)
       ? await renderDraftAudio(teamId, inboundMessageId, payload, config)
       : null;
@@ -192,30 +227,9 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
     });
     await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
       ...auditBase,
-      decision: mode === "escalate" ? "escalated" : "suggested",
+      decision: "suggested",
       suggestionId: suggestion.id,
     });
-
-    // Escalation = hand the thread to a human. Pause the assistant (sticky, so
-    // it stays quiet until an agent resumes) and apply the team's configured
-    // handoff assignment — the same policy the n8n "say human" branch runs, via
-    // the shared helper. The suggestion is kept as a starting draft for whoever
-    // picks it up. Best-effort: the customer-facing pause already committed, so
-    // an assignment failure degrades to "paused but unassigned", never throws.
-    if (mode === "escalate") {
-      await escalateToHuman(teamId, conversationId).catch((err) => {
-        console.warn(`[ai] escalate pause failed for ${conversationId}: ${errText(err)}`);
-      });
-      await runHandoffPolicy({
-        db,
-        publish,
-        teamId,
-        conversationId,
-        onError: (m) => console.warn(`[ai] ${m}`),
-      }).catch((err) => {
-        console.warn(`[ai] escalate handoff failed for ${conversationId}: ${errText(err)}`);
-      });
-    }
   }
 
   // Post-reply jobs — separate + idempotent, must never block the reply (#14).

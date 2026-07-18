@@ -2884,6 +2884,10 @@ model AiAssistantConfig {
   // after N consecutive AI turns without a human, to bound runaway loops.
   maxAutoRepliesPerConv Int             @default(0)
   humanTakeoverBehavior String          @default("cancel_and_yield")
+  // Seconds to WAIT after a customer's last message before replying, so a
+  // burst of chunked messages gets ONE considered answer. The timer resets on
+  // each new inbound. 0 = reply immediately (no debounce).
+  replyWaitSeconds      Int             @default(0)
 
   // --- Voice ---
   incomingTranscription Boolean            @default(true)
@@ -3016,6 +3020,9 @@ model ConversationSessionSummary {
   language              String?
   tone                  String?
   latestStatus          String?   @db.Text
+  // A 1-2 sentence brief of the WHOLE conversation/relationship (across all
+  // sessions), distinct from the current-session fields above.
+  overallBrief          String?   @db.Text
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 

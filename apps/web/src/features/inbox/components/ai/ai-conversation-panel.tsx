@@ -35,6 +35,7 @@ interface SessionSummary {
   language: string | null;
   tone: string | null;
   latestStatus: string | null;
+  overallBrief: string | null;
   updatedAt: string;
 }
 interface Overview {
@@ -91,7 +92,11 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
 
   const memory = (data?.memory ?? []).filter((m) => m.status !== "rejected");
   const attributes = memory.filter((m) => !TAG_KINDS.has(m.kind));
-  const tagItems = memory.filter((m) => TAG_KINDS.has(m.kind));
+  // Only the most recent, SURE (confirmed) interests — capped so the panel stays
+  // scannable. The overview returns memory most-recently-updated first.
+  const tagItems = memory
+    .filter((m) => TAG_KINDS.has(m.kind) && m.status === "confirmed")
+    .slice(0, 6);
   const summary = data?.summary ?? null;
 
   async function confirm(id: string) {
@@ -179,6 +184,12 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
           <p className="text-xs text-muted-foreground">No summary yet.</p>
         ) : (
           <div className="space-y-2 text-sm">
+            {summary.overallBrief && (
+              <p className="rounded-md bg-muted/50 px-2 py-1.5 text-xs">
+                <span className="font-medium text-muted-foreground">Overall: </span>
+                <span className="text-foreground">{summary.overallBrief}</span>
+              </p>
+            )}
             <SummaryLine label="Goal" value={summary.customerGoal} />
             <SummaryLine label="Context" value={summary.importantContext} />
             <SummaryList label="Open questions" items={summary.openQuestions} />

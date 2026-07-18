@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { Bot, Check, ChevronDown } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -41,12 +41,17 @@ export function AssignmentDropdown({
   teamMembers,
   currentUserName,
   onAlert,
+  aiActive = false,
 }: {
   teamId: string;
   conversationId: string;
   currentId: string | null;
   currentName: string | null;
   currentAvatarUrl?: string | null;
+  /** When the conversation is UNASSIGNED and the native AI is active, show the
+   *  assignee as "AI Agent" instead of "Unassigned" (label only — no real user
+   *  is assigned; a human takeover/auto-assign replaces it). */
+  aiActive?: boolean;
   /** Needed to predict the status side-effect of the assign (see
    *  predictNextStatus above). Mirrors the server rule. */
   currentStatus: ConversationStatus;
@@ -182,8 +187,8 @@ export function AssignmentDropdown({
           disabled={pending}
           // Full name is the label even when the text collapses below @2xl,
           // so the avatar-only trigger stays self-describing for hover + SR.
-          title={currentName ? `Assigned to ${currentName}` : "Unassigned — assign this conversation"}
-          aria-label={currentName ? `Assigned to ${currentName}` : "Unassigned — assign this conversation"}
+          title={currentName ? `Assigned to ${currentName}` : aiActive ? "Handled by the AI Agent — assign to a teammate" : "Unassigned — assign this conversation"}
+          aria-label={currentName ? `Assigned to ${currentName}` : aiActive ? "Handled by the AI Agent — assign to a teammate" : "Unassigned — assign this conversation"}
         >
           {currentName ? (
             <>
@@ -201,6 +206,11 @@ export function AssignmentDropdown({
                 {currentName.split(" ")[0]}
               </span>
             </>
+          ) : aiActive ? (
+            <span className="flex items-center gap-1 font-normal text-primary">
+              <Bot className="size-4 shrink-0" />
+              <span className="hidden truncate @2xl:inline">AI Agent</span>
+            </span>
           ) : (
             <span className="text-muted-foreground">Unassigned</span>
           )}

@@ -45,12 +45,36 @@ export async function enqueueAiReply(data: {
   inboundMessageId: string;
   text: string;
   isVoice: boolean;
+  /** Debounce window: wait this many seconds after the LAST inbound before
+   *  replying, so a burst of chunked messages yields ONE answer. 0 = immediate.
+   *  Clamped to [0, 120]. */
+  waitSeconds?: number;
 }): Promise<void> {
-  await getAiQueue().add(
-    "reply",
-    { kind: "reply", ...data },
-    { jobId: `ai-reply-${data.inboundMessageId}` },
-  );
+  const q = getAiQueue();
+  const jobData: AiJob = {
+    kind: "reply",
+    teamId: data.teamId,
+    conversationId: data.conversationId,
+    inboundMessageId: data.inboundMessageId,
+    text: data.text,
+    isVoice: data.isVoice,
+  };
+  const wait = Math.max(0, Math.min(120, Math.floor(data.waitSeconds ?? 0)));
+
+  if (wait > 0) {
+    // Debounce: coalesce a burst into one reply. Reset the timer by removing
+    // the pending delayed reply for THIS conversation, then re-adding with the
+    // newest message's data. Keyed by conversation (not message). The atomic
+    // claim (claimInbound, per inboundMessageId) still guards against any
+    // double-reply if a remove races a job that just started.
+    const jobId = `ai-reply-conv-${data.conversationId}`;
+    await q.remove(jobId).catch(() => {});
+    await q.add("reply", jobData, { jobId, delay: wait * 1000 });
+    return;
+  }
+
+  // Immediate (no debounce): keep the per-message jobId for at-least-once dedup.
+  await q.add("reply", jobData, { jobId: `ai-reply-${data.inboundMessageId}` });
 }
 
 export async function enqueueAiPost(

@@ -147,6 +147,9 @@ export async function speak(opts: {
   text: string;
   speed?: number;
   format?: "mp3" | "opus" | "aac" | "flac";
+  /** Natural-language delivery steering (gpt-4o-mini-tts) — tone, pacing,
+   *  emotion — to make the voice sound human rather than robotic. */
+  instructions?: string;
 }): Promise<{ bytes: Uint8Array; contentType: string }> {
   const { client } = await getClient();
   const format = opts.format ?? "mp3";
@@ -156,6 +159,7 @@ export async function speak(opts: {
     input: opts.text,
     response_format: format,
     ...(opts.speed ? { speed: opts.speed } : {}),
+    ...(opts.instructions ? { instructions: opts.instructions } : {}),
   });
   const buf = new Uint8Array(await res.arrayBuffer());
   const contentType =

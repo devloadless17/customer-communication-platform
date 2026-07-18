@@ -402,6 +402,12 @@ services:
       AI_MODEL_SUMMARY: ${AI_MODEL_SUMMARY:-gpt-4o-mini}
       AI_STT_MODEL: ${AI_STT_MODEL:-gpt-4o-transcribe}
       AI_TTS_MODEL: ${AI_TTS_MODEL:-gpt-4o-mini-tts}
+      # Azure Speech TTS — the ONLY authentically Lebanese voices (ar-LB Layla /
+      # Rami). Optional: unset = the assistant just uses OpenAI voices. When set,
+      # picking an ar-LB voice in Settings routes synthesis to Azure (STT + the
+      # text brain stay on OpenAI). Region e.g. francecentral / uaenorth.
+      AZURE_SPEECH_KEY: ${AZURE_SPEECH_KEY:-}
+      AZURE_SPEECH_REGION: ${AZURE_SPEECH_REGION:-}
       # Orphan-blob sweeper cadence (R2 objects referenced by no live
       # Message row). Default 6h — bumps to hourly on high-churn deploys.
       BLOB_ORPHAN_SWEEP_INTERVAL_MS: ${BLOB_ORPHAN_SWEEP_INTERVAL_MS:-21600000}

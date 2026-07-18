@@ -29,10 +29,22 @@ const ACTIONS: Record<State, Array<[string, string]>> = {
   disabled: [["Enable AI", "enable"]],
 };
 
-export function AiStateControl({ conversationId }: { conversationId: string }) {
+export function AiStateControl({
+  conversationId,
+  onState,
+}: {
+  conversationId: string;
+  /** Report the resolved AI state up so the header can label the assignee as
+   *  "AI Agent" while the assistant is active — reuses this component's fetch. */
+  onState?: (state: State | null) => void;
+}) {
   const [state, setState] = useState<State | null>(null);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    onState?.(state);
+  }, [state, onState]);
 
   const load = useCallback(async () => {
     const res = await apiFetch(`/api/ai-assistant/conversations/${conversationId}/overview`);

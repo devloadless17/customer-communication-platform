@@ -1,3 +1,4 @@
+import { isAzureVoice, speakAzure } from "./azure-tts";
 import { sttModel, ttsModel } from "./models";
 import { speak, transcribe } from "./openai-client";
 
@@ -41,9 +42,27 @@ export async function renderTts(opts: {
   text: string;
   voiceId?: string | null;
   speed?: number;
+  /** Delivery steering to humanize the voice (see speak()). */
+  instructions?: string;
 }): Promise<{ bytes: Uint8Array; contentType: string; model: string; voice: string }> {
-  const model = ttsModel();
   const voice = opts.voiceId?.trim() || "alloy";
-  const out = await speak({ model, voice, text: opts.text, speed: opts.speed, format: "mp3" });
+
+  // Azure neural voice (e.g. ar-LB-LaylaNeural) → authentic Lebanese. OpenAI's
+  // `instructions` steering doesn't apply; Azure voices carry the accent
+  // natively. Same mp3 output shape, so everything downstream is unchanged.
+  if (isAzureVoice(voice)) {
+    const out = await speakAzure({ voice, text: opts.text, speed: opts.speed });
+    return { ...out, model: "azure-tts", voice };
+  }
+
+  const model = ttsModel();
+  const out = await speak({
+    model,
+    voice,
+    text: opts.text,
+    speed: opts.speed,
+    format: "mp3",
+    instructions: opts.instructions,
+  });
   return { ...out, model, voice };
 }
