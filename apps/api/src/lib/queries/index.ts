@@ -29,6 +29,7 @@ export type { ListContactsOpts } from "./contacts";
 export {
   getPlatformAnalytics,
   getTeamDetailForSuperAdmin,
+  invalidateSuperAdminAggregates,
   listAllTeamsForSuperAdmin,
 } from "./super-admin";
 export type {

@@ -14,6 +14,16 @@ import type { Channel, Tag, TagColor } from "@ccp/shared/types";
 // can name it without reaching across the package boundary.
 export type { AudienceGroupDto };
 
+/**
+ * How many manual-member ids the LIST ships per group. The list UI only needs
+ * a count ("+N manual"), which `manualContactCount` carries exactly; the chips
+ * that actually render ids live on the single-group edit page, which calls
+ * `getAudienceGroup` and gets the full set. Preview ids are kept so the shape
+ * stays useful (and honest — see the DTO comment) without the list's payload
+ * scaling with a group's membership.
+ */
+const LIST_CONTACT_ID_PREVIEW = 50;
+
 export async function listAudienceGroups(teamId: string): Promise<AudienceGroupDto[]> {
   const rows = await db.audienceGroup.findMany({
     where: { teamId },
@@ -25,73 +35,107 @@ export async function listAudienceGroups(teamId: string): Promise<AudienceGroupD
       // UI renders) stays consistent with `memberCount` (which filters
       // deletedAt: null) — otherwise a soft-deleted member shows as a phantom
       // chip with no matching count.
-      contacts: { where: { deletedAt: null }, select: { id: true } },
+      //
+      // BOUNDED: this used to be every manual member of every group (up to
+      // 5000 each, the write-schema cap, times however many groups a team
+      // has). See LIST_CONTACT_ID_PREVIEW — the exact number comes from the
+      // aggregate below, so nothing here has to be complete to be correct.
+      // `getAudienceGroup` is deliberately NOT truncated: its result feeds an
+      // edit form that saves `contactIds` as a full replace.
+      contacts: {
+        where: { deletedAt: null },
+        select: { id: true },
+        take: LIST_CONTACT_ID_PREVIEW,
+      },
     },
   });
+  if (rows.length === 0) return [];
 
-  // Resolve member counts for every group in ONE query instead of one per
-  // group (the previous Promise.all spawned N COUNT queries — fine at a
-  // dozen groups, painful at fifty). Strategy:
-  //   1. Collect every tag id referenced by any group on this page.
-  //   2. Fetch each tag's contact carriers, scoped to this team, in a
-  //      single Prisma query.
-  //   3. For each group, union (manual contacts) ∪ (contacts carrying any
-  //      of its tags) in memory and take the set size.
-  // Memory bound: O(tagged-contacts × tags-per-contact). At the scale where
-  // that gets uncomfortable (~50k contacts × 5+ tags) switch to a CTE-based
-  // raw SQL aggregate that does the union server-side.
-  const usedTagIds = Array.from(
-    new Set(rows.flatMap((g) => g.tags.map((t) => t.id))),
+  // Member counts for every group in ONE server-side aggregate.
+  //
+  // This previously loaded every contact carrying ANY tag used by ANY group on
+  // the page, then unioned them per group in JS. The in-code note called that
+  // out and named ~50k contacts as the point to switch to "a CTE-based raw SQL
+  // aggregate" — enterprise tenants are past it, and the trigger is worse than
+  // contact count alone suggests: ONE broadly-applied tag ("customer") on one
+  // group is enough to pull the entire book into memory on a settings-page
+  // load, however small the groups are.
+  //
+  // The union is the same one `countAudienceContacts` expresses for a single
+  // group — manual members ∪ tag carriers, deduped, soft-deleted excluded —
+  // just evaluated for every group at once so it stays one round trip. Both
+  // arms are teamId-scoped independently: membership rows are not
+  // tenant-tagged themselves, so the Contact join is what enforces isolation.
+  // `manualCount` rides along in the same pass so it stays soft-delete aware —
+  // a Prisma `_count` can't carry the `deletedAt IS NULL` filter, and an
+  // unfiltered manual count next to a filtered memberCount is exactly the
+  // phantom-chip inconsistency the include comment above warns about.
+  // SHAPE MATTERS HERE, and the obvious phrasing is a trap. Writing this as
+  // `AudienceGroup LEFT JOIN Contact ON (EXISTS manual OR EXISTS tag)` reads
+  // naturally and plans as a Nested Loop over a Seq Scan of Contact with the
+  // EXISTS clauses as subplans — i.e. it evaluates them once per
+  // (group x contact) PAIR. That is worse than the JS version it replaces:
+  // 10 groups x 200k contacts is 2M subplan evaluations. (Confirmed with
+  // EXPLAIN before rewriting — do that before changing this query.)
+  //
+  // So drive from the MEMBERSHIP tables instead. The lateral collects this
+  // group's member ids from both arms (both indexed on "A" = the group), the
+  // UNION-by-GROUP-BY dedupes a contact that is both manual and tag-matched,
+  // and `bool_or(manual)` remembers whether any arm was the manual one. Only
+  // then does it touch Contact, by primary key, to apply the team +
+  // soft-delete filters. Cost is proportional to actual membership, never to
+  // the tenant's contact count.
+  //
+  // `COUNT(c.id)` (not `COUNT(*)`) is load-bearing: it skips the NULLs left by
+  // members the Contact join rejected — soft-deleted, or belonging to another
+  // team. That join IS the tenant-isolation check, since membership rows carry
+  // no teamId of their own.
+  const counts = await db.$queryRaw<
+    Array<{ groupId: string; count: bigint; manualCount: bigint }>
+  >`
+    SELECT g.id AS "groupId",
+           COUNT(c.id)::bigint AS count,
+           COUNT(c.id) FILTER (WHERE mem.manual)::bigint AS "manualCount"
+    FROM "AudienceGroup" g
+    LEFT JOIN LATERAL (
+      SELECT u.contact_id, bool_or(u.manual) AS manual
+      FROM (
+        SELECT m."B" AS contact_id, true AS manual
+        FROM "_AudienceGroupContacts" m
+        WHERE m."A" = g.id
+        UNION ALL
+        SELECT ct."A" AS contact_id, false AS manual
+        FROM "_AudienceGroupTags" gt
+        JOIN "_ContactToTag" ct ON ct."B" = gt."B"
+        WHERE gt."A" = g.id
+      ) u
+      GROUP BY u.contact_id
+    ) mem ON TRUE
+    LEFT JOIN "Contact" c
+      ON c.id = mem.contact_id
+     AND c."teamId" = g."teamId"
+     AND c."deletedAt" IS NULL
+    WHERE g."teamId" = ${teamId}
+    GROUP BY g.id
+  `;
+  const countByGroup = new Map(
+    counts.map((r) => [r.groupId, { total: Number(r.count), manual: Number(r.manualCount) }]),
   );
-  const tagCarriers =
-    usedTagIds.length > 0
-      ? await db.contact.findMany({
-          where: { teamId, deletedAt: null, tags: { some: { id: { in: usedTagIds } } } },
-          select: {
-            id: true,
-            // Scope the tag list to the ids we care about; otherwise Prisma
-            // would ship every tag on every matching contact.
-            tags: {
-              where: { id: { in: usedTagIds } },
-              select: { id: true },
-            },
-          },
-        })
-      : [];
 
-  const contactsByTag = new Map<string, Set<string>>();
-  for (const c of tagCarriers) {
-    for (const t of c.tags) {
-      let bucket = contactsByTag.get(t.id);
-      if (!bucket) {
-        bucket = new Set();
-        contactsByTag.set(t.id, bucket);
-      }
-      bucket.add(c.id);
-    }
-  }
-
-  return rows.map((g) => {
-    const members = new Set<string>(g.contacts.map((c) => c.id));
-    for (const t of g.tags) {
-      const carriers = contactsByTag.get(t.id);
-      if (!carriers) continue;
-      for (const id of carriers) members.add(id);
-    }
-    return {
-      id: g.id,
-      teamId: g.teamId,
-      name: g.name,
-      description: g.description,
-      tagIds: g.tags.map((t) => t.id),
-      contactIds: g.contacts.map((c) => c.id),
-      memberCount: members.size,
-      createdById: g.createdById,
-      createdByName: g.createdBy?.name ?? "Removed user",
-      createdAt: g.createdAt.toISOString(),
-      updatedAt: g.updatedAt.toISOString(),
-    };
-  });
+  return rows.map((g) => ({
+    id: g.id,
+    teamId: g.teamId,
+    name: g.name,
+    description: g.description,
+    tagIds: g.tags.map((t) => t.id),
+    contactIds: g.contacts.map((c) => c.id),
+    manualContactCount: countByGroup.get(g.id)?.manual ?? 0,
+    memberCount: countByGroup.get(g.id)?.total ?? 0,
+    createdById: g.createdById,
+    createdByName: g.createdBy?.name ?? "Removed user",
+    createdAt: g.createdAt.toISOString(),
+    updatedAt: g.updatedAt.toISOString(),
+  }));
 }
 
 export async function getAudienceGroup(
@@ -122,6 +166,8 @@ export async function getAudienceGroup(
     description: g.description,
     tagIds: g.tags.map((t) => t.id),
     contactIds: g.contacts.map((c) => c.id),
+    // Complete here (unlike the list), so the length IS the count.
+    manualContactCount: g.contacts.length,
     memberCount,
     createdById: g.createdById,
     createdByName: g.createdBy?.name ?? "Removed user",

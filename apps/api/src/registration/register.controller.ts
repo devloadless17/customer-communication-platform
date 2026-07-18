@@ -12,6 +12,7 @@ import type { Request } from "express";
 import { z } from "zod";
 
 import { hashPassword } from "@/auth/password";
+import { invalidateSuperAdminAggregates } from "@/lib/queries";
 import {
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
@@ -129,6 +130,11 @@ export class RegisterController {
         });
         return { email: body.email, teamId: team.id };
       });
+
+      // The super-admin roster + overview are memoized for 60s. A brand-new
+      // org lands in the APPROVAL QUEUE, which is the one list an admin sits
+      // and watches — it must not take a minute to appear.
+      invalidateSuperAdminAggregates();
 
       return { ok: true, ...result };
     } catch (err) {

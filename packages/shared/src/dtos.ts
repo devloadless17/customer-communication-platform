@@ -29,8 +29,24 @@ export interface AudienceGroupDto {
   name: string;
   description: string | null;
   tagIds: string[];
+  /**
+   * Manually-added member ids.
+   *
+   * COMPLETE from `getAudienceGroup`, and it MUST stay that way: the update
+   * endpoint treats `contactIds` as a full replace, so an edit form populated
+   * from a truncated list would silently drop every member past the cut on
+   * save. It is safely bounded already — the write schema caps manual members
+   * at 5000.
+   *
+   * TRUNCATED to a preview from `listAudienceGroups`, which only ever needs a
+   * number and must not ship N groups x their membership. Use
+   * `manualContactCount`, never `contactIds.length`, whenever you need the
+   * number.
+   */
   contactIds: string[];
-  /** Computed member count at read time. */
+  /** Exact count of manual members, soft-deleted excluded. Always complete. */
+  manualContactCount: number;
+  /** Computed member count at read time: manual ∪ tag-matched, deduped. */
   memberCount: number;
   /** Null when the creator was hard-deleted; UI shows "Removed user". */
   createdById: string | null;

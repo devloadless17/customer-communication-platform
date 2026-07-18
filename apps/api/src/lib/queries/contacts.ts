@@ -345,6 +345,30 @@ export async function listContacts(
  * so every filter (search / source / window / stage / tag / customField)
  * matches the flat list exactly; the CHANNEL filter is dropped (a person spans
  * channels). `totalCount` counts distinct persons.
+ *
+ * SCALING — known, measured, deliberately NOT worked around (2026-07-18).
+ *
+ * The inner query has no LIMIT and cannot have one: to order PERSONS by most
+ * recent activity you must know every matching person's activity, so the
+ * DISTINCT-ON must see every matching contact before the outer LIMIT/OFFSET
+ * can pick a page. Cost is therefore O(matching contacts) per page load, on
+ * page 1 as much as page 500 — deep paging does not compound it; only the
+ * discarded OFFSET rows grow.
+ *
+ * It is NOT as bad as the shape suggests. `Conversation` carries
+ * `@@unique([teamId, contactId])`, so the LEFT JOIN LATERAL resolves to ONE
+ * unique-index lookup per contact rather than a scan. At 200k contacts that
+ * is 200k index probes plus a sort — real, but a filtered directory page the
+ * user explicitly opened, not a hot path.
+ *
+ * The only real fix is denormalization: a per-person `lastActivityAt`
+ * maintained on `Customer` (plus the solo-contact case), which would make this
+ * an indexed ORDER BY with a genuine LIMIT. That needs a column, ingest
+ * maintenance, a backfill and a drift sweeper — the pattern CLAUDE.md §7
+ * requires for any denormalized field — so it is a scoped piece of work, not a
+ * tweak to slip into a hardening pass. TRIGGER: a tenant past ~100k contacts
+ * reporting a slow /contacts page in "group by person" mode. Until then the
+ * flat list (keyset, indexed) is the fast path and is the default.
  */
 export async function listPeople(
   teamId: string,
