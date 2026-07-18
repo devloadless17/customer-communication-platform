@@ -279,13 +279,17 @@ function ReplyBoxImpl({
   // widest window an agent may send in. WhatsApp's capability values reproduce
   // the previous hardcoded 24h, so this is behavior-identical there.
   const caps = CHANNEL_CAPABILITIES[channel];
-  const windowStatus = computeWindowStatus(
-    lastInboundAt,
-    now,
-    effectiveSendWindowMs(caps) ?? undefined,
-  );
+  // A NULL window means the channel has no re-engagement limit at all (webchat
+  // widget: a live in-browser session). That is different from "24h" — passing
+  // `undefined` down would fall through to computeWindowStatus's 24h default and
+  // lock the composer forever on a thread whose visitor last wrote yesterday,
+  // with no template escape hatch (caps.templates === false). The server already
+  // skips the gate for a null window (send-text-internal.ts), so the UI must too.
+  const sendWindowMs = effectiveSendWindowMs(caps);
+  const hasSendWindow = sendWindowMs !== null;
+  const windowStatus = computeWindowStatus(lastInboundAt, now, sendWindowMs ?? undefined);
   const windowClosed =
-    windowStatus.state === "closed" || windowStatus.state === "never";
+    hasSendWindow && (windowStatus.state === "closed" || windowStatus.state === "never");
   const [mode, setMode] = useState<Mode>("reply");
   // Draft persistence: WhatsApp/Slack/Telegram all hold typed-but-unsent text
   // across chat switches. We persist to localStorage keyed by team+conv id so

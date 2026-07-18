@@ -17,6 +17,7 @@ import type { NormalizedInboundMessage } from "@ccp/shared/providers/types";
 import { DbService } from "../db/db.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
 import { ingestEvents } from "@/lib/providers/ingest";
+import { blobStorage } from "@/lib/blob-storage";
 import { publish } from "@/lib/events/bus";
 import { mapMessage } from "@/lib/queries/_shared";
 import { REPLY_TO_INCLUDE } from "@/lib/queries/_shared";
@@ -120,6 +121,7 @@ export class WebchatwidgetGateway
             socket.handshake.address ||
             "unknown";
           if (!handshakeBucket.consume(ip).ok) {
+            this.logger.warn(`widget handshake throttled ip=${ip}`);
             next(new Error("handshake_throttled"));
             return;
           }
@@ -135,11 +137,23 @@ export class WebchatwidgetGateway
           }
           const resolved = await resolveWebchatwidgetByPublicKey(siteKey);
           if (!resolved) {
+            // Diagnostics: a mistyped/rotated key is the #1 onboarding failure and
+            // is otherwise INVISIBLE — the visitor just sees a dead widget. Log a
+            // key PREFIX only (enough to correlate, not the whole credential).
+            this.logger.warn(
+              `widget handshake rejected: unknown_site_key key=${siteKey.slice(0, 12)}… ip=${ip}`,
+            );
             next(new Error("unknown_site_key"));
             return;
           }
           const origin = (socket.handshake.headers.origin as string | undefined) ?? null;
           if (!originAllowed(origin, resolved.allowedOrigins)) {
+            // The other half of the same class: the client embedded the widget on a
+            // domain that isn't in its allow-list. Log the actual origin so support
+            // can tell them exactly what to add.
+            this.logger.warn(
+              `widget handshake rejected: origin_not_allowed origin=${origin ?? "<none>"} widget=${resolved.widgetId} team=${resolved.teamId}`,
+            );
             next(new Error("origin_not_allowed"));
             return;
           }
@@ -212,6 +226,33 @@ export class WebchatwidgetGateway
     const text = typeof body.body === "string" ? body.body.slice(0, MAX_BODY_CHARS) : "";
     const hasMedia = body.media && typeof body.media.mediaKey === "string";
     if (!text && !hasMedia) return { ok: false, error: "empty" };
+
+    // TENANT GATE (§7): `mediaKey` arrives from the browser, so it is untrusted
+    // input — without this check a visitor could name ANY key in the bucket
+    // (e.g. `media/<other-team>/…`), have it persisted on their OWN conversation,
+    // and then stream another tenant's private object back through
+    // GET /api/widget/media/:id (whose ownership check validates the MESSAGE, not
+    // the key). Keys are minted as `media/{teamId}/{yyyy}/{mm}/…` by the R2 key
+    // builder, so requiring the handshake team's prefix binds the blob to the
+    // team that uploaded it. Belt-and-braces: reject traversal segments too.
+    if (hasMedia) {
+      const key = body.media!.mediaKey;
+      const url = body.media!.mediaUrl;
+      // The url is persisted alongside the key and is what the forward/external
+      // paths hand to `fetch()`, so it gets the provider's own SSRF/open-redirect
+      // gate rather than being trusted because the key passed.
+      if (
+        !key.startsWith(`media/${data.teamId}/`) ||
+        key.includes("..") ||
+        typeof url !== "string" ||
+        !blobStorage.isOwnUrl(url)
+      ) {
+        this.logger.warn(
+          `[webchatwidget] rejected foreign media key/url on team=${data.teamId} widget=${data.widgetId}`,
+        );
+        return { ok: false, error: "bad_media" };
+      }
+    }
 
     // Dedupe key is stable per (widget, visitor, clientMsgId) so a reconnect
     // resend can't double-insert (the (teamId, channel, externalId) unique gate).

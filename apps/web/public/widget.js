@@ -51,13 +51,27 @@
   var reduceMotion = false;
   try { reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (_e) {}
 
+  // visitorId is the ONLY credential authenticating this visitor: possession
+  // grants their whole thread history (socket handshake) and their media
+  // (GET /api/widget/media). It must be unguessable, so prefer the CSPRNG —
+  // Math.random() is xorshift128+ with a predictable Date.now() suffix.
+  function newVisitorId() {
+    try {
+      if (window.crypto && crypto.randomUUID) return "vis_" + crypto.randomUUID();
+      if (window.crypto && crypto.getRandomValues) {
+        var a = new Uint8Array(16); crypto.getRandomValues(a);
+        return "vis_" + Array.prototype.map.call(a, function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
+      }
+    } catch (_e) { /* fall through */ }
+    return "vis_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  }
   var S = {
     socket: null, conn: "connecting", open: INLINE, ready: false, viewInit: false,
-    formDone: false, closed: false, cfg: null, preChat: null, replyTo: null,
+    formDone: false, closed: false, cfg: null, preChat: null, replyTo: null, fatal: false,
     byId: {}, pending: {}, unread: 0, lastSeenTs: Number(lsGet(K.seen) || 0),
-    lastGroup: null, stick: true, readTimer: null,
+    lastGroup: null, stick: true, readTimer: null, typingClear: null,
     hasMore: false, oldestCursor: null, loadingOlder: false, typingOn: false, recording: null,
-    visitorId: lsGet(K.visitor) || ("vis_" + Math.random().toString(36).slice(2) + Date.now().toString(36)),
+    visitorId: lsGet(K.visitor) || newVisitorId(),
   };
   lsSet(K.visitor, S.visitorId);
   var baseTitle = document.title, titleTimer = null;
@@ -97,7 +111,13 @@
     ".root.inl{height:100%}",
     ".launch{position:fixed;bottom:22px;z-index:2147483646;display:flex;align-items:center;gap:10px;border:0;background:transparent;cursor:pointer;padding:0}",
     ".launch.right{right:22px;flex-direction:row}.launch.left{left:22px;flex-direction:row-reverse}",
-    ".launch .b{width:60px;height:60px;border-radius:9999px;background:linear-gradient(145deg,var(--lc),color-mix(in srgb,var(--lc) 78%,#000));color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 14px 30px -8px color-mix(in srgb,var(--lc) 60%,transparent),0 4px 10px rgba(0,0,0,.12);transition:transform .18s ease}",
+    // NOTE on the doubled `background` declarations here and below: color-mix() is
+    // Chrome 111+/Safari 16.2+, and an engine that doesn't grok it drops the WHOLE
+    // declaration. Without a flat fallback first, iOS 15 and the Facebook/Instagram
+    // in-app browsers render an invisible launcher, a white-on-white header, and
+    // unreadable outgoing bubbles. The flat colour lands first; modern engines then
+    // override it with the gradient.
+    ".launch .b{width:60px;height:60px;border-radius:9999px;background:var(--lc);background:linear-gradient(145deg,var(--lc),color-mix(in srgb,var(--lc) 78%,#000));color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 14px 30px -8px color-mix(in srgb,var(--lc) 60%,transparent),0 4px 10px rgba(0,0,0,.12);transition:transform .18s ease}",
     ".launch:hover .b{transform:scale(1.06)}.launch:active .b{transform:scale(.95)}.launch .b svg{width:28px;height:28px}.launch .b img{width:30px;height:30px;border-radius:9999px;object-fit:cover}",
     ".launch .lbl{background:var(--surface);color:var(--ink);font-size:13.5px;font-weight:600;padding:9px 14px;border-radius:9999px;box-shadow:0 8px 22px -8px rgba(0,0,0,.25);white-space:nowrap;display:none}",
     ".launch.showlbl .lbl{display:block}",
@@ -108,7 +128,12 @@
     ".panel.open{display:flex}.panel.in{opacity:1;transform:none;transition:opacity .22s ease,transform .22s cubic-bezier(.2,.8,.2,1)}",
     ".panel.inline{position:relative;right:auto;left:auto;bottom:auto;width:100%;height:100%;max-width:100%;border-radius:var(--radius);opacity:1;transform:none;display:flex;box-shadow:0 0 0 1px var(--border)}",
     "@media (max-width:480px){.panel:not(.inline){right:0;left:0;bottom:0;top:0;width:100vw;max-width:100vw;height:100vh;height:100dvh;border-radius:0}}",
-    "header{display:flex;align-items:center;gap:11px;padding:15px 16px;background:linear-gradient(135deg,var(--c),color-mix(in srgb,var(--c) 82%,#000));color:var(--ct);flex:0 0 auto}",
+    // iOS Safari auto-zooms the HOST PAGE when a form control with font-size < 16px
+    // takes focus, and never zooms back out — so tapping the message box left the
+    // client's site zoomed in and horizontally scrollable. 16px on mobile is the
+    // documented way to opt out; desktop keeps the tighter 14px above.
+    "@media (max-width:480px){.composer textarea,.form input{font-size:16px}}",
+    "header{display:flex;align-items:center;gap:11px;padding:15px 16px;background:var(--c);background:linear-gradient(135deg,var(--c),color-mix(in srgb,var(--c) 82%,#000));color:var(--ct);flex:0 0 auto}",
     ".hava{width:38px;height:38px;border-radius:11px;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;position:relative;overflow:hidden;flex:0 0 auto}.hava img{width:100%;height:100%;object-fit:cover}",
     ".hdot{position:absolute;right:-2px;bottom:-2px;width:12px;height:12px;border-radius:9999px;background:#22c55e;box-shadow:0 0 0 2px var(--c)}.hdot.re{background:#f59e0b}.hdot.off{background:#9ca3af}",
     ".htxt{flex:1;min-width:0}.htxt b{display:block;font-size:15.5px;font-weight:700;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.25}.htxt small{font-size:12px;opacity:.9}",
@@ -123,7 +148,7 @@
     ".col{display:flex;flex-direction:column;min-width:0}.mr.out .col{align-items:flex-end}",
     ".bubble{padding:10px 13px;border-radius:17px;font-size:14px;line-height:1.5;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;max-width:100%;box-shadow:0 1px 1px rgba(15,23,42,.05)}",
     reduceMotion ? "" : ".bubble.anim{animation:cin .2s ease-out}@keyframes cin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}",
-    ".mr.out .bubble{background:linear-gradient(145deg,var(--uc),color-mix(in srgb,var(--uc) 88%,#000));color:var(--uct);border-bottom-right-radius:6px}",
+    ".mr.out .bubble{background:var(--uc);background:linear-gradient(145deg,var(--uc),color-mix(in srgb,var(--uc) 88%,#000));color:var(--uct);border-bottom-right-radius:6px}",
     ".mr.in .bubble{background:var(--inb);color:var(--ink);border:1px solid var(--border);border-bottom-left-radius:6px}",
     ".bubble a{color:inherit;text-decoration:underline;text-underline-offset:2px}",
     ".meta{font-size:10.5px;color:var(--ink2);margin:3px 5px 0;display:flex;gap:4px;align-items:center}.tick.err{color:#ef4444}.retry{color:#ef4444;cursor:pointer;text-decoration:underline}.tick.read{color:#38bdf8}",
@@ -196,6 +221,14 @@
   var micBtn = el("button", { class: "rbtn", "aria-label": "Record a voice message", title: "Voice message", html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>' });
   var ibar = el("div", { class: "ibar" }, [attachBtn, micBtn, ta, sendBtn]);
   var composer = el("div", { class: "composer" }, [ibar, fileInput]);
+  // Hidden until the socket proves itself (`ready`/`history`) or the pre-chat
+  // form is submitted. Previously it painted immediately while S.formDone was
+  // still false, so onSend() returned early and a visitor typing into an
+  // apparently-normal box got NOTHING — no bubble, no error, no queue. That is
+  // exactly what an origin_not_allowed / unknown_site_key misconfiguration looks
+  // like to the client. Once shown it stays shown, so the offline send queue on
+  // a later disconnect is unaffected.
+  composer.style.display = "none";
   panel.appendChild(composer);
   var footEl = el("div", { class: "foot" }); footEl.style.display = "none"; panel.appendChild(footEl);
 
@@ -209,15 +242,31 @@
 
   // ── open / close ───────────────────────────────────────────────────────────
   var lastFocus = null;
+  // On-screen-keyboard fit (mobile, floating panel only). The panel is
+  // position:fixed at 100dvh, but dvh tracks browser chrome — NOT the keyboard.
+  // On iOS Safari the layout viewport doesn't shrink when the keyboard opens, so
+  // the composer ends up underneath it and the visitor types blind. visualViewport
+  // is the only accurate source for the visible area, so pin the panel to it while
+  // open and hand the height back on close.
+  var vv = window.visualViewport || null;
+  function syncViewport() {
+    if (!vv || INLINE || !S.open) return;
+    if (window.innerWidth > 480) { panel.style.height = ""; return; }
+    panel.style.height = vv.height + "px";
+    scrollToBottom(false);
+  }
+  if (vv) { vv.addEventListener("resize", syncViewport); vv.addEventListener("scroll", syncViewport); }
   function openPanel() {
     if (INLINE) return;
     S.open = true; panel.classList.add("open"); requestAnimationFrame(function () { panel.classList.add("in"); });
     if (launcher) launcher.style.display = "none";
     clearUnread(); if (S.formDone) setTimeout(function () { ta.focus(); }, 40); scrollToBottom(true); markRead();
+    syncViewport();
   }
   function closePanel() {
     if (INLINE) return;
     S.open = false; panel.classList.remove("in"); panel.classList.remove("open");
+    panel.style.height = "";
     if (launcher) launcher.style.display = "flex";
     if (lastFocus && lastFocus.focus) lastFocus.focus(); else if (launcher) launcher.focus();
   }
@@ -431,7 +480,12 @@
   updateSend();
 
   // ── outbox ────────────────────────────────────────────────────────────────────
-  function persistOutbox() { var arr = []; for (var cid in S.pending) { var p = S.pending[cid]; if (p.file) continue; if (p.status === "queued" || p.status === "failed") arr.push({ cid: cid, payload: p.payload, status: p.status }); } if (arr.length) lsSet(K.outbox, JSON.stringify(arr)); else lsDel(K.outbox); }
+  // "inflight" is persisted AS "queued": the frame was emitted but not yet acked,
+  // so a refresh/tab-kill inside the SEND_TIMEOUT window would otherwise drop it
+  // from both the UI and storage with no trace (the mobile-flap case). Re-flushing
+  // it on next boot is safe — the server dedupes on
+  // externalId = widget:visitor:clientMsgId, and retries reuse the same cid.
+  function persistOutbox() { var arr = []; for (var cid in S.pending) { var p = S.pending[cid]; if (p.file) continue; if (p.status === "queued" || p.status === "failed" || p.status === "inflight") arr.push({ cid: cid, payload: p.payload, status: p.status === "failed" ? "failed" : "queued" }); } if (arr.length) lsSet(K.outbox, JSON.stringify(arr)); else lsDel(K.outbox); }
   function restoreOutbox() { var raw = lsGet(K.outbox); if (!raw) return; var arr; try { arr = JSON.parse(raw); } catch (_e) { return; } (arr || []).forEach(function (it) { if (it && it.cid && it.payload) optimistic(it.cid, it.payload, null, it.status === "failed" ? "failed" : "queued"); }); }
   function optimistic(cid, payload, file, status) {
     var m = { direction: "in", body: payload.body || "", media: null, status: status || "queued", createdAt: new Date().toISOString(), replyTo: payload.replyToExternalId ? { body: (S.replyTo && S.replyTo.body) || "" } : null, _local: true };
@@ -583,9 +637,29 @@
     var socket = window.io(apiBase + "/widget", { path: "/api/socket", transports: ["websocket"], auth: { siteKey: siteKey, visitorId: S.visitorId }, reconnection: true, reconnectionAttempts: Infinity, reconnectionDelay: 800, reconnectionDelayMax: 8000, timeout: 12000 });
     S.socket = socket;
     socket.on("connect", function () { setConn("online"); flushOutbox(); markRead(); });
-    socket.on("disconnect", function () { setConn("reconnecting"); });
+    socket.on("disconnect", function () { setConn("reconnecting"); hideTyping(); });
     socket.io.on("reconnect_attempt", function () { setConn("reconnecting"); });
-    socket.on("connect_error", function () { setConn("reconnecting"); });
+    // A rejected handshake is TERMINAL, not transient: retrying forever (attempts
+    // Infinity) just hides a misconfiguration behind a "Reconnecting…" strip while
+    // the visitor sees a chat that never works. Stop, say so, and put the reason in
+    // the console so whoever installed the snippet can actually fix it.
+    socket.on("connect_error", function (err) {
+      var reason = String((err && (err.message || err.data)) || "");
+      if (/unknown_site_key|origin_not_allowed|bad_handshake/.test(reason)) {
+        S.fatal = true;
+        socket.disconnect();
+        setConn("offline");
+        console.error(
+          "[webchat] chat unavailable (" + reason + "). " +
+          (reason === "origin_not_allowed"
+            ? "Add " + location.origin + " to this widget's allowed origins in Settings → Website chat."
+            : "Check the data-webchat-key value against Settings → Website chat.")
+        );
+        appendSys("Chat is unavailable right now. Please try again later.");
+        return;
+      }
+      setConn("reconnecting");
+    });
     socket.on("ready", onReady);
     socket.on("history", function (p) {
       var msgs = (p && p.messages) || [];
@@ -601,7 +675,17 @@
     });
     socket.on("message", function (m) { upsert(m, false); });
     socket.on("message:status", function (p) { if (p && p.id) applyStatus(p.id, p.status); });
-    socket.on("typing", function (p) { if (p && p.on) { showTyping(); scrollToBottom(false); } else hideTyping(); });
+    // Safety auto-clear mirrors the agent side (use-typing.ts): if the "off" frame
+    // is lost — e.g. the visitor's socket drops while the agent is mid-sentence, so
+    // the off is emitted to a room this client already left — the dots would
+    // otherwise persist forever (history replay never clears them).
+    socket.on("typing", function (p) {
+      if (S.typingClear) { clearTimeout(S.typingClear); S.typingClear = null; }
+      if (p && p.on) {
+        showTyping(); scrollToBottom(false);
+        S.typingClear = setTimeout(function () { S.typingClear = null; hideTyping(); }, 8000);
+      } else hideTyping();
+    });
     socket.on("conversation:status", function (p) { if (p && p.status === "closed") { S.closed = true; appendClosed(); } else if (p && p.status) { S.closed = false; bodyEl.querySelectorAll(".sys.closed").forEach(function (n) { n.remove(); }); } });
   }
   function appendClosed() { if (bodyEl.querySelector(".sys.closed")) return; bodyEl.appendChild(el("div", { class: "sys closed", dir: "auto" }, "This chat was closed. Send a message to continue.")); onNewRow(false); }

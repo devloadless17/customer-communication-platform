@@ -217,6 +217,14 @@ function Editor({
   const c = widget.config;
   const theme = c.theme ?? {};
   const [originDraft, setOriginDraft] = useState("");
+  /** Fold the typed origin into the list. Shared by Enter and blur so a domain
+   *  typed-then-Saved can't be silently dropped. Idempotent + de-duping. */
+  function commitOrigin() {
+    const v = originDraft.trim();
+    if (!v) return;
+    if (!widget.allowedOrigins.includes(v)) onOrigins([...widget.allowedOrigins, v]);
+    setOriginDraft("");
+  }
   const origin = appOrigin || "https://YOUR-APP";
   const scriptTag = buildScript(origin, widget.publicKey, c);
 
@@ -319,13 +327,18 @@ function Editor({
             </div>
             <input
               value={originDraft}
+              aria-label="Add an allowed origin"
               onChange={(e) => setOriginDraft(e.target.value)}
+              // Commit on BLUR as well as Enter. Enter-only silently discarded a
+              // typed domain when the admin went straight to "Save changes" — and
+              // an empty allow-list is permissive to EVERY site (origin-allow.ts),
+              // so the failure mode was the exact opposite of the admin's intent.
+              // Blur fires before the Save click, so the value lands first.
+              onBlur={() => commitOrigin()}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  const v = originDraft.trim();
-                  if (v && !widget.allowedOrigins.includes(v)) onOrigins([...widget.allowedOrigins, v]);
-                  setOriginDraft("");
+                  commitOrigin();
                 }
               }}
               placeholder="example.com or *.example.com — press Enter to add"
@@ -356,7 +369,11 @@ function Editor({
         {(c.launcher ?? "bubble") === "off" ? (
           <>
             <CopyBox title="1) Add the widget (bubble hidden)" hint="Paste before &lt;/body&gt; on every page." code={scriptTag} />
-            <CopyBox title="2) Open it from any link or button" hint="Wire your own element to the widget." code={`<a href="#" onclick="CCPWebchat.open();return false">Chat with us</a>`} />
+            <CopyBox
+              title="2) Open it from any link or button"
+              hint="Include both lines. The first keeps early clicks working while the widget is still loading."
+              code={`${CCP_WEBCHAT_STUB}\n<a href="#" onclick="CCPWebchat.open();return false">Chat with us</a>`}
+            />
           </>
         ) : (
           <CopyBox title="Floating bubble" hint="Paste before &lt;/body&gt; on every page — a chat bubble appears." code={scriptTag} />
@@ -428,6 +445,20 @@ function ColorField({ label, value, onChange }: { label: string; value?: string;
     </label>
   );
 }
+
+/**
+ * Pre-load call queue stub for the JS API. The embed script is `defer`red, so a
+ * visitor can click a `CCPWebchat.open()` link BEFORE widget.js executes — without
+ * this stub that throws ReferenceError, `return false` never runs, and the host
+ * page navigates to `#` instead of opening the chat. The stub buffers calls into
+ * `q`, which widget.js drains on load.
+ */
+const CCP_WEBCHAT_STUB =
+  `<script>window.CCPWebchat=window.CCPWebchat||{q:[],` +
+  `open:function(){this.q.push(["open"])},` +
+  `close:function(){this.q.push(["close"])},` +
+  `toggle:function(){this.q.push(["toggle"])},` +
+  `isOpen:function(){return false}};</script>`;
 
 /** Build the `<script>` embed tag with the org's launcher/position/label choices. */
 function buildScript(origin: string, key: string, c: WebchatWidgetView["config"]): string {

@@ -1,6 +1,5 @@
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
-import { findExistingCustomerIdByStrongKey } from "@/lib/identity/identity-service";
 import { toContactWire } from "@/lib/queries/_shared";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
@@ -56,30 +55,23 @@ export async function applyWebchatPreChatIdentity(
   }
   await db.contact.update({ where: { id: contact.id }, data: next });
 
-  // A strong key may now adopt an EXISTING person. Use the non-minting resolver
-  // (findExisting…, NOT resolveCustomerId) so a brand-new phone/email the business
-  // didn't already hold doesn't mint a fresh customer and tear this contact out of
-  // its own profile — the exact silent-un-merge bug documented in contact-share.ts.
-  const hasStrongKey = Boolean(next.phoneNumber || next.email);
-  if (hasStrongKey) {
-    const adoptedCustomerId = await findExistingCustomerIdByStrongKey(
-      teamId,
-      { id: contact.id, name: next.name, phoneNumber: next.phoneNumber, email: next.email },
-      undefined,
-      { trustEmailAsStrongKey: true },
-    );
-    if (adoptedCustomerId && adoptedCustomerId !== contact.customerId) {
-      await db.contact.update({
-        where: { id: contact.id },
-        data: { customerId: adoptedCustomerId },
-      });
-      if (contact.customerId) {
-        await db.customer.deleteMany({
-          where: { id: contact.customerId, teamId, contacts: { none: {} } },
-        });
-      }
-    }
-  }
+  // NO AUTO-MERGE from this surface — deliberately.
+  //
+  // §6 allows auto-merge on a strong key only when it is SELF-ASSERTED, and on
+  // WhatsApp/Messenger/Instagram that means something: the vendor already verified
+  // the channel identity, so the person asserting the email provably controls that
+  // account. A webchat visitor is ANONYMOUS and has proven nothing — the pre-chat
+  // form is an unauthenticated public text box on the client's website. Trusting it
+  // as a strong key let anyone type a known customer's email or phone and have
+  // their throwaway session adopted into that person's unified Customer, after
+  // which the contact panel and linked-channels switcher present the stranger as
+  // the verified customer. That is an impersonation vector against a surface agents
+  // trust, so the values are stored on the Contact (the agent can see and act on
+  // them) and merging is left to the MANUAL, reversible path — exactly the posture
+  // §6 prescribes for everything that isn't a deterministic verified key.
+  //
+  // Re-enabling this requires verifying the address/number first (emailed or SMS'd
+  // code), not loosening the check here.
 
   // Announce the change so the contact panel / linked-channels switcher / partner
   // webhooks refresh — same publish the PATCH route + contact-share path use.
