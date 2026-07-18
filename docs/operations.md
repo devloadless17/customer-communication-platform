@@ -50,6 +50,8 @@ Symptom: `FATAL ERROR: Ineffective mark-compacts near heap limit` after a long e
 
 ```
 SIGTERM → main.ts shutdown() →
+  drainSockets()                            (Socket.io: deliberate disconnect on "/" and
+                                             "/widget" so clients reconnect immediately)
   server.close() + closeIdleConnections()   (stop accepting; Caddy sees us down fast)
   → ~3s flush budget for in-flight responses
   → app.close()  (capped at APP_CLOSE_BUDGET_MS = 90_000)
@@ -62,7 +64,9 @@ SIGTERM → main.ts shutdown() →
 
 `app.close()` fires the full NestJS lifecycle on its own — we only wire the signal listeners ourselves. `uncaughtException` drains via the same path (30s backstop) then exits so Docker restarts clean; `unhandledRejection` is log-and-continue (dominated by fire-and-forget `void publish(...)` sites).
 
-**Invariants:** keep `server.close()` ordered BEFORE `app.close()`; don't strip the manual handlers; don't drop `stop_grace_period` below ~100s on api. If a worker dies mid-job, BullMQ re-claims the job after `lockDuration` (90s) and re-executes it — the `OutboundSendAttempt` ledger is what prevents a double Meta send in that window.
+**Why the socket drain comes first:** open WebSockets keep the HTTP server alive, so `server.close()` could never resolve while an agent had the inbox open — it always fell through its 3s fallback and the sockets died with the process. A browser sees that as an abrupt reset and waits out its full reconnect backoff, so every deploy blacked out the inbox for seconds. `drainSockets()` (`realtime/ws-adapter.ts`) sends a real disconnect instead; clients reconnect at once and `server.close()` resolves on its own. Measured with 3 visitor sockets attached: shutdown completed inside the same second, and clients reported `io server disconnect` rather than `transport close`. It is best-effort and fully caught — a failure here must never block shutdown.
+
+**Invariants:** keep the socket drain and `server.close()` ordered BEFORE `app.close()`; don't strip the manual handlers; don't drop `stop_grace_period` below ~100s on api. **Every BullMQ worker's `lockDuration` must stay ≤ 90s and its own close cap ≤ 85s** — hooks run sequentially inside one 90s `app.close()` budget, so a worker whose lock outlives the process gets its job re-claimed and re-executed on the next boot (for the AI reply worker that meant a second model call and a second billed send; it was 120s until this was caught). If a worker dies mid-job, BullMQ re-claims the job after `lockDuration` (90s) and re-executes it — the `OutboundSendAttempt` ledger is what prevents a double Meta send in that window.
 
 ---
 
@@ -135,7 +139,34 @@ Global: HTTP/3 (`protocols h3 h2 h1`), HSTS/nosniff/`X-Frame-Options SAMEORIGIN`
 
 ---
 
-## 9. Scaling cliffs (don't pre-build)
+## 9. Observability — health, degradation, alerting
+
+`GET /health` (no auth) reports `ok`, `db`, `redis`, `uptimeSec`, `pgPool`, `jobFailures`, `outboxLag`, `widgetVisitorSockets`, `ffmpeg`, and **`degraded: string[]`**.
+
+**`ok`/503 is a ROUTING decision, not a health verdict.** It 503s only when Postgres is down. A wedged outbox, an exhausted connection pool, a queue burning through retries, and a media backlog all keep `ok: true` **on purpose** — a degraded api must stay in Caddy's rotation rather than stop accepting Meta webhooks it could still ingest. The cost of that choice is that the process can be in serious trouble and still answer 200.
+
+`degraded` closes the gap: it is the same raw numbers, evaluated against thresholds (`health/health-thresholds.ts`), rendered as plain sentences. Empty means healthy.
+
+- **External monitoring** (the half we can't build from inside — a crashed process cannot report on itself): point any uptime service at `/health` and alert on **`degraded` being non-empty**, plus the usual non-200 / timeout checks. One assertion, no thresholds duplicated in the monitor.
+- **`HealthWatchdogService`** re-evaluates the same list every 60s and logs on TRANSITION — `HEALTH DEGRADED: …` on entry and on any change to which conditions are breached, `HEALTH RECOVERED: …` on return, and a re-statement hourly while a condition persists. Transitions, not levels, so a long outage doesn't emit 1,440 identical lines and train everyone to ignore it. Grep those two prefixes for log-based alerting.
+
+Thresholds (tune in `health-thresholds.ts`): pool ≥85% saturated, ≥5 requests waiting for a connection, outbox oldest-pending >30s, ≥8 media jobs queued behind the ffmpeg cap, ≥25 jobs/hour exhausting retries on any queue.
+
+**Concurrency ceilings** — every one is a single-process in-memory gate (see the scaling cliffs below):
+
+| Env | Default | Bounds |
+|---|---|---|
+| `SEND_PER_TEAM_CONCURRENCY` | 3 | Per-team in-flight message sends |
+| `BROADCAST_PER_TEAM_CONCURRENCY` | 2 | Concurrent broadcasts per team |
+| `BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY` | 16 | Per-team in-flight broadcast recipients |
+| `MAX_RUNNING_BROADCASTS` | 6 | Concurrent broadcasts **process-wide** |
+| `FFMPEG_CONCURRENCY` | 2 | Concurrent ffmpeg subprocesses **process-wide** |
+
+The two process-wide caps exist because per-team fairness does not imply a survivable total: ~30 tenants × 2 broadcasts × 16 lanes is ~960 concurrent sends, and unbounded ffmpeg spawns are charged to the api container's `mem_limit`, so a burst of inbound videos OOM-kills the **API**, not the transcode. Work that can't get a slot queues (broadcasts stay `queued` and retry; ffmpeg callers degrade to no-thumbnail / send-original after their wait budget) — deferred, never dropped.
+
+---
+
+## 10. Scaling cliffs (don't pre-build)
 
 - **Second app instance** → move Socket.io to the Redis adapter, add sticky sessions, and move rate-limit buckets + provider-config cache to Redis. (Everything in-process today assumes a single process.)
 - **50–200 tenants** → the in-process credential cache + grow-only Maps start to leak. Add eviction / move to Redis then.

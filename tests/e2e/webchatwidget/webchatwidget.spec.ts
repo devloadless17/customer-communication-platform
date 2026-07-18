@@ -589,8 +589,13 @@ test("history pagination: >50 messages replays the latest page + 'Load earlier' 
     await expect(earlier).toBeVisible({ timeout: 15_000 });
     await expect(v.locator(".bubble", { hasText: `older 0 ${RUN}` })).toHaveCount(0);
 
-    // Fetch the older page → the oldest message prepends into the thread.
-    await earlier.click();
+    // Fetch the older page. Scrolling the thread to the top is the real user
+    // action here — the widget auto-loads on an upward scroll, and the
+    // "Load earlier" button is the fallback for a thread too short to scroll.
+    // (Clicking the button directly is NOT a stable way to test this: Playwright
+    // scrolls it into view first, which is itself an upward scroll, so the
+    // auto-load fires and re-flows the thread out from under the click.)
+    await v.locator(".body").evaluate((n) => { n.scrollTop = 0; });
     await expect(v.locator(".bubble", { hasText: `older 0 ${RUN}` })).toBeVisible({ timeout: 15_000 });
   } finally {
     await ctx.close();

@@ -14,7 +14,7 @@ import { AppModule } from "./app.module";
 import { consumeUnauthIpToken } from "./auth/api-key.guard";
 import { correlationMiddleware } from "./common/correlation";
 import { ipRateLimitMiddleware } from "./common/ip-rate-limit.middleware";
-import { WsAdapter } from "./realtime/ws-adapter";
+import { drainSockets, WsAdapter } from "./realtime/ws-adapter";
 
 /**
  * NestJS entrypoint. Sits next to Next.js on the same VPS, on a different
@@ -443,6 +443,11 @@ async function bootstrap(): Promise<void> {
   // the background.
   //
   // Sequence:
+  //   0. drainSockets()             — disconnect Socket.io clients with a
+  //                                    proper close frame so they reconnect
+  //                                    immediately, and so the open
+  //                                    WebSockets stop pinning the HTTP
+  //                                    server open in step 1
   //   1. server.close()             — stop accepting new TCP connections
   //                                    (returns immediately; existing
   //                                    connections continue)
@@ -478,6 +483,23 @@ async function bootstrap(): Promise<void> {
     }
     shuttingDown = true;
     shutdownLogger.log(`${signal} received — starting graceful drain`);
+
+    // Drain Socket.io BEFORE server.close(). Open WebSockets otherwise keep
+    // the HTTP server from ever closing, so the close below always fell
+    // through its 3s fallback and every agent's socket died with the process
+    // (abrupt reset → full client reconnect backoff → seconds of dead inbox
+    // on every deploy). A deliberate disconnect tells clients to reconnect
+    // immediately and lets server.close() resolve on its own.
+    try {
+      const drained = await drainSockets();
+      if (drained > 0) {
+        shutdownLogger.log(`disconnected ${drained} socket(s) for reconnect`);
+      }
+    } catch (err) {
+      shutdownLogger.warn(
+        `socket drain failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     try {
       await new Promise<void>((resolve) => {

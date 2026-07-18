@@ -367,6 +367,45 @@ function releaseBroadcastTeamSlot(teamId: string): void {
 }
 
 /**
+ * GLOBAL concurrent-broadcast ceiling — the missing half of the pair. The
+ * per-team gate above bounds ONE team; it says nothing about the whole
+ * process. With ~30 tenants each allowed 2 concurrent broadcasts, the
+ * worst-case in-flight lane count was 30 × 2 × 16 = 960 concurrent
+ * recipient sends: far past the Prisma pool, the Meta call budget, and the
+ * heap headroom of a 2GB api container — and it would starve the inbox
+ * (REST + Socket.io share this event loop) for every other tenant at once.
+ * Per-team fairness does not imply a survivable total.
+ *
+ * The runner's own comments already referenced `MAX_RUNNING_BROADCASTS` as
+ * though it existed; it never did. This is that constant.
+ *
+ * Default 6 concurrent broadcasts → a worst-case 6 × 16 = 96 in-flight
+ * recipient sends, which the pool and the Meta budget absorb comfortably.
+ * A broadcast that can't claim a global slot stays `queued` and re-attempts
+ * on the same defer timer as the per-team path, so nothing is dropped —
+ * throughput is deferred, never lost. Tunable via MAX_RUNNING_BROADCASTS.
+ *
+ * Single-process only, like every other in-memory gate here; a second app
+ * instance needs Redis counters (deferred — see CLAUDE.md §16).
+ */
+function maxRunningBroadcasts(): number {
+  const raw = Number.parseInt(process.env.MAX_RUNNING_BROADCASTS ?? "6", 10);
+  return Number.isFinite(raw) && raw > 0 && raw <= 100 ? raw : 6;
+}
+
+let runningBroadcastCount = 0;
+
+function tryAcquireGlobalBroadcastSlot(): boolean {
+  if (runningBroadcastCount >= maxRunningBroadcasts()) return false;
+  runningBroadcastCount += 1;
+  return true;
+}
+
+function releaseGlobalBroadcastSlot(): void {
+  runningBroadcastCount = Math.max(0, runningBroadcastCount - 1);
+}
+
+/**
  * Per-team RECIPIENT-LEVEL concurrency cap. Sits on top of the per-broadcast
  * lane pool (SEND_CONCURRENCY) and the per-team broadcast cap above. Without
  * this, one team running N broadcasts × SEND_CONCURRENCY lanes can call
@@ -545,6 +584,22 @@ export async function startBroadcast(broadcastId: string): Promise<void> {
     return;
   }
 
+  // Global ceiling. Claimed AFTER the team slot so the release paths stay
+  // symmetric — on refusal we hand the team slot straight back, otherwise a
+  // process at the global cap would leak one team slot per deferred attempt
+  // and permanently wedge that team below its own cap.
+  if (!tryAcquireGlobalBroadcastSlot()) {
+    releaseBroadcastTeamSlot(owner.teamId);
+    console.warn(
+      `[broadcast ${broadcastId}] deferred: process at the global ` +
+        `concurrent-broadcast cap (${maxRunningBroadcasts()})`,
+    );
+    setTimeout(() => {
+      if (!shuttingDown) void startBroadcast(broadcastId);
+    }, BROADCAST_TEAM_BUSY_DEFER_MS).unref();
+    return;
+  }
+
   // Fire-and-forget — the caller doesn't await this; we explicitly catch so
   // the unhandled rejection doesn't crash the server.
   const run = runBroadcast(broadcastId)
@@ -554,6 +609,7 @@ export async function startBroadcast(broadcastId: string): Promise<void> {
     .finally(() => {
       inFlightRuns.delete(broadcastId);
       releaseBroadcastTeamSlot(owner.teamId);
+      releaseGlobalBroadcastSlot();
     });
   inFlightRuns.set(broadcastId, run);
 }
@@ -2650,8 +2706,9 @@ export async function pruneBroadcastInMemoryStateForTerminalRows(): Promise<void
       progressThrottles.delete(row.id);
       cleared++;
     }
-    // broadcastTeamSlots + teamRecipientSlots are keyed by teamId, not
-    // broadcastId — neither is pruned per-row here. A truly stuck entry would
+    // broadcastTeamSlots + teamRecipientSlots are keyed by teamId, and
+    // runningBroadcastCount is a bare process counter — none is pruned
+    // per-row here. A truly stuck entry would
     // only happen if a runner crashed BETWEEN acquire and the release in
     // `finally`, leaving `active` artificially high. The boot path
     // reconstructs lane state from DB rows and re-fires startBroadcast, which

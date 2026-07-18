@@ -516,7 +516,28 @@
   document.addEventListener("keydown", function (e) { if (e.key === "Escape" && lightbox.classList.contains("on")) lightbox.classList.remove("on"); });
 
   // ── scroll + unread ─────────────────────────────────────────────────────────
-  bodyEl.addEventListener("scroll", function () { S.stick = bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight < 90; if (S.stick) newPill.classList.remove("on"); if (bodyEl.scrollTop < 48 && S.hasMore && !S.loadingOlder) loadOlder(); });
+  // Auto-load older history only on a genuine UPWARD scroll.
+  //
+  // The naive "scrollTop < 48" test fires on scroll events the visitor never
+  // caused. While the panel is hidden the body has zero height, so scrollTop
+  // sits at 0; the scroll events emitted as it opens and snaps to the bottom
+  // are read as "already at the top" and immediately pull a second history
+  // page. Every open fetched 100 messages instead of 50 and rendered
+  // backlog the visitor hadn't asked for.
+  //
+  // Comparing against the previous position makes intent explicit: opening and
+  // snapping to the bottom moves DOWN, and prependOlder restores position
+  // downward too, so neither can trigger a fetch. A thread too short to
+  // overflow never scrolls at all and simply keeps the "Load earlier" button.
+  var lastScrollTop = 0;
+  bodyEl.addEventListener("scroll", function () {
+    var top = bodyEl.scrollTop;
+    var scrolledUp = top < lastScrollTop;
+    lastScrollTop = top;
+    S.stick = bodyEl.scrollHeight - top - bodyEl.clientHeight < 90;
+    if (S.stick) newPill.classList.remove("on");
+    if (scrolledUp && top < 48 && S.hasMore && !S.loadingOlder) loadOlder();
+  });
   newPill.addEventListener("click", function () { S.stick = true; scrollToBottom(true); });
   function scrollToBottom(force) { if (force || S.stick) { bodyEl.scrollTop = bodyEl.scrollHeight; newPill.classList.remove("on"); } }
   function onNewRow(isVisitor) { if (isVisitor || S.stick) scrollToBottom(true); else newPill.classList.add("on"); }
