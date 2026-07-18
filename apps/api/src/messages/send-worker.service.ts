@@ -6,7 +6,7 @@ import {
   forwardRef,
   Inject,
 } from "@nestjs/common";
-import { UnrecoverableError, Worker } from "bullmq";
+import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 
 import { recordJobFailure } from "@/common/job-failure-metrics";
 import type IORedis from "ioredis";
@@ -25,15 +25,71 @@ import {
 } from "./send-queue";
 
 /**
+ * PER-TEAM FAIRNESS for the send queue.
+ *
+ * `message-sends` was a flat FIFO at concurrency 5 with no tenant dimension —
+ * the only one of the three job workers without a per-team gate (workflows and
+ * webhook-deliver both have one). So one organisation pushing bulk sends through
+ * the API, or one whose Meta credential hangs until timeout on every attempt,
+ * occupied all five slots and every OTHER tenant's agent replies queued behind
+ * them. That is the delay an agent actually feels ("my reply took 40 seconds"),
+ * which makes it the highest-value fairness gap in the system.
+ *
+ * Same shape as the workflow worker: claim a slot synchronously, and if the team
+ * is at cap `moveToDelayed` the job so the global slot is released immediately
+ * instead of being parked. Cheaper than the workflow version, because `teamId`
+ * is already on the job payload — no DB read to decide admission.
+ */
+function sendPerTeamConcurrency(): number {
+  const raw = Number.parseInt(process.env.SEND_PER_TEAM_CONCURRENCY ?? "3", 10);
+  return Number.isFinite(raw) && raw > 0 && raw <= 100 ? raw : 3;
+}
+
+const sendTeamSlots = new Map<string, { active: number }>();
+
+function tryAcquireSendSlot(teamId: string): boolean {
+  const cap = sendPerTeamConcurrency();
+  let entry = sendTeamSlots.get(teamId);
+  if (!entry) {
+    entry = { active: 0 };
+    sendTeamSlots.set(teamId, entry);
+  }
+  if (entry.active >= cap) return false;
+  entry.active += 1;
+  return true;
+}
+
+function releaseSendSlot(teamId: string): void {
+  const entry = sendTeamSlots.get(teamId);
+  if (!entry) return;
+  entry.active = Math.max(0, entry.active - 1);
+  // Drop the entry once idle so the Map stays bounded by ACTIVE teams, not by
+  // every team that has ever sent.
+  if (entry.active === 0) sendTeamSlots.delete(teamId);
+}
+
+/**
+ * Backoff for a deferred (team-at-cap) job. Escalates with attempts and adds
+ * jitter: a flat re-poll makes an over-cap tenant's backlog recycle through the
+ * global slots continuously, burning the very capacity the cap exists to protect
+ * and delaying the other tenants it was meant to help. Jitter stops a large
+ * backlog from re-arriving in lockstep.
+ */
+function deferDelayMs(attemptsMade: number): number {
+  const base = Math.min(250 * 2 ** Math.min(attemptsMade, 4), 4_000);
+  return base + Math.floor(Math.random() * 250);
+}
+
+/**
  * Background worker that consumes the `message-sends` queue. Sole responsibility
  * is to call into `MessagesService.executeTextSendJob` and translate failures
  * into `message.send_failed` events so the originating client can flip the
  * optimistic bubble to its error state.
  *
- * Concurrency: 5 in flight. Meta's per-phone rate is ~80 msg/min, so even
- * five concurrent workers churning 200 ms-each sends well under that ceiling.
- * Bumping concurrency higher risks tripping Meta's pacing — keep this in
- * lockstep with the per-tenant pacer when one lands.
+ * Concurrency: 5 in flight, with a PER-TEAM cap on top (see below). Meta's
+ * per-phone rate is ~80 msg/min, so even five concurrent workers churning
+ * 200 ms-each sends well under that ceiling. Bumping concurrency higher risks
+ * tripping Meta's pacing.
  *
  * Retry policy: BullMQ retries 3× on exponential backoff (configured at queue
  * creation). We classify errors first: transient (network, 5xx, "rate_limited"
@@ -97,7 +153,22 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
       // retry attempts when a worker dies mid-job. Threaded into the
       // executor so it can write an OutboundSendAttempt row keyed on this
       // id, which prevents a mid-fetch Meta retry from double-sending.
-      async (job) => this.handle(job.data, job.id),
+      async (job, token) => {
+        // Admission control BEFORE any work: if this team is at its cap, hand the
+        // global slot straight back rather than holding it. `moveToDelayed` +
+        // DelayedError is BullMQ's non-blocking defer — the job returns to the
+        // queue and another tenant's send runs now.
+        const teamId = job.data.teamId;
+        if (!tryAcquireSendSlot(teamId)) {
+          await job.moveToDelayed(Date.now() + deferDelayMs(job.attemptsMade), token);
+          throw new DelayedError();
+        }
+        try {
+          return await this.handle(job.data, job.id);
+        } finally {
+          releaseSendSlot(teamId);
+        }
+      },
       {
         connection,
         concurrency: 5,

@@ -54,6 +54,13 @@ const messageBucket = createTokenBucket({ perMin: 120 });
  * generous so a shared corporate NAT / CGNAT egress isn't blocked.
  */
 const newConversationBucket = createTokenBucket({ perMin: 15 });
+/**
+ * Budget for the cheap-but-not-free visitor frames (delivery/read receipts and
+ * "load earlier"). Generous enough that a real visitor reading a thread and
+ * paging back never notices, tight enough that a loop can't turn one anonymous
+ * socket into hundreds of publishes per second. See `allowCheapFrame`.
+ */
+const receiptBucket = createTokenBucket({ perMin: 120 });
 
 /** What we stash on each visitor socket after a successful handshake. */
 interface WidgetSocketData {
@@ -406,14 +413,37 @@ export class WebchatwidgetGateway
   @SubscribeMessage("visitor:received")
   async onReceived(@ConnectedSocket() client: Socket): Promise<void> {
     const data = client.data as WidgetSocketData | undefined;
-    if (data?.conversationId) await this.markOutbound(data.teamId, data.conversationId, "delivered");
+    if (!data?.conversationId || !this.allowCheapFrame(data)) return;
+    await this.markOutbound(data.teamId, data.conversationId, "delivered");
   }
 
   // The panel is open + tab visible → mark outbound `read` (agent sees "Seen").
   @SubscribeMessage("visitor:read")
   async onRead(@ConnectedSocket() client: Socket): Promise<void> {
     const data = client.data as WidgetSocketData | undefined;
-    if (data?.conversationId) await this.markOutbound(data.teamId, data.conversationId, "read");
+    if (!data?.conversationId || !this.allowCheapFrame(data)) return;
+    await this.markOutbound(data.teamId, data.conversationId, "read");
+  }
+
+  /**
+   * Rate gate for the non-message visitor frames (`visitor:received`,
+   * `visitor:read`, `visitor:loadOlder`).
+   *
+   * These were completely UNLIMITED on an anonymous socket, while the agent
+   * gateway rate-limits every one of its handlers. `visitor:read` is the
+   * expensive one: it can fan out to a `findMany` plus up to 200 sequential
+   * `publish()` calls, each running the full subscriber chain — so a loop on the
+   * one auth-free surface in the product was a cheap way to saturate the process.
+   *
+   * Keyed on the SERVER-RESOLVED conversationId, deliberately not the visitorId:
+   * visitorId is chosen by the client, so a bucket keyed on it is bypassed by
+   * rotating the value (the same weakness the message bucket carries).
+   */
+  private allowCheapFrame(data: WidgetSocketData): boolean {
+    const key = data.conversationId ?? `${data.widgetId}:${data.ip}`;
+    if (receiptBucket.consume(key).ok) return true;
+    this.logger.warn(`widget receipt/history frame throttled conversation=${key}`);
+    return false;
   }
 
   /**
@@ -545,6 +575,9 @@ export class WebchatwidgetGateway
     if (!data?.conversationId || !cur || typeof cur.ts !== "string" || typeof cur.id !== "string") {
       return { messages: [], hasMore: false };
     }
+    // Two findMany's per call on an anonymous socket — same budget as the
+    // receipts. An empty page also stops the widget's scroll-triggered loop.
+    if (!this.allowCheapFrame(data)) return { messages: [], hasMore: false };
     // An unparseable timestamp makes Prisma throw, so the ack never fires and the
     // widget's `loadingOlder` latch stays true — "Load earlier" is then stuck on
     // "Loading…" for the rest of the session. Fail closed with an empty page.

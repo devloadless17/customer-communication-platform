@@ -702,6 +702,10 @@ model Session {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  // The daily auth cleanup deletes by `expiresAt < now()`. With only the userId
+  // index that was a sequential scan of every session row — the table grows with
+  // logins, so the sweep got slower forever while holding the sweeper mutex.
+  @@index([expiresAt])
 }
 
 // Credential / OAuth account record. For our email+password users the row
@@ -1207,6 +1211,16 @@ model Conversation {
 
   @@index([teamId, status, lastMessageAt(sort: Desc)])
   @@index([teamId, assignedUserId])
+  // "Mine" inbox — the view an agent lives in all day. The filter is
+  // (teamId, assignedUserId) with the list's standard
+  // ORDER BY lastMessageAt DESC, id DESC. The index above stops at
+  // assignedUserId, so Postgres had to read EVERY conversation assigned to that
+  // agent and sort it, and because the keyset predicate is then only a residual
+  // filter, every page repeated the whole sort. Carrying the sort key turns it
+  // into a range scan that stops after `take`. (`status != closed` stays a
+  // residual — an inequality can't be an index prefix — but it is cheap once the
+  // scan is already narrowed to one agent's rows.)
+  @@index([teamId, assignedUserId, lastMessageAt(sort: Desc), id(sort: Desc)])
   // FK index for the `assignedUser` relation's onDelete: SetNull. The
   // (teamId, assignedUserId) composite above leads with teamId, so a bare
   // `WHERE assignedUserId = $1` FK-trigger scan on user-delete can't use it.
@@ -1741,6 +1755,13 @@ model BroadcastRecipient {
   // picker, but enforce here too so the runner can re-run idempotently.
   @@unique([broadcastId, contactId])
   @@index([broadcastId, status])
+  // Broadcast send loop: the runner pages recipients with
+  // WHERE broadcastId = ? AND status = 'queued' ORDER BY id ASC, cursor on id.
+  // Without `id` in the index every page matched the whole remaining queued set
+  // and sorted it, so a 100k-recipient broadcast got progressively SLOWER the
+  // further it got — ~1000 pages each re-scanning what was left. With the sort
+  // column included each page is a bounded range scan from the cursor.
+  @@index([broadcastId, status, id])
   @@index([contactId])
 }
 
