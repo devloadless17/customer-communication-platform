@@ -164,6 +164,20 @@ Thresholds (tune in `health-thresholds.ts`): pool ≥85% saturated, ≥5 request
 
 The two process-wide caps exist because per-team fairness does not imply a survivable total: ~30 tenants × 2 broadcasts × 16 lanes is ~960 concurrent sends, and unbounded ffmpeg spawns are charged to the api container's `mem_limit`, so a burst of inbound videos OOM-kills the **API**, not the transcode. Work that can't get a slot queues (broadcasts stay `queued` and retry; ffmpeg callers degrade to no-thumbnail / send-original after their wait budget) — deferred, never dropped.
 
+**Burst-collapsing memos.** Several read paths are re-triggered by a *single* domain event across *every* connected agent, so one inbound message used to fan out into N identical query rounds. Each of these now shares an in-flight promise (the actual fix — it costs no staleness) behind a short TTL:
+
+| Where | TTL | Shared across |
+|---|---|---|
+| `RealtimeGateway.teamAvailability` | 3s | all sockets on a team; busted on `user.availability_changed` |
+| `ConversationsService.counts` (team half) | 250ms | all agents on a team; `mine` is never memoized |
+| `super-admin.ts` roster + overview | 60s | the whole platform; busted on org status/delete/registration |
+
+The TTLs are deliberately unequal: presence is ambient, sidebar counts must move the instant *you* act (so only the burst window is collapsed), and the platform dashboards are admin-only and expensive. When adding a memo here, ask whether the value is something the acting user watches for confirmation — if so, keep the TTL at burst-width or bust it on the mutation.
+
+**Outbox dispatch stamps** (`lib/events/bus.ts`) are coalesced on a 50ms timer / 500-row cap and flushed on drainer shutdown. `dispatchedAt` is forensic only — nothing reads it to decide whether to publish, retry, or dedupe — so batching it trades a per-event UPDATE for a bounded loss window that a crash one millisecond earlier would have produced anyway.
+
+**Offset paging** (`/contacts`, `/calls`) is upper-bounded at 10k pages. Offset scans and discards everything before the offset, including the per-row last-message probe, so page depth is server work a client chooses; there was no maximum at all.
+
 ---
 
 ## 10. Scaling cliffs (don't pre-build)

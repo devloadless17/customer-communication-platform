@@ -13,18 +13,38 @@
  * WebSocket transport isn't CORS-enforced by browsers, so this server-side check
  * is what actually gates which sites may open a widget socket.
  */
-export function originAllowed(origin: string | null, allowedOrigins: string[]): boolean {
+export function originAllowed(
+  origin: string | null,
+  allowedOrigins: string[],
+  /**
+   * Which transport is asking. This MATTERS for the missing-Origin case,
+   * because the two have opposite meanings:
+   *
+   *   "websocket" — a browser ALWAYS sends Origin on a WS handshake, so its
+   *     absence means a non-browser client (a script), which is what we want
+   *     to refuse once an org has locked its allow-list down.
+   *
+   *   "http" — per the Fetch spec a SAME-ORIGIN GET omits Origin entirely,
+   *     while every cross-origin fetch sends it. So on this path a missing
+   *     Origin means first-party, which must be allowed.
+   *
+   * Defaulting to "websocket" keeps the strict reading for any future caller
+   * that forgets to say.
+   */
+  transport: "websocket" | "http" = "websocket",
+): boolean {
   const configured = (allowedOrigins ?? []).map((o) => o.trim().toLowerCase()).filter(Boolean);
   const isProd = process.env.NODE_ENV === "production";
 
-  // No Origin header (native/non-browser client). Browsers ALWAYS send Origin on a
-  // WebSocket handshake, so a missing one means a script, not a visitor — and a
-  // script can also set Origin to anything it likes. That means this check only
-  // ever constrains honest browsers, and the escapes below are what a bot uses to
-  // walk around a configured allow-list. So: once an org has actually locked its
-  // list down, honour that and refuse the no-Origin case. An org that has NOT
-  // configured anything keeps the permissive behaviour, so no live widget breaks.
-  if (!origin) return configured.length === 0;
+  // No Origin header. See `transport` above for why the answer differs.
+  //
+  // Getting this wrong broke a real first-party flow: `GET /api/widget/config`
+  // is fetched same-origin by widget.js, so it carries no Origin, and treating
+  // that like a script meant the Settings → "Test this widget" page returned
+  // 403 for any org that had configured an allow-list — the inline first-party
+  // embed too. The "always allow our OWN app origin" branch below exists for
+  // exactly that case and was being short-circuited before it could run.
+  if (!origin) return transport === "http" || configured.length === 0;
 
   let host: string;
   try {

@@ -38,18 +38,40 @@ export type { PlatformAnalytics, SuperAdminTeamDetail, SuperAdminTeamRow };
  */
 const AGGREGATE_TTL_MS = 60_000;
 const aggregateCache = new Map<string, { at: number; value: unknown }>();
+/**
+ * Bumped by every invalidation. A load that STARTED before the bump must not
+ * write its result, because that result was snapshotted before the mutation
+ * the invalidation is announcing.
+ *
+ * Without this, `clear()` landing mid-load was silently undone by the very
+ * load it meant to discard — and worse, the stale value got re-stamped with a
+ * fresh `at`, buying it a full TTL. The concrete failure: an admin refreshes
+ * the platform page, the roster load takes a couple of seconds (it walks
+ * `_count.messages` per team), a new org registers during that window, and the
+ * approval queue then hides that org for the next 60 seconds no matter how
+ * many times they refresh — the exact symptom the invalidation exists to
+ * prevent.
+ */
+let aggregateEpoch = 0;
 
 async function memoAggregate<T>(key: string, load: () => Promise<T>): Promise<T> {
   const hit = aggregateCache.get(key);
   if (hit && Date.now() - hit.at < AGGREGATE_TTL_MS) return hit.value as T;
+  const startedAt = aggregateEpoch;
   const value = await load();
-  aggregateCache.set(key, { at: Date.now(), value });
+  // Only cache when nothing invalidated while we were loading. The caller
+  // still gets this value — it is the freshest read we have — it just doesn't
+  // get to poison the cache for the next 60s.
+  if (startedAt === aggregateEpoch) {
+    aggregateCache.set(key, { at: Date.now(), value });
+  }
   return value;
 }
 
 /** Drop the memo so the next read is fresh — called after a mutation that
- *  changes what these report (org approve / suspend / delete). */
+ *  changes what these report (org approve / suspend / delete / register). */
 export function invalidateSuperAdminAggregates(): void {
+  aggregateEpoch += 1;
   aggregateCache.clear();
 }
 

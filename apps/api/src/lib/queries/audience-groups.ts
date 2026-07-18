@@ -14,16 +14,6 @@ import type { Channel, Tag, TagColor } from "@ccp/shared/types";
 // can name it without reaching across the package boundary.
 export type { AudienceGroupDto };
 
-/**
- * How many manual-member ids the LIST ships per group. The list UI only needs
- * a count ("+N manual"), which `manualContactCount` carries exactly; the chips
- * that actually render ids live on the single-group edit page, which calls
- * `getAudienceGroup` and gets the full set. Preview ids are kept so the shape
- * stays useful (and honest — see the DTO comment) without the list's payload
- * scaling with a group's membership.
- */
-const LIST_CONTACT_ID_PREVIEW = 50;
-
 export async function listAudienceGroups(teamId: string): Promise<AudienceGroupDto[]> {
   const rows = await db.audienceGroup.findMany({
     where: { teamId },
@@ -36,17 +26,15 @@ export async function listAudienceGroups(teamId: string): Promise<AudienceGroupD
       // deletedAt: null) — otherwise a soft-deleted member shows as a phantom
       // chip with no matching count.
       //
-      // BOUNDED: this used to be every manual member of every group (up to
-      // 5000 each, the write-schema cap, times however many groups a team
-      // has). See LIST_CONTACT_ID_PREVIEW — the exact number comes from the
-      // aggregate below, so nothing here has to be complete to be correct.
-      // `getAudienceGroup` is deliberately NOT truncated: its result feeds an
-      // edit form that saves `contactIds` as a full replace.
-      contacts: {
-        where: { deletedAt: null },
-        select: { id: true },
-        take: LIST_CONTACT_ID_PREVIEW,
-      },
+      // COMPLETE, deliberately. Truncating this to a preview was tried and
+      // REVERTED: the broadcast composer reconstructs a group's audience from
+      // `contactIds` to show the recipient count and preview on the Review
+      // step, so a truncated list made a 200-member group read "50 recipients"
+      // on a billed, irreversible send. The send itself was fine (the server
+      // re-resolves from groupId) — the number the agent confirms against was
+      // not, which is worse than a slow query. Bounded anyway: the write
+      // schema caps manual members at 5000.
+      contacts: { where: { deletedAt: null }, select: { id: true } },
     },
   });
   if (rows.length === 0) return [];
@@ -183,7 +171,11 @@ export async function getAudienceGroup(
  */
 export async function resolveAudienceGroupMembers(
   teamId: string,
-  { tagIds, manualContactIds }: { tagIds: string[]; manualContactIds: string[] },
+  {
+    tagIds,
+    manualContactIds,
+    limit,
+  }: { tagIds: string[]; manualContactIds: string[]; limit?: number },
 ): Promise<string[]> {
   if (tagIds.length === 0 && manualContactIds.length === 0) return [];
 
@@ -199,9 +191,16 @@ export async function resolveAudienceGroupMembers(
         }
       : { teamId, deletedAt: null, id: { in: manualContactIds } };
 
+  // `limit` is a MEMORY guard, not the policy. A tag matching the whole contact
+  // book resolves the entire set into the caller's heap before anything checks
+  // the recipient cap — 100k+ ids on a shared 8GB box. Callers pass
+  // `MAX_RECIPIENTS_IN_PROCESS + 1` so the existing over-cap rejection still
+  // sees "more than the limit" and rejects with an accurate message, while the
+  // array stays bounded. Unset = unbounded, for the small/counting callers.
   const rows = await db.contact.findMany({
     where,
     select: { id: true },
+    ...(limit !== undefined ? { take: limit } : {}),
   });
   return rows.map((r) => r.id);
 }

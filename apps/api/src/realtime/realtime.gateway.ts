@@ -491,6 +491,20 @@ export class RealtimeGateway
    */
   invalidateTeamAvailability(teamId: string): void {
     this.availabilityCache.delete(teamId);
+    // Drop the IN-FLIGHT promise too, not just the cached value. A query
+    // already running was issued BEFORE the status write committed, so
+    // handing it to the next caller serves pre-change data — and its `.then`
+    // would then cache that stale row set for the full TTL.
+    //
+    // This is reachable exactly when it hurts most: during the deploy
+    // reconnect storm that `drainSockets()` now makes synchronized by design,
+    // agent A's connect starts a query, user X toggles "Appear offline"
+    // mid-flight, and the fanout's snapshot rebuild joins A's stale query. X
+    // would keep showing as online — and in teammates' "also viewing" pills,
+    // since buildVisibleViewers reads the same cache — until the next
+    // transition. The doc above promises a status flip is never delayed by the
+    // TTL; this is what makes that true.
+    this.availabilityInFlight.delete(teamId);
   }
 
   /**

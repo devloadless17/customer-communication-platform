@@ -30,21 +30,20 @@ export interface AudienceGroupDto {
   description: string | null;
   tagIds: string[];
   /**
-   * Manually-added member ids.
-   *
-   * COMPLETE from `getAudienceGroup`, and it MUST stay that way: the update
-   * endpoint treats `contactIds` as a full replace, so an edit form populated
-   * from a truncated list would silently drop every member past the cut on
-   * save. It is safely bounded already — the write schema caps manual members
-   * at 5000.
-   *
-   * TRUNCATED to a preview from `listAudienceGroups`, which only ever needs a
-   * number and must not ship N groups x their membership. Use
-   * `manualContactCount`, never `contactIds.length`, whenever you need the
-   * number.
+   * Manually-added member ids. ALWAYS COMPLETE, from both the list and the
+   * single-group read, and it must stay that way — two separate consumers
+   * break silently if it is truncated:
+   *   - the group edit form saves `contactIds` as a FULL REPLACE, so a
+   *     truncated list would delete every member past the cut on save;
+   *   - the broadcast composer reconstructs a group's audience from these ids
+   *     to show the recipient count and preview on the Review step, so a
+   *     truncated list understates the size of a billed, irreversible send.
+   * Bounded by the write schema, which caps manual members at 5000.
    */
   contactIds: string[];
-  /** Exact count of manual members, soft-deleted excluded. Always complete. */
+  /** Exact count of manual members, soft-deleted excluded. Equals
+   *  `contactIds.length`; kept as its own field so callers that only need the
+   *  number don't imply a dependency on the id array staying complete. */
   manualContactCount: number;
   /** Computed member count at read time: manual ∪ tag-matched, deduped. */
   memberCount: number;

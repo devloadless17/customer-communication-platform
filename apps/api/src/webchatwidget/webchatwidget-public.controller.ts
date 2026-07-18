@@ -75,7 +75,7 @@ export class WebchatwidgetPublicController {
     @Query("key") siteKey: string | undefined,
     @Headers("origin") origin: string | undefined,
   ): Promise<{ widgetId: string; name: string; config: unknown }> {
-    const resolved = await this.resolve(siteKey, origin);
+    const resolved = await this.resolve(siteKey, origin, "http");
     return { widgetId: resolved.widgetId, name: resolved.name, config: resolved.config };
   }
 
@@ -104,7 +104,9 @@ export class WebchatwidgetPublicController {
   }> {
     if (!file) throw new BadRequestException({ error: "file_required" });
     try {
-      const resolved = await this.resolve(siteKey, origin);
+      // STRICT: a browser always sends Origin on a POST, so a missing one here
+      // is a script — see the transport note on resolve().
+      const resolved = await this.resolve(siteKey, origin, "websocket");
       const bytes = new Uint8Array(await readFile(file.path));
       const mimeType = normalizeMimeType(file.mimetype || "application/octet-stream");
       // Reject a spoofed Content-Type (e.g. SVG bytes labeled image/png) and any
@@ -188,11 +190,33 @@ export class WebchatwidgetPublicController {
     });
   }
 
-  /** Resolve + origin-gate a site key, or throw a 404/403. */
-  private async resolve(siteKey: string | undefined, origin: string | undefined) {
+  /**
+   * Resolve + origin-gate a site key, or throw a 404/403.
+   *
+   * `transport` picks how a MISSING Origin is read, and the two routes here
+   * need opposite answers:
+   *
+   *   - `getConfig` is a same-origin GET from widget.js, and per the Fetch spec
+   *     a same-origin GET omits Origin entirely → "http", missing is fine.
+   *   - `uploadMedia` is a POST, and a browser ALWAYS sends Origin on a POST.
+   *     So a missing one there means a script, and being lenient made the
+   *     allow-list a no-op on the one route that WRITES: anyone could read the
+   *     public site key out of a customer's page source and curl unlimited
+   *     files into that tenant's R2 prefix with no Origin header, no visitorId
+   *     and no conversation — orphan blobs billed to the tenant, bounded only
+   *     by the 60/min/IP guard. It has to be read strictly → "websocket".
+   *
+   * (This leniency was introduced to fix a real 403 on the config fetch and
+   * immediately widened the upload route. Keep the two apart.)
+   */
+  private async resolve(
+    siteKey: string | undefined,
+    origin: string | undefined,
+    transport: "websocket" | "http" = "websocket",
+  ) {
     const resolved = await resolveWebchatwidgetByPublicKey(siteKey ?? "");
     if (!resolved) throw new NotFoundException({ error: "unknown_site_key" });
-    if (!originAllowed(origin ?? null, resolved.allowedOrigins)) {
+    if (!originAllowed(origin ?? null, resolved.allowedOrigins, transport)) {
       throw new ForbiddenException({ error: "origin_not_allowed" });
     }
     return resolved;
