@@ -51,6 +51,13 @@ const WRITE_BUFFER_REAP_INTERVAL_MS = 10_000;
  * [ws-adapter.ts](./ws-adapter.ts) so this file stays focused on event
  * handling.
  */
+/** One team member's availability, as the three snapshot builders need it. */
+interface TeamAvailabilityRow {
+  id: string;
+  availabilityStatus: string | null;
+  availabilityMessage: string | null;
+}
+
 @WebSocketGateway()
 export class RealtimeGateway
   implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
@@ -121,9 +128,14 @@ export class RealtimeGateway
     // with "not marked offline" — same rule as `buildVisibleOnlineSnapshot`
     // below (the connect path uses the helper directly; fanout uses this
     // indirection so the emitter doesn't take a circular dep on the gateway).
-    this.emitter.bindPresenceSnapshotter((teamId) =>
-      this.buildVisibleOnlineSnapshot(teamId),
-    );
+    // The ONLY caller of this is the `user.availability_changed` fanout, i.e.
+    // the exact moment the cached availability rows went stale. Busting the
+    // cache here means the TTL never delays a real status change — it only
+    // ever collapses reads that nothing invalidated (the reconnect storm).
+    this.emitter.bindPresenceSnapshotter((teamId) => {
+      this.invalidateTeamAvailability(teamId);
+      return this.buildVisibleOnlineSnapshot(teamId);
+    });
     // Same indirection for the per-conversation viewer pill — the
     // `user.availability_changed` fanout re-emits `conversation:viewers`
     // for every room the user is in so a status flip drops/restores them
@@ -386,11 +398,104 @@ export class RealtimeGateway
   }
 
   /**
+   * Per-team availability rows, cached for a few seconds.
+   *
+   * WHY THIS EXISTS. Three call sites here (`buildVisibleOnlineSnapshot`,
+   * `emitAvailabilitySnapshot`, `buildVisibleViewers`) each ran their own
+   * `user.findMany` per invocation, and the comment above the first one
+   * justified that with "presence snapshots are rare events (connect / status
+   * flip), not per-message". That is true of ONE agent's connect. It is false
+   * of the whole fleet's:
+   *
+   *   - `drainSockets()` on SIGTERM now disconnects every socket deliberately,
+   *     so a deploy makes the entire fleet reconnect within a few seconds
+   *     instead of trickling back. The reconnect storm is now synchronized BY
+   *     DESIGN, which is good for recovery time and turns this into a spike.
+   *   - `use-presence.ts` re-fires `presence:request` on every `connect`, and
+   *     that handler re-runs both reads again.
+   *
+   * At a 500-user tenant with two tabs each that is ~4000 queries in a burst,
+   * half of them returning all 500 team rows. That saturates the Prisma pool
+   * shared with inbox REST and webhook ingest — and both readers are fail-soft
+   * (they fall back to an unfiltered set on error), so the visible symptom is
+   * wrong presence dots and a slow inbox rather than an obvious failure.
+   *
+   * A few seconds of staleness is the right trade here: presence is an
+   * ambient signal, every status change still pushes an immediate delta frame
+   * to already-connected clients, and a stale read self-corrects on the next
+   * transition. The in-flight promise is shared so a thundering herd collapses
+   * to ONE query per team rather than one per socket.
+   *
+   * STALENESS IS BOUNDED TO WHAT IT SHOULD BE. The only write path to
+   * `availabilityStatus` is `UsersService.updateMyAvailability`, which
+   * publishes `user.availability_changed`; that fanout calls
+   * `emitPresenceSnapshot`, which busts this cache first (see `afterInit`). So
+   * a status flip is never delayed. The one case the TTL does cover is
+   * DEACTIVATION — a user deactivated in the last 3s can still appear in a
+   * teammate's availability list, which is cosmetic, self-correcting, and
+   * independent of the socket-disconnect path deactivation already triggers.
+   */
+  private static readonly AVAILABILITY_TTL_MS = 3_000;
+  private readonly availabilityCache = new Map<
+    string,
+    { at: number; rows: TeamAvailabilityRow[] }
+  >();
+  private readonly availabilityInFlight = new Map<
+    string,
+    Promise<TeamAvailabilityRow[]>
+  >();
+
+  /**
+   * Team availability rows, served from cache when fresh. Throws on a DB
+   * failure — every caller already has its own fail-soft fallback and they
+   * differ, so this must not pick one for them.
+   */
+  private async teamAvailability(teamId: string): Promise<TeamAvailabilityRow[]> {
+    const hit = this.availabilityCache.get(teamId);
+    if (hit && Date.now() - hit.at < RealtimeGateway.AVAILABILITY_TTL_MS) {
+      return hit.rows;
+    }
+    const inFlight = this.availabilityInFlight.get(teamId);
+    if (inFlight) return inFlight;
+
+    // One entry per team, so this is tiny at pilot scale — but sweep expired
+    // entries past a threshold rather than adding another grow-only map to
+    // the pile the §16 cliff already has to clean up.
+    if (this.availabilityCache.size > 200) {
+      const cutoff = Date.now() - RealtimeGateway.AVAILABILITY_TTL_MS;
+      for (const [k, v] of this.availabilityCache) {
+        if (v.at < cutoff) this.availabilityCache.delete(k);
+      }
+    }
+
+    const p = this.db.user
+      .findMany({
+        where: { teamId, deactivatedAt: null },
+        select: { id: true, availabilityStatus: true, availabilityMessage: true },
+      })
+      .then((rows) => {
+        this.availabilityCache.set(teamId, { at: Date.now(), rows });
+        return rows;
+      })
+      .finally(() => {
+        this.availabilityInFlight.delete(teamId);
+      });
+    this.availabilityInFlight.set(teamId, p);
+    return p;
+  }
+
+  /**
+   * Drop a team's cached availability so the next read is fresh. Called when a
+   * status actually changes, so the TTL only ever delays a read that nothing
+   * invalidated — a flip is reflected immediately, not up to 3s later.
+   */
+  invalidateTeamAvailability(teamId: string): void {
+    this.availabilityCache.delete(teamId);
+  }
+
+  /**
    * Compute the team's visibly-online userIds: presence (≥1 socket) intersected
-   * with `availabilityStatus !== "offline"`. One DB read on a small set
-   * (already-connected users only) — fine for a single-VPS pilot; on a hot
-   * path we'd cache it, but presence snapshots are rare events (connect /
-   * status flip), not per-message.
+   * with `availabilityStatus !== "offline"`.
    */
   /**
    * Stamp a presence transition with the next per-team seq (synchronous — must
@@ -425,10 +530,13 @@ export class RealtimeGateway
     const connected = this.presence.snapshot(teamId);
     if (connected.length === 0) return [];
     try {
-      const rows = await this.db.user.findMany({
-        where: { teamId, id: { in: connected } },
-        select: { id: true, availabilityStatus: true },
-      });
+      // Intersect the LIVE presence set against cached availability, rather
+      // than caching the intersection: a reconnect storm changes `connected`
+      // every few milliseconds, so a cached result would be wrong, while a
+      // cached "who is marked offline" is exactly as fresh as it needs to be.
+      // A user absent from the rows (deactivated) is not in `offline`, so they
+      // stay in the list — identical to the previous per-connected-id query.
+      const rows = await this.teamAvailability(teamId);
       const offline = new Set(
         rows.filter((r) => r.availabilityStatus === "offline").map((r) => r.id),
       );
@@ -463,10 +571,7 @@ export class RealtimeGateway
     const viewers = this.presence.snapshotViewers(conversationId);
     if (viewers.length === 0) return [];
     try {
-      const rows = await this.db.user.findMany({
-        where: { teamId, id: { in: viewers } },
-        select: { id: true, availabilityStatus: true },
-      });
+      const rows = await this.teamAvailability(teamId);
       const available = new Set(
         rows
           .filter((r) => (r.availabilityStatus ?? "available") === "available")
@@ -509,16 +614,9 @@ export class RealtimeGateway
     teamId: string,
     client: Socket,
   ): Promise<void> {
-    let rows: {
-      id: string;
-      availabilityStatus: string | null;
-      availabilityMessage: string | null;
-    }[];
+    let rows: TeamAvailabilityRow[];
     try {
-      rows = await this.db.user.findMany({
-        where: { teamId, deactivatedAt: null },
-        select: { id: true, availabilityStatus: true, availabilityMessage: true },
-      });
+      rows = await this.teamAvailability(teamId);
     } catch (err) {
       // Fail-soft like the presence snapshot: a transient Postgres flap on
       // connect must not leak an unhandled rejection (this is invoked via
@@ -1034,6 +1132,16 @@ export class RealtimeGateway
       } catch (err) {
         this.logger.error(`typing:thread:start lookup failed: ${err}`);
         return;
+      }
+      // Cap the memo like the neighbouring per-socket caches. Inbox sockets
+      // live for days, so an uncapped Set accumulates one entry per distinct
+      // thread the user has EVER typed in — tens of MB of resident heap across
+      // thousands of long-lived sockets in a chat-heavy tenant, against a 2GB
+      // container. Evicting the oldest costs at most one indexed re-validation,
+      // which is already charged to the subscribe budget above.
+      if (validatedThreads.size >= 200) {
+        const oldest = validatedThreads.values().next().value;
+        if (oldest !== undefined) validatedThreads.delete(oldest);
       }
       validatedThreads.add(composite);
     }

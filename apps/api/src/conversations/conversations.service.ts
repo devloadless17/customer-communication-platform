@@ -353,6 +353,52 @@ export class ConversationsService {
    * best-effort deleted post-commit. Publishes one `conversation.deleted`
    * per id so the socket fanout splices each row from live clients' lists.
    */
+  /**
+   * Every media/thumbnail R2 key belonging to the given conversations, read in
+   * bounded pages.
+   *
+   * Both delete paths used to pull these through a nested `messages` include
+   * with no `take`. The bulk path caps at 500 conversations
+   * (`BulkDeleteConversationsSchema`), so one call materialized every
+   * media-bearing message across 500 threads into a single Prisma result — for
+   * a large tenant, millions of rows on the V8 heap at once. That is an OOM
+   * against the api container's 2GB limit, which takes the whole process and
+   * every agent's socket with it. The single-conversation path had the same
+   * shape with a smaller radius (one long-lived enterprise thread).
+   *
+   * Keyset paging does the same total work with a bounded resident set, so
+   * peak memory no longer scales with a tenant's history.
+   */
+  private async collectMediaKeys(
+    teamId: string,
+    conversationIds: string[],
+  ): Promise<string[]> {
+    const keys: string[] = [];
+    const PAGE = 1_000;
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.db.message.findMany({
+        where: {
+          teamId,
+          conversationId: { in: conversationIds },
+          OR: [{ mediaKey: { not: null } }, { mediaThumbnailKey: { not: null } }],
+        },
+        select: { id: true, mediaKey: true, mediaThumbnailKey: true },
+        orderBy: { id: "asc" },
+        take: PAGE,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      });
+      for (const m of page) {
+        if (m.mediaKey) keys.push(m.mediaKey);
+        if (m.mediaThumbnailKey) keys.push(m.mediaThumbnailKey);
+      }
+      if (page.length < PAGE) break;
+      cursor = page[page.length - 1]?.id;
+      if (!cursor) break;
+    }
+    return keys;
+  }
+
   async bulkDelete(
     teamId: string,
     userId: string,
@@ -360,24 +406,14 @@ export class ConversationsService {
   ): Promise<{ count: number }> {
     const owned = await this.db.conversation.findMany({
       where: { teamId, id: { in: input.conversationIds } },
-      select: {
-        id: true,
-        messages: {
-          where: {
-            OR: [{ mediaKey: { not: null } }, { mediaThumbnailKey: { not: null } }],
-          },
-          select: { mediaKey: true, mediaThumbnailKey: true },
-        },
-      },
+      select: { id: true },
     });
     if (owned.length === 0) {
       throw new NotFoundException({ error: "no matching conversations in this team" });
     }
     const ownedIds = owned.map((c) => c.id);
-    const mediaKeys = owned
-      .flatMap((c) => c.messages)
-      .flatMap((m) => [m.mediaKey, m.mediaThumbnailKey])
-      .filter((k): k is string => Boolean(k));
+
+    const mediaKeys = await this.collectMediaKeys(teamId, ownedIds);
 
     await this.db.conversation.deleteMany({
       where: { teamId, id: { in: ownedIds } },
@@ -690,21 +726,11 @@ export class ConversationsService {
   async remove(teamId: string, actorUserId: string, conversationId: string): Promise<void> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
-      select: {
-        id: true,
-        messages: {
-          where: {
-            OR: [{ mediaKey: { not: null } }, { mediaThumbnailKey: { not: null } }],
-          },
-          select: { mediaKey: true, mediaThumbnailKey: true },
-        },
-      },
+      select: { id: true },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
-    const mediaKeys = conversation.messages
-      .flatMap((m) => [m.mediaKey, m.mediaThumbnailKey])
-      .filter((k): k is string => Boolean(k));
+    const mediaKeys = await this.collectMediaKeys(teamId, [conversationId]);
 
     // Compound where (id + teamId) via deleteMany — Prisma's single `delete`
     // accepts only unique constraints, and Conversation.id alone is the

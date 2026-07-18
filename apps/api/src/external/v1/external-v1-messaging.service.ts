@@ -1217,6 +1217,11 @@ export class ExternalV1MessagingService {
         });
         const message = await this.db.message.findUniqueOrThrow({
           where: { id: result.messageId },
+          // Same omit as every neighbouring read here. rawPayload is the full
+          // original webhook body and is never part of the external wire shape,
+          // so loading it just pulls a large JSONB off disk on the billed
+          // template-send path and drops it.
+          omit: { rawPayload: true },
         });
         out = {
           ok: true,

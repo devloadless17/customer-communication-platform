@@ -34,7 +34,7 @@ async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise
   ]);
 }
 
-async function probeApi(): Promise<{ ok: boolean; err?: string }> {
+async function probeApi(): Promise<{ ok: boolean; err?: string; degraded?: number }> {
   // INTERNAL_API_URL is the docker-compose service name path (e.g.
   // `http://api:4000`, always set in compose); on host dev it's unset and
   // falls back to localhost — matching api-client.ts / session-invalidation.ts
@@ -58,8 +58,19 @@ async function probeApi(): Promise<{ ok: boolean; err?: string }> {
     // healthcheck red and giving `docker ps` a true data-plane signal — which
     // is exactly what this file's header comment promises.
     const body = (await res.json().catch(() => null)) as
-      | { ok?: boolean; redis?: boolean; db?: boolean }
+      | { ok?: boolean; redis?: boolean; db?: boolean; degraded?: string[] }
       | null;
+    // Forward the COUNT of breached thresholds, never the strings. The api's
+    // /health is not routed publicly (Caddy sends /api/health here, and only
+    // this endpoint is reachable from the internet), so without this an
+    // external uptime monitor can see hard-down only — every soft degradation
+    // the api tracks (wedged outbox, saturated pool, queue burning retries)
+    // is invisible from outside the box. A count is enough to alarm on;
+    // the strings stay internal because they describe our capacity and load
+    // to anyone who asks, including someone probing whether a flood is working.
+    // Operators read the detail from the api logs (HEALTH DEGRADED) or the
+    // internal endpoint.
+    const degraded = Array.isArray(body?.degraded) ? body.degraded.length : undefined;
     if (body && body.ok === false) {
       const down: string[] = [];
       if (body.db === false) down.push("db");
@@ -67,9 +78,10 @@ async function probeApi(): Promise<{ ok: boolean; err?: string }> {
       return {
         ok: false,
         err: `api reports ok:false${down.length ? ` (${down.join(", ")} down)` : ""}`,
+        ...(degraded !== undefined ? { degraded } : {}),
       };
     }
-    return { ok: true };
+    return { ok: true, ...(degraded !== undefined ? { degraded } : {}) };
   } catch (err) {
     return { ok: false, err: err instanceof Error ? err.message : String(err) };
   }
@@ -96,6 +108,15 @@ export async function GET() {
         api: { status: apiResult.ok ? "ok" : "fail", ...(apiResult.err ? { detail: apiResult.err } : {}) },
       },
       uptimeSeconds: Math.round(process.uptime()),
+      // How many soft thresholds the api currently reports as breached. 0 (or
+      // absent, if the api didn't answer) means nothing is degraded.
+      //
+      // ALERT ON THIS being > 0. It deliberately does NOT affect the status
+      // code: this endpoint is the web container's healthcheck, and flipping
+      // it 503 over a busy connection pool would restart-loop the container
+      // during exactly the load spike that caused it — turning a slow minute
+      // into an outage. Degradation is a page for a human, not a restart.
+      degradedCount: apiResult.degraded ?? 0,
       timestamp: new Date().toISOString(),
     },
     {

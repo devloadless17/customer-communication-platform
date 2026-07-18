@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, type ReactNode } from "react";
-import { Check, Copy, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, ExternalLink, Plus, Trash2 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
 import { PageHeader } from "@/components/layouts/page-header";
@@ -383,6 +383,19 @@ function Editor({
           hint="Renders the chat inside your container (always open)."
           code={`<div id="ccp-chat" style="height:600px;max-width:440px"></div>\n<script src="${origin}/widget.js" data-webchat-key="${widget.publicKey}" data-webchat-target="#ccp-chat" defer></script>`}
         />
+        {/* Try it before touching the customer's site. Without this the first
+            real proof the widget works is a live page on their domain, where a
+            failure is both visible to their visitors and hard to diagnose. The
+            key is pre-filled so nobody hand-copies 30 characters. */}
+        <a
+          href={`/webchat/test.html?key=${encodeURIComponent(widget.publicKey)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 text-sm text-primary transition hover:underline"
+        >
+          <ExternalLink className="size-3.5" />
+          Test this widget on a sample page
+        </a>
       </Section>
 
       <div className="flex items-center justify-between">

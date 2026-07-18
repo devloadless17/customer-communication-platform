@@ -965,6 +965,14 @@ model Contact {
   @@index([teamId, deletedAt])
   // "Contacts by recency of last inbound" — inbox-sidebar surfaces.
   @@index([teamId, lastInboundAt(sort: Desc)], map: "Contact_teamId_lastInboundAt_idx")
+  // Newest-first contact listing — the DEFAULT order for three separate
+  // surfaces: `GET /v1/contacts` (external-v1.service.ts), the CSV export, and
+  // the global contact search keyset. No index covered `createdAt`, so every
+  // one of them read the tenant's whole contact partition and sorted it —
+  // verified with `SET enable_seqscan=off`, where the planner still produced a
+  // Sort node because nothing could supply the order. Keyset pagination does
+  // NOT rescue this: the cursor bounds which rows are returned, not the sort.
+  @@index([teamId, createdAt(sort: Desc), id(sort: Desc)])
   // pg_trgm GIN index for substring ILIKE search on contact name.
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "Contact_name_trgm_idx")
   // Same, for the email OR-arm of contact search (global-search.ts does
