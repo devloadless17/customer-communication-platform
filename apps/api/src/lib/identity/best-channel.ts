@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import {
   CHANNEL_CAPABILITIES,
   isChannelLive,
+  isEphemeralChannel,
 } from "@ccp/shared/providers/capabilities";
 import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
 import type { Channel } from "@ccp/shared/types";
@@ -27,6 +28,14 @@ export interface BestChannelResult {
   /** True when a plain free-form message can be sent right now. */
   inWindow: boolean;
 }
+
+/**
+ * How long after their last message a website visitor is still presumed to have
+ * the tab open. Deliberately short — a widget session is minutes, not days, and
+ * this only governs RANKING (a stale session sorts below a durable channel), never
+ * whether the thread is usable in the inbox.
+ */
+const EPHEMERAL_SESSION_WINDOW_MS = 30 * 60 * 1000;
 
 /** The contact shape `pickBestChannel` ranks over — a subset of `Contact`. */
 export interface RankableContact {
@@ -56,7 +65,16 @@ export function pickBestChannel(
       if (allowedChannels && !allowedChannels.has(c.identityChannel)) return null;
       const to = c.phoneNumber ?? c.externalContactId;
       if (!to) return null;
-      const windowMs = effectiveSendWindowMs(CHANNEL_CAPABILITIES[c.identityChannel]);
+      // An EPHEMERAL channel has no send window (`freeFormWindowMs: null`) because
+      // its composer is always open WHILE THE TAB IS — but "no window" is not "always
+      // reachable". Scoring it `open` unconditionally made a website visitor who
+      // closed their browser months ago outrank a real WhatsApp contact whose 24h
+      // window had merely lapsed, so the person got targeted on a dead socket. Treat
+      // a stale session as out-of-window instead; the caller then prefers a durable
+      // channel and only falls back here when nothing better exists.
+      const windowMs = isEphemeralChannel(c.identityChannel)
+        ? EPHEMERAL_SESSION_WINDOW_MS
+        : effectiveSendWindowMs(CHANNEL_CAPABILITIES[c.identityChannel]);
       // `null` window (no restriction) is always sendable; else check the state.
       const state =
         windowMs === null

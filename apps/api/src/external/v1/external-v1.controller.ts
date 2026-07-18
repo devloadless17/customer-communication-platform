@@ -44,6 +44,8 @@ import {
   ExternalUpdateTagSchema,
   ExternalUpsertContactSchema,
   ListContactsQuerySchema,
+  ListBroadcastRecipientsQuerySchema,
+  ListBroadcastsQuerySchema,
   ListConversationsQuerySchema,
   ListMessagesQuerySchema,
   type ExternalAssignInput,
@@ -65,6 +67,8 @@ import {
   type ExternalUpdateTagInput,
   type ExternalUpsertContactInput,
   type ListContactsQueryInput,
+  type ListBroadcastRecipientsQueryInput,
+  type ListBroadcastsQueryInput,
   type ListConversationsQueryInput,
   type ListMessagesQueryInput,
 } from "./external-v1.schemas";
@@ -536,6 +540,49 @@ export class ExternalV1Controller {
   }
 
   // ---- Conversations ------------------------------------------------
+
+  // ── Broadcasts (read-only) ────────────────────────────────────────────────
+  // Clients pull campaign results into their own BI. Same DTO the in-app report
+  // renders, so the API and the UI can never disagree about a number.
+
+  @Get("broadcasts")
+  @RequireScope("read:broadcasts")
+  async listBroadcasts(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query(zQuery(ListBroadcastsQuerySchema)) query: ListBroadcastsQueryInput,
+  ) {
+    return this.api.listBroadcasts(auth.teamId, query);
+  }
+
+  @Get("broadcasts/:id")
+  @RequireScope("read:broadcasts")
+  async getBroadcast(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+    const broadcast = await this.api.getBroadcast(auth.teamId, id);
+    return { broadcast };
+  }
+
+  /** Delivery funnel, rates, failure buckets, cost and diagnostics. */
+  @Get("broadcasts/:id/report")
+  @RequireScope("read:broadcasts")
+  async getBroadcastReport(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+    const report = await this.api.getBroadcastReport(auth.teamId, id);
+    return { report };
+  }
+
+  /**
+   * Recipient-level results. `updatedSince` enables incremental sync — delivery
+   * and read receipts keep arriving for hours, so without it a client would
+   * have to re-pull every recipient on each poll.
+   */
+  @Get("broadcasts/:id/recipients")
+  @RequireScope("read:broadcasts")
+  async listBroadcastRecipients(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Query(zQuery(ListBroadcastRecipientsQuerySchema)) query: ListBroadcastRecipientsQueryInput,
+  ) {
+    return this.api.listBroadcastRecipients(auth.teamId, id, query);
+  }
 
   @Get("conversations")
   @RequireScope("read:conversations")

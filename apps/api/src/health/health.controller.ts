@@ -12,7 +12,12 @@ import {
 import { getRedisConnection } from "../lib/workflows/queue";
 import { ffmpegSlotStats } from "../lib/media/ffmpeg-slots";
 import { widgetVisitorSocketCount } from "../webchatwidget/widget-metrics";
-import { computeDegradations, type PgPoolReport } from "./health-thresholds";
+import {
+  computeDegradations,
+  type PgPoolReport,
+  type StuckBroadcastReport,
+} from "./health-thresholds";
+import { probeStuckBroadcasts, STUCK_BROADCAST_PROBE_MIN } from "./stuck-broadcasts";
 
 interface HealthReport {
   ok: boolean;
@@ -48,6 +53,8 @@ interface HealthReport {
    *  thumbnails and voice-note transcodes start degrading before anything else
    *  here turns red. Reported only; never affects ok/503. */
   ffmpeg: { active: number; queued: number };
+  /** Broadcasts parked `paused` past the alert threshold — see stuck-broadcasts.ts. */
+  stuckBroadcasts: StuckBroadcastReport;
   /**
    * Human-readable list of breached thresholds — empty when healthy.
    *
@@ -78,10 +85,11 @@ export class HealthController {
 
   @Get()
   async check(): Promise<HealthReport> {
-    const [dbOk, redisOk, outboxLag] = await Promise.all([
+    const [dbOk, redisOk, outboxLag, stuckBroadcasts] = await Promise.all([
       this.pingDb(),
       this.pingRedis(),
       this.probeOutboxLag(),
+      probeStuckBroadcasts(this.db, STUCK_BROADCAST_PROBE_MIN),
     ]);
     const poolStats = this.db.getPoolStats();
     const saturationPercent =
@@ -107,6 +115,7 @@ export class HealthController {
       outboxLag,
       widgetVisitorSockets: widgetVisitorSocketCount(),
       ffmpeg,
+      stuckBroadcasts,
       degraded: computeDegradations({
         db: dbOk,
         redis: redisOk,
@@ -114,6 +123,7 @@ export class HealthController {
         outboxLag,
         jobFailures,
         ffmpeg,
+        stuckBroadcasts,
       }),
     };
     if (!dbOk) {

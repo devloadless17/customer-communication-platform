@@ -3,6 +3,23 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
 import type { Channel, Tag, TagColor } from "@ccp/shared/types";
+import { BROADCASTABLE_CHANNELS } from "@ccp/shared/providers/capabilities";
+
+/**
+ * Channel scope for an audience count/preview. An audience only ever answers
+ * "who will this broadcast reach", so with no explicit target channel the honest
+ * default is EVERY BROADCASTABLE channel — not every channel. Unscoped, an
+ * "All contacts" count folded in website-widget visitors, who have no durable
+ * push address and are dropped by the runner (`isBroadcastable`,
+ * broadcasts.service.ts) — inflating the promised audience above what we can
+ * actually send to.
+ */
+const BROADCASTABLE_LIST: Channel[] = [...BROADCASTABLE_CHANNELS];
+function audienceChannelFilter(channel?: Channel) {
+  return channel
+    ? { identityChannel: channel }
+    : { identityChannel: { in: BROADCASTABLE_LIST } };
+}
 
 // Audience groups: saved named lists of contacts. Hybrid composition —
 // manual contact ids PLUS any contact carrying one of the group's tags.
@@ -232,10 +249,11 @@ export async function countAudienceContacts(
   // A broadcast sends on ONE channel and drops contacts on other channels, so
   // the composer's recipient count must be scoped to the target channel — else a
   // freeform Messenger broadcast to a mixed-channel tag shows the whole audience
-  // but only reaches the Messenger subset. Omit to count every channel.
+  // but only reaches the Messenger subset. Omit to count every BROADCASTABLE
+  // channel (see `audienceChannelFilter` — never every channel).
   channel?: Channel,
 ): Promise<number> {
-  const channelFilter = channel ? { identityChannel: channel } : {};
+  const channelFilter = audienceChannelFilter(channel);
   // "All contacts" audience: every team contact (channel-scoped), tags/ids
   // ignored. Kept separate from the empty-selection case below, which returns 0
   // on purpose so an unconfigured custom audience never fans out to everyone.
@@ -283,7 +301,7 @@ export async function previewAudienceContacts(
     tags: Tag[];
   }>;
 }> {
-  const channelFilter = channel ? { identityChannel: channel } : {};
+  const channelFilter = audienceChannelFilter(channel);
   const tags = tagIds.filter((s) => s.length > 0);
   const ids = contactIds.filter((s) => s.length > 0);
   if (tags.length === 0 && ids.length === 0) return { total: 0, sample: [] };

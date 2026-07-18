@@ -395,7 +395,7 @@ async function injectWidget(page: Page, extra: Record<string, string>): Promise<
       s.src = `${base}/widget.js`;
       s.setAttribute("data-webchat-key", key);
       s.setAttribute("data-webchat-api", api);
-      for (const k in extra) s.setAttribute(k, extra[k]);
+      for (const [k, v] of Object.entries(extra)) s.setAttribute(k, v);
       document.body.appendChild(s);
     },
     { key: PUBLIC_KEY, api: API_ORIGIN, base: WEB_ORIGIN, extra },

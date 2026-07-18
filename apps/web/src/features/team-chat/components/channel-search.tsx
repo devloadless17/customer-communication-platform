@@ -19,10 +19,10 @@ const RESULT_BODY_EXCERPT = 200;
  *   1. Type → debounced GET /api/team/channels/:id/messages/search?q=…
  *   2. Render the result list (newest-first).
  *   3. Click a result → `onJumpTo(messageId)`. The workspace scrolls to it
- *      via `[data-message-id]` if it's in the loaded slice; otherwise it
- *      surfaces an inline note that the message lives in an older page
- *      (true context-window fetch is deferred — same scope as the inbox
- *      doesn't yet do it for team chat).
+ *      via `[data-message-id]` when it's in the loaded slice, and otherwise
+ *      fetches a context window around it (`/messages/around` via
+ *      `loadAround`) and enters anchored mode — see `jumpToMessage` in
+ *      team-chat-workspace.tsx.
  *
  * Owns: input state, debounce, fetch, render. Does NOT own scroll behavior
  * — that lives one level up so it can integrate with useChatScroll.

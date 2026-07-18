@@ -23,7 +23,8 @@ let seededContactIds: string[] = [];
 test.afterEach(async () => {
   const d = db();
   if (seededContactIds.length) {
-    await d.message.deleteMany({ where: { contact: { id: { in: seededContactIds } } } }).catch(() => {});
+    // Message has no contact relation — it hangs off the conversation.
+    await d.message.deleteMany({ where: { conversation: { contactId: { in: seededContactIds } } } });
     await d.conversation.deleteMany({ where: { contactId: { in: seededContactIds } } });
     await d.contact.deleteMany({ where: { id: { in: seededContactIds } } });
   }

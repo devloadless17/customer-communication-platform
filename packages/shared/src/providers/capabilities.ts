@@ -188,6 +188,39 @@ export function isBroadcastable(channel: Channel): boolean {
 }
 
 /**
+ * Channels whose contacts are EPHEMERAL: a session identity, not a person we can
+ * reach again. A website-widget visitor is a `vis_<uuid>` held in ONE browser's
+ * localStorage — clear it, switch device, or open incognito and the same human is
+ * a brand-new contact forever. Those rows are chat sessions, not directory
+ * entries, so they must not accumulate in the contacts list, CSV exports,
+ * audience counts, global search, or the person rollup.
+ *
+ * They are NOT second-class in the inbox: full thread, full realtime, workflows
+ * still fire. This is purely about the CONTACT DIRECTORY.
+ *
+ * PROMOTION: an ephemeral contact that self-asserts a phone or email (the widget
+ * pre-chat form) has told us how to reach them again, so it graduates to a normal
+ * directory contact — the "Visitor → Lead → Contact" model. That is DERIVED from
+ * the row, never stored, so promotion happens the instant the value lands with no
+ * flag to flip and nothing that can drift. The two predicates that express it live
+ * next to the queries that need them: `DIRECTORY_CONTACT_SQL` and
+ * `directoryContactWhere` in apps/api/src/lib/queries/contacts.ts.
+ *
+ * Ephemeral contacts are also excluded from the identity strong-key CANDIDATE set
+ * (`findExistingCustomerIdByStrongKey`) — a value typed into an unauthenticated
+ * public form is not a verified key in either direction.
+ *
+ * Must stay a SUBSET of LIVE_CHANNELS and DISJOINT from BROADCASTABLE_CHANNELS.
+ */
+export const EPHEMERAL_CONTACT_CHANNELS: ReadonlySet<Channel> = new Set<Channel>([
+  "webchatwidget",
+]);
+
+export function isEphemeralChannel(channel: Channel): boolean {
+  return EPHEMERAL_CONTACT_CHANNELS.has(channel);
+}
+
+/**
  * How a channel identifies a contact. `phone` channels resolve/create contacts
  * by `Contact.phoneNumber`; `external` channels use the opaque provider id
  * (`Contact.externalContactId`) via the `(teamId, identityChannel,

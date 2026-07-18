@@ -819,6 +819,11 @@ export interface TeamChannelPinChangedEvent {
   channelId: string;
   messageId: string;
   pinned: boolean;
+  /** Pin metadata so clients can update the pins bar without a refetch.
+   *  All null on unpin. */
+  pinnedAt: string | null;
+  pinnedById: string | null;
+  pinnedByName: string | null;
 }
 
 export interface TeamChannelReadEvent {
@@ -843,6 +848,21 @@ export interface TeamChannelMembersChangedEvent {
   action: "added" | "removed";
   userIds: string[];
   changedById: string | null;
+}
+
+/**
+ * A 1:1 DM channel was created for the first time. Published ONLY on the
+ * create branch of `createOrGetDm` — re-opening an existing DM must not
+ * re-emit, or every open would re-badge the other person's sidebar.
+ *
+ * `memberUserIds` is exactly the participants (two, or one for a self-DM).
+ * Fanout targets only their `user:` rooms — never the team room, because the
+ * existence of a DM between two people is itself private.
+ */
+export interface TeamChannelDmCreatedEvent {
+  teamId: string;
+  channelId: string;
+  memberUserIds: string[];
 }
 
 /**
@@ -1161,6 +1181,7 @@ export interface DomainEventMap {
   "team_channel.pin_changed": TeamChannelPinChangedEvent;
   "team_channel.read": TeamChannelReadEvent;
   "team_channel.members_changed": TeamChannelMembersChangedEvent;
+  "team_channel.dm_created": TeamChannelDmCreatedEvent;
   "team_channel.thread_reply_count_changed": TeamChannelThreadReplyCountChangedEvent;
   "user.profile_updated": UserProfileUpdatedEvent;
   "user.availability_changed": UserAvailabilityChangedEvent;

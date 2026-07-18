@@ -1,3 +1,8 @@
+import { getBroadcastReport, recipientOutcomeWhere } from "@/lib/broadcast-report";
+import type {
+  ListBroadcastRecipientsQueryInput,
+  ListBroadcastsQueryInput,
+} from "./external-v1.schemas";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { Prisma } from "@prisma/client";
 import {
@@ -18,7 +23,7 @@ import {
   EXTERNAL_CONTACT_INCLUDE,
   type ExternalContact,
 } from "@/lib/external-shapes";
-import { ensureDefaultStage, toContactWire } from "@/lib/queries";
+import { directoryContactWhere, ensureDefaultStage, toContactWire } from "@/lib/queries";
 import type {
   Contact as DomainContact,
   ContactStage,
@@ -308,10 +313,17 @@ export class ExternalV1Service {
     //
     // Phone is normalized server-side so a mis-formatted "961 71 50…" still
     // resolves to the same E.164 row.
+    // Directory-scoped, exactly like the internal list (§12 parity). An anonymous
+    // website visitor is a chat session, not a directory row, so it must not answer
+    // a partner's "who is +961…?" — doubly so because a widget phone/email is typed
+    // into a public form and verifies nothing. A visitor who self-identified IS
+    // promoted and does resolve. `getContact` by id stays unfiltered: unlike a
+    // tombstone the thread is live, and a partner legitimately holds that id from a
+    // `message.received` webhook.
     if (q.phone) {
       const normalized = normalizePhoneE164(q.phone) ?? q.phone;
       const rows = await this.db.contact.findMany({
-        where: { teamId, deletedAt: null, phoneNumber: normalized },
+        where: { teamId, deletedAt: null, ...directoryContactWhere, phoneNumber: normalized },
         include: EXTERNAL_CONTACT_INCLUDE,
         take: 1,
       });
@@ -320,7 +332,12 @@ export class ExternalV1Service {
     }
     if (q.email) {
       const rows = await this.db.contact.findMany({
-        where: { teamId, deletedAt: null, email: { equals: q.email.trim(), mode: "insensitive" } },
+        where: {
+          teamId,
+          deletedAt: null,
+          ...directoryContactWhere,
+          email: { equals: q.email.trim(), mode: "insensitive" },
+        },
         include: EXTERNAL_CONTACT_INCLUDE,
         take: 1,
       });
@@ -347,15 +364,23 @@ export class ExternalV1Service {
         deletedAt: null,
         ...(q.stageId ? { stageId: q.stageId } : {}),
         ...(tagIds.length > 0 ? { tags: { some: { id: { in: tagIds } } } } : {}),
-        ...(q.search
-          ? {
-              OR: [
-                { name: { contains: q.search, mode: "insensitive" as const } },
-                { phoneNumber: { contains: q.search, mode: "insensitive" as const } },
-                { email: { contains: q.search, mode: "insensitive" as const } },
-              ],
-            }
-          : {}),
+        // Both the directory predicate and the search clause are OR nodes, so they
+        // must be AND-composed — spreading both at this level would leave only the
+        // last one and silently widen the result set.
+        AND: [
+          directoryContactWhere,
+          ...(q.search
+            ? [
+                {
+                  OR: [
+                    { name: { contains: q.search, mode: "insensitive" as const } },
+                    { phoneNumber: { contains: q.search, mode: "insensitive" as const } },
+                    { email: { contains: q.search, mode: "insensitive" as const } },
+                  ],
+                },
+              ]
+            : []),
+        ],
       },
       include: EXTERNAL_CONTACT_INCLUDE,
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -1658,6 +1683,77 @@ export class ExternalV1Service {
       });
     }
   }
+
+  // ── Broadcasts (read-only) ─────────────────────────────────────────────────
+
+  /** Campaign list, newest first. `since` lets a client poll incrementally. */
+  async listBroadcasts(teamId: string, q: ListBroadcastsQueryInput) {
+    const rows = await this.db.broadcast.findMany({
+      where: {
+        teamId,
+        ...(q.status ? { status: q.status } : {}),
+        ...(q.since ? { createdAt: { gte: new Date(q.since) } } : {}),
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: q.limit + 1,
+      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+    });
+    const hasMore = rows.length > q.limit;
+    const page = hasMore ? rows.slice(0, q.limit) : rows;
+    return {
+      items: page.map(broadcastToExternal),
+      nextCursor: hasMore ? (page[page.length - 1]?.id ?? null) : null,
+    };
+  }
+
+  async getBroadcast(teamId: string, id: string) {
+    const row = await this.db.broadcast.findFirst({ where: { id, teamId } });
+    if (!row) throw new NotFoundException({ error: "broadcast_not_found" });
+    return broadcastToExternal(row);
+  }
+
+  /** The SAME report object the in-app UI renders — one computation, three
+   *  consumers, so the API and the dashboard can never disagree on a number. */
+  async getBroadcastReport(teamId: string, id: string) {
+    const report = await getBroadcastReport(teamId, id);
+    if (!report) throw new NotFoundException({ error: "broadcast_not_found" });
+    return report;
+  }
+
+  async listBroadcastRecipients(
+    teamId: string,
+    id: string,
+    q: ListBroadcastRecipientsQueryInput,
+  ) {
+    // BroadcastRecipient carries no teamId of its own (it is scoped through the
+    // parent), so ownership must be proven here before any recipient read.
+    const owner = await this.db.broadcast.findFirst({
+      where: { id, teamId },
+      select: { id: true },
+    });
+    if (!owner) throw new NotFoundException({ error: "broadcast_not_found" });
+
+    const rows = await this.db.broadcastRecipient.findMany({
+      where: {
+        broadcastId: id,
+        ...recipientOutcomeWhere(q),
+        ...(q.updatedSince ? { updatedAt: { gte: new Date(q.updatedSince) } } : {}),
+      },
+      // Keyset on id: stable under concurrent delivery updates, which a
+      // recency sort would not be during an incremental sync.
+      orderBy: { id: "asc" },
+      take: q.limit + 1,
+      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+      include: { contact: { select: { name: true, phoneNumber: true } } },
+    });
+    const hasMore = rows.length > q.limit;
+    const page = hasMore ? rows.slice(0, q.limit) : rows;
+    return {
+      items: page.map(broadcastRecipientToExternal),
+      nextCursor: hasMore ? (page[page.length - 1]?.id ?? null) : null,
+    };
+  }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1690,6 +1786,7 @@ function assertCustomFieldsTotal(
       detail: `at most ${MAX_TOTAL_FIELDS} custom fields per contact`,
     });
   }
+
 }
 
 function normalizeCreateCustomFields(
@@ -1733,4 +1830,103 @@ function slugifyKey(label: string): string {
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 60);
+}
+
+/**
+ * External wire shape for a campaign. Never a raw Prisma row: the DB model is
+ * free to change, this contract is not. Dates are ISO strings.
+ */
+function broadcastToExternal(b: {
+  id: string;
+  status: string;
+  name: string | null;
+  templateName: string | null;
+  templateLanguage: string | null;
+  templateCategory: string | null;
+  channel: string;
+  audienceMode: string;
+  totalCount: number;
+  sentCount: number;
+  failedCount: number;
+  suppressedCount: number;
+  createdAt: Date;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  scheduledAt: Date | null;
+}) {
+  return {
+    id: b.id,
+    status: b.status,
+    name: b.name,
+    templateName: b.templateName,
+    templateLanguage: b.templateLanguage,
+    templateCategory: b.templateCategory,
+    channel: b.channel,
+    audienceMode: b.audienceMode,
+    totalCount: b.totalCount,
+    sentCount: b.sentCount,
+    failedCount: b.failedCount,
+    suppressedCount: b.suppressedCount,
+    createdAt: b.createdAt.toISOString(),
+    scheduledAt: b.scheduledAt?.toISOString() ?? null,
+    startedAt: b.startedAt?.toISOString() ?? null,
+    completedAt: b.completedAt?.toISOString() ?? null,
+  };
+}
+
+/**
+ * External wire shape for one recipient's campaign outcome.
+ *
+ * `deliveryState` is the field to report on — `status` is the SEND-side outcome
+ * (did we hand it to Meta) and deliberately does not change when a message is
+ * later found undeliverable. Reporting on `status` is what produced the bug this
+ * whole feature fixed.
+ */
+function broadcastRecipientToExternal(r: {
+  id: string;
+  contactId: string;
+  status: string;
+  deliveryState: string;
+  sentAt: Date | null;
+  deliveredAt: Date | null;
+  readAt: Date | null;
+  repliedAt: Date | null;
+  repliedAttribution: string | null;
+  clickedAt: Date | null;
+  clickedOptionId: string | null;
+  optedOutAt: Date | null;
+  errorCode: string | null;
+  metaErrorCode: number | null;
+  errorMessage: string | null;
+  pricingCategory: string | null;
+  pricingBillable: boolean | null;
+  externalId: string | null;
+  conversationId: string | null;
+  updatedAt: Date;
+  contact: { name: string; phoneNumber: string | null };
+}) {
+  return {
+    id: r.id,
+    contactId: r.contactId,
+    contactName: r.contact.name,
+    phone: r.contact.phoneNumber,
+    deliveryState: r.deliveryState,
+    sendStatus: r.status,
+    sentAt: r.sentAt?.toISOString() ?? null,
+    deliveredAt: r.deliveredAt?.toISOString() ?? null,
+    readAt: r.readAt?.toISOString() ?? null,
+    repliedAt: r.repliedAt?.toISOString() ?? null,
+    replyAttribution: r.repliedAttribution,
+    clickedAt: r.clickedAt?.toISOString() ?? null,
+    clickedOptionId: r.clickedOptionId,
+    optedOutAt: r.optedOutAt?.toISOString() ?? null,
+    errorCode: r.errorCode,
+    metaErrorCode: r.metaErrorCode,
+    errorMessage: r.errorMessage,
+    pricingCategory: r.pricingCategory,
+    billable: r.pricingBillable,
+    messageExternalId: r.externalId,
+    conversationId: r.conversationId,
+    updatedAt: r.updatedAt.toISOString(),
+  };
 }

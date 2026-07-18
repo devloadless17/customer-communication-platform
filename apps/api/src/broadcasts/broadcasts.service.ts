@@ -29,9 +29,12 @@ import {
 } from "@/lib/broadcasts/materialize-queue";
 import {
   checkBroadcastEligibility,
+  countRecentUniqueRecipients,
   fetchWhatsappHealthFromGraph,
   getWhatsappHealth,
 } from "@/lib/providers/meta-health";
+import { getBroadcastReport, recipientOutcomeWhere } from "@/lib/broadcast-report";
+import { csvHeader, csvRows } from "@/lib/csv";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
 import { teamConnectedChannels } from "@/lib/providers";
 import { pickBestChannel, type RankableContact } from "@/lib/identity/best-channel";
@@ -547,6 +550,8 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       recipientIds = await resolveAudienceGroupMembers(teamId, {
         tagIds: group.tags.map((t) => t.id),
         manualContactIds: group.contacts.map((c) => c.id),
+        // +1 so the over-cap check below still sees "more than the limit".
+        limit: MAX_RECIPIENTS_IN_PROCESS + 1,
       });
       resolvedGroupId = group.id;
       resolvedGroupName = group.name;
@@ -565,6 +570,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       recipientIds = await resolveAudienceGroupMembers(teamId, {
         tagIds: validatedTagIds,
         manualContactIds: audience.contactIds,
+        limit: MAX_RECIPIENTS_IN_PROCESS + 1,
       });
     } else {
       // mode === "selected"
@@ -592,6 +598,29 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     const isCustomerMode = input.targetMode === "customer";
     const filterChannel: Channel = template ? "whatsapp" : freeformChannel ?? "whatsapp";
     const hadAnyBeforeFilter = recipientIds.length > 0;
+
+    // The `limit: MAX + 1` on the group/custom resolvers above is a HEAP guard,
+    // and it must be converted into a rejection HERE — before the channel and
+    // opt-out filters below shrink the list.
+    //
+    // Otherwise the +1 sentinel is destroyed by filtering and the cap check at
+    // the bottom sees a plausible number: a tag matching 400k contacts resolves
+    // to an arbitrary 100,001, the WhatsApp-only filter cuts that to ~22k, the
+    // guard passes, and the operator gets a campaign that silently reaches 22k
+    // of their 90k WhatsApp audience while reporting success. Before the limit
+    // existed the resolve was unbounded and this correctly rejected.
+    //
+    // Checked against the RAW resolved set, so "more than the cap matched" is
+    // answered by the same list the cap describes.
+    if (recipientIds.length > MAX_RECIPIENTS_IN_PROCESS) {
+      throw new BadRequestException({
+        error: "audience too large",
+        detail:
+          `This audience matches more than ${MAX_RECIPIENTS_IN_PROCESS.toLocaleString()} contacts; ` +
+          `the limit is ${MAX_RECIPIENTS_IN_PROCESS.toLocaleString()}. Narrow the tags or split it ` +
+          `into smaller broadcasts.`,
+      });
+    }
 
     let recipientRows: Array<{ contactId: string; customerId: string | null }>;
     if (isCustomerMode) {
@@ -623,6 +652,44 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
+    // ── Marketing opt-out suppression ────────────────────────────────────────
+    // Applied in exactly ONE place, AFTER every audience branch has resolved and
+    // BEFORE the cap check — deliberately not inside the six resolution branches
+    // above. A branch added later would otherwise silently skip suppression,
+    // which is a compliance failure rather than a bug.
+    //
+    // Gated on template CATEGORY: only MARKETING sends suppress. A utility /
+    // authentication message (order update, OTP) must still reach someone who
+    // opted out of marketing — they asked for those, and blocking them would be
+    // worse service, not better compliance.
+    let suppressedCount = 0;
+    const isMarketing =
+      effectiveKind === "template" &&
+      (template?.category ?? "MARKETING").toUpperCase() === "MARKETING";
+    if (isMarketing && recipientRows.length > 0) {
+      // INVERTED rather than chunked. Asking "which of these 100k opted out"
+      // needs a 100k-parameter `in` list; asking "who on this team has opted
+      // out" is one bounded, indexed query whose result we intersect in memory.
+      // Opt-outs are a small fraction of a contact book, so this is both
+      // parameter-safe and cheaper than ~100 chunked round-trips.
+      const optedOut = await this.db.contact.findMany({
+        where: { teamId, marketingOptOutAt: { not: null } },
+        select: { id: true },
+      });
+      if (optedOut.length > 0) {
+        const blocked = new Set(optedOut.map((c) => c.id));
+        const before = recipientRows.length;
+        recipientRows = recipientRows.filter((r) => !blocked.has(r.contactId));
+        suppressedCount = before - recipientRows.length;
+      }
+      if (recipientRows.length === 0) {
+        throw new BadRequestException({
+          error: "all_recipients_opted_out",
+          detail: `All ${suppressedCount} selected contacts have opted out of marketing messages.`,
+        });
+      }
+    }
+
     // Enforce the recipient ceiling HERE, before writing any rows. This is the
     // policy cap (BROADCAST_MAX_RECIPIENTS, default 100k) — bound a single team's
     // blast radius / Meta spend. Reaching it ALSO requires the number's messaging
@@ -641,14 +708,26 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // only when we have no tier snapshot (null → ungated). Skipped for freeform /
     // customer-mode (social windows, not a WhatsApp 24h unique-recipient tier).
     if (effectiveKind === "template" && !isCustomerMode) {
-      let gate = await checkBroadcastEligibility(teamId, recipientRows.length);
+      // Pass the ids, not just the size: recipients already messaged inside the
+      // rolling window consume no additional Meta budget, and without the ids
+      // the gate assumes all of them are new and refuses legitimate re-sends.
+      const audienceContactIds = recipientRows.map((r) => r.contactId);
+      let gate = await checkBroadcastEligibility(
+        teamId,
+        recipientRows.length,
+        audienceContactIds,
+      );
       if (!gate.allowed) {
         // The cached tier may be stale (a missed quality webhook on a number Meta
         // already upgraded) — hard-blocking on it would refuse a send Meta would
         // accept. Re-poll Graph ONCE (only on the block path, so it's rare) and
         // re-check before failing. A poll failure falls back to the stale block.
         await fetchWhatsappHealthFromGraph(teamId).catch(() => undefined);
-        gate = await checkBroadcastEligibility(teamId, recipientRows.length);
+        gate = await checkBroadcastEligibility(
+          teamId,
+          recipientRows.length,
+          audienceContactIds,
+        );
       }
       if (!gate.allowed) {
         throw new BadRequestException({
@@ -679,6 +758,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       audienceGroupId: resolvedGroupId,
       audienceGroupName: resolvedGroupName,
       totalCount: recipientRows.length,
+      // Surfaced in the report ("targeted 10,000 · 47 suppressed · 9,953
+      // queued"). Without it totalCount silently shrinks and the operator asks
+      // why only some of their audience got the message.
+      suppressedCount,
+      templateCategory: template?.category ?? null,
     };
 
     // LARGE audience → async materialization. Inserting tens of thousands of
@@ -971,8 +1055,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         const ids = await resolveAudienceGroupMembers(teamId, {
           tagIds: group.tags.map((t) => t.id),
           manualContactIds: group.contacts.map((c) => c.id),
+          limit,
         });
-        return ids.slice(0, limit);
+        return ids;
       }
       if (audience.mode === "custom") {
         const tagRows = audience.tagIds?.length
@@ -984,8 +1069,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         const ids = await resolveAudienceGroupMembers(teamId, {
           tagIds: tagRows.map((t) => t.id),
           manualContactIds: audience.contactIds ?? [],
+          limit,
         });
-        return ids.slice(0, limit);
+        return ids;
       }
       // mode === "selected"
       return Array.from(
@@ -1008,9 +1094,17 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Secret-free WhatsApp messaging-limit snapshot for the composer's pre-send
-   * eligibility hint. The composer compares the (known) audience size against
-   * `messagingDailyCap` to warn before submitting; the hard gate lives in
-   * create(). `hasSnapshot` is false when we've never polled the number's tier
+   * eligibility hint. The hard gate lives in create(); this is what lets the
+   * composer warn BEFORE the operator builds a whole campaign.
+   *
+   * The composer must compare its audience against `remainingDailyBudget`, not
+   * against `messagingDailyCap`: the cap is a rolling-24h budget shared by every
+   * send from this number, so a 40k audience can fit the cap and still be
+   * rejected because earlier campaigns already spent most of it. Comparing to
+   * the raw cap would show "fits" and then have create() refuse — the exact
+   * whiplash this endpoint exists to prevent.
+   *
+   * `hasSnapshot` is false when we've never polled the number's tier
    * (advisory-only, ungated).
    */
   async getMessagingHealth(teamId: string): Promise<{
@@ -1018,13 +1112,21 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     messagingDailyCap: number | null;
     qualityRating: string | null;
     hasSnapshot: boolean;
+    recentUniqueRecipients: number | null;
+    remainingDailyBudget: number | null;
   }> {
     const health = await getWhatsappHealth(teamId);
+    const cap = health?.messagingDailyCap ?? null;
+    // Only pay for the usage count when there's a cap to measure against —
+    // mirrors checkBroadcastEligibility so the two never disagree.
+    const used = cap === null ? null : await countRecentUniqueRecipients(teamId);
     return {
       messagingTier: health?.messagingTier ?? null,
-      messagingDailyCap: health?.messagingDailyCap ?? null,
+      messagingDailyCap: cap,
       qualityRating: health?.qualityRating ?? null,
       hasSnapshot: !!health && health.messagingHealthUpdatedAt !== null,
+      recentUniqueRecipients: used,
+      remainingDailyBudget: used === null || cap === null ? null : Math.max(0, cap - used),
     };
   }
 
@@ -1093,6 +1195,141 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       nextCursor,
       totalCount,
     };
+  }
+
+  /**
+   * Campaign report — funnel, rates, failure buckets, benchmark, diagnostics.
+   * Thin passthrough: the computation lives in the domain layer so the UI, the
+   * CSV export, and the /v1 endpoint all derive identical numbers.
+   */
+  async getReport(teamId: string, id: string) {
+    const report = await getBroadcastReport(teamId, id);
+    if (!report) throw new NotFoundException({ error: "not found" });
+    return report;
+  }
+
+  /**
+   * Stream the recipient-level CSV for a campaign.
+   *
+   * STREAMED, not built in memory: a 100k-recipient export is ~25MB as one
+   * string (and ~60MB of peak heap) on a box that is also serving the live
+   * inbox. Keyset-paging 2,000 rows at a time and writing each chunk keeps peak
+   * memory around 2MB, and the progressive bytes mean no proxy timeout.
+   *
+   * Deliberately NOT an async job staged to R2: that needs a queue, a job-status
+   * model, presigned delivery, expiry cleanup, and a whole new failure mode
+   * (job succeeded, operator never saw the toast) to avoid a ~12-second wait.
+   * The escape hatch for genuinely programmatic pulls already exists and is
+   * better — the /v1 recipients endpoint pages with no cap.
+   */
+  async exportRecipientsCsv(
+    teamId: string,
+    id: string,
+    filter: { outcome?: string; errorCode?: string },
+    res: {
+      setHeader: (k: string, v: string) => void;
+      write: (chunk: string) => boolean;
+      end: () => void;
+    },
+  ): Promise<void> {
+    const broadcast = await this.db.broadcast.findFirst({
+      where: { id, teamId },
+      select: { id: true, templateName: true, name: true },
+    });
+    if (!broadcast) throw new NotFoundException({ error: "not found" });
+
+    const columns = [
+      "contact_name",
+      "phone",
+      "contact_id",
+      "delivery_state",
+      "send_status",
+      "sent_at",
+      "delivered_at",
+      "read_at",
+      "replied_at",
+      "clicked_at",
+      "seconds_to_delivered",
+      "seconds_to_read",
+      "seconds_to_replied",
+      "clicked_option_id",
+      "reply_attribution",
+      "error_code",
+      "meta_error_code",
+      "error_message",
+      "pricing_category",
+      "billable",
+      "opted_out_at",
+      "conversation_id",
+      "message_external_id",
+    ];
+
+    const slug = (broadcast.templateName ?? broadcast.name ?? "broadcast")
+      .replace(/[^a-z0-9]+/gi, "-")
+      .slice(0, 40);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const suffix = filter.errorCode ?? filter.outcome ?? "all";
+    res.setHeader("content-type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "content-disposition",
+      `attachment; filename="broadcast-${slug}-${suffix}-${stamp}.csv"`,
+    );
+    res.write(csvHeader(columns));
+
+    const secs = (from: Date | null, to: Date | null): string =>
+      from && to ? String(Math.max(0, Math.round((to.getTime() - from.getTime()) / 1000))) : "";
+    const iso = (d: Date | null): string => (d ? d.toISOString() : "");
+
+    const PAGE = 2_000;
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.db.broadcastRecipient.findMany({
+        where: { broadcastId: id, ...recipientOutcomeWhere(filter) },
+        orderBy: { id: "asc" },
+        take: PAGE,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        include: {
+          contact: { select: { name: true, phoneNumber: true, marketingOptOutAt: true } },
+        },
+      });
+      if (page.length === 0) break;
+      res.write(
+        csvRows(
+          columns,
+          page.map((r) => ({
+            contact_name: r.contact.name,
+            phone: r.contact.phoneNumber ?? "",
+            contact_id: r.contactId,
+            delivery_state: r.deliveryState,
+            send_status: r.status,
+            sent_at: iso(r.sentAt),
+            delivered_at: iso(r.deliveredAt),
+            read_at: iso(r.readAt),
+            replied_at: iso(r.repliedAt),
+            clicked_at: iso(r.clickedAt),
+            // Pre-computed alongside the ISO timestamps: the deltas are what
+            // anyone actually pivots on, and asking an operator to write a
+            // datetime-diff formula in Excel is how reports go unused.
+            seconds_to_delivered: secs(r.sentAt, r.deliveredAt),
+            seconds_to_read: secs(r.sentAt, r.readAt),
+            seconds_to_replied: secs(r.sentAt, r.repliedAt),
+            clicked_option_id: r.clickedOptionId ?? "",
+            reply_attribution: r.repliedAttribution ?? "",
+            error_code: r.errorCode ?? "",
+            meta_error_code: r.metaErrorCode != null ? String(r.metaErrorCode) : "",
+            error_message: r.errorMessage ?? "",
+            pricing_category: r.pricingCategory ?? "",
+            billable: r.pricingBillable == null ? "" : r.pricingBillable ? "true" : "false",
+            opted_out_at: iso(r.optedOutAt ?? r.contact.marketingOptOutAt),
+            conversation_id: r.conversationId ?? "",
+            message_external_id: r.externalId ?? "",
+          })),
+        ),
+      );
+      if (page.length < PAGE) break;
+      cursor = page[page.length - 1]!.id;
+    }
+    res.end();
   }
 
   async get(teamId: string, id: string) {
@@ -1393,7 +1630,20 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * error, flips the broadcast back to `queued`, and fires the runner — whose
    * per-recipient CAS guarantees already-`sent` rows are never touched.
    */
-  async retryFailed(teamId: string, id: string): Promise<{ requeued: number }> {
+  /**
+   * Re-queue failed recipients and run them again.
+   *
+   * `errorCodes` narrows the retry to specific normalized failure reasons, which
+   * is what makes the report's failure table actionable: "1,204 were rate
+   * limited — retry just those" instead of blindly re-running every failure
+   * including the permanently-invalid numbers (which would fail again and, on a
+   * big campaign, waste real throughput against the number's quality rating).
+   */
+  async retryFailed(
+    teamId: string,
+    id: string,
+    opts?: { errorCodes?: string[] },
+  ): Promise<{ requeued: number }> {
     const row = await this.db.broadcast.findFirst({
       where: { id, teamId },
       select: { id: true, status: true, failedCount: true },
@@ -1429,9 +1679,21 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         where: {
           broadcastId: id,
           status: "failed",
+          // The CANCEL marker exclusion is load-bearing and must survive any
+          // narrowing: recipients finalized by cancel() were deliberately
+          // stopped by the operator, and billed template sends are
+          // irreversible. A bucketed retry must never become the hole that
+          // re-sends a cancelled audience.
           NOT: { errorMessage: CANCEL_RECIPIENT_MARKER },
+          ...(opts?.errorCodes?.length ? { errorCode: { in: opts.errorCodes } } : {}),
         },
         select: { id: true },
+        // Bounded so a 100k campaign that failed wholesale can't materialize an
+        // unbounded id array inside a transaction (a heap guard, not a
+        // bind-parameter one). Retrying the cap's worth is already the largest
+        // legal broadcast; anything beyond it is re-queued by pressing Retry
+        // again.
+        take: MAX_RECIPIENTS_IN_PROCESS,
       });
       if (failed.length === 0) {
         throw new ConflictException({
@@ -1443,8 +1705,16 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // No marker re-filter here: `failedIds` came from the findMany above, which
       // already excluded CANCEL_RECIPIENT_MARKER inside this same tx — a second
       // filter would be dead. (The findMany's exclusion is the load-bearing one.)
+      // `status: "failed"` is a CAS, not redundancy. `failedIds` was read earlier
+      // in this interactive transaction under READ COMMITTED, but this UPDATE
+      // re-reads at statement time. A lane still draining from a previous run
+      // (parent already flipped terminal, lane not yet finished) can CAS a
+      // recipient queued→sent in that gap — and without this predicate we would
+      // flip it back to `queued` AND null its `sentAt`/`externalId`, then delete
+      // its send-idempotency ledger row below. The runner would re-send a
+      // template Meta has already accepted and billed.
       const reset = await tx.broadcastRecipient.updateMany({
-        where: { id: { in: failedIds } },
+        where: { id: { in: failedIds }, status: "failed" },
         data: { status: "queued", errorMessage: null, sentAt: null, externalId: null },
       });
 
@@ -1489,7 +1759,15 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         });
       }
       return reset.count;
-    });
+    },
+    // Matches create(). The default is 5s, and a campaign that failed tens of
+    // thousands of recipients has to updateMany + deleteMany across all of them
+    // in here — comfortably past 5s, which made Retry (the one control that
+    // matters after a partial failure) time out exactly when it was needed most.
+    // This is a DURATION bound, not a parameter-count one: Prisma already
+    // splits oversized `in` lists internally (see the bind-limit spec).
+    { timeout: 30_000, maxWait: 5_000 },
+    );
     startBroadcast(id);
     return { requeued };
   }

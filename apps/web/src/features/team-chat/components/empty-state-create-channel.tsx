@@ -7,14 +7,15 @@ import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 import { NewChannelDialog } from "./channel-dialogs";
+import type { Role } from "@ccp/shared/types";
 
 /**
  * Primary CTA for the zero-channel empty state (/team). Reuses the SAME
  * `NewChannelDialog` the sidebar `+` icon opens — no duplicated create form.
- * Only rendered when the viewer can create a channel; the page keeps the
- * "ask an admin" copy for everyone else.
+ * Anyone can create a PUBLIC channel; the dialog gates the private option
+ * by role and the server re-checks.
  */
-export function EmptyStateCreateChannel() {
+export function EmptyStateCreateChannel({ currentRole }: { currentRole: Role }) {
   const router = useRouter();
   const [showNew, setShowNew] = useState(false);
 
@@ -26,6 +27,7 @@ export function EmptyStateCreateChannel() {
       </Button>
       {showNew && (
         <NewChannelDialog
+          currentRole={currentRole}
           onClose={() => setShowNew(false)}
           onCreated={(ch) => {
             setShowNew(false);

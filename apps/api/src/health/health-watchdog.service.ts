@@ -5,6 +5,7 @@ import { DbService } from "../db/db.service";
 import { ffmpegSlotStats } from "../lib/media/ffmpeg-slots";
 import { getRedisConnection } from "../lib/workflows/queue";
 import { computeDegradations, type OutboxLagReport } from "./health-thresholds";
+import { probeStuckBroadcasts, STUCK_BROADCAST_PROBE_MIN } from "./stuck-broadcasts";
 
 /**
  * Periodic self-check that turns the /health report into a LOG SIGNAL.
@@ -80,10 +81,11 @@ export class HealthWatchdogService implements OnModuleInit, OnModuleDestroy {
     if (this.ticking) return;
     this.ticking = true;
     try {
-      const [dbOk, redisOk, outboxLag] = await Promise.all([
+      const [dbOk, redisOk, outboxLag, stuckBroadcasts] = await Promise.all([
         this.pingDb(),
         this.pingRedis(),
         this.probeOutboxLag(),
+        probeStuckBroadcasts(this.db, STUCK_BROADCAST_PROBE_MIN),
       ]);
       const poolStats = this.db.getPoolStats();
       const degraded = computeDegradations({
@@ -102,6 +104,7 @@ export class HealthWatchdogService implements OnModuleInit, OnModuleDestroy {
         outboxLag,
         jobFailures: getJobFailureMetrics(),
         ffmpeg: ffmpegSlotStats(),
+        stuckBroadcasts,
       });
 
       const signature = degraded.join(" | ");

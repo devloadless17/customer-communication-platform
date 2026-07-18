@@ -46,6 +46,26 @@ export class RealtimeEmitter {
     io.to(teamRoom(teamId)).emit(event, ...args);
   }
 
+  /**
+   * Emit to every socket belonging to one user (all their tabs/devices).
+   *
+   * Use this when the audience is a KNOWN, explicit set of users — e.g. the
+   * two participants of a DM. Unlike emitChannelScoped it needs no membership
+   * resolver, because the caller already knows exactly who should receive it.
+   */
+  emitToUser<E extends keyof ServerToClientEvents>(
+    userId: string,
+    event: E,
+    ...args: Parameters<ServerToClientEvents[E]>
+  ): void {
+    const io = this.server;
+    if (!io) {
+      this.logger.warn(`emitToUser("${String(event)}") dropped — IO not ready yet`);
+      return;
+    }
+    io.to(userRoom(userId)).emit(event, ...args);
+  }
+
   emitToConversation<E extends keyof ServerToClientEvents>(
     conversationId: string,
     event: E,

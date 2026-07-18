@@ -10,6 +10,7 @@ import type {
 import type { MediaKind, MessageDirection } from "@ccp/shared/types";
 
 import { clampTake, siblingChannelsByCustomer } from "./_shared";
+import { directoryContactWhere } from "./contacts";
 import {
   encodeContactCursor,
   encodeMessageCursor,
@@ -84,6 +85,7 @@ export async function searchContacts(
             teamId,
             deletedAt: null,
             AND: [
+              directoryContactWhere,
               { OR: matchOr },
               {
                 OR: [
@@ -93,7 +95,7 @@ export async function searchContacts(
               },
             ],
           }
-        : { teamId, deletedAt: null, OR: matchOr },
+        : { teamId, deletedAt: null, AND: [directoryContactWhere, { OR: matchOr }] },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       // Over-fetch: we paginate CONTACTS but display PEOPLE, and a person can span
       // several channel-contacts. Fetch enough contacts to still fill a full page

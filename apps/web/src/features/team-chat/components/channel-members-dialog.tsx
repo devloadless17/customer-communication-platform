@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Check, Loader2, Search, Trash2, UserPlus } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { PresenceDot } from "@/components/presence-dot";
+import { usePresence } from "@/hooks/use-presence";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -39,6 +41,7 @@ export function ChannelMembersDialog({
   allTeamMembers,
   onClose,
   onChanged,
+  teamId,
 }: {
   channel: TeamChannelDto;
   currentUser: { id: string };
@@ -48,6 +51,8 @@ export function ChannelMembersDialog({
   /** Called after any add/remove with the new member count so the parent's
    *  header pill stays in sync without waiting for a refetch. */
   onChanged: (memberCount: number) => void;
+  /** Team id for the presence subscription (dots on each roster row). */
+  teamId: string;
 }) {
   const [members, setMembers] = useState<ChannelMemberDto[] | null>(null);
   const [memberFilter, setMemberFilter] = useState("");
@@ -58,6 +63,11 @@ export function ChannelMembersDialog({
   const [error, setError] = useState<string | null>(null);
 
   const canManage = canManageChannel(currentRole);
+
+  // usePresence is refcount-safe across mounts, so subscribing here (rather
+  // than threading the Set down from the sidebar) costs nothing and keeps the
+  // dialog self-contained.
+  const { onlineUserIds, availabilityByUserId } = usePresence(teamId, currentUser.id);
 
   // Initial fetch.
   useEffect(() => {
@@ -368,10 +378,17 @@ export function ChannelMembersDialog({
                     key={m.userId}
                     className="flex items-center gap-2.5 border-b border-border px-3 py-2 last:border-0"
                   >
-                    <Avatar className="size-7">
-                      {m.avatarUrl ? <AvatarImage src={m.avatarUrl} alt={m.name} /> : null}
-                      <AvatarFallback seed={m.userId} className="text-3xs">{initials(m.name)}</AvatarFallback>
-                    </Avatar>
+                    <span className="relative shrink-0">
+                      <Avatar className="size-7">
+                        {m.avatarUrl ? <AvatarImage src={m.avatarUrl} alt={m.name} /> : null}
+                        <AvatarFallback seed={m.userId} className="text-3xs">{initials(m.name)}</AvatarFallback>
+                      </Avatar>
+                      <PresenceDot
+                        online={onlineUserIds.has(m.userId)}
+                        availability={availabilityByUserId[m.userId]?.status ?? null}
+                        className="absolute -bottom-0.5 -right-0.5"
+                      />
+                    </span>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">
                         <span className="truncate text-sm font-medium">{m.name}</span>

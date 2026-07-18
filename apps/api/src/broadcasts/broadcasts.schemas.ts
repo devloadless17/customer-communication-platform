@@ -166,3 +166,38 @@ export const BroadcastRecipientsQuerySchema = z.object({
 export type BroadcastRecipientsQuery = z.infer<
   typeof BroadcastRecipientsQuerySchema
 >;
+
+/**
+ * Optional narrowing for `POST :id/retry`. Empty/absent = retry every genuine
+ * failure (the historical behaviour); `errorCodes` limits it to specific
+ * normalized reasons so the report's failure table can offer a bucketed retry.
+ */
+export const RetryBroadcastSchema = z.object({
+  errorCodes: z.array(z.string().max(64)).max(20).optional(),
+});
+export type RetryBroadcastInput = z.infer<typeof RetryBroadcastSchema>;
+
+/**
+ * Recipient CSV export filters — the SAME vocabulary the report's funnel and
+ * failure table deep-link with, so "export what I'm looking at" works.
+ * `never_received` is the union operators actually ask for (rejected at send OR
+ * accepted-then-undeliverable) and exists so they don't have to do set
+ * arithmetic across two buckets.
+ */
+export const BroadcastExportQuerySchema = z.object({
+  outcome: z
+    .enum([
+      "all",
+      "never_received",
+      "delivered",
+      "read",
+      "replied",
+      "clicked",
+      "failed",
+      "undelivered",
+      "pending",
+    ])
+    .optional(),
+  errorCode: z.string().max(64).optional(),
+});
+export type BroadcastExportQuery = z.infer<typeof BroadcastExportQuerySchema>;

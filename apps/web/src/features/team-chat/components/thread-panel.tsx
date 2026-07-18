@@ -29,7 +29,8 @@ export function ThreadPanel({
   onClose,
 }: {
   channelId: string;
-  channelName: string;
+  /** Null in a DM — the "in #channel" subtitle is omitted there. */
+  channelName: string | null;
   rootMessage: TeamChannelMessageDto;
   currentUser: User;
   teamMembers: User[];
@@ -91,9 +92,11 @@ export function ThreadPanel({
       <div className="flex items-center justify-between border-b border-border bg-background px-4 py-3">
         <div>
           <div className="text-sm font-semibold">Thread</div>
-          <div className="truncate text-2xs text-muted-foreground">
-            in #{channelName}
-          </div>
+          {channelName ? (
+            <div className="truncate text-2xs text-muted-foreground">
+              in #{channelName}
+            </div>
+          ) : null}
         </div>
         <Button size="icon" variant="ghost" onClick={onClose} aria-label="Close thread">
           <X className="size-4" />

@@ -603,12 +603,15 @@ export function NewBroadcastForm({
 
   // WhatsApp messaging-limit snapshot for the pre-send eligibility hint. Fetched
   // once (secret-free endpoint); the composer compares the audience size against
-  // the number's 24h tier cap locally. The hard gate lives server-side in create().
+  // the number's REMAINING rolling-24h budget locally. The hard gate lives
+  // server-side in create() and uses the same numbers.
   const [messagingHealth, setMessagingHealth] = useState<{
     messagingTier: string | null;
     messagingDailyCap: number | null;
     qualityRating: string | null;
     hasSnapshot: boolean;
+    recentUniqueRecipients: number | null;
+    remainingDailyBudget: number | null;
   } | null>(null);
   useEffect(() => {
     let alive = true;
@@ -633,14 +636,31 @@ export function NewBroadcastForm({
   >(() => {
     if (messageKind !== "template" || !messagingHealth) return null;
     const cap = messagingHealth.messagingDailyCap;
+    const tier = messagingHealth.messagingTier ?? "current";
     if (cap !== null && audienceCount > cap) {
       return {
         level: "error",
         text:
           `This number can message ${cap.toLocaleString()} unique customers per 24h ` +
-          `(${messagingHealth.messagingTier ?? "current"} tier), but this audience is ` +
+          `(${tier} tier), but this audience is ` +
           `${audienceCount.toLocaleString()}. Meta will reject the excess — split the send ` +
           `across days or raise your messaging limit with Meta first.`,
+      };
+    }
+    // The audience fits the cap outright but not what's LEFT of it. The cap is a
+    // rolling-24h budget shared across every send from this number, so earlier
+    // campaigns today can leave a perfectly reasonable audience unsendable.
+    const remaining = messagingHealth.remainingDailyBudget;
+    const used = messagingHealth.recentUniqueRecipients;
+    if (cap !== null && remaining !== null && used !== null && audienceCount > remaining) {
+      return {
+        level: "error",
+        text:
+          `This number has already messaged ${used.toLocaleString()} unique customers in the ` +
+          `last 24h, leaving ${remaining.toLocaleString()} of its ${cap.toLocaleString()} ` +
+          `${tier}-tier allowance. This audience is ${audienceCount.toLocaleString()}, so Meta ` +
+          `would reject about ${(audienceCount - remaining).toLocaleString()} of them. Wait for ` +
+          `the window to roll over, or reduce the audience.`,
       };
     }
     if (messagingHealth.qualityRating === "RED") {

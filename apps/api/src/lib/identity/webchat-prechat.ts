@@ -8,12 +8,18 @@ import type { Channel } from "@ccp/shared/types";
 /**
  * Apply a website-widget pre-chat form submission to the visitor's contact.
  *
- * The pre-chat form is the widget's analogue of the social "share your phone /
- * email" consent chip (see `applyContactShareFromReply`): a visitor VOLUNTARILY
- * typed these values about themselves, so an email/phone is SELF-ASSERTED and may
- * auto-merge the visitor into an existing unified `Customer` (exact phone, or
- * exact email under `trustEmailAsStrongKey`). Name is display-only — never a key
- * (no fuzzy matching, ever — docs/identity.md).
+ * The pre-chat form LOOKS like the social "share your phone / email" consent chip
+ * (see `applyContactShareFromReply`), but it is NOT equivalent and must not be
+ * treated as one: the social chip rides on a vendor-verified account, while this is
+ * an unauthenticated text box on a public website. The values are STORED on the
+ * contact (the agent can see and act on them) but NEVER act as a merge key in
+ * either direction — see the NO-AUTO-MERGE block below, and the matching candidate
+ * exclusion in `findExistingCustomerIdByStrongKey`. Name is display-only — never a
+ * key (no fuzzy matching, ever — docs/identity.md).
+ *
+ * Landing a phone or email here DOES promote the visitor out of ephemeral status
+ * into the contacts directory (`directoryContactWhere`) — that is visibility, not
+ * identity, and it mints no link to any other person.
  *
  * Best-effort, called AFTER the first inbound message has committed: a failure
  * here must never cost us the message. The customer-link drift sweeper is the

@@ -10,20 +10,24 @@ import {
 
 import { parseMentions } from "@ccp/shared/team-chat/mentions";
 import {
+  canCreateChannel,
   canDeleteChannel,
   canDeleteMessage,
   canEditMessage,
   canManageChannel,
-  canPinMessage,
+  canPinInChannel,
   EDIT_WINDOW_MS,
 } from "@ccp/shared/team-chat/permissions";
 import { blobStorage } from "@/lib/blob-storage";
 import { MEDIA_SIZE_CAPS, kindFromMime } from "@/lib/media-storage";
 import {
+  browsePublicChannels,
   buildMessagePreview,
   decodeCursor,
   getChannelById,
   getDefaultChannel,
+  getPublicChannelPreview,
+  listDirectMessagesForUser,
   listChannelMessages,
   listChannelMessagesAfter,
   listChannelMessagesAround,
@@ -71,13 +75,67 @@ export class ChannelsService {
     return listChannelsForUser(teamId, userId);
   }
 
+  /** The viewer's 1:1 DMs, most-recently-active first. */
+  listDirectMessages(teamId: string, userId: string) {
+    return listDirectMessagesForUser(teamId, userId);
+  }
+
+  /** Public channels for the "Browse channels" dialog. Metadata only. */
+  browse(
+    teamId: string,
+    userId: string,
+    q: string | null,
+    opts: { before?: string | null; take?: number },
+  ) {
+    return browsePublicChannels(teamId, userId, q, opts);
+  }
+
+  /**
+   * Metadata for a public channel the viewer may not have joined — backs the
+   * "join to see this channel" card. Null for private channels and DMs,
+   * indistinguishable from "doesn't exist".
+   */
+  getPreview(teamId: string, channelId: string) {
+    return getPublicChannelPreview(teamId, channelId);
+  }
+
+  /**
+   * Total unread @-mentions across every channel the viewer is in. Backs the
+   * app-rail badge, which needs an authoritative server-seeded count: a
+   * count derived purely from socket frames has no seed on page load and no
+   * way to converge after an offline gap.
+   */
+  async unreadMentionCount(teamId: string, userId: string): Promise<number> {
+    const rows = await this.db.$queryRaw<{ count: bigint }[]>`
+      SELECT COUNT(*) AS "count"
+      FROM "TeamChannelMention" mn
+      INNER JOIN "TeamChannelMessage" m ON m."id" = mn."messageId"
+      INNER JOIN "TeamChannel" c ON c."id" = m."channelId"
+      -- Membership join is load-bearing. Without it a mention in a channel the
+      -- user has since LEFT (or was removed from) keeps counting forever: the
+      -- receipt can never advance past it because they can no longer open the
+      -- channel, so the rail badge shows a permanent, unclearable number.
+      -- isDefault short-circuits for the same reason requireChannelMembership
+      -- does — everyone is implicitly a member there.
+      LEFT JOIN "TeamChannelMember" mem
+        ON mem."channelId" = m."channelId" AND mem."userId" = ${userId}
+      LEFT JOIN "TeamChannelReadReceipt" r
+        ON r."channelId" = m."channelId" AND r."userId" = ${userId}
+      WHERE mn."mentionedUserId" = ${userId}
+        AND m."teamId" = ${teamId}
+        AND (mem."userId" IS NOT NULL OR c."isDefault" = TRUE)
+        AND (r."lastReadAt" IS NULL OR m."createdAt" > r."lastReadAt")
+    `;
+    return Number(rows[0]?.count ?? 0);
+  }
+
   /**
    * Resolve the team's default channel — the one `/team` redirects into on
    * first load. Falls back to alphabetically-first if no `isDefault` row
    * exists (defensive — see getDefaultChannel in queries.ts).
    */
-  getDefault(teamId: string) {
-    return getDefaultChannel(teamId);
+  getDefault(teamId: string, userId: string) {
+    return getDefaultChannel(teamId, userId);
   }
 
   /**
@@ -86,7 +144,7 @@ export class ChannelsService {
    */
   async getById(teamId: string, userId: string, channelId: string) {
     await this.requireChannelMembership(teamId, userId, channelId);
-    return getChannelById(channelId, teamId);
+    return getChannelById(channelId, teamId, userId);
   }
 
   /**
@@ -104,8 +162,14 @@ export class ChannelsService {
     role: Role,
     input: CreateChannelInput,
   ) {
-    // Channel-create gate is per-role — not all members can create channels.
-    if (!canManageChannel(role)) {
+    // Public channels are free for anyone to create — they're discoverable in
+    // the browser and joinable by the whole team, so there's nothing to
+    // govern. PRIVATE channels stay admin/manager-gated: a private channel is
+    // invisible in the browser and excluded from everyone else's workspace
+    // search, so an agent-created one would be an ungoverned space with no
+    // discovery surface. See canCreateChannel for the full reasoning.
+    const visibility = input.visibility ?? "private";
+    if (!canCreateChannel(role, visibility)) {
       throw new ForbiddenException({ error: "forbidden" });
     }
 
@@ -123,7 +187,15 @@ export class ChannelsService {
     // channel-create rollback is clean. Self is added even if not listed,
     // and duplicates are deduped — we only need to confirm every id is a
     // real, non-deactivated user on this team.
-    const requestedMemberIds = new Set<string>(input.memberUserIds ?? []);
+    // Seeding a member list is the same privilege as addMembers, so it needs
+    // the same gate. Without this, relaxing canCreateChannel for PUBLIC
+    // channels handed every agent a side door: create a public channel with
+    // `memberUserIds: [...everyone]` and force-join the whole team — an action
+    // addMembers explicitly forbids them on any existing channel.
+    const mayPickMembers = canManageChannel(role);
+    const requestedMemberIds = new Set<string>(
+      mayPickMembers ? (input.memberUserIds ?? []) : [],
+    );
     requestedMemberIds.add(userId);
     const memberIds = [...requestedMemberIds];
     if (memberIds.length > 1) {
@@ -141,7 +213,7 @@ export class ChannelsService {
     try {
       const created = await this.db.$transaction(async (tx) => {
         const channel = await tx.teamChannel.create({
-          data: { teamId, name, description, createdById: userId },
+          data: { teamId, name, description, visibility, createdById: userId },
         });
         await tx.teamChannelMember.createMany({
           data: memberIds.map((id) => ({
@@ -223,7 +295,9 @@ export class ChannelsService {
     userIds: string[],
   ): Promise<{ added: string[] }> {
     if (!canManageChannel(role)) throw new ForbiddenException({ error: "forbidden" });
-    await this.requireChannelInTeam(teamId, channelId);
+    // A DM is 1:1 by construction — nobody, admin included, may add a third
+    // party to someone else's private conversation.
+    this.assertNotDm(await this.requireChannelInTeam(teamId, channelId));
 
     const ids = [...new Set(userIds)];
     if (ids.length === 0) return { added: [] };
@@ -280,6 +354,10 @@ export class ChannelsService {
     targetUserId: string,
   ): Promise<void> {
     const channel = await this.requireChannelInTeam(teamId, channelId);
+    // You don't "leave" a DM — it's the conversation itself, and leaving
+    // would strand the other party in a one-sided room. Hiding/archiving a
+    // DM is a separate feature if anyone asks for it.
+    this.assertNotDm(channel);
 
     const isSelfLeave = actorUserId === targetUserId;
     if (!isSelfLeave && !canManageChannel(role)) {
@@ -321,10 +399,28 @@ export class ChannelsService {
   private async requireChannelInTeam(teamId: string, channelId: string) {
     const channel = await this.db.teamChannel.findFirst({
       where: { id: channelId, teamId },
-      select: { id: true, isDefault: true },
+      select: { id: true, isDefault: true, kind: true, visibility: true },
     });
     if (!channel) throw new NotFoundException({ error: "channel not found" });
     return channel;
+  }
+
+  /**
+   * Reject channel-administration operations targeting a DM.
+   *
+   * LOAD-BEARING. Without this, `POST /api/team/channels/:dmId/members` would
+   * let an admin inject a third party into two colleagues' private 1:1 — the
+   * existing members_changed fanout would dutifully wire the new member into
+   * the room and hand them the full history. It also breaks the 1:1 invariant
+   * that `dmKey` exists to guarantee.
+   *
+   * 404 rather than 400/403 so the response is indistinguishable from "no such
+   * channel", matching the non-disclosure posture used everywhere else here.
+   */
+  private assertNotDm(channel: { kind: string }): void {
+    if (channel.kind === "dm") {
+      throw new NotFoundException({ error: "channel not found" });
+    }
   }
 
   async update(
@@ -341,8 +437,14 @@ export class ChannelsService {
       where: { id: channelId, teamId },
     });
     if (!existing) throw new NotFoundException({ error: "channel not found" });
+    // A DM has no name, description, or visibility to edit.
+    this.assertNotDm(existing);
 
-    const data: { name?: string; description?: string | null } = {};
+    const data: {
+      name?: string;
+      description?: string | null;
+      visibility?: "public" | "private";
+    } = {};
 
     if (input.name !== undefined) {
       const candidate = normalizeChannelName(input.name);
@@ -361,6 +463,21 @@ export class ChannelsService {
     if (input.description !== undefined) {
       data.description = input.description.length ? input.description : null;
     }
+    if (input.visibility !== undefined && input.visibility !== existing.visibility) {
+      // #general must stay public — it's the landing channel every team
+      // member is implicitly in, and making it private would lock newcomers
+      // out of the one place they're guaranteed to be able to read.
+      if (existing.isDefault) {
+        throw new ConflictException({
+          error: "default_channel_locked",
+          detail: "The default channel must stay public.",
+        });
+      }
+      // Note: public → private deliberately does NOT purge existing members.
+      // People already in the channel stay in it; visibility governs who may
+      // JOIN from here on, not who is retroactively evicted.
+      data.visibility = input.visibility;
+    }
 
     if (Object.keys(data).length === 0) {
       return mapChannel(existing);
@@ -368,7 +485,16 @@ export class ChannelsService {
 
     let updated;
     try {
-      updated = await this.db.teamChannel.update({ where: { id: channelId }, data });
+      // updateMany (not update) so `teamId` can appear in the WHERE — `id` is
+      // the only unique, and §18 wants teamId in every query's where clause.
+      const res = await this.db.teamChannel.updateMany({
+        where: { id: channelId, teamId },
+        data,
+      });
+      if (res.count === 0) throw new NotFoundException({ error: "channel not found" });
+      updated = await this.db.teamChannel.findFirstOrThrow({
+        where: { id: channelId, teamId },
+      });
     } catch (err) {
       if (isP2002(err)) throw new ConflictException({ error: "name_taken" });
       throw err;
@@ -389,6 +515,9 @@ export class ChannelsService {
       where: { id: channelId, teamId },
     });
     if (!existing) throw new NotFoundException({ error: "channel not found" });
+    // A DM isn't an administrable channel — deleting one would destroy the
+    // other party's history without their say.
+    this.assertNotDm(existing);
     // Hard-protect the default channel from deletion — same reason as rename.
     if (existing.isDefault || existing.name === DEFAULT_CHANNEL_NAME) {
       throw new ConflictException({
@@ -404,6 +533,139 @@ export class ChannelsService {
       teamId,
       scope: "team-channels",
     });
+  }
+
+  // ---- Direct messages --------------------------------------------------
+
+  /**
+   * Open the 1:1 DM between the actor and `targetUserId`, creating it on
+   * first use. Idempotent: opening the same DM again — from either side, any
+   * number of times — always resolves to the same channel row.
+   *
+   * Self-DM is allowed and becomes the "notes to self" surface. It needs no
+   * special handling: dmKey is "u:u", there's one member row, and
+   * requireChannelMembership / emitChannelScoped / member counts all tolerate
+   * a one-member channel unchanged.
+   */
+  async createOrGetDm(teamId: string, actorUserId: string, targetUserId: string) {
+    // TENANT ISOLATION: the teamId predicate here is load-bearing. Without
+    // it, a client-supplied userId from ANOTHER team would create a DM row
+    // inside this team carrying a foreign user's membership — and that user's
+    // DM list (which filters on membership alone) would surface it.
+    // `deactivatedAt: null` matches the filter addMembers already applies:
+    // you can keep reading an existing DM with someone who was deactivated,
+    // but you can't start a new one.
+    const target = await this.db.user.findFirst({
+      where: { id: targetUserId, teamId, deactivatedAt: null },
+      select: { id: true },
+    });
+    if (!target) {
+      throw new BadRequestException({
+        error: "invalid_member",
+        detail: "That person isn't an active member of this team.",
+      });
+    }
+
+    // Canonical participant key, ALWAYS derived server-side from the session
+    // user. Never accept this from the client or a caller could claim a DM
+    // between two other people.
+    const dmKey = [actorUserId, target.id].sort().join(":");
+    const memberIds = [...new Set([actorUserId, target.id])];
+
+    const existing = await this.db.teamChannel.findUnique({
+      where: { teamId_dmKey: { teamId, dmKey } },
+      include: { _count: { select: { members: true } } },
+    });
+    if (existing) return mapChannel(existing, existing._count.members);
+
+    try {
+      const created = await this.db.$transaction(async (tx) => {
+        const channel = await tx.teamChannel.create({
+          data: {
+            teamId,
+            name: null,
+            kind: "dm",
+            // Belt and braces — a DM is private by definition and must never
+            // appear in the public channel browser.
+            visibility: "private",
+            isDefault: false,
+            dmKey,
+            createdById: actorUserId,
+          },
+        });
+        await tx.teamChannelMember.createMany({
+          data: memberIds.map((id) => ({
+            channelId: channel.id,
+            userId: id,
+            addedById: actorUserId,
+          })),
+          skipDuplicates: true,
+        });
+        return channel;
+      });
+
+      // Published ONLY on the create branch. Re-opening an existing DM must
+      // not re-emit, or every open would re-surface it in the peer's sidebar.
+      await this.bus.publish({
+        type: "team_channel.dm_created",
+        teamId,
+        channelId: created.id,
+        memberUserIds: memberIds,
+      });
+      return mapChannel(created, memberIds.length);
+    } catch (err) {
+      // Lost the race against a concurrent open (the other party clicked at
+      // the same moment). The unique on (teamId, dmKey) is what makes this
+      // safe — re-read and return the winner rather than creating a twin.
+      if (isP2002(err)) {
+        const raced = await this.db.teamChannel.findUnique({
+          where: { teamId_dmKey: { teamId, dmKey } },
+          include: { _count: { select: { members: true } } },
+        });
+        if (raced) return mapChannel(raced, raced._count.members);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Self-serve join of a PUBLIC channel. Idempotent — joining twice is a
+   * no-op success, so a double-click can't 500.
+   *
+   * Private channels 404 rather than 403: telling a non-member "you're not
+   * allowed into #leadership-comp" discloses that it exists, which is exactly
+   * what requireChannelMembership's 404-not-403 posture avoids elsewhere.
+   */
+  async joinPublicChannel(
+    teamId: string,
+    userId: string,
+    channelId: string,
+  ): Promise<{ joined: boolean }> {
+    const channel = await this.requireChannelInTeam(teamId, channelId);
+    this.assertNotDm(channel);
+    if (channel.visibility === "private") {
+      throw new NotFoundException({ error: "channel not found" });
+    }
+
+    const result = await this.db.teamChannelMember.createMany({
+      data: [{ channelId, userId, addedById: userId }],
+      skipDuplicates: true,
+    });
+    const joined = result.count > 0;
+
+    if (joined) {
+      // Reuses the EXISTING members_changed event: same fanout rule, same
+      // client handler, no new realtime code for the join path.
+      await this.bus.publish({
+        type: "team_channel.members_changed",
+        teamId,
+        channelId,
+        action: "added",
+        userIds: [userId],
+        changedById: userId,
+      });
+    }
+    return { joined };
   }
 
   // ---- Messages ---------------------------------------------------------
@@ -837,8 +1099,14 @@ export class ChannelsService {
     channelId: string,
     messageId: string,
   ): Promise<void> {
-    if (!canPinMessage(role)) throw new ForbiddenException({ error: "forbidden" });
     await this.requireChannelMembership(teamId, userId, channelId);
+    // Role-gate pinning in channels only. In a DM both participants may pin:
+    // an admin who isn't in the DM can't reach it anyway, and a non-admin
+    // shouldn't need permission to pin something in their own conversation.
+    const channel = await this.requireChannelInTeam(teamId, channelId);
+    if (!canPinInChannel(role, channel.kind)) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
 
     const msg = await this.db.teamChannelMessage.findFirst({
       where: { id: messageId, channelId, teamId },
@@ -852,20 +1120,36 @@ export class ChannelsService {
       });
     }
 
+    let pinnedAt = new Date();
     try {
-      await this.db.teamChannelPin.create({
+      const pin = await this.db.teamChannelPin.create({
         data: { channelId, messageId, pinnedById: userId },
+        select: { pinnedAt: true },
       });
+      pinnedAt = pin.pinnedAt;
     } catch (err) {
       if (!isP2002(err)) throw err;
-      // Already pinned — idempotent success.
+      // Already pinned — idempotent success. Re-read so the emitted metadata
+      // describes the ORIGINAL pin, not this no-op retry.
+      const existing = await this.db.teamChannelPin.findUnique({
+        where: { messageId },
+        select: { pinnedAt: true },
+      });
+      if (existing) pinnedAt = existing.pinnedAt;
     }
+    const pinner = await this.db.user.findUnique({
+      where: { id: userId },
+      select: { name: true },
+    });
     await this.bus.publish({
       type: "team_channel.pin_changed",
       teamId,
       channelId,
       messageId,
       pinned: true,
+      pinnedAt: pinnedAt.toISOString(),
+      pinnedById: userId,
+      pinnedByName: pinner?.name ?? null,
     });
   }
 
@@ -876,8 +1160,11 @@ export class ChannelsService {
     channelId: string,
     messageId: string,
   ): Promise<void> {
-    if (!canPinMessage(role)) throw new ForbiddenException({ error: "forbidden" });
     await this.requireChannelMembership(teamId, userId, channelId);
+    const channel = await this.requireChannelInTeam(teamId, channelId);
+    if (!canPinInChannel(role, channel.kind)) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
 
     // Tenant guard via the message — keeps unpin from teaching the caller
     // about another team's message ids.
@@ -894,6 +1181,9 @@ export class ChannelsService {
       channelId,
       messageId,
       pinned: false,
+      pinnedAt: null,
+      pinnedById: null,
+      pinnedByName: null,
     });
   }
 

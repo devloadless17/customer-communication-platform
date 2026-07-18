@@ -254,6 +254,13 @@ type PrismaContactListItem = Omit<
   // socialProfile (IG follower/verified signals) is panel-only context — the
   // list row never renders it, so the narrow select omits the JSONB column.
   | "socialProfile"
+  // Marketing-consent state is enforced server-side during broadcast audience
+  // resolution and surfaced on the campaign report; the inbox list row never
+  // renders it, so it stays out of the narrow select like the other internals
+  // above. Surface it in the contact PANEL (which loads the full row) if an
+  // operator ever needs to see consent while replying.
+  | "marketingOptOutAt"
+  | "marketingOptOutSource"
 >;
 export function mapContactListItem(c: PrismaContactListItem): Contact {
   const display = contactDisplayIdentity(c);

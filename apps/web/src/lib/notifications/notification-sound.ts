@@ -25,11 +25,17 @@
  * reachable after `unlock()` (which only runs in a user gesture on the client).
  */
 
-export type SoundCategory = "messages" | "calls";
+/**
+ * "messages" means CUSTOMER message. "team" is deliberately separate rather
+ * than folded into it: muting customer pings while keeping teammate pings
+ * (or the reverse) is the obvious thing an agent wants, and one shared toggle
+ * makes that impossible.
+ */
+export type SoundCategory = "messages" | "calls" | "team";
 export type SoundPrefs = Record<SoundCategory, boolean>;
 
 const STORAGE_KEY = "ccp.sound.prefs";
-const DEFAULT_PREFS: SoundPrefs = { messages: true, calls: true };
+const DEFAULT_PREFS: SoundPrefs = { messages: true, calls: true, team: true };
 
 /** Min gap between message dings so an inbound burst can't machine-gun. */
 const MESSAGE_THROTTLE_MS = 1500;
@@ -42,6 +48,9 @@ const GAIN = 0.35;
 const SOUND_FILES: Record<SoundCategory, string> = {
   messages: "/sounds/message.mp3",
   calls: "/sounds/ring.mp3",
+  // No file shipped yet — falls back to the synth ding, which is the
+  // documented hybrid behaviour, not an oversight.
+  team: "/sounds/team.mp3",
 };
 
 type WebkitWindow = Window & { webkitAudioContext?: typeof AudioContext };
@@ -58,10 +67,14 @@ class NotificationSoundEngine {
   private buffers: Record<SoundCategory, AudioBuffer | null | false> = {
     messages: null,
     calls: null,
+    team: null,
   };
   private decoding = false;
 
   private lastMessageToneAt = 0;
+  // Separate throttle clock from customer messages so a busy inbox can't
+  // swallow a teammate's DM ding (and vice versa).
+  private lastTeamToneAt = 0;
 
   // Active call ids (ref-counted). The ring loops while this is non-empty so
   // two simultaneous incoming calls = one continuous ring, and it only stops
@@ -85,6 +98,9 @@ class NotificationSoundEngine {
           messages:
             typeof parsed.messages === "boolean" ? parsed.messages : DEFAULT_PREFS.messages,
           calls: typeof parsed.calls === "boolean" ? parsed.calls : DEFAULT_PREFS.calls,
+          // Parsed per-key, so prefs saved before this category existed load
+          // unchanged with `team` defaulting on — no migration needed.
+          team: typeof parsed.team === "boolean" ? parsed.team : DEFAULT_PREFS.team,
         };
       }
     } catch {
@@ -267,6 +283,26 @@ class NotificationSoundEngine {
     if (now - this.lastMessageToneAt < MESSAGE_THROTTLE_MS) return;
     this.lastMessageToneAt = now;
     const buf = this.buffers.messages;
+    if (buf) this.playBuffer(buf);
+    else this.synthDing();
+  }
+
+  /** Fire the team-chat ding (a DM or an @-mention). Same throttle window as
+   *  customer messages so a burst can't machine-gun. */
+  playTeamTone(): void {
+    if (!this.unlocked || !this.ctx || !this.getPrefs().team) return;
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (now - this.lastTeamToneAt < MESSAGE_THROTTLE_MS) return;
+    this.lastTeamToneAt = now;
+    const buf = this.buffers.team;
+    if (buf) this.playBuffer(buf);
+    else this.synthDing();
+  }
+
+  /** One-shot team sound for the settings preview — bypasses pref + throttle. */
+  previewTeam(): void {
+    if (!this.unlocked || !this.ctx) return;
+    const buf = this.buffers.team;
     if (buf) this.playBuffer(buf);
     else this.synthDing();
   }

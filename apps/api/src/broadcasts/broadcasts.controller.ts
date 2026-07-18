@@ -6,6 +6,7 @@ import {
   Param,
   Post,
   Query,
+  Res,
   UseGuards,
 } from "@nestjs/common";
 
@@ -14,15 +15,21 @@ import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { zBody, zQuery } from "../common/zod-validation.pipe";
+import type { Response } from "express";
+
 import {
+  BroadcastExportQuerySchema,
   BroadcastListQuerySchema,
+  RetryBroadcastSchema,
   BroadcastRecipientsQuerySchema,
   CreateBroadcastSchema,
   PreviewMissingFieldsSchema,
   type BroadcastListQuery,
   type BroadcastRecipientsQuery,
+  type BroadcastExportQuery,
   type CreateBroadcastInput,
   type PreviewMissingFieldsInput,
+  type RetryBroadcastInput,
 } from "./broadcasts.schemas";
 import { BroadcastsService } from "./broadcasts.service";
 
@@ -100,6 +107,24 @@ export class BroadcastsController {
   }
 
   /**
+   * Campaign report: delivery funnel, rates, failure breakdown by actionable
+   * bucket, benchmark against the team's recent campaigns, and the diagnostics
+   * that say what to DO about each problem.
+   *
+   * Deliberately a SEPARATE route from `GET :id` — that one is polled every 2s
+   * while a campaign sends and refetched on every socket tick, and aggregate
+   * queries must never ride that path.
+   */
+  @Get(":id/report")
+  async report(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    const report = await this.broadcasts.getReport(session.teamId, id);
+    return { report };
+  }
+
+  /**
    * Paginated recipient page. `GET :id/recipients?cursor=&status=&take=`.
    * Used by the broadcast detail UI when `recipientsTruncated` is true on
    * the parent get() response. Without this, a 10k-recipient broadcast
@@ -141,15 +166,40 @@ export class BroadcastsController {
     return { ok: true };
   }
 
-  /** Re-queue + re-run only the FAILED recipients of a finished broadcast. */
+  /**
+   * Re-queue + re-run FAILED recipients. An optional `errorCodes` body narrows
+   * it to one failure bucket, so the report can offer "retry the 1,204
+   * rate-limited" without also re-sending to permanently-invalid numbers.
+   */
   @Post(":id/retry")
   @RequireCapability("broadcasts:manage")
   async retry(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
+    @Body(zBody(RetryBroadcastSchema)) body: RetryBroadcastInput,
   ) {
-    const { requeued } = await this.broadcasts.retryFailed(session.teamId, id);
+    const { requeued } = await this.broadcasts.retryFailed(session.teamId, id, {
+      ...(body.errorCodes ? { errorCodes: body.errorCodes } : {}),
+    });
     return { ok: true, requeued };
+  }
+
+  /**
+   * Recipient-level CSV export, honouring the same filters as the table so the
+   * operator exports what they are looking at (the 4,102 invalid numbers, not a
+   * 100k dump). Gated behind `broadcasts:manage` — a deliberate deviation from
+   * this controller's reads-are-ungated convention, because this egresses every
+   * recipient's phone number in bulk, the same reason contacts:export exists.
+   */
+  @Get(":id/export")
+  @RequireCapability("broadcasts:manage")
+  async exportCsv(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Query(zQuery(BroadcastExportQuerySchema)) query: BroadcastExportQuery,
+    @Res() res: Response,
+  ): Promise<void> {
+    await this.broadcasts.exportRecipientsCsv(session.teamId, id, query, res);
   }
 
   @Delete(":id")

@@ -5,6 +5,8 @@ import { AppRail } from "@/components/layouts/app-rail";
 import { ChunkErrorReload } from "@/components/chunk-error-reload";
 import { CatalogSyncBoundary } from "@/providers/catalog-sync-boundary";
 import { NotificationSoundProvider } from "@/providers/notification-sound-provider";
+import { TeamChatNotificationsProvider } from "@/providers/team-chat-notifications";
+import { listDirectMessagesForUser } from "@/lib/api/queries";
 import { CallProvider } from "@/features/calls/call-provider";
 import { getSession } from "@/lib/auth/current-user";
 import { getCurrentTeam } from "@/lib/api/queries";
@@ -61,7 +63,16 @@ export default async function AppShellLayout({
 
   // Now safe to fetch team-scoped chrome. Parallel — independent reads, both
   // React.cached so child layouts re-calling them are free cache hits.
-  const [team, cookieStore] = await Promise.all([getCurrentTeam(), cookies()]);
+  const [team, cookieStore, dms] = await Promise.all([
+    getCurrentTeam(),
+    cookies(),
+    // Seeds the DM-alert set. A DM is inherently addressed to you, so ANY
+    // message in one should alert — but `team:channel:activity` can't tell a
+    // DM from a channel, so the client needs the id set to branch on.
+    // Best-effort: a failure just means DM dings wait until /team is visited.
+    listDirectMessagesForUser().catch(() => []),
+  ]);
+  const dmChannelIds = new Set(dms.map((d) => d.id));
   const railCollapsed = cookieStore.get(RAIL_COLLAPSED_COOKIE)?.value !== "false";
 
   return (
@@ -81,6 +92,12 @@ export default async function AppShellLayout({
           inbox call toast rings through). Wraps AppRail so the user-menu sound
           toggles can read its context. */}
       <NotificationSoundProvider>
+        {/* Team-chat @-mention / DM alerts. Null-rendering; lives here (not in
+            /team/layout) so a mention reaches you on any page. */}
+        <TeamChatNotificationsProvider
+          currentUserId={user.id}
+          dmChannelIds={dmChannelIds}
+        />
         {/* App-wide voice-call layer: the single useCall instance + the
             incoming-call toast / active-call panel, so a call ringing in is
             visible on every page (not just the inbox). */}

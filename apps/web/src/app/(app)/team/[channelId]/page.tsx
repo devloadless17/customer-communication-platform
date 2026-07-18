@@ -3,10 +3,12 @@ import { notFound } from "next/navigation";
 import { getSession } from "@/lib/auth/current-user";
 import {
   getChannelById,
+  getPublicChannelPreview,
   listChannelMessages,
   listChannelPins,
 } from "@/lib/api/queries";
 
+import { JoinChannelCard } from "@/features/team-chat/components/join-channel-card";
 import { TeamChatWorkspace } from "@/features/team-chat/components/team-chat-workspace";
 
 /**
@@ -29,15 +31,25 @@ export default async function ChannelPage({
   const { user } = await getSession();
   const { channelId } = await params;
 
-  const [channel, page, pins] = await Promise.all([
-    getChannelById(channelId),
+  // Channel FIRST, alone: a non-member 404s here, and the message/pin fetches
+  // would 404 too — so they can't be part of the same Promise.all or a
+  // legitimate "public channel I haven't joined" would throw before we get a
+  // chance to offer the join card.
+  const channel = await getChannelById(channelId).catch(() => null);
+
+  if (!channel) {
+    // Not a member. If it's a PUBLIC channel, offer to join instead of dead-
+    // ending — otherwise (private, DM, or genuinely missing) 404 exactly as
+    // before, which is what keeps a private channel's existence undisclosed.
+    const preview = await getPublicChannelPreview(channelId).catch(() => null);
+    if (preview) return <JoinChannelCard channel={preview} />;
+    notFound();
+  }
+
+  const [page, pins] = await Promise.all([
     listChannelMessages(channelId),
     listChannelPins(channelId),
   ]);
-
-  if (!channel) {
-    notFound();
-  }
 
   return (
     <>
@@ -45,7 +57,9 @@ export default async function ChannelPage({
           desktop view has no top-level landmark (the mobile chrome owns the h1
           below `md`). Expose one for SR heading nav; scoped to desktop to avoid
           a duplicate mobile h1. */}
-      <h1 className="sr-only max-md:hidden">{channel.name}</h1>
+      <h1 className="sr-only max-md:hidden">
+        {channel.name ?? "Direct message"}
+      </h1>
       <TeamChatWorkspace
         currentUser={user}
         initialChannel={channel}

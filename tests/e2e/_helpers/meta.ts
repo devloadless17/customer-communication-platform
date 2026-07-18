@@ -19,6 +19,7 @@
  */
 
 import { createHmac } from "node:crypto";
+import { Prisma } from "@prisma/client";
 
 import { encryptSecret } from "../../../apps/api/src/lib/crypto/envelope-core";
 import { generateApiKey } from "../../../apps/api/src/auth/api-key";
@@ -105,8 +106,8 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
   // the webhook loader's gate requires before it prefers the shared secret.
   const channels: Array<{
     channel: "whatsapp" | "messenger" | "instagram";
-    config: Record<string, unknown>;
-    secrets: Record<string, string>;
+    config: Prisma.InputJsonObject;
+    secrets: Prisma.InputJsonObject;
   }> = [
     {
       channel: "whatsapp",

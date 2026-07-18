@@ -13,6 +13,7 @@ import { getCountryFromPhone } from "@ccp/shared/utils";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import {
   countAudienceContacts,
+  directoryContactWhere,
   ensureDefaultStage,
   listContacts,
   listPeople,
@@ -1643,8 +1644,11 @@ export class ContactsService {
     const EXPORT_HARD_CAP = 50_000;
     const [contacts, fieldDefs, stages] = await Promise.all([
       this.db.contact.findMany({
-        // Export is a directory dump — soft-deleted contacts stay out.
-        where: { teamId, deletedAt: null },
+        // Export is a directory dump — soft-deleted contacts stay out, and so do
+        // anonymous ephemeral (website-widget) visitors: a `vis_<uuid>` with no
+        // phone or email is a chat session, not a row anyone can re-import or act
+        // on. A visitor who gave us an address is promoted and DOES export.
+        where: { teamId, deletedAt: null, ...directoryContactWhere },
         select: {
           phoneNumber: true,
           name: true,
@@ -1766,7 +1770,9 @@ export class ContactsService {
     // gave you a partial file of N"). When truncated, run a real count over the
     // same predicate; otherwise the loaded length IS the total.
     const total = truncated
-      ? await this.db.contact.count({ where: { teamId, deletedAt: null } })
+      ? await this.db.contact.count({
+          where: { teamId, deletedAt: null, ...directoryContactWhere },
+        })
       : contacts.length;
     // Date-stamp so multiple exports in a day don't overwrite each other. When
     // truncated, encode the cap in the filename itself — the export is a plain
@@ -1789,7 +1795,12 @@ export class ContactsService {
    * union logic.
    */
   async countAll(teamId: string): Promise<number> {
-    return this.db.contact.count({ where: { teamId, deletedAt: null } });
+    // Directory-scoped, matching the list: this feeds the broadcast wizard's
+    // "All contacts" card, and anonymous widget visitors are neither listed nor
+    // broadcastable — counting them would promise an audience we can't reach.
+    return this.db.contact.count({
+      where: { teamId, deletedAt: null, ...directoryContactWhere },
+    });
   }
 
   /**

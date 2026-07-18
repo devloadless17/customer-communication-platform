@@ -16,8 +16,10 @@ export {
 
 export {
   CONTACTS_PAGE,
+  DIRECTORY_CONTACT_SQL,
   buildContactFilterWhere,
   countContacts,
+  directoryContactWhere,
   listContactFieldDefinitions,
   listContacts,
   listPeople,

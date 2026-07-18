@@ -10,6 +10,8 @@ import { canDeleteMessage } from "@ccp/shared/team-chat/permissions";
 import type { TeamChannelMessageDto } from "@ccp/shared/team-chat/types";
 import type { User } from "@ccp/shared/types";
 import { useChatScroll } from "@/features/inbox/hooks/use-chat-scroll";
+import { useTzNow } from "@/providers/tz-provider";
+import { calendarDayKey, formatDaySeparator } from "@ccp/shared/utils";
 
 import { ChannelMessage } from "./channel-message";
 
@@ -34,6 +36,13 @@ import { ChannelMessage } from "./channel-message";
  *      the optimistic→confirmed swap.
  */
 const ESTIMATE_HEIGHT = 56;
+/**
+ * Two messages from the same author within this window collapse into one
+ * visual group (avatar + name shown once). 5 minutes matches Slack and the
+ * inbox thread — long enough to group a burst, short enough that a reply
+ * hours later still gets its own header.
+ */
+const GROUP_WINDOW_MS = 5 * 60 * 1000;
 const OVERSCAN = 6;
 
 // One-line announcement for a newly-arrived teammate message (text preview, or a
@@ -83,6 +92,8 @@ function ChannelThreadImpl({
   onRetry,
   onDismiss,
   displayNameById,
+  lastReadAt,
+  isDm = false,
   onScrollControlsReady,
 }: {
   messages: TeamChannelMessageDto[];
@@ -108,6 +119,13 @@ function ChannelThreadImpl({
   onDismiss: (clientTempId: string) => void;
   /** Canonical userId → name roster map for mention chip rendering. */
   displayNameById: Map<string, string>;
+  /**
+   * The viewer's read receipt AS OF CHANNEL OPEN — already frozen by the
+   * workspace. Anchors the "New messages" divider.
+   */
+  lastReadAt: string | null;
+  /** Swaps channel-specific empty-state copy for DM copy. */
+  isDm?: boolean;
   /** Publishes this feed's useChatScroll controls to the parent so
    *  jumpToMessage can release stick-to-bottom + flag the loadAround() slice
    *  swap benign before it runs. Stable identities; safe to store in a ref. */
@@ -179,6 +197,94 @@ function ChannelThreadImpl({
     await onGoToLive();
     scrollToBottom();
   }, [markBenignTailUpdate, onGoToLive, scrollToBottom]);
+
+  // ---- Day separators + consecutive-message grouping --------------------
+  //
+  // Ported from the inbox's message-thread (which already solved the
+  // non-obvious parts: clock-skew ungrouping, failed rows standing alone, and
+  // recomputing labels at local midnight without re-running Intl every tick).
+  //
+  // `tz` + `now` come from TimezoneProvider so "Today"/"Yesterday" agree
+  // across SSR and hydration — no flicker.
+  const { tz, now } = useTzNow();
+  // `now` ticks every 60s but the labels only change at LOCAL midnight, so
+  // read it through a ref and key the memo on the calendar day instead. On a
+  // 500-message feed the naive version is ~1000 Intl calls a minute.
+  const nowRef = useRef(now);
+  nowRef.current = now;
+  const todayKey = useMemo(() => calendarDayKey(now, tz), [tz, now]);
+
+  const dayLabels = useMemo(() => {
+    const labels: Array<string | null> = new Array(messages.length);
+    // This memo's identity changes on EVERY message, edit, reaction and
+    // optimistic swap, so it runs constantly. Formatting per message meant
+    // ~1000+ Intl operations per arriving message on a 500-message slice.
+    // Cache by calendar-day key so each distinct day is formatted once.
+    const byDay = new Map<string, string>();
+    let prevLabel: string | null = null;
+    for (let i = 0; i < messages.length; i++) {
+      const iso = messages[i]!.createdAt;
+      const key = calendarDayKey(Date.parse(iso), tz);
+      let label = byDay.get(key);
+      if (label === undefined) {
+        label = formatDaySeparator(iso, tz, nowRef.current);
+        byDay.set(key, label);
+      }
+      labels[i] = label !== prevLabel ? label : null;
+      prevLabel = label;
+    }
+    return labels;
+    // `todayKey` is a recompute TRIGGER, not a value read in the body — it
+    // changes exactly at local midnight, which is when Today/Yesterday must
+    // refresh. eslint can't model that, hence the disable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, tz, todayKey]);
+
+  // `continuationFlags[i]` = message i continues a run started by i-1, so it
+  // renders without the repeated avatar/name/timestamp header. This is the
+  // single biggest reason the feed reads as "chat" rather than "log".
+  //
+  // Simpler than the inbox's predicate: team chat has no direction, no
+  // `origin`, and no Coexistence echoes — just author, day boundary, and gap.
+  const continuationFlags = useMemo(() => {
+    const flags: boolean[] = new Array(messages.length).fill(false);
+    for (let i = 1; i < messages.length; i++) {
+      const prev = messages[i - 1]!;
+      const cur = messages[i]!;
+      // A day separator always breaks the run — the label needs to sit above
+      // a full header, not a bare continuation line.
+      if (dayLabels[i] !== null) continue;
+      if (!cur.authorUserId || cur.authorUserId !== prev.authorUserId) continue;
+      // Failed rows stand alone so their retry/alert affordance always shows.
+      if (cur.failed || prev.failed) continue;
+      const gap = Date.parse(cur.createdAt) - Date.parse(prev.createdAt);
+      // NaN (unparseable) or negative (clock skew between optimistic and
+      // server timestamps) → don't group; a wrong group is worse than none.
+      if (!(gap >= 0 && gap <= GROUP_WINDOW_MS)) continue;
+      flags[i] = true;
+    }
+    return flags;
+  }, [messages, dayLabels]);
+
+  // Index of the first message that arrived after the viewer's last read —
+  // where the "New messages" rule goes. Own messages never count (you don't
+  // have unread mail from yourself), which is what stops the divider from
+  // reappearing above your own reply.
+  const unreadDividerIndex = useMemo(() => {
+    // `lastReadAt === null` means NEVER READ — i.e. everything is unread,
+    // which is precisely the case the divider exists for. Treating it as
+    // "no divider" meant a channel you just joined showed 200 unread messages
+    // with no rule anywhere, and by your second visit the receipt had advanced
+    // so it could never appear at all.
+    const cutoff = lastReadAt ? Date.parse(lastReadAt) : 0;
+    if (Number.isNaN(cutoff)) return -1;
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i]!;
+      if (m.authorUserId === currentUser.id) continue;
+      if (Date.parse(m.createdAt) > cutoff) return i;
+    }
+    return -1;
+  }, [messages, lastReadAt, currentUser.id]);
 
   // Virtualizer. Stable keys per message id; clientTempId for optimistic
   // rows so the measured-height entry persists across the swap to the
@@ -298,9 +404,15 @@ function ChannelThreadImpl({
 
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-1 px-8 py-16 text-center">
-              <div className="text-sm font-medium">This is the start of the channel.</div>
+              <div className="text-sm font-medium">
+                {isDm
+                  ? "This is the start of your conversation."
+                  : "This is the start of the channel."}
+              </div>
               <div className="text-xs text-muted-foreground">
-                Say hi to your team — they'll see it in real time.
+                {isDm
+                  ? "Messages here are only visible to the two of you."
+                  : "Say hi to your team — they'll see it in real time."}
               </div>
             </div>
           ) : (
@@ -325,8 +437,33 @@ function ChannelThreadImpl({
                     className="absolute left-0 top-0 w-full"
                     style={{ transform: `translateY(${row.start}px)` }}
                   >
+                    {row.index === unreadDividerIndex && (
+                      <div className="flex items-center gap-3 px-4 pb-1 pt-2">
+                        <div className="h-px flex-1 bg-destructive/60" />
+                        <span className="text-3xs font-semibold uppercase tracking-wider text-destructive">
+                          New messages
+                        </span>
+                        <div className="h-px flex-1 bg-destructive/60" />
+                      </div>
+                    )}
+                    {dayLabels[row.index] && (
+                      // Rendered INSIDE the row wrapper, not as its own
+                      // virtual item: keeping count === messages.length
+                      // preserves the stable getItemKey contract, and
+                      // measureElement absorbs the extra height. Separate
+                      // header rows would desync every measured key whenever
+                      // an older page is prepended.
+                      <div className="flex items-center gap-3 px-4 pb-1 pt-4">
+                        <div className="h-px flex-1 bg-border" />
+                        <span className="text-3xs font-medium uppercase tracking-wider text-muted-foreground">
+                          {dayLabels[row.index]}
+                        </span>
+                        <div className="h-px flex-1 bg-border" />
+                      </div>
+                    )}
                     <ChannelMessage
                       message={m}
+                      isContinuation={continuationFlags[row.index] ?? false}
                       channelId={channelId}
                       currentUser={currentUser}
                       canPin={canPin}

@@ -123,7 +123,18 @@ export class RegisterController {
         // every future invite-accepted user is also auto-added to the default
         // channel via apps/api/src/team/invites/.
         const channel = await tx.teamChannel.create({
-          data: { teamId: team.id, name: "general", isDefault: true, createdById: user.id },
+          data: {
+            teamId: team.id,
+            name: "general",
+            isDefault: true,
+            // EXPLICIT: the column defaults to `private` (so the visibility
+            // migration couldn't accidentally widen existing invite-only
+            // channels). #general must be public — it's the one channel every
+            // member is guaranteed to reach, and `update` refuses to change a
+            // default channel's visibility, so a private one is unfixable.
+            visibility: "public",
+            createdById: user.id,
+          },
         });
         await tx.teamChannelMember.create({
           data: { channelId: channel.id, userId: user.id, addedById: user.id },

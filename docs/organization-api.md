@@ -57,7 +57,17 @@ curl -s "$CCP_BASE_URL/api/external/v1/contacts?search=ali&limit=20" \
   -H "Authorization: Bearer $CCP_API_KEY"
 ```
 
+> **Directory scope.** This endpoint returns only *directory* contacts, matching the
+> in-app contacts list. **Anonymous website-widget visitors are excluded** from both
+> the natural-key lookups and the browse path: a visitor's identity is a per-browser
+> session token with no durable address, so they can't be re-reached, and the
+> phone/email they may have typed into a public pre-chat form is unverified — it must
+> not answer a "who is +961…?" lookup. A visitor who submits a phone or email is
+> **promoted** and appears in the list normally from then on.
+
 **Get one contact** — `GET /contacts/:id` · `read:contacts`
+Resolves an anonymous widget visitor too — unlike a soft-deleted contact, the thread
+is live and an integrator legitimately holds the id from a `message.received` webhook.
 ```bash
 curl -s "$CCP_BASE_URL/api/external/v1/contacts/CONTACT_ID" \
   -H "Authorization: Bearer $CCP_API_KEY"
@@ -331,7 +341,77 @@ curl -s -X POST "$CCP_BASE_URL/api/external/v1/tags" \
 
 ---
 
-## 7. Outbound webhooks (events we send you)
+## 7. Broadcasts (campaign reporting)
+
+Read-only. Scope: `read:broadcasts` (no implicit upgrade from other scopes).
+There is deliberately no `write:broadcasts` — creating or firing a campaign via
+API is a separate feature, and billed template sends are irreversible.
+
+### List campaigns
+
+```
+GET /api/external/v1/broadcasts?status=completed&since=2026-07-01T00:00:00Z&limit=50&cursor=...
+```
+
+Returns `{ items, nextCursor }`, newest first. Use `since` to poll incrementally
+("what finished since my last sync") instead of re-pulling history.
+
+### One campaign
+
+```
+GET /api/external/v1/broadcasts/:id
+```
+
+Returns `{ broadcast }` with counters, template snapshot, timing, and
+`suppressedCount` (contacts excluded at create time because they had opted out
+of marketing — this is why `totalCount` can be lower than the audience you
+picked).
+
+### Campaign report
+
+```
+GET /api/external/v1/broadcasts/:id/report
+```
+
+Returns `{ report }` — the **same object the in-app report renders**, so the API
+and the dashboard can never disagree about a number:
+
+| Field | Meaning |
+|---|---|
+| `funnel.targeted` | every recipient row |
+| `funnel.accepted` | Meta accepted the send (the billable population) |
+| `funnel.reached` | arrived on the handset (`delivered` + `read`) |
+| `funnel.read` | read receipt received |
+| `funnel.neverReceived` | rejected at send **+** accepted-then-undeliverable |
+| `funnel.replied` / `clicked` | unique recipients who replied / tapped a button |
+| `funnel.optedOut` / `suppressed` | opted out during / excluded before the send |
+| `rates.*` | `deliveryRate = reached/accepted`, `readRate = read/reached`, `replyRate = replied/reached` |
+| `failures[]` | normalized `errorCode`, count, and a `bucket` of `retryable` / `permanent` / `suppress` |
+| `cost` | billable conversations by Meta pricing category (no currency: Meta reports a category, never a price) |
+| `benchmark` | your own last 5 campaigns, so a rate has context |
+| `diagnostics[]` | what went wrong and what to do about it |
+
+### Recipient-level results
+
+```
+GET /api/external/v1/broadcasts/:id/recipients?outcome=never_received&updatedSince=2026-07-18T10:00:00Z
+```
+
+Returns `{ items, nextCursor }`. Filters: `outcome` (`never_received`,
+`delivered`, `read`, `replied`, `clicked`, `failed`, `undelivered`, `pending`),
+`errorCode`, and `updatedSince`.
+
+> **Report on `deliveryState`, not `sendStatus`.** `sendStatus` is the send-side
+> outcome (did we hand it to Meta) and deliberately does not change when a
+> message is later found undeliverable. `deliveryState` carries the truth:
+> `pending → sent → delivered → read`, or `failed_at_send` / `undelivered`.
+
+Delivery and read receipts keep arriving for hours after a campaign finishes, so
+poll with `updatedSince` rather than treating the numbers as final at completion.
+
+---
+
+## 8. Outbound webhooks (events we send you)
 
 **Set up:** **Settings → Integrations → Webhooks → Create** — paste your receiving URL,
 pick the events. We generate a signing secret (`ccp_whsec_…`) shown once.
@@ -401,7 +481,7 @@ Sign over the **raw request bytes** — don't re-serialize the parsed JSON.
 
 ---
 
-## 8. Integrations
+## 9. Integrations
 
 - **n8n (AI Autopilot):** step-by-step flow — receive `message.received`, branch on
   `ai_enabled`, reply via `POST /conversations/:id/messages`, hand off to a human.

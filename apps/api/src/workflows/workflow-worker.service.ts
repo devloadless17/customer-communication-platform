@@ -49,6 +49,10 @@ import {
   stopConversationAnalyticsDriftSweeper,
 } from "@/lib/sweepers/conversation-analytics-drift";
 import {
+  startBroadcastDeliveryDriftSweeper,
+  stopBroadcastDeliveryDriftSweeper,
+} from "@/lib/sweepers/broadcast-delivery-drift";
+import {
   startAuthTableCleanupSweeper,
   stopAuthTableCleanupSweeper,
 } from "@/lib/sweepers/auth-table-cleanup";
@@ -127,6 +131,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private contactDriftSweeperStarted = false;
   private customerLinkSweeperStarted = false;
   private analyticsDriftSweeperStarted = false;
+  private broadcastDeliveryDriftSweeperStarted = false;
   private authCleanupSweeperStarted = false;
   private webhookDeliveryCleanupStarted = false;
   private apiIdempotencyCleanupStarted = false;
@@ -219,6 +224,17 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log("Conversation analytics drift sweeper started");
     } catch (err) {
       this.logger.error("Failed to start analytics-drift sweeper", err);
+    }
+    try {
+      // Backstop for the campaign delivery denormalization: the live
+      // propagation in ingest is fire-and-forget (a reporting write must never
+      // cost a delivery receipt), so it can drop under pool pressure. This
+      // re-derives deliveryState from Message for recently-finished campaigns.
+      startBroadcastDeliveryDriftSweeper();
+      this.broadcastDeliveryDriftSweeperStarted = true;
+      this.logger.log("Broadcast delivery-drift sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start broadcast-delivery-drift sweeper", err);
     }
     try {
       // Daily delete of EXPIRED Better Auth Session + Verification rows
@@ -448,6 +464,13 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(
         `stopConversationAnalyticsDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.broadcastDeliveryDriftSweeperStarted) stopBroadcastDeliveryDriftSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopBroadcastDeliveryDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {

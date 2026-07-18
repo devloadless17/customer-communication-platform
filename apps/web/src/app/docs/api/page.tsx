@@ -31,6 +31,7 @@ const SCOPES: ReadonlyArray<{ scope: string; grants: string }> = [
   { scope: "write:notes", grants: "add internal notes" },
   { scope: "read:catalog", grants: "read tags · fields · stages · channels · users" },
   { scope: "write:catalog", grants: "create / edit tags + custom fields" },
+  { scope: "read:broadcasts", grants: "read broadcast campaigns + delivery reports" },
 ];
 
 /**
@@ -168,9 +169,19 @@ export default function ApiDocsPage() {
           <code>?search=</code> for fuzzy across name / phone / email,{" "}
           <code>?stageId=</code>, <code>?tagIds=</code>,{" "}
           <code>?cursor=</code>, <code>?limit=</code>.
+          <br />
+          <strong>Directory scope.</strong> Both lookup and browsing return only{" "}
+          <em>directory</em> contacts. Anonymous website-widget visitors are
+          excluded: their identity is a per-browser session token, not a durable
+          address, so they are neither listable nor addressable. A visitor who
+          submits a phone or email in the pre-chat form is promoted and appears
+          normally from then on.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/contacts/:id">
-          Fetch a single contact (including custom fields, tags, stage).
+          Fetch a single contact (including custom fields, tags, stage). Unlike
+          the list, this resolves an anonymous widget visitor too — the thread is
+          live and you may hold its id from a <code>message.received</code>{" "}
+          webhook.
         </Endpoint>
         <Endpoint
           method="POST"
@@ -321,6 +332,33 @@ export default function ApiDocsPage() {
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/users/:idOrEmail">
           Find a user by id or by email.
+        </Endpoint>
+      </Section>
+
+      <Section title="Broadcasts (campaign reporting)">
+        <Endpoint method="GET" path="/api/external/v1/broadcasts">
+          Paginated campaign list, newest first. <code>?status=</code>,{" "}
+          <code>?since=</code> (ISO) for incremental sync, <code>?cursor=</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/broadcasts/:id">
+          One campaign: counters, template, timing, <code>suppressedCount</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/broadcasts/:id/report">
+          Delivery funnel, rates, failure breakdown (bucketed retryable /
+          permanent / suppress), cost by pricing category, benchmark and
+          diagnostics. This is the SAME object the in-app report renders, so API
+          and dashboard can never disagree.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/broadcasts/:id/recipients">
+          Per-recipient outcomes. <code>?outcome=</code> accepts{" "}
+          <code>never_received</code>, <code>delivered</code>, <code>read</code>,{" "}
+          <code>replied</code>, <code>clicked</code>, <code>failed</code>,{" "}
+          <code>undelivered</code>, <code>pending</code>; plus{" "}
+          <code>?errorCode=</code> and <code>?updatedSince=</code> (delivery and
+          read receipts arrive for hours, so incremental sync avoids re-pulling
+          everything). Report on <code>deliveryState</code>, not{" "}
+          <code>sendStatus</code> — the latter is the send-side outcome and does
+          not change when a message is later found undeliverable.
         </Endpoint>
       </Section>
 

@@ -179,7 +179,9 @@ test("inbox: day-divider pill renders and is NOT sticky (no overlap)", async ({ 
   // dividers to detach and overlap, so it was reverted to static.
   const label = thread.getByText(/^(TODAY|YESTERDAY)$/i).first();
   await expect(label).toBeVisible();
-  expect(await label.evaluate((el) => getComputedStyle(el.parentElement).position)).not.toBe("sticky");
+  expect(
+    await label.evaluate((el) => (el.parentElement ? getComputedStyle(el.parentElement).position : "")),
+  ).not.toBe("sticky");
 });
 
 test("inbox: list sort toggle (latest <-> longest waiting)", async ({ page }) => {

@@ -6,12 +6,25 @@ import type { TeamChannelMessageDto } from "../socket/events";
  * stream agree on the shape — no client-side normalization layer needed.
  */
 
+/** What a channel row IS. Mirrors the `TeamChannelKind` Prisma enum. */
+export type TeamChannelKind = "channel" | "dm";
+
+/**
+ * Who may JOIN a channel. Mirrors `TeamChannelVisibility`. Governs joining,
+ * not reading-after-join: public channels are join-to-read, so reads still
+ * go through the single `requireChannelMembership` gate.
+ */
+export type TeamChannelVisibility = "public" | "private";
+
 export interface TeamChannelDto {
   id: string;
   teamId: string;
-  name: string;
+  /** NULL for DMs — they render from the peer's identity, not a name. */
+  name: string | null;
   description: string | null;
   isDefault: boolean;
+  kind: TeamChannelKind;
+  visibility: TeamChannelVisibility;
   createdById: string | null;
   createdAt: string;
   updatedAt: string;
@@ -22,6 +35,14 @@ export interface TeamChannelDto {
    * Cheap aggregated COUNT(*) on the membership table; no per-user join.
    */
   memberCount: number;
+  /**
+   * The viewer's read receipt at the moment this DTO was built, or null if
+   * they've never read the channel. Drives the "New messages" divider.
+   *
+   * The client must FREEZE this on open — the workspace fires markRead() on
+   * mount, so a live-updating value would erase the divider before it paints.
+   */
+  lastReadAt: string | null;
 }
 
 export interface TeamChannelListItemDto extends TeamChannelDto {
@@ -29,6 +50,48 @@ export interface TeamChannelListItemDto extends TeamChannelDto {
   unreadForMe: boolean;
   /** Count of messages newer than my receipt that mention me. ≥ 0. */
   unreadMentionCount: number;
+}
+
+/**
+ * The other person in a 1:1 DM, resolved server-side from the membership
+ * rows. Deliberately carries NO presence/online field: presence is owned by
+ * the socket layer (`usePresence`), and duplicating it into an HTTP DTO
+ * would give the same state two owners and guarantee it goes stale.
+ */
+export interface DirectMessagePeerDto {
+  /** null when the peer's User row was hard-deleted. */
+  userId: string | null;
+  /** Display name, or "Removed user" when the account is gone. */
+  name: string;
+  avatarUrl: string | null;
+  /** Soft-deactivated account: history stays readable, composer disabled. */
+  deactivated: boolean;
+  /** True for the notes-to-self DM, which renders as "You". */
+  isSelf: boolean;
+}
+
+export interface TeamDmListItemDto extends TeamChannelListItemDto {
+  peer: DirectMessagePeerDto;
+}
+
+/**
+ * A public channel as seen in the browser by someone who may not be in it.
+ * METADATA ONLY — this shape must never carry `lastMessagePreview` or any
+ * other message-derived field, because it's served to non-members.
+ */
+export interface TeamChannelBrowseItemDto {
+  id: string;
+  name: string;
+  description: string | null;
+  memberCount: number;
+  lastMessageAt: string;
+  /** Whether the viewer is already a member (renders "Open" vs "Join"). */
+  joined: boolean;
+}
+
+export interface TeamChannelBrowsePage {
+  items: TeamChannelBrowseItemDto[];
+  nextCursor: string | null;
 }
 
 export interface ChannelMessagesPage {
@@ -78,11 +141,12 @@ export interface ChannelPinDto {
 }
 
 /**
- * The 6 curated reaction emojis offered in the picker's quick row. The full
- * picker is deferred — agents who want anything beyond these in v0 can
- * paste it as message text. Shared between client and server (the POST
- * route rejects emoji not in this set ONLY if we ever decide to gate; for
- * now any single-codepoint string is accepted so manual paste still works).
+ * The 6 curated reaction emojis offered in the picker's QUICK ROW. The full
+ * Unicode picker sits behind the "More reactions" button next to them (it
+ * reuses the inbox's EmojiPopover), so this set is a shortcut, not a limit.
+ * Shared between client and server (the POST route rejects emoji not in this
+ * set ONLY if we ever decide to gate; for now any single-codepoint string is
+ * accepted so manual paste still works).
  */
 export const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🎉"] as const;
 export type QuickReaction = (typeof QUICK_REACTIONS)[number];
@@ -95,21 +159,26 @@ export type { TeamChannelMessageDto, TeamChannelMediaDto } from "../socket/event
  * Trailing/leading whitespace is trimmed by the caller before calling this.
  */
 const CHANNEL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
-// `search` and `default` are reserved so a channel named "search" can't
-// shadow the static route segments (`GET /api/team/channels/search`,
-// `GET /api/team/channels/default`).
-const RESERVED_NAMES = new Set([
+// `search`, `default`, `dms` and `browse` are reserved so a channel named
+// e.g. "search" can't shadow the static route segments (`GET
+// /api/team/channels/search`, `.../default`, `.../dms`, `.../browse`).
+// Keep this in sync with the static segments in channels.controller.ts.
+export const RESERVED_CHANNEL_NAMES: ReadonlySet<string> = new Set([
   "new",
   "settings",
   "create",
   "edit",
   "search",
   "default",
+  "dm",
+  "dms",
+  "browse",
+  "unread-count",
 ]);
 
 export function isValidChannelName(name: string): boolean {
   if (!CHANNEL_NAME_PATTERN.test(name)) return false;
-  if (RESERVED_NAMES.has(name)) return false;
+  if (RESERVED_CHANNEL_NAMES.has(name)) return false;
   // No double-dashes — keeps slugs scannable.
   if (name.includes("--")) return false;
   return true;
