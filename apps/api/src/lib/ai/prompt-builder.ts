@@ -213,7 +213,7 @@ function buildLanguageRules(config: AiConfigRow): string {
       : "",
     config.lebaneseStyle ? `- Lebanese style guidance: ${config.lebaneseStyle}` : "",
     config.allowArabizi
-      ? "- If the customer writes in Arabizi, write your reply in normal Lebanese Arabic script and set replyScript='latin' — the system turns it into Arabizi for you. (Don't type Arabizi yourself.)"
+      ? "- Arabizi = Lebanese typed in Latin letters/numbers (e.g. 'kifak', 'shu 3am ta3mel', 'b23a mnih'). If the customer's latest message is Arabizi, MATCH it: set replyScript='latin' (and still write replyText in Arabic script — the system converts it to Arabizi for you; don't type Arabizi yourself). Only use replyScript='arabic' when they actually wrote in Arabic letters."
       : "- Write Arabic in Arabic script, not Arabizi.",
     config.scriptPolicy === "arabic"
       ? "- Script policy: when replying in Arabic, ALWAYS use Arabic script (admin override — do not use Arabizi even if the customer does)."
