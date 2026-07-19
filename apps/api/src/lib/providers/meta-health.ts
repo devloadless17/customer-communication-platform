@@ -28,11 +28,42 @@ import { ProviderNotConfiguredError } from "./config";
  * numbers are what the pre-send gate compares an audience against. Kept as a map
  * (not an enum) because Meta occasionally adds intermediate tiers — an unknown
  * tier string just yields `null` (ungated) rather than a crash.
+ *
+ * VERIFIED against Meta's live docs 2026-07-18:
+ *   https://developers.facebook.com/docs/whatsapp/messaging-limits/
+ *   https://developers.facebook.com/documentation/business-messaging/whatsapp/upcoming-messaging-limits-changes/
+ *
+ * Three facts from that pass worth keeping in view:
+ *
+ *  1. The ladder changed on **2025-10-07**: it is now 250 → 2K → 10K → 100K →
+ *     Unlimited. `TIER_1K` is gone (the auto-scale threshold moved 1,000 →
+ *     2,000) and upgrades land within ~6h instead of 24h.
+ *
+ *  2. **Limits are per business PORTFOLIO, shared by every phone number in it** —
+ *     not per number, as they were before 2025-10-07. We store the cap on the
+ *     per-team `ChannelConnection`, which is correct for the one-number-per-team
+ *     shape we actually have, but it means the budget gate is OPTIMISTIC for a
+ *     customer running several numbers inside one portfolio: their real
+ *     remaining allowance is the portfolio's, and our per-number view can't see
+ *     the other numbers' spend. Meta still enforces the true limit, so the
+ *     failure mode is a rejected send, not an overcharge. Closing this needs the
+ *     `whatsapp_business_manager_messaging_limit` field at portfolio scope.
+ *
+ *  3. The **`FLAGGED` phone-number quality state no longer exists**, and a
+ *     quality drop no longer downgrades a messaging limit. Quality still matters
+ *     for reputation, but it is no longer a mechanism that shrinks the cap
+ *     mid-campaign.
  */
 const TIER_DAILY_CAP: Record<string, number | null> = {
   TIER_50: 50,
   TIER_250: 250,
+  // TIER_1K is LEGACY — Meta's 2025-10-07 messaging-limits change moved the
+  // auto-scaling threshold from 1,000 to 2,000, so 1K is no longer a tier a
+  // number can currently sit at. Kept in the map (not deleted) so a stale
+  // snapshot taken before that change still sizes correctly instead of
+  // normalizing to null and going ungated.
   TIER_1K: 1_000,
+  TIER_2K: 2_000,
   TIER_10K: 10_000,
   TIER_100K: 100_000,
   TIER_UNLIMITED: null,
@@ -69,19 +100,35 @@ export function normalizeMessagingTier(raw: unknown): string | null {
   if (s.length === 0) return null;
   // Already a TIER_* key we know.
   if (s in TIER_DAILY_CAP) return s;
-  // Bare number or "1K"/"10K"/"100K" shorthand.
-  const kMatch = s.match(/^(\d+)\s*K$/);
-  if (kMatch) return numberToTier(Number(kMatch[1]) * 1_000);
-  if (/^\d+$/.test(s)) return numberToTier(Number(s));
   if (s === "UNLIMITED" || s === "TIER_UNLIMITED") return "TIER_UNLIMITED";
+  // "2K"/"10K"/"100K" shorthand, with or without the TIER_ prefix. The prefix
+  // must be optional: Meta's own vocabulary is `TIER_2K`, and a regex anchored
+  // without it silently failed to parse EVERY prefixed tier not already in the
+  // map above — which meant an unrecognised tier normalized to null and left
+  // the number completely ungated rather than conservatively capped.
+  const kMatch = s.match(/^(?:TIER_)?(\d+)\s*K$/);
+  if (kMatch) return numberToTier(Number(kMatch[1]) * 1_000);
+  const nMatch = s.match(/^(?:TIER_)?(\d+)$/);
+  if (nMatch) return numberToTier(Number(nMatch[1]));
   return null;
 }
 
+/**
+ * Map a raw cap number onto the tier at or above it.
+ *
+ * Buckets follow Meta's post-2025-10-07 ladder — 250 → 2K → 10K → 100K →
+ * Unlimited. Each bucket rounds a number UP to the tier whose cap covers it,
+ * so an unfamiliar intermediate value is never sized ABOVE its real allowance.
+ * (The pre-fix version had a 1,000 bucket and none at 2,000, so a genuine
+ * 2,000-cap number fell into `n <= 10_000` and was sized as TIER_10K — a 5x
+ * over-estimate that would wave a 10k campaign through on a 2k number.)
+ */
 function numberToTier(n: number): string | null {
   if (!Number.isFinite(n) || n <= 0) return null;
   if (n <= 50) return "TIER_50";
   if (n <= 250) return "TIER_250";
   if (n <= 1_000) return "TIER_1K";
+  if (n <= 2_000) return "TIER_2K";
   if (n <= 10_000) return "TIER_10K";
   if (n <= 100_000) return "TIER_100K";
   return "TIER_UNLIMITED";
@@ -173,6 +220,93 @@ export interface BroadcastEligibility {
   /** Whether we had a tier snapshot at all — false = advisory-only (ungated). */
   hasSnapshot: boolean;
   audienceSize: number;
+  /**
+   * Unique customers this number has ALREADY messaged in the trailing 24h, from
+   * broadcasts. The tier cap applies to a rolling window across every send, not
+   * per campaign, so this is what makes `audienceSize <= cap` an honest check
+   * rather than one that passes three 40k campaigns against a 100k cap.
+   * Null when there is no cap to measure against (unknown tier / unlimited).
+   */
+  recentUniqueRecipients: number | null;
+  /** `cap - recentUniqueRecipients`, floored at 0. Null when uncapped. */
+  remainingDailyBudget: number | null;
+}
+
+/**
+ * How far back to count toward the rolling 24h messaging limit.
+ * Meta's window is rolling, not calendar-day — a send at 23:00 still occupies
+ * budget at 09:00 the next morning.
+ */
+const ROLLING_WINDOW_HOURS = 24;
+/**
+ * How far back to look for broadcasts that might still have recipients inside
+ * the rolling window. Wider than the window itself ON PURPOSE: a 100k campaign
+ * takes 1–3 hours and a paused/resumed one can span far longer, so a broadcast
+ * created well before the window can still be stamping `sentAt` inside it.
+ */
+const BROADCAST_LOOKBACK_HOURS = 72;
+
+/**
+ * Count the UNIQUE customers this team has messaged on WhatsApp in the trailing
+ * rolling window, as counted against the number's messaging limit.
+ *
+ * SCOPE, stated honestly: this counts BROADCAST recipients only. Template sends
+ * driven by a workflow or the /v1 API also consume Meta's real budget but are
+ * not counted here, so this is a LOWER BOUND — it can under-report, never
+ * over-report. That's the safe direction for a gate (it will not block a send
+ * Meta would have accepted), and broadcasts are the dominant source of
+ * business-initiated volume by orders of magnitude. Widening it to all template
+ * sends needs a template marker on `Message`, which does not exist today.
+ *
+ * Two-step rather than one join so it rides existing indexes: `[teamId,
+ * createdAt desc]` on Broadcast, then the `broadcastId`-leading indexes on
+ * BroadcastRecipient. Runs once per broadcast creation, not per message.
+ */
+export async function countRecentUniqueRecipients(teamId: string): Promise<number> {
+  const ids = await recentUniqueRecipientIds(teamId);
+  return ids.size;
+}
+
+/**
+ * The actual SET of contacts messaged in the rolling window, not just its size.
+ *
+ * The set — rather than a count — is what makes the gate correct for a REPEAT
+ * campaign. Meta charges budget per unique customer per window, so re-messaging
+ * someone already inside the window costs nothing extra. Comparing a raw
+ * audience size against `cap - used` double-counts them and refuses a send Meta
+ * would happily accept (see `checkBroadcastEligibility`).
+ *
+ * `groupBy` rather than `findMany({ distinct })`: distinct materializes one row
+ * object per unique recipient in the client, and this runs on the composer's
+ * polling path, so a TIER_100K team would repeatedly pull ~100k objects into
+ * heap on an 8GB box. groupBy aggregates server-side.
+ */
+async function recentUniqueRecipientIds(teamId: string): Promise<Set<string>> {
+  const now = Date.now();
+  const recent = await db.broadcast.findMany({
+    where: {
+      teamId,
+      // Contact-mode WhatsApp sends only. A `targetMode: "customer"` broadcast
+      // stores `channel: "whatsapp"` as an inert default while routing each
+      // recipient to their best channel, so counting those would charge
+      // Messenger/Instagram deliveries against the WhatsApp number's budget and
+      // falsely block later sends.
+      channel: "whatsapp",
+      targetMode: { not: "customer" },
+      createdAt: { gte: new Date(now - BROADCAST_LOOKBACK_HOURS * 3_600_000) },
+    },
+    select: { id: true },
+  });
+  if (recent.length === 0) return new Set();
+
+  const rows = await db.broadcastRecipient.groupBy({
+    by: ["contactId"],
+    where: {
+      broadcastId: { in: recent.map((b) => b.id) },
+      sentAt: { gte: new Date(now - ROLLING_WINDOW_HOURS * 3_600_000) },
+    },
+  });
+  return new Set(rows.map((r) => r.contactId));
 }
 
 /**
@@ -194,6 +328,13 @@ export interface BroadcastEligibility {
 export async function checkBroadcastEligibility(
   teamId: string,
   audienceSize: number,
+  /**
+   * The audience's contact ids. Optional, but pass them whenever you have them:
+   * without it the gate assumes every recipient is NEW to the rolling window,
+   * which over-charges a repeat campaign and refuses sends Meta would accept.
+   * See the overlap note below.
+   */
+  audienceContactIds?: readonly string[],
 ): Promise<BroadcastEligibility> {
   const health = await getWhatsappHealth(teamId);
   const base: BroadcastEligibility = {
@@ -205,30 +346,84 @@ export async function checkBroadcastEligibility(
     qualityRating: health?.qualityRating ?? null,
     hasSnapshot: !!health && health.messagingHealthUpdatedAt !== null,
     audienceSize,
+    recentUniqueRecipients: null,
+    remainingDailyBudget: null,
   };
   const cap = health?.messagingDailyCap ?? null;
-  if (cap !== null && audienceSize > cap) {
+  if (cap === null) return base;
+
+  // Only pay for the usage query when there IS a cap to compare it against.
+  const alreadyMessaged = await recentUniqueRecipientIds(teamId);
+  const used = alreadyMessaged.size;
+  const remaining = Math.max(0, cap - used);
+
+  // How many of THIS audience are new to the window. Meta's cap counts unique
+  // customers, so a recipient already inside the window costs no additional
+  // budget — re-messaging the same 1,800 people at 14:00 that you messaged at
+  // 09:00 consumes 1,800 of the cap in total, not 3,600. Comparing raw
+  // `audienceSize` against `remaining` double-counted them and hard-refused a
+  // legitimate follow-up campaign with "Meta would reject roughly 1,600".
+  //
+  // Without ids we cannot compute the overlap, so we fall back to treating the
+  // whole audience as new: that over-estimates consumption and can only ever
+  // block too eagerly, never wave through a send Meta would reject.
+  const newUniques = audienceContactIds
+    ? audienceContactIds.reduce((n, id) => (alreadyMessaged.has(id) ? n : n + 1), 0)
+    : audienceSize;
+  const withUsage: BroadcastEligibility = {
+    ...base,
+    recentUniqueRecipients: used,
+    remainingDailyBudget: remaining,
+  };
+  const tier = health?.messagingTier ?? "current";
+
+  if (audienceSize > cap) {
     return {
-      ...base,
+      ...withUsage,
       allowed: false,
       exceedsCap: true,
       reason:
         `This number can message ${cap.toLocaleString()} unique customers per 24h ` +
-        `(${health?.messagingTier ?? "current"} tier), but this audience is ` +
+        `(${tier} tier), but this audience is ` +
         `${audienceSize.toLocaleString()}. Meta will reject the excess — split the ` +
         `send across days, reduce the audience, or raise your messaging limit with Meta first.`,
     };
   }
-  if (base.qualityRating === "RED") {
+  // The audience fits the cap on its own, but not alongside what this number has
+  // ALREADY sent in the rolling window. Without this branch, three 40k campaigns
+  // each pass a 100k cap and Meta silently rejects the last ~20k — and those
+  // rejections get bucketed as "retryable", telling the operator to retry into
+  // an exhausted budget.
+  if (newUniques > remaining) {
+    const overlap = audienceSize - newUniques;
+    const alreadyCounted =
+      overlap > 0
+        ? ` ${overlap.toLocaleString()} of them were already messaged in this window and cost no extra allowance, but`
+        : "";
     return {
-      ...base,
+      ...withUsage,
+      allowed: false,
+      exceedsCap: true,
+      reason:
+        `This number has already messaged ${used.toLocaleString()} unique customers in ` +
+        `the last 24h, leaving ${remaining.toLocaleString()} of its ${cap.toLocaleString()} ` +
+        `${tier}-tier allowance. This audience is ${audienceSize.toLocaleString()};` +
+        `${alreadyCounted} Meta would reject roughly ` +
+        `${(newUniques - remaining).toLocaleString()} of them. ` +
+        `Wait for the window to roll over, reduce the audience, or raise your messaging ` +
+        `limit with Meta first.`,
+    };
+  }
+  if (withUsage.qualityRating === "RED") {
+    return {
+      ...withUsage,
       reason:
         "This number's quality rating is RED — sending a large marketing blast now " +
         "risks a further downgrade or block. Consider warming up with a smaller, " +
         "high-engagement send first.",
     };
   }
-  return base;
+  return withUsage;
 }
 
 /** Read the current snapshot for the team's WhatsApp connection (null if none). */

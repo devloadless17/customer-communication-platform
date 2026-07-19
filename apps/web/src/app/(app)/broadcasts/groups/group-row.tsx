@@ -49,12 +49,15 @@ export function GroupRow({ group, sampleTags }: { group: AudienceGroupDto; sampl
               +{extraTagCount} tag{extraTagCount === 1 ? "" : "s"}
             </span>
           )}
-          {group.contactIds.length > 0 && (
+          {/* manualContactCount, NOT contactIds.length — the list ships only a
+              preview slice of the ids so its payload can't grow with a group's
+              membership. The count is always exact. */}
+          {group.manualContactCount > 0 && (
             <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-3xs font-medium text-violet-700 dark:text-violet-300">
-              +{group.contactIds.length} manual
+              +{group.manualContactCount} manual
             </span>
           )}
-          {sampleTags.length === 0 && group.contactIds.length === 0 && (
+          {sampleTags.length === 0 && group.manualContactCount === 0 && (
             <span className="text-2xs italic text-muted-foreground">Empty</span>
           )}
         </div>

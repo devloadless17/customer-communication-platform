@@ -233,6 +233,107 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
   };
 }
 
+/**
+ * Classify a Meta error code that arrived on an async DELIVERY-STATUS webhook
+ * (`statuses[].errors[0].code`) into the same `MetaErrorCode` vocabulary the
+ * send path uses. This is what lets the campaign failure report be a single
+ * `GROUP BY errorCode` instead of two disjoint taxonomies stitched together in
+ * the UI.
+ *
+ * Deliberately SEPARATE from `normalizeMetaSendError` rather than sharing an
+ * extracted helper. That function classifies a THROWN `MetaSendError` and its
+ * ladder depends on things a status webhook simply does not have: a response
+ * body (several branches fall back to body regexes — the 24h-window match, the
+ * duplicate-button-title match) and an `error_subcode` (the social-channel
+ * discriminator). Its branch ORDER is also load-bearing — 131049 is checked
+ * before the rate-limit family precisely so a shared body regex can't misroute
+ * it. Refactoring that ladder to serve a code-only caller would mean editing
+ * the billed, irreversible send path to add a reporting feature, for no
+ * behavioural gain. One shared VOCABULARY, two classifiers, is the safer seam.
+ *
+ * Codes here mirror the numeric groupings in `normalizeMetaSendError`; keep the
+ * two in sync when Meta adds a code. Unknown/absent → `provider_rejected`, the
+ * same catch-all, so an unmapped code degrades gracefully instead of failing
+ * the webhook write.
+ */
+export function classifyMetaStatusError(code: number | null | undefined): MetaErrorCode {
+  if (typeof code !== "number") return "provider_rejected";
+  switch (code) {
+    case 131047:
+    case 2534022:
+      return "outside_24h_window";
+    case 131026:
+    case 131051:
+    case 2534013:
+    case 2534014:
+    case 2534029:
+    case 2534041:
+      return "invalid_recipient";
+    // Per-USER marketing frequency cap. Only ever arrives post-acceptance, so
+    // the status webhook is the ONLY place it is ever observed — it is
+    // invisible to the send path entirely.
+    case 131049:
+      return "per_user_marketing_cap";
+    case 4:
+    case 80006:
+    case 80007:
+    case 130429:
+    case 131048:
+    case 131056:
+    case 613:
+      return "rate_limited";
+    case 190:
+      return "auth_expired";
+    case 132001:
+    case 132007:
+    case 132015:
+    case 132016:
+      return "template_unavailable";
+    case 551:
+      return "recipient_unavailable";
+    case 10900:
+    case 9000001:
+      return "message_unavailable";
+    case 131009:
+      return "unsupported_message";
+    default:
+      return "provider_rejected";
+  }
+}
+
+/**
+ * Actionability buckets for the campaign failure report. Each normalized code
+ * maps to what the operator can actually DO about it — this is what turns a
+ * failure list into a workflow (retry these / clean these / leave these alone)
+ * rather than a wall of red text.
+ *
+ *  - `retryable`  — transient; re-sending the same audience can succeed.
+ *  - `permanent`  — the recipient address is bad. List-hygiene candidates.
+ *  - `suppress`   — deliverable in principle, but Meta/user policy blocked it.
+ *                   Retrying is wasteful and hurts the number's quality rating.
+ */
+export type FailureBucket = "retryable" | "permanent" | "suppress";
+
+export function failureBucket(code: MetaErrorCode | string | null): FailureBucket {
+  switch (code) {
+    case "rate_limited":
+    case "template_unavailable":
+    case "auth_expired":
+      return "retryable";
+    case "invalid_recipient":
+      return "permanent";
+    case "per_user_marketing_cap":
+    case "recipient_unavailable":
+    case "outside_24h_window":
+      return "suppress";
+    default:
+      // Unknown / provider_rejected / content errors: not safely retryable in
+      // bulk (a content fault would just fail again and re-bill nothing, but a
+      // blind bulk retry is the kind of thing that burns an audience).
+      return "permanent";
+  }
+}
+
 /** Pull Meta's numeric `error.code` + `error.error_subcode` from a body string. */
 function extractMetaError(body: string): { code: number | null; subcode: number | null } {
   try {

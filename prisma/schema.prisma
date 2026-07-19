@@ -183,6 +183,38 @@ enum BroadcastRecipientStatus {
   failed
 }
 
+/// What happened to a broadcast message AFTER the send attempt — the delivery
+/// truth Meta reports asynchronously via status webhooks.
+///
+/// DELIBERATELY SEPARATE from `BroadcastRecipientStatus`. That enum is
+/// load-bearing in CAS predicates on the billed, irreversible send path (the
+/// runner's `queued → sent` never-resend lock, the cancel-race reconcile,
+/// cancel()'s `WHERE status='queued'` finalize, retryFailed()'s
+/// `status='failed'` selector). Folding delivered/read/undelivered into it
+/// would mean the first `WHERE status IN ('failed','undelivered')` written in
+/// retryFailed() RE-SENDS to recipients Meta already billed us for. Two
+/// owners, two columns: `status` = what the send attempt did (runner-owned,
+/// effectively write-once); `deliveryState` = what happened afterwards
+/// (webhook-owned). The reporting layer reads `deliveryState` ONLY.
+enum BroadcastDeliveryState {
+  /// Not sent yet (or the send is in flight).
+  pending
+  /// Meta rejected the send API call — the message never entered the network.
+  /// Stamped by the runner, never by a webhook (a rejected send has no wamid).
+  failed_at_send
+  /// Meta accepted the send and issued a wamid. Stamped by the runner.
+  sent
+  /// Handset acknowledged receipt.
+  delivered
+  /// Read receipt received.
+  read
+  /// Meta accepted the send, then reported it undeliverable (handset off,
+  /// number invalid, user blocked us, per-user marketing cap). THIS is the
+  /// state that was previously invisible: such recipients stayed `sent` and
+  /// were counted as successes, so "who never received it" answered wrongly.
+  undelivered
+}
+
 /// What a broadcast sends. `template` = a pre-approved WhatsApp template
 /// (reaches contacts any time). `freeform` = a plain text message, allowed
 /// only to contacts inside their free-form window — used for Messenger /
@@ -702,6 +734,10 @@ model Session {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  // The daily auth cleanup deletes by `expiresAt < now()`. With only the userId
+  // index that was a sequential scan of every session row — the table grows with
+  // logins, so the sweep got slower forever while holding the sweeper mutex.
+  @@index([expiresAt])
 }
 
 // Credential / OAuth account record. For our email+password users the row
@@ -873,6 +909,21 @@ model Contact {
   // Nullable because contacts created via /contacts/new (manual or CSV)
   // have no inbound yet.
   lastInboundAt     DateTime?
+  // ── Marketing consent ────────────────────────────────────────────────────
+  // Set when the customer opts out: replies STOP (exact-match keyword scan on
+  // inbound), or Meta's `user_preferences` webhook reports a marketing opt-out.
+  // Cleared ONLY by that webhook's `resume`. Broadcast audience resolution
+  // excludes these contacts from MARKETING sends automatically; utility /
+  // transactional messages (order updates, OTPs) still deliver, and agents can
+  // always reply 1:1 in the inbox.
+  //
+  // Deliberately opt-OUT only, with no `marketingOptInAt` counterpart: an
+  // opt-in column would be NULL for every existing contact, making the entire
+  // book un-messageable the moment suppression shipped. Do not "improve" this
+  // into an opt-in model without a backfill plan.
+  marketingOptOutAt     DateTime?
+  /** "stop_keyword" | "meta_preferences" | "agent" | "api" */
+  marketingOptOutSource String?
   // Optimistic concurrency token. Every Contact write CAS-bumps this from
   // the value it just read; concurrent writers on the same row race to the
   // bump and exactly one wins, the other gets P2025 → 409 Conflict. Without
@@ -961,6 +1012,14 @@ model Contact {
   @@index([teamId, deletedAt])
   // "Contacts by recency of last inbound" — inbox-sidebar surfaces.
   @@index([teamId, lastInboundAt(sort: Desc)], map: "Contact_teamId_lastInboundAt_idx")
+  // Newest-first contact listing — the DEFAULT order for three separate
+  // surfaces: `GET /v1/contacts` (external-v1.service.ts), the CSV export, and
+  // the global contact search keyset. No index covered `createdAt`, so every
+  // one of them read the tenant's whole contact partition and sorted it —
+  // verified with `SET enable_seqscan=off`, where the planner still produced a
+  // Sort node because nothing could supply the order. Keyset pagination does
+  // NOT rescue this: the cursor bounds which rows are returned, not the sort.
+  @@index([teamId, createdAt(sort: Desc), id(sort: Desc)])
   // pg_trgm GIN index for substring ILIKE search on contact name.
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "Contact_name_trgm_idx")
   // Same, for the email OR-arm of contact search (global-search.ts does
@@ -1207,6 +1266,16 @@ model Conversation {
 
   @@index([teamId, status, lastMessageAt(sort: Desc)])
   @@index([teamId, assignedUserId])
+  // "Mine" inbox — the view an agent lives in all day. The filter is
+  // (teamId, assignedUserId) with the list's standard
+  // ORDER BY lastMessageAt DESC, id DESC. The index above stops at
+  // assignedUserId, so Postgres had to read EVERY conversation assigned to that
+  // agent and sort it, and because the keyset predicate is then only a residual
+  // filter, every page repeated the whole sort. Carrying the sort key turns it
+  // into a range scan that stops after `take`. (`status != closed` stays a
+  // residual — an inequality can't be an index prefix — but it is cheap once the
+  // scan is already narrowed to one agent's rows.)
+  @@index([teamId, assignedUserId, lastMessageAt(sort: Desc), id(sort: Desc)])
   // FK index for the `assignedUser` relation's onDelete: SetNull. The
   // (teamId, assignedUserId) composite above leads with teamId, so a bare
   // `WHERE assignedUserId = $1` FK-trigger scan on user-delete can't use it.
@@ -1289,6 +1358,27 @@ model Message {
   statusErrorCode   Int?
   statusErrorTitle  String?
   statusErrorDetail String?
+  // The broadcast this outbound message belongs to (null for every ordinary
+  // send). Two jobs, both load-bearing:
+  //   1. DURABILITY — the same link used to live only in `rawPayload`, which
+  //      the message-rawpayload-retention sweeper COLLAPSES to
+  //      {"sentVia":"broadcast"}, destroying the id. A real column survives.
+  //   2. ZERO-COST DISCRIMINATOR — ingestStatusUpdate already loads this row
+  //      (and its conversation.contactId), so `if (broadcastId)` gates the
+  //      recipient-delivery propagation with no extra query, and every
+  //      non-broadcast status webhook skips it for free.
+  // Combined with conversation.contactId this yields (broadcastId, contactId)
+  // — already the @@unique on BroadcastRecipient — so the propagation needs no
+  // new index and no lookup by wamid.
+  broadcastId       String?
+  // The structured button / list-row tap behind an inbound message. `body`
+  // holds the user-facing TITLE, which an operator can rename in a template at
+  // any time; this holds the STABLE machine id the template defined. Reporting
+  // and workflow branching must key on the id — a title-keyed click report
+  // silently resets its history the moment someone edits a button label.
+  // Parsed by meta.ts today but, before this, never persisted anywhere.
+  interactiveOptionId   String?
+  interactiveOptionKind String?
   // The CUSTOMER's current emoji reaction to THIS message (WhatsApp lets a
   // contact react to any message). A single value because a conversation has
   // exactly one customer; a new reaction REPLACES it and an empty reaction
@@ -1683,12 +1773,42 @@ model Broadcast {
   audienceGroupName String?
   // Counters live on the parent for cheap progress reads — derived from
   // BroadcastRecipient.status, kept in sync by the runner.
+  // Recipients removed from the audience at create time because they had
+  // opted out of marketing. Write-once at creation, so unlike the delivery
+  // counters it has no drift surface and needs no sweeper. Surfaced in the
+  // report ("targeted 10,000 · 47 suppressed · 9,953 queued") — without it
+  // totalCount silently shrinks and generates "why did only N get this?" tickets.
+  suppressedCount   Int             @default(0)
+  // Template category snapshot (MARKETING | UTILITY | AUTHENTICATION) taken at
+  // send time. Gates opt-out suppression (only marketing suppresses) and labels
+  // the cost breakdown, so it pays for itself twice.
+  templateCategory  String?
   totalCount        Int             @default(0)
   sentCount         Int             @default(0)
   failedCount       Int             @default(0)
   // Free-form last-error captured if the whole runner crashed (not per-
   // recipient errors, those live on the BroadcastRecipient row).
   lastError         String?
+  // When this broadcast was last parked `paused` (dead credentials at fire time,
+  // or the mid-run permanent-error breaker). Null unless currently/previously
+  // paused. Exists so the drift sweeper can auto-resume a paused campaign after
+  // a COOLDOWN rather than only at process boot — before this, a broadcast
+  // paused at 2am sat dead until the next deploy. The cooldown is what makes
+  // auto-resume safe: a still-broken cause re-parks the row, so retrying is
+  // bounded to once per cooldown instead of a hot loop.
+  pausedAt          DateTime?
+  // WHY this broadcast was parked `paused`, so auto-resume can tell a transient
+  // cause from a hopeless one. Free-form string (not an enum) to match how
+  // `lastError` is already carried and to avoid a migration per new cause:
+  //   "rate_limited"  — Meta throttled us; resuming after a cooldown is the FIX
+  //   "not_connected" — creds missing at fire time; costs zero sends to retry
+  //   "credentials"   — token died mid-run; self-heals once re-authed
+  //   "shutdown"      — graceful stop mid-send; must resume
+  //   "template"      — template disabled/paused at Meta. NOT auto-resumed:
+  //                     the fix is entirely operator-side in Meta's console, and
+  //                     each retry burns PERMANENT_ERROR_PAUSE_THRESHOLD more
+  //                     recipients into `failed` for nothing.
+  pausedReason      String?
   // Staging area for a LARGE broadcast's recipients while it is `materializing`.
   // Audience is resolved to `{ contactId, customerId? }[]` in the create request
   // (so the snapshot is locked at creation), but the actual BroadcastRecipient
@@ -1711,6 +1831,9 @@ model Broadcast {
   @@index([teamId, status])
   // Calendar view + scheduler boot-reconcile scan upcoming scheduled sends.
   @@index([teamId, scheduledAt])
+  // Backs the paused-broadcast drift sweeper:
+  // WHERE status = 'paused' AND pausedAt <= cutoff.
+  @@index([status, pausedAt])
 }
 
 model BroadcastRecipient {
@@ -1734,6 +1857,67 @@ model BroadcastRecipient {
   errorMessage   String?
   sentAt         DateTime?
 
+  // ── Delivery truth (webhook-owned; see BroadcastDeliveryState) ────────────
+  // Advanced by `applyBroadcastDeliveryStatus` in lib/providers/ingest.ts as
+  // Meta's async status webhooks arrive. Monotonic: a terminal state never
+  // leaves, and `undelivered` may only overwrite `pending`/`sent` (if the
+  // handset already acked, a later failure webhook is a Meta duplicate, not a
+  // regression — Meta batches `delivered` + `failed` for one wamid more often
+  // than you'd expect on marketing sends).
+  deliveryState  BroadcastDeliveryState @default(pending)
+  deliveredAt    DateTime?
+  readAt         DateTime?
+  // Normalized failure reason, sharing ONE vocabulary with the send path (the
+  // `MetaErrorCode` union in lib/providers/meta-send-error.ts) so the failure
+  // report is a single GROUP BY instead of two disjoint taxonomies. Stored as
+  // String, not a Prisma enum, so a new Meta code is a code change rather than
+  // a migration — and an unmapped code degrades to `provider_rejected` instead
+  // of failing the webhook write.
+  errorCode      String?
+  // Meta's raw numeric code, kept for forensics + for classifying codes we
+  // haven't mapped yet.
+  metaErrorCode  Int?
+  // Required by the /v1 `updatedSince` incremental sync: without it a client
+  // pulling late-arriving delivery/read updates must re-fetch all 100k rows.
+  updatedAt      DateTime                 @updatedAt
+
+  // ── Engagement (attributed post-commit from inbound ingest) ───────────────
+  // First reply only — the CAS is `where repliedAt: null`, so this counts
+  // unique RECIPIENTS who replied, not messages. That's the right denominator
+  // for a reply RATE, and the UI labels it accordingly.
+  repliedAt         DateTime?
+  /** Soft pointer (no FK) to the inbound message credited, for audit. */
+  repliedMessageId  String?
+  /**
+   * How the reply was credited: "direct" = the customer quoted our campaign
+   * message (exact), "window" = first inbound inside the attribution window
+   * (last-touch inference). Stored so the report can footnote "N of M
+   * attributed by time window" — that's what turns a guess into a measurement
+   * an operator can calibrate their trust against.
+   */
+  repliedAttribution String?
+  // Template quick-reply button tap. Keyed on the STABLE option id, never the
+  // button's display title (titles are editable, which would silently reset a
+  // click report's history).
+  clickedAt         DateTime?
+  clickedOptionId   String?
+  /** Set when this recipient opted out within the campaign's attribution window. */
+  optedOutAt        DateTime?
+
+  // ── Cost (from Meta's status webhook `pricing` object) ────────────────────
+  // Stored HERE rather than on Message because campaign cost is always
+  // aggregated per campaign — on Message it would force a join across the
+  // largest table in the database — and because Message.rawPayload is not
+  // durable (the retention sweeper nulls it).
+  // NOTE: no currency amount. Meta sends a CATEGORY and a billable flag, never
+  // a price; rates are per-country rate cards that change quarterly, so storing
+  // a computed amount would freeze a wrong number into the audit trail. The
+  // report shows billable conversation counts by category and lets the operator
+  // apply their own rate card.
+  pricingCategory   String?
+  pricingBillable   Boolean?
+  pricingModel      String?
+
   broadcast Broadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
   contact   Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
@@ -1741,7 +1925,27 @@ model BroadcastRecipient {
   // picker, but enforce here too so the runner can re-run idempotently.
   @@unique([broadcastId, contactId])
   @@index([broadcastId, status])
-  @@index([contactId])
+  // Broadcast send loop: the runner pages recipients with
+  // WHERE broadcastId = ? AND status = 'queued' ORDER BY id ASC, cursor on id.
+  // Without `id` in the index every page matched the whole remaining queued set
+  // and sorted it, so a 100k-recipient broadcast got progressively SLOWER the
+  // further it got — ~1000 pages each re-scanning what was left. With the sort
+  // column included each page is a bounded range scan from the cursor.
+  @@index([broadcastId, status, id])
+  // Reply attribution probes "most recent campaign this contact was sent,
+  // within the window" on every inbound message. contactId-leading, so it also
+  // still backs the Contact-cascade delete that the bare [contactId] index
+  // served — that one is now a redundant leftmost prefix and is dropped.
+  @@index([contactId, sentAt(sort: Desc)])
+  // Campaign report: serves BOTH the funnel `GROUP BY deliveryState` (the
+  // leading two columns are an index-only scan) AND the filtered drill-down
+  // `WHERE broadcastId=? AND deliveryState=? ORDER BY id` (the trailing `id`
+  // is what keeps each page a bounded range scan — the same lesson already
+  // paid for on [broadcastId, status, id] above). Deliberately NOT paired with
+  // a 2-column [broadcastId, deliveryState] variant: that's a redundant
+  // leftmost prefix and pure write overhead on a table taking 100k inserts +
+  // ~200k webhook updates per campaign.
+  @@index([broadcastId, deliveryState, id])
 }
 
 model InternalNote {
@@ -2240,19 +2444,65 @@ model ConversationEvent {
 // surface) cannot accidentally leak into team-chat results, and vice versa.
 // Cost: some duplicated media columns. Worth it.
 
+// What a TeamChannel row IS. `channel` = a named, joinable room. `dm` = a
+// 1:1 direct message between two people (or one, for notes-to-self).
+//
+// DMs reuse this table rather than getting their own because a DM's
+// confidentiality requirement is EXACTLY what a private channel already
+// enforces (TeamChannelMember + requireChannelMembership + emitChannelScoped).
+// A parallel model would duplicate the whole service, the team_channel.*
+// event taxonomy, the fanout rules, the chan: room gate, the media proxy,
+// threading, and search — for zero security benefit.
+enum TeamChannelKind {
+  channel
+  dm
+}
+
+// Who may JOIN a channel. Orthogonal to `isDefault` (which means "landing
+// channel, undeletable, implicit membership").
+//   public  → any team member can browse it and join themselves
+//   private → invite-only; invisible in the browser, 404s on direct URL
+// DMs are always `private`.
+//
+// Note this governs JOIN, not READ-after-join: reading still requires a
+// membership row via requireChannelMembership. Public channels are
+// join-to-read, so that single security spine stays unbranched.
+enum TeamChannelVisibility {
+  public
+  private
+}
+
 model TeamChannel {
   id                 String   @id @default(cuid())
   teamId             String
   // Lowercase slug, unique per team. Becomes the URL: /team/<slug>.
   // The default channel "general" is auto-created at team setup time and
   // protected — the DELETE and rename routes refuse to touch it.
-  name               String
+  //
+  // NULL for DMs: a DM has no name, it's rendered from the peer's identity.
+  // Deliberately NULL rather than a synthetic "dm:<cuid>" — a synthetic name
+  // would leak into WorkspaceSearchHit.channelName, the page <h1>, and the
+  // sidebar filter, and would silently occupy the @@unique([teamId, name])
+  // namespace. NULL forces every consumer to be surfaced by the type checker.
+  name               String?
   description        String?
   // The first channel created with name="general" per team is the default.
   // Used to (a) redirect /team to the default channel, (b) protect from
   // deletion/rename. At-most-one-default-per-team is enforced in app code,
   // not by a partial unique (Prisma can't model those).
   isDefault          Boolean  @default(false)
+  kind               TeamChannelKind       @default(channel)
+  // Defaults to `private`: every channel that existed before this column was
+  // created under invite-only semantics, so the default is what keeps the
+  // migration honest. Only the default channel is flipped to public.
+  visibility         TeamChannelVisibility @default(private)
+  // Canonical participant key for a DM: the two user ids sorted and joined
+  // with ":" (a self-DM is "u:u"). NULL for channels. This is what dedupes
+  // "open a DM with Sara" to one row no matter who opens it or how often.
+  //
+  // ALWAYS derived server-side from the session user — never accepted from
+  // the client, or a caller could claim someone else's DM.
+  dmKey              String?
   // Nullable + SetNull — channels are team-shared and shouldn't be destroyed
   // when their creator leaves. The audit label degrades to "Removed user."
   createdById        String?
@@ -2272,8 +2522,14 @@ model TeamChannel {
   pins      TeamChannelPin[]
   members   TeamChannelMember[]
 
+  // Postgres treats NULLs as distinct in a unique index, so unlimited DM
+  // rows (name = NULL) coexist under this constraint unchanged.
   @@unique([teamId, name])
+  // The DM dedup guarantee. Team-scoped rather than global to match the
+  // tenant-isolation idiom used everywhere else — and it's free.
+  @@unique([teamId, dmKey])
   @@index([teamId, lastMessageAt(sort: Desc)])
+  @@index([teamId, kind, lastMessageAt(sort: Desc)])
 }
 
 // Per-channel membership. The default channel ("general") implicitly includes

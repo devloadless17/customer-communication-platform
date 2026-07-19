@@ -13,10 +13,38 @@
  * WebSocket transport isn't CORS-enforced by browsers, so this server-side check
  * is what actually gates which sites may open a widget socket.
  */
-export function originAllowed(origin: string | null, allowedOrigins: string[]): boolean {
-  // No Origin header (native/non-browser client). Allow — the site key already
-  // scoped the team; a headless client can't read a real visitor's data.
-  if (!origin) return true;
+export function originAllowed(
+  origin: string | null,
+  allowedOrigins: string[],
+  /**
+   * Which transport is asking. This MATTERS for the missing-Origin case,
+   * because the two have opposite meanings:
+   *
+   *   "websocket" — a browser ALWAYS sends Origin on a WS handshake, so its
+   *     absence means a non-browser client (a script), which is what we want
+   *     to refuse once an org has locked its allow-list down.
+   *
+   *   "http" — per the Fetch spec a SAME-ORIGIN GET omits Origin entirely,
+   *     while every cross-origin fetch sends it. So on this path a missing
+   *     Origin means first-party, which must be allowed.
+   *
+   * Defaulting to "websocket" keeps the strict reading for any future caller
+   * that forgets to say.
+   */
+  transport: "websocket" | "http" = "websocket",
+): boolean {
+  const configured = (allowedOrigins ?? []).map((o) => o.trim().toLowerCase()).filter(Boolean);
+  const isProd = process.env.NODE_ENV === "production";
+
+  // No Origin header. See `transport` above for why the answer differs.
+  //
+  // Getting this wrong broke a real first-party flow: `GET /api/widget/config`
+  // is fetched same-origin by widget.js, so it carries no Origin, and treating
+  // that like a script meant the Settings → "Test this widget" page returned
+  // 403 for any org that had configured an allow-list — the inline first-party
+  // embed too. The "always allow our OWN app origin" branch below exists for
+  // exactly that case and was being short-circuited before it could run.
+  if (!origin) return transport === "http" || configured.length === 0;
 
   let host: string;
   try {
@@ -24,7 +52,13 @@ export function originAllowed(origin: string | null, allowedOrigins: string[]): 
   } catch {
     return false;
   }
-  if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") return true;
+  // Loopback is a DEV convenience (embed test page, local development). In
+  // production it was a free bypass of any allow-list: `Origin: http://localhost`
+  // is one header on a scripted client.
+  if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") {
+    if (!isProd || configured.length === 0) return true;
+    return configured.some((e) => e === host || e === `*.${host}`);
+  }
 
   // Always allow our OWN app origin — the inline-embed / any first-party host page
   // (e.g. a page on this app's domain) must pass even when the org locked its
@@ -38,10 +72,9 @@ export function originAllowed(origin: string | null, allowedOrigins: string[]): 
     }
   }
 
-  const list = (allowedOrigins ?? []).map((o) => o.trim().toLowerCase()).filter(Boolean);
-  if (list.length === 0) return true; // not configured yet → permissive
+  if (configured.length === 0) return true; // not configured yet → permissive
 
-  return list.some((entry) => {
+  return configured.some((entry) => {
     if (entry.startsWith("*.")) {
       const base = entry.slice(2);
       return host === base || host.endsWith(`.${base}`);

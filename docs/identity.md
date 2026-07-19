@@ -34,6 +34,9 @@ Stages, tags, and custom fields: decide per-field whether they live on `Contact`
 4. **Merge is idempotent and conservative.** Merging never deletes a `Contact` or its messages — it only re-points `Contact.customerId`. Split re-points them back.
 5. **Tenant-scoped.** Identity resolution never crosses `teamId`. A phone number shared across two teams' contacts is two different customers.
 6. **One writer.** Identity resolution runs in exactly one place (an `IdentityService` in the domain layer, called from the ingest pipeline after the `Contact` upsert) — never scattered across controllers or providers.
+7. **A strong key must come from a VERIFIED identity — in both directions.** On WhatsApp/Messenger/Instagram the vendor already authenticated the account, so a self-asserted value provably belongs to the sender. The website widget has no such guarantee: the pre-chat form is an unauthenticated text box on a public site. So ephemeral-channel contacts (`EPHEMERAL_CONTACT_CHANNELS`) are excluded from the strong-key **candidate set** in `findExistingCustomerIdByStrongKey`, not merely blocked from initiating a merge.
+
+   Both directions matter, and the second is the non-obvious one. Blocking only the outbound half leaves the merge reachable from the far side: a stranger types a known customer's number into the pre-chat box, it lands on their widget contact, and then *the real owner's* next inbound resolves that number, finds the widget contact, and adopts **its** customer — folding the stranger's live thread into the real person's profile and channel switcher. (Exploitable specifically when the widget contact is the older row, i.e. the attacker probes before that person's first message on a real channel; `orderBy: createdAt asc` means oldest wins.) The value is still **stored** on the contact so an agent can see and act on it — it just never acts as a key. Re-enabling requires verifying the number/address first (SMS or email code), not loosening the predicate.
 
 ## Current state (implemented)
 
@@ -41,6 +44,20 @@ Stages, tags, and custom fields: decide per-field whether they live on `Contact`
 - **Auto-merge runs** on exact phone/email via `IdentityService.resolveCustomerId` (`apps/api/src/lib/identity/identity-service.ts`), called inline on the primary inbound path and reconciled for every other create path by the drift sweeper (`apps/api/src/lib/sweepers/customer-link-drift.ts`). No fuzzy matching.
 - **Manual merge/split** — `CustomersService.linkContact` / `unlinkContact` (`apps/api/src/customers/`), reversible (only re-points `customerId`; empty customers are cleaned up).
 - **Agent UI** — the "Same person" panel with a per-channel thread switcher (`apps/web/src/features/inbox/components/linked-channels.tsx`), mounted in the contact panel.
+
+## Ephemeral contacts (website widget)
+
+Not every channel identity is a person we can reach again. A `webchatwidget` visitor is a `vis_<uuid>` in **one browser's** localStorage — clear it, switch device, or open incognito and the same human is a brand-new contact, permanently. Those rows are chat sessions, not directory entries, so treating them as first-class contacts polluted the contacts list, CSV export, audience counts, and search with unreachable noise.
+
+- **The set**: `EPHEMERAL_CONTACT_CHANNELS` in `@ccp/shared/providers/capabilities` (a subset of `LIVE_CHANNELS`, disjoint from `BROADCASTABLE_CHANNELS`) — a policy over channels, kept beside `BROADCASTABLE_CHANNELS` rather than inside `ProviderCapabilities`, which describes the wire.
+- **Directory membership is DERIVED, never stored**: an ephemeral contact is in the directory iff it carries a phone or an email. `DIRECTORY_CONTACT_SQL` / `directoryContactWhere` (`apps/api/src/lib/queries/contacts.ts`) express it. No column, no migration, no backfill — and promotion can't drift, because there is no flag to forget to flip.
+- **Promotion** ("Visitor → Lead → Contact", the Intercom/Front model): the moment the pre-chat form supplies a phone or email, the visitor appears in the directory. Promotion is **visibility only** — it mints no link to any other person (see rule 7).
+- **Not second-class in the inbox**: full thread, history, realtime, and workflows all behave normally. The exclusion is strictly about the contact directory and bulk targeting.
+- **Escape hatch**: selecting the "Website widget" channel filter explicitly opts back in, and because the opt-in lives inside `buildContactFilterWhere`, select-all-matching still targets exactly the visible set.
+
+⚠️ `directoryContactWhere` is an `OR` node. Spreading it into a `where` that already has a top-level `OR` (global search's match arm, the audience tags∪ids union) **clobbers** that disjunction and silently widens the result. Compose with `AND: [...]` whenever another `OR` is in play.
+
+**Not built (deferred):** a retention sweeper for stale anonymous visitors. Nothing in the codebase deletes a `Contact` or `Conversation` today, and each visitor still mints a `Customer` at ingest, so widget rows grow without bound. Trigger: widget contacts pass ~50k on the VPS, or agents report stale visitor threads crowding the inbox.
 
 ## Remaining gaps (not yet built)
 

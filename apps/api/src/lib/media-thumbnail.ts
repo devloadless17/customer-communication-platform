@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
+import { FFMPEG_WAIT_BEST_EFFORT_MS, withFfmpegSlot } from "@/lib/media/ffmpeg-slots";
+
 /**
  * Extract a JPEG poster frame from a video buffer. Tries the first-frame at
  * 00:00:00.5 (slight offset because frame 0 is often a black frame in many
@@ -32,7 +34,22 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
 const THUMBNAIL_TIMEOUT_MS = 10_000;
 
+/**
+ * All three exported helpers below run under the process-wide ffmpeg
+ * semaphore (lib/media/ffmpeg-slots.ts). Every one of them is best-effort and
+ * already returns null on failure, so a slot-wait timeout under load is just
+ * another "no thumbnail" — the bubble renders without a poster instead of the
+ * api container OOM-ing on a burst of concurrent video decodes.
+ */
 export async function extractVideoPosterFrame(
+  bytes: Uint8Array,
+): Promise<Uint8Array | null> {
+  return withFfmpegSlot(FFMPEG_WAIT_BEST_EFFORT_MS, () =>
+    extractVideoPosterFrameInner(bytes),
+  ).catch(() => null);
+}
+
+async function extractVideoPosterFrameInner(
   bytes: Uint8Array,
 ): Promise<Uint8Array | null> {
   let workDir: string | null = null;
@@ -76,6 +93,12 @@ export async function extractVideoPosterFrame(
  * video poster path relies on. Best-effort + bounded 10s.
  */
 export async function extractImageThumbnail(bytes: Uint8Array): Promise<Uint8Array | null> {
+  return withFfmpegSlot(FFMPEG_WAIT_BEST_EFFORT_MS, () =>
+    extractImageThumbnailInner(bytes),
+  ).catch(() => null);
+}
+
+async function extractImageThumbnailInner(bytes: Uint8Array): Promise<Uint8Array | null> {
   let workDir: string | null = null;
   try {
     workDir = await mkdtemp(join(tmpdir(), "ccp-imgthumb-"));
@@ -156,6 +179,12 @@ function runFfmpegImageThumb(srcPath: string, outPath: string): Promise<void> {
  * binary the poster path already relies on. Bounded 10s.
  */
 export async function probeMediaDurationMs(bytes: Uint8Array): Promise<number | null> {
+  return withFfmpegSlot(FFMPEG_WAIT_BEST_EFFORT_MS, () =>
+    probeMediaDurationMsInner(bytes),
+  ).catch(() => null);
+}
+
+async function probeMediaDurationMsInner(bytes: Uint8Array): Promise<number | null> {
   let workDir: string | null = null;
   try {
     workDir = await mkdtemp(join(tmpdir(), "ccp-dur-"));

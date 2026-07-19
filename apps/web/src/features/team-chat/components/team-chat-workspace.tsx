@@ -7,12 +7,13 @@ import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { useTeamChannelEvents } from "@/features/team-chat/hooks/use-team-channel-events";
 import {
   useTeamChannels,
+  useTeamDms,
   useTeamMembers,
 } from "@/features/team-chat/contexts/team-chat-data";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
-import { canPinMessage } from "@ccp/shared/team-chat/permissions";
+import { canPinInChannel } from "@ccp/shared/team-chat/permissions";
 import type {
   ChannelPinDto,
   TeamChannelDto,
@@ -95,12 +96,12 @@ export function TeamChatWorkspace({
 
   // Socket-driven pin updates.
   //   - unpin → filter the messageId out of the bar (fast, no fetch)
-  //   - pin   → refetch `/pins` to grab the new PinnedItem with author +
-  //             pinnedAt + full message DTO. The event payload only carries
-  //             { messageId, pinned } so we can't synthesize the row
-  //             locally without re-deriving the author/message — refetching
-  //             is simpler than threading a full DTO through the event.
-  //             Pins are rare events so the extra GET is negligible.
+  //   - pin   → synthesize the row from the message already in state plus the
+  //             pinnedAt/pinnedBy metadata the frame now carries. Falls back
+  //             to refetching `/pins` when the pinned message is OFF the
+  //             loaded slice (an older page), which is the one case we can't
+  //             build locally.
+  // The `connect` refetch below stays as the reconnect convergence path.
   useEffect(() => {
     const socket = getClientSocket();
     if (!socket) return;
@@ -126,13 +127,40 @@ export function TeamChatWorkspace({
       channelId: string;
       messageId: string;
       pinned: boolean;
+      pinnedAt: string | null;
+      pinnedById: string | null;
+      pinnedByName: string | null;
     }) => {
       if (payload.channelId !== channelId) return;
       if (!payload.pinned) {
         setPins((prev) => prev.filter((p) => p.messageId !== payload.messageId));
-      } else {
-        void refetchPins();
+        return;
       }
+      // Synthesize the pin row from the message we already hold + the
+      // metadata now carried on the frame — no refetch for the common case.
+      const message = channelMessagesRef.current.find(
+        (m) => m.id === payload.messageId,
+      );
+      if (!message || !payload.pinnedAt) {
+        // Off-slice (pinned message is in an older page) or a pre-enrichment
+        // frame — fall back to the authoritative list.
+        void refetchPins();
+        return;
+      }
+      const pinnedAt = payload.pinnedAt;
+      setPins((prev) => {
+        if (prev.some((p) => p.messageId === payload.messageId)) return prev;
+        const next: ChannelPinDto = {
+          messageId: payload.messageId,
+          pinnedAt,
+          pinnedById: payload.pinnedById,
+          pinnedByName: payload.pinnedByName,
+          message: { ...message, pinned: true },
+        };
+        // Newest pin first — same order listChannelPins returns, so the bar
+        // doesn't reshuffle when a refetch eventually happens.
+        return [next, ...prev].sort((a, b) => b.pinnedAt.localeCompare(a.pinnedAt));
+      });
     };
 
     socket.on("team:channel:pin:changed", onPin);
@@ -314,6 +342,59 @@ export function TeamChatWorkspace({
   }, [searchParams, jumpToMessage]);
   const { deleteChannel, confirmDialog: deleteChannelDialog } = useDeleteChannel();
 
+  /**
+   * Leave this channel. Reuses the EXISTING self-removal route — the service
+   * already permits any role to remove themselves, blocks the default
+   * channel, publishes members_changed, and evicts the socket from the
+   * channel room. No new endpoint needed.
+   */
+  const leaveChannel = useCallback(async () => {
+    try {
+      const res = await fetchWithSessionGuard(
+        `/api/team/channels/${initialChannel.id}/members/${currentUser.id}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) {
+        const json = (await res.json().catch(() => ({}))) as { detail?: string };
+        toast.error(json.detail ?? "Couldn't leave that channel.");
+        return;
+      }
+      toast.success(`Left #${initialChannel.name ?? ""}`);
+      // /team redirects to the default channel, which we're always a member
+      // of — so this can't land on a channel we just lost access to.
+      window.location.assign("/team");
+    } catch {
+      toast.error("Couldn't leave that channel.");
+    }
+  }, [initialChannel.id, initialChannel.name, currentUser.id]);
+
+  /**
+   * The peer identity for a DM header. Read from the live DM list rather than
+   * refetched — the layout already loads it, and the header only needs a
+   * name/avatar. Null for channels.
+   */
+  /**
+   * The read receipt FROZEN at channel-open time.
+   *
+   * Must not be read live: `useTeamChannelEvents` fires markRead() on mount,
+   * so a live value would advance to "now" and erase the divider before it
+   * ever painted. Re-seeded only when the channel id changes — matching
+   * Slack, where the divider stays put for the whole visit.
+   */
+  const frozenLastReadAtRef = useRef(initialChannel.lastReadAt);
+  const [frozenChannelId, setFrozenChannelId] = useState(initialChannel.id);
+  if (frozenChannelId !== initialChannel.id) {
+    setFrozenChannelId(initialChannel.id);
+    frozenLastReadAtRef.current = initialChannel.lastReadAt;
+  }
+  const frozenLastReadAt = frozenLastReadAtRef.current;
+
+  const dms = useTeamDms();
+  const dmPeer = useMemo(() => {
+    if (initialChannel.kind !== "dm") return null;
+    return dms.find((d) => d.id === initialChannel.id)?.peer ?? null;
+  }, [dms, initialChannel.id, initialChannel.kind]);
+
   const namesById = useMemo(
     () => new Map(teamMembers.map((u) => [u.id, u.name])),
     [teamMembers],
@@ -355,9 +436,12 @@ export function TeamChatWorkspace({
           }}
           onOpenSearch={() => setChannelSearchOpen(true)}
           onOpenMembers={() => setShowMembers(true)}
+          onLeave={() => void leaveChannel()}
+          dmPeer={dmPeer}
         />
         {showMembers && (
           <ChannelMembersDialog
+            teamId={currentUser.teamId}
             channel={initialChannel}
             currentUser={{ id: currentUser.id }}
             currentRole={currentUser.role}
@@ -379,14 +463,14 @@ export function TeamChatWorkspace({
         )}
         <PinnedBar
           pins={pins}
-          canPin={canPinMessage(currentUser.role)}
+          canPin={canPinInChannel(currentUser.role, initialChannel.kind)}
           onUnpin={unpinFromBar}
         />
         <ChannelThread
           messages={channelState.messages}
           channelId={initialChannel.id}
           currentUser={currentUser}
-          canPin={canPinMessage(currentUser.role)}
+          canPin={canPinInChannel(currentUser.role, initialChannel.kind)}
           hasMoreOlder={channelState.hasMoreOlder}
           onLoadOlder={channelState.loadOlder}
           hasMoreNewer={channelState.hasMoreNewer}
@@ -396,6 +480,8 @@ export function TeamChatWorkspace({
           onGoToLive={channelState.goToLive}
           searchQuery={activeSearchQuery}
           displayNameById={namesById}
+          lastReadAt={frozenLastReadAt}
+          isDm={initialChannel.kind === "dm"}
           onOpenThread={handleOpenThread}
           onRetry={channelState.retryOptimistic}
           onDismiss={channelState.removeOptimistic}
@@ -426,7 +512,7 @@ export function TeamChatWorkspace({
           rootMessage={liveThreadRoot}
           currentUser={currentUser}
           teamMembers={teamMembers}
-          canPin={canPinMessage(currentUser.role)}
+          canPin={canPinInChannel(currentUser.role, initialChannel.kind)}
           onClose={() => setThread(null)}
         />
       )}
@@ -434,6 +520,7 @@ export function TeamChatWorkspace({
       {showEdit && (
         <EditChannelDialog
           channel={initialChannel}
+          currentRole={currentUser.role}
           onClose={() => setShowEdit(false)}
           onUpdated={(ch) => {
             setShowEdit(false);
@@ -455,6 +542,10 @@ export function TeamChatWorkspace({
  */
 function ChannelExistenceGuard({ channelId }: { channelId: string }) {
   const channels = useTeamChannels();
+  // DMs are deliberately excluded from the channel list, so this guard MUST
+  // consult the DM list too. Without it, every DM looked "deleted" the moment
+  // it opened and the guard bounced the user straight back to /team.
+  const dms = useTeamDms();
   const router = useRouter();
   // Only treat "channel missing from my list" as a deletion when the list is
   // NON-EMPTY. An EMPTY list means "I'm not a member of anything" — e.g. a user
@@ -464,9 +555,31 @@ function ChannelExistenceGuard({ channelId }: { channelId: string }) {
   // channelExists=false → replace("/team") → repeat ("infinite page refresh" in
   // prod). A real deletion always leaves ≥1 other channel (or zero, in which
   // case /team's own "No channels yet" empty state is the correct landing).
-  const channelExists = channels.some((c) => c.id === channelId);
+  const channelExists =
+    channels.some((c) => c.id === channelId) || dms.some((d) => d.id === channelId);
+  // The emptiness check spans BOTH lists for the same reason: a user with no
+  // channels but an open DM must not be treated as "list not loaded yet".
+  const knownCount = channels.length + dms.length;
+
+  // GRACE PERIOD before the first eviction check.
+  //
+  // A just-created DM is navigated to immediately, but this context won't hold
+  // it until either the `team:dm:created` refetch or the RSC refresh lands —
+  // both in flight. Without the delay the guard sees "channel absent from a
+  // non-empty list" and bounces the user straight back to /team, and whether
+  // it fires depends on which network round-trip wins. A real deletion is
+  // rare and not urgent, so trading instant eviction for a stable open is the
+  // right side of that tradeoff.
+  const [graceElapsed, setGraceElapsed] = useState(false);
   useEffect(() => {
-    if (channels.length > 0 && !channelExists) router.replace("/team");
-  }, [channels.length, channelExists, router]);
+    setGraceElapsed(false);
+    const t = setTimeout(() => setGraceElapsed(true), 2_000);
+    return () => clearTimeout(t);
+  }, [channelId]);
+
+  useEffect(() => {
+    if (!graceElapsed) return;
+    if (knownCount > 0 && !channelExists) router.replace("/team");
+  }, [graceElapsed, knownCount, channelExists, router]);
   return null;
 }

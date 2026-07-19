@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, InternalServerErrorException, Logger, 
 import type { AiHandoffAction, FirstTouchGreeter, Prisma } from "@prisma/client";
 
 import { blobStorage } from "@/lib/blob-storage";
-import { avatarObjectKey } from "@/lib/blob-storage/avatar";
+import { avatarObjectKey, contactAvatarObjectKey } from "@/lib/blob-storage/avatar";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 
 import { SessionInvalidationService } from "../auth/session-invalidation.service";
@@ -155,13 +155,21 @@ export class TeamRootService {
     }
   }
 
-  async destroy(teamId: string, label: string): Promise<void> {
-    // Snapshot blob keys + member ids BEFORE the cascade nukes the rows.
-    // Blob keys feed post-delete cleanup; member ids feed the explicit
-    // socket kick (the cascade clears their Session rows but already-
-    // connected sockets stay live until kicked).
-    const [blobKeyRows, teamMembers] = await Promise.all([
-      this.db.message.findMany({
+  /**
+   * Every message media/thumbnail key for a team, in bounded pages.
+   *
+   * Was a single unbounded `findMany`. Message is by far the heaviest table
+   * here — the drain loop below exists precisely because it can hold MILLIONS
+   * of rows for a long-lived tenant — so materializing every media key at once
+   * is a heap spike on exactly the tenant where deletion matters most, and it
+   * happens BEFORE anything is deleted, so the purge dies before it starts.
+   */
+  private async collectMessageBlobKeys(teamId: string): Promise<string[]> {
+    const keys: string[] = [];
+    const PAGE = 1_000;
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.db.message.findMany({
         // Both the media binary (mediaKey) AND the video poster-frame thumbnail
         // (mediaThumbnailKey) are independent blobs — collect both so the team
         // purge doesn't leak posters (audit fix F1d). The blob-orphan sweeper
@@ -170,18 +178,67 @@ export class TeamRootService {
           teamId,
           OR: [{ mediaKey: { not: null } }, { mediaThumbnailKey: { not: null } }],
         },
-        select: { mediaKey: true, mediaThumbnailKey: true },
-      }),
+        select: { id: true, mediaKey: true, mediaThumbnailKey: true },
+        orderBy: { id: "asc" },
+        take: PAGE,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      });
+      for (const m of page) {
+        if (m.mediaKey) keys.push(m.mediaKey);
+        if (m.mediaThumbnailKey) keys.push(m.mediaThumbnailKey);
+      }
+      if (page.length < PAGE) break;
+      cursor = page[page.length - 1]?.id;
+      if (!cursor) break;
+    }
+    return keys;
+  }
+
+  /** Captured social-contact avatar keys, paged for the same reason. */
+  private async collectContactAvatarKeys(teamId: string): Promise<string[]> {
+    const keys: string[] = [];
+    const PAGE = 1_000;
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.db.contact.findMany({
+        where: { teamId, avatarUrl: { not: null } },
+        select: { id: true },
+        orderBy: { id: "asc" },
+        take: PAGE,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      });
+      for (const c of page) keys.push(contactAvatarObjectKey(c.id));
+      if (page.length < PAGE) break;
+      cursor = page[page.length - 1]?.id;
+      if (!cursor) break;
+    }
+    return keys;
+  }
+
+  async destroy(teamId: string, label: string): Promise<void> {
+    // Snapshot blob keys + member ids BEFORE the cascade nukes the rows.
+    // Blob keys feed post-delete cleanup; member ids feed the explicit
+    // socket kick (the cascade clears their Session rows but already-
+    // connected sockets stay live until kicked).
+    const [messageBlobKeys, contactAvatarKeys, teamMembers] = await Promise.all([
+      this.collectMessageBlobKeys(teamId),
+      this.collectContactAvatarKeys(teamId),
       this.db.user.findMany({ where: { teamId }, select: { id: true, avatarUrl: true } }),
     ]);
-    const blobKeys = blobKeyRows
-      .flatMap((r) => [r.mediaKey, r.mediaThumbnailKey])
-      .filter((k): k is string => Boolean(k))
+    const blobKeys = messageBlobKeys
       // Each member's avatar is an independent R2 blob under the `avatars/`
       // prefix (deterministic `avatars/{userId}` key) — the cascade drops the
       // User rows but not the objects, so collect them too (F48). Only members
       // with a stored avatar have an object to delete.
-      .concat(teamMembers.filter((m) => m.avatarUrl).map((m) => avatarObjectKey(m.id)));
+      .concat(teamMembers.filter((m) => m.avatarUrl).map((m) => avatarObjectKey(m.id)))
+      // CONTACT avatars were missed entirely. Social contacts (Messenger /
+      // Instagram) get their profile picture captured to `avatars/contact-{id}`
+      // because Meta's own URL expires; nothing ever deleted those objects —
+      // not this purge, and not the blob-orphan sweeper, which skips the whole
+      // `avatars/` prefix. A churned enterprise tenant with 200k social
+      // contacts therefore left ~200k orphaned objects in R2, billed forever
+      // with no row, no reference, and no reclaim path anywhere in the tree.
+      .concat(contactAvatarKeys);
 
     try {
       // DB-2: pre-drain the Message table in bounded batches BEFORE the cascade.

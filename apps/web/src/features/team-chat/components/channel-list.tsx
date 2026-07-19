@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useDeferredValue, useMemo, useState } from "react";
 import Link from "next/link";
-import { Hash, Plus, Search, X } from "lucide-react";
+import { Compass, Hash, Lock, Plus, Search, X } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { Badge } from "@/components/ui/badge";
@@ -10,10 +10,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { TeamChannelListItemDto } from "@ccp/shared/team-chat/types";
-import type { Role } from "@ccp/shared/types";
 import { cn } from "@ccp/shared/utils";
 
-import { canCreateChannel } from "@ccp/shared/team-chat/permissions";
 
 /**
  * Left column inside /team. Lists every channel with unread + mention badges,
@@ -32,16 +30,25 @@ const OVERSCAN = 8;
 export function ChannelList({
   channels,
   activeChannelId,
-  currentRole,
   onlinePresenceCount,
   onCreate,
   onOpenWorkspaceSearch,
+  onBrowse,
+  dmSection,
 }: {
   channels: TeamChannelListItemDto[];
   activeChannelId: string;
-  currentRole: Role;
   onlinePresenceCount: number;
   onCreate: () => void;
+  /** Opens the public-channel browser. */
+  onBrowse: () => void;
+  /**
+   * The "Direct messages" section, rendered below the channel list inside the
+   * same scroller. Passed as a node rather than imported directly so this
+   * component stays a pure list renderer and the sidebar keeps owning the
+   * dialogs and presence subscription.
+   */
+  dmSection?: React.ReactNode;
   /** Opens the workspace-wide message search overlay. */
   onOpenWorkspaceSearch: () => void;
 }) {
@@ -53,7 +60,9 @@ export function ChannelList({
   const visible = useMemo(() => {
     const q = deferredQuery.trim().toLowerCase();
     if (!q) return channels;
-    return channels.filter((c) => c.name.toLowerCase().includes(q));
+    // `?? ""` never matches a non-empty query, so nameless rows (DMs, which
+    // render in their own section) simply drop out of a channel-name filter.
+    return channels.filter((c) => (c.name ?? "").toLowerCase().includes(q));
   }, [channels, deferredQuery]);
 
   // Direct viewport ref via ScrollArea's `viewportRef` prop — callback ref
@@ -117,18 +126,28 @@ export function ChannelList({
           >
             <Search className="size-4" />
           </Button>
-          {canCreateChannel(currentRole) && (
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              onClick={onCreate}
-              className="pointer-coarse:size-9"
-              aria-label="Create channel"
-              title="Create channel"
-            >
-              <Plus className="size-4" />
-            </Button>
-          )}
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            onClick={onBrowse}
+            className="pointer-coarse:size-9"
+            aria-label="Browse public channels"
+            title="Browse channels"
+          >
+            <Compass className="size-4" />
+          </Button>
+          {/* No role gate: anyone can create a PUBLIC channel now. The dialog
+              gates the private option, and the server re-checks. */}
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            onClick={onCreate}
+            className="pointer-coarse:size-9"
+            aria-label="Create channel"
+            title="Create channel"
+          >
+            <Plus className="size-4" />
+          </Button>
         </div>
       </div>
 
@@ -155,11 +174,13 @@ export function ChannelList({
         </div>
       </div>
 
-      <div className="px-4 pb-1 text-3xs font-semibold uppercase tracking-wider text-muted-foreground/80">
-        Channels
-      </div>
-
+      {/* Both section headers live INSIDE the scroller so Channels and Direct
+          messages scroll together as one list, the way Slack's sidebar does. */}
       <ScrollArea viewportRef={viewportRef} className="flex-1">
+        <div className="px-4 pb-1 text-3xs font-semibold uppercase tracking-wider text-muted-foreground/80">
+          Channels
+        </div>
+
         {visible.length === 0 ? (
           <div className="px-4 py-6 text-center text-xs text-muted-foreground">
             {query ? "No matches." : "No channels yet."}
@@ -185,6 +206,11 @@ export function ChannelList({
             })}
           </div>
         )}
+
+        {/* The channel-name filter above intentionally does NOT filter DMs —
+            it's labelled "Filter channels", and hiding people from a people
+            list because of a channel query would be surprising. */}
+        {dmSection}
       </ScrollArea>
     </div>
   );
@@ -212,12 +238,24 @@ const ChannelRow = memo(function ChannelRow({
           : "text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
     >
-      <Hash
-        className={cn(
-          "size-3.5 shrink-0",
-          active ? "text-primary" : "text-muted-foreground",
-        )}
-      />
+      {/* Lock vs hash is the at-a-glance privacy signal Slack users expect —
+          it's how you know whether linking someone here will actually work. */}
+      {c.visibility === "private" ? (
+        <Lock
+          className={cn(
+            "size-3.5 shrink-0",
+            active ? "text-primary" : "text-muted-foreground",
+          )}
+          aria-label="Private channel"
+        />
+      ) : (
+        <Hash
+          className={cn(
+            "size-3.5 shrink-0",
+            active ? "text-primary" : "text-muted-foreground",
+          )}
+        />
+      )}
       <span
         className={cn(
           "flex-1 truncate",

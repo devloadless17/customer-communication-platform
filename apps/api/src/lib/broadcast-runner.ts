@@ -115,23 +115,42 @@ import type { Message } from "@ccp/shared/types";
  * not retried (we don't know if they landed).
  *
  * Rate: `resolveSendPacing` picks `lanes` workers each leaving `gapMs` between
- * its own sends, adaptively from the WhatsApp number's throughput level —
- * baseline ~25 msg/s (unknown level / social), STANDARD ~64 msg/s, HIGH
- * ~266 msg/s — always deliberately UNDER Meta's per-number ceiling so a burst
- * can't drag the number's quality rating down. All knobs are env-tunable.
+ * its own sends, adaptively from the WhatsApp number's throughput level, always
+ * deliberately UNDER Meta's per-number ceiling so a burst can't drag the
+ * number's quality rating down. See `resolveSendPacing` for what the resulting
+ * rate actually is — it is NOT lanes÷gap. All knobs are env-tunable.
  */
 
 /**
  * Send pacing. A broadcast runs `lanes` workers, each pausing `gapMs` between
- * its own sends, so aggregate throughput ≈ lanes ÷ (gapMs/1000). The defaults
- * (5 lanes, 200ms → ~25 msg/s) are the historical conservative baseline, used
- * whenever the number's throughput level is unknown or for social channels.
+ * its own sends.
+ *
+ * DO NOT read the rate as `lanes ÷ gapMs`. That was the original claim here and
+ * it is wrong by 5–7×: a lane awaits the Meta round-trip AND ~6–8 DB queries
+ * BEFORE it sleeps, so the real per-lane period is `work + gapMs`, not `gapMs`.
+ * With a typical ~500ms Meta call the honest figures are:
+ *
+ *   level     lanes/gap    naive claim   realistic     100k ETA
+ *   baseline  5 / 200ms    25 msg/s      ~8-10 msg/s   ~3 hours
+ *   STANDARD  8 / 125ms    64 msg/s      ~15 msg/s     ~1.9 hours
+ *   HIGH      16 / 60ms    266 msg/s     ~35 msg/s     ~48 minutes
+ *
+ * These are estimates from the loop's structure, not measurements — treat them
+ * as the right ORDER of magnitude and re-measure before quoting an SLA.
+ *
+ * Second ceiling, easy to miss: effective concurrency is
+ * `min(lanes, perTeamRecipientConcurrency())`, and that per-team cap defaults to
+ * 16 — exactly the HIGH lane count. So HIGH is already at the cap, and a team
+ * running TWO campaigns at once splits those 16 slots between them, roughly
+ * halving each. Raise BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY with the lane
+ * count, or concurrent campaigns silently serialize.
  *
  * WhatsApp exposes a per-number THROUGHPUT LEVEL (STANDARD ~80 msg/s, HIGH up to
- * ~1000 msg/s). When we know it (meta-health snapshot), a large broadcast paces
- * UP toward — but deliberately under — that ceiling: STANDARD → ~64 msg/s, HIGH →
- * ~266 msg/s. Staying under the ceiling is what protects the number's quality
- * rating (over-driving triggers 130429s that drag quality → a tier downgrade).
+ * ~1000 msg/s — Meta's ceilings, which we stay well under). Being under is what
+ * protects the number's quality rating: over-driving triggers 130429s that drag
+ * quality down into a tier downgrade. Being far under, as above, is safe but
+ * slow — the operator must expect a multi-hour 100k send, which also means every
+ * Meta signal validated at t=0 is stale for most of the run.
  * All four knobs are env-tunable so ops can retune without a deploy.
  */
 function envInt(name: string, def: number, min: number, max: number): number {
@@ -367,6 +386,45 @@ function releaseBroadcastTeamSlot(teamId: string): void {
 }
 
 /**
+ * GLOBAL concurrent-broadcast ceiling — the missing half of the pair. The
+ * per-team gate above bounds ONE team; it says nothing about the whole
+ * process. With ~30 tenants each allowed 2 concurrent broadcasts, the
+ * worst-case in-flight lane count was 30 × 2 × 16 = 960 concurrent
+ * recipient sends: far past the Prisma pool, the Meta call budget, and the
+ * heap headroom of a 2GB api container — and it would starve the inbox
+ * (REST + Socket.io share this event loop) for every other tenant at once.
+ * Per-team fairness does not imply a survivable total.
+ *
+ * The runner's own comments already referenced `MAX_RUNNING_BROADCASTS` as
+ * though it existed; it never did. This is that constant.
+ *
+ * Default 6 concurrent broadcasts → a worst-case 6 × 16 = 96 in-flight
+ * recipient sends, which the pool and the Meta budget absorb comfortably.
+ * A broadcast that can't claim a global slot stays `queued` and re-attempts
+ * on the same defer timer as the per-team path, so nothing is dropped —
+ * throughput is deferred, never lost. Tunable via MAX_RUNNING_BROADCASTS.
+ *
+ * Single-process only, like every other in-memory gate here; a second app
+ * instance needs Redis counters (deferred — see CLAUDE.md §16).
+ */
+function maxRunningBroadcasts(): number {
+  const raw = Number.parseInt(process.env.MAX_RUNNING_BROADCASTS ?? "6", 10);
+  return Number.isFinite(raw) && raw > 0 && raw <= 100 ? raw : 6;
+}
+
+let runningBroadcastCount = 0;
+
+function tryAcquireGlobalBroadcastSlot(): boolean {
+  if (runningBroadcastCount >= maxRunningBroadcasts()) return false;
+  runningBroadcastCount += 1;
+  return true;
+}
+
+function releaseGlobalBroadcastSlot(): void {
+  runningBroadcastCount = Math.max(0, runningBroadcastCount - 1);
+}
+
+/**
  * Per-team RECIPIENT-LEVEL concurrency cap. Sits on top of the per-broadcast
  * lane pool (SEND_CONCURRENCY) and the per-team broadcast cap above. Without
  * this, one team running N broadcasts × SEND_CONCURRENCY lanes can call
@@ -545,6 +603,22 @@ export async function startBroadcast(broadcastId: string): Promise<void> {
     return;
   }
 
+  // Global ceiling. Claimed AFTER the team slot so the release paths stay
+  // symmetric — on refusal we hand the team slot straight back, otherwise a
+  // process at the global cap would leak one team slot per deferred attempt
+  // and permanently wedge that team below its own cap.
+  if (!tryAcquireGlobalBroadcastSlot()) {
+    releaseBroadcastTeamSlot(owner.teamId);
+    console.warn(
+      `[broadcast ${broadcastId}] deferred: process at the global ` +
+        `concurrent-broadcast cap (${maxRunningBroadcasts()})`,
+    );
+    setTimeout(() => {
+      if (!shuttingDown) void startBroadcast(broadcastId);
+    }, BROADCAST_TEAM_BUSY_DEFER_MS).unref();
+    return;
+  }
+
   // Fire-and-forget — the caller doesn't await this; we explicitly catch so
   // the unhandled rejection doesn't crash the server.
   const run = runBroadcast(broadcastId)
@@ -554,6 +628,7 @@ export async function startBroadcast(broadcastId: string): Promise<void> {
     .finally(() => {
       inFlightRuns.delete(broadcastId);
       releaseBroadcastTeamSlot(owner.teamId);
+      releaseGlobalBroadcastSlot();
     });
   inFlightRuns.set(broadcastId, run);
 }
@@ -637,7 +712,12 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       // per-recipient queued→sent CAS on resume sends each exactly once.
       const parked = await db.broadcast.updateMany({
         where: { id: broadcast.id, status: "queued" },
-        data: { status: "paused", lastError: msg.slice(0, 1000) },
+        data: {
+          status: "paused",
+          pausedAt: new Date(),
+          pausedReason: "not_connected",
+          lastError: msg.slice(0, 1000),
+        },
       });
       if (parked.count === 0) return; // already canceled / claimed elsewhere
       console.warn(
@@ -1096,7 +1176,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     });
     const paused = await db.broadcast.updateMany({
       where: { id: broadcast.id, status: "running" },
-      data: { status: "paused" },
+      data: { status: "paused", pausedAt: new Date(), pausedReason: "shutdown" },
     });
     console.warn(
       `[broadcast ${broadcast.id}] paused for shutdown — ${queuedRemaining} recipient(s) remain queued`,
@@ -1156,7 +1236,12 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     try {
       const paused = await db.broadcast.updateMany({
         where: { id: broadcast.id, status: "running" },
-        data: { status: "paused", lastError: message.slice(0, 1000) },
+        data: {
+          status: "paused",
+          pausedAt: new Date(),
+          pausedReason: "credentials",
+          lastError: message.slice(0, 1000),
+        },
       });
       if (paused.count > 0) {
         await publish({
@@ -1590,12 +1675,31 @@ async function processOneRecipient(
                 );
           } catch (retryErr) {
             await releaseBroadcastSendAttempt(recipient.id);
+            // STILL rate-limited after the backoff → this is a SUSTAINED limit
+            // (a spam/quality throttle can last ~30 minutes), not a burst.
+            //
+            // Failing the recipient here — which is what used to happen — turns
+            // a temporary throttle into permanent damage: at ~10 msg/s a
+            // 30-minute limit manufactures thousands of "failed" recipients who
+            // were never actually undeliverable, and the operator's only remedy
+            // is a Retry button that re-sends them all.
+            //
+            // Instead: leave the recipient `queued` (the attempt claim was just
+            // released, so it re-sends cleanly) and park the whole broadcast.
+            // The drift sweeper resumes it after its cooldown, by which time the
+            // rate-limit window has cleared. Nobody is marked failed, nobody is
+            // double-sent — the queued→sent CAS still guarantees exactly-once.
+            if (normalizeMetaSendError(retryErr)?.code === "rate_limited") {
+              await pauseForSustainedRateLimit(broadcast);
+              return;
+            }
             await failRecipientAndCount(
               recipient.id,
               errorDetail(retryErr),
               broadcast.id,
               broadcast.teamId,
               pendingBumps,
+              normalizeMetaSendError(retryErr)?.code ?? null,
             );
             // A first error that looked like a rate-limit can resolve into a
             // permanent credential failure on retry (token revoked mid-run,
@@ -1616,6 +1720,7 @@ async function processOneRecipient(
             broadcast.id,
             broadcast.teamId,
             pendingBumps,
+            normalizeMetaSendError(err)?.code ?? null,
           );
           // Permanent-error breaker: a credential that's dead for the whole run
           // (expired/revoked token → `auth_expired`, deconfigured number →
@@ -1648,6 +1753,11 @@ async function processOneRecipient(
         externalId: send.externalId,
         conversationId,
         sentAt: send.timestamp,
+        // Seed the delivery ladder at `sent`. Meta's own `sent` status webhook
+        // is therefore always a no-op, which is why ingest skips propagating it
+        // — that alone removes a third of the webhook write volume on a 100k
+        // campaign. From here the ladder is webhook-owned.
+        deliveryState: "sent",
       },
     });
     if (recipientLocked.count === 0) {
@@ -1674,6 +1784,9 @@ async function processOneRecipient(
           externalId: send.externalId,
           conversationId,
           sentAt: send.timestamp,
+          // Meta accepted this send, so the delivery ladder starts at `sent`
+          // here too — the cancel had wrongly parked it at failed_at_send.
+          deliveryState: "sent",
         },
       });
       if (reconciled.count === 0) {
@@ -1762,6 +1875,12 @@ async function processOneRecipient(
         direction: "out",
         channel: sendChannel,
         status: "sent",
+        // Durable campaign link. `rawPayload.broadcastId` below is kept for
+        // back-compat + the historical backfill, but the rawPayload-retention
+        // sweeper COLLAPSES that blob to {"sentVia":"broadcast"} after its
+        // window — this column is what survives, and it's what lets a status
+        // webhook find the recipient with no extra query.
+        broadcastId: broadcast.id,
         rawPayload: {
           sentVia: "broadcast",
           broadcastId: broadcast.id,
@@ -1838,6 +1957,7 @@ async function processOneRecipient(
 async function markRecipientFailed(
   recipientId: string,
   message: string,
+  errorCode?: string | null,
 ): Promise<boolean> {
   // CAS so a recipient that was already marked `sent` (or `failed`) by a
   // prior pass isn't reverted. Returns whether THIS call actually flipped a
@@ -1845,7 +1965,16 @@ async function markRecipientFailed(
   // `failRecipientAndCount`).
   const res = await db.broadcastRecipient.updateMany({
     where: { id: recipientId, status: "queued" },
-    data: { status: "failed", errorMessage: message.slice(0, 500) },
+    data: {
+      status: "failed",
+      errorMessage: message.slice(0, 500),
+      // Rejected at the API call — the message never entered Meta's network, so
+      // there is no wamid and no status webhook will ever arrive for it. Stamp
+      // the terminal delivery state HERE or these rows would sit at `pending`
+      // forever and the funnel would under-count failures.
+      deliveryState: "failed_at_send",
+      ...(errorCode ? { errorCode } : {}),
+    },
   });
   return res.count > 0;
 }
@@ -1865,8 +1994,11 @@ async function failRecipientAndCount(
   broadcastId: string,
   teamId: string,
   pendingBumps: Set<Promise<unknown>>,
+  /** Normalized MetaErrorCode, when the caller has the underlying error. Drives
+   *  the campaign report's failure buckets (retry / clean list / suppress). */
+  errorCode?: string | null,
 ): Promise<void> {
-  const flipped = await markRecipientFailed(recipientId, message);
+  const flipped = await markRecipientFailed(recipientId, message, errorCode);
   if (flipped) {
     bumpCountersFireAndForget(broadcastId, teamId, { failed: 1 }, pendingBumps);
   }
@@ -1936,9 +2068,14 @@ async function maybeTripPermanentBreaker(
     : isProviderNotConfigured(err)
       ? "WhatsApp connection error — the number is no longer configured."
       : "WhatsApp connection error — the access token expired or was revoked.";
+  // `template` is the one cause auto-resume must NOT retry: only an operator
+  // action in Meta's console fixes it, and every retry burns another
+  // PERMANENT_ERROR_PAUSE_THRESHOLD recipients into `failed` for nothing. A
+  // credential fault, by contrast, self-heals the moment the token is refreshed.
+  const pausedReason = templateFatal ? "template" : "credentials";
   const paused = await db.broadcast.updateMany({
     where: { id: broadcast.id, status: "running" },
-    data: { status: "paused", lastError: reason },
+    data: { status: "paused", pausedAt: new Date(), pausedReason, lastError: reason },
   });
   if (paused.count === 0) {
     // Already left `running` (canceled / completed by a racing path). Leave the
@@ -1959,6 +2096,57 @@ async function maybeTripPermanentBreaker(
 
 function isProviderNotConfigured(err: unknown): boolean {
   return err instanceof ProviderNotConfiguredError;
+}
+
+/**
+ * Park a broadcast because Meta is SUSTAINEDLY rate-limiting it — the recipient
+ * that triggered this stays `queued` and is re-sent on resume.
+ *
+ * Mirrors `maybeTripPermanentBreaker`'s shape (same FATAL_PAUSE claim so lanes
+ * stop, same running→paused CAS, same publish) but is a fundamentally different
+ * verdict: nothing is wrong with the campaign, the number, or the recipients.
+ * We are simply sending faster than Meta currently allows, and the correct
+ * response is to wait rather than to burn the audience into `failed`.
+ *
+ * Recovery is the drift sweeper's cooldown — no operator action needed. That
+ * makes this the one pause the system is expected to enter and leave on its own
+ * during a large campaign.
+ */
+async function pauseForSustainedRateLimit(broadcast: {
+  id: string;
+  teamId: string;
+}): Promise<void> {
+  if (FATAL_PAUSE.has(broadcast.id)) return; // another lane already parked it
+  // Claim in-memory before the DB write so two lanes hitting the wall in the
+  // same tick don't both pause and publish.
+  FATAL_PAUSE.add(broadcast.id);
+  const reason =
+    "Meta is rate-limiting this number — the broadcast paused and will resume " +
+    "automatically once the limit clears. No recipients were lost.";
+  const paused = await db.broadcast.updateMany({
+    where: { id: broadcast.id, status: "running" },
+    data: {
+      status: "paused",
+      pausedAt: new Date(),
+      pausedReason: "rate_limited",
+      lastError: reason,
+    },
+  });
+  if (paused.count === 0) {
+    // Already left `running` (canceled / completed by a racing path). Keep the
+    // FATAL_PAUSE flag set so lanes still stop; the tail clears it.
+    return;
+  }
+  console.warn(
+    `[broadcast ${broadcast.id}] sustained rate limit — pausing; queued recipients are intact and will resume`,
+  );
+  await publish({
+    type: "broadcast.status_changed",
+    teamId: broadcast.teamId,
+    broadcastId: broadcast.id,
+    status: "paused",
+    error: reason,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2259,6 +2447,127 @@ async function fail(broadcastId: string, message: string): Promise<void> {
  *
  * Called from BroadcastsService.onModuleInit.
  */
+/**
+ * Resume `paused` broadcasts: flip each back to `queued` and re-fire the runner.
+ *
+ * Shared by the boot reconciler and the drift sweeper so the subtle parts live
+ * in ONE place — in particular the "no queued recipients left" case, where the
+ * previous process sent everyone but died before stamping `completed`; resuming
+ * that row would otherwise leave it paused forever.
+ *
+ * SAFETY: this never re-sends. The flip is a CAS on `status = 'paused'`, and
+ * each recipient is advanced by its own queued→sent CAS, so a recipient Meta
+ * already accepted is skipped on resume.
+ *
+ * @param pausedBefore Only resume rows paused at/before this instant. The
+ *   sweeper passes a cooldown so a still-broken cause (dead credentials, a
+ *   disabled template) re-parks the row at most once per cooldown instead of
+ *   spinning. Omitted at boot, where every paused row should resume at once.
+ *   Rows with a NULL `pausedAt` (paused before the column existed) always
+ *   qualify — they are by definition old.
+ * @param limit Bound per invocation so a backlog can't thundering-herd the
+ *   runner. Omitted at boot.
+ * @param skipTemplatePauses Exclude `pausedReason: "template"` rows. Set ONLY by
+ *   the cooldown sweeper, whose concern is not re-firing a hopeless cause every
+ *   10 minutes. It must NOT be set at boot: `retryFailed` CASes on
+ *   `status IN ('completed','failed','canceled')`, so it cannot resume a
+ *   `paused` row, and there is no resume route — excluding template pauses
+ *   everywhere would strand such a broadcast PERMANENTLY, with its remaining
+ *   recipients queued forever and no operator action able to release them.
+ *   Boot is therefore the backstop that always resumes everything.
+ * @param teamId Restrict to one tenant. Unset in both production callers (boot
+ *   recovery and the sweep are platform-wide); used to scope a recovery to a
+ *   single org when operating on one, and by tests that must not resume another
+ *   fixture's rows.
+ * @returns how many rows had their paused→queued CAS succeed and were re-fired.
+ *   NOTE this is the count of rows HANDED to the runner, not rows that stayed
+ *   resumed: if the underlying cause is still broken the runner re-parks the row
+ *   moments later, which is the intended cooldown loop.
+ */
+export async function resumePausedBroadcasts({
+  pausedBefore,
+  limit,
+  teamId,
+  skipTemplatePauses = false,
+  label = "broadcast-reconciler",
+}: {
+  pausedBefore?: Date;
+  limit?: number;
+  teamId?: string;
+  skipTemplatePauses?: boolean;
+  label?: string;
+} = {}): Promise<number> {
+  const pausedRows = await db.broadcast.findMany({
+    where: {
+      status: "paused",
+      ...(teamId ? { teamId } : {}),
+      // NEVER auto-resume a template-fatal pause. The template is disabled or
+      // paused at Meta; only an operator can fix that in Meta's console, and
+      // each retry burns another PERMANENT_ERROR_PAUSE_THRESHOLD recipients into
+      // `failed` for nothing. The operator resumes it with Retry once fixed.
+      //
+      // The NULL branch is LOAD-BEARING, not defensive noise. `NOT (col =
+      // 'template')` is SQL three-valued logic: for a NULL `pausedReason` it
+      // evaluates to NULL rather than true, so a bare NOT silently excludes
+      // every row paused before this column existed — the exact rows that must
+      // stay resumable, since that is the behaviour they already had. A test
+      // caught this; do not "simplify" it back.
+      //
+      // Combined under AND because both conditions are OR-groups: two `OR` keys
+      // in one object literal would silently overwrite each other.
+      AND: [
+        ...(skipTemplatePauses
+          ? [{ OR: [{ pausedReason: null }, { pausedReason: { not: "template" } }] }]
+          : []),
+        ...(pausedBefore
+          ? [{ OR: [{ pausedAt: { lte: pausedBefore } }, { pausedAt: null }] }]
+          : []),
+      ],
+    },
+    select: { id: true, teamId: true },
+    ...(limit !== undefined ? { take: limit } : {}),
+  });
+
+  let resumed = 0;
+  for (const row of pausedRows) {
+    const queuedRemaining = await db.broadcastRecipient.count({
+      where: { broadcastId: row.id, status: "queued" },
+    });
+    if (queuedRemaining === 0) {
+      // Nothing to resume — mark completed. This handles the edge case
+      // where the previous process sent every recipient but died before
+      // flipping the parent row to `completed`.
+      await db.broadcast.updateMany({
+        where: { id: row.id, status: "paused" },
+        data: { status: "completed", completedAt: new Date() },
+      });
+      await publish({
+        type: "broadcast.status_changed",
+        teamId: row.teamId,
+        broadcastId: row.id,
+        status: "completed",
+      });
+      continue;
+    }
+
+    const flipped = await db.broadcast.updateMany({
+      where: { id: row.id, status: "paused" },
+      data: { status: "queued" },
+    });
+    if (flipped.count === 0) continue;
+
+    console.warn(
+      `[${label}] resuming broadcast ${row.id} (${queuedRemaining} recipient(s) remaining)`,
+    );
+    // Fire-and-forget — startBroadcast schedules the runner inside
+    // setImmediate via its own mechanics. We don't await so the caller
+    // (onModuleInit / a sweep tick) returns quickly.
+    void startBroadcast(row.id);
+    resumed += 1;
+  }
+  return resumed;
+}
+
 export async function reconcileOrphanedBroadcasts(): Promise<void> {
   // Reset the in-process shutdown flag — if this process previously called
   // signalShutdown() and is now starting fresh (e.g., from a test harness
@@ -2293,53 +2602,12 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
     );
     await db.broadcast.updateMany({
       where: { id: { in: runningOrphans.map((o) => o.id) } },
-      data: { status: "paused" },
+      data: { status: "paused", pausedAt: new Date(), pausedReason: "shutdown" },
     });
   }
 
   // 2) Every `paused` row → flip back to `queued` and re-fire the runner.
-  // updateMany is racing with create() callers but the per-row CAS in
-  // runBroadcast.claim() (status="queued") keeps it race-safe.
-  const pausedRows = await db.broadcast.findMany({
-    where: { status: "paused" },
-    select: { id: true, teamId: true },
-  });
-
-  for (const row of pausedRows) {
-    const queuedRemaining = await db.broadcastRecipient.count({
-      where: { broadcastId: row.id, status: "queued" },
-    });
-    if (queuedRemaining === 0) {
-      // Nothing to resume — mark completed. This handles the edge case
-      // where the previous process sent every recipient but died before
-      // flipping the parent row to `completed`.
-      await db.broadcast.updateMany({
-        where: { id: row.id, status: "paused" },
-        data: { status: "completed", completedAt: new Date() },
-      });
-      await publish({
-        type: "broadcast.status_changed",
-        teamId: row.teamId,
-        broadcastId: row.id,
-        status: "completed",
-      });
-      continue;
-    }
-
-    const flipped = await db.broadcast.updateMany({
-      where: { id: row.id, status: "paused" },
-      data: { status: "queued" },
-    });
-    if (flipped.count === 0) continue;
-
-    console.warn(
-      `[broadcast-reconciler] resuming broadcast ${row.id} (${queuedRemaining} recipient(s) remaining)`,
-    );
-    // Fire-and-forget — startBroadcast schedules the runner inside
-    // setImmediate via its own mechanics. We don't await so onModuleInit
-    // returns quickly.
-    void startBroadcast(row.id);
-  }
+  await resumePausedBroadcasts({ label: "broadcast-reconciler" });
 
   // 3) Re-fire the `queued` orphans snapshotted in step 0. startBroadcast is
   // idempotent (CAS on status="queued" in runBroadcast.claim), so a row that
@@ -2650,8 +2918,9 @@ export async function pruneBroadcastInMemoryStateForTerminalRows(): Promise<void
       progressThrottles.delete(row.id);
       cleared++;
     }
-    // broadcastTeamSlots + teamRecipientSlots are keyed by teamId, not
-    // broadcastId — neither is pruned per-row here. A truly stuck entry would
+    // broadcastTeamSlots + teamRecipientSlots are keyed by teamId, and
+    // runningBroadcastCount is a bare process counter — none is pruned
+    // per-row here. A truly stuck entry would
     // only happen if a runner crashed BETWEEN acquire and the release in
     // `finally`, leaving `active` artificially high. The boot path
     // reconstructs lane state from DB rows and re-fires startBroadcast, which

@@ -27,17 +27,21 @@ import { probeBlob, streamBlob } from "../media/stream-blob";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
-import { zBody } from "../common/zod-validation.pipe";
+import { zBody, zQuery } from "../common/zod-validation.pipe";
 import { ChannelsService } from "./channels.service";
 import {
   AddChannelMembersSchema,
+  BrowseChannelsQuerySchema,
   CreateChannelSchema,
+  CreateDmSchema,
   EditChannelMessageSchema,
   PostChannelMessageSchema,
   ToggleReactionSchema,
   UpdateChannelSchema,
   type AddChannelMembersInput,
+  type BrowseChannelsQuery,
   type CreateChannelInput,
+  type CreateDmInput,
   type EditChannelMessageInput,
   type PostChannelMessageInput,
   type ToggleReactionInput,
@@ -66,6 +70,12 @@ import {
  *   GET    /api/team/channels/:id/messages/:mid/media      — auth-gated redirect to attachment CDN URL
  *   GET    /api/team/channels/search                       — ?q workspace-wide substring search
  *   POST   /api/team/channels/:id/media                    — upload file (multipart)
+ *   GET    /api/team/channels/dms                          — the viewer's 1:1 DMs
+ *   POST   /api/team/channels/dm                           — open/create a 1:1 DM
+ *   GET    /api/team/channels/browse                       — ?q public channels (metadata only)
+ *   POST   /api/team/channels/:id/join                     — self-serve join a public channel
+ *   GET    /api/team/channels/:id/preview                  — public channel metadata (non-members)
+ *   GET    /api/team/channels/unread-count                 — unread @mention count (rail badge)
  */
 @Controller("api/team/channels")
 @UseGuards(SessionGuard)
@@ -78,14 +88,50 @@ export class ChannelsController {
     return { items };
   }
 
-  // `default` and `search` are static segments — must come before any `:id`
-  // route below so Express doesn't match them as a channel id. The
-  // `RESERVED_NAMES` set in shared/team-chat/types.ts refuses channel
-  // creation with these slugs as defense in depth.
+  // `default`, `search`, `dms`, `browse` and `unread-count` are static
+  // segments — they MUST come before any `:id` route below or Express matches
+  // them as a channel id. The `RESERVED_NAMES` set in
+  // shared/team-chat/types.ts refuses channel creation with these slugs as
+  // defense in depth. Keep the two lists in sync.
   @Get("default")
   async getDefault(@CurrentSession() session: ApiSession) {
-    const channel = await this.channels.getDefault(session.teamId);
+    const channel = await this.channels.getDefault(session.teamId, session.userId);
     return { channel };
+  }
+
+  /** The viewer's 1:1 DMs. Membership-filtered server-side. */
+  @Get("dms")
+  async listDms(@CurrentSession() session: ApiSession) {
+    const items = await this.channels.listDirectMessages(
+      session.teamId,
+      session.userId,
+    );
+    return { items };
+  }
+
+  /**
+   * Public channels in the team, including ones the viewer hasn't joined.
+   * METADATA ONLY — never message bodies or previews (see browsePublicChannels).
+   */
+  @Get("browse")
+  async browse(
+    @CurrentSession() session: ApiSession,
+    @Query(zQuery(BrowseChannelsQuerySchema)) query: BrowseChannelsQuery,
+  ) {
+    return this.channels.browse(session.teamId, session.userId, query.q || null, {
+      before: query.before,
+      take: query.take,
+    });
+  }
+
+  /** Authoritative unread-@mention count for the app-rail badge. */
+  @Get("unread-count")
+  async unreadCount(@CurrentSession() session: ApiSession) {
+    const mentions = await this.channels.unreadMentionCount(
+      session.teamId,
+      session.userId,
+    );
+    return { mentions };
   }
 
   /**
@@ -172,6 +218,50 @@ export class ChannelsController {
     @Body(zBody(CreateChannelSchema)) body: CreateChannelInput,
   ) {
     const channel = await this.channels.create(session.teamId, session.userId, session.role, body);
+    return { channel };
+  }
+
+  /**
+   * Open (or re-open) a 1:1 DM with a teammate. Idempotent — the (teamId,
+   * dmKey) unique guarantees one row per pair, so calling this repeatedly
+   * always resolves to the same channel. `dm` can't collide with the bare
+   * @Post() above because that route has no path segment.
+   */
+  @Post("dm")
+  async createDm(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(CreateDmSchema)) body: CreateDmInput,
+  ) {
+    const channel = await this.channels.createOrGetDm(
+      session.teamId,
+      session.userId,
+      body.userId,
+    );
+    return { channel };
+  }
+
+  /**
+   * Self-serve join of a public channel. 404s on private channels rather than
+   * 403 so a non-member can't confirm one exists.
+   */
+  @Post(":id/join")
+  async join(@CurrentSession() session: ApiSession, @Param("id") id: string) {
+    const { joined } = await this.channels.joinPublicChannel(
+      session.teamId,
+      session.userId,
+      id,
+    );
+    return { ok: true, joined };
+  }
+
+  /**
+   * Metadata for a public channel the viewer hasn't joined — backs the
+   * "join to see this channel" card when someone lands on its URL directly.
+   * Returns `{ channel: null }` for private channels and DMs.
+   */
+  @Get(":id/preview")
+  async preview(@CurrentSession() session: ApiSession, @Param("id") id: string) {
+    const channel = await this.channels.getPreview(session.teamId, id);
     return { channel };
   }
 

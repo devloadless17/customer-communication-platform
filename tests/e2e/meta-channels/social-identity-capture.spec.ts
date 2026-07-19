@@ -19,6 +19,7 @@
  */
 
 import { test, expect } from "@playwright/test";
+import { Prisma } from "@prisma/client";
 
 import { db } from "../_helpers/db";
 import {
@@ -166,7 +167,7 @@ function socialQuickReply(o: { senderId: string; mid: string; payload: string })
  */
 async function seedOffer(
   conversationId: string,
-  interactive: Record<string, unknown>,
+  interactive: Prisma.InputJsonObject,
   externalId: string,
 ) {
   await db().message.create({

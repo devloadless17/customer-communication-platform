@@ -14,11 +14,77 @@ import type { TeamStatus } from "@ccp/shared/types";
 export type { PlatformAnalytics, SuperAdminTeamDetail, SuperAdminTeamRow };
 
 /**
+ * Short-TTL memo for the two cross-team AGGREGATE reads below.
+ *
+ * WHY. Both walk every row a tenant owns. The roster's `_count.messages`
+ * resolves to one index-only scan of `Message_teamId_timestamp_id_idx` per
+ * team, so across N teams it scans the whole message index once;
+ * `getPlatformAnalytics` then does the same again with an unfiltered
+ * `message.count()`. At a 20M-message platform that is seconds of work
+ * holding pool connections the customer-facing inbox and webhook ingest
+ * share — and nothing stopped an admin from re-triggering it by refreshing.
+ *
+ * The reasoning in the comments below is about TEAM count staying low, which
+ * is true and beside the point: the cliff is rows-per-team, and it is reached
+ * by one large customer, not by many customers.
+ *
+ * A memo is the right fix rather than approximate counts (`reltuples`) —
+ * these are displayed as exact figures on an admin dashboard, and silently
+ * making them estimates is the kind of change nobody notices until they are
+ * reconciling numbers. 60s of staleness on a platform overview is invisible;
+ * the repeated full scans are not. Deliberately NOT applied to
+ * `getTeamDetailForSuperAdmin` — that one is scoped to a single team and is
+ * read right after an admin acts on it, where staleness would be confusing.
+ */
+const AGGREGATE_TTL_MS = 60_000;
+const aggregateCache = new Map<string, { at: number; value: unknown }>();
+/**
+ * Bumped by every invalidation. A load that STARTED before the bump must not
+ * write its result, because that result was snapshotted before the mutation
+ * the invalidation is announcing.
+ *
+ * Without this, `clear()` landing mid-load was silently undone by the very
+ * load it meant to discard — and worse, the stale value got re-stamped with a
+ * fresh `at`, buying it a full TTL. The concrete failure: an admin refreshes
+ * the platform page, the roster load takes a couple of seconds (it walks
+ * `_count.messages` per team), a new org registers during that window, and the
+ * approval queue then hides that org for the next 60 seconds no matter how
+ * many times they refresh — the exact symptom the invalidation exists to
+ * prevent.
+ */
+let aggregateEpoch = 0;
+
+async function memoAggregate<T>(key: string, load: () => Promise<T>): Promise<T> {
+  const hit = aggregateCache.get(key);
+  if (hit && Date.now() - hit.at < AGGREGATE_TTL_MS) return hit.value as T;
+  const startedAt = aggregateEpoch;
+  const value = await load();
+  // Only cache when nothing invalidated while we were loading. The caller
+  // still gets this value — it is the freshest read we have — it just doesn't
+  // get to poison the cache for the next 60s.
+  if (startedAt === aggregateEpoch) {
+    aggregateCache.set(key, { at: Date.now(), value });
+  }
+  return value;
+}
+
+/** Drop the memo so the next read is fresh — called after a mutation that
+ *  changes what these report (org approve / suspend / delete / register). */
+export function invalidateSuperAdminAggregates(): void {
+  aggregateEpoch += 1;
+  aggregateCache.clear();
+}
+
+/**
  * Every team on the platform with aggregate counts. Built from one query
  * per aggregate — fine at low team-count (single-VPS pilot). At >100 teams
  * we'd swap to a single SQL query with LATERAL joins; not worth it yet.
  */
 export async function listAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> {
+  return memoAggregate("roster", () => loadAllTeamsForSuperAdmin());
+}
+
+async function loadAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> {
   const teams = await db.team.findMany({
     // createdAt-asc here; the platform page re-groups status-first (pending
     // queue on top) using this as the stable within-group order.
@@ -156,6 +222,10 @@ export async function getTeamDetailForSuperAdmin(
  * fine at single-VPS pilot scale.
  */
 export async function getPlatformAnalytics(): Promise<PlatformAnalytics> {
+  return memoAggregate("analytics", () => loadPlatformAnalytics());
+}
+
+async function loadPlatformAnalytics(): Promise<PlatformAnalytics> {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const [byStatus, users, contacts, conversations, messages, broadcasts, newOrgsLast30d, pendingOrgs] =
     await Promise.all([

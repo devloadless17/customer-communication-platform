@@ -38,6 +38,21 @@
       <p id="hint" style="font-size: 13px"></p>
     </div>
     <script>
+      // Pre-fill from ?key= so Settings → Website chat can deep-link straight
+      // into a working test, instead of asking the operator to copy a 30-char
+      // key by hand (the #1 way a "the widget doesn't work" support ticket
+      // turns out to be a typo). Validated against the key shape rather than
+      // injected blind — this value lands in a DOM attribute.
+      (function preFill() {
+        try {
+          var q = new URLSearchParams(window.location.search).get("key");
+          if (q && /^wc_pk_[A-Za-z0-9]{8,64}$/.test(q)) {
+            document.getElementById("key").value = q;
+            document.getElementById("hint").textContent =
+              "Key loaded from Settings — pick a deploy mode above.";
+          }
+        } catch (e) { /* no URLSearchParams (ancient browser) — type it manually */ }
+      })();
       function key() { var k = document.getElementById("key").value.trim(); if (!k) document.getElementById("hint").textContent = "Enter a public key first."; return k; }
       function inject(attrs) {
         if (document.getElementById("ccp-webchat-root")) { document.getElementById("hint").textContent = "Widget already loaded — reload the page to try another mode."; return; }

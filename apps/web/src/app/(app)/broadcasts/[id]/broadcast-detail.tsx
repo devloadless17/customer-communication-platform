@@ -22,6 +22,7 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
 import { cn, formatPhone } from "@ccp/shared/utils";
 import { BroadcastStatusBadge } from "../broadcast-status-badge";
+import { BroadcastReport, type BroadcastReportDto } from "./broadcast-report";
 
 /**
  * Broadcast detail client component.
@@ -260,6 +261,35 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
       // Best effort — transient network blips just skip a tick.
     }
   };
+
+  // The campaign report (funnel, failure buckets, diagnostics) is a SEPARATE
+  // fetch from the detail poll above on purpose: it runs aggregate queries, and
+  // the detail endpoint is polled every 2s while sending. Refreshed on mount, on
+  // a much slower cadence while the campaign is live, and once more when it
+  // finishes — delivery and read receipts keep arriving for hours after the last
+  // send, so the final numbers are not known at completion time.
+  const [report, setReport] = useState<BroadcastReportDto | null>(null);
+  const reportRef = useRef<() => Promise<void>>(async () => {});
+  reportRef.current = async () => {
+    try {
+      const res = await apiFetch(`/api/broadcasts/${data.id}/report`);
+      if (!res.ok) return;
+      const json = (await res.json()) as { report?: BroadcastReportDto };
+      if (cancelledRef.current || !json.report) return;
+      setReport(json.report);
+    } catch {
+      // Advisory surface — a failed fetch just leaves the previous numbers.
+    }
+  };
+  useEffect(() => {
+    void reportRef.current();
+    const live =
+      data.status === "queued" || data.status === "running" || data.status === "materializing";
+    if (!live) return;
+    const t = window.setInterval(() => void reportRef.current(), 8_000);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.id, data.status]);
 
   // Debounced refresh used by the socket progress handler. A 10k-recipient
   // broadcast fires ~25 progress events/s (one per send, see broadcast-
@@ -533,6 +563,34 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
             : " · paused for server restart, will auto-resume")}
       </div>
 
+      {/* Campaign report. Sits directly under the progress bar because the
+          operator's questions are, in order: did it work → what went wrong and
+          what do I do → who do I follow up with. The template snapshot is audit
+          material, so it moves below this. */}
+      {report && report.funnel.targeted > 0 && (
+        <section className="rounded-xl border border-border bg-card p-4">
+          <BroadcastReport
+            report={report}
+            onFilter={(filter) => {
+              // Deep-link a funnel stage / failure bucket into the recipient
+              // table below. Today the table filters by send-side status; the
+              // richer outcome buckets land with the filter model in a later
+              // phase, so map what we can and always scroll the user to the
+              // list rather than silently doing nothing.
+              const value = filter.split("=")[1] ?? "all";
+              if (filter.startsWith("outcome=")) {
+                if (value === "failed" || value === "never_received") setStatusFilter("failed");
+                else if (value === "all") setStatusFilter("all");
+              }
+              document.getElementById("broadcast-recipients")?.scrollIntoView({
+                behavior: "smooth",
+                block: "start",
+              });
+            }}
+          />
+        </section>
+      )}
+
       <section className="rounded-xl border border-border bg-card">
         <header className="border-b border-border bg-muted/30 px-4 py-3">
           <div className="text-sm font-semibold">Template snapshot</div>
@@ -565,7 +623,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card">
+      <section id="broadcast-recipients" className="rounded-xl border border-border bg-card">
         <header className="flex flex-col gap-3 border-b border-border bg-muted/30 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div className="text-sm font-semibold">Recipients</div>

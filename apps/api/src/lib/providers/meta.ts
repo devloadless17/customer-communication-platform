@@ -247,6 +247,16 @@ interface MetaChangeValue {
   //     cap as a number).
   //   account_alerts → generic alert envelope (no reliable tier — we re-poll).
   current_limit?: string;
+  // `user_preferences` webhook: Meta reports a WhatsApp user's marketing
+  // messaging preference. `value` is "stop" | "resume"; `category` is
+  // "marketing". This is the ONLY signal allowed to CLEAR an opt-out.
+  user_preferences?: Array<{
+    wa_id?: string;
+    detail?: string;
+    category?: string;
+    value?: string;
+    timestamp?: string;
+  }>;
   max_daily_conversation_per_phone?: number | string;
   max_phone_numbers_per_business?: number | string;
   // WhatsApp Coexistence webhook fields (one number on both the Business App +
@@ -338,6 +348,23 @@ interface MetaStatus {
   status?: string;
   timestamp?: string;
   recipient_id?: string;
+  /**
+   * Billing metadata Meta attaches to a status (usually `sent`). Carries the
+   * conversation CATEGORY and whether it is billable — never a price, because
+   * rates are per-country cards that change quarterly. The campaign report
+   * counts billable conversations by category and lets the operator apply their
+   * own rate card; storing a computed amount would freeze a wrong number into
+   * the audit trail.
+   */
+  pricing?: {
+    billable?: boolean;
+    pricing_model?: string;
+    category?: string;
+  };
+  conversation?: {
+    id?: string;
+    origin?: { type?: string };
+  };
   /** Present on `status: "failed"` — the actual delivery-rejection reason. */
   errors?: Array<{
     code?: number;
@@ -1060,6 +1087,28 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           continue;
         }
 
+        // Marketing opt-out / opt-in. Meta reports when a WhatsApp user stops (or
+        // resumes) marketing messages from this business. Ingest applies it to
+        // Contact.marketingOptOutAt, which the broadcast audience resolver then
+        // suppresses on. Dropped entirely before this existed.
+        if (change.field === "user_preferences") {
+          for (const pref of value.user_preferences ?? []) {
+            const waId = pref.wa_id;
+            const val = pref.value?.toLowerCase();
+            if (!waId || (val !== "stop" && val !== "resume")) continue;
+            events.push({
+              kind: "marketing_preference",
+              contactPhone: waId.replace(/\D/g, ""),
+              optedOut: val === "stop",
+              timestamp: pref.timestamp
+                ? new Date(Number(pref.timestamp) * 1000)
+                : new Date(),
+              rawPayload: payload as Record<string, unknown>,
+            });
+          }
+          continue;
+        }
+
         // Number messaging-health: Meta pushes the phone number's messaging-limit
         // TIER (how many unique customers it may message per 24h) via
         // `phone_number_quality_update` (`current_limit`) and
@@ -1568,6 +1617,21 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             ...(errorCode !== undefined ? { errorCode } : {}),
             ...(errorTitle !== undefined ? { errorTitle } : {}),
             ...(errorDetail !== undefined ? { errorDetail } : {}),
+            // Billing metadata, when Meta attached it (normally on `sent`).
+            // Narrow, named shape rather than the raw Meta object: the provider
+            // layer's job is to translate wire shapes, and NormalizedStatusUpdate
+            // is a cross-channel contract that must not grow WhatsApp blobs.
+            ...(s.pricing
+              ? {
+                  pricing: {
+                    ...(typeof s.pricing.billable === "boolean"
+                      ? { billable: s.pricing.billable }
+                      : {}),
+                    ...(s.pricing.category ? { category: s.pricing.category } : {}),
+                    ...(s.pricing.pricing_model ? { model: s.pricing.pricing_model } : {}),
+                  },
+                }
+              : {}),
             timestamp: ts,
             rawPayload: payload as Record<string, unknown>,
           };

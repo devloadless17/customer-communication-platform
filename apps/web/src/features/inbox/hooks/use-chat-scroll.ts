@@ -100,6 +100,11 @@ export function useChatScroll({
   scrollToBottom: () => void;
   markBenignTailUpdate: () => void;
   releaseStickToBottom: () => void;
+  /** Is the viewport currently pinned to the newest message? Read at call time
+   *  (a getter, not a snapshot) so a caller holding it across renders always
+   *  sees the live value. Used by the thread-slice trim, which must never drop
+   *  history out from under someone who has scrolled up to read it. */
+  isStuckToBottom: () => boolean;
 } {
   const stickyRef = useRef(true);
   const settleStopRef = useRef<(() => void) | null>(null);
@@ -484,5 +489,11 @@ export function useChatScroll({
     stickyRef.current = false;
   }, []);
 
-  return { unreadBelow, scrollToBottom, markBenignTailUpdate, releaseStickToBottom };
+  return {
+    unreadBelow,
+    scrollToBottom,
+    markBenignTailUpdate,
+    releaseStickToBottom,
+    isStuckToBottom: () => stickyRef.current,
+  };
 }

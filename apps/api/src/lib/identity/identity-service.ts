@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { EPHEMERAL_CONTACT_CHANNELS } from "@ccp/shared/providers/capabilities";
 
 /**
  * Unified customer identity resolution (§6 / docs/identity.md).
@@ -80,12 +81,25 @@ export async function findExistingCustomerIdByStrongKey(
   // person — adopt its customer. Oldest wins so the canonical customer is stable
   // regardless of sweep order. `id` is optional: at ingest the contact row
   // doesn't exist yet, so there's nothing to exclude.
+  //
+  // EPHEMERAL channels are excluded from the CANDIDATE set — a strong key is only
+  // strong when the vendor verified the identity behind it, and a website-widget
+  // visitor is anonymous (`webchat-prechat.ts` refuses to merge FROM this data for
+  // exactly that reason). Without this exclusion the same merge happens from the
+  // far side: a stranger types a known customer's number into the public pre-chat
+  // box, it lands on their widget contact, and the real owner's next WhatsApp
+  // inbound resolves that number, finds the widget contact, and adopts ITS
+  // customer — folding the stranger's live thread into the real person's profile
+  // and linked-channels switcher. The value is still STORED on the contact (the
+  // agent can see and act on it); it just never acts as a key. Re-enabling
+  // requires verifying the number/address first (SMS/email code) — see §6.
   const match = await client.contact.findFirst({
     where: {
       teamId,
       ...(contact.id ? { id: { not: contact.id } } : {}),
       customerId: { not: null },
       deletedAt: null,
+      identityChannel: { notIn: [...EPHEMERAL_CONTACT_CHANNELS] },
       OR: strongKeys,
     },
     select: { customerId: true },

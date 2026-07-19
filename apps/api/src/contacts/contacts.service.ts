@@ -13,6 +13,7 @@ import { getCountryFromPhone } from "@ccp/shared/utils";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import {
   countAudienceContacts,
+  directoryContactWhere,
   ensureDefaultStage,
   listContacts,
   listPeople,
@@ -650,61 +651,77 @@ export class ContactsService {
 
     // Reload ALL ownedIds (not just succeeded) — emitting the current truth
     // for a failed update is harmless and keeps the socket payload simple.
-    const updated = await this.db.contact.findMany({
-      where: { teamId, id: { in: ownedIds } },
-      include: { tags: { select: { id: true } } },
-    });
-    // Per-contact events for workflow + audit subscribers (granular
-    // trigger dispatch). `suppressSocketFanout: true` skips the per-contact
-    // socket emit — the coalesced `contact.bulk_updated` below carries
-    // the whole id set in one frame instead.
     //
-    // Bounded 16-lane fanout so the subscriber chain doesn't pin the event
-    // loop on a 500-id bulk-tag. Per-subscriber try/catch in the bus
-    // prevents one bad subscriber from breaking the rest.
-    await runWithConcurrency(updated, 16, async (c) => {
-        const tagIds = c.tags.map((t) => t.id);
-        const payload: Contact = toContactWire(c, { tagIds });
-        const before = hadTag.get(c.id) ?? false;
-        const now = tagIds.includes(tagId);
-        const actuallyChanged = before !== now;
-        const tagChanges = actuallyChanged
-          ? action === "tag-add"
-            ? { added: [tagId], removed: [] }
-            : { added: [], removed: [tagId] }
-          : { added: [], removed: [] };
-
-        await this.bus.publish({
-          type: "contact.updated",
-          teamId,
-          contact: payload,
-          previousStageId: c.stageId,
-          fieldChanges: [],
-          tagChanges,
-          changedByUserId: userId,
-          workflowContact: workflowContactSnapshot(c),
-          suppressSocketFanout: true,
-        });
-
-        // Narrow `contact.tag_changed` only when membership actually shifted.
-        if (actuallyChanged) {
-          await this.bus.publish({
-            type: "contact.tag_changed",
-            teamId,
-            contactId: c.id,
-            before: {
-              tagIds:
-                action === "tag-add"
-                  ? tagIds.filter((id) => id !== tagId)
-                  : [...tagIds, tagId],
-            },
-            after: { tagIds },
-            added: tagChanges.added,
-            removed: tagChanges.removed,
-            changedByUserId: userId,
-          });
-        }
+    // Reloaded and fanned out in CHUNKS. The comments below reason about "a
+    // 500-id bulk-tag", which is the explicit-id cap (MAX_BULK_IDS) — but
+    // filter mode ("select all N matching") caps at MAX_FILTER_MATCH = 50_000,
+    // and this reload pulled every one of those as a FULL Contact row,
+    // customFields JSONB included, into a single Prisma result. Several
+    // hundred MB of heap in one request against a 2GB container, before the
+    // fanout below adds up to two OutboundEvent INSERTs per contact on top.
+    // Chunking does identical total work — every contact still gets its
+    // per-contact events, because workflow triggers and the audit trail depend
+    // on them — but the resident set stays bounded by the chunk, not by the
+    // tenant's contact count.
+    const RELOAD_CHUNK = 1_000;
+    for (let i = 0; i < ownedIds.length; i += RELOAD_CHUNK) {
+      const chunkIds = ownedIds.slice(i, i + RELOAD_CHUNK);
+      const updated = await this.db.contact.findMany({
+        where: { teamId, id: { in: chunkIds } },
+        include: { tags: { select: { id: true } } },
       });
+      // Per-contact events for workflow + audit subscribers (granular
+      // trigger dispatch). `suppressSocketFanout: true` skips the per-contact
+      // socket emit — the coalesced `contact.bulk_updated` below carries
+      // the whole id set in one frame instead.
+      //
+      // Bounded 16-lane fanout so the subscriber chain doesn't pin the event
+      // loop on a 500-id bulk-tag. Per-subscriber try/catch in the bus
+      // prevents one bad subscriber from breaking the rest.
+      await runWithConcurrency(updated, 16, async (c) => {
+          const tagIds = c.tags.map((t) => t.id);
+          const payload: Contact = toContactWire(c, { tagIds });
+          const before = hadTag.get(c.id) ?? false;
+          const now = tagIds.includes(tagId);
+          const actuallyChanged = before !== now;
+          const tagChanges = actuallyChanged
+            ? action === "tag-add"
+              ? { added: [tagId], removed: [] }
+              : { added: [], removed: [tagId] }
+            : { added: [], removed: [] };
+
+          await this.bus.publish({
+            type: "contact.updated",
+            teamId,
+            contact: payload,
+            previousStageId: c.stageId,
+            fieldChanges: [],
+            tagChanges,
+            changedByUserId: userId,
+            workflowContact: workflowContactSnapshot(c),
+            suppressSocketFanout: true,
+          });
+
+          // Narrow `contact.tag_changed` only when membership actually shifted.
+          if (actuallyChanged) {
+            await this.bus.publish({
+              type: "contact.tag_changed",
+              teamId,
+              contactId: c.id,
+              before: {
+                tagIds:
+                  action === "tag-add"
+                    ? tagIds.filter((id) => id !== tagId)
+                    : [...tagIds, tagId],
+              },
+              after: { tagIds },
+              added: tagChanges.added,
+              removed: tagChanges.removed,
+              changedByUserId: userId,
+            });
+          }
+        });
+    }
 
     // One coalesced socket frame for the whole batch. At 25 agents online
     // a 500-contact bulk-tag drops from ~12,500 socket frames to 25.
@@ -1627,8 +1644,11 @@ export class ContactsService {
     const EXPORT_HARD_CAP = 50_000;
     const [contacts, fieldDefs, stages] = await Promise.all([
       this.db.contact.findMany({
-        // Export is a directory dump — soft-deleted contacts stay out.
-        where: { teamId, deletedAt: null },
+        // Export is a directory dump — soft-deleted contacts stay out, and so do
+        // anonymous ephemeral (website-widget) visitors: a `vis_<uuid>` with no
+        // phone or email is a chat session, not a row anyone can re-import or act
+        // on. A visitor who gave us an address is promoted and DOES export.
+        where: { teamId, deletedAt: null, ...directoryContactWhere },
         select: {
           phoneNumber: true,
           name: true,
@@ -1750,7 +1770,9 @@ export class ContactsService {
     // gave you a partial file of N"). When truncated, run a real count over the
     // same predicate; otherwise the loaded length IS the total.
     const total = truncated
-      ? await this.db.contact.count({ where: { teamId, deletedAt: null } })
+      ? await this.db.contact.count({
+          where: { teamId, deletedAt: null, ...directoryContactWhere },
+        })
       : contacts.length;
     // Date-stamp so multiple exports in a day don't overwrite each other. When
     // truncated, encode the cap in the filename itself — the export is a plain
@@ -1773,7 +1795,12 @@ export class ContactsService {
    * union logic.
    */
   async countAll(teamId: string): Promise<number> {
-    return this.db.contact.count({ where: { teamId, deletedAt: null } });
+    // Directory-scoped, matching the list: this feeds the broadcast wizard's
+    // "All contacts" card, and anonymous widget visitors are neither listed nor
+    // broadcastable — counting them would promise an audience we can't reach.
+    return this.db.contact.count({
+      where: { teamId, deletedAt: null, ...directoryContactWhere },
+    });
   }
 
   /**

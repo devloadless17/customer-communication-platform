@@ -411,6 +411,19 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * A website-widget VISITOR is typing in this conversation. Distinct from
+   * `typing:update` (that carries teammate userIds; a visitor is not a user).
+   * The widget gateway relays the visitor's `visitor:typing {on}` to the agent
+   * conversation room so the inbox can show "the customer is typing…". Only
+   * `webchatwidget` threads ever emit this. Scoped to the conversation room
+   * (not team-wide) — same fanout scope as `typing:update`.
+   */
+  "conversation:visitor_typing": (payload: {
+    conversationId: string;
+    on: boolean;
+  }) => void;
+
+  /**
    * Snapshot of which teammates currently have this conversation OPEN in
    * their inbox UI. Different from `typing:update` — that fires on every
    * keystroke transition; this fires on subscribe/unsubscribe.
@@ -676,12 +689,23 @@ export interface ServerToClientEvents {
     optimistic?: boolean;
   }) => void;
 
-  /** A message was pinned or unpinned in a channel. */
+  /**
+   * A message was pinned or unpinned in a channel.
+   *
+   * The pin metadata is carried so the client can synthesize the ChannelPinDto
+   * from the message it already holds instead of refetching the whole pin
+   * list. It still falls back to a refetch when the pinned message is off the
+   * loaded slice — and the reconnect refetch stays as the convergence path.
+   * Fields are null on unpin.
+   */
   "team:channel:pin:changed": (payload: {
     teamId: string;
     channelId: string;
     messageId: string;
     pinned: boolean;
+    pinnedAt: string | null;
+    pinnedById: string | null;
+    pinnedByName: string | null;
   }) => void;
 
   /**
@@ -737,6 +761,19 @@ export interface ServerToClientEvents {
     name?: string;
     avatarUrl?: string | null;
   }) => void;
+
+  /**
+   * A 1:1 DM was created; the recipient should surface it in their sidebar.
+   *
+   * Emitted ONLY to the two participants' `user:` rooms — never the team
+   * room, because the existence of a DM between two people is itself private.
+   *
+   * Deliberately ID-ONLY: no peer name, no avatar, no preview. The client
+   * responds by refetching `GET /api/team/channels/dms`, which is membership-
+   * filtered server-side, so the frame itself can't disclose anything even if
+   * it were ever mis-routed. Do not "helpfully" enrich this payload.
+   */
+  "team:dm:created": (payload: { teamId: string; channelId: string }) => void;
 
   /**
    * Typing snapshot for a thread. Rides the channel room (so any tab with

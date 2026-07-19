@@ -59,7 +59,30 @@ const MAX_PAGES_PER_TICK = 4;
 // by their object-key prefix. These must be skipped by the orphan scan or
 // they'd be deleted as false orphans. Avatars (lib/blob-storage/avatar.ts) live
 // under `avatars/`.
-const URL_ONLY_KEY_PREFIXES = ["avatars/"] as const;
+//
+// `ai-knowledge/` and `ai-voice-draft/` are here for the SAME reason and were
+// missing, which made this sweeper permanently DESTROY customer data rather
+// than merely leak storage:
+//   - `ai-knowledge/{teamId}/{uuid}` (team/ai-assistant/ai-knowledge.service.ts)
+//     is referenced ONLY by `AiContextDocument.r2Key`.
+//   - `ai-voice-draft/{teamId}/{messageId}.mp3` (lib/ai/voice-delivery.ts) is
+//     referenced ONLY by the AI suggestion's `audioR2Key`.
+// `listKeys` walks the WHOLE bucket with no prefix filter, and the cross-check
+// below queries only Message.mediaKey / Message.mediaThumbnailKey /
+// TeamChannelMessage.mediaKey — so once past the grace window both categories
+// were classified as orphans and deleted, leaving the DB row pointing at a dead
+// key. For a knowledge doc that is the customer's uploaded source file, gone,
+// with `reprocess` throwing BlobObjectNotFoundError forever after.
+//
+// Excluding by prefix is the FAIL-SAFE choice and deliberate: the worst case is
+// unreclaimed storage, whereas a cross-check with a wrong column name deletes
+// data on the next weekly tick. Reclaiming these two categories properly means
+// adding their own cross-checks (`AiContextDocument.r2Key` and the suggestion's
+// `audioR2Key`) alongside the three below — worth doing, but not at the price
+// of risking the destructive direction to get there.
+// (`ai-voice/` — the SENT voice note — needs no entry: send-media-internal
+// stores it on `Message.mediaKey`, so the existing cross-check covers it.)
+const URL_ONLY_KEY_PREFIXES = ["avatars/", "ai-knowledge/", "ai-voice-draft/"] as const;
 // URL-only categories that DON'T have a distinguishing key prefix. Template
 // header media (messages.service.ts `uploadTemplateHeaderMedia`) lives under the
 // shared `media/` prefix, but its stable URL is the only persisted reference —

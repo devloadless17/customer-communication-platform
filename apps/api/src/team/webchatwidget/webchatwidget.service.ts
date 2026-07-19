@@ -52,6 +52,7 @@ function buildConfig(
   if (input.agentAvatarDataUrl !== undefined) next.agentAvatarDataUrl = input.agentAvatarDataUrl || undefined;
   if (input.fontFamily !== undefined) next.fontFamily = input.fontFamily;
   if (input.themeMode !== undefined) next.themeMode = input.themeMode;
+  if (input.soundEnabled !== undefined) next.soundEnabled = input.soundEnabled;
   if (input.launcher !== undefined) next.launcher = input.launcher;
   if (input.position !== undefined) next.position = input.position;
   if (input.launcherLabel !== undefined) next.launcherLabel = input.launcherLabel;

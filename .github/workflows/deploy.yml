@@ -626,6 +626,15 @@ jobs:
             R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
             R2_BUCKET=${R2_BUCKET}
             META_GRAPH_VERSION=v25.0
+            # Raw webhook-body retention (days). Message.rawPayload keeps the
+            # ORIGINAL provider payload for debugging; the sweeper that clears it
+            # is opt-in and was unset, i.e. we kept every raw body FOREVER. At a
+            # few KB per message that is GBs/month of pure debug data sharing a
+            # disk with both the database and its backups — and a full disk takes
+            # Postgres read-only AND stops backups at the same moment. 90d is the
+            # sweeper's documented floor: comfortably beyond the inbound-media
+            # re-download window, still long enough to debug anything real.
+            MESSAGE_RAWPAYLOAD_RETENTION_DAYS=90
             # AI Assistant (OpenAI). OPENAI_API_KEY is the only hard gate —
             # empty = the assistant no-ops. The model ids match the code
             # defaults; they live here so the whole subsystem is tunable from

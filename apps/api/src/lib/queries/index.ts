@@ -16,8 +16,10 @@ export {
 
 export {
   CONTACTS_PAGE,
+  DIRECTORY_CONTACT_SQL,
   buildContactFilterWhere,
   countContacts,
+  directoryContactWhere,
   listContactFieldDefinitions,
   listContacts,
   listPeople,
@@ -29,6 +31,7 @@ export type { ListContactsOpts } from "./contacts";
 export {
   getPlatformAnalytics,
   getTeamDetailForSuperAdmin,
+  invalidateSuperAdminAggregates,
   listAllTeamsForSuperAdmin,
 } from "./super-admin";
 export type {

@@ -12,6 +12,7 @@ import type { Request } from "express";
 import { z } from "zod";
 
 import { hashPassword } from "@/auth/password";
+import { invalidateSuperAdminAggregates } from "@/lib/queries";
 import {
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
@@ -122,13 +123,29 @@ export class RegisterController {
         // every future invite-accepted user is also auto-added to the default
         // channel via apps/api/src/team/invites/.
         const channel = await tx.teamChannel.create({
-          data: { teamId: team.id, name: "general", isDefault: true, createdById: user.id },
+          data: {
+            teamId: team.id,
+            name: "general",
+            isDefault: true,
+            // EXPLICIT: the column defaults to `private` (so the visibility
+            // migration couldn't accidentally widen existing invite-only
+            // channels). #general must be public — it's the one channel every
+            // member is guaranteed to reach, and `update` refuses to change a
+            // default channel's visibility, so a private one is unfixable.
+            visibility: "public",
+            createdById: user.id,
+          },
         });
         await tx.teamChannelMember.create({
           data: { channelId: channel.id, userId: user.id, addedById: user.id },
         });
         return { email: body.email, teamId: team.id };
       });
+
+      // The super-admin roster + overview are memoized for 60s. A brand-new
+      // org lands in the APPROVAL QUEUE, which is the one list an admin sits
+      // and watches — it must not take a minute to appear.
+      invalidateSuperAdminAggregates();
 
       return { ok: true, ...result };
     } catch (err) {

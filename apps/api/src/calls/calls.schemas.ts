@@ -84,8 +84,11 @@ export const ListTeamCallsQuerySchema = z
     take: z.coerce.number().int().min(1).max(100).default(50),
     cursor: z.string().optional(),
     /** 1-based page for numbered pagination. When present the query runs in
-     *  offset mode (cursor ignored, totalCount returned). */
-    page: z.coerce.number().int().min(1).optional(),
+     *  offset mode (cursor ignored, totalCount returned). Upper-bounded for
+     *  the same reason as the contacts list: offset paging scans and discards
+     *  everything before the offset, so an unbounded page number lets a client
+     *  ask for a full scan that returns nothing. */
+    page: z.coerce.number().int().min(1).max(10_000).optional(),
     q: z.string().trim().max(100).optional(),
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),

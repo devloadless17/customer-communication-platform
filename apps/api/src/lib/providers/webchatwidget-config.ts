@@ -57,6 +57,8 @@ export interface WebchatwidgetConfig {
   agentAvatarDataUrl?: string;
   fontFamily?: "system" | "rounded" | "serif";
   themeMode?: "light" | "dark" | "auto";
+  /** Play a subtle chime in the widget when an agent replies (visitor opt-in). */
+  soundEnabled?: boolean;
   // ---- launcher / placement defaults (used by the settings UI to generate the
   //      embed snippet; the widget itself reads these from data-* attributes) ----
   launcher?: "bubble" | "off";

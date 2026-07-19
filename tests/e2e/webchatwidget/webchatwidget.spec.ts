@@ -174,14 +174,25 @@ test("visitor → inbox → agent reply, with pre-chat identity + widget attribu
       { timeoutMs: 20_000, label: "inbound webchatwidget message" },
     );
 
-    const conv = await db().conversation.findUnique({
-      where: { id: msg.conversationId },
-      select: { webchatWidgetId: true, contactId: true, channel: true },
-    });
-    expect(conv?.channel).toBe(CHANNEL);
     // Attribution: the conversation is stamped with its source widget.
-    expect(conv?.webchatWidgetId).toBe(widgetId);
-    if (conv?.contactId) createdContactIds.add(conv.contactId);
+    // POLL, don't read once. The message row above is committed inside
+    // `ingestEvents`, but the widget stamp is a SEPARATE updateMany that runs
+    // after ingest returns — so the message poll can win the race and observe
+    // `webchatWidgetId` still null. Asserting on a single read made this test
+    // flaky (~1 in 3 locally).
+    const conv = await pollUntil(
+      async () => {
+        const c = await db().conversation.findUnique({
+          where: { id: msg.conversationId },
+          select: { webchatWidgetId: true, contactId: true, channel: true },
+        });
+        return c?.webchatWidgetId ? c : null;
+      },
+      { timeoutMs: 20_000, label: "conversation stamped with webchatWidgetId" },
+    );
+    expect(conv.channel).toBe(CHANNEL);
+    expect(conv.webchatWidgetId).toBe(widgetId);
+    if (conv.contactId) createdContactIds.add(conv.contactId);
 
     // Identity: the self-asserted email folded onto the contact.
     await pollUntil(
@@ -384,7 +395,7 @@ async function injectWidget(page: Page, extra: Record<string, string>): Promise<
       s.src = `${base}/widget.js`;
       s.setAttribute("data-webchat-key", key);
       s.setAttribute("data-webchat-api", api);
-      for (const k in extra) s.setAttribute(k, extra[k]);
+      for (const [k, v] of Object.entries(extra)) s.setAttribute(k, v);
       document.body.appendChild(s);
     },
     { key: PUBLIC_KEY, api: API_ORIGIN, base: WEB_ORIGIN, extra },
@@ -529,4 +540,79 @@ test("automation: outbound webhook fires for a webchatwidget message with the ch
   } finally {
     await ctx.close();
   }
+});
+
+test("history pagination: >50 messages replays the latest page + 'Load earlier' fetches older", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const v = await ctx.newPage();
+  try {
+    await mountWidget(v, PUBLIC_KEY);
+    await pastPreChat(v);
+    // One live message creates the conversation we can then backfill.
+    const seed = `pagination seed ${RUN}`;
+    await v.locator(".composer textarea").fill(seed);
+    await v.locator(".composer textarea").press("Enter");
+    const landed = await pollUntil(
+      async () =>
+        db().message.findFirst({
+          where: { teamId, channel: CHANNEL, direction: "in", body: seed },
+          select: { conversationId: true },
+        }),
+      { timeoutMs: 20_000, label: "pagination seed message" },
+    );
+    const conversationId = landed.conversationId;
+    const conv = await db().conversation.findUnique({
+      where: { id: conversationId },
+      select: { contactId: true },
+    });
+    if (conv?.contactId) createdContactIds.add(conv.contactId);
+
+    // Backfill 60 OLDER outbound messages (distinct timestamps in the past) so the
+    // conversation has 61 total — more than one HISTORY_LIMIT (50) page.
+    const base = Date.now() - 3_600_000;
+    await db().message.createMany({
+      data: Array.from({ length: 60 }, (_, i) => ({
+        teamId,
+        conversationId,
+        channel: CHANNEL as never,
+        direction: "out" as never,
+        externalId: `older-${RUN}-${i}`,
+        body: `older ${i} ${RUN}`,
+        timestamp: new Date(base + i * 1000),
+      })),
+    });
+
+    // Reconnect: the gateway replays the newest 50 and flags hasMore, so the
+    // oldest messages are absent and the "Load earlier" bar appears.
+    await mountWidget(v, PUBLIC_KEY);
+    const earlier = v.locator(".earlierbtn");
+    await expect(earlier).toBeVisible({ timeout: 15_000 });
+    await expect(v.locator(".bubble", { hasText: `older 0 ${RUN}` })).toHaveCount(0);
+
+    // Fetch the older page. Scrolling the thread to the top is the real user
+    // action here — the widget auto-loads on an upward scroll, and the
+    // "Load earlier" button is the fallback for a thread too short to scroll.
+    // (Clicking the button directly is NOT a stable way to test this: Playwright
+    // scrolls it into view first, which is itself an upward scroll, so the
+    // auto-load fires and re-flows the thread out from under the click.)
+    await v.locator(".body").evaluate((n) => { n.scrollTop = 0; });
+    await expect(v.locator(".bubble", { hasText: `older 0 ${RUN}` })).toBeVisible({ timeout: 15_000 });
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("broadcasts reject webchatwidget as a channel (not broadcastable)", async ({ request }) => {
+  // A freeform broadcast on `webchatwidget` must fail validation — a website
+  // visitor has no durable push address, so the channel isn't broadcastable.
+  const resp = await request.post(`${WEB_ORIGIN}/api/broadcasts`, {
+    data: {
+      kind: "freeform",
+      channel: "webchatwidget",
+      bodyText: `should never send ${RUN}`,
+      audience: { mode: "all" },
+    },
+  });
+  expect(resp.status()).toBe(400);
+  expect(JSON.stringify(await resp.json())).toContain("channel");
 });

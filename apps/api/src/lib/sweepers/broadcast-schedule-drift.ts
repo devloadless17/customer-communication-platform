@@ -2,12 +2,12 @@
 // via @swc-node/register, outside the Next bundler context.
 
 import { db } from "@/lib/db";
-import { startBroadcast } from "@/lib/broadcast-runner";
+import { resumePausedBroadcasts, startBroadcast } from "@/lib/broadcast-runner";
 import { enqueueScheduledBroadcast } from "@/lib/broadcasts/schedule-queue";
 
 /**
- * Periodic sweeper that recovers SCHEDULED + QUEUED broadcasts whose firing
- * stranded between deploys. Without it, the ONLY recovery path is the boot
+ * Periodic sweeper that recovers SCHEDULED + QUEUED + PAUSED broadcasts whose
+ * firing stranded between deploys. Without it, the ONLY recovery path is the boot
  * reconciler (BroadcastsService.onModuleInit) — i.e. the next deploy/restart,
  * which for a pilot can be days. Two stranding classes (both from the audit):
  *
@@ -28,9 +28,21 @@ import { enqueueScheduledBroadcast } from "@/lib/broadcasts/schedule-queue";
  *     Recovery: re-fire `startBroadcast` (idempotent — runBroadcast's own
  *     queued→running CAS + in-process inFlightRuns dedupe a row already running).
  *
- * Both recoveries are idempotent, so a row a racing path already advanced is a
- * no-op. A grace window keeps the sweep from racing the legitimate fire/claim
- * of a freshly-created row.
+ *   - `paused` rows. A broadcast parks itself `paused` when its credentials are
+ *     dead at fire time, when the mid-run permanent-error breaker trips, or when
+ *     a graceful shutdown stops it mid-send. Until now the ONLY thing that ever
+ *     resumed one was the boot reconciler — so a campaign paused at 2am sat dead
+ *     until the next deploy, which for a pilot can be days.
+ *     Recovery: `resumePausedBroadcasts` (paused→queued CAS + re-fire), gated on
+ *     a COOLDOWN rather than the 60s grace. The cooldown is what makes this safe
+ *     to run on a timer: if the underlying cause is still broken the row simply
+ *     re-parks, so retrying costs one cheap credential check per cooldown
+ *     instead of a hot loop. Resuming never re-sends — every recipient advances
+ *     through its own queued→sent CAS.
+ *
+ * All three recoveries are idempotent, so a row a racing path already advanced
+ * is a no-op. A grace window keeps the sweep from racing the legitimate
+ * fire/claim of a freshly-created row.
  *
  * Interval: 60s — short enough to recover within a minute, cheap enough to run
  * forever (two indexed status scans, bounded per tick).
@@ -42,6 +54,15 @@ const SWEEP_INTERVAL_MS = 60_000;
 const GRACE_MS = 60_000;
 // Bound per tick so a backlog can't thundering-herd the runner / queue.
 const MAX_PER_TICK = 100;
+// How long a row must have been `paused` before the sweep retries it. Much
+// longer than GRACE_MS on purpose: a paused row usually means something is
+// genuinely broken (expired token, disabled template), and retrying every 60s
+// would spin on that failure. 10 minutes recovers a transient cause promptly
+// while keeping a permanent one to ~6 cheap retries an hour.
+const PAUSED_COOLDOWN_MS = 10 * 60_000;
+// Paused rows re-fire the runner, so keep the per-tick bound tighter than the
+// scheduled/queued branches.
+const MAX_PAUSED_PER_TICK = 20;
 
 let timer: NodeJS.Timeout | null = null;
 // In-flight guard: a slow sweep MUST NOT overlap the next interval tick. The
@@ -137,6 +158,34 @@ async function sweepOnce(): Promise<void> {
   if (strandedQueued.length > 0) {
     console.warn(
       `[broadcast-schedule-drift-sweeper] re-fired ${strandedQueued.length} stranded queued broadcast(s)`,
+    );
+  }
+
+  // 3) `paused` rows past the cooldown. Shares the boot reconciler's resume
+  //    path, so the "every recipient already sent, row never stamped
+  //    completed" case is handled identically in both.
+  try {
+    const resumed = await resumePausedBroadcasts({
+      pausedBefore: new Date(now - PAUSED_COOLDOWN_MS),
+      limit: MAX_PAUSED_PER_TICK,
+      // Sweeper-only: a template disabled at Meta is fixed by an operator, not
+      // by waiting, so retrying it every 10min just burns recipients. Boot
+      // still resumes them — see resumePausedBroadcasts' doc-comment for why
+      // excluding them everywhere would strand the broadcast permanently.
+      skipTemplatePauses: true,
+      label: "broadcast-schedule-drift-sweeper",
+    });
+    if (resumed > 0) {
+      console.warn(
+        `[broadcast-schedule-drift-sweeper] resumed ${resumed} paused broadcast(s)`,
+      );
+    }
+  } catch (err) {
+    // Isolated from the branches above: a failure resuming paused rows must not
+    // stop the scheduled/queued recoveries that already ran this tick.
+    console.warn(
+      "[broadcast-schedule-drift-sweeper] paused-resume failed:",
+      err instanceof Error ? err.message : err,
     );
   }
 }

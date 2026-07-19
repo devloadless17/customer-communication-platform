@@ -455,3 +455,52 @@ export const ExternalSendInteractiveSchema = z
     { message: "option titles must be unique", path: ["options"] },
   );
 export type ExternalSendInteractiveInput = z.infer<typeof ExternalSendInteractiveSchema>;
+
+/** Broadcast list — `status`/`since` let a BI client poll "what completed since
+ *  my last sync" instead of re-pulling history. */
+export const ListBroadcastsQuerySchema = z.object({
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  status: z
+    .enum([
+      "scheduled",
+      "materializing",
+      "queued",
+      "running",
+      "completed",
+      "failed",
+      "canceled",
+      "paused",
+    ])
+    .optional(),
+  since: z.string().datetime().optional(),
+});
+export type ListBroadcastsQueryInput = z.infer<typeof ListBroadcastsQuerySchema>;
+
+/**
+ * Recipient-level results. `outcome` uses the same buckets the in-app report
+ * deep-links with (including `never_received`, the union of rejected-at-send and
+ * accepted-but-undeliverable). `updatedSince` drives incremental sync.
+ */
+export const ListBroadcastRecipientsQuerySchema = z.object({
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  outcome: z
+    .enum([
+      "all",
+      "never_received",
+      "delivered",
+      "read",
+      "replied",
+      "clicked",
+      "failed",
+      "undelivered",
+      "pending",
+    ])
+    .optional(),
+  errorCode: z.string().max(64).optional(),
+  updatedSince: z.string().datetime().optional(),
+});
+export type ListBroadcastRecipientsQueryInput = z.infer<
+  typeof ListBroadcastRecipientsQuerySchema
+>;

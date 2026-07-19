@@ -497,6 +497,11 @@ export const FANOUT_RULES: FanoutRuleMap = {
       channelId: e.channelId,
       messageId: e.messageId,
       pinned: e.pinned,
+      // Carried so the pins bar updates from the message the client already
+      // holds instead of refetching the whole list on every pin.
+      pinnedAt: e.pinnedAt,
+      pinnedById: e.pinnedById,
+      pinnedByName: e.pinnedByName,
     });
   },
 
@@ -549,6 +554,21 @@ export const FANOUT_RULES: FanoutRuleMap = {
       teamId: e.teamId,
       scope: "team-channels",
     });
+  },
+
+  "team_channel.dm_created": (e, emitter) => {
+    // ONLY the participants' user rooms — never the team room. The existence
+    // of a DM between two people is itself private information.
+    //
+    // Chosen over a team.catalog_changed tick because that would make every
+    // member of the team refetch whenever any two people start a DM; here the
+    // audience is exactly known, so we address it directly.
+    for (const uid of e.memberUserIds) {
+      emitter.emitToUser(uid, "team:dm:created", {
+        teamId: e.teamId,
+        channelId: e.channelId,
+      });
+    }
   },
 
   "user.availability_changed": (e, emitter) => {

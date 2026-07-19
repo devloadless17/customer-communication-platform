@@ -28,6 +28,14 @@ let seq = 0;
 /** Fail the next `failSendsRemaining` sends with `failSendStatus`; 0 = normal. */
 let failSendsRemaining = 0;
 let failSendStatus = 500;
+/**
+ * Meta error code returned with an injected failure. Defaults to 2 (a generic
+ * OAuthException) to preserve the original 5xx-ambiguity behaviour. A spec can
+ * override it to drive a SPECIFIC classification path — e.g. 130429/131048 for
+ * the rate-limit branch, which routes to a completely different outcome
+ * (requeue + pause) than a generic failure (mark recipient failed).
+ */
+let failSendCode = 2;
 
 function readBody(req) {
   return new Promise((resolve) => {
@@ -71,6 +79,7 @@ const server = createServer(async (req, res) => {
     // dedup and fold two distinct sends into one row.
     calls = [];
     failSendsRemaining = 0;
+    failSendCode = 2;
     return json(res, 200, { ok: true });
   }
   // Arm the next `count` `POST .../messages` calls to fail with `status`. Lets a
@@ -86,7 +95,13 @@ const server = createServer(async (req, res) => {
   if (path === "/__mock/fail-next-send" && method === "POST") {
     failSendStatus = Number(body?.status) || 500;
     failSendsRemaining = Number(body?.count) || 1;
-    return json(res, 200, { ok: true, status: failSendStatus, count: failSendsRemaining });
+    failSendCode = Number(body?.code) || 2;
+    return json(res, 200, {
+      ok: true,
+      status: failSendStatus,
+      count: failSendsRemaining,
+      code: failSendCode,
+    });
   }
   if (path === "/__mock/calls" && method === "GET") {
     return json(res, 200, { calls });
@@ -121,7 +136,11 @@ const server = createServer(async (req, res) => {
     if (failSendsRemaining > 0) {
       failSendsRemaining -= 1;
       return json(res, failSendStatus, {
-        error: { message: "Mock: injected send failure", code: 2, type: "OAuthException" },
+        error: {
+          message: "Mock: injected send failure",
+          code: failSendCode,
+          type: "OAuthException",
+        },
       });
     }
     if (body && body.messaging_product === "whatsapp") {

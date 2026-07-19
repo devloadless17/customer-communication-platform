@@ -57,8 +57,17 @@ export const ListContactsQuerySchema = z.object({
   search: z.string().optional(),
   cursor: z.string().optional(),
   /** 1-based page for numbered pagination. When present the query runs in
-   *  offset mode (cursor ignored, totalCount always returned). */
-  page: z.coerce.number().int().min(1).optional(),
+   *  offset mode (cursor ignored, totalCount always returned).
+   *
+   *  UPPER-BOUNDED. Offset paging costs a scan-and-discard of everything before
+   *  the offset — including the per-row LEFT JOIN LATERAL last-message probe —
+   *  so page depth is real server work an authenticated client chooses. There
+   *  was no maximum, so `page=1e9` was accepted and ran a full scan of the
+   *  tenant's filtered set to return nothing. 10k pages is far past any real
+   *  navigation (250k contacts at the 25 default) while making an absurd value
+   *  a 400 instead of a scan. Deep-but-legitimate paging is unaffected; the
+   *  fast path for large tenants remains search + filters, which are indexed. */
+  page: z.coerce.number().int().min(1).max(10_000).optional(),
   /** Page size for numbered pagination (clamped server-side, default 50). */
   take: z.coerce.number().int().min(1).max(100).optional(),
   fieldKey: z.string().optional(),

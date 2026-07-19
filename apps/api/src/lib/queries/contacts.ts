@@ -9,10 +9,50 @@ import type {
   CursorPage,
 } from "@ccp/shared/types";
 
+import {
+  EPHEMERAL_CONTACT_CHANNELS,
+  isEphemeralChannel,
+} from "@ccp/shared/providers/capabilities";
+
 import { clampTake, normalizeCustomFields, siblingChannelsByCustomer } from "./_shared";
 import { encodeContactCursor, parseContactCursor } from "./_cursors";
 
 export const CONTACTS_PAGE = 50;
+
+/** Ephemeral channels as a SQL-castable array — derived, never a literal. */
+const EPHEMERAL_CHANNEL_LIST: Channel[] = [...EPHEMERAL_CONTACT_CHANNELS];
+
+/**
+ * Directory membership over an aliased `Contact c`: an ephemeral-channel contact
+ * (a website-widget visitor — see `EPHEMERAL_CONTACT_CHANNELS`) only belongs in the
+ * directory once it carries a durable address it can be reached at again.
+ *
+ * Exported so the surfaces that DON'T go through `buildContactFilterWhere` — CSV
+ * export, the directory count, audience counts, global search — apply the exact
+ * same rule instead of re-deriving it.
+ */
+export const DIRECTORY_CONTACT_SQL = Prisma.sql`(
+  NOT (c."identityChannel" = ANY(${EPHEMERAL_CHANNEL_LIST}::"Channel"[]))
+  OR c."phoneNumber" IS NOT NULL
+  OR c.email IS NOT NULL
+)`;
+
+/**
+ * Prisma-typed twin of `DIRECTORY_CONTACT_SQL`, for non-raw `where` clauses.
+ *
+ * ⚠️ It is an `OR` node. Spreading it into a where that ALREADY has a top-level
+ * `OR` (global search's match arm, the audience tags∪ids union) silently
+ * CLOBBERS that disjunction and widens the result set. Compose it via `AND: [...]`
+ * whenever another `OR` is in play; a bare spread is only safe on a where with no
+ * `OR` of its own.
+ */
+export const directoryContactWhere: Prisma.ContactWhereInput = {
+  OR: [
+    { identityChannel: { notIn: EPHEMERAL_CHANNEL_LIST } },
+    { phoneNumber: { not: null } },
+    { email: { not: null } },
+  ],
+};
 
 // Options shape lives in @ccp/shared/dtos.
 export type { ListContactsOpts };
@@ -28,6 +68,12 @@ export type { ListContactsOpts };
  * The caller supplies the alias (always `c` today) and the same normalized
  * `opts` the list query uses. The cursor clause is intentionally NOT here: the
  * filter set is page-position-independent.
+ *
+ * Anonymous ephemeral contacts (website-widget visitors with no phone/email) are
+ * excluded by default — see `DIRECTORY_CONTACT_SQL`. Selecting that channel
+ * EXPLICITLY in the filter opts back in, so the "Website widget" view still works;
+ * because the opt-in lives here, the bulk path expands to exactly the same set the
+ * user is looking at either way.
  */
 export function buildContactFilterWhere(
   teamId: string,
@@ -44,6 +90,11 @@ export function buildContactFilterWhere(
   return Prisma.sql`
     c."teamId" = ${teamId}
     AND c."deletedAt" IS NULL
+    ${
+      channel && isEphemeralChannel(channel)
+        ? Prisma.empty // explicit opt-in view: show anonymous visitors too
+        : Prisma.sql`AND ${DIRECTORY_CONTACT_SQL}`
+    }
     ${
       search
         ? Prisma.sql`AND (
@@ -345,6 +396,30 @@ export async function listContacts(
  * so every filter (search / source / window / stage / tag / customField)
  * matches the flat list exactly; the CHANNEL filter is dropped (a person spans
  * channels). `totalCount` counts distinct persons.
+ *
+ * SCALING — known, measured, deliberately NOT worked around (2026-07-18).
+ *
+ * The inner query has no LIMIT and cannot have one: to order PERSONS by most
+ * recent activity you must know every matching person's activity, so the
+ * DISTINCT-ON must see every matching contact before the outer LIMIT/OFFSET
+ * can pick a page. Cost is therefore O(matching contacts) per page load, on
+ * page 1 as much as page 500 — deep paging does not compound it; only the
+ * discarded OFFSET rows grow.
+ *
+ * It is NOT as bad as the shape suggests. `Conversation` carries
+ * `@@unique([teamId, contactId])`, so the LEFT JOIN LATERAL resolves to ONE
+ * unique-index lookup per contact rather than a scan. At 200k contacts that
+ * is 200k index probes plus a sort — real, but a filtered directory page the
+ * user explicitly opened, not a hot path.
+ *
+ * The only real fix is denormalization: a per-person `lastActivityAt`
+ * maintained on `Customer` (plus the solo-contact case), which would make this
+ * an indexed ORDER BY with a genuine LIMIT. That needs a column, ingest
+ * maintenance, a backfill and a drift sweeper — the pattern CLAUDE.md §7
+ * requires for any denormalized field — so it is a scoped piece of work, not a
+ * tweak to slip into a hardening pass. TRIGGER: a tenant past ~100k contacts
+ * reporting a slow /contacts page in "group by person" mode. Until then the
+ * flat list (keyset, indexed) is the fast path and is the default.
  */
 export async function listPeople(
   teamId: string,

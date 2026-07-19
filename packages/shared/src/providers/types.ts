@@ -158,6 +158,14 @@ export interface NormalizedStatusUpdate {
   errorCode?: number;
   errorTitle?: string;
   errorDetail?: string;
+  /**
+   * Billing metadata for this message, when the provider reported it (WhatsApp
+   * attaches it to the `sent` status). Category + billable flag only — Meta
+   * never sends a price, and per-country rate cards change quarterly, so a
+   * computed amount would freeze a wrong number into the audit trail. Campaign
+   * cost reporting counts billable conversations by category.
+   */
+  pricing?: { billable?: boolean; category?: string; model?: string };
   timestamp: Date;
   rawPayload: Record<string, unknown>;
 }
@@ -508,6 +516,21 @@ export interface NormalizedChannelHealth {
   rawPayload: Record<string, unknown>;
 }
 
+/**
+ * A WhatsApp user changed their MARKETING messaging preference (Meta's
+ * `user_preferences` webhook). `optedOut: false` is the only signal permitted to
+ * clear an existing opt-out — an inbound STOP keyword may opt a customer OUT but
+ * must never opt them back IN, because consent has to be affirmative.
+ */
+export interface NormalizedMarketingPreference {
+  kind: "marketing_preference";
+  /** E.164 digits, no '+'. */
+  contactPhone: string;
+  optedOut: boolean;
+  timestamp: Date;
+  rawPayload: Record<string, unknown>;
+}
+
 export type NormalizedEvent =
   | NormalizedInboundMessage
   | NormalizedContactNumberChange
@@ -521,7 +544,8 @@ export type NormalizedEvent =
   | NormalizedContactSync
   | NormalizedMessageCorrection
   | NormalizedMessageFeedback
-  | NormalizedChannelHealth;
+  | NormalizedChannelHealth
+  | NormalizedMarketingPreference;
 
 export interface SendTextArgs {
   /** E.164 digits, no '+'. */

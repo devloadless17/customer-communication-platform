@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import {
   FileText,
   Image as ImageIcon,
   Mic,
   Paperclip,
   SendHorizontal,
+  SmilePlus,
   Video,
   X,
 } from "lucide-react";
@@ -22,6 +24,16 @@ import type { User } from "@ccp/shared/types";
 
 import { MentionPopup, filterMembersByQuery } from "./mention-popup";
 
+// Reused from the inbox reply box rather than rebuilt. Dynamic so its emoji
+// tables stay out of the team-chat entry bundle.
+const EmojiPopover = dynamic(
+  () =>
+    import("@/features/inbox/components/reply-box/emoji-popover").then(
+      (m) => m.EmojiPopover,
+    ),
+  { ssr: false },
+);
+
 /**
  * Composer for both the channel feed and the thread side panel. The only
  * difference is the POST URL: pass `threadRootId` to post into a thread.
@@ -29,7 +41,9 @@ import { MentionPopup, filterMembersByQuery } from "./mention-popup";
  * Wires up:
  *   - Enter to send (Shift+Enter for newline)
  *   - @ autocomplete with arrow keys / Enter to pick
- *   - file upload via the paperclip / drag is left out for v0
+ *   - file upload via the paperclip (drag-and-drop is still absent)
+ *   - emoji insertion at the caret (reuses the inbox EmojiPopover)
+ *   - per-(channel, thread) draft persistence across navigation
  *   - server-side reconcile via the matching `team:channel:message` event
  *
  * Optimistic message is added through `onOptimistic*` callbacks so the
@@ -47,7 +61,9 @@ export function ChannelComposer({
   onOptimisticConfirm,
 }: {
   channelId: string;
-  channelName: string;
+  /** Null in a DM — DMs have no channel name, so the composer drops the
+   *  "#name" affordance and falls back to a plain prompt. */
+  channelName: string | null;
   threadRootId?: string;
   currentUser: User;
   teamMembers: User[];
@@ -65,6 +81,9 @@ export function ChannelComposer({
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Initial value MUST be "" to match SSR — a lazy initializer reading
+  // localStorage would hydrate the Send button's `disabled` attribute
+  // mismatched whenever a draft exists. Restore happens post-mount below.
   const [body, setBody] = useState("");
   const [caret, setCaret] = useState(0);
   const [trigger, setTrigger] = useState<{ query: string; length: number } | null>(null);
@@ -76,12 +95,109 @@ export function ChannelComposer({
   // UX. Previously the picker fired the upload immediately, which made
   // accidental clicks impossible to recover from.
   const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [emojiOpen, setEmojiOpen] = useState(false);
 
   // ARIA combobox wiring for the @-mention popup. Stable ids so the textarea
   // can point aria-controls at the listbox and aria-activedescendant at the
   // highlighted option. Candidates are recomputed at render (same pure filter
   // the keyboard handler uses) so the active-descendant id stays in sync.
   const mentionListboxId = useId();
+  // ---- Draft persistence ------------------------------------------------
+  //
+  // Per (team, channel, thread) so the main composer and each thread panel
+  // keep independent buffers.
+  const draftKey = `team-chat:${currentUser.teamId}:draft:${channelId}${
+    threadRootId ? `:t:${threadRootId}` : ""
+  }`;
+
+  // Mirror of `body` for the cleanup closure below. Without this the cleanup
+  // captures the value from the render in which the effect was CREATED, so it
+  // would persist stale text (usually "") over the real draft.
+  const bodyRef = useRef(body);
+  bodyRef.current = body;
+
+  // ONE effect keyed on draftKey, doing restore-on-enter + save-on-leave.
+  //
+  // The trap that doesn't exist in the inbox: TeamChatWorkspace is rendered
+  // WITHOUT a key, so this composer is NOT remounted when you navigate
+  // /team/A → /team/B. A naive mount-only restore would therefore carry
+  // channel A's text into channel B and then overwrite A's saved draft with
+  // it. Handling both directions here is what makes channel switching safe.
+  useEffect(() => {
+    let restored = "";
+    try {
+      restored = window.localStorage.getItem(draftKey) ?? "";
+    } catch {
+      // Private mode / storage disabled — drafts silently off, composer fine.
+    }
+    setBody(restored);
+    setCaret(restored.length);
+
+    const persist = () => {
+      try {
+        const outgoing = bodyRef.current;
+        if (outgoing.trim()) window.localStorage.setItem(draftKey, outgoing);
+        else window.localStorage.removeItem(draftKey);
+      } catch {
+        // Ignore — see above.
+      }
+    };
+
+    // React does NOT run effect cleanups on reload / tab close / hard
+    // navigation, and this feature ships two hard navigations of its own
+    // (leave-channel and join-channel both use window.location). Without a
+    // pagehide save, a refresh silently drops the draft. `pagehide` fires on
+    // bfcache navigations where `beforeunload` doesn't.
+    window.addEventListener("pagehide", persist);
+
+    return () => {
+      window.removeEventListener("pagehide", persist);
+      // Persist whatever is in the box for the channel we're LEAVING.
+      persist();
+    };
+  }, [draftKey]);
+
+  /** Drop the saved draft after a successful send. */
+  const clearDraft = useCallback(() => {
+    try {
+      window.localStorage.removeItem(draftKey);
+    } catch {
+      // Ignore.
+    }
+  }, [draftKey]);
+
+  /**
+   * Splice an emoji in at the tracked caret and restore the selection after
+   * React commits — same shape as the @-mention insert path, so the caret
+   * never jumps to the end of the box mid-sentence.
+   */
+  const insertEmoji = useCallback(
+    (emoji: string) => {
+      setBody((prev) => {
+        const at = Math.min(caret, prev.length);
+        const next = `${prev.slice(0, at)}${emoji}${prev.slice(at)}`;
+        const nextCaret = at + emoji.length;
+        requestAnimationFrame(() => {
+          const el = textareaRef.current;
+          if (!el) return;
+          el.focus();
+          el.setSelectionRange(nextCaret, nextCaret);
+        });
+        setCaret(nextCaret);
+        return next;
+      });
+    },
+    [caret],
+  );
+
+  // A DM has no channel name, so it gets a plain prompt instead of the
+  // "Message #channel" affordance. Same string drives the a11y label.
+  const composerPrompt = threadRootId
+    ? "Reply in thread…"
+    : channelName
+      ? `Message #${channelName}`
+      : "Send a message…";
+
   const mentionCandidates = trigger
     ? filterMembersByQuery(teamMembers, trigger.query)
     : [];
@@ -237,6 +353,7 @@ export function ChannelComposer({
     };
     onOptimisticAdd(optimistic);
     setBody("");
+    clearDraft();
     setTrigger(null);
     setPopupPos(null);
     setBusy(true);
@@ -300,6 +417,7 @@ export function ChannelComposer({
     onOptimisticAdd(optimistic);
     const captionAtStart = body.trim();
     setBody("");
+    clearDraft();
     setBusy(true);
     const fd = new FormData();
     fd.append("file", file);
@@ -380,8 +498,8 @@ export function ChannelComposer({
               void submit();
             }
           }}
-          placeholder={threadRootId ? "Reply in thread…" : `Message #${channelName}`}
-          aria-label={threadRootId ? "Reply in thread" : `Message #${channelName}`}
+          placeholder={composerPrompt}
+          aria-label={composerPrompt}
           // Combobox ONLY while the @-mention popup is active — otherwise this is
           // a plain message textbox (a permanent combobox role would make every
           // message input announce as a combobox to screen readers).
@@ -405,6 +523,31 @@ export function ChannelComposer({
           </TooltipTrigger>
           <TooltipContent>Attach file</TooltipContent>
         </Tooltip>
+        {/* `relative` wrapper: EmojiPopover positions itself absolutely
+            against its offset parent. */}
+        <div className="relative">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => setEmojiOpen((v) => !v)}
+                aria-label="Insert emoji"
+                aria-expanded={emojiOpen}
+                className="flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <SmilePlus className="size-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Emoji</TooltipContent>
+          </Tooltip>
+          {/* Deliberately stays OPEN after a pick so several emoji can be
+              inserted in a row — don't "fix" that into auto-close. */}
+          <EmojiPopover
+            open={emojiOpen}
+            onClose={() => setEmojiOpen(false)}
+            onPick={insertEmoji}
+          />
+        </div>
         <input
           ref={fileInputRef}
           type="file"

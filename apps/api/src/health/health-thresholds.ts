@@ -1,0 +1,106 @@
+import type { JobFailureReport } from "../common/job-failure-metrics";
+
+/**
+ * Degradation thresholds, kept in a dependency-light leaf module so BOTH the
+ * /health endpoint and the HealthWatchdogService can import them without an
+ * import cycle (the watchdog would otherwise pull in the controller, which
+ * pulls in DbService, which is where cycles start). Same discipline as
+ * webchatwidget/widget-metrics.ts, and for the same reason: a cycle here
+ * typechecks clean and crashes at runtime.
+ */
+
+export interface PgPoolReport {
+  max: number;
+  total: number;
+  idle: number;
+  waiting: number;
+  /** (total - idle) / max * 100 — checked-out slots as % of configured max. */
+  saturationPercent: number;
+}
+
+/** Broadcasts parked `paused` that auto-recovery has not cleared. */
+export interface StuckBroadcastReport {
+  /** How many are paused beyond the alert threshold. */
+  count: number;
+  /** Age of the oldest, in minutes. Null when none are stuck. */
+  oldestPausedMin: number | null;
+  /** Distinct `pausedReason`s across them, so the alert says WHY. */
+  reasons: string[];
+}
+
+export interface OutboxLagReport {
+  pendingCount: number;
+  oldestPendingSec: number | null;
+  stale: boolean;
+}
+
+/**
+ * Thresholds for `degraded`. Chosen to fire BEFORE users notice, not after:
+ * a pool at 85% still serves requests but is one burst from queueing them.
+ */
+const DEGRADED_POOL_SATURATION_PERCENT = 85;
+const DEGRADED_POOL_WAITING = 5;
+const DEGRADED_FFMPEG_QUEUED = 8;
+const DEGRADED_JOB_FAILURES_LAST_HOUR = 25;
+/**
+ * A broadcast still parked `paused` this long needs a HUMAN.
+ *
+ * The drift sweeper auto-resumes a transient pause (Meta rate limit, a graceful
+ * shutdown, credentials that were missing at fire time) on a 10-minute cooldown,
+ * so anything past ~3 cooldowns is either a cause that keeps re-tripping or a
+ * `template` pause, which is deliberately never auto-resumed. Either way nobody
+ * is coming unless we say so — the broadcast runner is not a BullMQ job, so it
+ * never reaches `jobFailures` above, and its failures otherwise terminate in a
+ * console.warn plus a socket frame aimed at a browser tab nobody is watching at
+ * 3am. This is the signal that closes that hole.
+ */
+export const DEGRADED_BROADCAST_PAUSED_MIN = 35;
+
+/** Pure — shared by the endpoint and the watchdog so both agree by construction. */
+export function computeDegradations(report: {
+  db: boolean;
+  redis: boolean;
+  pgPool: PgPoolReport;
+  outboxLag: OutboxLagReport;
+  jobFailures: Record<string, JobFailureReport>;
+  ffmpeg: { active: number; queued: number };
+  stuckBroadcasts: StuckBroadcastReport;
+}): string[] {
+  const out: string[] = [];
+  if (!report.db) out.push("postgres unreachable");
+  if (!report.redis) out.push("redis unreachable — queues, workflows and sends are dark");
+  if (report.pgPool.saturationPercent >= DEGRADED_POOL_SATURATION_PERCENT) {
+    out.push(`db pool ${report.pgPool.saturationPercent}% saturated`);
+  }
+  if (report.pgPool.waiting >= DEGRADED_POOL_WAITING) {
+    out.push(`${report.pgPool.waiting} requests queued for a db connection`);
+  }
+  if (report.outboxLag.stale) {
+    out.push(
+      `outbox drainer behind — oldest pending event ${report.outboxLag.oldestPendingSec}s old ` +
+        `(${report.outboxLag.pendingCount} pending)`,
+    );
+  }
+  if (report.outboxLag.pendingCount === -1) out.push("outbox lag probe failed");
+  if (report.ffmpeg.queued >= DEGRADED_FFMPEG_QUEUED) {
+    out.push(`${report.ffmpeg.queued} media jobs queued behind the ffmpeg cap`);
+  }
+  if (
+    report.stuckBroadcasts.count > 0 &&
+    (report.stuckBroadcasts.oldestPausedMin ?? 0) >= DEGRADED_BROADCAST_PAUSED_MIN
+  ) {
+    const why = report.stuckBroadcasts.reasons.length
+      ? ` (${report.stuckBroadcasts.reasons.join(", ")})`
+      : "";
+    out.push(
+      `${report.stuckBroadcasts.count} broadcast(s) stuck paused — oldest ` +
+        `${report.stuckBroadcasts.oldestPausedMin}min${why}`,
+    );
+  }
+  for (const [queue, stats] of Object.entries(report.jobFailures)) {
+    if (stats.failedLastHour >= DEGRADED_JOB_FAILURES_LAST_HOUR) {
+      out.push(`${queue}: ${stats.failedLastHour} jobs exhausted retries in the last hour`);
+    }
+  }
+  return out;
+}

@@ -92,6 +92,64 @@ function useInboxUnread(): number {
   return unread;
 }
 
+/**
+ * Authoritative unread-@mention count for the team-chat rail badge.
+ *
+ * Same shape as useInboxUnread, for the same reason: a count derived purely
+ * from socket frames has no authoritative seed on page load and no way to
+ * converge after an offline gap longer than the 30s socket-recovery window.
+ * Server-seeded on mount, debounce-refetched on the frames that can change it,
+ * and re-seeded on every reconnect.
+ */
+function useTeamMentions(userId: string): number {
+  const [mentions, setMentions] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const refetch = async () => {
+      try {
+        const res = await apiFetch("/api/team/channels/unread-count");
+        if (!res.ok) return;
+        const json = (await res.json()) as { mentions?: unknown };
+        if (alive && typeof json.mentions === "number") setMentions(json.mentions);
+      } catch {
+        // nav badge is best-effort — ignore transient fetch failures
+      }
+    };
+    const debounced = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => void refetch(), 400);
+    };
+    void refetch();
+    const socket = getClientSocket();
+    // `team:channel:activity` is a TEAM-room frame — every message in every
+    // channel reaches every connected client. Refetching on all of them meant
+    // each online user hitting /unread-count every ~400ms during normal chat,
+    // for a number that only changes when THEY are mentioned. Gate on the same
+    // predicate the sidebar already uses.
+    const onActivity: Parameters<typeof socket.on<"team:channel:activity">>[1] = (p) => {
+      if (p.authorUserId === userId) return;
+      if (!p.mentionedUserIds.includes(userId)) return;
+      debounced();
+    };
+    const onRead: Parameters<typeof socket.on<"team:channel:read">>[1] = (p) => {
+      if (p.readByUserId !== userId) return;
+      debounced();
+    };
+    socket.on("team:channel:activity", onActivity);
+    socket.on("team:channel:read", onRead);
+    socket.on("connect", debounced);
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+      socket.off("team:channel:activity", onActivity);
+      socket.off("team:channel:read", onRead);
+      socket.off("connect", debounced);
+    };
+  }, [userId]);
+  return mentions;
+}
+
 const EXPANDED_WIDTH = 232;
 const COLLAPSED_WIDTH = 64;
 
@@ -158,6 +216,7 @@ export function AppRail({
 }) {
   const pathname = usePathname() ?? "";
   const inboxUnread = useInboxUnread();
+  const teamMentions = useTeamMentions(currentUser.id);
   const isOnline = onlineUserIds?.has(currentUser.id) ?? false;
   const hasPresence = onlineUserIds !== undefined;
   // Live mirror of THIS user's availability. Seeded from the session payload
@@ -313,7 +372,13 @@ export function AppRail({
             pathname={pathname}
             collapsed={collapsed}
             showLabels={showLabels}
-            badge={item.href === "/inbox" ? inboxUnread : 0}
+            badge={
+              item.href === "/inbox"
+                ? inboxUnread
+                : item.href === "/team"
+                  ? teamMentions
+                  : 0
+            }
           />
         ))}
       </nav>

@@ -7,6 +7,7 @@ import {
 
 import { runWithCorrelationContext, withCorrelation } from "@/common/correlation";
 import { runWithConcurrency } from "@/common/concurrency";
+import { flushDispatchedStamps } from "@/lib/events/bus";
 import {
   claimBatch,
   markDispatched,
@@ -208,6 +209,11 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
     while (this.inflight && Date.now() < flushDeadline) {
       await new Promise((r) => setTimeout(r, 50));
     }
+    // Write any dispatched-stamps still coalescing in the bus's 50ms window.
+    // Losing them isn't a correctness problem (the stamp is forensic), but on
+    // a CLEAN shutdown there is no reason to leave rows looking like they died
+    // mid-background — that is the exact signal an operator would triage.
+    await flushDispatchedStamps().catch(() => {});
     this.logger.log("outbox drainer stopped");
   }
 

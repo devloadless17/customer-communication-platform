@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "../packages/tsconfig/nest.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // page.evaluate() callbacks are serialized into the browser, so specs
+    // legitimately reference document/window alongside the Node globals.
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"],
+    // Specs import api domain code directly (e.g. lib/db, lib/providers/*),
+    // so the api's own path aliases have to resolve from here too.
+    "paths": {
+      "@/*": ["../apps/api/src/*"],
+      "@ccp/config": ["../packages/config/src/index.ts"],
+      "@ccp/shared/*": ["../packages/shared/src/*"]
+    },
+    // Specs legitimately keep unused fixtures/params around.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
+}

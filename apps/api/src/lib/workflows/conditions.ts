@@ -231,6 +231,15 @@ function validateLeaf(
     if (c.value.length > 200) {
       errors.push(`${path}: regex too long (max 200 chars)`);
     }
+    // Reject the catastrophic shape at publish time so the author gets a clear
+    // message now, rather than a condition that silently never matches at run
+    // time (where the same check fails closed to protect the event loop).
+    if (hasCatastrophicQuantifier(c.value)) {
+      errors.push(
+        `${path}: regex uses a nested repeat like (a+)+ which can hang the workflow engine — ` +
+          `rewrite it without a repeat inside a repeated group`,
+      );
+    }
   }
   return errors;
 }
@@ -245,6 +254,27 @@ function validateLeaf(
  * advance" before the next BullMQ retry takes over.
  */
 const REGEX_INPUT_MAX_LEN = 64 * 1024;
+
+/**
+ * Detect the nested-unbounded-quantifier shape that drives catastrophic
+ * backtracking — `(a+)+`, `(a*)*`, `(a+)*`, `([a-z]+){2,}`.
+ *
+ * This is the dominant ReDoS class and the one that is trivially short, so the
+ * 200-char pattern cap does nothing against it. An inner UNBOUNDED quantifier
+ * inside a group that is itself UNBOUNDED-quantified is what makes the match
+ * space exponential; a bounded inner count like `(\d{4})+` is linear and stays
+ * allowed, so ordinary patterns are unaffected.
+ *
+ * Heuristic by design — it cannot catch every pathological pattern (overlapping
+ * alternations such as `(a|a)+` slip through). The complete fix is a linear-time
+ * engine (`re2`) or evaluating in a worker thread with a hard terminate; both are
+ * larger changes than this file. This closes the cheap, obvious, high-impact
+ * case without a native dependency.
+ */
+const CATASTROPHIC_QUANTIFIER = /\([^()]*(?:[*+]|\{\d+,\})[^()]*\)\s*(?:[*+]|\{\d+,\})/;
+export function hasCatastrophicQuantifier(pattern: string): boolean {
+  return CATASTROPHIC_QUANTIFIER.test(pattern);
+}
 
 function validateGroup(
   raw: unknown,
@@ -375,6 +405,16 @@ function applyOp(
       // malicious automation tests.
       if (actual.length > REGEX_INPUT_MAX_LEN) return false;
       if (expected.length > 200) return false;
+      // Refuse to EXECUTE a catastrophic-backtracking shape, don't just refuse
+      // to save it: this runs in-process (RUN_WORKER_INLINE is mandatory in
+      // prod), so `(a+)+$` against an attacker-chosen body pins the single event
+      // loop serving HTTP + Socket.io for EVERY tenant — a full-platform freeze
+      // triggered by one org's workflow and one of that org's own customers.
+      // The publish-time validator below rejects new patterns, but workflows
+      // saved before this guard existed would still reach here, so the runtime
+      // check is the one that actually closes the hole. Fail closed: a condition
+      // we won't evaluate is `false`, never a stall.
+      if (hasCatastrophicQuantifier(expected)) return false;
       try {
         return new RegExp(expected).test(actual);
       } catch {

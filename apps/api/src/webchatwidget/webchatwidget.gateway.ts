@@ -3,6 +3,7 @@ import {
   ConnectedSocket,
   MessageBody,
   OnGatewayConnection,
+  OnGatewayDisconnect,
   OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
@@ -16,6 +17,7 @@ import type { NormalizedInboundMessage } from "@ccp/shared/providers/types";
 import { DbService } from "../db/db.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
 import { ingestEvents } from "@/lib/providers/ingest";
+import { blobStorage } from "@/lib/blob-storage";
 import { publish } from "@/lib/events/bus";
 import { mapMessage } from "@/lib/queries/_shared";
 import { REPLY_TO_INCLUDE } from "@/lib/queries/_shared";
@@ -27,6 +29,7 @@ import {
 import { createTokenBucket } from "../common/token-bucket";
 import { originAllowed } from "./origin-allow";
 import { widgetRoom } from "./rooms";
+import { setWidgetVisitorSocketCounter } from "./widget-metrics";
 import { frameFromMessage, type WidgetMessageFrame } from "./webchatwidget-frame";
 
 const CHANNEL = "webchatwidget" as const;
@@ -39,6 +42,25 @@ const MAX_BODY_CHARS = 4096;
 const handshakeBucket = createTokenBucket({ perMin: 120 });
 /** Per-visitor inbound message rate limit (a human can't type faster than this). */
 const messageBucket = createTokenBucket({ perMin: 120 });
+/**
+ * Per-IP cap on creating BRAND-NEW conversations. `messageBucket` is keyed by
+ * `${widgetId}:${visitorId}`, but visitorId is chosen by the client — rotating it
+ * on every connect sidesteps that limit entirely, leaving only the 120/min
+ * handshake bucket. That allowed one IP to mint ~120 new Contacts+Conversations a
+ * minute, each firing the full pipeline (message.received, workflow dispatch,
+ * outbound webhooks, agent frames, unread badges) — an inbox-spam and cost DoS
+ * against the tenant. Only the FIRST message of a conversation is charged here, so
+ * a normal visitor pays once and an established chat is untouched. Deliberately
+ * generous so a shared corporate NAT / CGNAT egress isn't blocked.
+ */
+const newConversationBucket = createTokenBucket({ perMin: 15 });
+/**
+ * Budget for the cheap-but-not-free visitor frames (delivery/read receipts and
+ * "load earlier"). Generous enough that a real visitor reading a thread and
+ * paging back never notices, tight enough that a loop can't turn one anonymous
+ * socket into hundreds of publishes per second. See `allowCheapFrame`.
+ */
+const receiptBucket = createTokenBucket({ perMin: 120 });
 
 /** What we stash on each visitor socket after a successful handshake. */
 interface WidgetSocketData {
@@ -49,6 +71,11 @@ interface WidgetSocketData {
   externalContactId: string;
   resolved: WebchatwidgetResolved;
   conversationId: string | null;
+  /** Handshake IP — the only visitor-independent key we can rate-limit new
+   *  conversation creation on (visitorId is client-chosen, so it isn't one). */
+  ip: string;
+  /** Whether we've last relayed a typing-on to the agents (so disconnect can clear it). */
+  typingOn?: boolean;
 }
 
 /** Body of a `visitor:message` frame. `body` is text or a media caption. */
@@ -85,7 +112,9 @@ interface VisitorMessageBody {
  * the public HTTP endpoint and referenced by key.
  */
 @WebSocketGateway({ namespace: "/widget" })
-export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection {
+export class WebchatwidgetGateway
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+{
   private readonly logger = new Logger(WebchatwidgetGateway.name);
 
   @WebSocketServer()
@@ -115,6 +144,7 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
             socket.handshake.address ||
             "unknown";
           if (!handshakeBucket.consume(ip).ok) {
+            this.logger.warn(`widget handshake throttled ip=${ip}`);
             next(new Error("handshake_throttled"));
             return;
           }
@@ -130,11 +160,23 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
           }
           const resolved = await resolveWebchatwidgetByPublicKey(siteKey);
           if (!resolved) {
+            // Diagnostics: a mistyped/rotated key is the #1 onboarding failure and
+            // is otherwise INVISIBLE — the visitor just sees a dead widget. Log a
+            // key PREFIX only (enough to correlate, not the whole credential).
+            this.logger.warn(
+              `widget handshake rejected: unknown_site_key key=${siteKey.slice(0, 12)}… ip=${ip}`,
+            );
             next(new Error("unknown_site_key"));
             return;
           }
           const origin = (socket.handshake.headers.origin as string | undefined) ?? null;
           if (!originAllowed(origin, resolved.allowedOrigins)) {
+            // The other half of the same class: the client embedded the widget on a
+            // domain that isn't in its allow-list. Log the actual origin so support
+            // can tell them exactly what to add.
+            this.logger.warn(
+              `widget handshake rejected: origin_not_allowed origin=${origin ?? "<none>"} widget=${resolved.widgetId} team=${resolved.teamId}`,
+            );
             next(new Error("origin_not_allowed"));
             return;
           }
@@ -145,6 +187,7 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
             externalContactId: `${resolved.widgetId}:${visitorId}`,
             resolved,
             conversationId: null,
+            ip,
           };
           socket.data = data;
           next();
@@ -154,6 +197,7 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
         }
       })();
     });
+    setWidgetVisitorSocketCounter(() => server.sockets.size);
     this.logger.log('Website-widget gateway ready (namespace "/widget")');
   }
 
@@ -180,13 +224,13 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
       if (conversationId) {
         data.conversationId = conversationId;
         await client.join(widgetRoom(conversationId));
-        client.emit("history", { messages: await this.history(data.teamId, conversationId) });
+        client.emit("history", await this.history(data.teamId, conversationId));
       } else {
-        client.emit("history", { messages: [] });
+        client.emit("history", { messages: [], hasMore: false });
       }
     } catch (err) {
       this.logger.error(`widget connect resume failed: ${err instanceof Error ? err.message : err}`);
-      client.emit("history", { messages: [] });
+      client.emit("history", { messages: [], hasMore: false });
     }
   }
 
@@ -207,6 +251,45 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
     const text = typeof body.body === "string" ? body.body.slice(0, MAX_BODY_CHARS) : "";
     const hasMedia = body.media && typeof body.media.mediaKey === "string";
     if (!text && !hasMedia) return { ok: false, error: "empty" };
+
+    // TENANT GATE (§7): `mediaKey` arrives from the browser, so it is untrusted
+    // input — without this check a visitor could name ANY key in the bucket
+    // (e.g. `media/<other-team>/…`), have it persisted on their OWN conversation,
+    // and then stream another tenant's private object back through
+    // GET /api/widget/media/:id (whose ownership check validates the MESSAGE, not
+    // the key). Keys are minted as `media/{teamId}/{yyyy}/{mm}/…` by the R2 key
+    // builder, so requiring the handshake team's prefix binds the blob to the
+    // team that uploaded it. Belt-and-braces: reject traversal segments too.
+    if (hasMedia) {
+      const key = body.media!.mediaKey;
+      const url = body.media!.mediaUrl;
+      // The url is persisted alongside the key and is what the forward/external
+      // paths hand to `fetch()`, so it gets the provider's own SSRF/open-redirect
+      // gate rather than being trusted because the key passed.
+      if (
+        !key.startsWith(`media/${data.teamId}/`) ||
+        key.includes("..") ||
+        typeof url !== "string" ||
+        !blobStorage.isOwnUrl(url)
+      ) {
+        this.logger.warn(
+          `[webchatwidget] rejected foreign media key/url on team=${data.teamId} widget=${data.widgetId}`,
+        );
+        return { ok: false, error: "bad_media" };
+      }
+    }
+
+    // Charge the per-IP new-conversation budget only when this socket has no
+    // conversation yet (see newConversationBucket). `data.conversationId` is set
+    // on connect for a returning visitor and after the first send below, so an
+    // ongoing chat never pays.
+    const isNewConversation = data.conversationId === null;
+    if (isNewConversation && !newConversationBucket.consume(data.ip).ok) {
+      this.logger.warn(
+        `widget new-conversation throttled ip=${data.ip} widget=${data.widgetId} team=${data.teamId}`,
+      );
+      return { ok: false, error: "rate_limited" };
+    }
 
     // Dedupe key is stable per (widget, visitor, clientMsgId) so a reconnect
     // resend can't double-insert (the (teamId, channel, externalId) unique gate).
@@ -269,7 +352,50 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
         );
       }
     }
+
+    // First message of a NEW conversation: the room join above happened AFTER
+    // ingestEvents, so the `message.received` fanout raced it and was very likely
+    // emitted into a room this socket hadn't joined yet. The visitor's own first
+    // message therefore never reconciles — most visibly, a first MEDIA message
+    // keeps its local "📎 image" placeholder instead of rendering, until the next
+    // reconnect. Replaying history now that we're in the room closes the gap;
+    // it's idempotent client-side (upsert keys on message id, and the pending
+    // clientMsgId match retires the optimistic bubble).
+    if (isNewConversation) {
+      try {
+        client.emit("history", await this.history(data.teamId, conversationId));
+      } catch (err) {
+        this.logger.error(`widget first-message history replay failed: ${err}`);
+      }
+    }
     return { ok: true, conversationId };
+  }
+
+  /**
+   * Visitor typing → relay to the agent inbox. Only meaningful once the visitor
+   * has a conversation (first message sent). We stash the last state so the
+   * disconnect handler can clear a stuck indicator when the tab vanishes.
+   */
+  @SubscribeMessage("visitor:typing")
+  onVisitorTyping(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { on?: unknown },
+  ): void {
+    const data = client.data as WidgetSocketData | undefined;
+    if (!data?.conversationId) return;
+    const on = body?.on === true;
+    if (on === (data.typingOn ?? false)) return;
+    data.typingOn = on;
+    this.realtime.notifyVisitorTyping(data.conversationId, on);
+  }
+
+  /** Clear a lingering "customer is typing…" if the visitor drops mid-type. */
+  handleDisconnect(client: Socket): void {
+    const data = client.data as WidgetSocketData | undefined;
+    if (data?.conversationId && data.typingOn) {
+      data.typingOn = false;
+      this.realtime.notifyVisitorTyping(data.conversationId, false);
+    }
   }
 
   /**
@@ -287,14 +413,37 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
   @SubscribeMessage("visitor:received")
   async onReceived(@ConnectedSocket() client: Socket): Promise<void> {
     const data = client.data as WidgetSocketData | undefined;
-    if (data?.conversationId) await this.markOutbound(data.teamId, data.conversationId, "delivered");
+    if (!data?.conversationId || !this.allowCheapFrame(data)) return;
+    await this.markOutbound(data.teamId, data.conversationId, "delivered");
   }
 
   // The panel is open + tab visible → mark outbound `read` (agent sees "Seen").
   @SubscribeMessage("visitor:read")
   async onRead(@ConnectedSocket() client: Socket): Promise<void> {
     const data = client.data as WidgetSocketData | undefined;
-    if (data?.conversationId) await this.markOutbound(data.teamId, data.conversationId, "read");
+    if (!data?.conversationId || !this.allowCheapFrame(data)) return;
+    await this.markOutbound(data.teamId, data.conversationId, "read");
+  }
+
+  /**
+   * Rate gate for the non-message visitor frames (`visitor:received`,
+   * `visitor:read`, `visitor:loadOlder`).
+   *
+   * These were completely UNLIMITED on an anonymous socket, while the agent
+   * gateway rate-limits every one of its handlers. `visitor:read` is the
+   * expensive one: it can fan out to a `findMany` plus up to 200 sequential
+   * `publish()` calls, each running the full subscriber chain — so a loop on the
+   * one auth-free surface in the product was a cheap way to saturate the process.
+   *
+   * Keyed on the SERVER-RESOLVED conversationId, deliberately not the visitorId:
+   * visitorId is chosen by the client, so a bucket keyed on it is bypassed by
+   * rotating the value (the same weakness the message bucket carries).
+   */
+  private allowCheapFrame(data: WidgetSocketData): boolean {
+    const key = data.conversationId ?? `${data.widgetId}:${data.ip}`;
+    if (receiptBucket.consume(key).ok) return true;
+    this.logger.warn(`widget receipt/history frame throttled conversation=${key}`);
+    return false;
   }
 
   /**
@@ -312,6 +461,12 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
     const msgs = await this.db.message.findMany({
       where: { teamId, conversationId, channel: CHANNEL, direction: "out", status: { in: from } },
       select: { id: true },
+      // Bounded: each row below costs a publish() (outbox write + full subscriber
+      // chain), so a visitor returning to a long-unread thread could otherwise turn
+      // one `visitor:read` into hundreds of serial publishes. Newest first, since
+      // those are the ones the agent is watching; the rest settle on later fires.
+      orderBy: { timestamp: "desc" },
+      take: 200,
     });
     if (msgs.length === 0) return;
     await this.db.message.updateMany({
@@ -362,15 +517,31 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
     return contact?.id ?? null;
   }
 
-  private async history(teamId: string, conversationId: string): Promise<WidgetMessageFrame[]> {
+  /**
+   * A page of history, newest-batch-first. `before` (keyset cursor) pages
+   * BACKWARD for "load earlier". Returns `hasMore` so the widget knows whether to
+   * keep offering "load earlier". Fetches LIMIT+1 to detect more without a count.
+   */
+  private async history(
+    teamId: string,
+    conversationId: string,
+    before?: { ts: Date; id: string },
+  ): Promise<{ messages: WidgetMessageFrame[]; hasMore: boolean }> {
     const rows = await this.db.message.findMany({
       omit: { rawPayload: true },
       include: { replyTo: REPLY_TO_INCLUDE },
-      where: { teamId, conversationId },
+      where: {
+        teamId,
+        conversationId,
+        ...(before
+          ? { OR: [{ timestamp: { lt: before.ts } }, { timestamp: before.ts, id: { lt: before.id } }] }
+          : {}),
+      },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
-      take: HISTORY_LIMIT,
+      take: HISTORY_LIMIT + 1,
     });
-    const asc = rows.reverse();
+    const hasMore = rows.length > HISTORY_LIMIT;
+    const asc = (hasMore ? rows.slice(0, HISTORY_LIMIT) : rows).reverse();
     // Batch-resolve agent names for outbound messages so the widget shows who
     // replied — one query for the distinct senders on the page.
     const senderIds = [
@@ -384,10 +555,34 @@ export class WebchatwidgetGateway implements OnGatewayInit, OnGatewayConnection 
       });
       for (const u of users) names.set(u.id, u.name);
     }
-    return asc.map((r) =>
+    const messages = asc.map((r) =>
       frameFromMessage(mapMessage(r), {
         senderName: r.senderUserId ? (names.get(r.senderUserId) ?? null) : null,
       }),
     );
+    return { messages, hasMore };
+  }
+
+  /** "Load earlier" — a page of messages older than the widget's oldest, keyed
+   *  off the (createdAt, id) cursor it holds. */
+  @SubscribeMessage("visitor:loadOlder")
+  async onLoadOlder(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { before?: { ts?: string; id?: string } },
+  ): Promise<{ messages: WidgetMessageFrame[]; hasMore: boolean }> {
+    const data = client.data as WidgetSocketData | undefined;
+    const cur = body?.before;
+    if (!data?.conversationId || !cur || typeof cur.ts !== "string" || typeof cur.id !== "string") {
+      return { messages: [], hasMore: false };
+    }
+    // Two findMany's per call on an anonymous socket — same budget as the
+    // receipts. An empty page also stops the widget's scroll-triggered loop.
+    if (!this.allowCheapFrame(data)) return { messages: [], hasMore: false };
+    // An unparseable timestamp makes Prisma throw, so the ack never fires and the
+    // widget's `loadingOlder` latch stays true — "Load earlier" is then stuck on
+    // "Loading…" for the rest of the session. Fail closed with an empty page.
+    const ts = new Date(cur.ts);
+    if (Number.isNaN(ts.getTime())) return { messages: [], hasMore: false };
+    return this.history(data.teamId, data.conversationId, { ts, id: cur.id });
   }
 }

@@ -863,17 +863,35 @@ export class CallsService {
    * send a post-pickup `media_update` webhook carrying a new SDP OFFER; the
    * agent's browser answers it and POSTs that answer here, and we forward it via
    * the unified `media_update` action. Only meaningful on a LIVE call the team
-   * owns, so it's teamId-scoped and gated on `in_progress` (like endCall, no
-   * extra capability — an agent already on the call must be able to keep its
-   * media alive). Returns any SDP the provider hands back for the browser to
-   * apply. WhatsApp never reaches here (no live-renegotiation flow); the adapter
-   * throws for it and we surface a clean 400.
+   * owns, so it's teamId-scoped and gated on `in_progress`.
+   *
+   * Capability-gated the same way `endCall` is. This comment used to claim
+   * parity with endCall while asserting "no extra capability" — but endCall
+   * DOES check, and this route was the only calling endpoint with neither a
+   * controller decorator nor a service check. That gap let any session in the
+   * team, INCLUDING a role scoped entirely out of calling, relay
+   * attacker-supplied SDP into a teammate's live call: call ids travel in
+   * `call:*` socket frames and `GET /api/calls`, so they are easy to obtain.
+   * Tenant isolation was never at risk (teamId is scoped); intra-tenant
+   * authorization was.
+   *
+   * Returns any SDP the provider hands back for the browser to apply. WhatsApp
+   * never reaches here (no live-renegotiation flow); the adapter throws for it
+   * and we surface a clean 400.
    */
   async mediaUpdate(
     session: ApiSession,
     callId: string,
     sdp: string,
   ): Promise<{ ok: true; sdpAnswer?: string; sdpRenegotiation?: string }> {
+    const perms = resolvePermissions(session.role, session.rolePermissions);
+    if (
+      !perms["calls:make" as Capability] &&
+      !perms["calls:receive" as Capability]
+    ) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+
     const call = await this.db.call.findFirst({
       where: { id: callId, teamId: session.teamId },
       select: {

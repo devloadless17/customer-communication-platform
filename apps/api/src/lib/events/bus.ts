@@ -214,7 +214,69 @@ export async function publish<K extends DomainEventType>(
   // and a failed row is intentionally KEPT undispatched for operator triage.
   if (rowId && !realtimeErrorSink.error) {
     const id = rowId;
-    void backgroundPromise.then(() => markDispatched([id])).catch(() => {});
+    void backgroundPromise.then(() => queueDispatchedStamp(id)).catch(() => {});
+  }
+}
+
+/**
+ * Coalesce the dispatched-stamp UPDATEs.
+ *
+ * Every publish cost an `OutboundEvent` INSERT **plus** a separate one-row
+ * UPDATE, on top of the entity write that triggered it. Under enterprise
+ * inbound volume — or a broadcast fanning `message.sent` — that is an extra
+ * round trip per event on the same pool the realtime emit and the inbox reads
+ * are contending for. The drainer path already batches the identical call
+ * (`markDispatched` takes an array and the drainer passes the whole
+ * `dispatched[]`); only this synchronous path went one at a time.
+ *
+ * Safe to defer because the stamp is FORENSIC, not control flow: nothing reads
+ * `dispatchedAt` to decide whether to publish, retry, or dedupe — it exists so
+ * an operator can tell "crashed mid-background" (publishedAt set,
+ * dispatchedAt NULL) from a clean run. Losing at most one window's worth of
+ * stamps to a hard crash degrades exactly the same signal that a crash one
+ * millisecond earlier would have degraded anyway, and `markDispatched` only
+ * touches rows still `dispatchedAt: null`, so a late flush can't clobber
+ * anything.
+ *
+ * Flushed on a short timer OR at a size cap, whichever comes first, so a
+ * steady trickle is still stamped promptly and a burst can't grow the pending
+ * array without bound. The timer is `unref`'d so it never holds the process
+ * open during shutdown; `flushDispatchedStamps` is exported so the shutdown
+ * path can drain it deliberately.
+ */
+const DISPATCH_STAMP_FLUSH_MS = 50;
+const DISPATCH_STAMP_MAX_PENDING = 500;
+let pendingDispatchIds: string[] = [];
+let dispatchFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function queueDispatchedStamp(id: string): void {
+  pendingDispatchIds.push(id);
+  if (pendingDispatchIds.length >= DISPATCH_STAMP_MAX_PENDING) {
+    void flushDispatchedStamps();
+    return;
+  }
+  if (dispatchFlushTimer) return;
+  dispatchFlushTimer = setTimeout(() => {
+    dispatchFlushTimer = null;
+    void flushDispatchedStamps();
+  }, DISPATCH_STAMP_FLUSH_MS);
+  dispatchFlushTimer.unref?.();
+}
+
+/** Write any queued dispatched stamps now. Idempotent; safe to call on drain. */
+export async function flushDispatchedStamps(): Promise<void> {
+  if (dispatchFlushTimer) {
+    clearTimeout(dispatchFlushTimer);
+    dispatchFlushTimer = null;
+  }
+  if (pendingDispatchIds.length === 0) return;
+  const ids = pendingDispatchIds;
+  pendingDispatchIds = [];
+  try {
+    await markDispatched(ids);
+  } catch {
+    // Best-effort, exactly as the per-row version was — a failed stamp leaves
+    // the row looking like a crash-window row, which is the conservative read.
   }
 }
 

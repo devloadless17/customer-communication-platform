@@ -38,8 +38,15 @@ const META_TYPING_START_DELAY_MS = 800;
 export function useTyping(
   conversationId: string,
   selfUserId: string,
-): { typingUserIds: string[]; notifyTyping: () => void; stopTyping: () => void } {
+): {
+  typingUserIds: string[];
+  visitorTyping: boolean;
+  notifyTyping: () => void;
+  stopTyping: () => void;
+} {
   const [typingUserIds, setTypingUserIds] = useState<string[]>([]);
+  const [visitorTyping, setVisitorTyping] = useState(false);
+  const visitorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startedRef = useRef(false);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastMetaPingRef = useRef(0);
@@ -143,8 +150,32 @@ export function useTyping(
     };
     socket.on("typing:update", onUpdate);
 
+    // Website-widget visitor typing. The gateway relays an explicit on/off and
+    // clears on disconnect, but a dropped "off" would otherwise pin the bubble,
+    // so each "on" arms a safety auto-clear that a fresh "on" refreshes.
+    const onVisitorTyping: Parameters<
+      typeof socket.on<"conversation:visitor_typing">
+    >[1] = (payload) => {
+      if (payload.conversationId !== conversationId) return;
+      if (visitorTimer.current) {
+        clearTimeout(visitorTimer.current);
+        visitorTimer.current = null;
+      }
+      setVisitorTyping(payload.on);
+      if (payload.on) {
+        visitorTimer.current = setTimeout(() => setVisitorTyping(false), 8000);
+      }
+    };
+    socket.on("conversation:visitor_typing", onVisitorTyping);
+
     return () => {
       socket.off("typing:update", onUpdate);
+      socket.off("conversation:visitor_typing", onVisitorTyping);
+      if (visitorTimer.current) {
+        clearTimeout(visitorTimer.current);
+        visitorTimer.current = null;
+      }
+      setVisitorTyping(false);
       // Leaving the thread should clear our typing flag — server also clears
       // on unsubscribe:conversation, but doing it here too means the local
       // ref state matches before the socket round-trip.
@@ -152,5 +183,5 @@ export function useTyping(
     };
   }, [conversationId, selfUserId, stopTyping]);
 
-  return { typingUserIds, notifyTyping, stopTyping };
+  return { typingUserIds, visitorTyping, notifyTyping, stopTyping };
 }

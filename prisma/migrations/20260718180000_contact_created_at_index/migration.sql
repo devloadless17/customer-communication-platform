@@ -1,0 +1,26 @@
+-- Contact newest-first listing index.
+--
+-- WHERE "teamId" = ? ORDER BY "createdAt" DESC, "id" DESC is the DEFAULT order
+-- for three surfaces — GET /v1/contacts (external-v1.service.ts), the CSV
+-- export (contacts.service.ts), and the global contact-search keyset
+-- (lib/queries/global-search.ts) — and no index could supply it, so each read
+-- the tenant's whole contact partition and sorted it. Keyset pagination does
+-- NOT rescue this: the cursor bounds which rows are RETURNED, not the sort
+-- that has to find them.
+--
+-- Verified missing with `SET enable_seqscan=off`: the planner still emitted a
+-- Sort node over an unrelated index scan, which is what "nothing can supply
+-- this order" looks like. (Reading a bare EXPLAIN on a small dev table is not
+-- sufficient evidence — it picks a Seq Scan on cost whether or not a usable
+-- index exists.)
+--
+-- LOCKING NOTE: plain CREATE INDEX, not CONCURRENTLY, because Prisma applies
+-- each migration inside a transaction and CONCURRENTLY cannot run in one. The
+-- build holds a write lock for its duration, so this ships while the tables are
+-- small and it is sub-second — the same index is far more expensive to add
+-- later against a large tenant, which is exactly when it is needed.
+--
+-- IF NOT EXISTS because this index was already created on the dev box by an
+-- earlier partially-applied run of this migration.
+CREATE INDEX IF NOT EXISTS "Contact_teamId_createdAt_id_idx"
+  ON "Contact"("teamId", "createdAt" DESC, "id" DESC);

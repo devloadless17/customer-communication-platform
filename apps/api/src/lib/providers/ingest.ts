@@ -1,10 +1,12 @@
 import { Prisma } from "@prisma/client";
+import type { BroadcastDeliveryState } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { runWithConcurrency } from "@/common/concurrency";
 import { captureRemoteContactAvatar } from "@/lib/blob-storage/avatar";
 import { getProviderBinding } from "@/lib/providers";
 import { persistWhatsappHealth } from "@/lib/providers/meta-health";
+import { classifyMetaStatusError } from "@/lib/providers/meta-send-error";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { publish } from "@/lib/events/bus";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
@@ -15,6 +17,11 @@ import {
 } from "@/lib/messages/idempotent-create";
 import { ingestCallEvent } from "@/lib/providers/ingest-call";
 import { applyContactShareFromReply } from "@/lib/identity/contact-share";
+import {
+  applyOptOut,
+  attributeInboundToBroadcast,
+  clearOptOut,
+} from "@/lib/broadcast-attribution";
 import { resolveCustomerId } from "@/lib/identity/identity-service";
 import { ensureDefaultStage } from "@/lib/queries";
 import {
@@ -149,6 +156,20 @@ export async function ingestEvents(
         await ingestContactNumberChange(teamId, channel, evt);
       } else if (evt.kind === "template_status") {
         await ingestTemplateStatusUpdate(teamId, evt);
+      } else if (evt.kind === "marketing_preference") {
+        // Marketing opt-out / resume from Meta. Resolve the contact by phone
+        // within this team, then set or clear consent.
+        const contact = await db.contact.findFirst({
+          where: { teamId, phoneNumber: { contains: evt.contactPhone }, deletedAt: null },
+          select: { id: true },
+        });
+        if (contact) {
+          if (evt.optedOut) {
+            await applyOptOut(teamId, contact.id, "meta_preferences", evt.timestamp);
+          } else {
+            await clearOptOut(teamId, contact.id);
+          }
+        }
       } else if (evt.kind === "channel_health") {
         // WhatsApp number messaging-limit tier / quality / throughput changed.
         await persistWhatsappHealth(teamId, {
@@ -249,7 +270,7 @@ export async function ingestEvents(
 export function isTransientDbError(err: unknown): boolean {
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
     return (
-      err.code === "P2024" /* pool timeout */ ||
+      err.code === "P2024" /* pool timeout (Rust engine only — see below) */ ||
       err.code === "P2034" /* write conflict / deadlock */ ||
       err.code === "P1001" /* server unreachable */ ||
       err.code === "P1002" /* connection timeout */ ||
@@ -258,7 +279,77 @@ export function isTransientDbError(err: unknown): boolean {
   }
   // DB unreachable at connect time surfaces as an init error, not a known
   // request error — also transient.
-  return err instanceof Prisma.PrismaClientInitializationError;
+  if (err instanceof Prisma.PrismaClientInitializationError) return true;
+  return isDriverTransientError(err);
+}
+
+/**
+ * Transient faults raised by the `pg` DRIVER rather than by Prisma.
+ *
+ * This function exists because of a silent regression: pool exhaustion used to
+ * arrive as `PrismaClientKnownRequestError` P2024, emitted by Prisma's own Rust
+ * engine pool. Since the move to driver adapters (`@prisma/adapter-pg`, see
+ * DbService) the pool is `pg-pool`, whose acquisition timeout is a BARE
+ * `Error("timeout exceeded when trying to connect")` — no `.code`, not a Prisma
+ * error class. So the P2024 branch above became unreachable, and a pool timeout
+ * fell through to "permanent poison": the event was swallowed, the webhook
+ * answered 200 {dropped}, and Meta — which has no history sync — never
+ * redelivered. In other words, inbound customer messages were dropped precisely
+ * when the system was busiest, which is the exact failure the surrounding
+ * comments say must never happen.
+ *
+ * Matches on SQLSTATE where the driver provides one, and on message shape for
+ * the pool/socket errors that carry no code. Erring toward "transient" is the
+ * safe direction here: a redelivery is deduped by (teamId, channel, externalId),
+ * whereas a wrong "permanent" verdict loses a customer's message for good.
+ */
+export function isDriverTransientError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+
+  // SQLSTATE from node-postgres, when present.
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === "string") {
+    if (
+      code === "53300" /* too_many_connections */ ||
+      code === "53400" /* configuration_limit_exceeded */ ||
+      code === "57P01" /* admin_shutdown (failover/restart) */ ||
+      code === "57P02" /* crash_shutdown */ ||
+      code === "57P03" /* cannot_connect_now (starting up) */ ||
+      code === "08000" /* connection_exception */ ||
+      code === "08001" /* sqlclient_unable_to_establish_sqlconnection */ ||
+      code === "08003" /* connection_does_not_exist */ ||
+      code === "08004" /* rejected */ ||
+      code === "08006" /* connection_failure */ ||
+      code === "40001" /* serialization_failure */ ||
+      code === "40P01" /* deadlock_detected */ ||
+      code === "55P03" /* lock_not_available */ ||
+      code === "57014" /* query_canceled — our statement_timeout */ ||
+      // Socket-level failures reaching us as errno strings.
+      code === "ECONNREFUSED" ||
+      code === "ECONNRESET" ||
+      code === "ETIMEDOUT" ||
+      code === "EPIPE" ||
+      code === "EHOSTUNREACH" ||
+      code === "ENOTFOUND"
+    ) {
+      return true;
+    }
+  }
+
+  const message = (err as { message?: unknown }).message;
+  if (typeof message !== "string" || message.length === 0) return false;
+  const m = message.toLowerCase();
+  return (
+    // pg-pool acquisition timeout — the regression this function was written for.
+    m.includes("timeout exceeded when trying to connect") ||
+    m.includes("connection terminated due to connection timeout") ||
+    m.includes("connection terminated unexpectedly") ||
+    m.includes("connection ended unexpectedly") ||
+    m.includes("too many clients already") ||
+    m.includes("the database system is starting up") ||
+    m.includes("terminating connection due to administrator command") ||
+    m.includes("cannot use a pool after calling end")
+  );
 }
 
 /**
@@ -663,6 +754,12 @@ async function ingestStatusUpdate(
       conversationId: true,
       status: true,
       direction: true,
+      // Campaign reporting: `broadcastId` + `conversation.contactId` form
+      // (broadcastId, contactId) — already the @@unique on BroadcastRecipient —
+      // so propagating this status to the campaign's recipient row needs NO
+      // extra lookup and no index on the wamid. Null for every ordinary send,
+      // which is what makes the propagation free for non-broadcast traffic.
+      broadcastId: true,
       conversation: { select: { contactId: true } },
     },
   });
@@ -686,6 +783,31 @@ async function ingestStatusUpdate(
   // read receipts target a specific `mid`; guard against a mid ever resolving to
   // an inbound row so a status write can't corrupt a customer message.
   if (existing.direction !== "out") return;
+
+  // Campaign reporting: mirror this delivery outcome onto the broadcast's
+  // recipient row. Before this existed, a message Meta accepted and then failed
+  // to deliver stayed `status='sent'` on the recipient forever and counted as a
+  // success — so "who never received it" was answered wrongly.
+  //
+  // Runs BEFORE the Message monotonic guard below, deliberately. Meta attaches
+  // the `pricing` object to the `sent` status, and our Message is ALREADY `sent`
+  // (the runner stamps it at send time), so that guard short-circuits — placing
+  // this after it meant campaign cost was never captured at all. The recipient
+  // has its own ladder + CAS, so it is safe to advance independently.
+  //
+  // Fire-and-forget, exactly like `applyContactShareFromReply`: a reporting
+  // enrichment must never be able to cost us a delivery receipt. A plain `sent`
+  // with no pricing is skipped — the runner already stamped that state, and
+  // skipping drops roughly a third of the webhook write volume on a 100k campaign.
+  if (existing.broadcastId && (evt.status !== "sent" || evt.pricing)) {
+    void applyBroadcastDeliveryStatus(
+      existing.broadcastId,
+      existing.conversation.contactId,
+      evt,
+    ).catch((err) => {
+      console.error("[ingest] broadcast delivery propagation failed", err);
+    });
+  }
 
   // `statusWinsOver` (module-level, shared with drainParkedStatus) applies both
   // the terminal-`failed` rule and the monotonic rank guard (sent < delivered
@@ -736,6 +858,7 @@ async function ingestStatusUpdate(
     pinnedStatus = current.status as Message["status"];
   }
   if (written.count === 0) return;
+
 
   await publish({
     type: "message.status_changed",
@@ -987,7 +1110,12 @@ export async function drainParkedStatus(
   // (sent→delivered→read = 3 states).
   const existing = await db.message.findUnique({
     where: { id: messageId },
-    select: { status: true },
+    // `broadcastId` for the campaign-delivery propagation below. This path
+    // matters more than it looks for reporting: a broadcast running at full
+    // throughput is exactly the workload that races Meta's status webhook
+    // ahead of our own Message insert, so a large campaign's delivery receipts
+    // disproportionately arrive via the park/drain route rather than live.
+    select: { status: true, broadcastId: true },
   });
   if (!existing) return; // row vanished (hard delete) — nothing to drain onto
   let pinnedStatus = existing.status as Message["status"];
@@ -1018,6 +1146,24 @@ export async function drainParkedStatus(
     pinnedStatus = current.status as Message["status"];
   }
   if (written.count === 0) return;
+
+  // Same campaign propagation as the live path. Calling it from both is safe:
+  // the whole thing is guard + CAS, so a double-apply is a no-op.
+  if (existing.broadcastId && parked.status !== "sent") {  // parked statuses carry no pricing
+    void applyBroadcastDeliveryStatus(existing.broadcastId, contactId, {
+      kind: "status",
+      externalId,
+      status: parked.status,
+      ...(parked.errorCode !== undefined ? { errorCode: parked.errorCode } : {}),
+      ...(parked.errorTitle !== undefined ? { errorTitle: parked.errorTitle } : {}),
+      ...(parked.errorDetail !== undefined ? { errorDetail: parked.errorDetail } : {}),
+      timestamp: new Date(),
+      rawPayload: {},
+    }).catch((err) => {
+      console.error("[ingest] broadcast delivery propagation (drain) failed", err);
+    });
+  }
+
   await publish({
     type: "message.status_changed",
     teamId,
@@ -1079,6 +1225,134 @@ function statusWinsOver(
   if (current === "failed") return false; // failed is terminal — nothing overwrites it
   if (incoming === "failed") return true; // failure overwrites any non-failed
   return statusRank(incoming) > statusRank(current);
+}
+
+/**
+ * Monotonic ladder for a broadcast recipient's DELIVERY state.
+ *
+ * Deliberately a SEPARATE ladder from `statusWinsOver`, not a reuse of it.
+ * `statusWinsOver` ranks `MessageStatus`, which collapses two very different
+ * terminal outcomes into one `failed`: "Meta rejected the API call" and "Meta
+ * accepted it then couldn't deliver". The campaign funnel must tell those apart
+ * (`failed_at_send` vs `undelivered`) because they mean different things to the
+ * operator and land in different actionability buckets — one is a bad template
+ * or credential, the other is a bad number. Sharing the function would force a
+ * lossy mapping.
+ *
+ * The subtle rule is the second line. Meta batches `delivered` and `failed` for
+ * the SAME wamid in one POST more often than you'd expect on marketing sends,
+ * and lane ordering is not guaranteed. If the handset already acked (delivered
+ * or read), a later "undelivered" is a duplicate/out-of-order artifact, NOT a
+ * regression — accepting it would silently move a genuinely-received message
+ * into the "never received" bucket and corrupt the headline number this whole
+ * feature exists to get right.
+ */
+const DELIVERY_RANK: Record<BroadcastDeliveryState, number> = {
+  pending: 0,
+  sent: 1,
+  delivered: 2,
+  read: 3,
+  failed_at_send: -1, // terminal
+  undelivered: -1, // terminal
+};
+
+function deliveryWinsOver(
+  next: BroadcastDeliveryState,
+  current: BroadcastDeliveryState,
+): boolean {
+  if (DELIVERY_RANK[current] < 0) return false; // already terminal — never leaves
+  if (DELIVERY_RANK[next] < 0) {
+    // A terminal failure may only overwrite a state where delivery was never
+    // confirmed. Once the handset acked, "undelivered" is a lie.
+    return current !== "read" && current !== "delivered";
+  }
+  return DELIVERY_RANK[next] > DELIVERY_RANK[current];
+}
+
+/**
+ * Propagate a Meta delivery-status webhook onto the broadcast recipient row.
+ *
+ * Looked up by `(broadcastId, contactId)` — the existing @@unique — using data
+ * the caller already had in hand, so this costs one indexed read + one indexed
+ * write and needs no new index.
+ *
+ * Guard + CAS mirror the Message path: pin the state we read, write only if it
+ * is still that, re-read and re-decide on a miss. Bounded at 4 attempts because
+ * the ladder is only three rungs deep, so it cannot spin.
+ */
+async function applyBroadcastDeliveryStatus(
+  broadcastId: string,
+  contactId: string,
+  evt: NormalizedStatusUpdate,
+): Promise<void> {
+  const recipient = await db.broadcastRecipient.findUnique({
+    where: { broadcastId_contactId: { broadcastId, contactId } },
+    select: { id: true, deliveryState: true },
+  });
+  // No recipient row: the campaign was deleted, or this is a non-broadcast
+  // message that somehow carries a broadcastId. Nothing to report on.
+  if (!recipient) return;
+
+  // Meta's `failed` on an ACCEPTED message means undeliverable — distinct from
+  // the runner's `failed_at_send` (the API call itself was rejected).
+  const next: BroadcastDeliveryState =
+    evt.status === "failed" ? "undelivered" : (evt.status as BroadcastDeliveryState);
+
+  // Cost columns ride whatever write happens next. Captured even when the
+  // delivery state itself doesn't advance (a pricing-bearing `sent`), which is
+  // why this is computed before the ladder check below.
+  const pricingFields = evt.pricing
+    ? {
+        ...(typeof evt.pricing.billable === "boolean"
+          ? { pricingBillable: evt.pricing.billable }
+          : {}),
+        ...(evt.pricing.category ? { pricingCategory: evt.pricing.category } : {}),
+        ...(evt.pricing.model ? { pricingModel: evt.pricing.model } : {}),
+      }
+    : {};
+
+  let pinned = recipient.deliveryState;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (!deliveryWinsOver(next, pinned)) {
+      // The ladder says this status is stale — but if it carried pricing we
+      // still want the cost, so write that alone and stop.
+      if (Object.keys(pricingFields).length > 0) {
+        await db.broadcastRecipient.updateMany({
+          where: { id: recipient.id },
+          data: pricingFields,
+        });
+      }
+      return;
+    }
+    const written = await db.broadcastRecipient.updateMany({
+      where: { id: recipient.id, deliveryState: pinned },
+      data: {
+        deliveryState: next,
+        ...(next === "delivered" ? { deliveredAt: evt.timestamp } : {}),
+        ...(next === "read" ? { readAt: evt.timestamp } : {}),
+        ...pricingFields,
+        ...(next === "undelivered"
+          ? {
+              metaErrorCode: evt.errorCode ?? null,
+              // Same normalized vocabulary the send path uses, so the failure
+              // report is one GROUP BY rather than two taxonomies.
+              errorCode: classifyMetaStatusError(evt.errorCode),
+              // Safe to write: a recipient carrying CANCEL_RECIPIENT_MARKER is
+              // `status='failed'` with no wamid, so it never reaches here and
+              // the marker can't be clobbered.
+              errorMessage: (evt.errorDetail ?? evt.errorTitle)?.slice(0, 500) ?? null,
+            }
+          : {}),
+      },
+    });
+    if (written.count > 0) return;
+    const current = await db.broadcastRecipient.findUnique({
+      where: { id: recipient.id },
+      select: { deliveryState: true },
+    });
+    if (!current) return;
+    pinned = current.deliveryState;
+  }
 }
 
 async function ingestInboundMessage(
@@ -1427,6 +1701,17 @@ async function ingestInboundMessage(
             ? { attribution: evt.attribution as unknown as Prisma.InputJsonValue }
             : {}),
           ...(replySnapshot ? { replyToMessageId: replySnapshot.id } : {}),
+          // Persist the structured button/list tap. Until now this was parsed,
+          // handed to workflows, and then dropped — only the button's display
+          // TITLE survived (as `body`), so click-through could only be derived
+          // from a string an operator can rename at will. Zero extra write:
+          // these are columns on the row already being inserted.
+          ...(evt.interactiveReply
+            ? {
+                interactiveOptionId: evt.interactiveReply.id,
+                interactiveOptionKind: evt.interactiveReply.kind,
+              }
+            : {}),
           ...(evt.media
             ? {
                 mediaKind: evt.media.kind,
@@ -1753,6 +2038,32 @@ async function ingestInboundMessage(
         );
       } catch (err) {
         console.error("[ingest][contact_share]", { contactId: txResult.contactId, err });
+      }
+    }
+
+    // Post-commit: credit this inbound to a recent campaign (reply / button
+    // click) and honour an opt-out keyword. Same placement and same contract as
+    // the contact-share enrichment above — after the tx, non-fatal — because
+    // campaign reporting must never be able to cost us the customer's message.
+    if (txResult) {
+      try {
+        await attributeInboundToBroadcast({
+          teamId,
+          contactId: txResult.contactId,
+          messageId: txResult.messageId,
+          body: evt.body ?? null,
+          timestamp: evt.timestamp,
+          // OUR message the customer quoted, when they used quote-reply. This is
+          // what makes direct (exact) attribution possible instead of inferring
+          // from a time window.
+          replyToMessageId: replySnapshot?.id ?? null,
+          interactiveOptionId: evt.interactiveReply?.id ?? null,
+        });
+      } catch (err) {
+        console.error("[ingest][broadcast_attribution]", {
+          contactId: txResult.contactId,
+          err,
+        });
       }
     }
   } catch (err) {

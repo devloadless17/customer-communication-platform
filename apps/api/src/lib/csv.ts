@@ -35,12 +35,30 @@ function escapeCell(value: string): string {
  * round-tripping through "Import Text Wizard".
  */
 export function serializeCsv(columns: string[], rows: Array<Record<string, string>>): string {
-  const lines: string[] = [];
-  lines.push(columns.map(escapeCell).join(","));
-  for (const row of rows) {
-    lines.push(columns.map((c) => escapeCell(row[c] ?? "")).join(","));
-  }
-  return "\uFEFF" + lines.join("\r\n") + "\r\n";
+  return csvHeader(columns) + csvRows(columns, rows);
+}
+
+/**
+ * Header line (with the BOM) on its own, for STREAMING exports that write the
+ * file in chunks instead of building the whole document in memory. A 100k-row
+ * campaign export is ~25MB as one string — rude on a shared 8GB box — but ~2MB
+ * peak when streamed a page at a time.
+ *
+ * Split out rather than reimplemented: `escapeCell` (and its formula-injection
+ * defuse) MUST remain the single implementation. Recipient names and Meta error
+ * strings are attacker-influenced exactly like contact names are.
+ */
+export function csvHeader(columns: string[]): string {
+  return "\uFEFF" + columns.map(escapeCell).join(",") + "\r\n";
+}
+
+/** One chunk of body rows, newline-terminated. Pairs with `csvHeader`. */
+export function csvRows(columns: string[], rows: Array<Record<string, string>>): string {
+  if (rows.length === 0) return "";
+  return (
+    rows.map((row) => columns.map((c) => escapeCell(row[c] ?? "")).join(",")).join("\r\n") +
+    "\r\n"
+  );
 }
 
 export interface ParsedCsv {

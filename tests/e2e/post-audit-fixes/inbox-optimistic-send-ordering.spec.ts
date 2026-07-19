@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Route } from "@playwright/test";
+import { Prisma } from "@prisma/client";
 
 import { appAdmin, db, wipeTestData } from "../_helpers/db";
 
@@ -265,7 +266,7 @@ async function injectAutoClaimTrio(): Promise<void> {
 async function seedConversationEvent(
   kind: "ai_paused" | "status_changed" | "assigned",
   atMs: number,
-  after: Record<string, unknown>,
+  after: Prisma.InputJsonObject,
 ): Promise<void> {
   await db().conversationEvent.create({
     data: { teamId, conversationId, userId, kind, after, at: new Date(atMs) },

@@ -47,6 +47,39 @@ import { ReactionPicker } from "./reaction-picker";
  * Receives callbacks instead of dispatching directly so the same bubble
  * works for both the channel feed and the thread side panel.
  */
+/**
+ * "You, Sara Kim and 3 others reacted with 👍".
+ *
+ * The viewer always sorts first and reads as "You" — that's the fact people
+ * actually scan for ("did I already react?"). Caps the name list so a
+ * 40-person reaction doesn't produce an unreadable tooltip.
+ */
+const MAX_NAMED_REACTORS = 5;
+
+function describeReactors(
+  userIds: string[],
+  viewerUserId: string,
+  displayNameById: Map<string, string> | undefined,
+  emoji: string,
+): string {
+  const ordered = userIds.includes(viewerUserId)
+    ? [viewerUserId, ...userIds.filter((id) => id !== viewerUserId)]
+    : userIds;
+  const names = ordered.map((id) =>
+    id === viewerUserId ? "You" : (displayNameById?.get(id) ?? "Someone"),
+  );
+
+  const shown = names.slice(0, MAX_NAMED_REACTORS);
+  const rest = names.length - shown.length;
+
+  let who: string;
+  if (shown.length === 1) who = shown[0]!;
+  else if (rest > 0) who = `${shown.join(", ")} and ${rest} ${rest === 1 ? "other" : "others"}`;
+  else who = `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}`;
+
+  return `${who} reacted with ${emoji}`;
+}
+
 function ChannelMessageImpl({
   message,
   currentUser,
@@ -54,6 +87,7 @@ function ChannelMessageImpl({
   canPin,
   canDelete,
   isThreadReply,
+  isContinuation = false,
   onOpenThread,
   onRetry,
   onDismiss,
@@ -69,6 +103,12 @@ function ChannelMessageImpl({
   /** True when this bubble lives inside the thread panel — hides the
    *  "Reply in thread" action so threads can't nest. */
   isThreadReply: boolean;
+  /**
+   * This message continues a same-author run started by the one above, so the
+   * avatar/name/timestamp header is suppressed and the row tightens up. The
+   * timestamp reappears on hover in the gutter where the avatar would be.
+   */
+  isContinuation?: boolean;
   /**
    * Retry sending a FAILED optimistic message (re-POSTs body + clientTempId,
    * flips back to pending). Only wired for the channel feed / thread panel;
@@ -158,6 +198,25 @@ function ChannelMessageImpl({
 
   const togglePin = async () => {
     const nextPinned = !message.pinned;
+    // The optimistic frame attributes the pin to the actor, which is who it
+    // will be attributed to server-side too. The authoritative frame arrives
+    // moments later with the real pinnedAt and overwrites this.
+    const optimisticPinMeta = nextPinned
+      ? {
+          pinnedAt: new Date().toISOString(),
+          pinnedById: currentUser.id,
+          pinnedByName: currentUser.name ?? null,
+        }
+      : { pinnedAt: null, pinnedById: null, pinnedByName: null };
+    // Roll-back frame: restore whatever the pin state was before this click.
+    const rollbackPinMeta = message.pinned
+      ? {
+          pinnedAt: new Date().toISOString(),
+          pinnedById: null,
+          pinnedByName: null,
+        }
+      : { pinnedAt: null, pinnedById: null, pinnedByName: null };
+
     // Optimistic: flip the pin badge instantly + fan the same frame the
     // server will emit so other surfaces (pinned-list etc.) update too.
     dispatchLocalSocketEvent("team:channel:pin:changed", {
@@ -165,28 +224,26 @@ function ChannelMessageImpl({
       channelId,
       messageId: message.id,
       pinned: nextPinned,
+      ...optimisticPinMeta,
     });
-    try {
-      const res = await fetchWithSessionGuard(
-        `/api/team/channels/${channelId}/messages/${message.id}/pin`,
-        { method: message.pinned ? "DELETE" : "POST" },
-      );
-      if (!res.ok) {
-        // Roll back to the prior value.
-        dispatchLocalSocketEvent("team:channel:pin:changed", {
-          teamId: currentUser.teamId,
-          channelId,
-          messageId: message.id,
-          pinned: message.pinned,
-        });
-      }
-    } catch {
+    const rollback = () => {
       dispatchLocalSocketEvent("team:channel:pin:changed", {
         teamId: currentUser.teamId,
         channelId,
         messageId: message.id,
         pinned: message.pinned,
+        ...rollbackPinMeta,
       });
+    };
+    try {
+      const res = await fetchWithSessionGuard(
+        `/api/team/channels/${channelId}/messages/${message.id}/pin`,
+        { method: message.pinned ? "DELETE" : "POST" },
+      );
+      // Roll back to the prior value.
+      if (!res.ok) rollback();
+    } catch {
+      rollback();
     }
   };
 
@@ -271,20 +328,34 @@ function ChannelMessageImpl({
       // (which still uniquely identifies the row while it's optimistic).
       data-message-id={message.id}
       className={cn(
-        "group relative flex gap-3 px-4 py-1.5 transition-colors hover:bg-muted/40",
+        "group relative flex gap-3 px-4 transition-colors hover:bg-muted/40",
+        isContinuation ? "py-0.5" : "py-1.5",
         message.pinned && !isThreadReply && "bg-warning-bg/30",
         message.failed && "bg-destructive/10",
       )}
     >
-      <Avatar className="mt-0.5 size-9 shrink-0">
-        {message.authorAvatarUrl ? (
-          <AvatarImage src={message.authorAvatarUrl} alt={authorName} />
-        ) : null}
-        <AvatarFallback seed={authorName} className="text-xs">{initials(authorName)}</AvatarFallback>
-      </Avatar>
+      {isContinuation ? (
+        // Spacer holding the avatar column, with the timestamp revealed on
+        // hover — the Slack/Discord affordance that keeps a grouped run
+        // scannable without repeating the header on every line.
+        <div className="w-9 shrink-0 select-none pt-0.5 text-right">
+          <LocalTime
+            iso={message.createdAt}
+            format="messageTime"
+            className="text-3xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
+          />
+        </div>
+      ) : (
+        <Avatar className="mt-0.5 size-9 shrink-0">
+          {message.authorAvatarUrl ? (
+            <AvatarImage src={message.authorAvatarUrl} alt={authorName} />
+          ) : null}
+          <AvatarFallback seed={authorName} className="text-xs">{initials(authorName)}</AvatarFallback>
+        </Avatar>
+      )}
 
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-baseline gap-1">
+        <div className={cn("flex min-w-0 items-baseline gap-1", isContinuation && "hidden")}>
           <span className="min-w-0 truncate text-sm font-semibold">{authorName}</span>
           <LocalTime
             iso={message.createdAt}
@@ -354,21 +425,31 @@ function ChannelMessageImpl({
             {message.reactions.map((r) => {
               const mine = r.userIds.includes(currentUser.id);
               return (
-                <button
-                  key={r.emoji}
-                  type="button"
-                  onClick={() => void toggleReaction(r.emoji)}
-                  className={cn(
-                    "flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors",
-                    mine
-                      ? "border-primary/70 bg-primary/20 text-primary"
-                      : "border-border bg-muted/70 hover:border-primary/40 hover:bg-accent",
-                  )}
-                  title={`${r.userIds.length} ${r.userIds.length === 1 ? "reaction" : "reactions"}`}
-                >
-                  <span className="text-sm leading-none">{r.emoji}</span>
-                  <span className="font-medium">{r.userIds.length}</span>
-                </button>
+                <Tooltip key={r.emoji}>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => void toggleReaction(r.emoji)}
+                      className={cn(
+                        "flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors",
+                        mine
+                          ? "border-primary/70 bg-primary/20 text-primary"
+                          : "border-border bg-muted/70 hover:border-primary/40 hover:bg-accent",
+                      )}
+                    >
+                      <span className="text-sm leading-none">{r.emoji}</span>
+                      <span className="font-medium">{r.userIds.length}</span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {describeReactors(
+                      r.userIds,
+                      currentUser.id,
+                      displayNameById,
+                      r.emoji,
+                    )}
+                  </TooltipContent>
+                </Tooltip>
               );
             })}
           </div>
@@ -563,6 +644,7 @@ export const ChannelMessage = memo(
       prev.canPin === next.canPin &&
       prev.canDelete === next.canDelete &&
       prev.isThreadReply === next.isThreadReply &&
+      prev.isContinuation === next.isContinuation &&
       prev.onOpenThread === next.onOpenThread &&
       prev.onRetry === next.onRetry &&
       prev.onDismiss === next.onDismiss &&
@@ -579,6 +661,7 @@ export const ChannelMessage = memo(
       prev.canPin !== next.canPin ||
       prev.canDelete !== next.canDelete ||
       prev.isThreadReply !== next.isThreadReply ||
+      prev.isContinuation !== next.isContinuation ||
       prev.onOpenThread !== next.onOpenThread ||
       prev.onRetry !== next.onRetry ||
       prev.onDismiss !== next.onDismiss ||

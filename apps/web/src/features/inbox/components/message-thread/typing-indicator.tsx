@@ -12,15 +12,21 @@ import type { User } from "@ccp/shared/types";
 export function TypingIndicator({
   typingUserIds,
   memberById,
+  visitorTyping = false,
+  visitorName,
 }: {
   typingUserIds: string[];
   memberById: Map<string, User>;
+  /** A website-widget visitor is typing (not a teammate). */
+  visitorTyping?: boolean;
+  /** The contact's display name, for the "… is typing" sentence. */
+  visitorName?: string;
 }) {
   const names = typingUserIds
     .map((id) => memberById.get(id)?.name.split(" ")[0])
     .filter((n): n is string => Boolean(n));
 
-  const sentence =
+  const teammateSentence =
     names.length === 0
       ? ""
       : names.length === 1
@@ -28,6 +34,12 @@ export function TypingIndicator({
         : names.length === 2
           ? `${names[0]} and ${names[1]} are typing…`
           : `${names.length} teammates are typing…`;
+
+  // The visitor's own typing takes visual priority — it's the customer waiting.
+  const sentence = visitorTyping
+    ? `${visitorName?.split(" ")[0] || "Customer"} is typing…`
+    : teammateSentence;
+  const active = visitorTyping || names.length > 0;
 
   return (
     <>
@@ -40,7 +52,7 @@ export function TypingIndicator({
         {sentence}
       </p>
       <AnimatePresence>
-        {names.length > 0 && (
+        {active && (
           <motion.div
             aria-hidden
             initial={{ opacity: 0, y: 4, height: 0 }}

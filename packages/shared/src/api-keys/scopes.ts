@@ -50,6 +50,12 @@ export const API_KEY_SCOPES = [
   // the contacts/messages/conversations surfaces above.
   "read:catalog",
   "write:catalog",
+
+  // Broadcast campaigns — read-only. Clients pull campaign results into their
+  // own BI/reporting. Deliberately no `write:broadcasts`: creating or firing a
+  // campaign via API is a separate feature with its own idempotency and
+  // abuse-surface questions, and billed template sends are irreversible.
+  "read:broadcasts",
 ] as const;
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];

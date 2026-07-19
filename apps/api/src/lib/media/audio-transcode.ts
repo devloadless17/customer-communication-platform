@@ -3,6 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { FFMPEG_WAIT_OUTBOUND_MS, withFfmpegSlot } from "./ffmpeg-slots";
+
 /**
  * Transcode an arbitrary audio buffer to OGG/Opus — WhatsApp's native voice-note
  * format.
@@ -105,18 +107,30 @@ export async function transcodeToM4a(
   ]);
 }
 
+/**
+ * Both funnels below run under the process-wide ffmpeg semaphore
+ * (./ffmpeg-slots.ts) so a burst of concurrent voice notes can't spawn
+ * unbounded decoders inside the api container's memory limit. They get the
+ * LONGER outbound wait budget: unlike a thumbnail, skipping this transcode
+ * means sending browser-native mp4, which Meta accepts and then fails to
+ * deliver — so it should only degrade under sustained load, not a blip.
+ * A slot timeout throws, and every caller already treats a throw as
+ * "best-effort: send the original".
+ */
 async function transcode(
   input: Uint8Array,
   outputArgs: string[],
 ): Promise<Uint8Array<ArrayBuffer>> {
-  const dir = await mkdtemp(join(tmpdir(), "ccp-voice-"));
-  const inPath = join(dir, "in");
-  try {
-    await writeFile(inPath, Buffer.from(input));
-    return await runFfmpeg(inPath, outputArgs);
-  } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => {});
-  }
+  return withFfmpegSlot(FFMPEG_WAIT_OUTBOUND_MS, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ccp-voice-"));
+    const inPath = join(dir, "in");
+    try {
+      await writeFile(inPath, Buffer.from(input));
+      return await runFfmpeg(inPath, outputArgs);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
 }
 
 /**
@@ -130,21 +144,23 @@ async function transcodeToFile(
   outName: string,
   outputArgs: string[],
 ): Promise<Uint8Array<ArrayBuffer>> {
-  const dir = await mkdtemp(join(tmpdir(), "ccp-voice-"));
-  const inPath = join(dir, "in");
-  const outPath = join(dir, outName);
-  try {
-    await writeFile(inPath, Buffer.from(input));
-    // Run ffmpeg to the temp file (stdout stays empty); `-y` overwrites.
-    await runFfmpegToFile(inPath, [...outputArgs, "-y", outPath]);
-    const buf = await readFile(outPath);
-    if (buf.byteLength === 0) throw new Error("ffmpeg produced an empty file");
-    const result = new Uint8Array(buf.byteLength);
-    result.set(buf);
-    return result;
-  } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => {});
-  }
+  return withFfmpegSlot(FFMPEG_WAIT_OUTBOUND_MS, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ccp-voice-"));
+    const inPath = join(dir, "in");
+    const outPath = join(dir, outName);
+    try {
+      await writeFile(inPath, Buffer.from(input));
+      // Run ffmpeg to the temp file (stdout stays empty); `-y` overwrites.
+      await runFfmpegToFile(inPath, [...outputArgs, "-y", outPath]);
+      const buf = await readFile(outPath);
+      if (buf.byteLength === 0) throw new Error("ffmpeg produced an empty file");
+      const result = new Uint8Array(buf.byteLength);
+      result.set(buf);
+      return result;
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
 }
 
 /** Run ffmpeg with a FILE output target (no stdout capture). Resolves on a clean

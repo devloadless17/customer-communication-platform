@@ -32,11 +32,36 @@ import type { TeamChannelListItemDto } from "@ccp/shared/team-chat/types";
  * unread state. Clicking away during that window left the dot stuck on
  * the just-viewed channel.
  */
-export function useTeamChannelsList(
-  initial: TeamChannelListItemDto[],
+/**
+ * Generalized over the DTO so the CHANNEL sidebar and the DM sidebar are two
+ * instances of the same hook rather than two copies of this logic. Every frame
+ * handled below already reaches DM members correctly — `emitChannelScoped`
+ * fans activity/read to each member's `user:` room, and a DM is just a
+ * two-member private channel — so nothing here needed DM-specific branching.
+ *
+ * Duplicating these ~200 lines for DMs would have guaranteed the two surfaces
+ * eventually disagreed about what "unread" means.
+ *
+ * @param refetchUrl the endpoint that returns `{ items }` for THIS surface
+ *                   (`/api/team/channels` or `/api/team/channels/dms`).
+ * @param extraRefetchEvents socket events that should trigger a refetch on top
+ *                   of the shared ones — the DM list passes `team:dm:created`.
+ */
+/**
+ * Stable empty default. A default parameter is re-evaluated on EVERY call, so
+ * `= []` handed the effect a fresh array identity per render and re-bound all
+ * six socket listeners each time the provider re-rendered — which it does on
+ * every activity frame.
+ */
+const NO_EXTRA_EVENTS: readonly "team:dm:created"[] = [];
+
+export function useTeamChannelsList<T extends TeamChannelListItemDto>(
+  initial: T[],
   currentUserId: string,
   activeChannelId: string | null,
-): TeamChannelListItemDto[] {
+  refetchUrl = "/api/team/channels",
+  extraRefetchEvents: readonly "team:dm:created"[] = NO_EXTRA_EVENTS,
+): T[] {
   const [channels, setChannels] = useState(initial);
 
   // Sync from the server-rendered prop on the first render after a server
@@ -142,10 +167,10 @@ export function useTeamChannelsList(
     };
 
     const refetchChannels = () => {
-      void fetchWithSessionGuard("/api/team/channels")
+      void fetchWithSessionGuard(refetchUrl)
         .then((r) => (r.ok ? r.json() : null))
         .then((res) => {
-          if (res?.items) setChannels(res.items as TeamChannelListItemDto[]);
+          if (res?.items) setChannels(res.items as T[]);
         })
         .catch(() => {});
     };
@@ -194,6 +219,10 @@ export function useTeamChannelsList(
     socket.on("team:catalog:changed", onCatalog);
     socket.on("team:channel:members:changed", onMembersChanged);
     socket.on("connect", onConnect);
+    // The DM list passes `team:dm:created` here: a brand-new DM has no row to
+    // patch, so the only correct response is to refetch the (membership-
+    // filtered) list. That's also why the frame itself carries no peer data.
+    for (const evt of extraRefetchEvents) socket.on(evt, refetchChannels);
 
     return () => {
       socket.off("team:channel:activity", onActivity);
@@ -202,14 +231,17 @@ export function useTeamChannelsList(
       socket.off("team:catalog:changed", onCatalog);
       socket.off("team:channel:members:changed", onMembersChanged);
       socket.off("connect", onConnect);
+      for (const evt of extraRefetchEvents) socket.off(evt, refetchChannels);
     };
-  }, [currentUserId]);
+    // `extraRefetchEvents` is a module-level constant at every call site, so
+    // it's referentially stable and safe in the dep array.
+  }, [currentUserId, refetchUrl, extraRefetchEvents]);
 
   return channels;
 }
 
 /** Stable string signature for fast equality across server-prop updates. */
-function signatureOf(list: TeamChannelListItemDto[]): string {
+function signatureOf(list: readonly TeamChannelListItemDto[]): string {
   return list
     .map((c) => `${c.id}:${c.lastMessageAt}:${c.unreadForMe ? 1 : 0}:${c.unreadMentionCount}`)
     .join("|");

@@ -678,7 +678,18 @@ export async function ingestCallEvent(
       // media, connectionState goes to "failed" after ~15s ICE timeout,
       // and the user sees a panel that closes itself. This was a real bug
       // in the first outbound flow.
-      if (evt.sdp) {
+      // `!alreadyTerminal` matches every other side effect in this transaction
+      // (the reopen, the lastMessageAt bump, and all four terminal publishes).
+      // This publish was the only ungated one, and Meta redelivers — so a
+      // `connect` webhook arriving AFTER the call ended still emitted an SDP
+      // frame for a dead call. The browser's handler can't match it to a live
+      // call, so it stashes the SDP under that call id in `pendingAnswersRef`,
+      // and the only two things that ever clear that map (teardown of a live
+      // call, or `onEnded` for that id) have both already run. Result: a few KB
+      // stranded per redelivery, for the life of a tab that stays open all day.
+      // Gating here also removes any chance of a stale offer being applied to a
+      // still-live peer connection.
+      if (evt.sdp && !alreadyTerminal) {
         await publishInTx(tx, {
           type: "call.sdp_offer",
           teamId,

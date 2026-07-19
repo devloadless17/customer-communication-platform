@@ -29,8 +29,23 @@ export interface AudienceGroupDto {
   name: string;
   description: string | null;
   tagIds: string[];
+  /**
+   * Manually-added member ids. ALWAYS COMPLETE, from both the list and the
+   * single-group read, and it must stay that way — two separate consumers
+   * break silently if it is truncated:
+   *   - the group edit form saves `contactIds` as a FULL REPLACE, so a
+   *     truncated list would delete every member past the cut on save;
+   *   - the broadcast composer reconstructs a group's audience from these ids
+   *     to show the recipient count and preview on the Review step, so a
+   *     truncated list understates the size of a billed, irreversible send.
+   * Bounded by the write schema, which caps manual members at 5000.
+   */
   contactIds: string[];
-  /** Computed member count at read time. */
+  /** Exact count of manual members, soft-deleted excluded. Equals
+   *  `contactIds.length`; kept as its own field so callers that only need the
+   *  number don't imply a dependency on the id array staying complete. */
+  manualContactCount: number;
+  /** Computed member count at read time: manual ∪ tag-matched, deduped. */
   memberCount: number;
   /** Null when the creator was hard-deleted; UI shows "Removed user". */
   createdById: string | null;

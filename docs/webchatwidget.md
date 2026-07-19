@@ -15,7 +15,7 @@ from. Managed at **Settings → Website chat** (`team/webchatwidget/` admin API,
 `@RequireRole("admin")`). The channel is "connected" for a team iff it has ≥1
 active widget (`getWebchatwidgetSendConfig` gates on that).
 
-## Embed
+## Embed & deploy modes
 
 ```html
 <script src="https://YOUR-APP/widget.js" data-webchat-key="wc_pk_..." defer></script>
@@ -25,6 +25,36 @@ active widget (`getWebchatwidgetSendConfig` gates on that).
 from the host page) that loads socket.io's UMD client from the same origin
 (`/webchat/socket.io.min.js`) and connects. Test page:
 `/webchat/test.html`.
+
+Deployment is flexible via `data-webchat-*` attributes (read at load, before the
+socket `ready`), so it isn't only a floating bubble:
+
+- `data-webchat-launcher="on|off"` (default `on`). `off` hides the bubble — open
+  only via the JS API.
+- `data-webchat-position="right|left"` (default `right`).
+- `data-webchat-label="Chat with us"` — a text pill beside the bubble.
+- `data-webchat-target="#selector"` — **inline embed**: the panel mounts INSIDE
+  that element (full container, always open, no launcher).
+- `data-webchat-icon` — custom launcher icon (url/emoji).
+
+**JS API:** `window.CCPWebchat = { open, close, toggle, isOpen }` with a pre-load
+call queue, so any element opens the chat — e.g.
+`<a onclick="CCPWebchat.open()">Chat</a>` with the launcher hidden. This is the
+"a link opens the chat" deployment.
+
+The panel loads **closed by default** (a page load can't tell a refresh from a
+navigation); conversation history is preserved and an **unread badge** on the
+launcher signals agent replies received while it was closed.
+
+## Theming
+
+Appearance is per-widget `config` (delivered on `ready`): colors (primary /
+launcher / user bubble), header title + subtitle, welcome message, suggested
+questions, `logoDataUrl` + `agentAvatarDataUrl` (size-capped **data: URIs**, no
+external host), `fontFamily` (system/rounded/serif), `themeMode`
+(light/dark/auto), and `soundEnabled` (opt-in chime on agent replies). Edited at
+**Settings → Website chat** with a live preview and copyable embed snippets for
+every deploy mode.
 
 ## Transport
 
@@ -42,6 +72,18 @@ from the host page) that loads socket.io's UMD client from the same origin
   local id + return sent). Delivery to the visitor is realtime:
   `WebchatwidgetDeliveryService` subscribes to `message.sent` / `message.received` /
   `message.status_changed` on the REALTIME tier and pushes to the visitor room.
+- **Reliability (v2):** an offline send queue with optimistic bubbles + retry,
+  refresh-safe persistence, and delivery/read receipts over the socket
+  (`readReceipts` + `deliveryReceipts` capabilities). History is **paginated** —
+  the gateway replays the latest `HISTORY_LIMIT` on connect and serves older
+  pages via `visitor:loadOlder` (keyset `(timestamp,id)` cursor, `hasMore` flag);
+  the widget lazy-loads earlier messages on scroll-up.
+- **Typing (both directions):** agent typing relays to the visitor
+  (`bindWidgetTypingRelay`); the visitor's `visitor:typing` relays to the agent
+  conversation room as `conversation:visitor_typing`, so the inbox shows
+  "<customer> is typing…" (cleared on the visitor's disconnect + an 8s safety
+  auto-clear). Voice notes record in-browser (MediaRecorder) and upload as a
+  `voice`-flagged audio message.
 
 ## Media
 
@@ -59,13 +101,30 @@ unified `Customer` via the existing strong-key path
 (`lib/identity/webchat-prechat.ts` → `findExistingCustomerIdByStrongKey` with
 `trustEmailAsStrongKey`). No fuzzy/name matching (docs/identity.md).
 
-## Automation / bots (future, seam-ready)
+## Automation / bots
 
-The widget holds no bot logic. An n8n webhook or org AI agent plugs in via the
-existing seams: each visitor message publishes `message.received` (forwarded by
-outbound webhooks), the bot replies via the `/v1` API (channel-agnostic send), and
-"customer says human" is an automation-layer **assign** call. The `aiEnabled`
-conversation flag already models bot-handling vs human-handling.
+The widget holds no bot logic — it plugs into the platform's two AI paths via the
+existing seams (same as every other channel):
+
+- **n8n autopilot** — each visitor message publishes `message.received` (forwarded
+  by outbound webhooks); the flow replies via the `/v1` API (channel-agnostic
+  send). "Customer says human" calls `/v1` `set-ai` with `{aiEnabled:false}`,
+  which runs the team's configured **handoff policy** (assign / round-robin /
+  unassign).
+- **Native AI Assistant** — the reply orchestrator answers from the org's
+  knowledge base; when it decides to **escalate**, it pauses the assistant
+  (`ai_paused`) and applies the SAME handoff policy. Both paths share one helper,
+  `lib/conversations/handoff.ts` (`runHandoffPolicy`), so assignment behaves
+  identically whichever AI is driving.
+
+## Not a broadcast target
+
+A website visitor is reachable only while their browser tab holds a live socket —
+there's no durable push address — so `webchatwidget` is **excluded from
+broadcasts** (`BROADCASTABLE_CHANNELS` in `@ccp/shared/providers/capabilities`;
+the composer's channel picker + `zBroadcastableChannel` schema + the customer-mode
+best-channel resolver all gate on it). Widget contacts never appear as broadcast
+recipients.
 
 ## Touch points
 

@@ -47,6 +47,19 @@ import type {
   StartConversationInput,
 } from "./conversations.schemas";
 
+/** The team-wide half of `counts()` — identical for every agent on the team. */
+interface TeamCountsBlock {
+  active: number;
+  all: number;
+  unassigned: number;
+  closed: number;
+  stageGroups: Array<{ stageId: string | null; _count: number }>;
+  uActive: number;
+  uAll: number;
+  uUnassigned: number;
+  uClosed: number;
+}
+
 @Injectable()
 export class ConversationsService {
   private readonly logger = new Logger(ConversationsService.name);
@@ -101,11 +114,16 @@ export class ConversationsService {
    * Eleven queries fan out in parallel: 5 status/preset totals, 5 unread-filtered
    * (`unreadCount > 0`) variants, and 1 per-stage groupBy. The total/preset counts
    * hit the (teamId, status, lastMessageAt) + (teamId, assignedUserId) indexes;
-   * the 5 unread counts narrow on those same indexes then count-filter
-   * `unreadCount > 0` as a residual (no index covers unreadCount — acceptable at
-   * pilot scale; if EXPLAIN ever shows it hot, add a hand-written partial index
-   * `Conversation(teamId) WHERE unreadCount > 0`, tiny because zero-unread rows
-   * dominate, NOT a full unreadCount index which would bloat every markRead write).
+   * the 5 unread counts narrow on those same indexes and are served by the
+   * hand-written PARTIAL index `Conversation_teamId_unread_idx`
+   * (`Conversation(teamId) WHERE unreadCount > 0`, migration
+   * 20260615130000) — tiny, because zero-unread rows dominate. (This comment
+   * used to say no index covered `unreadCount`; that was true when written and
+   * stale from the moment the partial index shipped. It has since sent at
+   * least one audit chasing a "missing index" that already existed — a bare
+   * EXPLAIN on a small dev table shows a Seq Scan either way, so confirm with
+   * `SET enable_seqscan=off` before believing it.) A FULL unreadCount index is
+   * still the wrong answer: it would bloat every markRead write.
    * The per-stage count is a server-side GROUP BY through Contact (NOT a
    * full-table walk into JS): one conversation per contact is DB-enforced
    * (@@unique([teamId, contactId])), so counting contacts that have a
@@ -138,16 +156,90 @@ export class ConversationsService {
     // unread pills on the sub-sidebar filters. Coalesced client-side so the
     // extra counts don't fire on every inbound; indexed on (teamId,status).
     const unreadWhere: Prisma.ConversationWhereInput = { unreadCount: { gt: 0 } };
+
+    // NINE of the eleven queries are TEAM-WIDE — identical for every agent on
+    // the team — and only `mine` / `unread.mine` depend on the viewer. This
+    // endpoint re-fires on every count-changing socket event, so a single
+    // inbound message made all 40 agents of a busy tenant each run the full
+    // eleven: ~440 counts for one message, 360 of them computing the same nine
+    // numbers. The team block is therefore memoized briefly and SHARED across
+    // agents, while the two viewer-scoped counts always run fresh.
+    //
+    // Note where the win actually comes from: the SHARED IN-FLIGHT PROMISE,
+    // not the TTL. One inbound event makes every agent refetch at once, so
+    // collapsing that simultaneous burst to a single round of queries costs
+    // exactly zero staleness. The TTL is deliberately tiny (250ms) — just wide
+    // enough to also catch refetches spread by client-side debounce jitter,
+    // narrow enough that nobody perceives it. A multi-second TTL was the first
+    // instinct and it is wrong here: the sidebar count must move the moment
+    // YOU close or assign a thread, and CLAUDE.md holds the inbox to
+    // "everything feels instant". `mine` is never memoized at all.
+    const team = await this.teamCounts(teamId, unreadWhere);
+    const [mine, uMine] = await Promise.all([
+      this.db.conversation.count({
+        where: { teamId, status: { not: "closed" }, assignedUserId: viewerUserId },
+      }),
+      this.db.conversation.count({
+        where: {
+          teamId,
+          status: { not: "closed" },
+          assignedUserId: viewerUserId,
+          ...unreadWhere,
+        },
+      }),
+    ]);
+    const { active, all, unassigned, closed, stageGroups, uActive, uAll, uUnassigned, uClosed } =
+      team;
+    return this.shapeCounts({
+      active, all, mine, unassigned, closed, stageGroups,
+      uActive, uAll, uMine, uUnassigned, uClosed,
+    });
+  }
+
+  /** Cached team-wide half of `counts()`. See the note there. */
+  private static readonly COUNTS_TTL_MS = 250;
+  private readonly teamCountsCache = new Map<
+    string,
+    { at: number; value: TeamCountsBlock }
+  >();
+  private readonly teamCountsInFlight = new Map<string, Promise<TeamCountsBlock>>();
+
+  private async teamCounts(
+    teamId: string,
+    unreadWhere: Prisma.ConversationWhereInput,
+  ): Promise<TeamCountsBlock> {
+    const hit = this.teamCountsCache.get(teamId);
+    if (hit && Date.now() - hit.at < ConversationsService.COUNTS_TTL_MS) return hit.value;
+    const inFlight = this.teamCountsInFlight.get(teamId);
+    // Share the in-flight promise so a burst — which is exactly what a single
+    // inbound event produces across N agents — collapses to ONE round of
+    // queries instead of N.
+    if (inFlight) return inFlight;
+
+    const p = this.loadTeamCounts(teamId, unreadWhere)
+      .then((value) => {
+        this.teamCountsCache.set(teamId, { at: Date.now(), value });
+        return value;
+      })
+      .finally(() => {
+        this.teamCountsInFlight.delete(teamId);
+      });
+    this.teamCountsInFlight.set(teamId, p);
+    return p;
+  }
+
+  private async loadTeamCounts(
+    teamId: string,
+    unreadWhere: Prisma.ConversationWhereInput,
+  ): Promise<TeamCountsBlock> {
     const [
       active,
       all,
-      mine,
       unassigned,
       closed,
       stageGroups,
       uActive,
       uAll,
-      uMine,
       uUnassigned,
       uClosed,
     ] = await Promise.all([
@@ -156,9 +248,6 @@ export class ConversationsService {
       }),
       this.db.conversation.count({
         where: { teamId },
-      }),
-      this.db.conversation.count({
-        where: { teamId, status: { not: "closed" }, assignedUserId: viewerUserId },
       }),
       this.db.conversation.count({
         where: { teamId, status: { not: "closed" }, assignedUserId: null },
@@ -191,14 +280,6 @@ export class ConversationsService {
         where: {
           teamId,
           status: { not: "closed" },
-          assignedUserId: viewerUserId,
-          ...unreadWhere,
-        },
-      }),
-      this.db.conversation.count({
-        where: {
-          teamId,
-          status: { not: "closed" },
           assignedUserId: null,
           ...unreadWhere,
         },
@@ -207,25 +288,41 @@ export class ConversationsService {
         where: { teamId, status: "closed", ...unreadWhere },
       }),
     ]);
+    return { active, all, unassigned, closed, stageGroups, uActive, uAll, uUnassigned, uClosed };
+  }
 
+  /** Fold the team block + the two viewer counts into the wire shape. */
+  private shapeCounts(c: {
+    active: number;
+    all: number;
+    mine: number;
+    unassigned: number;
+    closed: number;
+    stageGroups: Array<{ stageId: string | null; _count: number }>;
+    uActive: number;
+    uAll: number;
+    uMine: number;
+    uUnassigned: number;
+    uClosed: number;
+  }) {
     const byStage: Record<string, number> = {};
-    for (const g of stageGroups) {
+    for (const g of c.stageGroups) {
       if (g.stageId) byStage[g.stageId] = g._count;
     }
 
     return {
-      active,
-      all,
-      mine,
-      unassigned,
-      closed,
+      active: c.active,
+      all: c.all,
+      mine: c.mine,
+      unassigned: c.unassigned,
+      closed: c.closed,
       byStage,
       unread: {
-        active: uActive,
-        all: uAll,
-        mine: uMine,
-        unassigned: uUnassigned,
-        closed: uClosed,
+        active: c.uActive,
+        all: c.uAll,
+        mine: c.uMine,
+        unassigned: c.uUnassigned,
+        closed: c.uClosed,
       },
     };
   }
@@ -353,6 +450,52 @@ export class ConversationsService {
    * best-effort deleted post-commit. Publishes one `conversation.deleted`
    * per id so the socket fanout splices each row from live clients' lists.
    */
+  /**
+   * Every media/thumbnail R2 key belonging to the given conversations, read in
+   * bounded pages.
+   *
+   * Both delete paths used to pull these through a nested `messages` include
+   * with no `take`. The bulk path caps at 500 conversations
+   * (`BulkDeleteConversationsSchema`), so one call materialized every
+   * media-bearing message across 500 threads into a single Prisma result — for
+   * a large tenant, millions of rows on the V8 heap at once. That is an OOM
+   * against the api container's 2GB limit, which takes the whole process and
+   * every agent's socket with it. The single-conversation path had the same
+   * shape with a smaller radius (one long-lived enterprise thread).
+   *
+   * Keyset paging does the same total work with a bounded resident set, so
+   * peak memory no longer scales with a tenant's history.
+   */
+  private async collectMediaKeys(
+    teamId: string,
+    conversationIds: string[],
+  ): Promise<string[]> {
+    const keys: string[] = [];
+    const PAGE = 1_000;
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.db.message.findMany({
+        where: {
+          teamId,
+          conversationId: { in: conversationIds },
+          OR: [{ mediaKey: { not: null } }, { mediaThumbnailKey: { not: null } }],
+        },
+        select: { id: true, mediaKey: true, mediaThumbnailKey: true },
+        orderBy: { id: "asc" },
+        take: PAGE,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      });
+      for (const m of page) {
+        if (m.mediaKey) keys.push(m.mediaKey);
+        if (m.mediaThumbnailKey) keys.push(m.mediaThumbnailKey);
+      }
+      if (page.length < PAGE) break;
+      cursor = page[page.length - 1]?.id;
+      if (!cursor) break;
+    }
+    return keys;
+  }
+
   async bulkDelete(
     teamId: string,
     userId: string,
@@ -360,24 +503,14 @@ export class ConversationsService {
   ): Promise<{ count: number }> {
     const owned = await this.db.conversation.findMany({
       where: { teamId, id: { in: input.conversationIds } },
-      select: {
-        id: true,
-        messages: {
-          where: {
-            OR: [{ mediaKey: { not: null } }, { mediaThumbnailKey: { not: null } }],
-          },
-          select: { mediaKey: true, mediaThumbnailKey: true },
-        },
-      },
+      select: { id: true },
     });
     if (owned.length === 0) {
       throw new NotFoundException({ error: "no matching conversations in this team" });
     }
     const ownedIds = owned.map((c) => c.id);
-    const mediaKeys = owned
-      .flatMap((c) => c.messages)
-      .flatMap((m) => [m.mediaKey, m.mediaThumbnailKey])
-      .filter((k): k is string => Boolean(k));
+
+    const mediaKeys = await this.collectMediaKeys(teamId, ownedIds);
 
     await this.db.conversation.deleteMany({
       where: { teamId, id: { in: ownedIds } },
@@ -690,21 +823,11 @@ export class ConversationsService {
   async remove(teamId: string, actorUserId: string, conversationId: string): Promise<void> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
-      select: {
-        id: true,
-        messages: {
-          where: {
-            OR: [{ mediaKey: { not: null } }, { mediaThumbnailKey: { not: null } }],
-          },
-          select: { mediaKey: true, mediaThumbnailKey: true },
-        },
-      },
+      select: { id: true },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
-    const mediaKeys = conversation.messages
-      .flatMap((m) => [m.mediaKey, m.mediaThumbnailKey])
-      .filter((k): k is string => Boolean(k));
+    const mediaKeys = await this.collectMediaKeys(teamId, [conversationId]);
 
     // Compound where (id + teamId) via deleteMany — Prisma's single `delete`
     // accepts only unique constraints, and Conversation.id alone is the

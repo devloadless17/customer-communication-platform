@@ -97,7 +97,8 @@ Full design + current state: **[docs/identity.md](docs/identity.md)**.
 The platform adopts a **unified customer identity**: a `Customer` (person) owns many channel-scoped `Contact` rows, so an agent sees one profile across all a person's channels. Threads stay **per-contact/per-channel** (we never merge message histories) — the customer is a profile-and-switcher layer over separate threads.
 
 Discipline that keeps this simple and safe:
-- **Auto-merge only on deterministic strong keys** (exact phone; exact email **only when self-asserted** via the contact-share chip — an agent-typed or CSV-imported email never auto-merges). **No fuzzy/name matching, ever.**
+- **Auto-merge only on deterministic strong keys** (exact phone; exact email **only when self-asserted** via the contact-share chip — an agent-typed or CSV-imported email never auto-merges). **No fuzzy/name matching, ever.** A strong key requires a **vendor-verified** identity, so ephemeral-channel contacts are excluded from the strong-key *candidate set* in both directions — a value typed into the widget's public pre-chat box is stored but never acts as a key.
+- **Ephemeral contacts.** `EPHEMERAL_CONTACT_CHANNELS` (webchatwidget today) are chat sessions, not directory entries: a per-browser `vis_<uuid>` with no durable address. They're hidden from the contacts list / CSV / audience counts / search — but full-quality in the inbox, and workflows still fire. Directory membership is **derived** (has a phone or email), so a visitor who self-identifies is promoted automatically. See [docs/identity.md](docs/identity.md).
 - Everything else is **manual, reversible merge/split**. Merge never deletes a contact or its messages — it only re-points `Contact.customerId`. (A persisted audit record for merges is designed but **not yet built** — see gaps below.)
 - Identity resolution runs in **exactly one place** (`IdentityService.resolveCustomerId` in the domain layer, called from ingest + a drift sweeper), tenant-scoped.
 
@@ -109,7 +110,7 @@ Discipline that keeps this simple and safe:
 
 Real entities (`prisma/schema.prisma`; ERD in [docs/schema-erd.md](docs/schema-erd.md)):
 
-`Team → User → ChannelConnection`; `Contact → Conversation → Message`; plus `ContactStage`, `ContactFieldDefinition`, `Tag`, `AudienceGroup`, `Broadcast`/`BroadcastRecipient`, `InternalNote`, `Workflow`/`WorkflowRun`/`WorkflowContactState`, `TeamApiKey`, `OutboundWebhook`/`OutboundWebhookDelivery`, `OutboundEvent` (outbox), `ConversationEvent` (audit timeline), the team-chat models (a deliberately separate message graph), `Call`/`CallPermissionRequest`, `OutboundSendAttempt` (send-idempotency ledger).
+`Team → User → ChannelConnection`; `Contact → Conversation → Message`; plus `ContactStage`, `ContactFieldDefinition`, `Tag`, `AudienceGroup`, `Broadcast`/`BroadcastRecipient`, `InternalNote`, `Workflow`/`WorkflowRun`/`WorkflowContactState`, `TeamApiKey`, `OutboundWebhook`/`OutboundWebhookDelivery`, `OutboundEvent` (outbox), `ConversationEvent` (audit timeline), the team-chat models (a deliberately separate message graph — channels **and** 1:1 DMs share `TeamChannel` via a `kind` discriminator; see [docs/team-chat.md](docs/team-chat.md)), `Call`/`CallPermissionRequest`, `OutboundSendAttempt` (send-idempotency ledger).
 
 **Non-negotiable data invariants:**
 - **`teamId` on every table**, and in the `where` of every query — sourced from `req.session.teamId` or `req.apiKey.teamId`, **never** from client input. There is no Prisma middleware / RLS; tenant isolation is manual and load-bearing.
@@ -302,6 +303,7 @@ Each links to the reasoning:
 | Realtime: rooms, fanout scoping, reducers, read-state convergence | [docs/realtime.md](docs/realtime.md) |
 | Event bus: tiers, taxonomy, subscribers, outbox | [docs/events.md](docs/events.md) |
 | Customer identity: unified model, auto-merge rules, migration | [docs/identity.md](docs/identity.md) |
+| Team chat: channels, 1:1 DMs, public/private visibility, invariants | [docs/team-chat.md](docs/team-chat.md) |
 | Adding a channel: recipe + per-channel constraints | [docs/adding-a-channel.md](docs/adding-a-channel.md) |
 | Meta channels capability & gap matrix (WhatsApp/Messenger/Instagram) | [docs/meta-channels-capabilities.md](docs/meta-channels-capabilities.md) |
 | Data model ERD | [docs/schema-erd.md](docs/schema-erd.md) |

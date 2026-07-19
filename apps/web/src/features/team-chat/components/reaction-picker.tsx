@@ -1,16 +1,32 @@
 "use client";
 
+import { useState } from "react";
+import dynamic from "next/dynamic";
 import { SmilePlus } from "lucide-react";
 
 import { QUICK_REACTIONS } from "@ccp/shared/team-chat/types";
 import { cn } from "@ccp/shared/utils";
 
+// The full Unicode picker is ~400 lines plus its emoji tables — load it only
+// when someone actually opens it, exactly as the inbox reply box does.
+const EmojiPopover = dynamic(
+  () =>
+    import("@/features/inbox/components/reply-box/emoji-popover").then(
+      (m) => m.EmojiPopover,
+    ),
+  { ssr: false },
+);
+
 /**
- * Curated quick-row reaction picker. We intentionally don't ship a full
- * Unicode picker in v0 — six emoji cover the dominant cases (ack / agree
- * / lol / huh / sad / celebrate), and the "Add reaction" button gives us
- * a slot to drop a fuller picker in later without changing the bubble
- * hover UI.
+ * Reaction picker: a curated quick row (ack / agree / lol / huh / sad /
+ * celebrate) plus the full Unicode picker behind "More reactions".
+ *
+ * The quick row stays because six one-click targets beat a search box for the
+ * overwhelmingly common cases — it's a shortcut, not a limit.
+ *
+ * The full picker is the inbox's `EmojiPopover`, reused rather than rebuilt,
+ * so search / categories / keyboard nav / recents behave identically on both
+ * surfaces (recents are shared between them, which is desirable).
  */
 export function ReactionPicker({
   onPick,
@@ -19,6 +35,8 @@ export function ReactionPicker({
   onPick: (emoji: string) => void;
   align?: "left" | "right";
 }) {
+  const [showFull, setShowFull] = useState(false);
+
   return (
     <div
       className={cn(
@@ -37,17 +55,30 @@ export function ReactionPicker({
           {emoji}
         </button>
       ))}
-      <button
-        type="button"
-        // Disabled until the full picker ships — otherwise it's a dead
-        // tab-stop that focuses to nothing for keyboard/SR users.
-        disabled
-        className="flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40 pointer-coarse:size-9"
-        aria-label="More reactions"
-        title="More reactions — full picker coming soon"
-      >
-        <SmilePlus className="size-4" />
-      </button>
+
+      <div className="relative">
+        <button
+          type="button"
+          className="flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
+          aria-label="More reactions"
+          title="More reactions"
+          aria-expanded={showFull}
+          onClick={() => setShowFull((v) => !v)}
+        >
+          <SmilePlus className="size-4" />
+        </button>
+        <EmojiPopover
+          open={showFull}
+          onClose={() => setShowFull(false)}
+          onPick={(emoji) => {
+            onPick(emoji);
+            // Unlike the composer — where staying open for multi-insert is
+            // the point — a reaction is a single act, so close after picking.
+            setShowFull(false);
+          }}
+          className={align === "left" ? "left-0" : "right-0"}
+        />
+      </div>
     </div>
   );
 }

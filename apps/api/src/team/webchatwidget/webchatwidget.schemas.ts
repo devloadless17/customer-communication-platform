@@ -62,6 +62,7 @@ const AppearanceSchema = z.object({
   agentAvatarDataUrl: ImageDataUrl(60_000),
   fontFamily: z.enum(["system", "rounded", "serif"]).optional(),
   themeMode: z.enum(["light", "dark", "auto"]).optional(),
+  soundEnabled: z.boolean().optional(),
   // launcher / placement (settings-only — the widget reads these from data-* attrs)
   launcher: z.enum(["bubble", "off"]).optional(),
   position: z.enum(["right", "left"]).optional(),

@@ -6,9 +6,15 @@ import type {
   ChannelMessagesAroundPage,
   ChannelMessagesPage,
   ChannelPinDto,
+  DirectMessagePeerDto,
+  TeamChannelBrowseItemDto,
+  TeamChannelBrowsePage,
   TeamChannelDto,
+  TeamChannelKind,
   TeamChannelListItemDto,
   TeamChannelMessageDto,
+  TeamChannelVisibility,
+  TeamDmListItemDto,
   WorkspaceSearchPage,
 } from "@ccp/shared/team-chat/types";
 
@@ -43,9 +49,11 @@ export function mapChannel(
   row: {
     id: string;
     teamId: string;
-    name: string;
+    name: string | null;
     description: string | null;
     isDefault: boolean;
+    kind: TeamChannelKind;
+    visibility: TeamChannelVisibility;
     createdById: string | null;
     createdAt: Date;
     updatedAt: Date;
@@ -53,6 +61,7 @@ export function mapChannel(
     lastMessagePreview: string;
   },
   memberCount = 0,
+  lastReadAt: Date | null = null,
 ): TeamChannelDto {
   return {
     id: row.id,
@@ -60,12 +69,15 @@ export function mapChannel(
     name: row.name,
     description: row.description,
     isDefault: row.isDefault,
+    kind: row.kind,
+    visibility: row.visibility,
     createdById: row.createdById,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     lastMessageAt: row.lastMessageAt.toISOString(),
     lastMessagePreview: row.lastMessagePreview,
     memberCount,
+    lastReadAt: lastReadAt ? lastReadAt.toISOString() : null,
   };
 }
 
@@ -147,25 +159,40 @@ export async function loadMessageForEmit(
 // ===========================================================================
 
 /**
- * Sidebar list of channels with per-user unread state. One round-trip:
- * fetch channels + the viewer's read receipts in parallel. Mention counts
- * use a separate aggregated query so the cost is one indexed scan per
- * call, not N+1.
+ * Shared engine behind BOTH the channel sidebar and the DM list: loads the
+ * viewer's rows plus their unread/mention state in one round-trip.
  *
- * Returns channels sorted by `name ASC` so #announcements / #general are
- * predictable in the sidebar — last-activity sort confuses muscle memory.
+ * Extracted rather than duplicated so the two surfaces cannot drift on what
+ * "unread" means — a DM badging by different rules than a channel would be a
+ * subtle, permanent source of confusion.
+ *
+ * `where` narrows to the surface (kind: "channel" vs kind: "dm"); `orderBy`
+ * differs because channels sort by name (muscle memory) and DMs by recency.
  */
-export async function listChannelsForUser(
+async function listChannelRowsForUser<T extends Prisma.TeamChannelInclude | undefined>(
   teamId: string,
   userId: string,
-): Promise<TeamChannelListItemDto[]> {
-  const [channels, receipts, mentionAgg, memberCounts] = await Promise.all([
-    // Only channels the viewer is a member of. The default channel auto-includes
+  where: Prisma.TeamChannelWhereInput,
+  orderBy: Prisma.TeamChannelOrderByWithRelationInput[],
+  include?: T,
+) {
+  const [channels, receipts, mentionAgg] = await Promise.all([
+    // Only rows the viewer is a member of. The default channel auto-includes
     // every team member (enforced at create/team-join time), so users who haven't
     // been explicitly added to anything still see #general.
+    //
+    // Member counts ride along as a per-row `_count` rather than a parallel
+    // groupBy. The groupBy had to be scoped by the same `where` as this query
+    // (the viewer's ids aren't known until this resolves), which for DMs meant
+    // aggregating membership rows for EVERY DM in the tenant — O(users²) —
+    // and discarding all but a dozen. This counts only the rows we return.
     db.teamChannel.findMany({
-      where: { teamId, members: { some: { userId } } },
-      orderBy: [{ isDefault: "desc" }, { name: "asc" }],
+      where: { teamId, members: { some: { userId } }, ...where },
+      orderBy,
+      include: {
+        ...(include ?? {}),
+        _count: { select: { members: true } },
+      } as Prisma.TeamChannelInclude,
     }),
     db.teamChannelReadReceipt.findMany({
       where: { userId, channel: { teamId } },
@@ -186,23 +213,15 @@ export async function listChannelsForUser(
         AND (r."lastReadAt" IS NULL OR m."createdAt" > r."lastReadAt")
       GROUP BY m."channelId"
     `,
-    db.teamChannelMember.groupBy({
-      by: ["channelId"],
-      where: { channel: { teamId } },
-      _count: { userId: true },
-    }),
   ]);
 
   const receiptByChannel = new Map(receipts.map((r) => [r.channelId, r.lastReadAt]));
   const mentionsByChannel = new Map(
     mentionAgg.map((row) => [row.channelId, Number(row.count)]),
   );
-  const memberCountByChannel = new Map(
-    memberCounts.map((row) => [row.channelId, row._count.userId]),
-  );
 
   return channels.map((ch) => {
-    const lastRead = receiptByChannel.get(ch.id);
+    const lastRead = receiptByChannel.get(ch.id) ?? null;
     // No receipt yet = the user has never opened this channel. Treat as
     // unread iff the channel has had any message activity at all. Brand-new
     // channels with no messages should NOT badge — there's nothing to read.
@@ -214,40 +233,272 @@ export async function listChannelsForUser(
       ? ch.lastMessageAt > lastRead
       : ch.lastMessageAt.getTime() > ch.createdAt.getTime();
     return {
-      ...mapChannel(ch, memberCountByChannel.get(ch.id) ?? 0),
-      unreadForMe,
-      unreadMentionCount: mentionsByChannel.get(ch.id) ?? 0,
+      row: ch,
+      item: {
+        ...mapChannel(
+          ch,
+          (ch as typeof ch & { _count?: { members: number } })._count?.members ?? 0,
+          lastRead,
+        ),
+        unreadForMe,
+        unreadMentionCount: mentionsByChannel.get(ch.id) ?? 0,
+      } satisfies TeamChannelListItemDto,
     };
   });
 }
 
+/**
+ * Sidebar list of channels with per-user unread state.
+ *
+ * Returns channels sorted by `name ASC` so #announcements / #general are
+ * predictable in the sidebar — last-activity sort confuses muscle memory.
+ *
+ * The `kind: "channel"` filter is load-bearing: without it every DM the
+ * viewer is in would appear in the channel sidebar with a null name.
+ */
+export async function listChannelsForUser(
+  teamId: string,
+  userId: string,
+): Promise<TeamChannelListItemDto[]> {
+  const rows = await listChannelRowsForUser(
+    teamId,
+    userId,
+    { kind: "channel" },
+    [{ isDefault: "desc" }, { name: "asc" }],
+  );
+  return rows.map((r) => r.item);
+}
+
+/**
+ * Sidebar list of the viewer's 1:1 DMs, most-recently-active first (unlike
+ * channels, which sort by name — a DM list is a recency list).
+ *
+ * The peer is resolved from the membership rows: the member who isn't the
+ * viewer, falling back to the viewer themselves for the notes-to-self DM,
+ * falling back to a "Removed user" tombstone when the peer's User row was
+ * hard-deleted (the membership cascade removes the row, but the DM and its
+ * history survive — deleting it would destroy the survivor's messages).
+ */
+export async function listDirectMessagesForUser(
+  teamId: string,
+  userId: string,
+): Promise<TeamDmListItemDto[]> {
+  const rows = await listChannelRowsForUser(
+    teamId,
+    userId,
+    { kind: "dm" },
+    [{ lastMessageAt: "desc" }],
+    {
+      members: {
+        select: {
+          userId: true,
+          user: {
+            select: { id: true, name: true, avatarUrl: true, deactivatedAt: true },
+          },
+        },
+      },
+    },
+  );
+
+  return rows.map(({ row, item }) => {
+    // The shared row loader types its include loosely (it merges the caller's
+    // include with a _count), so name the shape we asked for here.
+    type DmMemberRow = {
+      userId: string;
+      user: {
+        id: string;
+        name: string | null;
+        avatarUrl: string | null;
+        deactivatedAt: Date | null;
+      } | null;
+    };
+    const members = (row as unknown as { members: DmMemberRow[] }).members;
+
+    // The peer is the non-viewer member. A self-DM has exactly one member
+    // row (the viewer), so fall back to it and flag isSelf.
+    const other = members.find((m) => m.userId !== userId) ?? null;
+    const isSelf = other === null;
+    const source = other ?? members.find((m) => m.userId === userId) ?? null;
+
+    const peer: DirectMessagePeerDto = source?.user
+      ? {
+          userId: source.user.id,
+          name: source.user.name ?? "Unnamed",
+          avatarUrl: source.user.avatarUrl,
+          deactivated: source.user.deactivatedAt !== null,
+          isSelf,
+        }
+      : {
+          userId: null,
+          name: "Removed user",
+          avatarUrl: null,
+          deactivated: true,
+          isSelf,
+        };
+
+    return { ...item, peer };
+  });
+}
+
+/**
+ * Single channel by id. Takes `userId` so it can project the viewer's read
+ * receipt onto the DTO — that timestamp is what the "New messages" divider
+ * anchors to, and it has to come from the same read that loads the channel
+ * (the workspace fires markRead() on mount, so fetching it later is racy).
+ */
 export async function getChannelById(
   channelId: string,
   teamId: string,
+  userId: string,
 ): Promise<TeamChannelDto | null> {
   const row = await db.teamChannel.findFirst({
     where: { id: channelId, teamId },
-    include: { _count: { select: { members: true } } },
+    include: {
+      _count: { select: { members: true } },
+      receipts: { where: { userId }, select: { lastReadAt: true } },
+    },
   });
-  return row ? mapChannel(row, row._count.members) : null;
+  if (!row) return null;
+  return mapChannel(row, row._count.members, row.receipts[0]?.lastReadAt ?? null);
 }
 
-/** Default channel for a team — the one /team redirects to. */
-export async function getDefaultChannel(teamId: string): Promise<TeamChannelDto | null> {
+/**
+ * Default channel for a team — the one /team redirects to.
+ *
+ * Both branches filter `kind: "channel"`. The fallback especially: it orders
+ * by name, and a team whose channels were all deleted but which has DMs would
+ * otherwise redirect the user straight into a DM as their "default channel".
+ */
+export async function getDefaultChannel(
+  teamId: string,
+  userId: string,
+): Promise<TeamChannelDto | null> {
   const row = await db.teamChannel.findFirst({
-    where: { teamId, isDefault: true },
+    where: { teamId, kind: "channel", isDefault: true },
     orderBy: { createdAt: "asc" },
     include: { _count: { select: { members: true } } },
   });
   if (row) return mapChannel(row, row._count.members);
-  // Fallback: alphabetically-first channel. Happens if the default was
-  // somehow demoted without another being promoted — defensive only.
+  // Fallback: alphabetically-first channel the VIEWER IS A MEMBER OF.
+  // Happens if the default was demoted without another being promoted.
+  //
+  // The membership filter is load-bearing, not defensive tidiness: this DTO
+  // carries `lastMessagePreview`, and the route that serves it does no
+  // membership check of its own. Without the filter, a demoted default would
+  // hand every agent on the team the name, description and LAST MESSAGE BODY
+  // of whichever private channel happens to sort first — the same leak class
+  // the `OR isDefault: true` removal in searchAllChannels closed.
   const fallback = await db.teamChannel.findFirst({
-    where: { teamId },
+    where: { teamId, kind: "channel", members: { some: { userId } } },
     orderBy: { name: "asc" },
     include: { _count: { select: { members: true } } },
   });
   return fallback ? mapChannel(fallback, fallback._count.members) : null;
+}
+
+// ===========================================================================
+// Channel browser (public channels the viewer may not be in)
+// ===========================================================================
+
+/**
+ * Public channels in the team, for the "Browse channels" dialog.
+ *
+ * METADATA ONLY — this query must never touch TeamChannelMessage or project
+ * `lastMessagePreview`, because it is served to people who are NOT members.
+ * Browsing tells you a public channel exists and how busy it is; reading it
+ * still requires joining (see requireChannelMembership, deliberately
+ * unbranched on visibility).
+ */
+export async function browsePublicChannels(
+  teamId: string,
+  viewerUserId: string,
+  q: string | null,
+  opts: { before?: string | null; take?: number } = {},
+): Promise<TeamChannelBrowsePage> {
+  const take = Math.min(Math.max(opts.take ?? PAGE_SIZE, 1), MAX_PAGE_SIZE);
+  const cursor = opts.before ? decodeCursor(opts.before) : null;
+
+  const rows = await db.teamChannel.findMany({
+    where: {
+      teamId,
+      kind: "channel",
+      visibility: "public",
+      ...(q ? { name: { contains: q, mode: "insensitive" as const } } : {}),
+      ...(cursor
+        ? {
+            OR: [
+              { lastMessageAt: { lt: new Date(cursor.createdAt) } },
+              { lastMessageAt: new Date(cursor.createdAt), id: { lt: cursor.id } },
+            ],
+          }
+        : {}),
+    },
+    orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
+    take: take + 1,
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      lastMessageAt: true,
+      _count: { select: { members: true } },
+    },
+  });
+
+  const hasMore = rows.length > take;
+  const page = hasMore ? rows.slice(0, take) : rows;
+
+  // One extra indexed lookup rather than a per-row membership subquery.
+  const joined = await db.teamChannelMember.findMany({
+    where: { userId: viewerUserId, channelId: { in: page.map((r) => r.id) } },
+    select: { channelId: true },
+  });
+  const joinedIds = new Set(joined.map((j) => j.channelId));
+
+  const last = page[page.length - 1];
+  return {
+    items: page.map((r) => ({
+      id: r.id,
+      // A public channel always has a name; DMs (the only nameless rows) are
+      // excluded by the kind filter above.
+      name: r.name ?? "",
+      description: r.description,
+      memberCount: r._count.members,
+      lastMessageAt: r.lastMessageAt.toISOString(),
+      joined: joinedIds.has(r.id),
+    })),
+    nextCursor: hasMore && last ? encodeCursor(last.lastMessageAt, last.id) : null,
+  };
+}
+
+/**
+ * Metadata for one public channel, for the "join to see this channel" card
+ * shown when someone lands on a public channel's URL without being a member.
+ * Returns null for private channels and DMs — indistinguishable from "does
+ * not exist", which is the point.
+ */
+export async function getPublicChannelPreview(
+  teamId: string,
+  channelId: string,
+): Promise<TeamChannelBrowseItemDto | null> {
+  const row = await db.teamChannel.findFirst({
+    where: { id: channelId, teamId, kind: "channel", visibility: "public" },
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      lastMessageAt: true,
+      _count: { select: { members: true } },
+    },
+  });
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name ?? "",
+    description: row.description,
+    memberCount: row._count.members,
+    lastMessageAt: row.lastMessageAt.toISOString(),
+    joined: false,
+  };
 }
 
 // ===========================================================================
@@ -569,22 +820,32 @@ export async function searchAllChannels(
   opts: { take?: number; before?: { createdAt: string; id: string } | null } = {},
 ): Promise<WorkspaceSearchPage> {
   const take = Math.min(opts.take ?? PAGE_SIZE, MAX_PAGE_SIZE);
-  // CRITICAL: filter hits to channels the viewer is a member of, plus the
-  // team's default channel (everyone is implicitly a member). Without this
-  // intersection, a member of only `#general` could search the workspace
-  // for "salaries" and pull body+channel-name from a private leadership
-  // channel they were never invited to — the same data-leak class the
-  // per-channel membership gate closes for direct reads.
+  // CRITICAL: filter hits to channels the viewer is an ACTUAL member of.
+  // Without this intersection, a member of only `#general` could search the
+  // workspace for "salaries" and pull body+channel-name from a private
+  // leadership channel they were never invited to — the same data-leak class
+  // the per-channel membership gate closes for direct reads.
+  //
+  // The old `OR isDefault: true` branch is gone on purpose: it granted search
+  // over the default channel regardless of membership, which was harmless
+  // while "default" implied "everyone" but becomes a leak now that a channel
+  // can be demoted or have its visibility changed. The
+  // 20260719120000_team_chat_dm_and_visibility migration backfills an explicit
+  // membership row for every user on their default channel, so nobody loses
+  // their #general search results.
+  //
+  // `kind: "channel"` excludes DMs. Workspace search is a CHANNEL search —
+  // users don't expect Cmd-K to surface private 1:1 conversations, and
+  // WorkspaceSearchHit.channelName has nothing meaningful to show for one.
+  // A `?scope=` param can add them later; the trgm index already serves both.
   const rows = await db.teamChannelMessage.findMany({
     where: {
       teamId,
       threadRootId: null,
       body: { contains: q, mode: "insensitive" },
       channel: {
-        OR: [
-          { isDefault: true },
-          { members: { some: { userId: viewerUserId } } },
-        ],
+        kind: "channel",
+        members: { some: { userId: viewerUserId } },
       },
       ...(opts.before
         ? {
@@ -609,7 +870,9 @@ export async function searchAllChannels(
   const slice = hasMore ? rows.slice(0, take) : rows;
   const items = slice.map((row) => ({
     message: mapMessage(row),
-    channelName: row.channel.name,
+    // Non-null in practice: the `kind: "channel"` filter above excludes DMs,
+    // which are the only rows with a null name.
+    channelName: row.channel.name ?? "",
   }));
   const nextCursor =
     hasMore && slice.length > 0

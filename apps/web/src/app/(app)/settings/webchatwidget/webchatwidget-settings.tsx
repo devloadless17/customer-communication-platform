@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, type ReactNode } from "react";
-import { Check, Copy, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, ExternalLink, Plus, Trash2 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
 import { PageHeader } from "@/components/layouts/page-header";
@@ -86,6 +86,7 @@ export function WebchatWidgetSettings({
           agentAvatarDataUrl: w.config.agentAvatarDataUrl ?? "",
           fontFamily: w.config.fontFamily ?? "system",
           themeMode: w.config.themeMode ?? "light",
+          soundEnabled: w.config.soundEnabled ?? false,
           launcher: w.config.launcher ?? "bubble",
           position: w.config.position ?? "right",
           launcherLabel: w.config.launcherLabel ?? "",
@@ -216,6 +217,14 @@ function Editor({
   const c = widget.config;
   const theme = c.theme ?? {};
   const [originDraft, setOriginDraft] = useState("");
+  /** Fold the typed origin into the list. Shared by Enter and blur so a domain
+   *  typed-then-Saved can't be silently dropped. Idempotent + de-duping. */
+  function commitOrigin() {
+    const v = originDraft.trim();
+    if (!v) return;
+    if (!widget.allowedOrigins.includes(v)) onOrigins([...widget.allowedOrigins, v]);
+    setOriginDraft("");
+  }
   const origin = appOrigin || "https://YOUR-APP";
   const scriptTag = buildScript(origin, widget.publicKey, c);
 
@@ -318,13 +327,18 @@ function Editor({
             </div>
             <input
               value={originDraft}
+              aria-label="Add an allowed origin"
               onChange={(e) => setOriginDraft(e.target.value)}
+              // Commit on BLUR as well as Enter. Enter-only silently discarded a
+              // typed domain when the admin went straight to "Save changes" — and
+              // an empty allow-list is permissive to EVERY site (origin-allow.ts),
+              // so the failure mode was the exact opposite of the admin's intent.
+              // Blur fires before the Save click, so the value lands first.
+              onBlur={() => commitOrigin()}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  const v = originDraft.trim();
-                  if (v && !widget.allowedOrigins.includes(v)) onOrigins([...widget.allowedOrigins, v]);
-                  setOriginDraft("");
+                  commitOrigin();
                 }
               }}
               placeholder="example.com or *.example.com — press Enter to add"
@@ -333,6 +347,7 @@ function Editor({
           </Section>
 
           <Section title="Behavior">
+            <Toggle checked={c.soundEnabled === true} onChange={(v) => onConfig({ soundEnabled: v })} label="Play a chime on new messages" hint="A subtle sound when an agent replies." />
             <Toggle checked={c.showBranding !== false} onChange={(v) => onConfig({ showBranding: v })} label="Show “Powered by” footer" />
             <Toggle checked={widget.isActive} onChange={onActive} label="Active" hint="Inactive widgets stop accepting new chats." />
           </Section>
@@ -354,7 +369,11 @@ function Editor({
         {(c.launcher ?? "bubble") === "off" ? (
           <>
             <CopyBox title="1) Add the widget (bubble hidden)" hint="Paste before &lt;/body&gt; on every page." code={scriptTag} />
-            <CopyBox title="2) Open it from any link or button" hint="Wire your own element to the widget." code={`<a href="#" onclick="CCPWebchat.open();return false">Chat with us</a>`} />
+            <CopyBox
+              title="2) Open it from any link or button"
+              hint="Include both lines. The first keeps early clicks working while the widget is still loading."
+              code={`${CCP_WEBCHAT_STUB}\n<a href="#" onclick="CCPWebchat.open();return false">Chat with us</a>`}
+            />
           </>
         ) : (
           <CopyBox title="Floating bubble" hint="Paste before &lt;/body&gt; on every page — a chat bubble appears." code={scriptTag} />
@@ -364,6 +383,19 @@ function Editor({
           hint="Renders the chat inside your container (always open)."
           code={`<div id="ccp-chat" style="height:600px;max-width:440px"></div>\n<script src="${origin}/widget.js" data-webchat-key="${widget.publicKey}" data-webchat-target="#ccp-chat" defer></script>`}
         />
+        {/* Try it before touching the customer's site. Without this the first
+            real proof the widget works is a live page on their domain, where a
+            failure is both visible to their visitors and hard to diagnose. The
+            key is pre-filled so nobody hand-copies 30 characters. */}
+        <a
+          href={`/webchat/test.html?key=${encodeURIComponent(widget.publicKey)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 text-sm text-primary transition hover:underline"
+        >
+          <ExternalLink className="size-3.5" />
+          Test this widget on a sample page
+        </a>
       </Section>
 
       <div className="flex items-center justify-between">
@@ -426,6 +458,20 @@ function ColorField({ label, value, onChange }: { label: string; value?: string;
     </label>
   );
 }
+
+/**
+ * Pre-load call queue stub for the JS API. The embed script is `defer`red, so a
+ * visitor can click a `CCPWebchat.open()` link BEFORE widget.js executes — without
+ * this stub that throws ReferenceError, `return false` never runs, and the host
+ * page navigates to `#` instead of opening the chat. The stub buffers calls into
+ * `q`, which widget.js drains on load.
+ */
+const CCP_WEBCHAT_STUB =
+  `<script>window.CCPWebchat=window.CCPWebchat||{q:[],` +
+  `open:function(){this.q.push(["open"])},` +
+  `close:function(){this.q.push(["close"])},` +
+  `toggle:function(){this.q.push(["toggle"])},` +
+  `isOpen:function(){return false}};</script>`;
 
 /** Build the `<script>` embed tag with the org's launcher/position/label choices. */
 function buildScript(origin: string, key: string, c: WebchatWidgetView["config"]): string {

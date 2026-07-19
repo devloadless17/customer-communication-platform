@@ -4,7 +4,10 @@ import { createContext, useContext, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 
 import { useTeamChannelsList } from "@/features/team-chat/hooks/use-team-channels-events";
-import type { TeamChannelListItemDto } from "@ccp/shared/team-chat/types";
+import type {
+  TeamChannelListItemDto,
+  TeamDmListItemDto,
+} from "@ccp/shared/team-chat/types";
 import type { User } from "@ccp/shared/types";
 
 /**
@@ -37,6 +40,14 @@ import type { User } from "@ccp/shared/types";
 
 const TeamMembersContext = createContext<User[] | null>(null);
 const TeamChannelsContext = createContext<TeamChannelListItemDto[] | null>(null);
+const TeamDmsContext = createContext<TeamDmListItemDto[] | null>(null);
+
+/**
+ * Socket events that should make the DM list refetch, beyond the ones every
+ * list surface handles. Module-level so the identity is stable across renders
+ * (the hook takes it as a dep).
+ */
+const DM_REFETCH_EVENTS = ["team:dm:created"] as const;
 
 /** `/team/<channelId>` → `<channelId>`; `/team` (pre-redirect) → null. */
 function channelIdFromPathname(pathname: string | null): string | null {
@@ -48,25 +59,38 @@ function channelIdFromPathname(pathname: string | null): string | null {
 
 export function TeamChatLayoutDataProvider({
   initialChannels,
+  initialDms,
   teamMembers,
   currentUserId,
   children,
 }: {
   initialChannels: TeamChannelListItemDto[];
+  initialDms: TeamDmListItemDto[];
   teamMembers: User[];
   currentUserId: string;
   children: ReactNode;
 }) {
   const activeChannelId = channelIdFromPathname(usePathname());
   const channels = useTeamChannelsList(initialChannels, currentUserId, activeChannelId);
+  // Same hook, different surface — see its docblock for why the DM list is an
+  // instance rather than a copy.
+  const dms = useTeamChannelsList<TeamDmListItemDto>(
+    initialDms,
+    currentUserId,
+    activeChannelId,
+    "/api/team/channels/dms",
+    DM_REFETCH_EVENTS,
+  );
 
-  // Two providers, not one memoized object: `teamMembers` is the (stable) server
-  // prop so its Provider value is referentially stable across the pathname/
-  // channel re-renders that churn `channels` — members consumers bail.
+  // THREE providers, not one memoized object: `teamMembers` is the (stable)
+  // server prop so its Provider value is referentially stable across the
+  // pathname/channel re-renders that churn `channels` — members consumers bail.
+  // DMs get their own for the same reason: a channel badge ticking must not
+  // re-render the DM list, or vice versa.
   return (
     <TeamMembersContext.Provider value={teamMembers}>
       <TeamChannelsContext.Provider value={channels}>
-        {children}
+        <TeamDmsContext.Provider value={dms}>{children}</TeamDmsContext.Provider>
       </TeamChannelsContext.Provider>
     </TeamMembersContext.Provider>
   );
@@ -97,6 +121,21 @@ export function useTeamChannels(): TeamChannelListItemDto[] {
   if (!value) {
     throw new Error(
       "useTeamChannels called outside TeamChatLayoutDataProvider — " +
+        "the /team/layout.tsx provider must wrap any consumer.",
+    );
+  }
+  return value;
+}
+
+/**
+ * The LIVE 1:1 DM list. Same subscribe-narrowly rule as `useTeamChannels`:
+ * read it only where the DM list itself is rendered.
+ */
+export function useTeamDms(): TeamDmListItemDto[] {
+  const value = useContext(TeamDmsContext);
+  if (!value) {
+    throw new Error(
+      "useTeamDms called outside TeamChatLayoutDataProvider — " +
         "the /team/layout.tsx provider must wrap any consumer.",
     );
   }

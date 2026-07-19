@@ -32,7 +32,10 @@ import { StepConfigError, type StepHandler, type StepResult } from "@/lib/workfl
  * Per-run state on WorkflowRun:
  *   - currentStepId — the step that will execute next pickup (or NULL on completed/failed)
  *   - jumpsUsed     — incremented per jump_to_step
- *   - stepLog       — append-only per-step audit; capped at MAX_STEPS_PER_RUN
+ *   - stepLog       — append-only per-step audit. NOT capped — see the read
+ *                     site below for why truncating it would break the
+ *                     MAX_STEPS_PER_RUN ceiling (which counts DISTINCT
+ *                     stepIds from this array).
  */
 
 // Aligned with the publish-time node cap (graph.ts MAX_WORKFLOW_NODES): a valid
@@ -311,6 +314,26 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
   let previousStepId: string | null = null;
   let jumpsUsed = run.jumpsUsed;
   // Read the existing stepLog so we can append (instead of overwriting on retry).
+  //
+  // GROWTH, known and deliberately NOT truncated (2026-07-18). This array gets
+  // one entry per EXECUTION, not per distinct step, and the whole JSONB is
+  // rewritten after every step. A jump loop running to its 200-jump ceiling
+  // with 3 nodes per iteration reaches ~600 entries (~1.3MB) and costs a few
+  // hundred MB of row writes plus WAL/TOAST churn for a single run, while
+  // holding a worker slot.
+  //
+  // The obvious fix — keep only the newest N — is WRONG here, and quietly so:
+  // `progressCount` below derives the MAX_STEPS_PER_RUN loop ceiling from the
+  // DISTINCT stepIds in this very array. Truncating it lowers that count and
+  // hands a runaway workflow a fresh budget, converting a bounded run into an
+  // unbounded one. Trading a write-amplification problem for a loop-safety
+  // hole is a bad trade.
+  //
+  // Doing it properly means persisting the distinct-step count as its own
+  // column so the ceiling survives truncation — the pattern `jumpsUsed`
+  // already uses. That is a schema + migration change, not a local tweak.
+  // TRIGGER: a tenant whose workflow queue backs up behind long jump loops, or
+  // WorkflowRun table bloat showing up in disk usage.
   const stepLog: StepLogEntry[] = Array.isArray(run.stepLog)
     ? (run.stepLog as unknown as StepLogEntry[])
     : [];
@@ -448,19 +471,41 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
     // so we presume YES and advance without re-running. Better one missed
     // workflow than a double-charged WhatsApp send. The
     // `skipped_after_crash` entry is what an admin checks to reconcile.
-    const orphanInProgress = stepLog.find(
-      (e) =>
-        e.stepId === node.id &&
-        e.status === "in_progress" &&
-        !stepLog.some(
+    // POSITION MATTERS. This used to scan the WHOLE log for a terminal entry
+    // with the same stepId, which silently defeated the guarantee two lines
+    // above on any workflow that RE-ENTERS a step — i.e. exactly the
+    // `jump_to_step` clarifier loop this runner documents as supported
+    // ("ask → timeout edge → send clarifier → jump back to ask").
+    //
+    // Iteration 1 leaves `success` for node X. Iteration 2 journals
+    // `in_progress` for X and the worker then dies mid-send. BullMQ redelivers
+    // legitimately, the scan finds iteration 1's `success`, concludes "not an
+    // orphan", and RE-RUNS the handler — a second billed WhatsApp template to
+    // the same customer. (A prior crash's `skipped_after_crash` masks the next
+    // orphan the same way.) Nothing else covers this: the run lock, the BullMQ
+    // lock and the stalled-count guards all consider that redelivery valid;
+    // this check is the only thing standing between it and the re-send.
+    //
+    // So: take the NEWEST `in_progress` (same newest-entry convention as
+    // `isResume` and the ask_question park check below) and only let entries
+    // AFTER it count as resolving it. Also drops the old nested scan from
+    // O(n²) to O(n) per step.
+    let orphanInProgress: (typeof stepLog)[number] | undefined;
+    for (let i = stepLog.length - 1; i >= 0; i--) {
+      const e = stepLog[i];
+      if (!e || e.stepId !== node.id || e.status !== "in_progress") continue;
+      const resolvedAfter = stepLog
+        .slice(i + 1)
+        .some(
           (later) =>
             later.stepId === node.id &&
-            later !== e &&
             (later.status === "success" ||
               later.status === "failed" ||
               later.status === "skipped_after_crash"),
-        ),
-    );
+        );
+      if (!resolvedAfter) orphanInProgress = e;
+      break;
+    }
     if (orphanInProgress && hasSideEffect(node.type)) {
       // WF-2 (I-5): an await_reply-producing step (ask_question) whose side
       // effect — the question SEND — fired, but whose await state wasn't

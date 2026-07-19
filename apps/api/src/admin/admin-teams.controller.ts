@@ -14,6 +14,7 @@ import { z } from "zod";
 
 import {
   getTeamDetailForSuperAdmin,
+  invalidateSuperAdminAggregates,
   listAllTeamsForSuperAdmin,
 } from "@/lib/queries";
 
@@ -142,6 +143,11 @@ export class AdminTeamsController {
       for (const m of members) this.sessionInvalidator.bustCache(m.id);
     }
 
+    // The roster + overview aggregates are memoized for 60s. An admin who just
+    // approved or suspended an org will look straight at that list, so a stale
+    // status there would read as "the action didn't work".
+    invalidateSuperAdminAggregates();
+
     return { ok: true };
   }
 
@@ -220,6 +226,7 @@ export class AdminTeamsController {
     });
     if (!team) throw new NotFoundException({ error: "team not found" });
     await this.teamRoot.destroy(teamId, `api/admin/teams ${teamId}`);
+    invalidateSuperAdminAggregates();
     return { ok: true };
   }
 }

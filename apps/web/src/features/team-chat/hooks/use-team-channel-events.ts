@@ -655,14 +655,34 @@ export function useTeamChannelEvents(
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", onVisibility);
     }
+    // ONE table, iterated in both directions.
+    //
+    // This isn't cosmetic: this component is never remounted on a channel
+    // switch, so a handler registered in `on` but forgotten in `off` leaks a
+    // listener on EVERY navigation. Two hand-maintained parallel lists is
+    // exactly the shape that eventually diverges; a single table makes the
+    // mismatch unrepresentable.
+    //
+    // NOTE: deliberately NOT the inbox's pure-reducer + assertReducerCoverage
+    // design. That exists because three separate consumers apply the same
+    // event there and a missed wiring yields a SILENTLY stale cached thread.
+    // Here there's one consumer per event, so a miss fails loudly and
+    // immediately ("my reaction didn't show up"). Revisit if a second
+    // consumer (e.g. a channel message cache) ever appears.
+    const handlers = {
+      "team:channel:message": onMessage,
+      "team:channel:message:edited": onEdited,
+      "team:channel:message:deleted": onDeleted,
+      "team:channel:reaction:changed": onReaction,
+      "team:channel:pin:changed": onPin,
+      "team:channel:thread:reply": onThreadReply,
+      "team:channel:typing:update": onTyping,
+    } as const;
+
     socket.on("connect", onConnect);
-    socket.on("team:channel:message", onMessage);
-    socket.on("team:channel:message:edited", onEdited);
-    socket.on("team:channel:message:deleted", onDeleted);
-    socket.on("team:channel:reaction:changed", onReaction);
-    socket.on("team:channel:pin:changed", onPin);
-    socket.on("team:channel:thread:reply", onThreadReply);
-    socket.on("team:channel:typing:update", onTyping);
+    for (const [event, handler] of Object.entries(handlers)) {
+      socket.on(event as keyof typeof handlers, handler as never);
+    }
     if (socket.connected) onConnect();
 
     return () => {
@@ -672,13 +692,9 @@ export function useTeamChannelEvents(
       }
       socket.emit("unsubscribe:channel", { channelId });
       socket.off("connect", onConnect);
-      socket.off("team:channel:message", onMessage);
-      socket.off("team:channel:message:edited", onEdited);
-      socket.off("team:channel:message:deleted", onDeleted);
-      socket.off("team:channel:reaction:changed", onReaction);
-      socket.off("team:channel:pin:changed", onPin);
-      socket.off("team:channel:thread:reply", onThreadReply);
-      socket.off("team:channel:typing:update", onTyping);
+      for (const [event, handler] of Object.entries(handlers)) {
+        socket.off(event as keyof typeof handlers, handler as never);
+      }
       if (typeof document !== "undefined") {
         document.removeEventListener("visibilitychange", onVisibility);
       }

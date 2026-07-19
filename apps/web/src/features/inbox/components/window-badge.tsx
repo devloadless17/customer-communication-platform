@@ -50,9 +50,12 @@ export function WindowBadge({
   const now = useNow();
   // Match the reply composer: derive the window length from the channel's
   // capability so social threads reflect the full 7-day human-agent window.
-  const windowMs = channel
-    ? effectiveSendWindowMs(CHANNEL_CAPABILITIES[channel]) ?? undefined
-    : undefined;
+  // A NULL capability means the channel has NO window (webchat widget) — render
+  // nothing rather than letting the 24h default paint a false "Window closed"
+  // lock in the contacts list, contact drawer and browser rows.
+  const caps = channel ? CHANNEL_CAPABILITIES[channel] : null;
+  if (caps && effectiveSendWindowMs(caps) === null) return null;
+  const windowMs = caps ? effectiveSendWindowMs(caps) ?? undefined : undefined;
   const status = computeWindowStatus(lastInboundAt, now, windowMs);
   return <WindowBadgeFromStatus status={status} size={size} className={className} />;
 }
