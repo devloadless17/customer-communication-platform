@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "prebuild": "node scripts/build-widget.mjs",
-    "dev": "ln -sf ../../.env .env && NODE_OPTIONS='--max-old-space-size=3072' next dev --turbopack",
+    "dev": "ln -sf ../../.env .env && NODE_OPTIONS='--max-old-space-size=3072' next dev --turbopack -H 0.0.0.0",
     "build": "next build",
     "start": "ln -sf ../../.env .env && NODE_OPTIONS='--max-old-space-size=1536' next start",
     "typecheck": "tsc --noEmit"

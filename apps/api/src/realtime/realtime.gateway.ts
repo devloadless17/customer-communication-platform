@@ -18,6 +18,7 @@ import type {
 import type { Role } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
+import { getOnlineUserIds } from "@/lib/conversations/presence-bridge";
 import { PresenceService } from "./presence.service";
 import { RealtimeEmitter, type TypedIO } from "./emitter.service";
 import { channelRoom, conversationRoom, teamRoom, userRoom } from "./rooms";
@@ -111,6 +112,60 @@ export class RealtimeGateway
       conversationId,
       on,
     });
+  }
+
+  // A website visitor's socket connected/disconnected → tell the agents viewing
+  // that conversation, so they can see whether the visitor is still there instead
+  // of waiting on a dead thread. Called by WebchatwidgetGateway on connect/
+  // disconnect. Ephemeral (like typing) — not persisted.
+  //
+  // The last-known state is ALSO cached here so an agent who opens the thread AFTER
+  // the visitor connected (having missed the live frame) still gets seeded on
+  // subscribe:conversation. Bounded: single process, ~30 orgs, short chats; a light
+  // cap evicts the oldest offline entries so it can't grow without limit.
+  private readonly visitorPresence = new Map<string, { present: boolean; leftAt: number | null }>();
+  private static readonly VISITOR_PRESENCE_CAP = 5_000;
+
+  notifyVisitorPresence(conversationId: string, present: boolean): void {
+    const leftAt = present ? null : Date.now();
+    this.visitorPresence.set(conversationId, { present, leftAt });
+    if (this.visitorPresence.size > RealtimeGateway.VISITOR_PRESENCE_CAP) this.evictPresence();
+    this.emitter.emitToConversation(conversationId, "conversation:visitor_presence", {
+      conversationId,
+      present,
+      leftAt,
+    });
+  }
+
+  /** Drop offline entries (oldest leftAt first) once the map exceeds its cap — a
+   *  currently-present visitor is always kept. */
+  private evictPresence(): void {
+    const offline = [...this.visitorPresence.entries()]
+      .filter(([, v]) => !v.present)
+      .sort((a, b) => (a[1].leftAt ?? 0) - (b[1].leftAt ?? 0));
+    for (const [id] of offline) {
+      if (this.visitorPresence.size <= RealtimeGateway.VISITOR_PRESENCE_CAP) break;
+      this.visitorPresence.delete(id);
+    }
+  }
+
+  // ── Agent availability → the widget ────────────────────────────────────────
+  // The visitor's green dot should mean "an agent is reachable", not "my socket is
+  // up". WebchatwidgetGateway binds a relay that pushes availability to that team's
+  // visitor sockets; we call it whenever a team's presence flips (broadcastPresence),
+  // so the dot updates live as agents come and go.
+  private widgetAvailabilityRelay: ((teamId: string, online: boolean) => void) | null = null;
+  bindWidgetAvailabilityRelay(fn: (teamId: string, online: boolean) => void): void {
+    this.widgetAvailabilityRelay = fn;
+  }
+  private relayWidgetAvailability(teamId: string): void {
+    if (!this.widgetAvailabilityRelay) return;
+    this.widgetAvailabilityRelay(teamId, this.teamHasOnlineAgent(teamId));
+  }
+
+  /** True when ≥1 agent on the team is connected right now. Cheap, synchronous. */
+  teamHasOnlineAgent(teamId: string): boolean {
+    return (getOnlineUserIds(teamId)?.size ?? 0) > 0;
   }
 
   constructor(
@@ -538,6 +593,8 @@ export class RealtimeGateway
       teamId,
       onlineUserIds,
     });
+    // Keep the widget's "an agent is available" dot in step with real presence.
+    this.relayWidgetAvailability(teamId);
   }
 
   private async buildVisibleOnlineSnapshot(teamId: string): Promise<string[]> {
@@ -822,14 +879,27 @@ export class RealtimeGateway
       try {
         const owns = await this.db.conversation.findFirst({
           where: { id: body.conversationId, teamId },
-          select: { id: true },
+          select: { id: true, channel: true },
         });
         if (!owns) return; // silently drop — fail-soft posture
+        client.join(room);
+        // Seed website-widget visitor presence to THIS agent. The live frame only
+        // fires on the visitor's connect/disconnect, so an agent opening a thread
+        // whose visitor is already connected would otherwise never see the chip.
+        // Emit the last-known state (Online / Left Xm ago), or "Away" when we've
+        // never seen this visitor's socket this process.
+        if (owns.channel === "webchatwidget") {
+          const p = this.visitorPresence.get(body.conversationId);
+          client.emit("conversation:visitor_presence", {
+            conversationId: body.conversationId,
+            present: p?.present ?? false,
+            leftAt: p?.present ? null : p?.leftAt ?? null,
+          });
+        }
       } catch (err) {
         this.logger.error(`subscribe:conversation lookup failed: ${err}`);
         return;
       }
-      client.join(room);
     }
 
     // Always re-emit typing snapshot — handles both first-subscribe and

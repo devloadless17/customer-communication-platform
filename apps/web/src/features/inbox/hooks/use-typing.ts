@@ -41,11 +41,16 @@ export function useTyping(
 ): {
   typingUserIds: string[];
   visitorTyping: boolean;
+  /** null = unknown (no frame yet); true = visitor socket connected; false = left. */
+  visitorPresent: boolean | null;
+  visitorLeftAt: number | null;
   notifyTyping: () => void;
   stopTyping: () => void;
 } {
   const [typingUserIds, setTypingUserIds] = useState<string[]>([]);
   const [visitorTyping, setVisitorTyping] = useState(false);
+  const [visitorPresent, setVisitorPresent] = useState<boolean | null>(null);
+  const [visitorLeftAt, setVisitorLeftAt] = useState<number | null>(null);
   const visitorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startedRef = useRef(false);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -168,9 +173,25 @@ export function useTyping(
     };
     socket.on("conversation:visitor_typing", onVisitorTyping);
 
+    const onVisitorPresence: Parameters<
+      typeof socket.on<"conversation:visitor_presence">
+    >[1] = (payload) => {
+      if (payload.conversationId !== conversationId) return;
+      setVisitorPresent(payload.present);
+      // Prefer the server's leftAt (accurate for a late-opened thread and for the
+      // "Away/never-seen" case where it is explicitly null); fall back to now only
+      // when the field is absent (older server).
+      setVisitorLeftAt(
+        payload.present ? null : payload.leftAt !== undefined ? payload.leftAt : Date.now(),
+      );
+      if (!payload.present) setVisitorTyping(false);
+    };
+    socket.on("conversation:visitor_presence", onVisitorPresence);
+
     return () => {
       socket.off("typing:update", onUpdate);
       socket.off("conversation:visitor_typing", onVisitorTyping);
+      socket.off("conversation:visitor_presence", onVisitorPresence);
       if (visitorTimer.current) {
         clearTimeout(visitorTimer.current);
         visitorTimer.current = null;
@@ -183,5 +204,5 @@ export function useTyping(
     };
   }, [conversationId, selfUserId, stopTyping]);
 
-  return { typingUserIds, visitorTyping, notifyTyping, stopTyping };
+  return { typingUserIds, visitorTyping, visitorPresent, visitorLeftAt, notifyTyping, stopTyping };
 }

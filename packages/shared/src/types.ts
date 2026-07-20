@@ -663,6 +663,7 @@ export type ConversationEventKind =
   | "stage_changed"
   | "note_added"
   | "note_deleted"
+  | "visitor_started_conversation"
   | "ai_paused"
   | "ai_resumed"
   | "call_completed"

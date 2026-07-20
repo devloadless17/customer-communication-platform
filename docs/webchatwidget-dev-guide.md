@@ -62,7 +62,34 @@ These are the places a change ripples outward — check them when you change beh
 - `apps/api/src/lib/media-storage.ts` — per-channel media policy, incl.
   `classifyWebpAsImage`.
 - `apps/api/src/lib/identity/webchat-prechat.ts` — pre-chat identity, and the
-  deliberate **no-auto-merge** block.
+  deliberate **no-auto-merge** block. Field mapping, in order: `name` sets the display
+  name **and** splits into `firstName`/`lastName` (`splitContactName`: first word →
+  first, rest → last); `email`/`phone` set those columns; a `text` field whose label
+  matches a known person column (First name, Last name, Language, Country, Location →
+  `BUILTIN_FIELD_BY_SLUG`) sets that column; anything else becomes a **custom field**
+  on `Contact.customFields` keyed by a slug of its label, with a `ContactFieldDefinition`
+  upserted (reused if it exists, created if not) so it renders in the panel. An explicit
+  built-in field wins over the name-derived split.
+
+### Per-widget config flags (in `WebchatwidgetConfig`)
+
+Non-secret, stored in `WebchatWidget.config`, delivered to the widget on `ready`.
+Beyond appearance (colors, font, logo, avatar, suggested questions, pre-chat fields):
+
+- `aiEnabled` — **default OFF.** Gates AI-autopilot for this widget's conversations
+  (`webchatwidgetAiAllowed`, checked in `ai-reply.subscriber.ts`). AI replies are
+  disclosed to the visitor with an "AI" label (frame `ai` flag; live from
+  `rawPayload.sentVia="ai-assistant/…"`, on history from `AiMessageMetadata.aiGenerated`).
+- `allowedMediaKinds` — attachment policy, **server-enforced** on upload. `[]` = text-only.
+- `awayMessage` — shown when no agent is online (`agents` frame; presence-derived).
+- `showHeader` — `false` hides the header on an **inline/full-page** embed ("just chat");
+  ignored for a bubble (it needs the header's close control).
+
+**Presence** (agent sees the visitor Online / Left): the widget gateway calls
+`RealtimeGateway.notifyVisitorPresence` on connect, first-message, and disconnect;
+the state is cached so `subscribe:conversation` **seeds** an agent opening the thread
+late. The widget disconnects on `pagehide` so a tab-close flips to "Left" immediately
+rather than after the ~45s ping-timeout.
 
 ---
 

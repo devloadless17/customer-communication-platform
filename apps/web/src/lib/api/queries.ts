@@ -490,6 +490,10 @@ export interface WebchatWidgetView {
     fontFamily?: "system" | "rounded" | "serif";
     themeMode?: "light" | "dark" | "auto";
     soundEnabled?: boolean;
+    allowedMediaKinds?: Array<"image" | "video" | "audio" | "document">;
+    awayMessage?: string;
+    aiEnabled?: boolean;
+    showHeader?: boolean;
     launcher?: "bubble" | "off" | "inline";
     position?: "right" | "left";
     launcherLabel?: string;

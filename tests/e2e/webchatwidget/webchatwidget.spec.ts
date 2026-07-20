@@ -128,6 +128,8 @@ test("settings UI: create, list, and show the embed snippet", async ({ page }) =
 
   // Create a second widget via the UI (exercises the admin POST).
   await page.getByRole("button", { name: /New widget/i }).click();
+  // Settings are grouped into tabs; the install snippet lives on the Install tab.
+  await page.getByRole("tab", { name: "Install" }).click();
   // The embed snippet renders a public key for the newly-selected widget.
   const snippet = page.locator("code", { hasText: "data-webchat-key" }).first();
   await expect(snippet).toBeVisible({ timeout: 15_000 });
@@ -141,6 +143,42 @@ test("settings UI: create, list, and show the embed snippet", async ({ page }) =
     select: { id: true },
   });
   if (newest) createdWidgetIds.add(newest.id);
+});
+
+test("settings: AI auto-reply defaults OFF and the toggle persists to config", async ({ page }) => {
+  const name = `AI Toggle ${RUN}`;
+  const w = await db().webchatWidget.create({
+    data: {
+      teamId, name, publicKey: `wc_pk_ai${RUN}${"0".repeat(16)}`.slice(0, 40),
+      allowedOrigins: [], config: {},
+    },
+    select: { id: true, config: true },
+  });
+  createdWidgetIds.add(w.id);
+  // Default: a fresh widget is NOT AI-enabled (absent === off).
+  expect((w.config as Record<string, unknown>).aiEnabled ?? false).toBe(false);
+
+  await page.goto(`${WEB_ORIGIN}/settings/webchatwidget`);
+  // Select this widget (a per-widget tab appears once the team has >1).
+  await page.getByRole("button", { name: new RegExp(name) }).click();
+  await page.getByRole("tab", { name: "Behavior" }).click();
+
+  const aiToggle = page.getByRole("switch", { name: /AI auto-reply/ });
+  await expect(aiToggle).toBeVisible({ timeout: 15_000 });
+  await expect(aiToggle).toHaveAttribute("aria-checked", "false");
+  await aiToggle.click();
+  await expect(aiToggle).toHaveAttribute("aria-checked", "true");
+  await page.getByRole("button", { name: /Save changes/i }).click();
+
+  const saved = await pollUntil(
+    async () => {
+      const row = await db().webchatWidget.findUnique({ where: { id: w.id }, select: { config: true } });
+      const cfg = (row?.config ?? {}) as Record<string, unknown>;
+      return cfg.aiEnabled === true ? cfg : null;
+    },
+    { timeoutMs: 15_000, label: "aiEnabled persisted" },
+  );
+  expect(saved.aiEnabled).toBe(true);
 });
 
 test("visitor → inbox → agent reply, with pre-chat identity + widget attribution", async ({
@@ -346,6 +384,61 @@ test("agent reply shows the agent's name and is marked read", async ({ browser, 
   }
 });
 
+test("AI disclosure: an AI-authored reply is labelled 'AI' in the widget", async ({ browser }) => {
+  // The visitor must always know a bot answered (disclosure). An AI reply carries
+  // no human senderUserId; the widget distinguishes it via the frame's `ai` flag,
+  // which on history replay is sourced from AiMessageMetadata.aiGenerated.
+  const ctx = await browser.newContext();
+  const visitor = await ctx.newPage();
+  try {
+    await mountWidget(visitor, PUBLIC_KEY);
+    await pastPreChat(visitor);
+    const msg = `ai disclosure ${RUN}`;
+    await visitor.locator(".composer textarea").fill(msg);
+    await visitor.locator(".composer textarea").press("Enter");
+    const landed = await pollUntil(
+      async () =>
+        db().message.findFirst({
+          where: { teamId, channel: CHANNEL, direction: "in", body: msg },
+          select: { conversationId: true },
+        }),
+      { timeoutMs: 20_000, label: "ai-disclosure inbound" },
+    );
+    const conv = await db().conversation.findUnique({
+      where: { id: landed.conversationId },
+      select: { contactId: true },
+    });
+    if (conv?.contactId) createdContactIds.add(conv.contactId);
+
+    // Seed an AI-authored outbound reply the way the assistant would: no
+    // senderUserId, provenance `ai-assistant/reply`, and the canonical
+    // AiMessageMetadata.aiGenerated row history replay reads.
+    const aiReply = `I can help with that — ${RUN}`;
+    const aiMsg = await db().message.create({
+      data: {
+        teamId, conversationId: landed.conversationId, channel: CHANNEL,
+        externalId: `ai_${RUN}_${Math.random().toString(36).slice(2)}`,
+        body: aiReply, direction: "out", status: "sent",
+        rawPayload: { sentVia: "ai-assistant/reply" },
+      },
+      select: { id: true },
+    });
+    await db().aiMessageMetadata.create({
+      data: { teamId, messageId: aiMsg.id, aiGenerated: true },
+    });
+
+    // Re-mount → the widget resumes from server history, which must carry the AI
+    // label (mountWidget re-injects the script; a bare reload would drop it).
+    await mountWidget(visitor, PUBLIC_KEY);
+    await expect(visitor.locator(".bubble", { hasText: aiReply })).toBeVisible({ timeout: 20_000 });
+    // The "AI" disclosure badge on the sender-name row, and the distinct AI avatar.
+    await expect(visitor.locator(".sname .aib")).toHaveText("AI");
+    await expect(visitor.locator(".mr.in .av.aiav")).toBeVisible();
+  } finally {
+    await ctx.close();
+  }
+});
+
 test("closing shows a notice; a new message reopens the thread", async ({ browser, request }) => {
   const ctx = await browser.newContext();
   const visitor = await ctx.newPage();
@@ -453,6 +546,208 @@ test("deploy mode: inline embed renders in a container (always open, no launcher
     // The shadow host moved into our container.
     const inside = await v.evaluate(() => !!document.getElementById("ccp-inline")?.querySelector("#ccp-webchat-root"));
     expect(inside).toBe(true);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("presence: agent sees the visitor Online while connected, then Left on disconnect", async ({ browser, page }) => {
+  // The reported bug: the presence chip never appeared because the live frame only
+  // fires on the visitor's connect/disconnect, which an agent opening the thread
+  // later would miss. The fix seeds current presence on subscribe AND announces it
+  // when a first-message conversation is created. This proves both directions.
+  const ctx = await browser.newContext();
+  const visitor = await ctx.newPage();
+  try {
+    await mountWidget(visitor, PUBLIC_KEY);
+    await pastPreChat(visitor);
+    const msg = `presence ${RUN}`;
+    await visitor.locator(".composer textarea").fill(msg);
+    await visitor.locator(".composer textarea").press("Enter");
+    const landed = await pollUntil(
+      async () =>
+        db().message.findFirst({
+          where: { teamId, channel: CHANNEL, direction: "in", body: msg },
+          select: { conversationId: true },
+        }),
+      { timeoutMs: 20_000, label: "presence inbound" },
+    );
+    const conv = await db().conversation.findUnique({
+      where: { id: landed.conversationId },
+      select: { contactId: true },
+    });
+    if (conv?.contactId) createdContactIds.add(conv.contactId);
+
+    // Agent opens the thread AFTER the visitor is already connected — the seed path.
+    await page.goto(`${WEB_ORIGIN}/inbox/${landed.conversationId}`);
+    await expect(page.getByText("Online", { exact: true })).toBeVisible({ timeout: 20_000 });
+
+    // Visitor leaves → the agent's chip flips to "Left …" live.
+    await ctx.close();
+    await expect(page.getByText(/Left|Away/)).toBeVisible({ timeout: 20_000 });
+  } finally {
+    if (!visitor.isClosed()) await ctx.close();
+  }
+});
+
+test("visitor 'Start a new conversation' records a timeline note on the fresh thread", async ({ browser }) => {
+  // Deliberately starting over (⋯ → Clear this chat → confirm) rotates the visitor
+  // to a brand-new contact + conversation, and the fresh thread carries a
+  // "visitor_started_conversation" note so the agent knows it's a restart.
+  const ctx = await browser.newContext();
+  const v = await ctx.newPage();
+  try {
+    await mountWidget(v, PUBLIC_KEY);
+    await pastPreChat(v);
+    const msg1 = `restart first ${RUN}`;
+    await v.locator(".composer textarea").fill(msg1);
+    await v.locator(".composer textarea").press("Enter");
+    const convA = await pollUntil(
+      () =>
+        db().message.findFirst({
+          where: { teamId, channel: CHANNEL, direction: "in", body: msg1 },
+          select: { conversationId: true },
+        }),
+      { timeoutMs: 20_000, label: "restart first message" },
+    );
+    const ca = await db().conversation.findUnique({
+      where: { id: convA.conversationId },
+      select: { contactId: true },
+    });
+    if (ca?.contactId) createdContactIds.add(ca.contactId);
+
+    // ⋯ → "Clear this chat" → confirm. doReset sets the restart marker + reloads
+    // (which drops the injected widget), so we re-mount for the rotated visitor.
+    await v.locator('button.hx[aria-label="More options"]').click();
+    await v.getByRole("menuitem", { name: "Clear this chat" }).click();
+    await v.locator("button.rcy").click();
+    await mountWidget(v, PUBLIC_KEY);
+    await pastPreChat(v);
+    const msg2 = `restart second ${RUN}`;
+    await v.locator(".composer textarea").fill(msg2);
+    await v.locator(".composer textarea").press("Enter");
+    const convB = await pollUntil(
+      () =>
+        db().message.findFirst({
+          where: { teamId, channel: CHANNEL, direction: "in", body: msg2 },
+          select: { conversationId: true },
+        }),
+      { timeoutMs: 20_000, label: "restart second message" },
+    );
+    // A genuinely new thread, not the same one reopened.
+    expect(convB.conversationId).not.toBe(convA.conversationId);
+    const cb = await db().conversation.findUnique({
+      where: { id: convB.conversationId },
+      select: { contactId: true },
+    });
+    if (cb?.contactId) createdContactIds.add(cb.contactId);
+
+    const note = await pollUntil(
+      () =>
+        db().conversationEvent.findFirst({
+          where: { conversationId: convB.conversationId, kind: "visitor_started_conversation" },
+          select: { id: true },
+        }),
+      { timeoutMs: 15_000, label: "restart timeline note" },
+    );
+    expect(note).toBeTruthy();
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("inline embed can hide the header for a bare 'just chat' surface (showHeader:false)", async ({ browser }) => {
+  const w = await db().webchatWidget.create({
+    data: {
+      teamId, name: `NoHeader ${RUN}`, publicKey: `wc_pk_nh${RUN}${"0".repeat(16)}`.slice(0, 40),
+      allowedOrigins: [], config: { showHeader: false },
+    },
+    select: { id: true, publicKey: true },
+  });
+  createdWidgetIds.add(w.id);
+
+  const ctx = await browser.newContext();
+  const v = await ctx.newPage();
+  try {
+    await v.goto(`${WEB_ORIGIN}/webchat/test.html`);
+    await v.evaluate(
+      ({ key, api, base }) => {
+        const d = document.createElement("div");
+        d.id = "nh-host";
+        d.style.height = "520px";
+        d.style.maxWidth = "440px";
+        document.body.appendChild(d);
+        const s = document.createElement("script");
+        s.src = `${base}/widget.js`;
+        s.setAttribute("data-webchat-key", key);
+        s.setAttribute("data-webchat-api", api);
+        s.setAttribute("data-webchat-target", "#nh-host");
+        document.body.appendChild(s);
+      },
+      { key: w.publicKey, api: API_ORIGIN, base: WEB_ORIGIN },
+    );
+    await v.waitForSelector("#ccp-webchat-root", { state: "attached", timeout: 15_000 });
+    // Composer is usable, but the widget's header is hidden — a bare chat surface.
+    // (Scope to the embed host: the demo page has its own <header> nav.)
+    await expect(v.locator(".composer textarea, .form input").first()).toBeVisible({ timeout: 15_000 });
+    await expect(v.locator("#nh-host header")).toBeHidden();
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("the sample demo page auto-loads the widget and connects (bubble + full-page)", async ({ browser }) => {
+  // This is the page an operator shows a prospect from Settings → "Test on a sample
+  // page". It must inject the REAL widget itself and connect with zero fiddling —
+  // including on the dev stack, where the socket lives on a different port than the
+  // app (the page's apiOverride handles that). If this breaks, every live demo does.
+  const ctx = await browser.newContext();
+  try {
+    // Bubble mode: the page injects the widget from ?key=; it must connect and send.
+    const v = await ctx.newPage();
+    await v.goto(`${WEB_ORIGIN}/webchat/test.html?key=${PUBLIC_KEY}&mode=bubble`);
+    await v.waitForSelector("#ccp-webchat-root", { state: "attached", timeout: 15_000 });
+    // Open deterministically via the widget's own JS API (the page exposes it).
+    await v.waitForFunction(
+      () => !!(window as unknown as { CCPWebchat?: { open?: () => void } }).CCPWebchat?.open,
+      null,
+      { timeout: 15_000 },
+    );
+    await v.evaluate(() => (window as unknown as { CCPWebchat: { open: () => void } }).CCPWebchat.open());
+    // Wait for the panel content to render before dismissing the pre-chat form.
+    await v.locator(".composer textarea, .form input").first().waitFor({ state: "visible", timeout: 15_000 });
+    await pastPreChat(v);
+    const msg = `demo page ${RUN}`;
+    await v.locator(".composer textarea").fill(msg);
+    await v.locator(".composer textarea").press("Enter");
+    const landed = await pollUntil(
+      async () =>
+        db().message.findFirst({
+          where: { teamId, channel: CHANNEL, direction: "in", body: msg },
+          select: { conversationId: true },
+        }),
+      { timeoutMs: 20_000, label: "demo-page bubble message" },
+    );
+    const conv = await db().conversation.findUnique({
+      where: { id: landed.conversationId },
+      select: { contactId: true },
+    });
+    if (conv?.contactId) createdContactIds.add(conv.contactId);
+
+    // Full-page mode: the chat fills the viewport (help-center style) — mounted in
+    // the full-page host, no floating launcher, composer ready immediately.
+    const v2 = await ctx.newPage();
+    await v2.goto(`${WEB_ORIGIN}/webchat/test.html?key=${PUBLIC_KEY}&mode=fullpage`);
+    await v2.waitForSelector("#ccp-webchat-root", { state: "attached", timeout: 15_000 });
+    expect(await v2.locator("button.launch").count()).toBe(0);
+    await expect(v2.locator(".composer textarea, .form input").first()).toBeVisible({ timeout: 15_000 });
+    const fullpageMounted = await v2.evaluate(
+      () =>
+        document.body.classList.contains("fullpage") &&
+        !!document.getElementById("fullpage-host")?.querySelector("#ccp-webchat-root"),
+    );
+    expect(fullpageMounted).toBe(true);
+    await v2.close();
   } finally {
     await ctx.close();
   }
@@ -923,4 +1218,303 @@ test("the MINIFIED production artifact works (this is what customers load)", asy
   } finally {
     await ctx.close();
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-07-20 (later): pre-chat form rewrite, attachment policy, expand.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("regression: the pre-chat form is NOT re-shown to a returning visitor", async ({ browser }) => {
+  // The gateway emits `ready` BEFORE `history`, but the client used to decide
+  // whether to render the form inside onReady via hasThread() — which reads a
+  // message map that is always empty at that instant. Every returning visitor was
+  // therefore asked for their details again, with their existing thread rendered
+  // underneath the form. Re-asking for information already given is a textbook chat
+  // UX failure, and it happened on every page load.
+  const w = await db().webchatWidget.create({
+    data: {
+      teamId, name: `Reask ${RUN}`, publicKey: `wc_pk_reask${RUN}${"0".repeat(16)}`.slice(0, 40),
+      allowedOrigins: [],
+      config: { preChatFields: [{ id: "f_e", label: "Email", type: "email", required: false }] },
+    },
+    select: { id: true, publicKey: true },
+  });
+  createdWidgetIds.add(w.id);
+
+  const ctx = await browser.newContext();
+  try {
+    const v = await ctx.newPage();
+    await mountWidget(v, w.publicKey);
+    await expect(v.locator(".form")).toBeAttached({ timeout: 10_000 }); // first visit: asked
+    await pastPreChat(v, VISITOR_EMAIL);
+    const msg = `returning visitor ${RUN}`;
+    await v.locator(".composer textarea").fill(msg);
+    await v.locator("button.sbtn").click();
+    await pollUntil(
+      () => db().message.findFirst({ where: { teamId, body: msg }, select: { id: true } }),
+      { timeoutMs: 25_000, label: "first message" },
+    );
+
+    // Come back: same browser, same visitor id, existing conversation.
+    await mountWidget(v, w.publicKey);
+    await expect(v.locator(".bubble", { hasText: msg })).toBeVisible({ timeout: 15_000 });
+    expect(await v.locator(".form").count()).toBe(0); // NOT asked again
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("pre-chat form asks one field at a time with a step counter", async ({ browser }) => {
+  const w = await db().webchatWidget.create({
+    data: {
+      teamId, name: `Stepped ${RUN}`, publicKey: `wc_pk_step${RUN}${"0".repeat(16)}`.slice(0, 40),
+      allowedOrigins: [],
+      config: {
+        preChatFields: [
+          { id: "s1", label: "Your name", type: "name", required: true },
+          { id: "s2", label: "Email", type: "email", required: false },
+        ],
+      },
+    },
+    select: { id: true, publicKey: true },
+  });
+  createdWidgetIds.add(w.id);
+
+  const ctx = await browser.newContext();
+  try {
+    const v = await ctx.newPage();
+    await mountWidget(v, w.publicKey);
+    await expect(v.locator(".form")).toBeAttached({ timeout: 10_000 });
+
+    // One input, not the whole form at once.
+    expect(await v.locator(".form input").count()).toBe(1);
+    await expect(v.locator(".fcount")).toHaveText("1 of 2");
+    // A required field blocks progress rather than failing silently.
+    await v.locator("button.fnext").click();
+    await expect(v.locator(".err")).toBeVisible();
+
+    await v.locator(".fld input").fill("Ali Ahmad");
+    await v.locator("button.fnext").click();
+    await expect(v.locator(".fcount")).toHaveText("2 of 2");
+    // The answered step collapses to a summary instead of staying a live input.
+    await expect(v.locator(".fsumrow")).toContainText("Ali Ahmad");
+    // The final step's action is "Start chat" even when the field is optional and
+    // empty — skipping the last field IS starting the chat. ("Skip" is the label on
+    // non-final optional steps.)
+    await expect(v.locator("button.fnext")).toHaveText("Start chat");
+
+    await v.locator(".fld input").fill("stepped@example.com");
+    await v.locator("button.fnext").click();
+    await expect(v.locator(".form")).toHaveCount(0, { timeout: 10_000 });
+    await expect(v.locator(".composer textarea")).toBeVisible();
+
+    // The identity actually landed — a stepped rewrite must not drop a field.
+    const msg = `stepped done ${RUN}`;
+    await v.locator(".composer textarea").fill(msg);
+    await v.locator("button.sbtn").click();
+    const row = await pollUntil(
+      () => db().message.findFirst({ where: { teamId, body: msg }, select: { conversationId: true } }),
+      { timeoutMs: 25_000, label: "stepped-form message" },
+    );
+    const conv = await db().conversation.findUnique({
+      where: { id: row.conversationId },
+      select: { contact: { select: { name: true, email: true } } },
+    });
+    expect(conv?.contact.email).toBe("stepped@example.com");
+    expect(conv?.contact.name).toBe("Ali Ahmad");
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("pre-chat: a custom (non identity) field lands on the contact's customFields + a definition", async ({
+  browser,
+}) => {
+  // A field the org adds that isn't name/email/phone (type "text", e.g. "Company")
+  // is real contact data — it must be stored on Contact.customFields keyed by a slug
+  // of the label, and a ContactFieldDefinition must exist so it RENDERS in the panel.
+  // The old code mapped every non-email/phone field onto `name`, silently dropping it.
+  const w = await db().webchatWidget.create({
+    data: {
+      teamId, name: `Custom ${RUN}`, publicKey: `wc_pk_cf${RUN}${"0".repeat(16)}`.slice(0, 40),
+      allowedOrigins: [],
+      config: {
+        preChatFields: [
+          { id: "c1", label: "Your name", type: "name", required: true },
+          // "Language" is a KNOWN person column → sets Contact.language directly.
+          { id: "c2", label: "Language", type: "text", required: false },
+          // "Company" is unknown → becomes a custom field + definition.
+          { id: "c3", label: "Company", type: "text", required: false },
+        ],
+      },
+    },
+    select: { id: true, publicKey: true },
+  });
+  createdWidgetIds.add(w.id);
+
+  const ctx = await browser.newContext();
+  try {
+    const v = await ctx.newPage();
+    await mountWidget(v, w.publicKey);
+    await expect(v.locator(".form")).toBeAttached({ timeout: 10_000 });
+
+    await v.locator(".fld input").fill("Custom Person");
+    await v.locator("button.fnext").click();
+    await expect(v.locator(".fcount")).toHaveText("2 of 3");
+    await v.locator(".fld input").fill("French");
+    await v.locator("button.fnext").click();
+    await expect(v.locator(".fcount")).toHaveText("3 of 3");
+    await v.locator(".fld input").fill("Acme Corp");
+    await v.locator("button.fnext").click();
+    await expect(v.locator(".form")).toHaveCount(0, { timeout: 10_000 });
+
+    const msg = `custom field done ${RUN}`;
+    await v.locator(".composer textarea").fill(msg);
+    await v.locator("button.sbtn").click();
+    const row = await pollUntil(
+      () => db().message.findFirst({ where: { teamId, body: msg }, select: { conversationId: true } }),
+      { timeoutMs: 25_000, label: "custom-field message" },
+    );
+    // The unknown field lands under its slug key; the known field ("Language") sets
+    // the person column directly (NOT a custom field); the identity field it shares
+    // the form with must NOT be clobbered.
+    const conv = await pollUntil(
+      async () => {
+        const c = await db().conversation.findUnique({
+          where: { id: row.conversationId },
+          select: { contact: { select: { name: true, firstName: true, lastName: true, language: true, customFields: true } } },
+        });
+        const cf = (c?.contact.customFields ?? {}) as Record<string, string>;
+        return cf.company === "Acme Corp" && c?.contact.language === "French" ? c : null;
+      },
+      { timeoutMs: 15_000, label: "customFields + known field applied" },
+    );
+    expect(conv?.contact.name).toBe("Custom Person");
+    // The name field also splits into first/last (first word → first, rest → last).
+    expect(conv?.contact.firstName).toBe("Custom");
+    expect(conv?.contact.lastName).toBe("Person");
+    expect(conv?.contact.language).toBe("French");
+    // The unknown field became a custom field with a definition (renders in panel)…
+    const def = await db().contactFieldDefinition.findFirst({
+      where: { teamId, key: "company" },
+      select: { label: true },
+    });
+    expect(def?.label).toBe("Company");
+    // …and the KNOWN field did NOT leak into customFields as a duplicate key.
+    const cf = (conv?.contact.customFields ?? {}) as Record<string, string>;
+    expect(cf.language).toBeUndefined();
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("attachment policy is enforced by the SERVER, not just the widget", async ({ browser, request }) => {
+  // The widget hides buttons as a courtesy, but it runs on the visitor's machine —
+  // so the policy has to hold against a client that ignores it entirely.
+  const w = await db().webchatWidget.create({
+    data: {
+      teamId, name: `Policy ${RUN}`, publicKey: `wc_pk_pol${RUN}${"0".repeat(16)}`.slice(0, 40),
+      allowedOrigins: [], config: { allowedMediaKinds: ["image"] },
+    },
+    select: { id: true, publicKey: true },
+  });
+  createdWidgetIds.add(w.id);
+
+  // Raw upload, bypassing the widget completely.
+  const refused = await request.post(`${API_ORIGIN}/api/widget/media?key=${w.publicKey}`, {
+    headers: { origin: "https://policy.test" },
+    multipart: { file: { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello") } },
+  });
+  expect(refused.status()).toBe(400);
+  expect((await refused.json()).error).toBe("media_kind_not_allowed");
+
+  const allowed = await request.post(`${API_ORIGIN}/api/widget/media?key=${w.publicKey}`, {
+    headers: { origin: "https://policy.test" },
+    multipart: {
+      file: {
+        name: "pixel.png", mimeType: "image/png",
+        buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64"),
+      },
+    },
+  });
+  expect(allowed.ok()).toBe(true);
+
+  // …and the widget reflects it: no mic (audio off), picker scoped to images.
+  const ctx = await browser.newContext();
+  try {
+    const v = await ctx.newPage();
+    await mountWidget(v, w.publicKey);
+    await expect(v.locator('input[type=file]')).toHaveAttribute("accept", "image/*");
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("visitor can expand the panel, and it survives a refresh", async ({ browser }) => {
+  // A fixed 392px is what made media controls and images feel cramped; widening on
+  // demand beats widening the default, which would make the widget more intrusive
+  // for every visitor who never needs it.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  try {
+    const v = await ctx.newPage();
+    await mountWidget(v, PUBLIC_KEY);
+    const width = (): Promise<number> => v.evaluate(`Math.round(document.getElementById("ccp-webchat-root").shadowRoot.querySelector(".panel").getBoundingClientRect().width)`);
+    const narrow = await width();
+    expect(narrow).toBeLessThan(450); // corner-chat default (~392, sub-pixel varies)
+
+    await v.locator('[aria-label="Expand chat"]').click();
+    await expect.poll(width).toBeGreaterThan(600);
+
+    await mountWidget(v, PUBLIC_KEY); // re-mount = fresh page load
+    expect(await width()).toBeGreaterThan(600); // persisted
+    await v.locator('[aria-label="Restore chat size"]').click();
+    await expect.poll(width).toBeLessThan(450);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("identity: duplicate phone surfaces a link SUGGESTION (unverified), not an auto-merge", async ({ request }) => {
+  // Same human, several browsers, each typing the same phone into the pre-chat box.
+  // Each browser is its own vis_<uuid> = its own Contact, so the agent would
+  // otherwise see duplicate people. We suggest linking (a human confirms) and flag
+  // the match unverified — auto-merging an unverified value is the impersonation
+  // hole the identity layer prevents.
+  const PHONE = `9617${Date.now().toString().slice(-7)}`;
+  const mk = async (name: string, channel: "whatsapp" | "webchatwidget", extra: Record<string, unknown>) => {
+    const cust = await db().customer.create({ data: { teamId, name } });
+    const c = await db().contact.create({
+      data: { teamId, name, identityChannel: channel, customerId: cust.id, ...extra },
+      select: { id: true },
+    });
+    createdContactIds.add(c.id);
+    return c.id;
+  };
+  const widgetA = await mk(`w:visA ${RUN}`, "webchatwidget", { externalContactId: `wq:visA${RUN}`, phoneNumber: PHONE });
+  await mk(`w:visB ${RUN}`, "webchatwidget", { externalContactId: `wq:visB${RUN}`, phoneNumber: PHONE });
+  const real = await mk(`Real ${RUN}`, "whatsapp", { phoneNumber: PHONE });
+
+  // From a widget contact: sees the other widget contact AND the real customer.
+  const r1 = await request.get(`${WEB_ORIGIN}/api/customers/by-contact/${widgetA}/suggestions`);
+  expect(r1.ok()).toBe(true);
+  const s1 = (await r1.json()).suggestions as Array<{ contactId: string; verified: boolean; matchedOn: string }>;
+  expect(s1.length).toBe(2);
+  expect(s1.every((x) => x.matchedOn === "phone")).toBe(true);
+  expect(s1.every((x) => x.verified === false)).toBe(true); // widget value = unverified
+
+  // From the REAL customer: the widget contacts claiming their number show up.
+  const r2 = await request.get(`${WEB_ORIGIN}/api/customers/by-contact/${real}/suggestions`);
+  const s2 = (await r2.json()).suggestions as Array<{ verified: boolean }>;
+  expect(s2.length).toBe(2);
+  expect(s2.every((x) => x.verified === false)).toBe(true);
+
+  // Confirm one link via the existing reversible endpoint; it drops off the list.
+  const realCustomer = await db().contact.findUnique({ where: { id: real }, select: { customerId: true } });
+  const linkRes = await request.post(`${WEB_ORIGIN}/api/customers/${realCustomer!.customerId}/link`, {
+    data: { contactId: widgetA },
+  });
+  expect(linkRes.ok()).toBe(true);
+  const r3 = await request.get(`${WEB_ORIGIN}/api/customers/by-contact/${real}/suggestions`);
+  const s3 = (await r3.json()).suggestions as unknown[];
+  expect(s3.length).toBe(1); // widgetA now the same person, only visB remains
 });

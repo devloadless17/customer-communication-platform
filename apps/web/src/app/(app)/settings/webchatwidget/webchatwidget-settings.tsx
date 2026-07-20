@@ -87,6 +87,12 @@ export function WebchatWidgetSettings({
           fontFamily: w.config.fontFamily ?? "system",
           themeMode: w.config.themeMode ?? "light",
           soundEnabled: w.config.soundEnabled ?? false,
+          // Absent means "all kinds" — only send an explicit list once the org has
+          // actually restricted something, so untouched widgets stay unrestricted.
+          ...(w.config.allowedMediaKinds ? { allowedMediaKinds: w.config.allowedMediaKinds } : {}),
+          awayMessage: w.config.awayMessage ?? "",
+          aiEnabled: w.config.aiEnabled ?? false,
+          showHeader: w.config.showHeader ?? true,
           launcher: w.config.launcher ?? "bubble",
           position: w.config.position ?? "right",
           launcherLabel: w.config.launcherLabel ?? "",
@@ -217,6 +223,9 @@ function Editor({
   const c = widget.config;
   const theme = c.theme ?? {};
   const [originDraft, setOriginDraft] = useState("");
+  // Group the many fields into tabs so the page isn't one long scroll. The live
+  // preview stays visible across all tabs so every edit is seen immediately.
+  const [tab, setTab] = useState<"content" | "appearance" | "behavior" | "install">("content");
   /** Fold the typed origin into the list. Shared by Enter and blur so a domain
    *  typed-then-Saved can't be silently dropped. Idempotent + de-duping. */
   function commitOrigin() {
@@ -237,9 +246,20 @@ function Editor({
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
-      <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
-        {/* form */}
+      <TabBar
+        tab={tab}
+        onTab={setTab}
+        tabs={[
+          { id: "content", label: "Content" },
+          { id: "appearance", label: "Appearance" },
+          { id: "behavior", label: "Behavior" },
+          { id: "install", label: "Install" },
+        ]}
+      />
+      <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+        {/* form — one tab visible at a time */}
         <div className="flex min-w-0 flex-col gap-5">
+          {tab === "content" && (
           <Section title="Content">
             <Field label="Widget name" hint="Internal — how you identify this site.">
               <input value={widget.name} onChange={(e) => onName(e.target.value)} className={inputCls} />
@@ -253,6 +273,9 @@ function Editor({
             <Field label="Welcome message">
               <textarea value={c.welcomeMessage ?? ""} onChange={(e) => onConfig({ welcomeMessage: e.target.value })} rows={2} className={`${inputCls} resize-y`} />
             </Field>
+            <Field label="Away message" hint="Shown when no agent is online, so visitors know to expect an email reply.">
+              <input value={c.awayMessage ?? ""} placeholder="We're away right now — leave a message and we'll reply by email." onChange={(e) => onConfig({ awayMessage: e.target.value })} className={inputCls} />
+            </Field>
             <Field label="Suggested questions" hint="One per line, up to 6.">
               <SuggestedQuestions
                 key={widget.id}
@@ -262,7 +285,9 @@ function Editor({
               />
             </Field>
           </Section>
+          )}
 
+          {tab === "appearance" && (
           <Section title="Appearance">
             <div className="grid grid-cols-3 gap-3">
               <ColorField label="Primary" value={theme.primaryColor} onChange={(v) => onConfig({ theme: { ...theme, primaryColor: v } })} />
@@ -286,14 +311,18 @@ function Editor({
               </Field>
             </div>
           </Section>
+          )}
 
+          {tab === "appearance" && (
           <Section title="Branding">
             <div className="grid grid-cols-2 gap-4">
               <ImageUpload label="Logo" value={c.logoDataUrl} maxKb={64} onChange={(v) => onConfig({ logoDataUrl: v })} />
               <ImageUpload label="Agent avatar" value={c.agentAvatarDataUrl} maxKb={40} onChange={(v) => onConfig({ agentAvatarDataUrl: v })} />
             </div>
           </Section>
+          )}
 
+          {tab === "behavior" && (
           <Section title="Launcher & placement">
             <div className="grid grid-cols-2 gap-3">
               <Field label="Deploy mode" hint="One per page — the widget is a singleton.">
@@ -327,12 +356,24 @@ function Editor({
                 <input value={c.launcherLabel ?? ""} placeholder="e.g. Chat with us" onChange={(e) => onConfig({ launcherLabel: e.target.value })} className={inputCls} />
               </Field>
             )}
+            {isInline && (
+              <Toggle
+                checked={c.showHeader !== false}
+                onChange={(v) => onConfig({ showHeader: v })}
+                label="Show chat header"
+                hint="Turn off for a bare “just chat” embed — your page’s own header frames it."
+              />
+            )}
           </Section>
+          )}
 
+          {tab === "behavior" && (
           <Section title="Pre-chat form" desc="Optionally ask for a few details before the chat starts.">
             <PreChatEditor fields={c.preChatFields ?? []} onChange={(preChatFields) => onConfig({ preChatFields })} />
           </Section>
+          )}
 
+          {tab === "install" && (
           <Section title="Allowed domains" desc="Only these sites may embed the widget. localhost is always allowed for testing.">
             {/* Trust-on-first-use. Your site key is public — it's in the page source
                 of every page you install it on — so an unlocked widget can be lifted
@@ -386,12 +427,17 @@ function Editor({
               className={inputCls}
             />
           </Section>
+          )}
 
+          {tab === "behavior" && (
           <Section title="Behavior">
+            <Toggle checked={c.aiEnabled === true} onChange={(v) => onConfig({ aiEnabled: v })} label="AI auto-reply" hint="Let the AI assistant answer this widget's chats automatically. Off by default — turn on once you've reviewed how it responds." />
             <Toggle checked={c.soundEnabled === true} onChange={(v) => onConfig({ soundEnabled: v })} label="Play a chime on new messages" hint="A subtle sound when an agent replies." />
+            <AttachmentPolicy value={c.allowedMediaKinds} onChange={(allowedMediaKinds) => onConfig({ allowedMediaKinds })} />
             <Toggle checked={c.showBranding !== false} onChange={(v) => onConfig({ showBranding: v })} label="Show “Powered by” footer" />
             <Toggle checked={widget.isActive} onChange={onActive} label="Active" hint="Inactive widgets stop accepting new chats." />
           </Section>
+          )}
         </div>
 
         {/* sticky preview — fits its column, never overflows */}
@@ -406,6 +452,7 @@ function Editor({
       </div>
 
       {/* install */}
+      {tab === "install" && (
       <Section title="Install on your website" desc={`Public key: ${widget.publicKey}`}>
         {/* ONE snippet per mode. Showing every variant at once was the old
             behaviour and it read as a menu of things to paste — but the widget is
@@ -474,6 +521,7 @@ function Editor({
           covers sizing, single-page apps, allowed domains, CSP, and troubleshooting.
         </p>
       </Section>
+      )}
 
       <div className="flex items-center justify-between">
         <button onClick={onDelete} disabled={busy} className="inline-flex items-center gap-1.5 rounded-lg border border-destructive/40 px-3 py-2 text-sm text-destructive transition hover:bg-destructive/5 disabled:opacity-50">
@@ -488,6 +536,41 @@ function Editor({
 }
 
 // ── small building blocks ────────────────────────────────────────────────────
+
+/**
+ * Segmented tab control that groups the widget's many settings so the page reads as
+ * four short sections instead of one long scroll. Flat, accessible (role=tab), and
+ * the active tab is clear by fill + weight, not colour alone.
+ */
+function TabBar<T extends string>({
+  tab,
+  onTab,
+  tabs,
+}: {
+  tab: T;
+  onTab: (t: T) => void;
+  tabs: ReadonlyArray<{ id: T; label: string }>;
+}) {
+  return (
+    <div role="tablist" className="flex w-full gap-1 rounded-xl border bg-muted/40 p-1">
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          role="tab"
+          aria-selected={tab === t.id}
+          onClick={() => onTab(t.id)}
+          className={`flex-1 cursor-pointer rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+            tab === t.id
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function Section({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
   return (
@@ -506,6 +589,54 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
       {children}
       {hint && <span className="text-2xs text-muted-foreground">{hint}</span>}
     </label>
+  );
+}
+
+/**
+ * What visitors are allowed to attach.
+ *
+ * `undefined` means "everything" — the default, and what every widget created before
+ * this setting existed has. Only once an org toggles something off do we persist an
+ * explicit list, so we never silently narrow an existing widget. Turning all four off
+ * gives a text-only chat, and the widget then hides the attach and mic buttons
+ * entirely rather than showing controls that would fail.
+ *
+ * The toggles are a convenience: the policy is enforced server-side on the upload
+ * endpoint, because the widget runs on the customer's own page.
+ */
+const MEDIA_KINDS = [
+  { key: "image" as const, label: "Images", hint: "Photos and screenshots" },
+  { key: "audio" as const, label: "Voice notes & audio", hint: "Also hides the microphone button" },
+  { key: "video" as const, label: "Videos", hint: "Clips and screen recordings" },
+  { key: "document" as const, label: "Documents", hint: "PDF, Word, Excel, PowerPoint, text" },
+];
+
+function AttachmentPolicy({
+  value,
+  onChange,
+}: {
+  value?: Array<"image" | "video" | "audio" | "document">;
+  onChange: (v: Array<"image" | "video" | "audio" | "document">) => void;
+}) {
+  const current = value ?? MEDIA_KINDS.map((k) => k.key);
+  const has = (k: (typeof MEDIA_KINDS)[number]["key"]) => current.includes(k);
+  const toggle = (k: (typeof MEDIA_KINDS)[number]["key"]) =>
+    onChange(has(k) ? current.filter((x) => x !== k) : [...current, k]);
+  const none = current.length === 0;
+  return (
+    <div className="flex flex-col gap-2.5 rounded-lg border p-3">
+      <div>
+        <p className="text-sm font-medium">What visitors can attach</p>
+        <p className="text-2xs text-muted-foreground">
+          {none
+            ? "Text-only chat — the attach and microphone buttons are hidden."
+            : "Turn everything off for a text-only chat."}
+        </p>
+      </div>
+      {MEDIA_KINDS.map((k) => (
+        <Toggle key={k.key} checked={has(k.key)} onChange={() => toggle(k.key)} label={k.label} hint={k.hint} />
+      ))}
+    </div>
   );
 }
 
@@ -585,16 +716,51 @@ function CopyBox({ title, hint, code }: { title: string; hint: string; code: str
   );
 }
 
-/** Upload a small image → data URL (no server infra). Size-capped. */
+/**
+ * Downscale a picked image to a small square data URL BEFORE storing.
+ *
+ * These data URLs ride in the config payload delivered to EVERY visitor on every
+ * page load, so an un-optimised photo would make the customer's whole site heavier
+ * for no visible benefit (the logo renders at ~28px, the avatar at ~28px). Drawing
+ * to a small canvas and re-encoding as WebP typically turns a 40–64 KB upload into
+ * a few KB. Enforced here so the config stays tiny regardless of what's uploaded.
+ */
+async function downscaleImage(file: File, maxPx: number): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, maxPx / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("no 2d context");
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close?.();
+  // WebP where supported (much smaller), else JPEG. PNG only if the source had
+  // transparency worth keeping — but a chat avatar/logo at this size rarely does,
+  // and JPEG/WebP keep it tiny.
+  const webp = canvas.toDataURL("image/webp", 0.85);
+  return webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/jpeg", 0.85);
+}
+
+/** Upload a small image → downscaled data URL (no server infra). */
 function ImageUpload({ label, value, maxKb, onChange }: { label: string; value?: string; maxKb: number; onChange: (v: string) => void }) {
   const [err, setErr] = useState<string | null>(null);
-  function pick(file: File) {
+  async function pick(file: File) {
     setErr(null);
-    if (file.size > maxKb * 1024) return setErr(`Max ${maxKb} KB`);
     if (!/^image\//.test(file.type)) return setErr("Images only");
-    const r = new FileReader();
-    r.onload = () => onChange(String(r.result || ""));
-    r.readAsDataURL(file);
+    // Guard the SOURCE size loosely (a 20MB upload shouldn't be decoded), but the
+    // stored size is governed by the downscale, not this.
+    if (file.size > 8 * 1024 * 1024) return setErr("Image too large");
+    try {
+      // Logo shows a touch larger than the avatar; both are tiny on screen.
+      const out = await downscaleImage(file, maxKb >= 64 ? 192 : 128);
+      if (out.length > maxKb * 1024 * 1.4) return setErr("Couldn't compress that image enough — try a simpler one");
+      onChange(out);
+    } catch {
+      setErr("Couldn't read that image");
+    }
   }
   return (
     <div className="flex flex-col gap-1.5">
@@ -724,9 +890,16 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
   const ink2 = dark ? "#93a1b8" : "#66748c";
   const border = dark ? "#243244" : "#e6e9f0";
   const font = c.fontFamily === "serif" ? "Georgia, serif" : c.fontFamily === "rounded" ? "ui-rounded, system-ui, sans-serif" : undefined;
-  const qs = useMemo(() => (c.suggestedQuestions ?? []).slice(0, 3), [c.suggestedQuestions]);
-  return (
+  // Match the real widget: it renders every configured question (capped at 6 by the
+  // schema), not a hardcoded 3 — the preview was under-reporting.
+  const qs = useMemo(() => (c.suggestedQuestions ?? []).slice(0, 6), [c.suggestedQuestions]);
+  const launcher = c.launcher ?? "bubble";
+  const launcherColor = /^#[0-9a-f]{6}$/i.test(theme.launcherColor ?? "") ? theme.launcherColor! : primary;
+  const onLeft = c.position === "left";
+  const hideHeader = launcher === "inline" && c.showHeader === false;
+  const panel = (
     <div className="w-full max-w-[300px] overflow-hidden rounded-[20px] shadow-xl" style={{ background: surface, border: `1px solid ${border}`, fontFamily: font, color: ink }}>
+      {!hideHeader && (
       <div className="flex items-center gap-2.5 px-4 py-3.5" style={{ background: `linear-gradient(135deg, ${primary}, ${primary}cc)`, color: contrastOn(primary) }}>
         <span className="relative flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-[11px] bg-white/20 text-sm font-bold">
           {c.logoDataUrl ? (
@@ -742,6 +915,7 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
           {c.headerSubtitle && <div className="truncate text-[11px] opacity-90">{c.headerSubtitle}</div>}
         </div>
       </div>
+      )}
       <div className="flex min-h-[210px] flex-col gap-2 p-3.5" style={{ background: surface2 }}>
         {c.welcomeMessage && (
           <div className="max-w-[82%] self-start rounded-2xl rounded-bl-md px-3 py-2 text-sm" style={{ background: inb, border: `1px solid ${border}`, color: ink }}>
@@ -775,6 +949,50 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
       {c.showBranding !== false && (
         <div className="pb-2 text-center text-[11px]" style={{ background: surface, color: ink2 }}>Powered by chat</div>
       )}
+    </div>
+  );
+
+  // The closed state: how the visitor first sees the widget on the page. This is
+  // the launcher — previously absent from the preview, so the launcher colour,
+  // label, and position were invisible until you shipped and loaded a real page.
+  const bubble = (
+    <button
+      type="button"
+      aria-hidden
+      className="flex size-[52px] shrink-0 items-center justify-center rounded-full shadow-lg"
+      style={{ background: launcherColor, color: contrastOn(launcherColor) }}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-6">
+        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+      </svg>
+    </button>
+  );
+
+  return (
+    <div className="flex w-full flex-col items-center gap-4">
+      {panel}
+      <div className="w-full max-w-[300px]">
+        <div className="mb-1.5 text-center text-[11px] font-medium text-muted-foreground">
+          {launcher === "inline" ? "Embedded in your page" : launcher === "off" ? "Opens from your own button" : "Closed — how visitors first see it"}
+        </div>
+        {launcher === "bubble" ? (
+          <div className={`flex items-center gap-2 ${onLeft ? "justify-start" : "justify-end"}`}>
+            {onLeft && bubble}
+            {c.launcherLabel && (
+              <span className="rounded-full bg-card px-3 py-2 text-xs font-medium shadow-md" style={{ border: `1px solid ${border}`, color: ink }}>
+                {c.launcherLabel}
+              </span>
+            )}
+            {!onLeft && bubble}
+          </div>
+        ) : (
+          <div className="rounded-xl border border-dashed py-3 text-center text-xs text-muted-foreground">
+            {launcher === "inline"
+              ? "No floating bubble — the chat lives inside a container on your page."
+              : "No floating bubble — you open the chat from your own link or button."}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

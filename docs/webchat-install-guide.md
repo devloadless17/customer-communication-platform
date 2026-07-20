@@ -23,6 +23,12 @@ That's the whole install. A chat bubble appears in the bottom-right corner.
 `defer` matters: it tells the browser to load us *after* your page renders, so we
 can never slow your site down.
 
+> **See it before you install.** In **Settings → Website chat** there's a
+> **"Test this widget on a sample page"** link. It opens a realistic demo page with
+> your live widget on it and a toolbar to switch between the bubble, an inline embed,
+> and a full-page "help centre" layout — so you can see exactly how each mode looks
+> and behaves before touching your own site.
+
 ---
 
 ## 2. Choose how it appears
@@ -71,6 +77,15 @@ nothing to fill. For a full-page chat:
 
 Use `100dvh` rather than `100vh`: on mobile, `100vh` ignores the browser's own
 toolbars and pushes the message box off the bottom of the screen.
+
+The embedded chat takes the **corner shape of your container** — give `#ccp-chat`
+a `border-radius` and the chat rounds to match; a full-page container stays square.
+
+**A bare "just chat" surface.** For a full-page help centre where your own page
+already shows a title and branding, you can hide the widget's header entirely in
+**Settings → Website chat → Behavior → Show chat header**. The visitor just sees the
+conversation. (This applies to inline / full-page embeds only — a floating bubble
+keeps its header, which holds the close button.)
 
 ### React, Next.js, Vue, and other single-page apps
 
@@ -178,6 +193,8 @@ In production both are on one domain and this attribute is not needed.
   widget automatically falls back to standard HTTP requests.
 - **Nothing is shared between visitors.** Each browser gets its own private
   conversation.
+- **They can see if you're available** — the widget shows a live online/away dot based on whether an agent is actually connected, and an away message (which you set in Settings) when no one is online, so a visitor knows to expect an email reply.
+- **They can start over** — a "Start a new conversation" option in the widget menu, and after 30 days of inactivity a returning visitor automatically gets a fresh chat.
 - **Clearing browser data starts a new conversation** — the visitor's identity
   lives in their own browser, so a cleared cache, a different device, or a private
   window is a new chat. If you ask for an email or phone in the pre-chat form,

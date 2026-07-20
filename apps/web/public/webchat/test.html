@@ -3,66 +3,238 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Widget test page</title>
+    <title>Website chat — live demo</title>
     <style>
-      body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; padding: 40px; background: #f8fafc; color: #0f172a; }
-      .card { max-width: 720px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 28px; }
-      h1 { margin: 0 0 6px; font-size: 20px; }
-      h2 { font-size: 14px; margin: 22px 0 8px; }
-      p { color: #475569; line-height: 1.6; font-size: 14px; }
-      input { width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font: inherit; }
-      button, a.btn { display: inline-block; margin-top: 10px; margin-right: 8px; padding: 9px 15px; border: 0; border-radius: 8px; background: #4f46e5; color: #fff; font: inherit; cursor: pointer; text-decoration: none; }
-      a.btn.ghost { background: #eef2ff; color: #4f46e5; }
-      #inline-host { margin-top: 14px; height: 520px; max-width: 440px; }
-      code { background: #f1f5f9; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+      :root {
+        --ink: #0f172a; --ink2: #475569; --line: #e6e9f0; --bg: #f6f8fc;
+        --brand: #4f46e5; --brand2: #7c3aed; --card: #ffffff;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; }
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        color: var(--ink); background: var(--bg); line-height: 1.55; -webkit-font-smoothing: antialiased;
+      }
+      a { color: inherit; }
+      .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+      /* ---- top nav ---- */
+      header.site { position: sticky; top: 0; z-index: 5; background: rgba(255,255,255,.82); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+      .nav { display: flex; align-items: center; gap: 22px; height: 66px; }
+      .logo { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 16px; letter-spacing: -.01em; }
+      .logo .mark { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, var(--brand), var(--brand2)); box-shadow: 0 4px 12px rgba(79,70,229,.35); }
+      .nav .links { display: flex; gap: 20px; margin-left: 12px; }
+      .nav .links a { color: var(--ink2); text-decoration: none; font-size: 14px; font-weight: 500; }
+      .nav .links a:hover { color: var(--ink); }
+      .nav .spacer { flex: 1; }
+      .nav .cta { background: var(--ink); color: #fff; text-decoration: none; font-size: 14px; font-weight: 600; padding: 9px 16px; border-radius: 10px; }
+      @media (max-width: 720px) { .nav .links { display: none; } }
+
+      /* ---- hero ---- */
+      .hero { padding: 74px 0 60px; }
+      .eyebrow { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; color: var(--brand); background: rgba(79,70,229,.09); padding: 5px 12px; border-radius: 999px; }
+      .hero h1 { font-size: clamp(34px, 6vw, 56px); line-height: 1.04; letter-spacing: -.025em; margin: 18px 0 0; max-width: 15ch; }
+      .hero p.sub { font-size: clamp(16px, 2.2vw, 19px); color: var(--ink2); margin: 20px 0 0; max-width: 52ch; }
+      .hero .row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+      .btn { display: inline-flex; align-items: center; gap: 8px; border: 0; cursor: pointer; font: inherit; font-weight: 600; font-size: 15px; padding: 12px 20px; border-radius: 12px; text-decoration: none; transition: transform .12s ease, box-shadow .12s ease, background .12s ease; }
+      .btn.primary { background: linear-gradient(135deg, var(--brand), var(--brand2)); color: #fff; box-shadow: 0 8px 22px rgba(79,70,229,.32); }
+      .btn.primary:hover { transform: translateY(-1px); box-shadow: 0 12px 26px rgba(79,70,229,.4); }
+      .btn.ghost { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+      .btn.ghost:hover { border-color: #c7cdd9; }
+
+      /* ---- feature cards ---- */
+      .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; padding: 8px 0 72px; }
+      @media (max-width: 860px) { .features { grid-template-columns: 1fr; } }
+      .feature { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 22px; }
+      .feature .ic { width: 38px; height: 38px; border-radius: 10px; background: rgba(79,70,229,.1); display: flex; align-items: center; justify-content: center; font-size: 19px; }
+      .feature h3 { margin: 14px 0 6px; font-size: 16px; }
+      .feature p { margin: 0; color: var(--ink2); font-size: 14px; }
+
+      /* ---- inline-embed section ---- */
+      .embed { background: linear-gradient(180deg, #fff, #f7f9fd); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 64px 0; }
+      .embed h2 { font-size: 28px; letter-spacing: -.02em; margin: 0 0 8px; }
+      .embed p { color: var(--ink2); margin: 0 0 24px; max-width: 56ch; }
+      #inline-host { height: 560px; max-width: 420px; border-radius: 20px; box-shadow: 0 24px 60px rgba(15,23,42,.14); }
+      .embed .placeholder { height: 560px; max-width: 420px; border: 1.5px dashed #c7cdd9; border-radius: 20px; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--ink2); font-size: 14px; padding: 24px; background: #fff; }
+
+      footer.site { padding: 40px 0; color: var(--ink2); font-size: 13px; }
+      footer.site .wrap { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+      /* ---- demo control TOP BAR (kept off the bottom so it never overlaps the
+             widget's composer — attach / emoji / mic live there) ---- */
+      body { padding-top: 48px; }
+      header.site { top: 48px; } /* stick below the demo bar, not under it */
+      .demobar { position: fixed; top: 0; left: 0; right: 0; height: 48px; z-index: 60; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: #0f172a; color: #e5e9f2; box-shadow: 0 2px 14px rgba(2,6,23,.28); overflow-x: auto; overflow-y: hidden; }
+      .demobar .brand { display: flex; align-items: center; gap: 7px; font-weight: 700; font-size: 12.5px; white-space: nowrap; }
+      .demobar .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,.2); flex: 0 0 auto; }
+      .demobar input { flex: 0 0 auto; width: 200px; padding: 7px 10px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #fff; font: inherit; font-size: 12.5px; }
+      .demobar .modes { display: flex; gap: 6px; align-items: center; }
+      .demobar .mbtn { white-space: nowrap; padding: 7px 11px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #e5e9f2; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; text-decoration: none; }
+      .demobar .mbtn:hover { background: #263449; }
+      .demobar .mbtn.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+      .demobar .hide { flex: 0 0 auto; margin-left: auto; background: transparent; border: 0; color: #94a3b8; cursor: pointer; font-size: 18px; line-height: 1; padding: 4px 6px; }
+      .demobar .hide:hover { color: #fff; }
+      .demoshow { display: none; position: fixed; top: 8px; left: 8px; z-index: 61; background: #0f172a; color: #e5e9f2; border: 0; border-radius: 8px; padding: 7px 11px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; box-shadow: 0 4px 14px rgba(2,6,23,.4); }
+      .demoshow .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #22c55e; margin-right: 6px; }
+      body.barhidden { padding-top: 0; }
+      body.barhidden header.site { top: 0; }
+      body.barhidden .demobar { display: none; }
+      body.barhidden .demoshow { display: inline-flex; align-items: center; }
+      .demonote { position: fixed; top: 52px; left: 12px; z-index: 55; background: rgba(15,23,42,.9); color: #cbd5e1; font-size: 11.5px; padding: 6px 10px; border-radius: 8px; max-width: 340px; pointer-events: none; }
+      @media (max-width: 600px) { .demonote { display: none; } }
+
+      /* ---- full-page chat mode: hide the site, fill the viewport under the bar ---- */
+      body.fullpage .site, body.fullpage .hero, body.fullpage .embed, body.fullpage footer.site { display: none; }
+      #fullpage-host { display: none; }
+      body.fullpage #fullpage-host { display: block; position: fixed; top: 48px; left: 0; right: 0; bottom: 0; z-index: 30; background: #fff; }
+      body.fullpage.barhidden #fullpage-host { top: 0; }
     </style>
   </head>
   <body>
-    <div class="card">
-      <h1>Widget test page</h1>
-      <p>Paste a widget public key (<code>wc_pk_…</code>) from Settings → Website chat, then pick a deploy mode.</p>
-      <input id="key" placeholder="wc_pk_..." />
+    <!-- ============ a realistic demo website ============ -->
+    <header class="site">
+      <div class="wrap nav">
+        <span class="logo"><span class="mark"></span> Northwind</span>
+        <nav class="links">
+          <a href="#">Product</a><a href="#">Pricing</a><a href="#">Customers</a><a href="#">Docs</a>
+        </nav>
+        <span class="spacer"></span>
+        <a class="cta" href="#" onclick="openChat();return false">Talk to sales</a>
+      </div>
+    </header>
 
-      <h2>1) Floating bubble</h2>
-      <button onclick="loadFloating()">Load bubble (bottom-right)</button>
-      <button onclick="loadFloating('left','Chat with us')">Bubble left + label</button>
+    <section class="hero">
+      <div class="wrap">
+        <span class="eyebrow">● Live chat demo</span>
+        <h1>Support your customers where they already are.</h1>
+        <p class="sub">This is a sample website. The chat widget below is <strong>your real widget</strong>, live and connected — send a message and watch it land in your shared inbox.</p>
+        <div class="row">
+          <a class="btn primary" href="#" onclick="openChat();return false">💬 Chat with us</a>
+          <a class="btn ghost" href="#embed">See it embedded ↓</a>
+        </div>
+      </div>
+    </section>
 
-      <h2>2) Open from your own link (launcher hidden)</h2>
-      <button onclick="loadTrigger()">Load (hidden)</button>
-      <a href="#" class="btn ghost" onclick="window.CCPWebchat&&CCPWebchat.open();return false">💬 Chat with us</a>
+    <section class="wrap features">
+      <div class="feature"><div class="ic">⚡</div><h3>Instant replies</h3><p>Messages reach your team in real time across every channel, from one inbox.</p></div>
+      <div class="feature"><div class="ic">🔒</div><h3>Private &amp; secure</h3><p>Each visitor gets their own conversation. Nothing is shared between them.</p></div>
+      <div class="feature"><div class="ic">🤝</div><h3>Human or AI</h3><p>Answer yourself, or let the assistant handle the first response — your choice.</p></div>
+    </section>
 
-      <h2>3) Inline — embedded in this page</h2>
-      <button onclick="loadInline()">Load inline</button>
-      <div id="inline-host"></div>
+    <section class="embed" id="embed">
+      <div class="wrap">
+        <h2>Embedded right in the page</h2>
+        <p>The same chat can live inside any part of your site — a support page, a sidebar, or a full-screen help center. This one is embedded below.</p>
+        <div id="inline-host"></div>
+        <div class="placeholder" id="inline-ph">Choose <strong>&nbsp;Inline&nbsp;</strong> in the demo panel to embed the chat here.</div>
+      </div>
+    </section>
 
-      <p id="hint" style="font-size: 13px"></p>
+    <footer class="site">
+      <div class="wrap">
+        <span>© Northwind — sample page for widget demo</span>
+        <span>Powered by your shared inbox</span>
+      </div>
+    </footer>
+
+    <!-- full-page chat mount (shown only in full-page mode) -->
+    <div id="fullpage-host"></div>
+
+    <!-- ============ demo control TOP BAR (never overlaps the widget) ========= -->
+    <div class="demobar" id="demobar">
+      <span class="brand"><span class="dot"></span>Demo</span>
+      <input id="key" placeholder="wc_pk_…" autocomplete="off" spellcheck="false" />
+      <div class="modes">
+        <a class="mbtn" data-mode="bubble" href="#">Bubble ↘</a>
+        <a class="mbtn" data-mode="bubble-left" href="#">Bubble ↙ + label</a>
+        <a class="mbtn" data-mode="link" href="#">From link</a>
+        <a class="mbtn" data-mode="inline" href="#">Inline</a>
+        <a class="mbtn" data-mode="fullpage" href="#">Full-page</a>
+      </div>
+      <button class="hide" id="barhide" title="Hide controls" aria-label="Hide controls">×</button>
     </div>
+    <button class="demoshow" id="barshow" onclick="showBar()"><span class="dot"></span>Demo controls</button>
+    <div class="demonote" id="note">Paste a key, then pick a mode. Each mode reloads cleanly so what you see is what your visitors get.</div>
+
     <script>
-      // Pre-fill from ?key= so Settings → Website chat can deep-link straight
-      // into a working test, instead of asking the operator to copy a 30-char
-      // key by hand (the #1 way a "the widget doesn't work" support ticket
-      // turns out to be a typo). Validated against the key shape rather than
-      // injected blind — this value lands in a DOM attribute.
-      (function preFill() {
-        try {
-          var q = new URLSearchParams(window.location.search).get("key");
-          if (q && /^wc_pk_[A-Za-z0-9]{8,64}$/.test(q)) {
-            document.getElementById("key").value = q;
-            document.getElementById("hint").textContent =
-              "Key loaded from Settings — pick a deploy mode above.";
-          }
-        } catch (e) { /* no URLSearchParams (ancient browser) — type it manually */ }
-      })();
-      function key() { var k = document.getElementById("key").value.trim(); if (!k) document.getElementById("hint").textContent = "Enter a public key first."; return k; }
+      // ---- config from the URL -------------------------------------------------
+      var params = new URLSearchParams(location.search);
+      var KEY_RE = /^wc_pk_[A-Za-z0-9]{8,64}$/;
+      var mode = params.get("mode") || "bubble";
+      var keyInput = document.getElementById("key");
+      var note = document.getElementById("note");
+      var urlKey = params.get("key");
+      if (urlKey && KEY_RE.test(urlKey)) keyInput.value = urlKey;
+
+      // ---- dev vs prod: point the widget at the right API ----------------------
+      // On the dev stack the app is on :3000 but the API (and its WebSocket) is on
+      // :4000, and Next's rewrites don't proxy the socket upgrade — so a same-origin
+      // widget would paint but never connect. Point it explicitly there in dev; in
+      // production the app + API share one origin (Caddy), so we add nothing.
+      function apiOverride() {
+        var h = location.hostname, p = location.port;
+        if ((h === "localhost" || h === "127.0.0.1") && p === "3000") return location.protocol + "//" + h + ":4000";
+        return null;
+      }
+
+      // ---- inject the real widget ---------------------------------------------
       function inject(attrs) {
-        if (document.getElementById("ccp-webchat-root")) { document.getElementById("hint").textContent = "Widget already loaded — reload the page to try another mode."; return; }
-        var s = document.createElement("script"); s.src = "/widget.js"; s.defer = true;
-        for (var a in attrs) s.setAttribute(a, attrs[a]);
+        var s = document.createElement("script");
+        s.src = "/widget.js"; s.defer = true;
+        var api = apiOverride();
+        if (api) s.setAttribute("data-webchat-api", api);
+        for (var a in attrs) if (attrs[a] != null) s.setAttribute(a, attrs[a]);
         document.body.appendChild(s);
       }
-      function loadFloating(pos, label) { var k = key(); if (!k) return; var a = { "data-webchat-key": k }; if (pos) a["data-webchat-position"] = pos; if (label) a["data-webchat-label"] = label; inject(a); }
-      function loadTrigger() { var k = key(); if (!k) return; inject({ "data-webchat-key": k, "data-webchat-launcher": "off" }); document.getElementById("hint").textContent = "Loaded hidden — click the “Chat with us” link above."; }
-      function loadInline() { var k = key(); if (!k) return; inject({ "data-webchat-key": k, "data-webchat-target": "#inline-host" }); }
+
+      // Mark the active mode button + wire each to a clean reload carrying the key.
+      var btns = document.querySelectorAll(".mbtn");
+      for (var i = 0; i < btns.length; i++) {
+        (function (b) {
+          if (b.getAttribute("data-mode") === mode) b.classList.add("on");
+          b.addEventListener("click", function (e) {
+            e.preventDefault();
+            var k = keyInput.value.trim();
+            if (!KEY_RE.test(k)) { note.textContent = "Enter a valid public key (wc_pk_…) first."; keyInput.focus(); return; }
+            var u = new URL(location.href);
+            u.searchParams.set("key", k);
+            u.searchParams.set("mode", b.getAttribute("data-mode"));
+            location.href = u.toString();
+          });
+        })(btns[i]);
+      }
+
+      function openChat() { if (window.CCPWebchat) CCPWebchat.open(); }
+      function showBar() { document.body.classList.remove("barhidden"); }
+      document.getElementById("barhide").addEventListener("click", function () { document.body.classList.add("barhidden"); });
+
+      // ---- boot: load the widget for the chosen mode ---------------------------
+      (function boot() {
+        var k = keyInput.value.trim();
+        if (!KEY_RE.test(k)) {
+          note.innerHTML = "Paste your <strong>wc_pk_…</strong> key from Settings → Website chat, then pick a mode.";
+          keyInput.focus();
+          return; // nothing to load yet — the operator types a key
+        }
+        if (mode === "inline") {
+          document.getElementById("inline-ph").style.display = "none";
+          inject({ "data-webchat-key": k, "data-webchat-target": "#inline-host" });
+          note.textContent = "Inline mode — the chat is embedded in the page above. Resize the window to see it adapt.";
+        } else if (mode === "fullpage") {
+          document.body.classList.add("fullpage");
+          inject({ "data-webchat-key": k, "data-webchat-target": "#fullpage-host" });
+          note.textContent = "Full-page mode — the chat fills the screen, like a dedicated help center page.";
+        } else if (mode === "link") {
+          inject({ "data-webchat-key": k, "data-webchat-launcher": "off" });
+          note.textContent = "Launcher hidden — open the chat from the “Chat with us” / “Talk to sales” buttons on the page.";
+        } else if (mode === "bubble-left") {
+          inject({ "data-webchat-key": k, "data-webchat-position": "left", "data-webchat-label": "Chat with us" });
+          note.textContent = "Floating bubble, bottom-left, with a text label.";
+        } else {
+          inject({ "data-webchat-key": k });
+          note.textContent = "Floating bubble, bottom-right — the default. Click it to open the chat.";
+        }
+      })();
     </script>
   </body>
 </html>

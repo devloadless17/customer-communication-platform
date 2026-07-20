@@ -27,7 +27,10 @@ import {
   assertSignatureMatches,
 } from "@/lib/blob-storage/mime-guard";
 import { kindFromMime, normalizeMimeType } from "@/lib/media-storage";
-import { resolveWebchatwidgetByPublicKey } from "@/lib/providers/webchatwidget-config";
+import {
+  resolveWebchatwidgetByPublicKey,
+  widgetAllowsMediaKind,
+} from "@/lib/providers/webchatwidget-config";
 
 import { DbService } from "../db/db.service";
 import { streamBlob } from "../media/stream-blob";
@@ -74,8 +77,13 @@ export class WebchatwidgetPublicController {
   async getConfig(
     @Query("key") siteKey: string | undefined,
     @Headers("origin") origin: string | undefined,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<{ widgetId: string; name: string; config: unknown }> {
     const resolved = await this.resolve(siteKey, origin, "http");
+    // Appearance changes rarely and every page load fetches this; a short cache
+    // spares the API a request per pageview without making edits take long to
+    // appear. Config is non-sensitive and public, so `public` is correct.
+    res.setHeader("Cache-Control", "public, max-age=300");
     return { widgetId: resolved.widgetId, name: resolved.name, config: resolved.config };
   }
 
@@ -114,6 +122,13 @@ export class WebchatwidgetPublicController {
       assertSignatureMatches(bytes, mimeType);
       const kind = kindFromMime(mimeType, CHANNEL);
       assertAllowedMime(kind, mimeType);
+      // The organization's own attachment policy. Enforced HERE and not merely in
+      // the widget, because the widget is code running on a visitor's machine — the
+      // hidden button is a courtesy, this is the control. An org that turned off
+      // documents must not receive documents from a crafted client.
+      if (!widgetAllowsMediaKind(resolved.config, kind)) {
+        throw new BadRequestException({ error: "media_kind_not_allowed", detail: `This chat doesn't accept ${kind} attachments.` });
+      }
 
       const originalFilename = file.originalname
         ? Buffer.from(file.originalname, "latin1").toString("utf8")
@@ -139,6 +154,11 @@ export class WebchatwidgetPublicController {
       };
     } catch (err) {
       if (err instanceof ForbiddenException || err instanceof NotFoundException) throw err;
+      // A BadRequest raised deliberately above (e.g. media_kind_not_allowed) already
+      // carries the precise reason — re-wrapping it as a generic `upload_rejected`
+      // would hide that from the visitor. The mime/signature guards throw plain
+      // Errors, so they still fall through to the generic shape below.
+      if (err instanceof BadRequestException) throw err;
       // A mime/signature rejection is a client error, not a 500.
       throw new BadRequestException({
         error: "upload_rejected",

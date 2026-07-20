@@ -59,6 +59,17 @@ function subtitle(c: { phoneNumber: string | null; identityChannel: Channel }): 
  * Link joins another contact into this person; unlink splits one off. Threads
  * stay separate — this is the profile-and-switcher layer over them (§6).
  */
+/** A possible same-person match the agent can confirm — never auto-applied. */
+interface LinkSuggestion {
+  contactId: string;
+  name: string;
+  identityChannel: string;
+  matchedOn: "phone" | "email";
+  matchedValue: string | null;
+  /** False when either side is a self-asserted (website widget) value. */
+  verified: boolean;
+}
+
 export function LinkedChannels({ contactId }: { contactId: string }) {
   const [profile, setProfile] = useState<Profile | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
@@ -70,6 +81,19 @@ export function LinkedChannels({ contactId }: { contactId: string }) {
   // Inline person rename.
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
+
+  const [suggestions, setSuggestions] = useState<LinkSuggestion[]>([]);
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+
+  const loadSuggestions = useCallback(async () => {
+    const res = await apiFetch(`/api/customers/by-contact/${contactId}/suggestions`);
+    if (res.ok) {
+      const { suggestions } = (await res.json()) as { suggestions: LinkSuggestion[] };
+      setSuggestions(suggestions);
+    } else {
+      setSuggestions([]);
+    }
+  }, [contactId]);
 
   const load = useCallback(async () => {
     const res = await apiFetch(`/api/customers/by-contact/${contactId}`);
@@ -87,8 +111,10 @@ export function LinkedChannels({ contactId }: { contactId: string }) {
     setQuery("");
     setHits([]);
     setEditingName(false);
+    setDismissed(new Set());
     void load();
-  }, [load]);
+    void loadSuggestions();
+  }, [load, loadSuggestions]);
 
   // Debounced contact search for the link picker.
   useEffect(() => {
@@ -156,6 +182,7 @@ export function LinkedChannels({ contactId }: { contactId: string }) {
         setQuery("");
         setHits([]);
         await load();
+        await loadSuggestions();
       } else {
         await toastError(res, "Couldn't link that channel.");
       }
@@ -215,8 +242,50 @@ export function LinkedChannels({ contactId }: { contactId: string }) {
   const contacts = profile?.contacts ?? [];
   const hasOthers = contacts.some((c) => c.id !== contactId);
 
+  const visible = suggestions.filter((x) => !dismissed.has(x.contactId));
+
   return (
     <div className="flex flex-col gap-2 px-5 py-3">
+      {/* Possible same-person matches.
+          Deliberately a SUGGESTION: linking on an unverified value is the
+          impersonation hole the identity layer exists to prevent, so a human
+          confirms. `verified` is surfaced prominently because the whole decision
+          rests on it — a phone typed into a public website box proves nothing. */}
+      {visible.length > 0 && (
+        <div className="flex flex-col gap-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-2.5">
+          <p className="text-2xs text-muted-foreground">
+            {visible.length === 1 ? "1 other contact shares" : `${visible.length} other contacts share`} this{" "}
+            {visible[0]?.matchedOn === "email" ? "email" : "phone number"}. Same person?
+          </p>
+          {visible.map((sug) => (
+            <div key={sug.contactId} className="flex items-center gap-2">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-medium">{sug.name}</p>
+                <p className="truncate text-3xs text-muted-foreground">
+                  {sug.identityChannel === "webchatwidget" ? "Website chat" : sug.identityChannel}
+                  {!sug.verified && " · unverified — they typed this themselves"}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={busy || !profile}
+                onClick={() => void link(sug.contactId)}
+                className="shrink-0 rounded-md bg-primary px-2 py-1 text-3xs font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-50"
+              >
+                Link
+              </button>
+              <button
+                type="button"
+                aria-label={`Dismiss ${sug.name}`}
+                onClick={() => setDismissed((d) => new Set(d).add(sug.contactId))}
+                className="shrink-0 rounded-md px-1.5 py-1 text-3xs text-muted-foreground transition hover:text-foreground"
+              >
+                Not them
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <span className="inline-flex items-center gap-1.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
           <Users className="size-3" />

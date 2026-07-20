@@ -101,6 +101,10 @@ import {
   stopConversationEventRetentionSweeper,
 } from "@/lib/sweepers/conversation-event-retention";
 import {
+  startWebchatVisitorRetentionSweeper,
+  stopWebchatVisitorRetentionSweeper,
+} from "@/lib/sweepers/webchat-visitor-retention";
+import {
   startMessageRawPayloadRetentionSweeper,
   stopMessageRawPayloadRetentionSweeper,
 } from "@/lib/sweepers/message-rawpayload-retention";
@@ -140,6 +144,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private outboundSendAttemptRetentionStarted = false;
   private workflowRunRetentionStarted = false;
   private conversationEventRetentionStarted = false;
+  private webchatVisitorRetentionStarted = false;
   private messageRawPayloadRetentionStarted = false;
   private broadcastScheduleWorkerStarted = false;
   private broadcastScheduleDriftSweeperStarted = false;
@@ -320,6 +325,17 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start conversation-event retention sweeper", err);
     }
+
+    try {
+      // Daily retention on ANONYMOUS website-widget visitors — the only channel
+      // whose rows grow without bound (a cleared browser is a new contact). 90-day
+      // cutoff (WEBCHAT_VISITOR_RETENTION_DAYS). Never touches identified visitors.
+      startWebchatVisitorRetentionSweeper();
+      this.webchatVisitorRetentionStarted = true;
+      this.logger.log("Webchat visitor retention sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start webchat-visitor retention sweeper", err);
+    }
     try {
       // OPT-IN rawPayload bloat control (DB-1). No-ops unless
       // MESSAGE_RAWPAYLOAD_RETENTION_DAYS is set, so the default keeps payloads
@@ -407,6 +423,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     try {
       if (this.conversationEventRetentionStarted)
         stopConversationEventRetentionSweeper();
+      if (this.webchatVisitorRetentionStarted) stopWebchatVisitorRetentionSweeper();
       if (this.messageRawPayloadRetentionStarted)
         stopMessageRawPayloadRetentionSweeper();
     } catch (err) {

@@ -55,6 +55,10 @@ function buildConfig(
   if (input.fontFamily !== undefined) next.fontFamily = input.fontFamily;
   if (input.themeMode !== undefined) next.themeMode = input.themeMode;
   if (input.soundEnabled !== undefined) next.soundEnabled = input.soundEnabled;
+  if (input.allowedMediaKinds !== undefined) next.allowedMediaKinds = input.allowedMediaKinds;
+  if (input.awayMessage !== undefined) next.awayMessage = input.awayMessage || undefined;
+  if (input.aiEnabled !== undefined) next.aiEnabled = input.aiEnabled;
+  if (input.showHeader !== undefined) next.showHeader = input.showHeader;
   if (input.launcher !== undefined) next.launcher = input.launcher;
   if (input.position !== undefined) next.position = input.position;
   if (input.launcherLabel !== undefined) next.launcherLabel = input.launcherLabel;

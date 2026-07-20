@@ -258,6 +258,14 @@ enum ConversationEventKind {
   stage_changed
   note_added
   note_deleted
+  // A website-widget visitor deliberately started a fresh conversation (the
+  // "Start a new conversation" control). Written when the new conversation's
+  // first message arrives carrying the client's `startedNew` flag, so an agent
+  // opening the fresh thread knows the person chose to start over (new topic /
+  // shared computer) rather than this being their first-ever contact. Rendered
+  // as a normal timeline pill (activity-entry.tsx). Actor is the visitor → no
+  // userId, so it reads as a self-contained "Visitor started…" line.
+  visitor_started_conversation
   // AI Autopilot toggled off / on for this conversation (by a human in the
   // inbox, by the AI on escalation via /v1, or auto-paused on a human reply).
   // Rendered as an inline timeline pill, same as status/assignment.

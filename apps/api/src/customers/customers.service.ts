@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import {
   ephemeralVisitorLabel,
   isEphemeralChannel,
@@ -32,6 +33,19 @@ function isRealContactName(
 }
 
 /** A channel-contact under a customer, shaped for the profile's channel switcher. */
+/** A possible same-person match for an agent to confirm. Never auto-applied. */
+export interface LinkSuggestion {
+  contactId: string;
+  customerId: string | null;
+  name: string;
+  identityChannel: string;
+  matchedOn: "phone" | "email";
+  matchedValue: string | null;
+  /** False when either side is a self-asserted (website widget) value. */
+  verified: boolean;
+  lastInboundAt: string | null;
+}
+
 export interface CustomerContactView {
   id: string;
   name: string;
@@ -287,6 +301,75 @@ export class CustomersService {
    * contact's `customerId`; if its previous customer is left with no contacts,
    * that empty customer is dropped. Reversible via `unlink`.
    */
+  /**
+   * Other contacts that look like the SAME PERSON as `contactId`, for an agent to
+   * confirm — never applied automatically.
+   *
+   * Two situations produce this, and they're the same query:
+   *   - The same visitor chats from three browsers and types their phone each time.
+   *     Each browser is its own `vis_<uuid>`, so each is its own Contact; without a
+   *     hint the agent sees three unrelated people with one phone number.
+   *   - A widget visitor claims a phone/email belonging to an existing customer.
+   *
+   * `verified` is the load-bearing field. A value typed into the widget's public
+   * pre-chat box proves nothing — anyone can type anyone's number — so a match that
+   * involves an ephemeral channel on EITHER side is reported as unverified, and the
+   * UI says so. This is deliberately a suggestion and not an auto-merge: auto-merging
+   * on an unverified key is the impersonation hole that `webchat-prechat.ts` and the
+   * `findExistingCustomerIdByStrongKey` candidate filter both exist to prevent.
+   * Confirming calls the ordinary, reversible `linkContact`.
+   */
+  async suggestLinks(teamId: string, contactId: string): Promise<LinkSuggestion[]> {
+    const me = await this.db.contact.findFirst({
+      where: { id: contactId, teamId, deletedAt: null },
+      select: { id: true, phoneNumber: true, email: true, customerId: true, identityChannel: true },
+    });
+    if (!me) return [];
+    const keys: Prisma.ContactWhereInput[] = [];
+    if (me.phoneNumber) keys.push({ phoneNumber: me.phoneNumber });
+    if (me.email) keys.push({ email: me.email });
+    if (keys.length === 0) return [];
+
+    const others = await this.db.contact.findMany({
+      where: {
+        teamId,
+        deletedAt: null,
+        id: { not: me.id },
+        // Already the same person — nothing to suggest.
+        ...(me.customerId ? { customerId: { not: me.customerId } } : {}),
+        OR: keys,
+      },
+      select: {
+        id: true, name: true, identityChannel: true, phoneNumber: true, email: true,
+        externalContactId: true, customerId: true, lastInboundAt: true,
+      },
+      orderBy: { lastInboundAt: "desc" },
+      take: 10,
+    });
+
+    const mineEphemeral = isEphemeralChannel(me.identityChannel as Channel);
+    return others.map((o) => {
+      const matchedOn: "phone" | "email" =
+        me.phoneNumber && o.phoneNumber === me.phoneNumber ? "phone" : "email";
+      const otherEphemeral = isEphemeralChannel(o.identityChannel as Channel);
+      return {
+        contactId: o.id,
+        customerId: o.customerId,
+        name: isRealContactName(o.name, o.externalContactId)
+          ? o.name
+          : otherEphemeral
+            ? o.email || o.phoneNumber || ephemeralVisitorLabel(o.externalContactId)
+            : socialContactPlaceholder(o.identityChannel as Channel | null),
+        identityChannel: o.identityChannel,
+        matchedOn,
+        matchedValue: matchedOn === "phone" ? o.phoneNumber : o.email,
+        // Self-asserted on either side ⇒ the agent must not treat it as proof.
+        verified: !mineEphemeral && !otherEphemeral,
+        lastInboundAt: o.lastInboundAt?.toISOString() ?? null,
+      };
+    });
+  }
+
   async linkContact(
     teamId: string,
     customerId: string,

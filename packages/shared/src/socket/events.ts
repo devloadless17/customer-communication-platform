@@ -424,6 +424,21 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * A website-widget visitor's socket connected (`present:true`) or dropped
+   * (`present:false`). Lets an agent see whether the visitor is still on the page
+   * instead of waiting on a dead thread. Conversation-scoped, ephemeral.
+   */
+  "conversation:visitor_presence": (payload: {
+    conversationId: string;
+    present: boolean;
+    /** Epoch ms the visitor's last socket dropped (present=false). Carried so an
+     *  agent who opens the thread AFTER the visitor left still sees an accurate
+     *  "Left Xm ago" rather than "just now". null when currently present, or when
+     *  the visitor was never seen this session (renders "Away"). */
+    leftAt?: number | null;
+  }) => void;
+
+  /**
    * Snapshot of which teammates currently have this conversation OPEN in
    * their inbox UI. Different from `typing:update` — that fires on every
    * keystroke transition; this fires on subscribe/unsubscribe.

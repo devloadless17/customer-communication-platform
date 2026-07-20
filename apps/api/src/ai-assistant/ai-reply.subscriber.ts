@@ -9,6 +9,7 @@ import { enqueueAiMemoryOnClose, enqueueAiReply } from "@/lib/ai/queue";
 import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
 import { ensureTranscription } from "@/lib/ai/voice-ingest";
 import { subscribe, SubscriberPriority } from "@/lib/events/bus";
+import { webchatwidgetAiAllowed } from "@/lib/providers/webchatwidget-config";
 
 /**
  * Bridges domain events to the AI reply queue (DEFAULT tier — this never sits on
@@ -79,6 +80,9 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
     if (!text) return; // voice notes have empty body → handled on media_ready
     const config = await loadAiConfig(e.teamId);
     if (!configEnabled(config)) return;
+    // Per-widget switch: the website widget defaults to AI OFF (see
+    // webchatwidgetAiAllowed). Only pay the lookup for a widget message.
+    if (m.channel === "webchatwidget" && !(await webchatwidgetAiAllowed(e.conversationId))) return;
     await enqueueAiReply({
       teamId: e.teamId,
       conversationId: e.conversationId,
@@ -92,6 +96,9 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
   private async onMediaReady(e: DomainEventOf<"message.media_ready">): Promise<void> {
     if (!aiGloballyEnabled() || !openaiConfigured()) return;
     const kind = e.media?.kind;
+    // media_ready carries no channel — the helper is a no-op (returns true) for
+    // non-widget conversations, and gates widget ones on their per-widget switch.
+    if (!(await webchatwidgetAiAllowed(e.conversationId))) return;
     if (kind === "audio") {
       const transcript = await ensureTranscription(e.teamId, e.messageId);
       if (transcript) {

@@ -98,6 +98,14 @@ export default function WebchatInstallDocsPage() {
           <Code>100vh</Code> ignores the browser&apos;s own toolbars and pushes the
           message box off the bottom of the screen.
         </P>
+        <P className="mt-3">
+          The embedded chat takes the corner shape of your container, and for a
+          full-page help centre you can hide its header entirely under{" "}
+          <strong>Settings → Website chat → Behavior → Show chat header</strong> for a
+          bare “just chat” surface. Not sure which layout you want?{" "}
+          <strong>“Test this widget on a sample page”</strong> in Settings shows the
+          bubble, inline, and full-page modes live before you install.
+        </P>
         <h3 className="mt-5 text-sm font-semibold">React, Next.js, Vue</h3>
         <P>
           Your container usually doesn&apos;t exist yet when the script runs. The widget

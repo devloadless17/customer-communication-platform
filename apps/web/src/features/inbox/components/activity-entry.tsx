@@ -5,6 +5,7 @@ import {
   ArrowRightLeft,
   Bot,
   CircleDot,
+  RefreshCw,
   Tag,
   Trash2,
   UserPlus,
@@ -165,6 +166,13 @@ function describe(e: ConversationActivityEvent): {
     // already shows inline, so a "added a note" line would be redundant noise.
     case "note_added":
       return null;
+    // The visitor chose "Start a new conversation" in the widget — a self-contained
+    // line (the actor IS the visitor, so there's no team-user prefix).
+    case "visitor_started_conversation":
+      return {
+        icon: RefreshCw,
+        text: <>Visitor started a new conversation</>,
+      };
     default:
       return null;
   }
