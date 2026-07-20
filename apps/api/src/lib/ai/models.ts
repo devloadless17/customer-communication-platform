@@ -52,3 +52,26 @@ export function aiGloballyEnabled(): boolean {
 export function openaiApiKey(): string | null {
   return process.env.OPENAI_API_KEY || null;
 }
+
+export function anthropicApiKey(): string | null {
+  return process.env.ANTHROPIC_API_KEY?.trim() || null;
+}
+
+/**
+ * Which engine generates the reply TEXT (replyText + spoken ttsText). Claude is
+ * markedly better at Lebanese/Arabizi dialect than gpt-4o, so it's the target.
+ * Explicit override via AI_TEXT_PROVIDER ("anthropic" | "openai"); otherwise
+ * auto — use Anthropic whenever a key is present, else fall back to OpenAI. STT
+ * and voice synthesis are unaffected (they stay on OpenAI / Azure).
+ */
+export function replyTextProvider(): "anthropic" | "openai" {
+  const explicit = (process.env.AI_TEXT_PROVIDER || "").trim().toLowerCase();
+  if (explicit === "anthropic") return "anthropic";
+  if (explicit === "openai") return "openai";
+  return anthropicApiKey() ? "anthropic" : "openai";
+}
+
+/** Claude model for the reply-text step. Tunable; defaults to the flagship. */
+export function anthropicReplyModel(): string {
+  return process.env.AI_ANTHROPIC_MODEL_REPLY || "claude-opus-4-8";
+}

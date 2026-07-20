@@ -1,5 +1,13 @@
-import { replyTierFromConfig, resolveModel } from "./models";
-import { chatJson } from "./openai-client";
+import { Logger } from "@nestjs/common";
+
+import { anthropicConfigured, chatJsonAnthropic } from "./anthropic-client";
+import {
+  anthropicReplyModel,
+  replyTextProvider,
+  replyTierFromConfig,
+  resolveModel,
+} from "./models";
+import { chatJson, type ChatJsonResult } from "./openai-client";
 import { retrieveContextChunks } from "./knowledge-retrieval";
 import {
   buildSystemPrompt,
@@ -50,17 +58,48 @@ export async function generateReply(input: GenerateReplyInput): Promise<Generate
     isVoice: input.isVoice,
   });
 
-  const model = resolveModel(replyTierFromConfig(input.config.replyModelTier));
-  const res = await chatJson<ReplyPayload>({
-    model,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-    schemaName: "customer_reply",
-    schema: REPLY_SCHEMA,
-    maxTokens: 1200,
-  });
+  const openaiModel = resolveModel(replyTierFromConfig(input.config.replyModelTier));
+  const openai = () =>
+    chatJson<ReplyPayload>({
+      model: openaiModel,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      schemaName: "customer_reply",
+      schema: REPLY_SCHEMA,
+      maxTokens: 1200,
+    });
+
+  // Claude is markedly better at Lebanese/Arabizi than gpt-4o, so route the
+  // reply-text step to it when configured. Both replyText and the spoken ttsText
+  // come from this one structured call. Any Anthropic failure (SDK, key, API)
+  // falls back to OpenAI so a customer never gets silence — a degraded reply
+  // beats no reply. STT + voice synthesis are untouched by this switch.
+  const useAnthropic = replyTextProvider() === "anthropic" && anthropicConfigured();
+  let model = openaiModel;
+  let res: ChatJsonResult<ReplyPayload>;
+  if (useAnthropic) {
+    model = anthropicReplyModel();
+    try {
+      res = await chatJsonAnthropic<ReplyPayload>({
+        model,
+        system,
+        user,
+        schemaName: "customer_reply",
+        schema: REPLY_SCHEMA,
+        maxTokens: 1200,
+      });
+    } catch (err) {
+      new Logger("generateReply").warn(
+        `Anthropic reply failed (${String(err)}) — falling back to OpenAI`,
+      );
+      model = openaiModel;
+      res = await openai();
+    }
+  } else {
+    res = await openai();
+  }
 
   if (!res.data || !res.data.replyText?.trim()) {
     throw new Error("ai_empty_reply");
