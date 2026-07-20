@@ -664,11 +664,16 @@ jobs:
             # :-claude-opus-4-8 fallback and the code default (lib/ai/models.ts)
             # both cover it.
             #
-            # NO BACKTICKS ANYWHERE IN THIS HEREDOC. The delimiter is unquoted
-            # (<<EOF, not <<'EOF') so ${VAR} expands — which is the point — but
-            # that also makes backticks COMMAND SUBSTITUTION. A backticked
-            # comment here does not document a command, it RUNS it on the VPS
-            # mid-deploy and leaves the mangled output in .env. That happened.
+            # THIS HEREDOC IS LIVE SHELL. Its delimiter is unquoted, so every
+            # comment below is evaluated, not just the assignments. Two ways a
+            # COMMENT can break production, both of which already have:
+            #   - backticks run as commands (a comment showing a docker command
+            #     actually executed it on the VPS mid-deploy);
+            #   - a dollar-brace name that is not a forwarded secret is an
+            #     unbound variable, and the script runs under set -u, so the
+            #     whole deploy aborts.
+            # Write comments here in plain prose: no backticks, and no
+            # dollar-brace unless it names something in the envs: list above.
             #
             # An empty ANTHROPIC_API_KEY degrades rather than crashes (Translate
             # 503s, reply falls back to OpenAI), which is deliberate — and also
