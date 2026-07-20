@@ -227,6 +227,13 @@ function Editor({
   }
   const origin = appOrigin || "https://YOUR-APP";
   const scriptTag = buildScript(origin, widget.publicKey, c);
+  const inlineScriptTag = `<script src="${origin}/widget.js" data-webchat-key="${widget.publicKey}" data-webchat-target="#ccp-chat" defer></script>`;
+  // In production Caddy fronts the app and the API on ONE origin, so these collapse
+  // to the same host — which is exactly what a customer needs in their CSP. Split
+  // out anyway so the values stay correct if the API is ever served separately.
+  const isInline = (c.launcher ?? "bubble") === "inline";
+  const apiOrigin = origin;
+  const wsOrigin = origin.replace(/^http/, "ws");
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
@@ -247,10 +254,10 @@ function Editor({
               <textarea value={c.welcomeMessage ?? ""} onChange={(e) => onConfig({ welcomeMessage: e.target.value })} rows={2} className={`${inputCls} resize-y`} />
             </Field>
             <Field label="Suggested questions" hint="One per line, up to 6.">
-              <textarea
-                value={(c.suggestedQuestions ?? []).join("\n")}
-                onChange={(e) => onConfig({ suggestedQuestions: e.target.value.split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 6) })}
-                rows={3}
+              <SuggestedQuestions
+                key={widget.id}
+                value={c.suggestedQuestions ?? []}
+                onChange={(suggestedQuestions) => onConfig({ suggestedQuestions })}
                 className={`${inputCls} resize-y`}
               />
             </Field>
@@ -289,22 +296,37 @@ function Editor({
 
           <Section title="Launcher & placement">
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Launcher">
-                <select value={c.launcher ?? "bubble"} onChange={(e) => onConfig({ launcher: e.target.value as "bubble" | "off" })} className={inputCls}>
+              <Field label="Deploy mode" hint="One per page — the widget is a singleton.">
+                <select value={c.launcher ?? "bubble"} onChange={(e) => onConfig({ launcher: e.target.value as "bubble" | "off" | "inline" })} className={inputCls}>
                   <option value="bubble">Floating bubble</option>
                   <option value="off">Hidden (open from a link)</option>
+                  <option value="inline">Inline (inside your page)</option>
                 </select>
               </Field>
-              <Field label="Position">
-                <select value={c.position ?? "right"} onChange={(e) => onConfig({ position: e.target.value as "right" | "left" })} className={inputCls}>
-                  <option value="right">Bottom right</option>
-                  <option value="left">Bottom left</option>
-                </select>
-              </Field>
+              {/* Position and label only mean something when a launcher exists —
+                  an inline embed has neither, so showing them implied a choice
+                  that silently did nothing. */}
+              {isInline ? (
+                <Field label="Size" hint="Set on your container, not here.">
+                  <p className="rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                    The chat fills the element you point it at — give that element a
+                    height in your own CSS. See the install snippet below.
+                  </p>
+                </Field>
+              ) : (
+                <Field label="Position">
+                  <select value={c.position ?? "right"} onChange={(e) => onConfig({ position: e.target.value as "right" | "left" })} className={inputCls}>
+                    <option value="right">Bottom right</option>
+                    <option value="left">Bottom left</option>
+                  </select>
+                </Field>
+              )}
             </div>
-            <Field label="Bubble label" hint="Optional text beside the bubble.">
-              <input value={c.launcherLabel ?? ""} placeholder="e.g. Chat with us" onChange={(e) => onConfig({ launcherLabel: e.target.value })} className={inputCls} />
-            </Field>
+            {!isInline && (
+              <Field label="Bubble label" hint="Optional text beside the bubble.">
+                <input value={c.launcherLabel ?? ""} placeholder="e.g. Chat with us" onChange={(e) => onConfig({ launcherLabel: e.target.value })} className={inputCls} />
+              </Field>
+            )}
           </Section>
 
           <Section title="Pre-chat form" desc="Optionally ask for a few details before the chat starts.">
@@ -312,6 +334,25 @@ function Editor({
           </Section>
 
           <Section title="Allowed domains" desc="Only these sites may embed the widget. localhost is always allowed for testing.">
+            {/* Trust-on-first-use. Your site key is public — it's in the page source
+                of every page you install it on — so an unlocked widget can be lifted
+                onto someone else's site and used to impersonate you. Rather than
+                demand a domain up front (which would block a first install), we show
+                the domain we actually observed and make locking to it one click. */}
+            {widget.allowedOrigins.length === 0 && widget.firstSeenOrigin && (
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs">
+                <span className="text-muted-foreground">
+                  This widget is currently open to <strong className="text-foreground">any site</strong>. We&apos;ve seen it
+                  used on <strong className="text-foreground">{widget.firstSeenOrigin}</strong>.
+                </span>
+                <button
+                  onClick={() => onOrigins([widget.firstSeenOrigin!])}
+                  className="rounded-md bg-primary px-2.5 py-1 font-medium text-primary-foreground transition hover:opacity-90"
+                >
+                  Lock to {widget.firstSeenOrigin}
+                </button>
+              </div>
+            )}
             <div className="flex flex-wrap gap-1.5">
               {widget.allowedOrigins.length === 0 && (
                 <span className="text-xs text-muted-foreground">Any site (not recommended) — add your domains below.</span>
@@ -366,7 +407,30 @@ function Editor({
 
       {/* install */}
       <Section title="Install on your website" desc={`Public key: ${widget.publicKey}`}>
-        {(c.launcher ?? "bubble") === "off" ? (
+        {/* ONE snippet per mode. Showing every variant at once was the old
+            behaviour and it read as a menu of things to paste — but the widget is
+            a per-page singleton, so a customer pasting two of them silently gets
+            whichever ran first. */}
+        {isInline ? (
+          <>
+            <CopyBox
+              title="1) Add a container where the chat should appear"
+              hint="The chat FILLS this element, so its height is yours to choose. A container with no height renders nothing."
+              code={`<div id="ccp-chat" style="height:600px;max-width:440px"></div>`}
+            />
+            <CopyBox title="2) Add the widget" hint="Paste before &lt;/body&gt;." code={inlineScriptTag} />
+            <CopyBox
+              title="Full-page chat instead?"
+              hint="Use 100dvh, not 100vh — on mobile, 100vh ignores the browser toolbars and pushes the message box off-screen."
+              code={`<div id="ccp-chat" style="height:100dvh;width:100%"></div>`}
+            />
+            <CopyBox
+              title="React / Next / Vue"
+              hint="SPAs create the container AFTER the script runs. The widget waits for it automatically; call mount() if yours appears later than 15s."
+              code={`useEffect(() => {\n  window.CCPWebchat?.mount("#ccp-chat");\n}, []);`}
+            />
+          </>
+        ) : (c.launcher ?? "bubble") === "off" ? (
           <>
             <CopyBox title="1) Add the widget (bubble hidden)" hint="Paste before &lt;/body&gt; on every page." code={scriptTag} />
             <CopyBox
@@ -379,9 +443,15 @@ function Editor({
           <CopyBox title="Floating bubble" hint="Paste before &lt;/body&gt; on every page — a chat bubble appears." code={scriptTag} />
         )}
         <CopyBox
-          title="Inline — embed inside a page section"
-          hint="Renders the chat inside your container (always open)."
-          code={`<div id="ccp-chat" style="height:600px;max-width:440px"></div>\n<script src="${origin}/widget.js" data-webchat-key="${widget.publicKey}" data-webchat-target="#ccp-chat" defer></script>`}
+          title="Content-Security-Policy (only if your site sets one)"
+          hint="Add these sources, or the widget is blocked. Avatars are inline data: URLs, and media streams from the API origin."
+          code={[
+            `script-src  ${origin};`,
+            `connect-src ${origin} ${apiOrigin} ${wsOrigin};`,
+            `img-src     ${apiOrigin} data:;`,
+            `media-src   ${apiOrigin};`,
+            `style-src   'unsafe-inline';`,
+          ].join("\n")}
         />
         {/* Try it before touching the customer's site. Without this the first
             real proof the widget works is a live page on their domain, where a
@@ -396,6 +466,13 @@ function Editor({
           <ExternalLink className="size-3.5" />
           Test this widget on a sample page
         </a>
+        <p className="text-xs text-muted-foreground">
+          Sending this to your web developer? The{" "}
+          <a href="/docs/webchat-install" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+            full installation guide
+          </a>{" "}
+          covers sizing, single-page apps, allowed domains, CSP, and troubleshooting.
+        </p>
       </Section>
 
       <div className="flex items-center justify-between">
@@ -543,6 +620,49 @@ function ImageUpload({ label, value, maxKb, onChange }: { label: string; value?:
     </div>
   );
 }
+
+/**
+ * Free-text editor for the suggested-question list.
+ *
+ * The textarea keeps its RAW text locally and only normalizes on the way out.
+ * Deriving `value` straight from the array (`arr.join("\n")`) with an onChange that
+ * split/trimmed/filtered made Enter impossible to type: the keystroke produced
+ * `"a\n"`, `filter(Boolean)` dropped the new empty line, and the value re-rendered
+ * as `"a"` — so the caret never reached a second line. Trailing blanks and
+ * whitespace still never reach the server; they're just allowed to exist WHILE
+ * TYPING. Remounted per widget via `key`, so switching widgets re-seeds the buffer.
+ */
+function SuggestedQuestions({
+  value,
+  onChange,
+  className,
+}: {
+  value: string[];
+  onChange: (v: string[]) => void;
+  className?: string;
+}) {
+  const [raw, setRaw] = useState(() => value.join("\n"));
+  return (
+    <textarea
+      value={raw}
+      onChange={(e) => {
+        setRaw(e.target.value);
+        onChange(
+          e.target.value
+            .split("\n")
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .slice(0, MAX_SUGGESTED_QUESTIONS),
+        );
+      }}
+      rows={3}
+      className={className}
+    />
+  );
+}
+
+/** Server caps the list at 6 (webchatwidget.schemas.ts) — keep them in step. */
+const MAX_SUGGESTED_QUESTIONS = 6;
 
 function PreChatEditor({ fields, onChange }: { fields: Field[]; onChange: (f: Field[]) => void }) {
   return (

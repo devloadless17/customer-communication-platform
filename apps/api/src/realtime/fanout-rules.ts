@@ -539,14 +539,32 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
-  "team_channel.members_changed": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "team:channel:members:changed", {
+  "team_channel.members_changed": async (e, emitter) => {
+    // minor#10 / RT-1: never blast private-channel roster metadata (channelId,
+    // added/removed userIds, actor) to the whole team room — that's the exact
+    // metadata-on-the-wire leak RT-1 closed for activity/read frames. Route the
+    // frame membership-scoped (default channel → team-wide, since everyone's a
+    // member anyway; gated channel → members only). A REMOVED user is no longer
+    // a member at emit time, so emitChannelScoped won't reach them — address
+    // their user room directly so they still get the immediate prune frame.
+    const payload = {
       teamId: e.teamId,
       channelId: e.channelId,
       action: e.action,
       userIds: e.userIds,
       changedById: e.changedById,
-    });
+    };
+    await emitter.emitChannelScoped(
+      e.channelId,
+      e.teamId,
+      "team:channel:members:changed",
+      payload,
+    );
+    if (e.action === "removed") {
+      for (const uid of e.userIds) {
+        emitter.emitToUser(uid, "team:channel:members:changed", payload);
+      }
+    }
     // Catalog tick so the channel list (memberCount, visibility) refreshes
     // for everyone — including the just-added users who need to start seeing
     // this channel and the just-removed users who need to stop seeing it.

@@ -301,6 +301,30 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
   // the graph from the start node (defense-in-depth behind the terminal guard).
   const hasPriorProgress = Array.isArray(run.stepLog) && run.stepLog.length > 0;
   if (run.currentStepId == null && hasPriorProgress) {
+    // Distinguish "crash lost only the completion write" from real corruption.
+    // Once currentStepId advances per step (see the success-advance write), the
+    // ONLY way a running/waiting run reaches null currentStepId is the terminal
+    // step's success write (nextId=null); if the worker then dies before the
+    // completion write, redelivery lands here. The signature is unambiguous: the
+    // newest stepLog entry is a terminal SUCCESS with no onward step. Converge it
+    // to completed (idempotent — every side effect already committed) instead of
+    // false-failing an already-done run. Anything else is genuine corruption.
+    const prior = run.stepLog as unknown as StepLogEntry[];
+    const last = prior[prior.length - 1];
+    const naturallyCompleted =
+      !!last && last.status === "success" && last.nextStepId == null;
+    if (naturallyCompleted) {
+      await db.workflowRun.update({
+        where: { id: run.id },
+        data: {
+          status: "completed",
+          currentStepId: null,
+          stepLog: prior as unknown as Prisma.InputJsonValue,
+          finishedAt: new Date(),
+        },
+      });
+      return { runId: run.id, status: "completed" };
+    }
     await markFailed(
       run.id,
       "resume with null currentStepId on an in-progress run (corrupt state; refusing to restart from start node)",
@@ -564,7 +588,9 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
             finishedAt: new Date().toISOString(),
           });
           // Same upsert + run-update + resume enqueue as the normal await_reply
-          // result handler — KEEP currentStepId so the step re-runs on resume.
+          // result handler — pin currentStepId at this ask node so the step
+          // re-runs on resume AND isParkedOnAskQuestionAwaitingReply recognizes
+          // the park (see the normal await_reply path).
           await db.$transaction([
             db.workflowAwaitingReply.upsert({
               where: { runId: run.id },
@@ -582,6 +608,7 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
               where: { id: run.id },
               data: {
                 status: "waiting",
+                currentStepId: node.id,
                 waitUntil: resumeAt,
                 stepLog: stepLog as unknown as Prisma.InputJsonValue,
                 jumpsUsed,
@@ -682,6 +709,21 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
         }
       | null;
 
+    // 0-based execution ordinal of THIS step within the run: count of prior
+    // SUCCESS entries for this stepId. Counting ONLY success is load-bearing:
+    // http_request (the sole consumer) is sideEffect:"pure", so on a transient
+    // throw the runner writes a terminal `failed` breadcrumb and BullMQ retries.
+    // If that `failed` entry were counted, the ordinal would increment on the
+    // very retry the X-CCP-Delivery key must stay STABLE across — changing the
+    // key the partner dedupes on and double-charging (the exact bug the key
+    // prevents). A transient-failed attempt writes `failed`, not `success`, so
+    // the index is unchanged across retries; a genuinely COMPLETED loop iteration
+    // (jump_to_step re-entry) writes `success`, so it still increments once per
+    // iteration — distinct per re-entry, stable per execution.
+    const executionIndex = stepLog.filter(
+      (e) => e.stepId === node.id && e.status === "success",
+    ).length;
+
     let result: StepResult;
     try {
       const config = handler.parseConfig(node.config);
@@ -697,6 +739,7 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
         isResume,
         stepOutputs,
         previousStepId,
+        executionIndex,
       });
       // Strip the in-progress sentinel — the success/failed entry below
       // is the canonical record. Leaving the in_progress in place would
@@ -874,7 +917,12 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
           where: { id: run.id },
           data: {
             status: "waiting",
-            // KEEP currentStepId — the same step re-runs on resume.
+            // Pin currentStepId at THIS ask node — the same step re-runs on
+            // resume, and isParkedOnAskQuestionAwaitingReply(currentStepId)
+            // must resolve to it so an early inbound reply wakes the run
+            // instead of being discarded as a stale resume. (Previously omitted,
+            // leaving currentStepId at the upstream entry step.)
+            currentStepId: node.id,
             waitUntil: resumeAt,
             stepLog: stepLog as unknown as Prisma.InputJsonValue,
             jumpsUsed,
@@ -947,6 +995,27 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
     await db.workflowRun.update({
       where: { id: run.id },
       data: {
+        // Advance the persisted pointer at every step boundary. Without this
+        // the DB `currentStepId` stayed pinned at the pickup's ENTRY step
+        // through the whole forward run, so (a) a crash after this step's
+        // success redelivered with currentStepId still upstream — re-running
+        // this (already-committed, billed) send because orphan-detect had no
+        // in_progress entry to catch, and (b) an ask_question further down
+        // parked with currentStepId upstream, so isParkedOnAskQuestionAwaiting
+        // Reply() couldn't recognize the park and early replies were dropped
+        // until the 24h timeout (which then replayed the whole prefix). Keeping
+        // it in lock-step with the in-memory `currentStepId = nextId` below is
+        // what makes crash-redelivery land on the right step and lets the
+        // orphan-detect / ask re-arm recovery work as designed.
+        //
+        // On the TERMINAL step nextId is null. Persisting null here is safe (and
+        // correct — pinning the terminal node instead would re-run its committed
+        // side effect on a redelivery, since its in_progress entry was already
+        // spliced on success). The tiny crash window between this write and the
+        // completion write below (status still "running", currentStepId now null)
+        // is handled by the corruption guard (:303), which recognizes a
+        // naturally-ended run and converges it to "completed" rather than failing.
+        currentStepId: nextId,
         stepLog: stepLog as unknown as Prisma.InputJsonValue,
         stepOutputs: stepOutputs as unknown as Prisma.InputJsonValue,
         jumpsUsed,

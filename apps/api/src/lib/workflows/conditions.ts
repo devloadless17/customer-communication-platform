@@ -276,6 +276,10 @@ export function hasCatastrophicQuantifier(pattern: string): boolean {
   return CATASTROPHIC_QUANTIFIER.test(pattern);
 }
 
+// Patterns already warned about at runtime, so we log each stored pattern once
+// instead of on every evaluation (the regex op runs per matching event).
+const refusedRuntimePatterns = new Set<string>();
+
 function validateGroup(
   raw: unknown,
   allowed: ReadonlySet<ConditionField>,
@@ -414,7 +418,23 @@ function applyOp(
       // saved before this guard existed would still reach here, so the runtime
       // check is the one that actually closes the hole. Fail closed: a condition
       // we won't evaluate is `false`, never a stall.
-      if (hasCatastrophicQuantifier(expected)) return false;
+      //
+      // Fail-closed here is silent from the tenant's side — a pre-existing regex
+      // condition (incl. a heuristic false-positive on a safe polynomial pattern
+      // like `^(\d+,)*\d+$`) stops matching with no error. Warn once per pattern
+      // so operators can see which automation went dark and rewrite it.
+      if (hasCatastrophicQuantifier(expected)) {
+        if (!refusedRuntimePatterns.has(expected)) {
+          refusedRuntimePatterns.add(expected);
+          console.warn(
+            `[workflows] regex_condition_refused_at_runtime — a stored regex ` +
+              `condition uses a nested-repeat shape and will never match until ` +
+              `rewritten (pattern=${JSON.stringify(expected)}); the automation ` +
+              `using it has gone dark.`,
+          );
+        }
+        return false;
+      }
       try {
         return new RegExp(expected).test(actual);
       } catch {

@@ -575,8 +575,10 @@ export class WhatsappService {
     // now-corrected wabaId). Match on (name, language) — the upsert's identity,
     // immutable in Meta — and spare rows touched in the last 60s so a freshly
     // created template racing Meta's list propagation survives.
+    // Delimit the composite key with an ESCAPED NUL, never a raw byte: a raw
+    // NUL in source makes grep/rg classify this file as binary and skip it.
     const fetchedKeys = new Set(
-      fetched.map((t) => `${t.name} ${t.language}`),
+      fetched.map((t) => `${t.name}\u0000${t.language}`),
     );
     const graceCutoff = new Date(now.getTime() - 60_000);
     const localRows = await this.db.messageTemplate.findMany({
@@ -586,7 +588,7 @@ export class WhatsappService {
     const staleIds = localRows
       .filter(
         (r) =>
-          !fetchedKeys.has(`${r.name} ${r.language}`) &&
+          !fetchedKeys.has(`${r.name}\u0000${r.language}`) &&
           r.syncedAt < graceCutoff,
       )
       .map((r) => r.id);

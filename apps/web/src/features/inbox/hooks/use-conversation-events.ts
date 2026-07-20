@@ -1198,13 +1198,23 @@ export function useConversationEvents(
                 (f.body ?? null) !== (m.body ?? null);
               const mediaChanged =
                 (f.media && !m.media) || (!!m.mediaPending && !f.mediaPending);
+              // Customer 👍/👎 feedback (message:updated) can be missed while
+              // backgrounded too — like edit/unsend, converge it to the server
+              // row or the feedback pill never appears after a reconnect. The
+              // statusError* diagnostics ride along with a sent→failed status
+              // flip below so a bare red "failed" icon carries its reason.
+              const feedbackChanged = (f.feedback ?? null) !== (m.feedback ?? null);
               return f.status !== m.status ||
                 mediaChanged ||
                 reactionChanged ||
-                editChanged
+                editChanged ||
+                feedbackChanged
                 ? {
                     ...m,
                     status: f.status,
+                    statusErrorCode: f.statusErrorCode,
+                    statusErrorTitle: f.statusErrorTitle,
+                    statusErrorDetail: f.statusErrorDetail,
                     ...(f.media ? { media: f.media } : {}),
                     mediaPending: f.mediaPending,
                     reaction: f.reaction,
@@ -1212,6 +1222,7 @@ export function useConversationEvents(
                     deletedAt: f.deletedAt,
                     editedAt: f.editedAt,
                     body: f.body,
+                    feedback: f.feedback,
                   }
                 : m;
             });

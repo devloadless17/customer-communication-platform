@@ -700,6 +700,20 @@ jobs:
             EOF
             chmod 600 /opt/ccp/.env
 
+            # Operator-set runtime knobs live in /opt/ccp/.env.local so they
+            # SURVIVE this every-deploy re-render. The block above is a fixed
+            # template, so anything hand-set directly in /opt/ccp/.env is wiped
+            # by the next push — that silently re-arms the DISABLE_CALLING kill
+            # switch mid-incident (docker-compose.yml) and drops the BACKUP_*
+            # offsite targets (pg-backup.sh) back to local-copy-only. docker
+            # compose reads an env-file top-to-bottom with LAST value winning,
+            # so appending .env.local here lets an operator override or add any
+            # key WITHOUT a redeploy. Ops set knobs in .env.local, never in .env.
+            if [ -f /opt/ccp/.env.local ]; then
+              printf '\n# --- operator overrides (/opt/ccp/.env.local) ---\n' >> /opt/ccp/.env
+              cat /opt/ccp/.env.local >> /opt/ccp/.env
+            fi
+
             # Loud warning for OPTIONAL-but-probably-wanted keys that arrived
             # empty. These deliberately do NOT fail the deploy (an empty key
             # degrades: Translate 503s, the reply brain falls back to OpenAI),

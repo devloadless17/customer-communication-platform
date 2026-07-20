@@ -1,10 +1,16 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import {
+  ephemeralVisitorLabel,
+  isEphemeralChannel,
   isSocialContactPlaceholder,
   socialContactPlaceholder,
 } from "@ccp/shared/providers/capabilities";
 import type { Channel } from "@ccp/shared/types";
 
+import { toContactWire } from "@/lib/queries/_shared";
+import { workflowContactSnapshot } from "@/lib/workflows/events";
+
+import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
 
 /**
@@ -69,7 +75,47 @@ export interface CustomerProfile {
 @Injectable()
 export class CustomersService {
   private readonly logger = new Logger(CustomersService.name);
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly bus: EventBus,
+  ) {}
+
+  /**
+   * Announce a manual merge/split re-point. link/unlink move `Contact.customerId`
+   * but nothing on the bus said so — so other agents' open contact panels, the
+   * group-by-person rollup, and identity-syncing partner webhooks kept the
+   * pre-merge view until a manual reload. Publish the same `contact.updated` the
+   * contact-share re-point does (docs/identity.md §6) so the existing socket
+   * fanout + outbound-webhook subscriber converge with no new wiring.
+   * Best-effort: a publish failure must never undo a committed merge.
+   */
+  private async publishContactUpdated(
+    teamId: string,
+    contactId: string,
+    actorUserId: string | null,
+  ): Promise<void> {
+    try {
+      const fresh = await this.db.contact.findFirst({
+        where: { id: contactId, teamId },
+        include: { tags: { select: { id: true } } },
+      });
+      if (!fresh) return;
+      await this.bus.publish({
+        type: "contact.updated",
+        teamId,
+        contact: toContactWire(fresh, { tagIds: fresh.tags.map((t) => t.id) }),
+        previousStageId: fresh.stageId,
+        fieldChanges: [],
+        changedByUserId: actorUserId,
+        workflowContact: workflowContactSnapshot(fresh),
+      });
+    } catch (err) {
+      this.logger.error(
+        `publish(contact.updated) failed for contact ${contactId} (team ${teamId})`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
+  }
 
   private async loadProfile(teamId: string, customerId: string): Promise<CustomerProfile> {
     const customer = await this.db.customer.findFirst({
@@ -112,9 +158,15 @@ export class CustomersService {
       const convo = c.conversations[0] ?? null;
       // Substitute the friendly placeholder for a still-un-enriched contact whose
       // name is its raw id — so the switcher never shows "1932759190769573".
+      // Same fallback chain as the contact wire mapper (queries/_shared.ts):
+      // real name → self-asserted email/phone → per-visitor label for an ephemeral
+      // channel → channel placeholder. Kept in step so the switcher and the inbox
+      // never disagree about what to call the same person.
       const contactName = isRealContactName(c.name, c.externalContactId)
         ? c.name
-        : socialContactPlaceholder(c.identityChannel as Channel | null);
+        : isEphemeralChannel(c.identityChannel as Channel)
+          ? c.email || c.phoneNumber || ephemeralVisitorLabel(c.externalContactId)
+          : socialContactPlaceholder(c.identityChannel as Channel | null);
       return {
         id: c.id,
         name: contactName,
@@ -241,7 +293,7 @@ export class CustomersService {
     contactId: string,
     actorUserId: string | null = null,
   ): Promise<CustomerProfile> {
-    await this.db.$transaction(async (tx) => {
+    const moved = await this.db.$transaction(async (tx) => {
       const [customer, contact] = await Promise.all([
         tx.customer.findFirst({ where: { id: customerId, teamId }, select: { id: true } }),
         tx.contact.findFirst({
@@ -251,7 +303,7 @@ export class CustomersService {
       ]);
       if (!customer) throw new NotFoundException({ error: "customer_not_found" });
       if (!contact) throw new NotFoundException({ error: "contact_not_found" });
-      if (contact.customerId === customerId) return; // already linked — no-op
+      if (contact.customerId === customerId) return false; // already linked — no-op
 
       const previousCustomerId = contact.customerId;
       // Capture the source person's name BEFORE the reap below deletes its row.
@@ -289,8 +341,12 @@ export class CustomersService {
           await tx.customer.deleteMany({ where: { id: previousCustomerId, teamId } });
         }
       }
+      return true;
     });
     this.logger.log(`link contact ${contactId} → customer ${customerId} (team ${teamId})`);
+    // Only after the re-point commits, and only when it actually moved (never a
+    // speculative/unchanged frame for a no-op re-link).
+    if (moved) await this.publishContactUpdated(teamId, contactId, actorUserId);
     return this.loadProfile(teamId, customerId);
   }
 
@@ -355,6 +411,9 @@ export class CustomersService {
       return fresh.id;
     });
     this.logger.log(`unlink contact ${contactId} → new customer ${newCustomerId} (team ${teamId})`);
+    // The split re-pointed the contact to a fresh customer — announce it so
+    // panels/rollup/webhooks converge (see publishContactUpdated).
+    await this.publishContactUpdated(teamId, contactId, actorUserId);
     return { customerId: newCustomerId };
   }
 }

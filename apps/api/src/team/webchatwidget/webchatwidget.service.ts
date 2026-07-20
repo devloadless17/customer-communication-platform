@@ -22,6 +22,8 @@ export interface WidgetView {
   allowedOrigins: string[];
   config: WebchatwidgetConfig;
   isActive: boolean;
+  /** Host of the first real site that embedded this widget; null until observed. */
+  firstSeenOrigin: string | null;
   conversationCount: number;
   createdAt: string;
 }
@@ -155,6 +157,7 @@ export class WebchatwidgetAdminService {
       config: Prisma.JsonValue;
       isActive: boolean;
       createdAt: Date;
+      firstSeenOrigin: string | null;
     },
     conversationCount: number,
   ): WidgetView {
@@ -165,6 +168,9 @@ export class WebchatwidgetAdminService {
       allowedOrigins: r.allowedOrigins,
       config: (r.config ?? {}) as WebchatwidgetConfig,
       isActive: r.isActive,
+      // Drives the "lock this widget to <domain>?" suggestion in Settings. Only
+      // meaningful while allowedOrigins is empty; the UI hides it once locked.
+      firstSeenOrigin: r.firstSeenOrigin,
       conversationCount,
       createdAt: r.createdAt.toISOString(),
     };

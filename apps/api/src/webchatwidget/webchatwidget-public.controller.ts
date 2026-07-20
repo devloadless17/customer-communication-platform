@@ -112,7 +112,7 @@ export class WebchatwidgetPublicController {
       // Reject a spoofed Content-Type (e.g. SVG bytes labeled image/png) and any
       // kind outside the allow-list — same guards the inbound Meta media path uses.
       assertSignatureMatches(bytes, mimeType);
-      const kind = kindFromMime(mimeType);
+      const kind = kindFromMime(mimeType, CHANNEL);
       assertAllowedMime(kind, mimeType);
 
       const originalFilename = file.originalname

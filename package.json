@@ -25,6 +25,7 @@
     "db:seed:long": "tsx prisma/seeds/seed-long-thread.ts",
     "db:seed:closed": "tsx prisma/seeds/seed-closed-window-chats.ts",
     "test:e2e": "playwright test",
+    "test:e2e:webchat": "playwright test tests/e2e/webchatwidget",
     "test:e2e:meta": "NODE_OPTIONS=--conditions=react-server META_GRAPH_BASE_URL=http://127.0.0.1:4100 playwright test --config playwright.meta.config.ts",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:ui": "playwright test --ui",

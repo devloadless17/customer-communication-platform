@@ -61,7 +61,13 @@ export interface WebchatwidgetConfig {
   soundEnabled?: boolean;
   // ---- launcher / placement defaults (used by the settings UI to generate the
   //      embed snippet; the widget itself reads these from data-* attributes) ----
-  launcher?: "bubble" | "off";
+  /**
+   * Deploy mode, one per page (the widget is a singleton):
+   * `bubble` floating launcher · `off` opened from the host's own button ·
+   * `inline` embedded in a container on their page. Settings uses this to show
+   * the ONE matching install snippet.
+   */
+  launcher?: "bubble" | "off" | "inline";
   position?: "right" | "left";
   launcherLabel?: string;
 }
@@ -76,6 +82,8 @@ export interface WebchatwidgetResolved {
   name: string;
   allowedOrigins: string[];
   config: WebchatwidgetConfig;
+  /** Already-observed embed host, or null. Cached so the hot path skips a write. */
+  firstSeenOrigin: string | null;
 }
 
 const connectedCache = new TtlCache<boolean>();
@@ -131,7 +139,7 @@ export async function resolveWebchatwidgetByPublicKey(
   if (cached !== undefined) return cached;
   const widget = await db.webchatWidget.findUnique({
     where: { publicKey },
-    select: { id: true, teamId: true, name: true, allowedOrigins: true, config: true, isActive: true },
+    select: { id: true, teamId: true, name: true, allowedOrigins: true, config: true, isActive: true, firstSeenOrigin: true },
   });
   const resolved: WebchatwidgetResolved | null =
     widget && widget.isActive
@@ -141,8 +149,52 @@ export async function resolveWebchatwidgetByPublicKey(
           name: widget.name,
           allowedOrigins: widget.allowedOrigins,
           config: (widget.config ?? {}) as WebchatwidgetConfig,
+          firstSeenOrigin: widget.firstSeenOrigin,
         }
       : null;
   byKeyCache.set(publicKey, resolved);
   return resolved;
+}
+
+/**
+ * Remember the first real domain that embeds a widget (trust-on-first-use).
+ *
+ * A new widget ships with an EMPTY allow-list, which is permissive — it has to be,
+ * or it would refuse the customer's very first page load. But the site key is
+ * public (it sits in the page source), so an unlocked widget can be lifted onto a
+ * phishing page that impersonates the brand. Rather than demand a domain during
+ * onboarding — data we don't collect, and a step that blocks first-run — we
+ * observe the domain the widget is actually used on and let Settings offer a
+ * one-click lock at the point the value is self-evidently right.
+ *
+ * Deliberately inert: this only ever RECORDS. It never rejects a connection, so a
+ * wrong guess can't lock a customer out of their own widget.
+ *
+ * Cheap on the hot path — skipped entirely once the widget is locked or the origin
+ * is already known (both read from the cached resolve). The write is a CAS
+ * (`firstSeenOrigin: null`), so concurrent handshakes race harmlessly and the
+ * FIRST one wins.
+ */
+export async function recordFirstSeenOrigin(
+  publicKey: string,
+  resolved: WebchatwidgetResolved,
+  origin: string | null,
+): Promise<void> {
+  // Already locked down, or already observed → nothing to learn.
+  if (resolved.allowedOrigins.length > 0 || resolved.firstSeenOrigin || !origin) return;
+  let host: string;
+  try {
+    host = new URL(origin).hostname.toLowerCase();
+  } catch {
+    return;
+  }
+  // Loopback is the developer testing their own embed, not the site to lock to.
+  if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") return;
+  const written = await db.webchatWidget.updateMany({
+    where: { id: resolved.widgetId, firstSeenOrigin: null },
+    data: { firstSeenOrigin: host },
+  });
+  // Refresh the cache so the next handshake short-circuits above instead of
+  // re-running this no-op UPDATE for the rest of the TTL.
+  if (written.count > 0) invalidateWebchatwidgetKey(publicKey);
 }

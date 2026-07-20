@@ -26,7 +26,11 @@ import { withSweeperMutex } from "@/lib/sweepers/_mutex";
  */
 
 const SWEEP_INTERVAL_MS = 24 * 60 * 60_000;
-const INITIAL_DELAY_MS = 35 * 60_000; // 35min after boot — staggered behind outbound-event-retention (30min)
+// 40min after boot — staggered behind outbound-event-retention (30min). NOT 35min:
+// workflow-run-retention already owns 35min and shares this file's 24h cadence, so a
+// shared expiry makes them collide deterministically every day and the mutex-loser
+// (this sweep) can be starved out once the WorkflowRun delete runs long. Unique slot.
+const INITIAL_DELAY_MS = 40 * 60_000;
 const DEFAULT_RETENTION_DAYS = 90;
 const MAX_PER_SWEEP = 20_000;
 const MAX_BATCHES = 4;

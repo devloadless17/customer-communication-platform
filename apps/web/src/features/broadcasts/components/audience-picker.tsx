@@ -13,6 +13,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 
 import { cn } from "@ccp/shared/utils";
+import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
@@ -54,6 +55,7 @@ export function AudiencePicker({
   stages = [],
   groups,
   totalContactCount,
+  allContactsCount,
   initialContactLabels = [],
   value,
   onChange,
@@ -66,6 +68,10 @@ export function AudiencePicker({
   stages?: ContactStage[];
   groups: AudienceGroupDto[];
   totalContactCount: number;
+  /** Channel-scoped recipient count for "all" mode, resolved by the parent — a
+   *  broadcast sends on ONE channel, so the raw directory total overstates reach.
+   *  Falls back to `totalContactCount` until the parent's scoped count resolves. */
+  allContactsCount?: number;
   initialContactLabels?: ContactLabel[];
   value: AudienceState;
   onChange: (next: AudienceState) => void;
@@ -84,7 +90,7 @@ export function AudiencePicker({
       <AnimatePresence mode="wait" initial={false}>
         {value.mode === "all" ? (
           <ModePanel key="all">
-            <AllContactsCard count={totalContactCount} />
+            <AllContactsCard count={allContactsCount ?? totalContactCount} channel={channel} />
           </ModePanel>
         ) : value.mode === "group" ? (
           <ModePanel key="group">
@@ -411,7 +417,16 @@ function GroupSelector({
   );
 }
 
-function AllContactsCard({ count }: { count: number }) {
+function AllContactsCard({ count, channel }: { count: number; channel?: string }) {
+  // WHY: a broadcast sends on ONE channel, so "every contact in this team" is
+  // false whenever a channel is targeted (template → WhatsApp, freeform → one
+  // social channel). Scope both the count (`allContactsCount` from the parent)
+  // and the copy off `channel` so this card matches the step summary and send
+  // footer; only People/customer mode (no channel) truly reaches every person.
+  const label =
+    channel && channel in CHANNEL_LABEL
+      ? CHANNEL_LABEL[channel as keyof typeof CHANNEL_LABEL]
+      : null;
   return (
     <div className="rounded-xl border border-warning-border bg-warning-bg p-4">
       <div className="flex items-start gap-3">
@@ -420,13 +435,15 @@ function AllContactsCard({ count }: { count: number }) {
         </div>
         <div className="flex-1">
           <div className="text-sm font-medium text-warning-fg">
-            Broadcast to <span className="tabular-nums">{count}</span> contact
-            {count === 1 ? "" : "s"}
+            Broadcast to <span className="tabular-nums">{count}</span>{" "}
+            {label ? `${label} ` : ""}contact{count === 1 ? "" : "s"}
           </div>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            Every contact in this team will receive the template. Marketing
-            templates are billed per recipient by Meta — double-check the
-            preview before sending.
+            {label
+              ? `Every reachable ${label} contact will receive this broadcast. `
+              : "Every person will be reached once on their best live channel. "}
+            Marketing templates are billed per recipient by Meta — double-check
+            the preview before sending.
           </p>
         </div>
       </div>

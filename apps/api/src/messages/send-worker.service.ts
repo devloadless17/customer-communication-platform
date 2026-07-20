@@ -56,7 +56,29 @@ function tryAcquireSendSlot(teamId: string): boolean {
   }
   if (entry.active >= cap) return false;
   entry.active += 1;
+  // The team just made progress → clear its defer-generation so a later
+  // saturated burst starts escalating from the floor again.
+  sendTeamDeferGen.delete(teamId);
   return true;
+}
+
+/**
+ * Per-team defer-generation counter that actually drives `deferDelayMs`'s
+ * escalation. `job.attemptsMade` can't: BullMQ's `moveToDelayed` uses
+ * `skipAttempt`, so `attemptsMade` stays 0 across every defer and the backoff
+ * would never climb off its ~250ms floor — the exact continuous re-poll churn
+ * the escalating backoff exists to prevent. We bump this on each defer and
+ * reset it on a successful acquire. Under saturation defers vastly outnumber
+ * acquires, so it climbs to the 4s cap as designed; under light load acquires
+ * keep it near zero. Deleted on acquire so the Map stays bounded by teams
+ * currently in a defer-storm.
+ */
+const sendTeamDeferGen = new Map<string, number>();
+
+function nextSendDeferGen(teamId: string): number {
+  const n = (sendTeamDeferGen.get(teamId) ?? 0) + 1;
+  sendTeamDeferGen.set(teamId, n);
+  return n;
 }
 
 function releaseSendSlot(teamId: string): void {
@@ -69,14 +91,15 @@ function releaseSendSlot(teamId: string): void {
 }
 
 /**
- * Backoff for a deferred (team-at-cap) job. Escalates with attempts and adds
- * jitter: a flat re-poll makes an over-cap tenant's backlog recycle through the
- * global slots continuously, burning the very capacity the cap exists to protect
- * and delaying the other tenants it was meant to help. Jitter stops a large
- * backlog from re-arriving in lockstep.
+ * Backoff for a deferred (team-at-cap) job. Escalates with the team's
+ * defer-generation (see `sendTeamDeferGen` — NOT `job.attemptsMade`, which never
+ * advances on a defer) and adds jitter: a flat re-poll makes an over-cap
+ * tenant's backlog recycle through the global slots continuously, burning the
+ * very capacity the cap exists to protect and delaying the other tenants it was
+ * meant to help. Jitter stops a large backlog from re-arriving in lockstep.
  */
-function deferDelayMs(attemptsMade: number): number {
-  const base = Math.min(250 * 2 ** Math.min(attemptsMade, 4), 4_000);
+function deferDelayMs(gen: number): number {
+  const base = Math.min(250 * 2 ** Math.min(gen, 4), 4_000);
   return base + Math.floor(Math.random() * 250);
 }
 
@@ -160,7 +183,11 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
         // queue and another tenant's send runs now.
         const teamId = job.data.teamId;
         if (!tryAcquireSendSlot(teamId)) {
-          await job.moveToDelayed(Date.now() + deferDelayMs(job.attemptsMade), token);
+          // Backoff keyed on the team's defer-generation, not job.attemptsMade
+          // (which stays 0 across defers because moveToDelayed skips the attempt
+          // counter) — so a saturated team's backlog actually escalates toward
+          // the 4s cap instead of re-polling every ~250ms forever.
+          await job.moveToDelayed(Date.now() + deferDelayMs(nextSendDeferGen(teamId)), token);
           throw new DelayedError();
         }
         try {

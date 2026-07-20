@@ -1221,8 +1221,14 @@ function ReplyBoxImpl({
 
     // Clear input now so the user can keep typing. Skip clearing `value`
     // when this is a voice-only send so the user's draft in the textarea
-    // survives.
-    if (!overrideFile) setValue("");
+    // survives. Also skip it when a "sends-alone" attachment (WhatsApp
+    // audio/sticker, ALL Messenger/IG media) just went out WITHOUT the
+    // typed text: with no inline caption and no separate follow-up, that
+    // text was never delivered, so wiping it here would silently destroy
+    // the agent's reply (and the persisted draft with it). Leaving it lets
+    // a second Send deliver it — exactly what the placeholder instructs.
+    const textWentUnsent = file != null && !attachmentInlineCaption && trimmed !== "";
+    if (!overrideFile && !textWentUnsent) setValue("");
     setAttachment(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (reply) onCancelReply?.();

@@ -152,7 +152,11 @@ export default tseslint.config(
 
   // ---- Config / script / seed files: Node context, allow CJS-ish patterns --
   {
-    files: ["**/*.config.{js,mjs,ts}", "scripts/**/*.{ts,js}", "prisma/**/*.ts"],
+    // `**/scripts/**` (not bare `scripts/**`) so per-package build scripts are
+    // covered too — apps/web/scripts/build-widget.mjs runs under plain `node` and
+    // otherwise inherits the browser-globals block from `apps/web/**`, which flags
+    // `console` as undefined.
+    files: ["**/*.config.{js,mjs,ts}", "**/scripts/**/*.{ts,js,mjs}", "prisma/**/*.ts"],
     languageOptions: { globals: { ...globals.node } },
     rules: {
       "@typescript-eslint/no-require-imports": "off",

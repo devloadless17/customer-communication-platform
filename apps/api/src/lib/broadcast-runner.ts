@@ -18,7 +18,7 @@ import {
 } from "@ccp/shared/template-render";
 import type { MessagingProvider } from "@ccp/shared/providers/types";
 import type { Channel } from "@ccp/shared/types";
-import { LIVE_CHANNELS, isPhoneChannel } from "@ccp/shared/providers/capabilities";
+import { CHANNEL_CAPABILITIES, LIVE_CHANNELS, isPhoneChannel } from "@ccp/shared/providers/capabilities";
 import { flagChannelNeedsReconnect } from "@/lib/providers/channel-health";
 import { enqueueBroadcastMaterialize } from "@/lib/broadcasts/materialize-queue";
 import { getWhatsappHealth } from "@/lib/providers/meta-health";
@@ -925,6 +925,10 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         // opt-out path, most likely on a SCHEDULED broadcast whose create→fire
         // gap is hours/days — is skipped instead of getting a billed template.
         deletedAt: true,
+        // Re-checked at SEND time for the same reason: create-time marketing
+        // suppression can't cover a contact who opts out during the create→fire
+        // gap of a scheduled MARKETING broadcast.
+        marketingOptOutAt: true,
         customFields: true,
       },
     },
@@ -946,6 +950,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
             location: true,
             lastInboundAt: true,
             deletedAt: true,
+            marketingOptOutAt: true,
           },
         },
       } as unknown as typeof RECIPIENT_SELECT_FULL);
@@ -1292,6 +1297,7 @@ async function processOneRecipient(
     templateId: string | null;
     templateName: string | null;
     templateLanguage: string | null;
+    templateCategory: string | null;
     bodyText: string | null;
     createdById: string | null;
   },
@@ -1308,6 +1314,7 @@ async function processOneRecipient(
       location: string | null;
       lastInboundAt: Date | null;
       deletedAt: Date | null;
+      marketingOptOutAt: Date | null;
       customFields: Prisma.JsonValue;
     };
   },
@@ -1391,6 +1398,28 @@ async function processOneRecipient(
       broadcast.id,
       broadcast.teamId,
       pendingBumps,
+    );
+    return;
+  }
+  // Re-check marketing opt-out at FIRE time. Create-time suppression
+  // (broadcasts.service.ts) only sees opt-outs that existed when the broadcast
+  // was built; a contact who opts out during the create→fire gap of a SCHEDULED
+  // MARKETING template would otherwise still receive the billed send — a
+  // compliance failure. Mirrors the create-time category gate: only MARKETING
+  // templates suppress (utility/auth messages still reach an opted-out contact).
+  // Distinct errorCode so retry buckets exclude these (a compliance skip is not
+  // a transient failure to retry).
+  const isMarketingTemplate =
+    broadcast.kind === "template" &&
+    (broadcast.templateCategory ?? "MARKETING").toUpperCase() === "MARKETING";
+  if (isMarketingTemplate && recipient.contact.marketingOptOutAt) {
+    await failRecipientAndCount(
+      recipient.id,
+      "Contact opted out of marketing after the broadcast was created.",
+      broadcast.id,
+      broadcast.teamId,
+      pendingBumps,
+      "marketing_opt_out",
     );
     return;
   }
@@ -1513,6 +1542,38 @@ async function processOneRecipient(
         pendingBumps,
       );
       return;
+    }
+
+    // Fire-time freeform-window re-check. Customer-mode picks each person's best
+    // channel at CREATE time; a SCHEDULED broadcast fired hours/days later can
+    // have recipients whose 24h freeform window has since closed. WhatsApp has no
+    // human-agent extension, so a freeform send past 24h is a guaranteed Meta
+    // rejection — skip it here with a clean, actionable reason instead of a
+    // cryptic bulk Meta failure. (Social keeps its human-agent-tag behavior for
+    // the 24h–7d band via `useHumanAgentTag` above; a truly-expired social send
+    // still surfaces Meta's own error.)
+    if (isFreeform && dialsPhone) {
+      const freeFormMs = CHANNEL_CAPABILITIES[sendChannel].freeFormWindowMs;
+      if (
+        freeFormMs !== null &&
+        ["closed", "never"].includes(
+          computeWindowStatus(
+            recipient.contact.lastInboundAt?.toISOString() ?? null,
+            Date.now(),
+            freeFormMs,
+          ).state,
+        )
+      ) {
+        await failRecipientAndCount(
+          recipient.id,
+          "Messaging window closed since the broadcast was created — the contact must message first to reopen it.",
+          broadcast.id,
+          broadcast.teamId,
+          pendingBumps,
+          "window_closed",
+        );
+        return;
+      }
     }
 
     // Empty-variable guard. WhatsApp REJECTS a template whose variable resolved
@@ -2666,10 +2727,20 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
  * us and the customer received the template, so the row MUST end up `sent` with
  * an inbox Message — exactly what the live cancel-race reconcile produces.
  *
- * Bounded: only `canceled` broadcasts, only failed+marker recipients, only ones
- * with a completed attempt. Idempotent: the marker-gated CAS no-ops on a second
- * pass (already `sent`), and createOutboundMessageIdempotent dedupes on the
- * wamid, so re-running (or racing the live path) writes nothing twice.
+ * Bounded: only `canceled` broadcasts, recipients with a completed attempt.
+ * Idempotent: the state-gated CAS no-ops on a second pass (already `sent`), and
+ * createOutboundMessageIdempotent dedupes on the wamid, so re-running (or racing
+ * the live path) writes nothing twice.
+ *
+ * Handles BOTH stranded states a cancel-race can leave (audit 2026-07-20 extends
+ * this beyond the failed+marker case):
+ *   - failed+marker + completed attempt → sent  (cancel counted it as failed).
+ *   - queued + completed attempt        → sent  (cancel LEFT it queued because
+ *     failedAt was null; the live queued→sent CAS never ran). Meta billed +
+ *     delivered it, so it must end sent with an inbox Message.
+ * Plus finalizes leftover queued rows whose attempt is in-flight-but-incomplete
+ * (crash mid round-trip, delivery unprovable) → failed+marker, so a canceled
+ * broadcast's counters ALWAYS sum to totalCount and retryFailed excludes them.
  */
 async function reconcileCanceledMarkerRecipients(): Promise<void> {
   // Query ONLY the recoverable set in ONE shot: a marker recipient in a
@@ -2688,6 +2759,7 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
       conversationId: string;
       externalId: string;
       completedAt: Date;
+      sourceStatus: "failed" | "queued";
     }[]
   >`
     SELECT br."id"          AS "recipientId",
@@ -2695,17 +2767,62 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
            br."broadcastId" AS "broadcastId",
            COALESCE(br."conversationId", osa."conversationId") AS "conversationId",
            osa."externalId" AS "externalId",
-           osa."completedAt" AS "completedAt"
+           osa."completedAt" AS "completedAt",
+           br."status"::text AS "sourceStatus"
     FROM "BroadcastRecipient" br
     JOIN "Broadcast" b
       ON b."id" = br."broadcastId" AND b."status" = 'canceled'::"BroadcastStatus"
     JOIN "OutboundSendAttempt" osa
       ON osa."jobId" = 'bc-recipient-' || br."id"
-    WHERE br."status" = 'failed'::"BroadcastRecipientStatus"
-      AND br."errorMessage" = ${CANCEL_RECIPIENT_MARKER}
-      AND osa."completedAt" IS NOT NULL
+    WHERE osa."completedAt" IS NOT NULL
       AND osa."externalId" IS NOT NULL
+      AND (
+        -- (a) the marker case: cancel() flipped it to failed+marker before the
+        -- attempt row was visible (failed → sent).
+        (br."status" = 'failed'::"BroadcastRecipientStatus"
+           AND br."errorMessage" = ${CANCEL_RECIPIENT_MARKER})
+        -- (b) the still-queued case: cancel() deliberately LEFT it queued because
+        -- its attempt hadn't failed (failedAt null), then the process crashed
+        -- before the runner's live queued → sent CAS ran. Meta billed + delivered
+        -- it, so it must also end up sent (queued → sent).
+        OR br."status" = 'queued'::"BroadcastRecipientStatus"
+      )
   `;
+
+  // (c) Leftover queued rows in a canceled broadcast whose attempt is in-flight
+  // but NOT completed (failedAt null, completedAt null) — the send crashed mid
+  // round-trip, we can't prove Meta accepted it, so finalize to failed+marker so
+  // the broadcast's counters still sum to totalCount and retryFailed excludes it.
+  // ONE atomic CTE: the UPDATE ... RETURNING feeds the failedCount bump, so we
+  // count EXACTLY the rows this statement flips — never the rows cancel() already
+  // finalized+counted (a re-scan of all failed+marker rows would double-count).
+  await db.$executeRaw`
+    WITH flipped AS (
+      UPDATE "BroadcastRecipient" br
+      SET "status" = 'failed'::"BroadcastRecipientStatus",
+          "errorMessage" = ${CANCEL_RECIPIENT_MARKER}
+      FROM "Broadcast" b
+      WHERE b."id" = br."broadcastId"
+        AND b."status" = 'canceled'::"BroadcastStatus"
+        AND br."status" = 'queued'::"BroadcastRecipientStatus"
+        AND NOT EXISTS (
+          SELECT 1 FROM "OutboundSendAttempt" osa
+          WHERE osa."jobId" = 'bc-recipient-' || br."id"
+            AND osa."completedAt" IS NOT NULL
+        )
+      RETURNING br."broadcastId" AS bid
+    ),
+    counts AS (
+      SELECT bid, COUNT(*)::int AS n FROM flipped GROUP BY bid
+    )
+    UPDATE "Broadcast" b
+    SET "failedCount" = "failedCount" + counts.n
+    FROM counts
+    WHERE b."id" = counts.bid
+  `.catch((err) => {
+    console.error("[broadcast-reconciler] finalize of stranded queued rows in canceled broadcasts failed", err);
+  });
+
   if (recoverable.length === 0) return;
 
   // Memoize per-broadcast render context (template + bindings + variables) so
@@ -2758,14 +2875,16 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
     const conversationId = row.conversationId;
 
     {
-      // Marker-gated CAS: failed+marker → sent. A prior boot pass (or a live
-      // reconcile that DID run) leaves it already `sent`, so count===0 → skip.
+      // State-gated CAS → sent, keyed on the ACTUAL source state so it stays
+      // idempotent (a prior boot pass / live reconcile left it already `sent`,
+      // count===0 → skip). Two source states reach here (see the query):
+      //   failed+marker → sent  (cancel() had counted it as failed)
+      //   queued        → sent  (cancel() left it queued; never counted)
       const reconciled = await db.broadcastRecipient.updateMany({
-        where: {
-          id: recipient.id,
-          status: "failed",
-          errorMessage: CANCEL_RECIPIENT_MARKER,
-        },
+        where:
+          row.sourceStatus === "failed"
+            ? { id: recipient.id, status: "failed", errorMessage: CANCEL_RECIPIENT_MARKER }
+            : { id: recipient.id, status: "queued" },
         data: {
           status: "sent",
           externalId: attempt.externalId,
@@ -2833,14 +2952,44 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
         );
       }
 
-      // Move one unit failed→sent so the terminal counters stay honest — the
-      // same clamped write the live cancel-race path uses.
-      await reconcileCancelRaceCounters(broadcast.id, broadcast.teamId).catch((err) => {
-        console.error(
-          `[broadcast-reconciler] cancel-race counter reconcile failed for recipient ${recipient.id}`,
-          err,
-        );
-      });
+      // Keep the terminal counters honest. The bump differs by source state:
+      //   failed → sent : swap one unit failed→sent (it WAS counted as failed by
+      //                   cancel()); the existing clamped helper does exactly this.
+      //   queued → sent : it was NEVER counted, so ONLY increment sent (no failed
+      //                   decrement). Clamp sent to totalCount defensively.
+      if (row.sourceStatus === "failed") {
+        await reconcileCancelRaceCounters(broadcast.id, broadcast.teamId).catch((err) => {
+          console.error(
+            `[broadcast-reconciler] cancel-race counter reconcile failed for recipient ${recipient.id}`,
+            err,
+          );
+        });
+      } else {
+        await withTransientRetry(() =>
+          db.$queryRaw<{ sentCount: number; failedCount: number; totalCount: number }[]>`
+            UPDATE "Broadcast"
+            SET "sentCount" = LEAST("totalCount", "sentCount" + 1)
+            WHERE "id" = ${broadcast.id}
+            RETURNING "sentCount", "failedCount", "totalCount"
+          `,
+        )
+          .then((rows) => {
+            const u = rows[0];
+            if (u)
+              scheduleProgress(broadcast.id, {
+                teamId: broadcast.teamId,
+                sentCount: Number(u.sentCount),
+                failedCount: Number(u.failedCount),
+                totalCount: Number(u.totalCount),
+              });
+          })
+          .catch((err) => {
+            console.error(
+              `[broadcast-reconciler] queued→sent counter bump failed for recipient ${recipient.id}`,
+              err,
+            );
+          });
+      }
     }
   }
 }

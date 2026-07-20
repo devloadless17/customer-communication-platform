@@ -38,6 +38,14 @@ const SWEEP_INTERVAL_MS = 60 * 1000;
 // Rows younger than this may still have an in-flight download from the original
 // request (slow video, 4-in-flight concurrency) — don't touch them.
 const STALE_THRESHOLD_MS = 2 * 60 * 1000;
+// A non-WhatsApp row can't be re-downloaded (no re-fetchable media id), so its
+// only outcomes are "in-flight completion" or "final downgrade". A multi-
+// attachment social burst can legitimately still be downloading well past the
+// 2-min in-flight grace (fetchUrlBytes: 20s timeout × 3 retries per attachment,
+// 4-wide lanes over a 12-photo message ≈ 3 min under a degraded Meta CDN), so
+// downgrading at 2 min races a still-successful download and drops the media.
+// Wait comfortably past worst-case wall time before the text-only downgrade.
+const SOCIAL_INFLIGHT_GRACE_MS = 10 * 60 * 1000;
 // How long we keep re-attempting a parked row before the final text-only
 // downgrade. Comfortably inside Meta's ~30-day media retention; long enough to
 // ride out any realistic blob-storage / Meta-CDN outage window.
@@ -115,6 +123,7 @@ async function selectAndDowngrade(): Promise<ParkedRow[]> {
   const now = Date.now();
   const cutoff = new Date(now - STALE_THRESHOLD_MS);
   const horizon = new Date(now - RECOVERY_HORIZON_MS);
+  const socialGrace = new Date(now - SOCIAL_INFLIGHT_GRACE_MS);
 
   // Find inbound rows whose phase-2 download never landed. Outbound rows
   // never go through the pending state (the send route writes media columns
@@ -155,7 +164,15 @@ async function selectAndDowngrade(): Promise<ParkedRow[]> {
   // WhatsApp webhook shape, so a stranded Messenger/Instagram row (expiring CDN
   // URL, no re-fetchable media id) can never be recovered here; downgrade it
   // straight to text-only instead of looping a no-op retry until the horizon.
-  const expired = stuck.filter((r) => r.createdAt < horizon || r.channel !== "whatsapp");
+  // But a social row can still be legitimately in-flight past the 2-min cutoff,
+  // so hold its downgrade until SOCIAL_INFLIGHT_GRACE_MS — a row inside that
+  // window is neither expired nor retriable, so it stays parked and lets the
+  // controller's still-running download win the CAS instead of being nulled out.
+  const expired = stuck.filter(
+    (r) =>
+      r.createdAt < horizon ||
+      (r.channel !== "whatsapp" && r.createdAt < socialGrace),
+  );
   const retriable = stuck.filter((r) => r.createdAt >= horizon && r.channel === "whatsapp");
 
   // Downgrade the expired rows FIRST — both the batched UPDATE and the

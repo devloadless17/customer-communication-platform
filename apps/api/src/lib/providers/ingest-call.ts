@@ -738,7 +738,7 @@ async function handlePermissionEvent(
     ? {
         teamId,
         OR: [
-          ...(evt.contactPhone ? [{ phoneNumber: evt.contactPhone }] : []),
+          ...(evt.contactPhone ? [{ identityChannel: channel, phoneNumber: evt.contactPhone }] : []),
           ...(evt.bsuid ? [{ identityChannel: channel, bsuid: evt.bsuid }] : []),
         ],
       }

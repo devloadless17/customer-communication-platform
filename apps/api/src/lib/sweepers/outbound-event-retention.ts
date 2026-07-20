@@ -21,15 +21,21 @@ import { withSweeperMutex } from "@/lib/sweepers/_mutex";
  * "what happened in the last week" investigation surface is consistent
  * across the queue + bus.
  *
- * Cadence: daily. Same shape as the other daily sweepers; deletes in
- * bounded batches so a large backlog doesn't lock the table.
+ * Cadence: hourly, draining the full backlog each tick. The platform's primary
+ * workload — broadcast campaigns — produces 250k-350k outbox rows per 100k
+ * recipients (one `broadcast.recipient_message_sent` per send + status frames).
+ * The old daily×4-batch ceiling deleted at most 80k rows/day, so a single day's
+ * campaigns outran retention and the table grew without bound. The per-batch
+ * 20k findMany+deleteMany still bounds lock time, and the sweeper mutex
+ * serializes this against the other heavy sweepers, so looping to empty is safe.
+ * MAX_BATCHES is now a large runaway-backstop, not the steady-state limit.
  */
 
-const SWEEP_INTERVAL_MS = 24 * 60 * 60_000;
+const SWEEP_INTERVAL_MS = 60 * 60_000; // hourly
 const INITIAL_DELAY_MS = 30 * 60_000; // 30min after boot — let waiting sweepers go first
 const RETENTION_MS = 7 * 24 * 60 * 60_000;
 const MAX_PER_SWEEP = 20_000;
-const MAX_BATCHES = 4;
+const MAX_BATCHES = 2_000; // safety backstop only (≤40M rows/tick); normal draining stops at empty
 
 let timer: NodeJS.Timeout | null = null;
 let initialTimer: NodeJS.Timeout | null = null;

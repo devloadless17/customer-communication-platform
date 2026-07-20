@@ -66,3 +66,6 @@ playwright-report/
 
 # Meta e2e stack logs (mock Graph + isolated test api)
 tests/e2e/.meta-logs/
+
+# Generated from apps/web/public/widget.js by prebuild (see scripts/build-widget.mjs)
+apps/web/public/widget.min.js

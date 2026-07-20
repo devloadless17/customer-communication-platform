@@ -111,6 +111,10 @@ export function useVoiceRecorder(opts: {
   const mimeRef = useRef<string>("");
   /** Synchronous "a start() is in flight" latch — see the note in start(). */
   const startingRef = useRef(false);
+  /** Set once the host unmounts so a getUserMedia await that resolves AFTER
+   *  unmount doesn't bring the mic hot in a dead hook — see the check in
+   *  startInner() after the await. */
+  const disposedRef = useRef(false);
   /** Timestamp of the last committed mic-level sample (see the ~30Hz gate). */
   const lastSampleRef = useRef(0);
 
@@ -153,6 +157,7 @@ export function useVoiceRecorder(opts: {
   // mid-record). Without this the mic tracks stay hot in the background.
   useEffect(() => {
     return () => {
+      disposedRef.current = true;
       try {
         recorderRef.current?.stop();
       } catch {
@@ -240,6 +245,16 @@ export function useVoiceRecorder(opts: {
             ? "No microphone found on this device."
             : "Couldn't access the microphone.";
       onErrorRef.current(message);
+      return;
+    }
+
+    // The host may have unmounted (chat switch) while getUserMedia awaited — the
+    // unmount effect ran but found streamRef/recorderRef still null, so it tore
+    // down nothing. Proceeding here would leave the mic hot (stream + AudioContext
+    // + rAF + interval) in a dead hook with no RecordingBar. Drop the fresh stream
+    // and bail without touching refs/state.
+    if (disposedRef.current) {
+      for (const t of stream.getTracks()) t.stop();
       return;
     }
 

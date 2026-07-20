@@ -64,7 +64,15 @@ const AppearanceSchema = z.object({
   themeMode: z.enum(["light", "dark", "auto"]).optional(),
   soundEnabled: z.boolean().optional(),
   // launcher / placement (settings-only — the widget reads these from data-* attrs)
-  launcher: z.enum(["bubble", "off"]).optional(),
+  //
+  // The three DEPLOY MODES, mutually exclusive per page:
+  //   bubble — floating launcher (default)
+  //   off    — launcher hidden, opened from the customer's own button/link
+  //   inline — embedded inside a container on their page (always open)
+  // Stored so Settings can show the ONE install snippet that matches; previously
+  // it advertised the bubble and inline snippets side by side with no hint that
+  // picking both on one page is unsupported (the widget is a per-page singleton).
+  launcher: z.enum(["bubble", "off", "inline"]).optional(),
   position: z.enum(["right", "left"]).optional(),
   launcherLabel: z.string().trim().max(40).optional(),
 });

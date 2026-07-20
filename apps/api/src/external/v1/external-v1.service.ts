@@ -323,7 +323,14 @@ export class ExternalV1Service {
     if (q.phone) {
       const normalized = normalizePhoneE164(q.phone) ?? q.phone;
       const rows = await this.db.contact.findMany({
-        where: { teamId, deletedAt: null, ...directoryContactWhere, phoneNumber: normalized },
+        // Phone is the WhatsApp identity (the partial unique on
+        // (teamId, phoneNumber) fires only for identityChannel='whatsapp'). The
+        // same number can also sit on a social/widget contact via contact-share
+        // or widget pre-chat; scope to whatsapp so a partner "who is +…?" lookup
+        // is deterministic and returns the phone's canonical owner, not a row
+        // that merely borrowed it. (Safe scalar AND — directoryContactWhere's OR
+        // has no sibling OR here.)
+        where: { teamId, deletedAt: null, ...directoryContactWhere, identityChannel: "whatsapp", phoneNumber: normalized },
         include: EXTERNAL_CONTACT_INCLUDE,
         take: 1,
       });
@@ -595,7 +602,8 @@ export class ExternalV1Service {
     },
   ): Promise<ExternalContact | null> {
     const existing = await this.db.contact.findFirst({
-      where: { teamId, phoneNumber: phone, deletedAt: { not: null } },
+      // whatsapp-scoped: the phone unique slot this revives is WhatsApp-only.
+      where: { teamId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: { not: null } },
       select: { id: true },
     });
     if (!existing) return null;
@@ -794,8 +802,27 @@ export class ExternalV1Service {
       const next = newCustom[key] ?? null;
       if (prev !== next) fieldChanges.push({ key, previous: prev, next });
     }
+    // Built-in column diffs too — the internal UI path includes these, so the
+    // /v1 path must match or the same mutation emits a different event payload
+    // by entry point. (The workflow-dispatch guard already excludes built-in
+    // keys, so this adds payload fidelity without a workflow re-trigger risk.)
+    for (const key of ["name", "firstName", "lastName", "email", "language", "countryCode", "location"] as const) {
+      const prev = (existing[key] as string | null) ?? null;
+      const next = (updated[key] as string | null) ?? null;
+      if (prev !== next) fieldChanges.push({ key, previous: prev, next });
+    }
 
     const contact: DomainContact = toContactWire(updated, { tagIds });
+
+    // No-op guard: a CRM re-sync that PATCHes the same values it already holds
+    // changed nothing (no field diffs, same stage). Publishing contact.updated
+    // anyway fans a signed delivery to every outbound webhook per idle re-sync —
+    // a storm with zero information. Skip the fanout entirely on a true no-op.
+    // (The version was bumped by the CAS above; that's a cheap idempotent write,
+    // and the realistic storm is the webhook fanout, which this suppresses.)
+    if (fieldChanges.length === 0 && existing.stageId === updated.stageId) {
+      return toExternalContact(updated, tagIds);
+    }
 
     // `silent: true` → skip reactions on every event this update fans out, so
     // a partner that edits a contact via /v1 doesn't re-trigger a workflow
@@ -875,7 +902,11 @@ export class ExternalV1Service {
       });
     }
     const existing = await this.db.contact.findFirst({
-      where: { teamId, phoneNumber: phone },
+      // Scope to whatsapp — the create path below stamps identityChannel:
+      // 'whatsapp', so the whole /v1 phone-keyed contact CRUD surface is
+      // WhatsApp-semantic. Without this a re-sync could patch/revive a
+      // social/widget contact that merely borrowed the phone.
+      where: { teamId, phoneNumber: phone, identityChannel: "whatsapp" },
       select: { id: true, deletedAt: true },
     });
     // Not found OR soft-deleted → go through createContact. For a tombstoned
@@ -895,7 +926,7 @@ export class ExternalV1Service {
         // path instead of surfacing the 409 to the partner.
         if (err instanceof ConflictException) {
           const winner = await this.db.contact.findFirst({
-            where: { teamId, phoneNumber: phone, deletedAt: null },
+            where: { teamId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: null },
             select: { id: true },
           });
           if (!winner) throw err;
@@ -987,7 +1018,11 @@ export class ExternalV1Service {
       select: { id: true, phoneNumber: true, identityChannel: true, externalContactId: true },
     });
     if (!c) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
-    if (!c.phoneNumber) return { items: [] };
+    // A social/widget contact has no phoneNumber but IS on a channel — its
+    // identityChannel + externalContactId prove it. Returning [] for every
+    // Messenger/Instagram/webchatwidget contact wrongly reported them as having
+    // no channel; only a row with NEITHER identity (which shouldn't exist) is [].
+    if (!c.phoneNumber && !c.externalContactId) return { items: [] };
     return {
       items: [
         {
@@ -1618,13 +1653,28 @@ export class ExternalV1Service {
         const cfg = (c.config ?? {}) as {
           phoneNumberId?: string;
           displayPhoneNumber?: string;
+          pageId?: string;
+          pageName?: string;
+          igUserId?: string;
+          igUsername?: string;
+          siteKey?: string;
+          widgetName?: string;
         };
-        if (!cfg.phoneNumberId) return null;
-        return {
-          id: cfg.phoneNumberId,
-          channel: c.channel,
-          display: cfg.displayPhoneNumber ?? cfg.phoneNumberId,
-        };
+        // Every LIVE channel is a real connection the UI shows — not just
+        // WhatsApp. Derive a stable per-channel id + display from whatever
+        // identity that channel carries, instead of dropping every non-WA row
+        // (which made teams on messenger/instagram/webchatwidget see an empty
+        // or WhatsApp-only channel list through the API).
+        const id =
+          cfg.phoneNumberId ?? cfg.pageId ?? cfg.igUserId ?? cfg.siteKey ?? null;
+        if (!id) return null;
+        const display =
+          cfg.displayPhoneNumber ??
+          (cfg.igUsername ? `@${cfg.igUsername}` : undefined) ??
+          cfg.pageName ??
+          cfg.widgetName ??
+          id;
+        return { id, channel: c.channel, display };
       })
       .filter((x): x is NonNullable<typeof x> => x !== null);
     return { items };
@@ -1840,6 +1890,8 @@ function broadcastToExternal(b: {
   id: string;
   status: string;
   name: string | null;
+  kind: string;
+  targetMode: string;
   templateName: string | null;
   templateLanguage: string | null;
   templateCategory: string | null;
@@ -1854,14 +1906,22 @@ function broadcastToExternal(b: {
   completedAt: Date | null;
   scheduledAt: Date | null;
 }) {
+  // `targetMode:"customer"` (People / best-channel) campaigns store an inert
+  // channel:"whatsapp" — surfacing kind + targetMode lets a partner tell an
+  // omnichannel campaign apart from a WhatsApp one (the API claims never to
+  // disagree with the UI), and channel is null'd for customer mode so it can't
+  // be mistaken for a real per-channel send.
+  const isCustomerMode = b.targetMode === "customer";
   return {
     id: b.id,
     status: b.status,
     name: b.name,
+    kind: b.kind,
+    targetMode: b.targetMode,
     templateName: b.templateName,
     templateLanguage: b.templateLanguage,
     templateCategory: b.templateCategory,
-    channel: b.channel,
+    channel: isCustomerMode ? null : b.channel,
     audienceMode: b.audienceMode,
     totalCount: b.totalCount,
     sentCount: b.sentCount,

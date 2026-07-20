@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import { Worker } from "bullmq";
+import { UnrecoverableError, Worker } from "bullmq";
 
+import { recordJobFailure } from "@/common/job-failure-metrics";
 import { runMemoryExtraction } from "@/lib/ai/memory-job";
 import { runAiReply } from "@/lib/ai/orchestrator";
 import { AI_QUEUE_NAME, closeAiQueue, type AiJob } from "@/lib/ai/queue";
@@ -29,6 +30,7 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AiWorkerService.name);
   private worker: Worker<AiJob> | null = null;
   private connection: ReturnType<typeof createWorkerConnection> | null = null;
+  private shuttingDown = false;
 
   onModuleInit(): void {
     if (process.env.RUN_WORKER_INLINE === "0") return;
@@ -37,12 +39,13 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
 
   private start(): void {
     if (this.worker) return;
-    this.connection = createWorkerConnection("ai-worker");
-    this.worker = new Worker<AiJob>(
+    const connection = createWorkerConnection("ai-worker");
+    this.connection = connection;
+    const worker = new Worker<AiJob>(
       AI_QUEUE_NAME,
       async (job) => this.handle(job.data),
       {
-        connection: this.connection,
+        connection,
         concurrency: 4,
         lockDuration: 90_000,
         lockRenewTime: 30_000,
@@ -50,9 +53,41 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
         maxStalledCount: 3,
       },
     );
-    this.worker.on("error", (err) =>
-      this.logger.error(`ai worker error: ${err instanceof Error ? err.message : String(err)}`),
-    );
+    this.worker = worker;
+    worker.on("error", (err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`ai worker error: ${msg}`);
+      // Fatal classes (Redis socket closed, auth) leave the worker wedged with
+      // this.worker still set. start() runs only from onModuleInit, so without a
+      // self-respawn one unrecoverable Redis blip stalls ALL AI replies/summaries/
+      // memory until a manual restart — the same guard every sibling worker has
+      // (send-worker, workflows, webhook-deliver). Skipped during shutdown, and
+      // only the currently-registered worker may clear the shared slot so a late
+      // error from a superseded worker can't blank the live replacement.
+      const fatal =
+        msg.includes("Connection is closed") ||
+        msg.includes("WRONGPASS") ||
+        msg.includes("NOAUTH");
+      if (fatal && !this.shuttingDown && this.worker === worker) {
+        this.logger.warn("ai worker unrecoverable; re-spawning");
+        worker.close().catch(() => undefined);
+        this.connection?.disconnect();
+        this.worker = null;
+        this.connection = null;
+        setTimeout(() => {
+          if (!this.shuttingDown) this.start();
+        }, 1_000).unref();
+      }
+    });
+    worker.on("failed", (job, err) => {
+      // Terminal AI failure (retries exhausted or UnrecoverableError) — surface
+      // it on /health via recordJobFailure like every other queue, otherwise a
+      // steadily failing model/provider stays silently green.
+      const attempts = job?.opts.attempts ?? 1;
+      if (job && (err instanceof UnrecoverableError || job.attemptsMade >= attempts)) {
+        recordJobFailure(AI_QUEUE_NAME, job.id, err instanceof Error ? err.message : String(err));
+      }
+    });
   }
 
   private async handle(data: AiJob): Promise<void> {
@@ -67,6 +102,9 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    // Set before close so a fatal 'error' racing the drain can't self-respawn a
+    // worker we're tearing down.
+    this.shuttingDown = true;
     if (this.worker) {
       // 85s, same as the send worker: OnModuleDestroy hooks run SEQUENTIALLY,
       // so a per-worker cap equal to the FULL 90s app.close() budget leaves

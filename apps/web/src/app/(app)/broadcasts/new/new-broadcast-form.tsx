@@ -88,6 +88,9 @@ export function NewBroadcastForm({
   cloneTemplateId = null,
   cloneBodyVars = null,
   cloneHeaderVar = null,
+  cloneKind = null,
+  cloneBodyText = null,
+  cloneChannel = null,
 }: {
   totalContactCount: number;
   initialContactLabels: ContactLabel[];
@@ -109,6 +112,11 @@ export function NewBroadcastForm({
   cloneTemplateId?: string | null;
   cloneBodyVars?: string[] | null;
   cloneHeaderVar?: string | null;
+  /** Clone of a freeform/People broadcast — reopen in the same message mode,
+   *  channel, and body instead of an empty WhatsApp-template composer. */
+  cloneKind?: "template" | "freeform" | "customer" | null;
+  cloneBodyText?: string | null;
+  cloneChannel?: string | null;
 }) {
   const router = useRouter();
   const { confirm, confirmDialog } = useConfirm();
@@ -170,9 +178,11 @@ export function NewBroadcastForm({
   //    live channel (omnichannel + deduped). Both non-template modes share the
   //    free-form body input + skip the template/variables steps.
   const [messageKind, setMessageKind] =
-    useState<"template" | "freeform" | "customer">("template");
-  const [freeformChannel, setFreeformChannel] = useState<"messenger" | "instagram">("messenger");
-  const [freeformBody, setFreeformBody] = useState("");
+    useState<"template" | "freeform" | "customer">(cloneKind ?? "template");
+  const [freeformChannel, setFreeformChannel] = useState<"messenger" | "instagram">(
+    cloneChannel === "instagram" ? "instagram" : "messenger",
+  );
+  const [freeformBody, setFreeformBody] = useState(cloneBodyText ?? "");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [templateQuery, setTemplateQuery] = useState("");
   const [bodyVars, setBodyVars] = useState<string[]>([]);
@@ -884,6 +894,13 @@ export function NewBroadcastForm({
           stages={stages}
           groups={groups}
           totalContactCount={totalContactCount}
+          // Channel-scoped "all" count so the AllContactsCard's number matches
+          // its channel-scoped copy (and the send footer). Falls back to the
+          // unscoped total until the server count resolves, or in People mode
+          // where reach is person-level (no channel scope).
+          allContactsCount={
+            countChannel && allCount.resolved ? allCount.count : totalContactCount
+          }
           initialContactLabels={initialContactLabels}
           value={audience}
           onChange={setAudience}

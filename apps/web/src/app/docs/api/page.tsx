@@ -453,6 +453,11 @@ export default function ApiDocsPage() {
           <code>{`{ url, mime_type, caption? }`}</code>) is <strong>roadmap, not yet
           supported</strong> — it currently returns{" "}
           <code>400 media_not_yet_supported</code>; send media via the inbox UI for now.
+          {" "}Other UI composer send types — direct media <strong>upload</strong>,{" "}
+          <strong>location</strong>, <strong>contact-card</strong>,{" "}
+          <strong>reaction</strong>, and message <strong>forward</strong> — are
+          likewise roadmap and have no <code>/v1</code> endpoint yet; text,
+          template, and interactive sends have full parity.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/messages/:id">
           Find a single message by id.

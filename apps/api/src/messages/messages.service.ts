@@ -1537,7 +1537,7 @@ export class MessagesService {
     // (splits on `;` for its allowlist check) — Meta isn't.
     // `let` so the voice-note transcode below can rewrite it to audio/ogg.
     let mimeType = normalizeMimeType(file.mimetype);
-    const kind = kindFromMime(mimeType);
+    const kind = kindFromMime(mimeType, provider);
     // Per-channel caps + allow-lists — Messenger/Instagram accept larger files
     // (and a different audio set) than WhatsApp, so reusing WhatsApp's caps
     // would wrongly reject valid social media.
@@ -1733,8 +1733,13 @@ export class MessagesService {
       });
     }
 
-    // Optional methods — a channel without media support raises a typed error.
-    const uploadMedia = requireProviderMethod(binding.provider, "uploadMedia", provider);
+    // sendMedia is required on every live channel. uploadMedia is required ONLY
+    // on upload-based channels; URL-send channels (Instagram, webchatwidget)
+    // never call it and legitimately don't implement it, so requiring it
+    // up-front would wrongly throw on every widget/IG media send. Resolve it
+    // lazily inside the non-byUrl branch below, mirroring the forward path
+    // (~2372) and lib/messaging/send-media-internal.ts.
+    const byUrl = binding.provider.capabilities.mediaSendByUrl === true;
     const sendMedia = requireProviderMethod(binding.provider, "sendMedia", provider);
 
     // Parallel: Meta /media upload AND blob-storage upload. Both pure
@@ -1771,7 +1776,6 @@ export class MessagesService {
     //    URL-based channels (Instagram) presign the just-stored object so Meta
     //    fetches it directly — the reusable attachment_id path errors on IG.
     //    Upload-based channels (WhatsApp / Messenger) push the bytes to Meta.
-    const byUrl = binding.provider.capabilities.mediaSendByUrl === true;
     let mediaId = "";
     let mediaUrl: string | undefined;
     if (byUrl) {
@@ -1795,6 +1799,7 @@ export class MessagesService {
       }
     } else {
       try {
+        const uploadMedia = requireProviderMethod(binding.provider, "uploadMedia", provider);
         const uploaded = await uploadMedia({ bytes, mimeType, filename }, sendConfig);
         mediaId = uploaded.mediaId;
       } catch (err) {

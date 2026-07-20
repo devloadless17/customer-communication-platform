@@ -412,11 +412,11 @@ function TableView({
                   href={`/broadcasts/${b.id}`}
                   className="block truncate font-medium text-foreground hover:text-primary"
                 >
-                  {b.name || b.templateName}
+                  {broadcastTitle(b)}
                 </Link>
                 <div className="mt-0.5 truncate text-2xs text-muted-foreground">
-                  {b.name ? `${b.templateName} · ` : ""}
-                  {b.templateLanguage} ·{" "}
+                  {b.name && b.templateName ? `${b.templateName} · ` : ""}
+                  {b.templateLanguage ? `${b.templateLanguage} · ` : ""}
                   {b.audienceMode === "all"
                     ? `All (${b.totalCount})`
                     : `${b.totalCount} selected`}
@@ -440,7 +440,7 @@ function TableView({
                 {canManage && (
                   <BroadcastDeleteButton
                     broadcastId={b.id}
-                    templateName={b.name || b.templateName}
+                    templateName={broadcastTitle(b)}
                     status={b.status}
                     onDeleted={() => onDeleted(b.id)}
                   />
@@ -487,11 +487,11 @@ function TableView({
                   href={`/broadcasts/${b.id}`}
                   className="block truncate font-medium text-foreground hover:text-primary"
                 >
-                  {b.name || b.templateName}
+                  {broadcastTitle(b)}
                 </Link>
                 <div className="truncate text-2xs text-muted-foreground">
-                  {b.name ? `${b.templateName} · ` : ""}
-                  {b.templateLanguage} · by {b.createdByName}
+                  {b.name && b.templateName ? `${b.templateName} · ` : ""}
+                  {b.templateLanguage ? `${b.templateLanguage} · ` : ""}by {b.createdByName}
                 </div>
               </td>
               <td className="px-4 py-3 text-muted-foreground">
@@ -533,7 +533,7 @@ function TableView({
                   {canManage && (
                     <BroadcastDeleteButton
                       broadcastId={b.id}
-                      templateName={b.name || b.templateName}
+                      templateName={broadcastTitle(b)}
                       status={b.status}
                       onDeleted={() => onDeleted(b.id)}
                     />
@@ -662,7 +662,7 @@ function CalendarView({ rows }: { rows: BroadcastListItem[] }) {
                   <Link
                     key={b.id}
                     href={`/broadcasts/${b.id}`}
-                    title={b.name || b.templateName}
+                    title={broadcastTitle(b)}
                     className={cn(
                       "truncate rounded px-1 py-0.5 text-3xs font-medium transition-opacity hover:opacity-80",
                       b.status === "scheduled"
@@ -672,7 +672,7 @@ function CalendarView({ rows }: { rows: BroadcastListItem[] }) {
                           : "bg-muted text-muted-foreground",
                     )}
                   >
-                    {b.name || b.templateName}
+                    {broadcastTitle(b)}
                   </Link>
                 ))}
                 {items.length > 3 && (
@@ -753,6 +753,14 @@ function canRetry(b: BroadcastListItem): boolean {
     b.failedCount > 0 &&
     (b.status === "completed" || b.status === "failed" || b.status === "canceled")
   );
+}
+
+/** Row title: name → templateName → a fallback for freeform/People broadcasts,
+ *  which have no templateName (so the raw `name || templateName` was blank). */
+function broadcastTitle(b: BroadcastListItem): string {
+  if (b.name) return b.name;
+  if (b.templateName) return b.templateName;
+  return b.targetMode === "customer" ? "People broadcast" : `Free-form · ${b.channel}`;
 }
 
 function ProgressBar({

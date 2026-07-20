@@ -175,15 +175,11 @@ export async function handoffToHuman(
 }
 
 /**
- * The assistant itself decided the customer needs a human (reply payload
- * `shouldEscalate`). Pause the thread (sticky `ai_paused`, system-initiated so
- * `pausedByUserId` is null) so it stops auto-replying until an agent resumes —
- * the customer-facing counterpart of the n8n "say human" branch. Idempotent:
- * skips the write when already paused/disabled so a redelivery doesn't churn.
- *
- * Distinct from `handoffToHuman` above: that one records the round-robin agent
- * the thread was handed TO, this one is system-initiated (no assignee yet) and
- * pairs with `runHandoffPolicy` for the assignment half.
+ * CURRENTLY UNUSED — superseded by `handoffToHuman` above. The live escalate
+ * path (orchestrator.ts) calls `handoffToHuman` + `assignConversation`, not this.
+ * Kept only as the intended system-initiated variant (no assignee yet, sticky
+ * `ai_paused`, idempotent on already paused/disabled). Do NOT edit this expecting
+ * a production effect — wire it up first, or change `handoffToHuman` instead.
  */
 export async function escalateToHuman(
   teamId: string,

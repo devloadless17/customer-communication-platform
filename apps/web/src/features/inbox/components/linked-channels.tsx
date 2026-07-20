@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { LocalTime } from "@/components/local-time";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { toast } from "@/lib/toast";
 import { CHANNEL_LABEL, ChannelBadge } from "./channel-badge";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type { Channel, ContactListItem } from "@ccp/shared/types";
@@ -133,6 +134,14 @@ export function LinkedChannels({ contactId }: { contactId: string }) {
 
   const linkedIds = new Set(profile?.contacts.map((c) => c.id) ?? []);
 
+  // These re-point Contact.customerId — a teammate may have merged/split the same
+  // identity a moment ago, so surface the server's reason on failure rather than
+  // silently no-op'ing (which reads as "it worked"). Matches the app-wide toast pattern.
+  async function toastError(res: Response, fallback: string) {
+    const json = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
+    toast.error(json.detail ?? json.error ?? fallback);
+  }
+
   async function link(otherId: string) {
     if (!profile) return;
     setBusy(true);
@@ -147,7 +156,11 @@ export function LinkedChannels({ contactId }: { contactId: string }) {
         setQuery("");
         setHits([]);
         await load();
+      } else {
+        await toastError(res, "Couldn't link that channel.");
       }
+    } catch {
+      toast.error("Couldn't link that channel.");
     } finally {
       setBusy(false);
     }
@@ -163,6 +176,9 @@ export function LinkedChannels({ contactId }: { contactId: string }) {
         body: JSON.stringify({ contactId: otherId }),
       });
       if (res.ok) await load();
+      else await toastError(res, "Couldn't unlink that channel.");
+    } catch {
+      toast.error("Couldn't unlink that channel.");
     } finally {
       setBusy(false);
     }
@@ -183,7 +199,11 @@ export function LinkedChannels({ contactId }: { contactId: string }) {
       if (res.ok) {
         const { customer } = (await res.json()) as { customer: Profile };
         setProfile(customer);
+      } else {
+        await toastError(res, "Couldn't rename this person.");
       }
+    } catch {
+      toast.error("Couldn't rename this person.");
     } finally {
       setBusy(false);
     }

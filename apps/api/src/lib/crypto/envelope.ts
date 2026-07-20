@@ -1,7 +1,7 @@
 /**
- * Envelope encryption for the per-team Meta secrets stored on the Team row
- * (CLAUDE.md rule #6 reminder + the schema TODO at metaAccessToken). The DB
- * column type stays `String?` — we just store ciphertext instead of plaintext.
+ * Envelope encryption for the per-(team, channel) credentials stored on
+ * `ChannelConnection.secrets` (CLAUDE.md §7 — non-plaintext channel creds).
+ * The JSON `secrets` blob just holds ciphertext instead of plaintext.
  *
  * Algorithm: AES-256-GCM with a fresh 96-bit IV per encryption. The 128-bit
  * GCM auth tag protects against modification — decrypt throws on any flip

@@ -268,7 +268,8 @@ export class ContactsService {
     },
   ): Promise<Contact | null> {
     const existing = await this.db.contact.findFirst({
-      where: { teamId, phoneNumber: phone, deletedAt: { not: null } },
+      // whatsapp-scoped: the phone unique slot being revived is WhatsApp-only.
+      where: { teamId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: { not: null } },
       select: { id: true },
     });
     if (!existing) return null;
@@ -1082,13 +1083,19 @@ export class ContactsService {
     // Two narrow lookups (active + tombstoned) instead of one un-filtered query
     // so tombstoned rows don't masquerade as duplicates.
     const phones = pending.map((p) => p.phoneNumber);
+    // CSV import is WhatsApp-semantic — it creates rows with identityChannel:
+    // 'whatsapp' (below) and the phone partial-unique fires only for whatsapp.
+    // Scope every phone-keyed lookup the same way, else a phone that a social/
+    // widget contact borrowed (contact-share / widget pre-chat) is read as an
+    // "existing" duplicate and the import silently skips creating the WhatsApp
+    // contact (or revives the wrong-channel row).
     const [activeRows, tombstonedRows] = await Promise.all([
       this.db.contact.findMany({
-        where: { teamId, phoneNumber: { in: phones }, deletedAt: null },
+        where: { teamId, identityChannel: "whatsapp", phoneNumber: { in: phones }, deletedAt: null },
         select: { phoneNumber: true },
       }),
       this.db.contact.findMany({
-        where: { teamId, phoneNumber: { in: phones }, deletedAt: { not: null } },
+        where: { teamId, identityChannel: "whatsapp", phoneNumber: { in: phones }, deletedAt: { not: null } },
         select: { id: true, phoneNumber: true },
       }),
     ]);
@@ -1286,6 +1293,8 @@ export class ContactsService {
       const taggedRows = await this.db.contact.findMany({
         where: {
           teamId,
+          identityChannel: "whatsapp",
+          deletedAt: null,
           phoneNumber: { in: rowsWithTags.map((p) => p.phoneNumber) },
         },
         select: { id: true, phoneNumber: true },
@@ -1341,7 +1350,7 @@ export class ContactsService {
     if (created > 0 && toCreate.length > 0) {
       const createdPhones = toCreate.map((p) => p.phoneNumber);
       const createdRows = await this.db.contact.findMany({
-        where: { teamId, phoneNumber: { in: createdPhones }, deletedAt: null },
+        where: { teamId, identityChannel: "whatsapp", phoneNumber: { in: createdPhones }, deletedAt: null },
         include: { tags: { select: { id: true } } },
       });
       // 16-lane fanout (see the revived-rows loop / bulk-delete at line 575) —
@@ -1372,7 +1381,7 @@ export class ContactsService {
     if (created + revived > 0) {
       const importedPhones = [...toCreate, ...toRevive].map((p) => p.phoneNumber);
       const importedRows = await this.db.contact.findMany({
-        where: { teamId, phoneNumber: { in: importedPhones }, deletedAt: null },
+        where: { teamId, identityChannel: "whatsapp", phoneNumber: { in: importedPhones }, deletedAt: null },
         select: { id: true },
       });
       if (importedRows.length > 0) {

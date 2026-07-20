@@ -92,9 +92,21 @@ export function pickBestChannel(
 
   if (candidates.length === 0) return null;
 
-  // In-window first, then most-recently-active.
+  // In-window first, then DURABLE channels over ephemeral ones, then
+  // most-recently-active. The ephemeral-demotion tiebreak is load-bearing: a
+  // workflow customer-target reaching a person who has both a fresh widget
+  // session (20 min ago) and an open WhatsApp window (3 h ago, still inside 24h)
+  // would otherwise pick the widget purely on recency — routing an automation
+  // reply to a browser tab the visitor has since closed instead of their durable
+  // WhatsApp thread. Ephemeral is only DEMOTED here, never dropped, so a
+  // widget-only person still resolves (the caller's fallback is preserved).
+  // Broadcast's customer-mode pre-filters ephemeral channels before ranking, so
+  // its behavior is unchanged.
   candidates.sort(
-    (a, b) => Number(b.inWindow) - Number(a.inWindow) || b.lastInboundMs - a.lastInboundMs,
+    (a, b) =>
+      Number(b.inWindow) - Number(a.inWindow) ||
+      Number(isEphemeralChannel(a.channel)) - Number(isEphemeralChannel(b.channel)) ||
+      b.lastInboundMs - a.lastInboundMs,
   );
   const best = candidates[0]!;
   return { contactId: best.contactId, channel: best.channel, to: best.to, inWindow: best.inWindow };

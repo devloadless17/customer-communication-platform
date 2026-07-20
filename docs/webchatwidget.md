@@ -34,17 +34,55 @@ socket `ready`), so it isn't only a floating bubble:
 - `data-webchat-position="right|left"` (default `right`).
 - `data-webchat-label="Chat with us"` — a text pill beside the bubble.
 - `data-webchat-target="#selector"` — **inline embed**: the panel mounts INSIDE
-  that element (full container, always open, no launcher).
-- `data-webchat-icon` — custom launcher icon (url/emoji).
+  that element (fills the container, always open, no launcher). The container's
+  size is the customer's to choose; a `min-height` floor stops a height-less
+  ancestor chain collapsing it to nothing. If the element doesn't exist yet (a
+  React/Next/Vue host that mounts after hydration) the widget watches for it for
+  15s, then logs how to mount manually — a one-shot lookup used to leave SPA
+  embeds permanently invisible.
+- `data-webchat-api="https://api-host"` — override the API origin. Only needed
+  when the API is NOT on the script's own origin, i.e. split-port local dev
+  (`pnpm dev`: web :3000, api :4000). Production is single-origin behind Caddy.
 
-**JS API:** `window.CCPWebchat = { open, close, toggle, isOpen }` with a pre-load
-call queue, so any element opens the chat — e.g.
+**JS API:** `window.CCPWebchat = { open, close, toggle, isOpen, mount, unreadCount,
+on }` with a pre-load call queue, so any element opens the chat — e.g.
 `<a onclick="CCPWebchat.open()">Chat</a>` with the launcher hidden. This is the
 "a link opens the chat" deployment.
+- `mount(elOrSelector)` — attach an inline embed once its container exists (SPAs).
+- `on(event, fn) → unsubscribe` for `"ready" | "message" | "unread" | "typing"`,
+  so a host page can render its OWN unread badge or typing hint without reaching
+  into the shadow root.
 
-The panel loads **closed by default** (a page load can't tell a refresh from a
-navigation); conversation history is preserved and an **unread badge** on the
-launcher signals agent replies received while it was closed.
+The panel **restores whatever state it was left in** — open stays open across a
+refresh (`ccp_wc_open_<siteKey>`), conversation history replays on connect, and an
+**unread badge** on the launcher signals agent replies received while it was closed.
+
+## Allowed origins (and how a widget gets locked)
+
+`WebchatWidget.allowedOrigins` holds hosts (`example.com`, `*.example.com`), and an
+**EMPTY list is permissive on purpose** — a brand-new widget has to work on the
+customer's page before they've configured anything, and refusing until a domain is
+set would break every first install. `localhost`/`127.0.0.1` always pass in dev.
+
+The residual risk is not spam, it's **impersonation**: the site key is public by
+design (it sits in the page source of every page it's installed on), so an unlocked
+widget can be lifted onto a phishing page where the visitor believes they're talking
+to the brand and the agent sees an ordinary conversation.
+
+**Trust-on-first-use** closes that without an onboarding step. The handshake records
+`WebchatWidget.firstSeenOrigin` — the host of the first NON-loopback page to embed the
+widget — and Settings then offers a one-click "Lock to `<domain>`". Properties:
+
+- **Write-once** (`updateMany` CAS on `firstSeenOrigin: null`), so a later attacker
+  origin cannot overwrite the suggestion to launder its own domain in.
+- **Loopback is skipped** — a developer testing locally is not the site to lock to.
+- **Only recorded while `allowedOrigins` is empty**, and it NEVER gates a connection
+  on its own, so a wrong guess can't lock a customer out of their own widget.
+- **Off the hot path**: fire-and-forget, and skipped entirely once the widget is
+  locked or the origin is already known (both read from the cached resolve).
+
+`recordFirstSeenOrigin` lives in `apps/api/src/lib/providers/webchatwidget-config.ts`
+(domain layer) — the gateway only calls it.
 
 ## Theming
 

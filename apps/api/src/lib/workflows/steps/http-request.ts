@@ -192,13 +192,17 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
           "User-Agent": "ccp-workflows/1",
           ...(resolvedToken ? { Authorization: `Bearer ${resolvedToken}` } : {}),
           ...(resolvedHeaders ?? {}),
-          // Idempotency key STABLE across BullMQ retries (runId + stepId don't
-          // change on retry; only `attempt` does). This step is sideEffect:"pure"
-          // — the runner does NOT journal it, so a transient failure / slow
-          // (>timeout) response re-runs the job and re-POSTs. Without a stable
-          // key the partner has no way to dedupe → double charge/ticket. Set
-          // AFTER the custom-header spread so a partner can't override it.
-          "X-CCP-Delivery": `${ctx.runId}:${ctx.stepId}`,
+          // Idempotency key STABLE across BullMQ retries (runId + stepId +
+          // executionIndex don't change on retry; only `attempt` does) but
+          // DISTINCT per jump_to_step re-entry (executionIndex increments). This
+          // step is sideEffect:"pure" — the runner does NOT journal it, so a
+          // transient failure / slow (>timeout) response re-runs the job and
+          // re-POSTs; without a stable key the partner can't dedupe → double
+          // charge/ticket. WITHOUT executionIndex a clarifier loop (…→ notify →
+          // jump back → notify) re-POSTs with the SAME key, so a partner deduping
+          // on it silently drops every iteration after the first. Set AFTER the
+          // custom-header spread so a partner can't override it.
+          "X-CCP-Delivery": `${ctx.runId}:${ctx.stepId}:${ctx.executionIndex}`,
           "X-CCP-Depth": String(nextDepth),
         },
         body: serializedBody,

@@ -63,7 +63,25 @@ export default async function NewBroadcastPage({
         tagIds: source.audienceTagIds ?? [],
         groupId: source.audienceGroupId ?? null,
         contactIds: cloneContactIds,
+        // Message content — without these, duplicating a freeform / People
+        // broadcast silently dropped its kind + channel + body and reopened as
+        // an empty WhatsApp-template composer.
+        kind: source.kind,
+        targetMode: source.targetMode,
+        channel: source.channel,
+        bodyText: source.bodyText,
       }
+    : null;
+  // Reproduce the source's message kind on duplicate rather than defaulting to
+  // "template": a freeform-to-one-channel clone reopens as freeform on that
+  // channel, a customer-mode ("People") clone reopens in People mode, and both
+  // carry the original body text.
+  const cloneMessageKind: "template" | "freeform" | "customer" | null = clone
+    ? clone.kind === "template"
+      ? "template"
+      : clone.targetMode === "customer"
+        ? "customer"
+        : "freeform"
     : null;
 
   // Audience prefill — clone's audience wins; otherwise the deep-link params.
@@ -132,6 +150,9 @@ export default async function NewBroadcastPage({
       cloneTemplateId={clone?.templateId ?? null}
       cloneBodyVars={clone?.variables.body ?? null}
       cloneHeaderVar={clone?.variables.header ?? null}
+      cloneKind={cloneMessageKind}
+      cloneBodyText={clone?.bodyText ?? null}
+      cloneChannel={clone?.channel ?? null}
     />
   );
 }

@@ -976,3 +976,15 @@ export interface SocketData {
 
 /** Path Socket.io binds to. Kept here so client and server cannot drift. */
 export const SOCKET_PATH = "/api/socket";
+
+/**
+ * Handshake query flag marking a socket as the anonymous WEBSITE WIDGET rather
+ * than the agent app. Both share one Socket.io server, and CORS is resolved on the
+ * HTTP handshake before any namespace is known — so the transport-level CORS
+ * delegate in `ws-adapter.ts` needs this to tell them apart and reflect the
+ * customer's third-party origin WITHOUT credentials (see the rationale there).
+ *
+ * `apps/web/public/widget.js` is plain, un-bundled JS served as a static asset, so
+ * it cannot import this — it hardcodes the literal `widget=1`. Change both together.
+ */
+export const WIDGET_HANDSHAKE_FLAG = "widget";

@@ -46,15 +46,24 @@ export interface BroadcastDetailDto {
   id: string;
   status: string;
   name: string | null;
+  // freeform / People (customer-mode) broadcasts have no template — these are
+  // null for them; the message is carried by `kind` + `bodyText` instead.
+  kind: "template" | "freeform";
+  channel: string;
+  targetMode: "contact" | "customer";
+  bodyText: string | null;
   scheduledAt: string | null;
-  templateId: string;
-  templateName: string;
-  templateLanguage: string;
+  templateId: string | null;
+  templateName: string | null;
+  templateLanguage: string | null;
   audienceMode: string;
   variables: unknown;
   totalCount: number;
   sentCount: number;
   failedCount: number;
+  /** Retryable failures only — excludes cancel-finalized recipients (retryFailed
+   *  ignores those, so gating the Retry button on the raw failedCount 409s). */
+  genuineFailedCount: number;
   lastError: string | null;
   createdByName: string;
   createdAt: string;
@@ -395,6 +404,14 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
   }, [data.status, data.id]);
 
   const variables = parseVariables(data.variables);
+  // Title: prefer the operator-set name, then the template name, then a
+  // human fallback for freeform / People broadcasts (which have neither).
+  const isFreeform = data.kind === "freeform" || data.targetMode === "customer";
+  const fallbackTitle =
+    data.targetMode === "customer"
+      ? "People broadcast"
+      : `Free-form · ${data.channel}`;
+  const title = data.name || data.templateName || fallbackTitle;
   const remaining = data.totalCount - data.sentCount - data.failedCount;
   const progressPct =
     data.totalCount === 0
@@ -407,9 +424,9 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <h1 className="truncate text-2xl font-semibold tracking-tight">
-              {data.name || data.templateName}
+              {title}
             </h1>
-            {data.name && (
+            {data.name && data.templateName && (
               <div className="mt-0.5 truncate text-xs text-muted-foreground">
                 Template: {data.templateName}
               </div>
@@ -438,9 +455,12 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                 Stop broadcast
               </button>
             )}
-            {/* Retry only makes sense on a finished broadcast that has
-                failures. Hidden while scheduled/queued/running. */}
-            {data.failedCount > 0 &&
+            {/* Retry only makes sense on a finished broadcast that has REAL
+                (retryable) failures. Gated on genuineFailedCount — the raw
+                failedCount includes cancel-finalized recipients that
+                retryFailed() excludes, so gating on it showed a button that
+                409s ("no failed recipients") on a canceled broadcast. */}
+            {data.genuineFailedCount > 0 &&
               (data.status === "completed" ||
                 data.status === "failed" ||
                 data.status === "canceled") && (
@@ -455,7 +475,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                   ) : (
                     <RotateCcw className="size-3.5" />
                   )}
-                  Retry {data.failedCount} failed
+                  Retry {data.genuineFailedCount} failed
                 </button>
               )}
             <BroadcastStatusBadge status={data.status} failedCount={data.failedCount} totalCount={data.totalCount} />
@@ -581,6 +601,11 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
               if (filter.startsWith("outcome=")) {
                 if (value === "failed" || value === "never_received") setStatusFilter("failed");
                 else if (value === "all") setStatusFilter("all");
+              } else if (filter.startsWith("errorCode=")) {
+                // Per-error-code buckets are all failures — map to the failed
+                // tab (a truthful superset) so the click actually narrows the
+                // table instead of only scrolling.
+                setStatusFilter("failed");
               }
               document.getElementById("broadcast-recipients")?.scrollIntoView({
                 behavior: "smooth",
@@ -593,32 +618,46 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
 
       <section className="rounded-xl border border-border bg-card">
         <header className="border-b border-border bg-muted/30 px-4 py-3">
-          <div className="text-sm font-semibold">Template snapshot</div>
+          <div className="text-sm font-semibold">
+            {isFreeform ? "Message snapshot" : "Template snapshot"}
+          </div>
           <div className="text-2xs text-muted-foreground">
-            Captured at the moment the broadcast was created — even if the
-            template gets edited in WhatsApp Manager, this is what was sent.
+            {isFreeform
+              ? "The message that was sent to each recipient, captured at send time."
+              : "Captured at the moment the broadcast was created — even if the template gets edited in WhatsApp Manager, this is what was sent."}
           </div>
         </header>
         <div className="px-4 py-4">
-          {(variables.header || variables.body.length > 0) && (
-            <dl className="mb-3 flex flex-wrap gap-x-6 gap-y-2 text-xs">
-              {variables.header !== undefined && (
-                <div className="flex flex-col">
-                  <dt className="text-3xs uppercase tracking-wide text-muted-foreground">
-                    Header
-                  </dt>
-                  <dd className="font-mono">{variables.header || "—"}</dd>
-                </div>
+          {isFreeform ? (
+            // Freeform / People broadcasts have no template variables — show the
+            // actual message body (previously rendered nowhere, so these
+            // broadcasts had a blank snapshot card).
+            <p className="whitespace-pre-wrap break-words text-sm">
+              {data.bodyText || (
+                <span className="text-muted-foreground">No message body.</span>
               )}
-              {variables.body.map((v, i) => (
-                <div key={i} className="flex flex-col">
-                  <dt className="text-3xs uppercase tracking-wide text-muted-foreground">
-                    {`{{${i + 1}}}`}
-                  </dt>
-                  <dd className="font-mono">{v || "—"}</dd>
-                </div>
-              ))}
-            </dl>
+            </p>
+          ) : (
+            (variables.header || variables.body.length > 0) && (
+              <dl className="mb-3 flex flex-wrap gap-x-6 gap-y-2 text-xs">
+                {variables.header !== undefined && (
+                  <div className="flex flex-col">
+                    <dt className="text-3xs uppercase tracking-wide text-muted-foreground">
+                      Header
+                    </dt>
+                    <dd className="font-mono">{variables.header || "—"}</dd>
+                  </div>
+                )}
+                {variables.body.map((v, i) => (
+                  <div key={i} className="flex flex-col">
+                    <dt className="text-3xs uppercase tracking-wide text-muted-foreground">
+                      {`{{${i + 1}}}`}
+                    </dt>
+                    <dd className="font-mono">{v || "—"}</dd>
+                  </div>
+                ))}
+              </dl>
+            )
           )}
         </div>
       </section>

@@ -1580,7 +1580,6 @@ export class ChannelsService {
       threadRootId: string | null;
     },
   ) {
-    const receivedAt = new Date();
     await this.requireChannelMembership(teamId, userId, channelId);
 
     if (args.threadRootId) {
@@ -1631,6 +1630,11 @@ export class ChannelsService {
 
     const validMentionIds = await this.validateMentions(teamId, channelId, args.body);
     const preview = buildMessagePreview(args.body, true);
+    // Stamp AFTER the (potentially slow) blob upload so createdAt / lastMessageAt
+    // reflect commit time, not upload start. A method-entry stamp backdates the
+    // message and moves lastMessageAt backwards past activity that happened during
+    // a large upload (breaking unread + the timestamp-delta backfill).
+    const receivedAt = new Date();
     let created: { id: string; threadReplyCount: number };
     try {
       created = await this.db.$transaction(async (tx) => {

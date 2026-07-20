@@ -142,6 +142,20 @@ export function getClientSocket(): ClientSocket {
     warned = false;
   });
 
+  // Deploy-safe reconnect. When the api drains sockets on SIGTERM it sends a
+  // namespace DISCONNECT packet ('io server disconnect'), and Socket.io's
+  // client does NOT auto-reconnect after that reason — so without this every
+  // deploy would leave agents on a dead socket ("Reconnecting…" never fires)
+  // until they manually reload. Manually reconnect in that case; the new api
+  // instance is up within the compose grace window. teardown-guarded so a
+  // deliberate eviction (unauthenticated → /logout above) never loops. Other
+  // reasons ('transport close', 'ping timeout') already auto-reconnect.
+  socket.on("disconnect", (reason) => {
+    if (reason === "io server disconnect" && !teardown) {
+      socket?.connect();
+    }
+  });
+
   return socket;
 }
 

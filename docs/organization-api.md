@@ -38,7 +38,7 @@ curl -s "$CCP_BASE_URL/api/external/v1/conversations?limit=5" \
 | **Auth** | `Authorization: Bearer $CCP_API_KEY` on every request |
 | **Scopes** | Each route needs a scope (listed per endpoint). A **Full access** key has all of them. |
 | **Idempotency** | The three **send** routes (`POST /messages`, `POST /conversations/:id/messages`, `POST /conversations/:id/interactive`) **require** an `Idempotency-Key` header — reuse the same value on a retry and we won't double-send. Use something stable per logical send (e.g. the inbound message id). |
-| **Rate limit** | **60 req/min per key**, across *all* routes — over it returns `429 {"error":"rate_limited"}`. Sends carry an extra **30/min per conversation** loop-guard. Missing/bad keys are throttled separately at 30/min per IP. |
+| **Rate limit** | **60 req/min per key**, across *all* routes — over it returns `429 {"error":"rate_limited"}`. Sends carry an extra **30/min per conversation** loop-guard, and the bulk tag routes (`POST /contacts/tags/add\|remove`) are additionally capped at **20/min per key**. Missing/bad keys are throttled separately at 30/min per IP. |
 | **24-hour window** | Free-form text/media only sends to a customer who messaged you within the channel's window (WhatsApp 24h; Messenger/Instagram 24h + a 7-day human-agent extension). Outside it, WhatsApp needs a **template**; Messenger/Instagram have no templates — wait for the customer to message again. |
 | **Pagination** | List routes take `?limit=&cursor=`. The response includes `nextCursor` (null when done) — pass it back as `cursor`. |
 | **Errors** | Non-2xx returns `{ "error": "code", "detail": "..." }`. Common: `401` (missing/invalid key), `403 insufficient_scope` (key lacks the route's scope), `404` (not found / wrong org), `409 duplicate_phone` (create on an existing number), `422`/`400` (validation), `429 rate_limited` / `chain_depth_exceeded`. |
@@ -236,6 +236,8 @@ curl -s -X POST "$CCP_BASE_URL/api/external/v1/messages" \
   }'
 ```
 Media instead of text — **ROADMAP, not yet supported.** URL-based media send via `/v1/messages` currently returns `400 media_not_yet_supported`; the URL → upload → send pipeline is on the roadmap. Send media via the inbox UI for now.
+
+> **UI send types not yet exposed on `/v1` (roadmap, tracked exceptions to the UI↔API parity rule):** direct **media upload**, **location**, **contact-card**, **reaction** (and dismiss), and **message forward**. These exist in the inbox composer but have no `/v1` twin yet. Text, template, and interactive sends have full `/v1` parity. Use the inbox UI for the above until they land.
 ```bash
 # NOT YET SUPPORTED — returns 400 media_not_yet_supported
   -d '{ "contact": { "phone": "+96170123456" },
@@ -304,7 +306,7 @@ curl -s -X DELETE "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/n
 
 > **Note on unified customers:** merging/splitting a `Customer` (linking channel contacts into one person) is currently a **UI-only** capability — there is no `/v1` customers resource yet. Auto-merge on a self-asserted strong key (exact phone/email) still happens automatically at ingest. Programmatic merge/split is a planned addition; until then, reconcile identities in the inbox.
 
-> **Note on broadcasts:** bulk templated/free-form outbound (**Broadcasts**) is currently a **UI-only** capability — there is no `/v1` broadcasts resource yet. To reach many contacts programmatically today, iterate the send routes above (each with its own `Idempotency-Key`). A `/v1` broadcast trigger is a planned addition.
+> **Note on broadcasts:** *creating* a broadcast is a **UI-only** capability — there is deliberately no `write:broadcasts` scope (billed template sends are irreversible), so to reach many contacts programmatically today you iterate the send routes above (each with its own `Idempotency-Key`). Read-only campaign/report/recipient endpoints **do** exist — see the [Broadcasts](#7-broadcasts-campaign-reporting) section below.
 
 ---
 
@@ -353,8 +355,11 @@ API is a separate feature, and billed template sends are irreversible.
 GET /api/external/v1/broadcasts?status=completed&since=2026-07-01T00:00:00Z&limit=50&cursor=...
 ```
 
-Returns `{ items, nextCursor }`, newest first. Use `since` to poll incrementally
-("what finished since my last sync") instead of re-pulling history.
+Returns `{ items, nextCursor }`, newest first. `since` filters on **broadcast
+creation time** (`createdAt`), not completion — use it to poll for campaigns
+**created** since your last sync. (A campaign created before your window but
+completing inside it will not appear; page without `since` if you need
+completion-time semantics.)
 
 ### One campaign
 

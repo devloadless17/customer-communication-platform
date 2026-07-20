@@ -835,8 +835,14 @@ export class ExternalV1Controller {
   /**
    * Interactive send — buttons / list options, plus Meta's one-tap "share your
    * phone / email" consent chips. The external twin of the composer's
-   * `POST /api/messages/interactive`; §12 locks `/v1` to UI parity, and this was
-   * the last capability the UI had that the API didn't.
+   * `POST /api/messages/interactive`; §12 locks `/v1` to UI parity.
+   *
+   * Parity gap (tracked, documented as a roadmap exception in both
+   * docs/organization-api.md and the /docs/api page alongside the URL-media
+   * note): the composer send types shipped 2026-07-13 — location, contact-card,
+   * reaction (+dismiss), and forward — plus direct media upload have no `/v1`
+   * twin yet. They're not silently missing: the doc surfaces list them as
+   * not-yet-in-/v1 so the parity contract stays honest until they're wired.
    *
    * Social channels only for `contactShare` (capability `contactShareChips`) —
    * WhatsApp already knows the phone and has no such chip, so it 422s with

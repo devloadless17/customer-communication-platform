@@ -47,6 +47,10 @@
     // "this visitor has chatted before" — drives eager connect on later visits so
     // agent replies and the unread badge still arrive without opening the panel.
     chatted: "ccp_wc_chatted_" + siteKey,
+    // Panel open/closed across reloads. Without it a refresh mid-conversation
+    // silently closed the chat and the visitor had to hunt for the bubble again;
+    // Intercom/Crisp/Drift all restore this.
+    open: "ccp_wc_open_" + siteKey,
   };
   // Storage access itself can THROW (Safari private mode, "block all cookies"), so
   // every call is guarded. Fall back localStorage → sessionStorage → in-memory:
@@ -90,6 +94,8 @@
   var S = {
     socket: null, conn: "connecting", open: INLINE, ready: false, viewInit: false,
     formDone: false, closed: false, cfg: null, preChat: null, replyTo: null, fatal: false,
+    /** File picked but not sent yet — see stageFile/clearStage. */
+    staged: null,
     byId: {}, pending: {}, unread: 0, lastSeenTs: Number(lsGet(K.seen) || 0),
     lastGroup: null, stick: true, readTimer: null, typingClear: null,
     hasMore: false, oldestCursor: null, loadingOlder: false, typingOn: false, recording: null,
@@ -147,7 +153,11 @@
     ":host,*{box-sizing:border-box}",
     ".root{--c:" + BRAND + ";--ct:#fff;--lc:" + BRAND + ";--uc:" + BRAND + ";--uct:#fff;--surface:#fff;--surface2:#f5f7fb;--inb:#fff;--border:#e6e9f0;--ink:#0f1729;--ink2:#66748c;--radius:20px;font-family:var(--font,ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif);color:var(--ink)}",
     ".root.dark{--surface:#0f172a;--surface2:#0b1220;--inb:#1e293b;--border:#243244;--ink:#e8edf6;--ink2:#93a1b8}",
-    ".root.inl{height:100%}",
+    // Inline embeds fill their host container. `min-height` is the safety net: an
+    // ancestor chain with no resolved height makes `height:100%` collapse to zero,
+    // which reads as "the widget didn't load" rather than "size your container".
+    // Wider media too — a full-page inline chat showing 236px images looked broken.
+    ".root.inl{height:100%;min-height:320px;--media-max:min(100%,420px)}",
     ".launch{position:fixed;bottom:22px;z-index:2147483646;display:flex;align-items:center;gap:10px;border:0;background:transparent;cursor:pointer;padding:0}",
     ".launch.right{right:22px;flex-direction:row}.launch.left{left:22px;flex-direction:row-reverse}",
     // NOTE on the doubled `background` declarations here and below: color-mix() is
@@ -192,8 +202,10 @@
     ".bubble a{color:inherit;text-decoration:underline;text-underline-offset:2px}",
     ".meta{font-size:10.5px;color:var(--ink2);margin:3px 5px 0;display:flex;gap:4px;align-items:center}.tick.err{color:#ef4444}.retry{color:#ef4444;cursor:pointer;text-decoration:underline}.tick.read{color:#38bdf8}",
     ".rep{opacity:0;background:transparent;border:0;color:var(--ink2);cursor:pointer;font-size:14px;align-self:center;padding:4px;border-radius:7px;transition:opacity .12s}.mr:hover .rep{opacity:.7}.rep:hover{opacity:1;background:color-mix(in srgb,var(--ink2) 14%,transparent)}",
-    ".rq{border-left:3px solid rgba(0,0,0,.18);padding:2px 8px;margin-bottom:5px;font-size:12.5px;opacity:.85;max-height:44px;overflow:hidden}.mr.out .rq{border-left-color:rgba(255,255,255,.55)}",
-    ".media img,.media video{max-width:236px;max-height:250px;border-radius:13px;display:block;cursor:pointer}.media audio{width:236px}",
+    ".rq{border-left:3px solid rgba(0,0,0,.18);padding:2px 8px;margin-bottom:5px;font-size:12.5px;opacity:.85;max-height:44px;overflow:hidden}.mr.out .rq{border-left-color:rgba(255,255,255,.55)}.rq.jump{cursor:pointer}.rq.jump:hover{opacity:1}",
+    // Brief highlight on the message a quote jumped to, so the eye lands on it.
+    "@keyframes rqflash{0%,100%{background:transparent}25%,75%{background:color-mix(in srgb,var(--c) 26%,transparent)}}.mr.flash{animation:rqflash 1.2s ease}",
+    ".media img,.media video{max-width:var(--media-max,236px);max-height:250px;border-radius:13px;display:block;cursor:pointer}.media audio{width:var(--media-max,236px);max-width:100%}",
     ".doc{display:flex;align-items:center;gap:9px;text-decoration:none;color:inherit;font-size:13px}.doc .ic{width:32px;height:32px;flex:0 0 auto;border-radius:8px;background:rgba(0,0,0,.08);display:flex;align-items:center;justify-content:center}",
     ".prog{height:4px;background:rgba(0,0,0,.14);border-radius:9999px;overflow:hidden;margin-top:7px}.prog i{display:block;height:100%;background:currentColor;width:0;transition:width .15s}",
     ".typ{display:inline-flex;gap:4px;padding:4px 2px}.typ i{width:6px;height:6px;background:var(--ink2);border-radius:9999px;animation:tb 1s infinite}.typ i:nth-child(2){animation-delay:.15s}.typ i:nth-child(3){animation-delay:.3s}@keyframes tb{0%,80%,100%{transform:scale(.6);opacity:.5}40%{transform:scale(1);opacity:1}}",
@@ -204,6 +216,8 @@
     ".err{color:#dc2626;font-size:12px}",
     ".rc{display:none;align-items:center;gap:9px;padding:8px 14px;background:color-mix(in srgb,var(--c) 8%,var(--surface));border-top:1px solid var(--border);font-size:12.5px;color:var(--ink);flex:0 0 auto}.rc.on{display:flex}.rc .qt{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rc button{border:0;background:transparent;cursor:pointer;color:var(--ink2);font-size:16px}",
     ".composer{padding:12px 14px 14px;background:var(--surface);flex:0 0 auto}",
+    // Staged-attachment chip: the file the visitor picked but hasn't sent yet.
+    ".stg{display:none;align-items:center;gap:10px;margin-bottom:8px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:14px}.stg.on{display:flex}.stg img{width:40px;height:40px;flex:0 0 auto;object-fit:cover;border-radius:9px}.stg .ic{width:40px;height:40px;flex:0 0 auto;border-radius:9px;background:color-mix(in srgb,var(--ink2) 12%,transparent);display:flex;align-items:center;justify-content:center;font-size:18px}.stg .meta{flex:1;min-width:0}.stg .nm{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.stg .sz{font-size:11.5px;color:var(--ink2)}.stg .x{border:0;background:transparent;cursor:pointer;color:var(--ink2);font-size:17px;line-height:1;padding:4px}.stg .x:hover{color:var(--ink)}",
     ".ibar{display:flex;align-items:flex-end;gap:4px;background:var(--surface2);border:1.5px solid var(--border);border-radius:24px;padding:5px 5px 5px 7px;transition:border-color .15s,box-shadow .15s}.ibar.focus{border-color:var(--c);box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 16%,transparent)}",
     ".composer textarea{flex:1;resize:none;border:0;outline:none;background:transparent;font:inherit;font-size:14px;line-height:1.45;padding:8px 6px;max-height:112px;min-height:20px;overflow-y:hidden;color:var(--ink);appearance:none;-webkit-appearance:none}",
     ".rbtn{width:38px;height:38px;flex:0 0 auto;border:0;border-radius:9999px;cursor:pointer;display:flex;align-items:center;justify-content:center;background:transparent;color:var(--ink2);transition:.12s}.rbtn:hover{background:color-mix(in srgb,var(--ink2) 14%,transparent);color:var(--ink)}.rbtn svg{width:19px;height:19px}",
@@ -259,7 +273,15 @@
   var sendBtn = el("button", { class: "rbtn sbtn", "aria-label": "Send message", html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>' });
   var micBtn = el("button", { class: "rbtn", "aria-label": "Record a voice message", title: "Voice message", html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>' });
   var ibar = el("div", { class: "ibar" }, [attachBtn, micBtn, ta, sendBtn]);
-  var composer = el("div", { class: "composer" }, [ibar, fileInput]);
+  // Staged attachment preview. Picking a file no longer sends it: it lands here so
+  // the visitor can confirm they chose the right one and add a caption, matching
+  // both the agent composer and every mainstream messenger.
+  var stgThumb = el("span", { class: "ic" }, "📎");
+  var stgName = el("div", { class: "nm" });
+  var stgSize = el("div", { class: "sz" });
+  var stgClear = el("button", { class: "x", type: "button", "aria-label": "Remove attachment", html: "&times;" });
+  var stageEl = el("div", { class: "stg" }, [stgThumb, el("div", { class: "meta" }, [stgName, stgSize]), stgClear]);
+  var composer = el("div", { class: "composer" }, [stageEl, ibar, fileInput]);
   // Hidden until the socket proves itself (`ready`/`history`) or the pre-chat
   // form is submitted. Previously it painted immediately while S.formDone was
   // still false, so onSend() returned early and a visitor typing into an
@@ -272,19 +294,50 @@
   var footEl = el("div", { class: "foot" }); footEl.style.display = "none"; panel.appendChild(footEl);
 
   root.appendChild(panel); // panel stays inside the shadow root (keeps its styles)
-  if (INLINE) {
-    var tgt = document.querySelector(A.target);
-    if (tgt) {
-      tgt.appendChild(host);
-      // Undo the floating-mode pinning above (set with !important, so these must
-      // be too) — inline embeds fill their container instead of the viewport.
-      host.style.setProperty("position", "static", "important");
-      host.style.setProperty("display", "block", "important");
-      host.style.setProperty("width", "100%", "important");
-      host.style.setProperty("height", "100%", "important");
-      root.classList.add("inl");
+  /**
+   * Attach an inline embed to its container.
+   *
+   * Exposed as `CCPWebchat.mount(elOrSelector)` and retried by observer below,
+   * because a ONE-SHOT `querySelector` at script time is wrong for the customers
+   * most likely to use inline mode: a React/Next/Vue host mounts its container
+   * after hydration, so the lookup missed, we logged a warning, and the widget
+   * stayed invisible forever with no way to recover.
+   */
+  function mountInline(target) {
+    var tgt = typeof target === "string" ? document.querySelector(target) : target;
+    if (!tgt || !tgt.appendChild) return false;
+    if (host.parentNode === tgt) return true;
+    tgt.appendChild(host);
+    // Undo the floating-mode pinning above (set with !important, so these must
+    // be too) — inline embeds fill their container instead of the viewport.
+    host.style.setProperty("position", "static", "important");
+    host.style.setProperty("display", "block", "important");
+    host.style.setProperty("width", "100%", "important");
+    host.style.setProperty("height", "100%", "important");
+    root.classList.add("inl");
+    return true;
+  }
+  if (INLINE && !mountInline(A.target)) {
+    // Not in the DOM yet. Watch for it rather than giving up — bounded so we don't
+    // leave an observer running forever on a page whose selector is simply a typo.
+    var mo = null, moStop = null;
+    var giveUp = function () {
+      if (mo) { mo.disconnect(); mo = null; }
+      if (moStop) { clearTimeout(moStop); moStop = null; }
+    };
+    try {
+      mo = new MutationObserver(function () { if (mountInline(A.target)) giveUp(); });
+      mo.observe(document.documentElement, { childList: true, subtree: true });
+      moStop = setTimeout(function () {
+        giveUp();
+        console.warn(
+          "[webchat] target not found after 15s: " + A.target +
+          " — check the selector, or call CCPWebchat.mount(element) once your container exists.",
+        );
+      }, 15000);
+    } catch (_e) {
+      console.warn("[webchat] target not found:", A.target);
     }
-    else console.warn("[webchat] target not found:", A.target);
   }
   var lightbox = el("div", { class: "lb", "aria-hidden": "true" }); root.appendChild(lightbox);
 
@@ -298,7 +351,21 @@
   // open and hand the height back on close.
   var vv = window.visualViewport || null;
   function syncViewport() {
-    if (!vv || INLINE || !S.open) return;
+    if (!vv || !S.open) return;
+    if (INLINE) {
+      // An inline embed can't be pinned to the visual viewport — it lives inside
+      // the host's layout and we must not fight their CSS. But on mobile the
+      // software keyboard still covers the bottom of the page, and the composer is
+      // at the bottom of our container, so the visitor types blind. Nudge the
+      // composer back into the visible strip instead (the host page scrolls, we
+      // don't resize anything). Only when the keyboard is actually up: vv.height
+      // collapses well below the layout viewport when it opens.
+      if (window.innerWidth <= 480 && vv.height < window.innerHeight * 0.75) {
+        try { composer.scrollIntoView({ block: "end", behavior: "smooth" }); } catch (_e) {}
+        scrollToBottom(false);
+      }
+      return;
+    }
     if (window.innerWidth > 480) { panel.style.height = ""; return; }
     panel.style.height = vv.height + "px";
     scrollToBottom(false);
@@ -311,6 +378,7 @@
     S.open = true; panel.classList.add("open"); requestAnimationFrame(function () { panel.classList.add("in"); });
     if (launcher) launcher.style.display = "none";
     clearUnread(); if (S.formDone) setTimeout(function () { ta.focus(); }, 40); scrollToBottom(true); markRead();
+    lsSet(K.open, "1");
     syncViewport();
   }
   function closePanel() {
@@ -318,6 +386,7 @@
     S.open = false; panel.classList.remove("in"); panel.classList.remove("open");
     panel.style.height = "";
     if (launcher) launcher.style.display = "flex";
+    lsDel(K.open);
     if (lastFocus && lastFocus.focus) lastFocus.focus(); else if (launcher) launcher.focus();
   }
   if (launcher) launcher.addEventListener("click", function () { lastFocus = launcher; openPanel(); });
@@ -333,8 +402,32 @@
   });
 
   // Public JS API (+ drain any pre-load queued calls).
+  //
+  // `mount` and `on` exist for host pages that build their own chrome around an
+  // inline embed: `mount` hands us a container that didn't exist at script time
+  // (an SPA route), and `on` lets them render their own unread badge or
+  // "agent is typing" without reaching into the shadow root.
   var prior = window.CCPWebchat;
-  window.CCPWebchat = { open: openPanel, close: closePanel, toggle: function () { S.open ? closePanel() : openPanel(); }, isOpen: function () { return S.open; } };
+  var listeners = {};
+  function emitApi(name, payload) {
+    (listeners[name] || []).forEach(function (fn) { try { fn(payload); } catch (_e) {} });
+  }
+  window.CCPWebchat = {
+    open: openPanel,
+    close: closePanel,
+    toggle: function () { S.open ? closePanel() : openPanel(); },
+    isOpen: function () { return S.open; },
+    /** Attach an inline embed to a container (element or selector). */
+    mount: function (target) { return INLINE ? mountInline(target) : false; },
+    /** Current unread count — for a host-rendered badge. */
+    unreadCount: function () { return S.unread; },
+    /** on("message"|"unread"|"ready"|"typing", fn) → unsubscribe function. */
+    on: function (name, fn) {
+      if (typeof fn !== "function") return function () {};
+      (listeners[name] = listeners[name] || []).push(fn);
+      return function () { listeners[name] = (listeners[name] || []).filter(function (f) { return f !== fn; }); };
+    },
+  };
   if (prior && prior.q && prior.q.length) prior.q.forEach(function (c) { try { if (window.CCPWebchat[c[0]]) window.CCPWebchat[c[0]].apply(null, c[1] || []); } catch (_e) {} });
 
   // ── theming / config ────────────────────────────────────────────────────────
@@ -356,7 +449,7 @@
   }
   function agentAvatar() { var cfg = (S.cfg && S.cfg.config) || {}; return cfg.agentAvatarDataUrl || null; }
   function onReady(payload) {
-    S.ready = true; applyConfig(payload);
+    S.ready = true; applyConfig(payload); emitApi("ready", { conversationId: (payload && payload.conversationId) || null });
     if (S.viewInit) return; S.viewInit = true;
     var cfg = (payload && payload.config) || {}, fields = Array.isArray(cfg.preChatFields) ? cfg.preChatFields : [];
     if (fields.length && !hasThread()) renderForm(fields);
@@ -400,14 +493,23 @@
   function bubbleHtml(m) {
     if (m.deletedAt) return '<span style="opacity:.6;font-style:italic">This message was deleted</span>';
     var parts = [];
-    if (m.replyTo) { var q = m.replyTo.mediaKind ? "📎 " + m.replyTo.mediaKind : (m.replyTo.body || ""); parts.push('<div class="rq">' + esc(q).slice(0, 160) + "</div>"); }
+    // `data-rq` makes the quote a jump link to the quoted message, matching the
+    // agent inbox (clicking a quote there scrolls to the original). Only set when
+    // we know the id — a quote of a message older than the loaded window has
+    // nothing to scroll to, and rendering it as clickable would dead-end.
+    if (m.replyTo) { var q = m.replyTo.mediaKind ? "📎 " + m.replyTo.mediaKind : (m.replyTo.body || ""); parts.push('<div class="rq' + (m.replyTo.id ? " jump" : "") + '"' + (m.replyTo.id ? ' data-rq="' + esc(m.replyTo.id) + '"' : "") + ">" + esc(q).slice(0, 160) + "</div>"); }
     if (m.media && m.id) parts.push(mediaHtml(m));
     if (m.body) parts.push('<div dir="auto">' + linkify(m.body) + "</div>");
     return parts.join("");
   }
   function mediaHtml(m) {
     var url = mediaUrl(m.id, false);
-    if (m.media.kind === "image") return '<div class="media"><img src="' + url + '" alt="image" loading="lazy" data-full="' + url + '"></div>';
+    // `sticker` is grouped with `image`: new webp uploads classify as `image`
+    // (media-storage `classifyWebpAsImage`), but rows stored BEFORE that fix — and
+    // any sticker forwarded from a Meta thread — still carry kind `sticker`. Absent
+    // this branch they fell through to the document row, so a photo rendered as a
+    // grey 📄 link.
+    if (m.media.kind === "image" || m.media.kind === "sticker") return '<div class="media"><img src="' + url + '" alt="image" loading="lazy" data-full="' + url + '"></div>';
     if (m.media.kind === "video") return '<div class="media"><video src="' + url + '" controls preload="metadata"' + (m.media.hasThumbnail ? ' poster="' + mediaUrl(m.id, true) + '"' : "") + "></video></div>";
     if (m.media.kind === "audio") return '<div class="media"><audio src="' + url + '" controls preload="none"></audio></div>';
     return '<a class="doc" href="' + url + '&download=1" target="_blank" rel="noopener"><span class="ic">📄</span><span>' + esc(m.media.filename || m.media.kind || "file") + "</span></a>";
@@ -435,7 +537,7 @@
     if (!m._local && m.externalId) row.appendChild(el("button", { class: "rep", title: "Reply", "aria-label": "Reply", onclick: function () { setReply(m); } }, "↩"));
     row._meta = meta; row._bub = bub;
     wireMedia(bub);
-    if (m.id) S.byId[m.id] = { el: row, msg: m };
+    if (m.id) { S.byId[m.id] = { el: row, msg: m }; trimHistory(); }
     return row;
   }
   function appendBubble(m, opts) {
@@ -453,6 +555,33 @@
     return row;
   }
   // "Load earlier" — prepend an older batch above the thread, preserving scroll.
+  /**
+   * Cap the rendered thread.
+   *
+   * `S.byId` held an entry per message, each pinning its DOM node, and nothing ever
+   * evicted them — a visitor paging back through a long support thread grew the DOM
+   * and the map monotonically for the life of the tab, degrading scroll and leaking
+   * memory. Trim from the TOP (oldest) once we're comfortably past a screenful;
+   * "Load earlier" re-fetches anything dropped, so nothing is lost. Only trims when
+   * the visitor is near the bottom, so it can never yank content out from under
+   * someone who is actively reading history.
+   */
+  var MAX_RENDERED = 250, TRIM_TO = 150;
+  function trimHistory() {
+    var ids = Object.keys(S.byId);
+    if (ids.length <= MAX_RENDERED) return;
+    var dist = bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight;
+    if (dist > 400) return; // reading older messages — leave the DOM alone
+    ids
+      .map(function (id) { return S.byId[id]; })
+      .sort(function (a, b) { return new Date(a.msg.createdAt) - new Date(b.msg.createdAt); })
+      .slice(0, ids.length - TRIM_TO)
+      .forEach(function (e) {
+        if (e.el && e.el.parentNode) e.el.parentNode.removeChild(e.el);
+        delete S.byId[e.msg.id];
+      });
+    S.hasMore = true; showEarlier(true); // dropped rows are re-fetchable
+  }
   function prependOlder(msgs) {
     if (!msgs.length) return;
     var anchor = null, kids = bodyEl.children;
@@ -507,6 +636,9 @@
     }
     appendBubble(m, { anim: !quiet });
     if (!quiet && m.direction === "out") { hideTyping(); if (S.socket && S.socket.connected) S.socket.emit("visitor:received"); if (!S.open || document.hidden) { bumpUnread(); playPing(); } else markRead(); }
+    // Host-page hook. `quiet` marks a history replay, so a host badge doesn't
+    // re-fire for messages the visitor already saw on a reconnect.
+    if (!quiet) emitApi("message", { direction: m.direction, body: m.body, hasMedia: !!m.media, createdAt: m.createdAt });
   }
   function applyStatus(id, s) { var e = S.byId[id]; if (e) { e.msg.status = s; if (e.msg.direction === "in" && e.el._meta) e.el._meta.innerHTML = metaHtml(e.msg, true); } }
 
@@ -530,6 +662,24 @@
   // downward too, so neither can trigger a fetch. A thread too short to
   // overflow never scrolls at all and simply keeps the "Load earlier" button.
   var lastScrollTop = 0;
+  // Click a reply quote → scroll to the quoted message and flash it. Delegated so
+  // it keeps working across re-renders and history prepends (bubbles are rebuilt
+  // by `upsert`, so a per-node listener would be lost).
+  bodyEl.addEventListener("click", function (e) {
+    var q = e.target && e.target.closest ? e.target.closest(".rq.jump") : null;
+    if (!q) return;
+    var entry = S.byId[q.getAttribute("data-rq")];
+    if (!entry || !entry.el) {
+      // Quoted message is older than the loaded window — say so instead of doing
+      // nothing, which reads as a broken click.
+      return toast("That message is further up — tap “Load earlier”.");
+    }
+    entry.el.scrollIntoView({ block: "center", behavior: "smooth" });
+    var bub = entry.el.querySelector(".mr") || entry.el;
+    bub.classList.remove("flash");
+    void bub.offsetWidth; // restart the animation if the same target is re-clicked
+    bub.classList.add("flash");
+  });
   bodyEl.addEventListener("scroll", function () {
     var top = bodyEl.scrollTop;
     var scrolledUp = top < lastScrollTop;
@@ -541,8 +691,8 @@
   newPill.addEventListener("click", function () { S.stick = true; scrollToBottom(true); });
   function scrollToBottom(force) { if (force || S.stick) { bodyEl.scrollTop = bodyEl.scrollHeight; newPill.classList.remove("on"); } }
   function onNewRow(isVisitor) { if (isVisitor || S.stick) scrollToBottom(true); else newPill.classList.add("on"); }
-  function bumpUnread() { S.unread++; if (badge) { badge.textContent = S.unread > 9 ? "9+" : String(S.unread); badge.classList.add("on"); } flashTitle(); }
-  function clearUnread() { S.unread = 0; if (badge) badge.classList.remove("on"); S.lastSeenTs = Date.now(); lsSet(K.seen, String(S.lastSeenTs)); stopFlash(); }
+  function bumpUnread() { S.unread++; if (badge) { badge.textContent = S.unread > 9 ? "9+" : String(S.unread); badge.classList.add("on"); } flashTitle(); emitApi("unread", S.unread); }
+  function clearUnread() { S.unread = 0; if (badge) badge.classList.remove("on"); S.lastSeenTs = Date.now(); lsSet(K.seen, String(S.lastSeenTs)); stopFlash(); emitApi("unread", 0); }
   // Capture the title when the flash STARTS, not at script load. On a React/Next/Vue
   // host that retitles on route change, restoring a load-time snapshot reverted the
   // customer's page title to a stale value — and it never recovered.
@@ -564,7 +714,38 @@
 
   // ── composer ─────────────────────────────────────────────────────────────────
   function autogrow() { ta.style.height = "auto"; var h = Math.min(ta.scrollHeight, 112); ta.style.height = h + "px"; ta.style.overflowY = ta.scrollHeight > 112 ? "auto" : "hidden"; }
-  function updateSend() { sendBtn.disabled = !ta.value.trim(); }
+  // Send is live when there's text OR a staged attachment (a file with no caption
+  // is a perfectly normal message).
+  function updateSend() { sendBtn.disabled = !ta.value.trim() && !S.staged; }
+  function fmtSize(b) { return b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB"; }
+  /** Put a picked file in the staging chip. Nothing is uploaded until send. */
+  function stageFile(file) {
+    if (!S.formDone) return;
+    if (file.size > MAX_BYTES) return toast("File is too large (max 25 MB).");
+    if (file.type && !OK_MIME.test(baseMime(file.type))) return toast("That file type isn't supported.");
+    clearStage();
+    var kind = (file.type || "").split("/")[0];
+    kind = kind === "image" || kind === "video" || kind === "audio" ? kind : "document";
+    S.staged = { file: file, kind: kind, name: file.name || "attachment" };
+    stgName.textContent = S.staged.name;
+    stgSize.textContent = fmtSize(file.size);
+    // Thumbnail for images; an objectURL we must revoke on clear so the blob isn't
+    // pinned in memory for the life of the tab.
+    if (kind === "image") {
+      var url = URL.createObjectURL(file);
+      S.staged.preview = url;
+      var img = el("img", { src: url, alt: "" });
+      stageEl.replaceChild(img, stgThumb); stgThumb = img;
+    } else {
+      var ic = el("span", { class: "ic" }, kind === "video" ? "🎬" : kind === "audio" ? "🎵" : "📄");
+      stageEl.replaceChild(ic, stgThumb); stgThumb = ic;
+    }
+    stageEl.classList.add("on"); updateSend(); ta.focus();
+  }
+  function clearStage() {
+    if (S.staged && S.staged.preview) URL.revokeObjectURL(S.staged.preview);
+    S.staged = null; stageEl.classList.remove("on"); updateSend();
+  }
   var draftTimer = null;
   ta.addEventListener("input", function () { autogrow(); updateSend(); if (draftTimer) clearTimeout(draftTimer); draftTimer = setTimeout(function () { lsSet(K.draft, ta.value); }, 300); });
   ta.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(); } });
@@ -572,7 +753,8 @@
   ta.addEventListener("blur", function () { ibar.classList.remove("focus"); });
   sendBtn.addEventListener("click", onSend);
   attachBtn.addEventListener("click", function () { fileInput.click(); });
-  fileInput.addEventListener("change", function () { var f = fileInput.files && fileInput.files[0]; fileInput.value = ""; if (f) uploadFile(f); });
+  fileInput.addEventListener("change", function () { var f = fileInput.files && fileInput.files[0]; fileInput.value = ""; if (f) stageFile(f); });
+  stgClear.addEventListener("click", clearStage);
   function restoreDraft() { var d = lsGet(K.draft); if (d) { ta.value = d; autogrow(); updateSend(); } }
   updateSend();
 
@@ -584,9 +766,59 @@
   // externalId = widget:visitor:clientMsgId, and retries reuse the same cid.
   function persistOutbox() { var arr = []; for (var cid in S.pending) { var p = S.pending[cid]; if (p.file) continue; if (p.status === "queued" || p.status === "failed" || p.status === "inflight") arr.push({ cid: cid, payload: p.payload, status: p.status === "failed" ? "failed" : "queued" }); } if (arr.length) lsSet(K.outbox, JSON.stringify(arr)); else lsDel(K.outbox); }
   function restoreOutbox() { var raw = lsGet(K.outbox); if (!raw) return; var arr; try { arr = JSON.parse(raw); } catch (_e) { return; } (arr || []).forEach(function (it) { if (it && it.cid && it.payload) optimistic(it.cid, it.payload, null, it.status === "failed" ? "failed" : "queued"); }); }
+
+  // ── attachment store (IndexedDB) ──────────────────────────────────────────────
+  // A QUEUED attachment cannot ride in the localStorage outbox: a File isn't JSON,
+  // so `persistOutbox` skips it (`if (p.file) continue`). That meant a refresh while
+  // an upload was queued (offline) or failed made the visitor's file vanish — bubble
+  // gone, no error, nothing to retry. Silent data loss is the worst failure mode in
+  // the widget, so blobs live here instead, keyed by clientMsgId, and are deleted
+  // the instant the upload succeeds (after which the outbox row is plain JSON and
+  // localStorage carries it as usual).
+  //
+  // Every call is best-effort and individually guarded: Safari private mode and
+  // some embedded webviews throw on `indexedDB.open`, and a widget must degrade to
+  // today's behaviour rather than break the chat.
+  var IDB_STORE = "files";
+  function idb(cb) {
+    var req;
+    try { req = indexedDB.open("ccp_wc_" + siteKey, 1); } catch (_e) { return cb(null); }
+    req.onupgradeneeded = function () { try { req.result.createObjectStore(IDB_STORE); } catch (_e) {} };
+    req.onsuccess = function () { cb(req.result); };
+    req.onerror = function () { cb(null); };
+    req.onblocked = function () { cb(null); };
+  }
+  function idbPut(cid, rec) { idb(function (db) { if (!db) return; try { db.transaction(IDB_STORE, "readwrite").objectStore(IDB_STORE).put(rec, cid); } catch (_e) {} }); }
+  function idbDel(cid) { idb(function (db) { if (!db) return; try { db.transaction(IDB_STORE, "readwrite").objectStore(IDB_STORE).delete(cid); } catch (_e) {} }); }
+  /** Re-hydrate queued attachments into pending bubbles, then flush if we're live. */
+  function restoreAttachments() {
+    idb(function (db) {
+      if (!db) return;
+      var store, keysReq, valsReq;
+      try {
+        store = db.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE);
+        keysReq = store.getAllKeys(); valsReq = store.getAll();
+      } catch (_e) { return; }
+      valsReq.onsuccess = function () {
+        var keys = keysReq.result || [], vals = valsReq.result || [];
+        for (var i = 0; i < keys.length; i++) {
+          var cid = keys[i], rec = vals[i];
+          if (!rec || !rec.blob || S.pending[cid]) continue;
+          var m = { direction: "in", body: rec.voice ? "🎤 voice message" : "📎 " + (rec.kind || "file"), media: null, status: "queued", createdAt: rec.createdAt || new Date().toISOString(), _local: true };
+          var row = appendBubble(m, { anim: false });
+          S.pending[cid] = { el: row, payload: rec.payload || { clientMsgId: cid, body: "" }, status: "queued", file: rec.blob, fileName: rec.name, kind: rec.kind, voice: rec.voice, ts: (rec.payload && rec.payload.clientTs) || new Date(rec.createdAt || Date.now()).getTime() };
+          renderPending(cid);
+        }
+        // IndexedDB is async, so boot()'s synchronous `hasQueued` check has already
+        // run by now. Connecting here is what actually gets a recovered attachment
+        // delivered — the socket's own `connect` handler calls flushOutbox().
+        if (keys.length) { ensureConnected(); flushOutbox(); }
+      };
+    });
+  }
   function optimistic(cid, payload, file, status) {
     var m = { direction: "in", body: payload.body || "", media: null, status: status || "queued", createdAt: new Date().toISOString(), replyTo: payload.replyToExternalId ? { body: (S.replyTo && S.replyTo.body) || "" } : null, _local: true };
-    var row = appendBubble(m, { anim: true }); S.pending[cid] = { el: row, payload: payload, status: status || "queued", file: file || null }; renderPending(cid); return row;
+    var row = appendBubble(m, { anim: true }); S.pending[cid] = { el: row, payload: payload, status: status || "queued", file: file || null, ts: payload.clientTs || Date.now() }; renderPending(cid); return row;
   }
   function renderPending(cid) {
     var p = S.pending[cid]; if (!p || !p.el._meta) return; var meta = p.el._meta;
@@ -594,21 +826,70 @@
     else meta.innerHTML = esc(fmtTime()) + " " + tickHtml(p.status);
     if (p.file && (p.status === "queued" || p.status === "inflight") && !p._prog) { p._prog = el("div", { class: "prog" }, el("i")); p.el._bub.appendChild(p._prog); }
   }
-  function removePending(cid) { var p = S.pending[cid]; if (!p) return; if (p.el && p.el.parentNode) p.el.parentNode.removeChild(p.el); delete S.pending[cid]; persistOutbox(); }
+  function removePending(cid) { var p = S.pending[cid]; if (!p) return; if (p.el && p.el.parentNode) p.el.parentNode.removeChild(p.el); delete S.pending[cid]; idbDel(cid); persistOutbox(); }
   function markPending(cid, s) { var p = S.pending[cid]; if (!p) return; p.status = s; renderPending(cid); persistOutbox(); }
-  function flushOutbox() { if (!S.socket || !S.socket.connected) return; for (var cid in S.pending) { var p = S.pending[cid]; if (p.status !== "queued") continue; if (p.file) doUpload(cid); else sendPayload(cid); } }
-  function sendPayload(cid) {
-    var p = S.pending[cid]; if (!p) return; markPending(cid, "inflight"); var done = false;
-    var timer = setTimeout(function () { if (!done) { done = true; markPending(cid, "failed"); } }, SEND_TIMEOUT);
-    S.socket.emit("visitor:message", p.payload, function (ack) { if (done) return; done = true; clearTimeout(timer);
-      if (ack && ack.ok === false) { markPending(cid, "failed"); toast(ack.error === "rate_limited" ? "You're sending too fast — try again in a moment." : "Message failed to send."); }
-      else markPending(cid, "sent"); });
+  // Flush SERIALLY, oldest first. Firing every queued message in parallel let them
+  // race: whichever ingest committed first won, so three messages typed offline
+  // could reach the agent shuffled. `clientTs` (stamped at compose time, honoured
+  // by the server within a 24h window) fixes the recorded ORDER; sending one at a
+  // time keeps the wire order matching too. Also re-arms "inflight" items: a send
+  // interrupted by the disconnect would otherwise sit untouched until its 12s
+  // SEND_TIMEOUT expired, stalling a reconnect that already happened.
+  var flushing = false;
+  function flushOutbox() {
+    if (flushing || !S.socket || !S.socket.connected) return;
+    var cids = Object.keys(S.pending)
+      .filter(function (cid) { var s = S.pending[cid].status; return s === "queued" || s === "inflight"; })
+      .sort(function (a, b) { return (S.pending[a].ts || 0) - (S.pending[b].ts || 0); });
+    if (!cids.length) return;
+    flushing = true;
+    var i = 0;
+    var next = function () {
+      if (i >= cids.length || !S.socket || !S.socket.connected) { flushing = false; return; }
+      var cid = cids[i++], p = S.pending[cid];
+      if (!p) return next();
+      if (p.file) { doUpload(cid, next); return; }
+      sendPayload(cid, next);
+    };
+    next();
+  }
+  function sendPayload(cid, after) {
+    var p = S.pending[cid]; if (!p) return after && after();
+    markPending(cid, "inflight");
+    var settled = false, advanced = false;
+    var go = function () { if (!advanced) { advanced = true; if (after) after(); } };
+    var timer = setTimeout(function () {
+      if (settled) return;
+      // Timed out — surface Retry and let the queue move on, but do NOT mark this
+      // resolved: a late ack below can still arrive and correct the bubble.
+      markPending(cid, "failed"); go();
+    }, SEND_TIMEOUT);
+    S.socket.emit("visitor:message", p.payload, function (ack) {
+      // Accept a LATE ack. Previously the timeout set `done` and this callback
+      // returned early, so a message the server had accepted kept showing ⚠ Retry —
+      // telling the visitor their message failed when it hadn't. Retrying was
+      // harmless (same clientMsgId, server dedupes) but the state was a lie.
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      if (ack && ack.ok === false) {
+        markPending(cid, "failed");
+        toast(ack.error === "rate_limited" ? "You're sending too fast — try again in a moment." : "Message failed to send.");
+      } else markPending(cid, "sent");
+      go();
+    });
   }
   function retry(cid) { var p = S.pending[cid]; if (!p) return; markPending(cid, "queued"); if (p.file) doUpload(cid); else sendPayload(cid); }
   function onSend() {
-    if (!S.formDone) return; var text = ta.value.replace(/\s+$/, ""); if (!text.trim()) return;
+    if (!S.formDone) return; var text = ta.value.replace(/\s+$/, "");
+    // A staged attachment sends with whatever text is in the box as its caption.
+    if (S.staged) { var st = S.staged; S.staged = null; stageEl.classList.remove("on"); ta.value = ""; autogrow(); updateSend(); lsDel(K.draft); dropPills(); emitTyping(false); uploadFile(st.file, { caption: text, staged: st }); return; }
+    if (!text.trim()) return;
     ta.value = ""; autogrow(); updateSend(); lsDel(K.draft); dropPills(); emitTyping(false);
-    var cid = newCid(); var payload = { clientMsgId: cid, body: text.slice(0, 4096) };
+    var cid = newCid();
+    // clientTs = when the visitor TYPED it. For a message that queues offline this
+    // is what preserves order in the agent inbox; the server clamps it (see
+    // resolveClientTimestamp) so a skewed clock can't hijack the sort.
+    var payload = { clientMsgId: cid, body: text.slice(0, 4096), clientTs: Date.now() };
     if (S.replyTo) payload.replyToExternalId = S.replyTo.externalId;
     if (S.preChat) { payload.preChat = S.preChat; S.preChat = null; }
     if (S.closed) { S.closed = false; bodyEl.querySelectorAll(".sys.closed").forEach(function (n) { n.remove(); }); }
@@ -619,7 +900,15 @@
   }
 
   // ── media ─────────────────────────────────────────────────────────────────────
-  var OK_MIME = /^(image\/(jpeg|png|gif|webp)|video\/(mp4|webm|quicktime|3gpp)|audio\/(mpeg|mp4|ogg|wav|webm|aac)|application\/pdf|text\/(plain|csv)|application\/(msword|vnd\.openxmlformats-officedocument.*|vnd\.ms-excel|vnd\.ms-powerpoint|zip))$/i;
+  // MUST stay in step with the server's ALLOWED_MIME_BY_KIND
+  // (apps/api/src/lib/blob-storage/mime-guard.ts). Drift is invisible in testing
+  // and awful in production: a type the client allows but the server refuses
+  // uploads and then fails with a bare "Upload failed.", while a type the server
+  // allows but the client refuses never leaves the browser. Notably `audio/x-m4a`
+  // — Chrome and Safari report .m4a files as that, so omitting it rejected every
+  // .m4a with "That file type isn't supported". `application/zip` is deliberately
+  // absent from BOTH sides.
+  var OK_MIME = /^(image\/(jpeg|png|gif|webp)|video\/(mp4|webm|quicktime|3gpp)|audio\/(mpeg|mp4|ogg|wav|x-wav|webm|aac|x-m4a|amr|opus)|application\/pdf|text\/(plain|csv)|application\/(msword|vnd\.openxmlformats-officedocument.*|vnd\.ms-excel|vnd\.ms-powerpoint))$/i;
   /** MIME without parameters — `audio/webm;codecs=opus` → `audio/webm`. */
   function baseMime(t) { return String(t || "").split(";")[0].trim().toLowerCase(); }
   function uploadFile(file, opts) {
@@ -632,44 +921,61 @@
     if (file.type && !OK_MIME.test(baseMime(file.type))) return toast("That file type isn't supported.");
     dropPills(); var cid = newCid(); var kind = (file.type || "").split("/")[0]; kind = kind === "image" || kind === "video" || kind === "audio" ? kind : "document";
     var voice = !!(opts && opts.voice);
-    var payload = { clientMsgId: cid, body: "" };
+    // Caption typed alongside a staged attachment. The server inlines it on this
+    // channel (supportsInlineCaption("webchatwidget") === true), so it rides on the
+    // same message rather than becoming a second bubble.
+    var caption = (opts && opts.caption) || "";
+    var payload = { clientMsgId: cid, body: caption.slice(0, 4096), clientTs: Date.now() };
+    if (opts && opts.staged && opts.staged.preview) URL.revokeObjectURL(opts.staged.preview);
     if (S.replyTo) payload.replyToExternalId = S.replyTo.externalId; if (S.preChat) { payload.preChat = S.preChat; S.preChat = null; } clearReply();
-    var m = { direction: "in", body: (voice ? "🎤 voice message" : "📎 " + kind), media: null, status: "queued", createdAt: new Date().toISOString(), _local: true };
-    var row = appendBubble(m, { anim: true }); S.pending[cid] = { el: row, payload: payload, status: "queued", file: file, kind: kind, voice: voice }; renderPending(cid); doUpload(cid);
+    var m = { direction: "in", body: caption || (voice ? "🎤 voice message" : "📎 " + kind), media: null, status: "queued", createdAt: new Date().toISOString(), _local: true };
+    var row = appendBubble(m, { anim: true }); S.pending[cid] = { el: row, payload: payload, status: "queued", file: file, fileName: file.name, kind: kind, voice: voice, ts: payload.clientTs }; renderPending(cid);
+    // Persist the bytes BEFORE attempting the upload, so a refresh mid-upload (or
+    // while offline) can still recover the file. Cleared on success in doUpload.
+    idbPut(cid, { blob: file, name: file.name, type: file.type, kind: kind, voice: voice, payload: payload, createdAt: m.createdAt });
+    doUpload(cid);
   }
-  function doUpload(cid) {
-    var p = S.pending[cid]; if (!p || !p.file) return; if (!S.socket || !S.socket.connected) { markPending(cid, "queued"); return; }
-    markPending(cid, "inflight"); var fd = new FormData(); fd.append("file", p.file); var xhr = new XMLHttpRequest();
+  function doUpload(cid, after) {
+    var p = S.pending[cid]; if (!p || !p.file) return after && after();
+    if (!S.socket || !S.socket.connected) { markPending(cid, "queued"); return after && after(); }
+    // A restored attachment is a bare Blob (IndexedDB doesn't round-trip File), so
+    // pass the remembered filename explicitly — otherwise multer receives "blob"
+    // and the agent sees a nameless download.
+    markPending(cid, "inflight"); var fd = new FormData(); fd.append("file", p.file, p.fileName || p.file.name || "upload"); var xhr = new XMLHttpRequest();
     xhr.open("POST", apiBase + "/api/widget/media?key=" + encodeURIComponent(siteKey));
     xhr.upload.onprogress = function (e) { if (e.lengthComputable && p._prog) p._prog.querySelector("i").style.width = Math.round((e.loaded / e.total) * 100) + "%"; };
     xhr.onload = function () {
-      if (xhr.status >= 200 && xhr.status < 300) { var media; try { media = JSON.parse(xhr.responseText); } catch (_e) { return markPending(cid, "failed"); }
+      if (xhr.status >= 200 && xhr.status < 300) { var media; try { media = JSON.parse(xhr.responseText); } catch (_e) { markPending(cid, "failed"); return after && after(); }
         p.payload.media = { mediaKey: media.mediaKey, mediaUrl: media.mediaUrl, kind: media.kind, mimeType: media.mimeType, sizeBytes: media.sizeBytes, filename: media.filename };
         if (p.voice) p.payload.media.voice = true;
-        p.file = null; if (p._prog && p._prog.parentNode) p._prog.parentNode.removeChild(p._prog); sendPayload(cid); }
-      else { markPending(cid, "failed"); toast("Upload failed."); }
+        // Bytes are on the server now — drop the local copy so IndexedDB doesn't
+        // grow without bound. From here the outbox row is plain JSON.
+        p.file = null; idbDel(cid); if (p._prog && p._prog.parentNode) p._prog.parentNode.removeChild(p._prog); sendPayload(cid, after); }
+      else { markPending(cid, "failed"); toast("Upload failed."); if (after) after(); }
     };
-    xhr.onerror = function () { markPending(cid, "failed"); toast("Upload failed — check your connection."); };
+    xhr.onerror = function () { markPending(cid, "failed"); toast("Upload failed — check your connection."); if (after) after(); };
     // Without a timeout a stalled upload (captive portal, dead tunnel) never fires
     // onerror: the bubble sits at "inflight" with a frozen progress bar forever and
     // renderPending only offers Retry on "failed", so the visitor has no way out.
     xhr.timeout = 60000;
-    xhr.ontimeout = function () { markPending(cid, "failed"); toast("Upload timed out — tap Retry."); };
+    xhr.ontimeout = function () { markPending(cid, "failed"); toast("Upload timed out — tap Retry."); if (after) after(); };
     xhr.send(fd);
   }
   ["dragenter", "dragover"].forEach(function (ev) { panel.addEventListener(ev, function (e) { e.preventDefault(); if (S.formDone) dropEl.classList.add("on"); }); });
   ["dragleave", "drop"].forEach(function (ev) { panel.addEventListener(ev, function (e) { e.preventDefault(); if (ev === "dragleave" && panel.contains(e.relatedTarget)) return; dropEl.classList.remove("on"); }); });
-  panel.addEventListener("drop", function (e) { var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) uploadFile(f); });
-  ta.addEventListener("paste", function (e) { var items = e.clipboardData && e.clipboardData.items; if (!items) return; for (var i = 0; i < items.length; i++) if (items[i].type.indexOf("image") === 0) { var f = items[i].getAsFile(); if (f) { e.preventDefault(); uploadFile(f); } } });
+  // Drop and paste STAGE like the picker does — a mis-drop or a stray Ctrl+V used to
+  // fire an irreversible send straight into the agent's inbox.
+  panel.addEventListener("drop", function (e) { var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) stageFile(f); });
+  ta.addEventListener("paste", function (e) { var items = e.clipboardData && e.clipboardData.items; if (!items) return; for (var i = 0; i < items.length; i++) if (items[i].type.indexOf("image") === 0) { var f = items[i].getAsFile(); if (f) { e.preventDefault(); stageFile(f); } } });
 
   // ── typing / receipts ──────────────────────────────────────────────────────────
   var typingRow = null;
   function showTyping() {
     if (typingRow || S.closed) return; var av = el("div", { class: "av" }); var a = agentAvatar(); if (a) av.appendChild(el("img", { src: a, alt: "" })); else av.appendChild(document.createTextNode("•"));
     typingRow = el("div", { class: "mr in" }, [av, el("div", { class: "col" }, el("div", { class: "bubble", html: '<span class="typ"><i></i><i></i><i></i></span>' }))]);
-    bodyEl.appendChild(typingRow); onNewRow(false);
+    bodyEl.appendChild(typingRow); onNewRow(false); emitApi("typing", true);
   }
-  function hideTyping() { if (typingRow) { if (typingRow.parentNode) typingRow.parentNode.removeChild(typingRow); typingRow = null; } }
+  function hideTyping() { if (typingRow) { if (typingRow.parentNode) typingRow.parentNode.removeChild(typingRow); typingRow = null; } emitApi("typing", false); }
   function markRead() { if (!S.socket || !S.socket.connected || !S.open || document.hidden) return; if (S.readTimer) return; S.readTimer = setTimeout(function () { S.readTimer = null; if (S.socket && S.socket.connected) S.socket.emit("visitor:read"); }, 400); }
 
   // Visitor → agent typing (throttled; the agent inbox shows "customer is typing").
@@ -702,12 +1008,24 @@
   }
 
   // ── voice recording (MediaRecorder → upload as audio) ────────────────────────
-  var recBar = null, recTimer = null, recStart = 0;
+  var recBar = null, recTimer = null, recStart = 0, recStarting = false;
+  var MAX_RECORDING_SEC = 300; // hard cap so a forgotten recording can't run forever
   function toggleRecord() {
     if (S.recording) return stopRecord(true);
+    // Synchronous re-entrancy latch: S.recording is only set inside the async
+    // getUserMedia .then, so a second mic tap during the permission-prompt /
+    // device-open window would otherwise pass the guard above and open a SECOND
+    // stream+MediaRecorder — orphaning the first and leaving the visitor's mic
+    // hot for the rest of the page visit. recStarting closes that window.
+    if (recStarting) return;
     if (!S.formDone) return;
     if (!navigator.mediaDevices || !window.MediaRecorder) return toast("Voice recording isn't supported here.");
+    recStarting = true;
     navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      recStarting = false;
+      // Lost the race (another tap already started a recording, or the user
+      // cancelled while the prompt was open): stop this now-orphan stream.
+      if (S.recording) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
       var mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : (MediaRecorder.isTypeSupported("audio/ogg") ? "audio/ogg" : "");
       var mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
       var chunks = [];
@@ -730,7 +1048,7 @@
       };
       S.recording = { mr: mr, send: false };
       mr.start(); recStart = Date.now(); micBtn.classList.add("rec"); showRecBar();
-    }).catch(function () { toast("Microphone access denied."); });
+    }).catch(function () { recStarting = false; toast("Microphone access denied."); });
   }
   function stopRecord(send) { if (!S.recording) return; S.recording.send = send; try { S.recording.mr.stop(); } catch (_e) { teardownRec(); } }
   function teardownRec() { S.recording = null; micBtn.classList.remove("rec"); if (recTimer) { clearInterval(recTimer); recTimer = null; } if (recBar && recBar.parentNode) recBar.parentNode.removeChild(recBar); recBar = null; ibar.style.display = ""; }
@@ -743,7 +1061,12 @@
       el("button", { class: "snd", title: "Send", "aria-label": "Send voice message", onclick: function () { stopRecord(true); } }, "Send"),
     ]);
     composer.insertBefore(recBar, fileInput);
-    recTimer = setInterval(function () { var s = Math.floor((Date.now() - recStart) / 1000); t.textContent = Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2); }, 250);
+    if (recTimer) { clearInterval(recTimer); recTimer = null; } // never leak a prior interval
+    recTimer = setInterval(function () {
+      var s = Math.floor((Date.now() - recStart) / 1000);
+      t.textContent = Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2);
+      if (s >= MAX_RECORDING_SEC) { stopRecord(true); } // auto-send at the hard cap
+    }, 250);
   }
   micBtn.addEventListener("click", toggleRecord);
 
@@ -761,10 +1084,28 @@
     }
   }
   function connect() {
-    var socket = window.io(apiBase + "/widget", { path: "/api/socket", transports: ["websocket"], auth: { siteKey: siteKey, visitorId: S.visitorId }, reconnection: true, reconnectionAttempts: Infinity, reconnectionDelay: 800, reconnectionDelayMax: 8000, timeout: 12000 });
+    // transports: websocket FIRST, polling as the fallback. Websocket-only was a
+    // hard failure on any corporate proxy / captive portal that blocks the upgrade —
+    // the visitor sat on "Reconnecting…" forever while reconnectionAttempts:Infinity
+    // retried a transport that was never going to work. Intercom/Crisp/Tawk all fall
+    // back for this reason.
+    //
+    // `tryAllTransports` is REQUIRED, not decorative: socket.io defaults it to FALSE,
+    // meaning if the FIRST transport fails it gives up rather than trying the next —
+    // so listing "polling" second did nothing on its own, and an e2e run with
+    // WebSockets blocked failed until this was added. Websocket stays first so the
+    // 99% who can use it never pay for a polling handshake.
+    //
+    // `query.widget=1` is REQUIRED for the polling half to work at all: polling is
+    // plain XHR and therefore CORS-checked (websockets are not), and the server
+    // pins socket CORS to the app origin with credentials. The flag tells the CORS
+    // delegate in ws-adapter.ts to reflect this customer's origin WITHOUT
+    // credentials instead. Keep in step with WIDGET_HANDSHAKE_FLAG in
+    // @ccp/shared/socket/events (this file is un-bundled, so it can't import it).
+    var socket = S.io(apiBase + "/widget", { path: "/api/socket", transports: ["websocket", "polling"], tryAllTransports: true, query: { widget: "1" }, auth: { siteKey: siteKey, visitorId: S.visitorId }, reconnection: true, reconnectionAttempts: Infinity, reconnectionDelay: 800, reconnectionDelayMax: 8000, timeout: 12000 });
     S.socket = socket;
     socket.on("connect", function () { setConn("online"); flushOutbox(); markRead(); });
-    socket.on("disconnect", function () { setConn("reconnecting"); hideTyping(); });
+    socket.on("disconnect", function (reason) { setConn("reconnecting"); hideTyping(); if (reason === "io server disconnect" && !S.fatal) { socket.connect(); } });
     socket.io.on("reconnect_attempt", function () { setConn("reconnecting"); });
     // A rejected handshake is TERMINAL, not transient: retrying forever (attempts
     // Infinity) just hides a misconfiguration behind a "Reconnecting…" strip while
@@ -825,14 +1166,32 @@
   function ensureConnected() {
     if (S.socket || S.fatal) return;
     setConn("connecting");
-    if (window.io) { connect(); return; }
+    if (S.io) { connect(); return; }
     if (S.loadingIo) return;
     S.loadingIo = true;
     var s = document.createElement("script");
     s.src = staticBase + "/webchat/socket.io.min.js";
     s.async = true;
-    s.onload = function () { S.loadingIo = false; connect(); };
-    s.onerror = function () { S.loadingIo = false; setConn("offline"); console.error("[webchat] failed to load socket.io client"); };
+    // The vendored client is a UMD build, so loading it DEFINES window.io on the
+    // host page. Two ways that bit us:
+    //   - we used to reuse an existing `window.io`, so on a site already running
+    //     socket.io we adopted THEIR version — a v2/v4 protocol mismatch broke the
+    //     widget with no diagnostic;
+    //   - and we clobbered theirs when we loaded first.
+    // So: snapshot whatever the host had, capture ours privately as `S.io`, then
+    // put the host's value back exactly as it was (including absent).
+    var hostIo = window.io, hadHostIo = "io" in window;
+    var restore = function () {
+      if (hadHostIo) window.io = hostIo;
+      else { try { delete window.io; } catch (_e) { window.io = undefined; } }
+    };
+    s.onload = function () {
+      S.loadingIo = false;
+      S.io = window.io;
+      restore();
+      connect();
+    };
+    s.onerror = function () { S.loadingIo = false; restore(); setConn("offline"); console.error("[webchat] failed to load socket.io client"); };
     document.head.appendChild(s);
   }
 
@@ -851,10 +1210,22 @@
    * Otherwise the socket opens the moment they open the chat.
    */
   function boot() {
+    // Draft first, and independent of the socket: restoreDraft() used to run only
+    // from onReady(), so a visitor whose handshake failed — or who simply had not
+    // opened the panel yet — saw an empty box even though their text was saved.
+    restoreDraft();
     restoreOutbox();
+    // Async (IndexedDB): re-hydrates any attachment queued when the tab closed and
+    // connects itself if it finds one. See restoreAttachments.
+    restoreAttachments();
     var hasQueued = false;
     for (var _cid in S.pending) { hasQueued = true; break; }
-    var needsLive = INLINE || S.open || !!lsGet(K.chatted) || hasQueued;
+    // Reopen if they left it open. Deliberately AFTER the restores so the panel
+    // paints with the draft and any queued bubbles already in place, and only in
+    // launcher mode (inline is always open by definition).
+    var wasOpen = !INLINE && lsGet(K.open) === "1";
+    var needsLive = INLINE || S.open || wasOpen || !!lsGet(K.chatted) || hasQueued;
+    if (wasOpen) openPanel();
     if (needsLive) { ensureConnected(); return; }
     setConn("idle");
     // Paint the launcher with the org's real branding without a socket. On failure

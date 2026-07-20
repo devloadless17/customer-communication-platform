@@ -23,6 +23,7 @@ import { mapMessage } from "@/lib/queries/_shared";
 import { REPLY_TO_INCLUDE } from "@/lib/queries/_shared";
 import { applyWebchatPreChatIdentity } from "@/lib/identity/webchat-prechat";
 import {
+  recordFirstSeenOrigin,
   resolveWebchatwidgetByPublicKey,
   type WebchatwidgetResolved,
 } from "@/lib/providers/webchatwidget-config";
@@ -37,6 +38,31 @@ const CHANNEL = "webchatwidget" as const;
 const HISTORY_LIMIT = 50;
 /** Max chars accepted on a single visitor message (matches the capability cap). */
 const MAX_BODY_CHARS = 4096;
+
+/** How far back a client-claimed send time may reach (the offline-outbox window). */
+const MAX_CLIENT_BACKDATE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * When the visitor typed a message, for messages that queued offline.
+ *
+ * Stamping `new Date()` at ingest was wrong for the offline case: three messages
+ * typed while disconnected all landed at reconnect time and could interleave, so
+ * the agent saw them out of the order they were written. The client therefore
+ * sends the time it composed the message.
+ *
+ * That value is UNTRUSTED — a visitor controls their own clock, and a wild one
+ * would sort their thread to the top of the inbox forever (or bury it). So it is
+ * only honoured when it is in the past, within the outbox window, and never in
+ * the future; anything else falls back to server time. Worst case a skewed clock
+ * costs that visitor slightly-off ordering inside their own thread, which is the
+ * same failure they already had.
+ */
+function resolveClientTimestamp(clientTs: number | undefined): Date {
+  const now = Date.now();
+  if (typeof clientTs !== "number" || !Number.isFinite(clientTs)) return new Date(now);
+  if (clientTs > now || clientTs < now - MAX_CLIENT_BACKDATE_MS) return new Date(now);
+  return new Date(clientTs);
+}
 
 /** Handshake rate limit: generous per-IP so a reconnect flap is fine, but bounded. */
 const handshakeBucket = createTokenBucket({ perMin: 120 });
@@ -93,6 +119,11 @@ interface VisitorMessageBody {
     voice?: boolean;
   };
   replyToExternalId?: string;
+  /**
+   * When the visitor actually typed this, epoch ms. Only meaningful for a message
+   * that sat in the offline outbox — see `resolveClientTimestamp`. Untrusted.
+   */
+  clientTs?: number;
   /** Sent only on the FIRST message (pre-chat form). */
   preChat?: { name?: string; email?: string; phone?: string };
 }
@@ -180,6 +211,13 @@ export class WebchatwidgetGateway
             next(new Error("origin_not_allowed"));
             return;
           }
+          // Trust-on-first-use: learn the domain this widget is really embedded on
+          // so Settings can offer a one-click origin lock. Fire-and-forget — a
+          // visitor's handshake must never wait on (or fail from) a bookkeeping
+          // write, and the helper no-ops once the widget is locked or already known.
+          void recordFirstSeenOrigin(siteKey, resolved, origin).catch((err) =>
+            this.logger.warn(`first-seen-origin record failed: ${err}`),
+          );
           const data: WidgetSocketData = {
             teamId: resolved.teamId,
             widgetId: resolved.widgetId,
@@ -299,7 +337,7 @@ export class WebchatwidgetGateway
       externalContactId: data.externalContactId,
       contactName: body.preChat?.name?.trim() || null,
       body: text,
-      timestamp: new Date(),
+      timestamp: resolveClientTimestamp(body.clientTs),
       rawPayload: { source: "webchatwidget", clientMsgId: body.clientMsgId } as Record<
         string,
         unknown
@@ -383,6 +421,11 @@ export class WebchatwidgetGateway
   ): void {
     const data = client.data as WidgetSocketData | undefined;
     if (!data?.conversationId) return;
+    // Rate-gate like the other visitor frames: the on/off state-flip dedupe below
+    // is bypassed by an attacker alternating {on:true}/{on:false}, so without a
+    // bucket one anonymous socket can flood notifyVisitorTyping at wire speed. A
+    // real typist's ~2 flips/sec never trips the shared 120/min bucket.
+    if (!this.allowCheapFrame(data)) return;
     const on = body?.on === true;
     if (on === (data.typingOn ?? false)) return;
     data.typingOn = on;
@@ -427,7 +470,7 @@ export class WebchatwidgetGateway
 
   /**
    * Rate gate for the non-message visitor frames (`visitor:received`,
-   * `visitor:read`, `visitor:loadOlder`).
+   * `visitor:read`, `visitor:loadOlder`, `visitor:typing`).
    *
    * These were completely UNLIMITED on an anonymous socket, while the agent
    * gateway rate-limits every one of its handlers. `visitor:read` is the
@@ -576,8 +619,10 @@ export class WebchatwidgetGateway
       return { messages: [], hasMore: false };
     }
     // Two findMany's per call on an anonymous socket — same budget as the
-    // receipts. An empty page also stops the widget's scroll-triggered loop.
-    if (!this.allowCheapFrame(data)) return { messages: [], hasMore: false };
+    // receipts. On throttle echo hasMore:true (not false): a false ack is
+    // persisted by widget.js and would permanently hide "Load earlier" for the
+    // session even though more history exists — so a re-tap retries after refill.
+    if (!this.allowCheapFrame(data)) return { messages: [], hasMore: true };
     // An unparseable timestamp makes Prisma throw, so the ack never fires and the
     // widget's `loadingOlder` latch stays true — "Load earlier" is then stuck on
     // "Loading…" for the rest of the session. Fail closed with an empty page.

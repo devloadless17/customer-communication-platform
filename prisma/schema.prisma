@@ -609,7 +609,21 @@ model WebchatWidget {
   // indexed lookup instead of scanning JSON.
   publicKey String @unique
   // Origins allowed to embed this widget: "example.com" or "*.example.com".
+  // EMPTY = permissive (any site), deliberately: a brand-new widget must work on
+  // the customer's page before they've configured anything. See `firstSeenOrigin`
+  // for how that gets closed without breaking first-run.
   allowedOrigins String[] @default([])
+  // Host of the FIRST non-loopback page that ever embedded this widget, recorded
+  // write-once and only while `allowedOrigins` is still empty.
+  //
+  // The site key is public by design (it sits in the page source of every customer
+  // site), so an unlocked widget can be lifted and embedded on a phishing page —
+  // the visitor believes they're talking to the brand and the agent sees an
+  // ordinary conversation. Requiring a domain up front would instead break every
+  // widget before its first message, so we do trust-on-first-use: observe the real
+  // domain, then let Settings offer a one-click lock at the moment the value is
+  // obviously correct. Purely a SUGGESTION — it never gates a connection itself.
+  firstSeenOrigin String?
   // Non-secret appearance + pre-chat config the widget fetches (theme,
   // welcomeMessage, headerTitle, suggestedQuestions, preChatFields, showBranding).
   config    Json     @default("{}")

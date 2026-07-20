@@ -10,7 +10,7 @@ This is the single source of truth for how this repository is designed and how f
 
 A web platform where an organization's team members collaborate on customer conversations across many channels from one shared inbox — the class of product defined by **Respond.io, Trengo, Front, Intercom, Missive**. Agents receive customer messages, reply, assign each other, change status / stage / tags / custom fields, leave internal notes, run automations, place calls, and send broadcasts — with **every state change reflected live to everyone on the team**.
 
-It is **channel-agnostic**. WhatsApp is live today; Facebook Messenger, Instagram DMs, Telegram, TikTok, SMS, Email, and Voice/Calling are designed-for and plug in through one abstraction. **Never design anything around WhatsApp only.**
+It is **channel-agnostic**. WhatsApp, Facebook Messenger, Instagram DMs, and the first-party web chat widget are live today; Telegram, TikTok, SMS, Email, and Voice/Calling are designed-for and plug in through one abstraction. **Never design anything around WhatsApp only.**
 
 The whole thing runs on **one Hostinger KVM2 VPS (8 GB)** serving ~30 organizations. This is a deliberate constraint, not a limitation to engineer around: the architecture is tuned to be excellent at this scale and to grow only when a *named* scaling cliff is hit (see §16). Do not add infrastructure (Kafka, Kubernetes, multi-region, a second datastore) speculatively.
 
@@ -80,7 +80,7 @@ This is what lets one layer change without breaking the rest. Swap a provider, m
 
 Full recipe + per-channel constraint table: **[docs/adding-a-channel.md](docs/adding-a-channel.md)**.
 
-- One discriminator: the `Channel` enum. **Live today**: `whatsapp`, `messenger`, `instagram` (each has a registered provider + onboarding). **Designed-for / disabled**: `telegram`, `email`, `sms` — the enum value + capability/identity/label maps exist so the architecture is ready, but there's no provider/webhook/onboarding yet, so no row can carry them. `@ccp/shared/providers/capabilities` exposes `LIVE_CHANNELS` + `isChannelLive()`; shipping a designed-for channel = add its provider/webhook/onboarding **and** add it to `LIVE_CHANNELS`. **No `provider`/`vendor` column anywhere** — which vendor implements a channel is an impl detail, never stored. Meta Cloud serves WhatsApp/Messenger/Instagram; they are distinct *channels* because the channel is the medium, not the vendor.
+- One discriminator: the `Channel` enum. **Live today**: `whatsapp`, `messenger`, `instagram`, `webchatwidget` (each has a registered provider + onboarding; `webchatwidget` is first-party, no vendor). **Designed-for / disabled**: `telegram`, `email`, `sms` — the enum value + capability/identity/label maps exist so the architecture is ready, but there's no provider/webhook/onboarding yet, so no row can carry them. `@ccp/shared/providers/capabilities` exposes `LIVE_CHANNELS` + `isChannelLive()`; shipping a designed-for channel = add its provider/webhook/onboarding **and** add it to `LIVE_CHANNELS`. **No `provider`/`vendor` column anywhere** — which vendor implements a channel is an impl detail, never stored. Meta Cloud serves WhatsApp/Messenger/Instagram; they are distinct *channels* because the channel is the medium, not the vendor.
 - `MessagingProvider<C>` interface (`packages/shared/src/providers/types.ts`): declarative `capabilities`, a pure `parseWebhook(payload) → NormalizedEvent[]`, `sendText`, and optional media/template/calling methods. The only impl today is the `metaProvider` object in `apps/api/src/lib/providers/meta.ts`.
 - Registry `getProviderBinding(channel)` (`apps/api/src/lib/providers/index.ts`) → `{ provider, getSendConfig(teamId) }`. Per-(team,channel) credentials live on `ChannelConnection` (`config` + envelope-encrypted `secrets`), loaded/cached by `apps/api/src/lib/providers/config.ts`.
 
@@ -304,6 +304,9 @@ Each links to the reasoning:
 | Event bus: tiers, taxonomy, subscribers, outbox | [docs/events.md](docs/events.md) |
 | Customer identity: unified model, auto-merge rules, migration | [docs/identity.md](docs/identity.md) |
 | Team chat: channels, 1:1 DMs, public/private visibility, invariants | [docs/team-chat.md](docs/team-chat.md) |
+| Website chat widget: embed modes, transport, media, identity | [docs/webchatwidget.md](docs/webchatwidget.md) |
+| Website chat widget: **developer** guide — file map, local run, tests, invariants, debugging | [docs/webchatwidget-dev-guide.md](docs/webchatwidget-dev-guide.md) |
+| Website chat widget: **customer-facing** install guide (also in-app at `/docs/webchat-install`) | [docs/webchat-install-guide.md](docs/webchat-install-guide.md) |
 | Adding a channel: recipe + per-channel constraints | [docs/adding-a-channel.md](docs/adding-a-channel.md) |
 | Meta channels capability & gap matrix (WhatsApp/Messenger/Instagram) | [docs/meta-channels-capabilities.md](docs/meta-channels-capabilities.md) |
 | Data model ERD | [docs/schema-erd.md](docs/schema-erd.md) |

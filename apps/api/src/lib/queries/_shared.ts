@@ -1,6 +1,10 @@
 import { db } from "@/lib/db";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
-import { socialContactPlaceholder } from "@ccp/shared/providers/capabilities";
+import {
+  ephemeralVisitorLabel,
+  isEphemeralChannel,
+  socialContactPlaceholder,
+} from "@ccp/shared/providers/capabilities";
 import type {
   ActivityActorKind,
   Contact,
@@ -152,14 +156,31 @@ function contactDisplayIdentity(c: {
   lastName: string | null;
   identityChannel: string | null;
   externalContactId: string | null;
+  email?: string | null;
+  phoneNumber?: string | null;
 }): { name: string; firstName: string | null; lastName: string | null } {
   if (!c.externalContactId || c.name !== c.externalContactId) {
     return { name: c.name, firstName: c.firstName, lastName: c.lastName };
   }
   // Null the split-from-id parts too, so no surface reading firstName/lastName
   // leaks the raw id; initials fall back to the placeholder name.
+  const channel = c.identityChannel as Channel | null;
+  if (channel && isEphemeralChannel(channel)) {
+    // A visitor who self-identified via the pre-chat form has a real handle — show
+    // it. (They gave a phone/email but no name, so `name` is still the raw id;
+    // without this a PROMOTED visitor still read "Website visitor", hiding the very
+    // identity they just supplied.) Otherwise fall back to a per-visitor label so
+    // concurrent anonymous chats are distinguishable — the shared placeholder made
+    // every widget row in the inbox look identical.
+    const identified = c.email || c.phoneNumber;
+    return {
+      name: identified || ephemeralVisitorLabel(c.externalContactId),
+      firstName: null,
+      lastName: null,
+    };
+  }
   return {
-    name: socialContactPlaceholder(c.identityChannel as Channel | null),
+    name: socialContactPlaceholder(channel),
     firstName: null,
     lastName: null,
   };
