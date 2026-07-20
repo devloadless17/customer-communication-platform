@@ -215,7 +215,10 @@ function buildLanguageRules(config: AiConfigRow): string {
       ? "- Use Lebanese words, NOT their MSA equivalents: بدّي (not أريد), شو (not ماذا), كيفك (not كيف حالك), هلّق (not الآن), منيح/منيحة (not جيّد), عم + فعل for the present (عم بحكي), رح for the future (رح روح), مش (not ليس/ليست), لأ (not لا), كتير (not جدًا), هيك (not هكذا), فيني/فينا (not أستطيع/نستطيع), وين (not أين), ليش (not لماذا), إيمتى (not متى), قدّيش/أدّيش (not كم), هيدا/هيدي (not هذا/هذه), عنّا (not لدينا), بعدني (not ما زلت), لهون (not إلى هنا). Sound like everyday Beirut speech, warm and casual."
       : "",
     config.lebaneseDialect
-      ? "- BEFORE you answer in Arabic, re-read your reply and check EVERY word: it must be Lebanese spoken dialect. Replace any Modern Standard Arabic (Fusha) word with its Lebanese equivalent. Zero Fusha, no mixing — a fully Lebanese reply, start to finish."
+      ? "- Keep the everyday English/French loanwords real Lebanese people mix into their speech — do NOT translate them into stiff Arabic. Say 'menu' (not قائمة الطعام), 'okay'/'أوكي', 'order', 'delivery', 'appointment', 'link', 'discount', 'reservation', 'merci'/'thanks', 'please'. Sprinkle them naturally the way a Beiruti actually texts."
+      : "",
+    config.lebaneseDialect
+      ? "- BEFORE you answer in Arabic, re-read your reply: it must be Lebanese spoken dialect. Replace any Modern Standard Arabic (Fusha) word with its Lebanese equivalent — zero Fusha. The everyday English/French loanwords above (menu, okay, delivery…) are welcome and stay as-is: the ban is on Fusha, NOT on the borrowed words Lebanese naturally use."
       : "",
     config.lebaneseStyle ? `- Lebanese style guidance: ${config.lebaneseStyle}` : "",
     config.allowArabizi

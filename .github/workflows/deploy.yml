@@ -581,13 +581,14 @@ jobs:
           # Optional: empty if the OPENAI_API_KEY secret isn't set — the AI
           # Assistant simply no-ops (no boot crash), same as ANTHROPIC_API_KEY.
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # Anthropic: powers the composer's Translate action AND the AI reply
-          # TEXT brain (Claude handles Lebanese/Arabizi far better than gpt-4o).
-          # Optional in the same sense as the key above — unset means Translate
-          # returns a clean 503 and the reply brain falls back to OpenAI, rather
-          # than a boot crash. AI_ANTHROPIC_MODEL_REPLY only tunes which Claude
-          # model is used; it has a code default, so it is safe to leave unset.
+          # Optional: Claude powers the AI-Assistant reply-TEXT step (better
+          # Lebanese/Arabizi than gpt-4o) + the composer Translate feature.
+          # Empty = the assistant falls back to OpenAI for text (no boot crash).
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Model selector, from the GH secret rather than a literal here, so it
+          # can be retuned without editing + redeploying this workflow. Empty is
+          # safe: compose's `:-claude-opus-4-8` and the code default both cover
+          # it (lib/ai/models.ts).
           AI_ANTHROPIC_MODEL_REPLY: ${{ secrets.AI_ANTHROPIC_MODEL_REPLY }}
           # Optional: Azure Speech TTS (authentic ar-LB Lebanese voices). Empty =
           # the assistant just uses OpenAI voices; picking an ar-LB voice falls
@@ -650,31 +651,30 @@ jobs:
             # global kill switch. This block is rendered on EVERY deploy, so
             # edit it here (not by hand on the VPS — hand edits get overwritten).
             OPENAI_API_KEY=${OPENAI_API_KEY}
+            # Claude powers the reply-TEXT step (much better Lebanese/Arabizi
+            # than gpt-4o) and the composer Translate feature. When this key is
+            # present, AI_TEXT_PROVIDER auto-selects Claude for text; empty =
+            # OpenAI. Model tunable via AI_ANTHROPIC_MODEL_REPLY. STT + voice
+            # synthesis stay on OpenAI/Azure regardless.
+            #
+            # Both come from GH secrets, so neither needs a workflow edit to
+            # retune. AI_ANTHROPIC_MODEL_REPLY was briefly a literal here; that
+            # silently ignored the secret of the same name, so changing it in
+            # GitHub would have had no effect. Empty is safe — compose's
+            # `:-claude-opus-4-8` and the code default (lib/ai/models.ts) both
+            # cover it.
+            #
+            # An empty ANTHROPIC_API_KEY degrades rather than crashes (Translate
+            # 503s, reply falls back to OpenAI), which is deliberate — and also
+            # why a typo'd secret name is invisible. If Claude replies look
+            # wrong after a deploy: `docker compose exec api printenv | grep ANTHROPIC`.
+            ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+            AI_ANTHROPIC_MODEL_REPLY=${AI_ANTHROPIC_MODEL_REPLY}
             AI_ASSISTANT_ENABLED=1
             AI_MODEL_REPLY=gpt-4o
             AI_MODEL_SUMMARY=gpt-4o-mini
             AI_STT_MODEL=gpt-4o-transcribe
             AI_TTS_MODEL=gpt-4o-mini-tts
-            # Anthropic. Two independent consumers:
-            #   1. the composer's Translate action (/api/messages/translate),
-            #   2. the AI reply TEXT brain — Claude handles Lebanese/Arabizi far
-            #      better than gpt-4o.
-            # No AI_TEXT_PROVIDER line is needed: models.ts auto-selects
-            # Anthropic whenever ANTHROPIC_API_KEY is present and falls back to
-            # OpenAI when it isn't, so setting the key IS the switch. Force one
-            # way or the other by adding AI_TEXT_PROVIDER=anthropic|openai here.
-            #
-            # An EMPTY value is safe rather than a boot failure — Translate
-            # returns a clean 503 and the reply brain silently uses OpenAI — so
-            # if the GH secret is missing you get degraded behaviour, NOT a
-            # crash. That is deliberate, and it is also why a typo'd secret name
-            # is easy to miss: check `docker compose exec api printenv` after the
-            # first deploy if Claude replies don't look right.
-            #
-            # AI_ANTHROPIC_MODEL_REPLY only picks the model. Empty is fine —
-            # compose's `:-claude-opus-4-8` and the code default both cover it.
-            ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-            AI_ANTHROPIC_MODEL_REPLY=${AI_ANTHROPIC_MODEL_REPLY}
             # Azure Speech TTS — authentic Lebanese (ar-LB Layla/Rami) voices.
             # Optional: empty = OpenAI voices only. Rendered every deploy, so set
             # the values via the AZURE_SPEECH_KEY / AZURE_SPEECH_REGION GH secrets
