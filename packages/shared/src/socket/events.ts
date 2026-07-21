@@ -239,6 +239,13 @@ export interface ServerToClientEvents {
     messageId: string;
     status: string;
   }) => void;
+  "ai:flag": (payload: {
+    teamId: string;
+    conversationId: string;
+    messageId: string;
+    risk: number;
+    notes: string | null;
+  }) => void;
 
   /**
    * Conversation was hard-deleted by an agent. Every client splices it out

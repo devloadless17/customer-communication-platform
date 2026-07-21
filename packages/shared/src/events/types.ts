@@ -1202,6 +1202,15 @@ export interface AiTranscriptionChangedEvent {
   // ready | failed
   status: string;
 }
+/** A just-sent AI reply scored at/above the hallucination flag threshold — see lib/ai/hallucination.ts. */
+export interface AiMessageFlaggedEvent {
+  teamId: string;
+  conversationId: string;
+  messageId: string;
+  /** 0..1 model self-reported risk. */
+  risk: number;
+  notes: string | null;
+}
 
 // ---------------------------------------------------------------------------
 // Event map — discriminated union by `type`. Use `DomainEventOf<K>` to grab
@@ -1256,6 +1265,7 @@ export interface DomainEventMap {
   "ai.memory_changed": AiMemoryChangedEvent;
   "ai.state_changed": AiStateChangedEvent;
   "ai.transcription_changed": AiTranscriptionChangedEvent;
+  "ai.message_flagged": AiMessageFlaggedEvent;
   // WhatsApp Business Calling. Per-phase split so subscribers can attach
   // to just the phase they care about (audit on terminal, outbound webhooks
   // on ended/missed/rejected, fanout has its own per-phase room scoping).

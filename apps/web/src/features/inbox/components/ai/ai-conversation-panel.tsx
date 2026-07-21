@@ -38,9 +38,15 @@ interface SessionSummary {
   overallBrief: string | null;
   updatedAt: string;
 }
+interface HallucinationSummary {
+  ratePercent: number | null;
+  scoredCount: number;
+  flagged: Array<{ messageId: string; risk: number; notes: string | null }>;
+}
 interface Overview {
   memory: MemoryItem[];
   summary: SessionSummary | null;
+  hallucination: HallucinationSummary | null;
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -82,8 +88,9 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
     void load();
   }, [load]);
 
-  // Realtime: refetch when the system updates this conversation's summary or the
-  // customer's memory (ai.summary_changed / ai.memory_changed domain events).
+  // Realtime: refetch when the system updates this conversation's summary, the
+  // customer's memory, or flags a newly-sent AI reply as a hallucination risk
+  // (ai.summary_changed / ai.memory_changed / ai.message_flagged).
   useEffect(() => {
     const socket = getClientSocket();
     const onSummary = (p: { teamId: string; conversationId: string }) => {
@@ -92,11 +99,16 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
     const onMemory = (p: { teamId: string; conversationId: string; customerId: string }) => {
       if (p.conversationId === conversationId) void load();
     };
+    const onFlag = (p: { teamId: string; conversationId: string }) => {
+      if (p.conversationId === conversationId) void load();
+    };
     socket.on("ai:summary", onSummary);
     socket.on("ai:memory", onMemory);
+    socket.on("ai:flag", onFlag);
     return () => {
       socket.off("ai:summary", onSummary);
       socket.off("ai:memory", onMemory);
+      socket.off("ai:flag", onFlag);
     };
   }, [conversationId, load]);
 
@@ -108,6 +120,7 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
     .filter((m) => TAG_KINDS.has(m.kind) && m.status === "confirmed")
     .slice(0, 6);
   const summary = data?.summary ?? null;
+  const hallucination = data?.hallucination ?? null;
 
   async function fetchRangeSummary() {
     if (!rangeFrom || !rangeTo) return;
@@ -310,6 +323,35 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
           )}
         </div>
       </Section>
+
+      {hallucination && hallucination.scoredCount > 0 && (
+        <Section title="AI Reliability">
+          <div className="space-y-1.5 text-sm">
+            <p>
+              <span className="font-medium">{hallucination.ratePercent}%</span>{" "}
+              <span className="text-xs text-muted-foreground">
+                average hallucination risk across {hallucination.scoredCount} AI-generated
+                {hallucination.scoredCount === 1 ? " reply" : " replies"} in this chat.
+              </span>
+            </p>
+            {hallucination.flagged.length > 0 && (
+              <div>
+                <p className="mb-1 text-xs font-medium text-muted-foreground">
+                  Flagged for review ({hallucination.flagged.length}):
+                </p>
+                <ul className="space-y-1">
+                  {hallucination.flagged.map((f) => (
+                    <li key={f.messageId} className="text-xs text-muted-foreground">
+                      <span className="font-medium text-foreground">{Math.round(f.risk * 100)}%</span>
+                      {f.notes ? ` — ${f.notes}` : " — unverified claim, check the message"}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
     </>
   );
 }

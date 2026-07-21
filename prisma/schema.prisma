@@ -3489,6 +3489,14 @@ model AiMessageMetadata {
   intent        String?
   confidence    Float?
   interactionId String?
+  // Model self-reported risk (0..1) that this reply contains a claim not
+  // grounded in the company info / retrieved knowledge (see REPLY_SCHEMA).
+  // Null for replies generated before this field existed. A conversation's
+  // hallucination rate is the average across its scored AI messages (see
+  // lib/ai/hallucination.ts); messages at/above HALLUCINATION_FLAG_THRESHOLD
+  // are surfaced to the agent for review via `ai.message_flagged`.
+  hallucinationRisk  Float?
+  hallucinationNotes String? @db.Text
   createdAt     DateTime @default(now())
 
   @@index([teamId])
