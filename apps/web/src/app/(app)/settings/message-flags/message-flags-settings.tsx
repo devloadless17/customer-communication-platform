@@ -10,9 +10,10 @@ import { PageHeader } from "@/components/layouts/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
-import { TAG_COLORS, type TagColor } from "@ccp/shared/types";
+import { type TagColor } from "@ccp/shared/types";
 import type { MessageFlagDefinitionWithUsage } from "@ccp/shared/message-flags/types";
 import { cn } from "@ccp/shared/utils";
+import { ColorSwatchPicker } from "@/components/ui/color-swatch-picker";
 
 /**
  * Message-flag catalog manager — deliberately the same shape as the tags
@@ -299,9 +300,16 @@ function DefinitionRow({
 
   return (
     <li className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:gap-3">
-      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+      {/* The colour picker IS the row's colour indicator — it used to sit on
+          its own line under the description while a second, non-interactive dot
+          sat beside the name. Two swatches saying the same thing, and a wasted
+          line of height per flag. One control, leading the row. */}
+      <ColorRow
+        value={def.color as TagColor}
+        onChange={(color) => onPatch({ color })}
+      />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex items-center gap-2">
-          <span className={cn("size-2.5 shrink-0 rounded-full", tagColorClasses(def.color).solid)} />
           <Input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -324,11 +332,6 @@ function DefinitionRow({
           placeholder="Add a description…"
           maxLength={200}
           className="h-7 border-transparent bg-transparent px-1 text-xs text-muted-foreground hover:border-border focus:border-border"
-        />
-        <ColorRow
-          value={def.color as TagColor}
-          onChange={(color) => onPatch({ color })}
-          compact
         />
       </div>
 
@@ -374,29 +377,12 @@ function DefinitionRow({
 function ColorRow({
   value,
   onChange,
-  compact,
 }: {
   value: TagColor;
   onChange: (color: TagColor) => void;
   compact?: boolean;
 }) {
   return (
-    <div className={cn("flex flex-wrap gap-1", compact && "gap-0.5")}>
-      {TAG_COLORS.map((color) => (
-        <button
-          key={color}
-          type="button"
-          onClick={() => onChange(color)}
-          aria-label={color}
-          aria-pressed={value === color}
-          className={cn(
-            "rounded-full ring-offset-2 ring-offset-background transition-transform hover:scale-110",
-            compact ? "size-3.5" : "size-5",
-            tagColorClasses(color).solid,
-            value === color && "ring-2 ring-foreground/40",
-          )}
-        />
-      ))}
-    </div>
+    <ColorSwatchPicker selected={value} onChange={onChange} label="flag colour" />
   );
 }

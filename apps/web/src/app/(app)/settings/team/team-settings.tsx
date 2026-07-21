@@ -9,6 +9,7 @@ import {
   Clock,
   Copy,
   KeyRound,
+  MoreHorizontal,
   Loader2,
   Mail,
   Settings as SettingsIcon,
@@ -593,7 +594,17 @@ function UserRow({
           )}
         </div>
       </div>
-      <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+      {/* Actions: `shrink-0` so this cluster can never steal width from the
+          identity column again. Five equal-weight buttons per row squeezed the
+          name/email/status until the status truncated to "Appear o" and emails
+          vanished entirely — the row was all chrome and no information.
+
+          Kept inline: role (you read it at a glance down the column) and
+          availability (one icon; admins use it to cover for someone who left
+          without switching off). Everything else — disable, reset password,
+          delete — is rare, per-person and destructive, so it belongs behind an
+          overflow menu rather than repeated seven times down the page. */}
+      <div className="flex shrink-0 items-center justify-end gap-1.5">
         {canManageAvailability && !user.deactivated && (
           <MemberAvailabilityMenu
             user={user}
@@ -608,6 +619,8 @@ function UserRow({
             disabled={pending}
             onChange={(e) => onPatch({ role: e.target.value as Role })}
             className="h-8 pl-2 pr-7 text-xs"
+            wrapperClassName="w-28"
+            aria-label={`Role for ${user.name || user.email}`}
           >
             {options.map((r) => (
               <option key={r} value={r}>
@@ -621,59 +634,59 @@ function UserRow({
           </Badge>
         )}
         {editable && (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={pending || isSelf}
-            title={
-              isSelf
-                ? "You can't deactivate yourself"
-                : user.deactivated
-                  ? "Re-enable this account"
-                  : "Disable sign-in for this account"
-            }
-            onClick={() => onPatch({ deactivated: !user.deactivated })}
-          >
-            {user.deactivated ? (
-              <>
-                <UserCheck className="size-3.5" />
-                Re-enable
-              </>
-            ) : (
-              <>
-                <UserX className="size-3.5" />
-                Disable
-              </>
-            )}
-          </Button>
-        )}
-        {editable && !isSelf && (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={pending}
-            title="Set a new password for this teammate"
-            onClick={onResetPassword}
-          >
-            <KeyRound className="size-3.5" />
-            Reset password
-          </Button>
-        )}
-        {editable && !isSelf && (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={pending}
-            title="Permanently remove this account"
-            className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-            onClick={onDelete}
-          >
-            <Trash2 className="size-3.5" />
-            Delete
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="size-8 shrink-0"
+                disabled={pending}
+                aria-label={`More actions for ${user.name || user.email}`}
+              >
+                <MoreHorizontal className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-52">
+              <DropdownMenuItem
+                disabled={pending || isSelf}
+                onSelect={() => onPatch({ deactivated: !user.deactivated })}
+              >
+                {user.deactivated ? (
+                  <>
+                    <UserCheck className="size-3.5" />
+                    Re-enable account
+                  </>
+                ) : (
+                  <>
+                    <UserX className="size-3.5" />
+                    Disable sign-in
+                  </>
+                )}
+              </DropdownMenuItem>
+              {!isSelf && (
+                <DropdownMenuItem disabled={pending} onSelect={onResetPassword}>
+                  <KeyRound className="size-3.5" />
+                  Reset password
+                </DropdownMenuItem>
+              )}
+              {!isSelf && (
+                <>
+                  {/* Separated, per the menu guidance — an irreversible delete
+                      should never sit flush against routine actions. */}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    disabled={pending}
+                    className="text-destructive focus:text-destructive"
+                    onSelect={onDelete}
+                  >
+                    <Trash2 className="size-3.5" />
+                    Delete permanently
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         )}
       </div>
     </li>
@@ -1069,13 +1082,17 @@ function MemberAvailabilityMenu({
         <DropdownMenuTrigger asChild>
           <Button
             type="button"
-            size="sm"
-            variant="outline"
+            size="icon"
+            variant="ghost"
+            className="size-8 shrink-0"
             disabled={disabled || busy}
             title={`Set ${user.name || "this member"}'s availability`}
+            // Icon-only: the label was the widest thing in the row and the
+            // action is self-evident from the clock + tooltip. aria-label keeps
+            // it announced for screen readers.
+            aria-label={`Set ${user.name || "this member"}'s availability`}
           >
-            {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Clock className="size-3.5" />}
-            Availability
+            {busy ? <Loader2 className="size-4 animate-spin" /> : <Clock className="size-4" />}
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-52">

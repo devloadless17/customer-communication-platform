@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpDown,
   Check,
-  CheckCircle2,
   ChevronDown,
   Loader2,
   Pencil,
@@ -29,9 +28,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
-import { TAG_COLORS, type Tag, type TagColor } from "@ccp/shared/types";
+import { type Tag, type TagColor } from "@ccp/shared/types";
 import { cn } from "@ccp/shared/utils";
+import { ColorSwatchPicker } from "@/components/ui/color-swatch-picker";
 
 /**
  * Tag catalog manager — mirrors the stages-settings UX so admins don't have
@@ -297,7 +296,6 @@ export function TagsSettings({
               )}
             >
               <div className="flex flex-wrap items-center gap-2">
-                <TagDot color={newColor} />
                 <Input
                   ref={newInputRef}
                   value={newName}
@@ -431,7 +429,9 @@ function TagRow({
 
   return (
     <li className="flex flex-wrap items-center gap-3 px-4 py-3">
-      <TagDot color={tag.color} />
+      {/* The picker is the colour indicator; a separate decorative dot beside
+          the name said the same thing twice. */}
+      <ColorSwatches selected={tag.color} onChange={onRecolor} disabled={busy} />
 
       {editing ? (
         <Input
@@ -462,7 +462,6 @@ function TagRow({
         </button>
       )}
 
-      <ColorSwatches selected={tag.color} onChange={onRecolor} compact disabled={busy} />
 
       <a
         href={`/contacts?tag=${tag.id}`}
@@ -486,15 +485,9 @@ function TagRow({
   );
 }
 
-function TagDot({ color }: { color: TagColor }) {
-  const cls = tagColorClasses(color);
-  return <span className={cn("inline-block size-3 shrink-0 rounded-full", cls.solid)} />;
-}
-
 function ColorSwatches({
   selected,
   onChange,
-  compact = false,
   disabled = false,
 }: {
   selected: TagColor;
@@ -502,35 +495,18 @@ function ColorSwatches({
   compact?: boolean;
   disabled?: boolean;
 }) {
+  // Collapsed to the current swatch — see ColorSwatchPicker for why the full
+  // nine-dot palette per row had to go. `compact` is accepted and ignored so
+  // existing call sites keep compiling.
   return (
-    <div className={cn("flex items-center gap-1", compact && "ml-2")}>
-      {TAG_COLORS.map((c) => {
-        const classes = tagColorClasses(c);
-        return (
-          <button
-            key={c}
-            type="button"
-            onClick={() => onChange(c)}
-            disabled={disabled}
-            aria-label={`${c} color`}
-            className={cn(
-              "size-4 cursor-pointer rounded-full ring-1 ring-border transition-transform",
-              classes.solid,
-              selected === c && "ring-2 ring-foreground/60 ring-offset-1 ring-offset-card scale-110",
-              "disabled:cursor-not-allowed disabled:opacity-50",
-            )}
-          >
-            {selected === c && <CheckCircle2 className="size-3 text-background opacity-0" />}
-          </button>
-        );
-      })}
-    </div>
+    <ColorSwatchPicker
+      selected={selected}
+      onChange={onChange}
+      disabled={disabled}
+      label="tag colour"
+    />
   );
 }
-
-// ---------------------------------------------------------------------------
-// Search + sort
-// ---------------------------------------------------------------------------
 
 type SortKey =
   | "newest"
@@ -551,11 +527,6 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: "usage-asc", label: "Least used" },
 ];
 
-/**
- * Pure sort over a copy. `createdAt` is an ISO-8601 string, so a lexical
- * compare is chronological. Usage sorts tie-break on name so equal-count tags
- * stay stable and alphabetical.
- */
 function sortTags(
   tags: Tag[],
   sortBy: SortKey,

@@ -5,7 +5,6 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
-  CheckCircle2,
   Loader2,
   Milestone,
   Pencil,
@@ -22,8 +21,9 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/layouts/page-header";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
-import { TAG_COLORS, type ContactStage, type TagColor } from "@ccp/shared/types";
+import { type ContactStage, type TagColor } from "@ccp/shared/types";
 import { cn } from "@ccp/shared/utils";
+import { ColorSwatchPicker } from "@/components/ui/color-swatch-picker";
 
 /**
  * Customer-lifecycle stage manager.
@@ -529,7 +529,6 @@ function StageDot({ color }: { color: TagColor }) {
 function ColorSwatches({
   selected,
   onChange,
-  compact = false,
   disabled = false,
 }: {
   selected: TagColor;
@@ -538,30 +537,12 @@ function ColorSwatches({
   disabled?: boolean;
 }) {
   return (
-    <div className={cn("flex items-center gap-1", compact && "ml-2")}>
-      {TAG_COLORS.map((c) => {
-        const classes = tagColorClasses(c);
-        return (
-          <button
-            key={c}
-            type="button"
-            onClick={() => onChange(c)}
-            disabled={disabled}
-            aria-label={`${c} color`}
-            className={cn(
-              "size-4 cursor-pointer rounded-full ring-1 ring-border transition-transform",
-              classes.solid,
-              selected === c && "ring-2 ring-foreground/60 ring-offset-1 ring-offset-card scale-110",
-              "disabled:cursor-not-allowed disabled:opacity-50",
-            )}
-          >
-            {selected === c && (
-              <CheckCircle2 className="size-3 text-background opacity-0" />
-            )}
-          </button>
-        );
-      })}
-    </div>
+    <ColorSwatchPicker
+      selected={selected}
+      onChange={onChange}
+      disabled={disabled}
+      label="stage colour"
+    />
   );
 }
 
