@@ -71,6 +71,18 @@ export const TranslateSchema = z.object({
 });
 export type TranslateInput = z.infer<typeof TranslateSchema>;
 
+/**
+ * Composer "refine" (AI polish). Same stateless shape as Translate — no
+ * conversation context, just a draft-text transform. `mode` picks the
+ * rewrite style; the curated set mirrors what agents actually reach for
+ * (tone up, tone down, trim length, clean up grammar).
+ */
+export const RefineSchema = z.object({
+  text: z.string().trim().min(1).max(8000),
+  mode: z.enum(["formal", "friendly", "shorten", "grammar"]),
+});
+export type RefineInput = z.infer<typeof RefineSchema>;
+
 export const SendTemplateSchema = z.object({
   conversationId: z.string().min(1),
   templateId: z.string().min(1),

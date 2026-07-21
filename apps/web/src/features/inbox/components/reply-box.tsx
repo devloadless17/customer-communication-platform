@@ -12,6 +12,7 @@ import {
   Sparkles,
   StickyNote,
   UserRound,
+  Wand2,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -79,6 +80,10 @@ const EmojiPopover = dynamic(
 );
 const TranslatePopover = dynamic(
   () => import("./reply-box/translate-popover").then((m) => m.TranslatePopover),
+  { ssr: false },
+);
+const RefinePopover = dynamic(
+  () => import("./reply-box/refine-popover").then((m) => m.RefinePopover),
   { ssr: false },
 );
 const InteractivePopover = dynamic(
@@ -382,6 +387,7 @@ function ReplyBoxImpl({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [translateOpen, setTranslateOpen] = useState(false);
+  const [refineOpen, setRefineOpen] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1939,6 +1945,32 @@ function ReplyBoxImpl({
                 onClose={() => setTranslateOpen(false)}
                 text={value}
                 onTranslated={(translated) => setValue(translated)}
+              />
+            </div>
+
+            {/* AI-refine the current draft (Formalise / Friendly / Shorten /
+                Fix grammar — Gmail-"Polish"-style). Replaces the composer
+                text with the rewrite once the agent hits Apply. */}
+            <div className="relative">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-8 pointer-coarse:size-9 text-muted-foreground"
+                type="button"
+                title="Refine with AI"
+                aria-label="Refine with AI"
+                onClick={() => {
+                  setEmojiOpen(false);
+                  setRefineOpen((v) => !v);
+                }}
+              >
+                <Wand2 className="size-4" />
+              </Button>
+              <RefinePopover
+                open={refineOpen}
+                onClose={() => setRefineOpen(false)}
+                text={value}
+                onRefined={(refined) => setValue(refined)}
               />
             </div>
 
