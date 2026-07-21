@@ -18,19 +18,36 @@ import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
 import {
   providerPlaceCall,
   providerAnswerCall,
+  providerCompleteAccept,
   providerRejectCall,
   providerEndCall,
   providerMediaUpdate,
   usesUnifiedCalling,
 } from "@/lib/messaging/call-actions";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
-import {
-  BIC_BLOCKED_COUNTRY_CODES,
-  SANCTIONED_COUNTRY_CODES,
-} from "@ccp/shared/providers/calling-regions";
+import { getBusinessNumberCountry } from "@/lib/providers/config";
+import { isBicAllowedForBusinessNumber } from "@ccp/shared/providers/calling-regions";
 import type { Capability } from "@ccp/shared/auth/permissions";
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
+import type {
+  CallPermissionState,
+  CallSettings,
+  CallSettingsState,
+} from "@ccp/shared/providers/types";
 import type { Channel } from "@ccp/shared/types";
+
+/**
+ * Context shown above the provider-rendered Allow/Deny prompt when we ask a
+ * customer for calling permission.
+ *
+ * Deliberately a constant, not agent-supplied: this text is the only thing the
+ * customer reads before granting an ongoing right to be phoned, so it has to
+ * stay accurate and consistent. The prompt itself is rendered by the provider
+ * and cannot be customized. (Per-team wording belongs in Settings alongside the
+ * other calling policy, not in a free-text field on a call button.)
+ */
+const CALL_PERMISSION_REQUEST_BODY =
+  "We'd like to call you to help with your request. Allow calls from us?";
 
 import { DbService } from "../db/db.service";
 import { EventBus } from "../events/event-bus.module";
@@ -60,9 +77,30 @@ export type InitiateCallFailure =
   | { ok: false; reason: "bic_blocked_region" }
   | { ok: false; reason: "permission_revoked" }
   | { ok: false; reason: "rate_limited"; retryAt: string }
+  // The provider has PAUSED calling on our number entirely (negative feedback
+  // or a low pickup rate). Distinct from rate_limited, which is per-customer:
+  // this blocks every call until it lifts.
+  | { ok: false; reason: "calling_restricted"; retryAt: string }
   | { ok: false; reason: "daily_cap_reached" }
   | { ok: false; reason: "provider_not_configured" }
   | { ok: false; reason: "provider_rejected" };
+
+/** One line of the calling setup checklist. */
+export interface CallingReadinessCheck {
+  key: string;
+  ok: boolean;
+  /** Short affirmative statement of what's required. */
+  label: string;
+  /** What to do about it, when `ok` is false. */
+  detail: string | null;
+}
+
+export interface CallingReadiness {
+  ready: boolean;
+  checks: CallingReadinessCheck[];
+  /** Null when the provider's settings couldn't be read. */
+  settings: CallSettingsState | null;
+}
 
 export interface InitiateCallSuccess {
   ok: true;
@@ -87,16 +125,23 @@ export class CallsService {
   ) {}
 
   /**
-   * Initiate an outbound call. Pre-flight gauntlet runs in this order so
-   * each failure surfaces a precise reason the UI can render:
+   * Initiate an outbound call. Pre-flight runs in this order so each failure
+   * surfaces a precise reason the UI can render:
    *   1. conversation + contact load, then a capability gate on the channel's
    *      declared `capabilities.calling` (Instagram / any future non-calling
    *      channel is refused here, not left to fail deep in the provider)
-   *   2. region gate (BIC_BLOCKED_COUNTRY_CODES + sanctioned)
-   *   3. revocation gate (Contact.callPermissionRevokedUntil)
-   *   4. 24h window check OR live permission
-   *   6. 5-calls-per-24h-per-contact cap
-   *   7. placeCall against Meta + INSERT Call row + publish ringing_out
+   *   2. region gate — on OUR business number's country, not the customer's
+   *   3. permission + quota, read from the PROVIDER (never a local ledger)
+   *   4. placeCall + INSERT Call row + publish ringing_out
+   *
+   * The permission gate is the part worth understanding. Permission is
+   * required for EVERY business-initiated call — there is no 24h-window
+   * exemption; the window only decides how we may ASK. And permission can be
+   * granted by paths that leave no trace on our side (automatically when the
+   * customer calls us, or from the business profile), so a local request
+   * ledger cannot be the gate — it would refuse contacts who are perfectly
+   * callable. We ask the provider, which also returns the live quota, so no
+   * call cap is hardcoded here to go stale.
    */
   async initiateCall(
     session: ApiSession,
@@ -113,7 +158,7 @@ export class CallsService {
             id: true,
             phoneNumber: true,
             externalContactId: true,
-            countryCode: true,
+            bsuid: true,
             callPermissionRevokedUntil: true,
             lastInboundAt: true,
           },
@@ -142,44 +187,80 @@ export class CallsService {
       });
     }
     const isUnified = usesUnifiedCalling(binding.provider);
-    const to = isUnified ? contact.externalContactId : contact.phoneNumber;
-    if (!to) {
+    // Phone channels identify the callee by phone OR business-scoped user id.
+    // A customer who called us cold (the provider omits their number once we
+    // haven't messaged them in 30 days) has ONLY a BSUID — requiring a phone
+    // here made those contacts permanently uncallable, which is exactly the
+    // callback case calling exists to serve.
+    const to =
+      (isUnified ? contact.externalContactId : contact.phoneNumber) ?? undefined;
+    const recipient = isUnified ? undefined : contact.bsuid ?? undefined;
+    if (!to && !recipient) {
       throw new BadRequestException({
-        error: isUnified ? "contact has no messaging id" : "contact has no phone number",
+        error: isUnified
+          ? "contact has no messaging id"
+          : "contact has no phone number or user id",
       });
     }
 
-    // Region gate (phone channels only — a PSID carries no country; Messenger's
-    // per-Page feature status is its region gate). Defense-in-depth for a direct
-    // API call; the UI already hides the button.
-    if (!isUnified && contact.countryCode) {
-      const cc = contact.countryCode.toUpperCase();
-      if (
-        BIC_BLOCKED_COUNTRY_CODES.has(cc) ||
-        SANCTIONED_COUNTRY_CODES.has(cc)
-      ) {
+    // ── Cheap local gates first ──────────────────────────────────────────
+    // Everything below this comment is answerable from our own database, so it
+    // runs before any credential load or provider round-trip. Ordering them
+    // this way isn't just speed: it means a team that hasn't connected
+    // WhatsApp still gets the precise reason ("your number's country can't
+    // place calls") rather than a blanket "not configured".
+
+    // Region. Eligibility follows OUR business number's country, not the
+    // customer's: a number registered in a blocked market can't call anyone,
+    // and an eligible one can call customers anywhere. (Phone channels only —
+    // a PSID carries no country, and Messenger's per-Page feature status is its
+    // own region gate.) Defense-in-depth; the UI already hides the button.
+    if (!isUnified) {
+      const businessCountry = await getBusinessNumberCountry(session.teamId);
+      if (!isBicAllowedForBusinessNumber(businessCountry)) {
         return { ok: false, reason: "bic_blocked_region" };
       }
     }
 
-    // Testing escape hatch: skip our permission / 24h-window / daily-cap
-    // pre-flight so QA can place repeat calls without tripping Meta's permission
-    // dance or our own 5/24h cap. Gated to non-production AND an explicit flag,
-    // so it can never silently weaken prod. NOTE: Meta still enforces its OWN
-    // window / permission rules at placeCall — this only removes OUR friction,
-    // so an out-of-window customer with no granted permission will still get a
-    // provider_rejected from Meta. Region/sanctions gate above is NEVER skipped.
+    // Provider-imposed pause on calling for this number (negative feedback or a
+    // low pickup rate). Every attempt would fail anyway; refusing here gives the
+    // agent the real reason and the date it lifts instead of a generic
+    // rejection, and avoids adding failed attempts to the record that caused it.
+    const restriction = await this.db.channelConnection.findUnique({
+      where: { teamId_channel: { teamId: session.teamId, channel: channelForCall } },
+      select: { callingRestrictedUntil: true },
+    });
+    if (
+      restriction?.callingRestrictedUntil &&
+      restriction.callingRestrictedUntil.getTime() > Date.now()
+    ) {
+      return {
+        ok: false,
+        reason: "calling_restricted",
+        retryAt: restriction.callingRestrictedUntil.toISOString(),
+      };
+    }
+
+    // Testing escape hatch: skip the permission/quota pre-flight so QA can
+    // place repeat calls without burning real permission quota. Gated to
+    // non-production AND an explicit flag, so it can never silently weaken
+    // prod. Meta still enforces its OWN rules at placeCall — this only removes
+    // our friction, so an unpermitted customer still yields a provider
+    // rejection. The region gate above is NEVER skipped.
     const skipPreflight =
       process.env.NODE_ENV !== "production" &&
       process.env.CALLS_SKIP_PREFLIGHT === "1";
     if (skipPreflight) {
       this.logger.warn(
-        `CALLS_SKIP_PREFLIGHT active — bypassing permission/window/cap for team=${session.teamId} contact=${contact.id}`,
+        `CALLS_SKIP_PREFLIGHT active — bypassing permission/quota for team=${session.teamId} contact=${contact.id}`,
       );
     }
 
-    // Permission revocation gate (WhatsApp). Meta strips calling permission
-    // after 4 consecutive unanswered outbound calls; this column mirrors that.
+    // Known revocation, mirrored from the provider's own revoke webhook (the
+    // customer withdrew consent, or it lapsed after four unanswered calls).
+    // A local fast path only — the provider read below is what actually
+    // authorizes a call — but it saves a pointless round-trip for a contact we
+    // already know said no, and gives the agent a precise reason.
     if (
       !isUnified &&
       !skipPreflight &&
@@ -189,16 +270,28 @@ export class CallsService {
       return { ok: false, reason: "permission_revoked" };
     }
 
+    // Everything past here needs provider credentials.
+    let sendConfig: unknown;
+    try {
+      sendConfig = await binding.getSendConfig(session.teamId);
+    } catch (err) {
+      this.logger.warn(
+        `getSendConfig failed for team=${session.teamId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+      return { ok: false, reason: "provider_not_configured" };
+    }
+
     // Messenger permission: Meta owns the model (7-day opt-in), so we ask it
-    // directly rather than keeping our own request ledger. `canStartCall` also
-    // encodes Meta's per-thread call quota, so it doubles as the cap gate.
-    if (isUnified && !skipPreflight) {
-      const cfg = await binding.getSendConfig(session.teamId);
-      const perm = await binding.provider.checkCallPermission?.(to, cfg);
+    // directly. `canStartCall` also encodes Meta's per-thread call quota, so it
+    // doubles as the cap gate.
+    if (isUnified && !skipPreflight && to) {
+      const perm = await binding.provider.checkCallPermission?.(to, sendConfig);
       if (perm && !perm.canStartCall) {
         if (perm.canRequestPermission) {
           try {
-            await binding.provider.requestCallPermission?.(to, cfg);
+            await binding.provider.requestCallPermission?.(to, sendConfig);
           } catch (err) {
             this.logger.warn(
               `messenger call-permission request failed for team=${session.teamId} contact=${contact.id}: ${
@@ -212,112 +305,74 @@ export class CallsService {
       }
     }
 
-    // 24h-window check. Inside the window → free-form calls OK. Outside →
-    // need a live permission row OR auto-request one.
-    const now = Date.now();
-    const insideWindow = Boolean(
-      contact.lastInboundAt &&
-        now - contact.lastInboundAt.getTime() < 24 * 60 * 60 * 1000,
-    );
-    if (!isUnified && !skipPreflight && !insideWindow) {
-      // A call is only permitted out-of-window against a GRANTED permission
-      // still inside its 72h validity. Sending a request is NOT a grant — the
-      // permission_granted webhook stamps `granted` + `grantedAt`. expiresAt
-      // alone (set +72h at REQUEST time) used to gate this, which made a merely-
-      // sent request a 72h green light and produced opaque provider_rejected
-      // errors for ungranted/denied contacts.
-      const grantedPerm = await this.db.callPermissionRequest.findFirst({
-        where: {
-          teamId: session.teamId,
-          contactId: contact.id,
-          status: CallPermissionStatus.granted,
-          expiresAt: { gt: new Date(now) },
-        },
-        orderBy: { requestedAt: "desc" },
-        select: { id: true },
-      });
-      if (!grantedPerm) {
-        // No live grant. Look at the newest request row to decide the precise
-        // not-yet-callable reason the UI should render.
-        const latest = await this.db.callPermissionRequest.findFirst({
-          where: { teamId: session.teamId, contactId: contact.id },
-          orderBy: { requestedAt: "desc" },
-          select: {
-            status: true,
-            expiresAt: true,
-            rateLimitedUntil: true,
-          },
-        });
-        // Meta rate-limited a recent request (1/24h or 2/7d) — surface the
-        // retry time. This is now ONLY set on a genuine Meta rate-limit
-        // (see requestPermissionInternal), never on a transient failure.
-        if (
-          latest?.rateLimitedUntil &&
-          latest.rateLimitedUntil.getTime() > now
-        ) {
-          return {
-            ok: false,
-            reason: "rate_limited",
-            retryAt: latest.rateLimitedUntil.toISOString(),
-          };
-        }
-        // A request is already out and still within its 72h window, but the
-        // customer hasn't accepted it (status still `pending`, and it's not a
-        // rate-limit placeholder). Don't re-fire — Meta caps requests at 1/24h
-        // and a second send would just burn the quota. Tell the agent we're
-        // waiting on the customer.
-        if (
-          latest?.status === CallPermissionStatus.pending &&
-          !latest.rateLimitedUntil &&
-          latest.expiresAt.getTime() > now
-        ) {
-          return { ok: false, reason: "permission_pending" };
-        }
-        // Nothing live on file (never requested, or the prior request expired /
-        // was denied). Fire a fresh permission request opportunistically and
-        // tell the agent to retry once the customer accepts. Swallow the throw:
-        // the permission row is the source of truth for the next click; a
-        // transient failure no longer writes a cooldown (it rethrows), so the
-        // agent can simply retry — a 5xx-bubble here would 502 the inbox button.
+    // Phone-channel permission + quota, straight from the provider.
+    //
+    // This replaced a local ledger that tried to reconstruct the provider's
+    // rules — request cooldowns, grant validity, a hardcoded per-day call cap.
+    // That could never be right: two of the three ways a customer grants
+    // permission (automatically by calling us, or from the business profile)
+    // write nothing on our side, so the ledger refused callable contacts; and
+    // the call cap has moved 5 → 10 → 100 in a year, so any number baked in
+    // here is wrong by the next changelog. The provider knows all of it and
+    // returns a computed verdict, so we ask.
+    if (!isUnified && !skipPreflight) {
+      const readPermission = binding.provider.getCallPermission;
+      if (readPermission) {
+        let permission: Awaited<ReturnType<typeof readPermission>>;
         try {
-          await this.requestPermissionInternal(
-            session.teamId,
-            contact.id,
-            to,
+          permission = await readPermission(
+            { ...(to ? { to } : {}), ...(recipient ? { recipient } : {}) },
+            sendConfig,
           );
         } catch (err) {
+          // A permission read that fails is NOT a green light — placing the
+          // call anyway would burn quota and hit an opaque rejection. Refuse
+          // with the reason the agent can act on.
           this.logger.warn(
-            `sendCallPermissionRequest failed for team=${session.teamId} contact=${contact.id}: ${
+            `getCallPermission failed for team=${session.teamId} contact=${contact.id}: ${
               err instanceof Error ? err.message : err
             }`,
           );
+          return { ok: false, reason: "permission_required" };
         }
-        return { ok: false, reason: "permission_required" };
-      }
-    }
 
-    // 5-per-24h connected-call cap. Runs on BOTH paths — in-window AND
-    // permission-authorized. Meta's per-contact business-initiated call cap is
-    // independent of WHY the call is allowed (the 24h service window vs. an
-    // explicit permission grant), so it must gate both. Previously this lived
-    // inside the in-window `else` branch only, which made a granted permission
-    // an effectively unlimited-calls pass for its 72h validity — the exact
-    // quality-rating risk the cap exists to prevent. Counts ONLY calls the
-    // customer actually picked up (answeredAt non-null) — Meta's rule is about
-    // CONNECTED calls; a failed handshake torn down with answeredAt=null
-    // shouldn't burn the cap.
-    const since = new Date(now - 24 * 60 * 60 * 1000);
-    const dailyOutboundConnected = await this.db.call.count({
-      where: {
-        teamId: session.teamId,
-        conversationId,
-        direction: CallDirection.out,
-        answeredAt: { not: null },
-        ringingAt: { gte: since },
-      },
-    });
-    if (!skipPreflight && dailyOutboundConnected >= 5) {
-      return { ok: false, reason: "daily_cap_reached" };
+        // Mirror the provider's answer locally so the contact panel and the
+        // next pre-flight agree with it without another round-trip.
+        await this.syncPermissionCache(session.teamId, contact.id, permission);
+
+        if (!permission.hasPermission) {
+          // No permission at all. Ask for it, then tell the agent to wait —
+          // sending the request is the useful action here, not an error.
+          if (permission.canRequestPermission) {
+            const requested = await this.tryRequestPermission(
+              session.teamId,
+              contact.id,
+              conversation.channel,
+              { to, recipient },
+            );
+            return {
+              ok: false,
+              reason: requested ? "permission_required" : "permission_pending",
+            };
+          }
+          // Can't even ask — the request quota is spent. Distinguish this from
+          // "we asked, waiting on them" so the UI doesn't tell the agent to be
+          // patient when the real answer is "try again tomorrow".
+          return { ok: false, reason: "permission_pending" };
+        }
+
+        // Permission exists but the connected-call quota for this customer is
+        // spent. The provider tells us when it resets.
+        if (!permission.canStartCall) {
+          return permission.startCallResetAt
+            ? {
+                ok: false,
+                reason: "rate_limited",
+                retryAt: permission.startCallResetAt.toISOString(),
+              }
+            : { ok: false, reason: "daily_cap_reached" };
+        }
+      }
     }
 
     // All checks passed. Hit Meta to initiate the call, then INSERT the
@@ -338,9 +393,9 @@ export class CallsService {
     // Gateway" in console) is the failure mode we just hit in prod.
     let placed: { externalCallId: string; sdpAnswer?: string };
     try {
-      const sendConfig = await binding.getSendConfig(session.teamId);
       placed = await providerPlaceCall(binding.provider, channelForCall, sendConfig, {
-        to,
+        ...(to ? { to } : {}),
+        ...(recipient ? { recipient } : {}),
         sdpOffer,
       });
     } catch (err) {
@@ -348,6 +403,15 @@ export class CallsService {
       this.logger.warn(
         `placeCall failed for team=${session.teamId} contact=${contact.id}: ${message}`,
       );
+      // Map the provider's own error code where it says something actionable,
+      // so the agent sees "they haven't allowed calls" instead of a generic
+      // rejection. A permission error also means our cached grant is stale —
+      // clear it so the next click re-reads rather than trusting a dead row.
+      const normalized = normalizeMetaSendError(err);
+      if (normalized?.code === "call_permission_required") {
+        await this.invalidatePermissionCache(session.teamId, contact.id);
+        return { ok: false, reason: "permission_required" };
+      }
       // Differentiate config errors from provider-side rejections so the UI
       // can render the right copy. Both come back as 4xx, never 5xx.
       const reason: "provider_not_configured" | "provider_rejected" =
@@ -548,11 +612,206 @@ export class CallsService {
     }
   }
 
+
   /**
-   * Send an explicit permission request to the contact. Idempotent over a
-   * fresh-enough live row — if one already exists, returns its id without
-   * re-hitting Meta. Used by the standalone POST /call-permission endpoint
-   * AND internally as a fallback from initiateCall.
+   * Admin: read the current calling configuration + any active restrictions.
+   *
+   * Always read through to the provider rather than a local cache: an admin can
+   * change these in the provider's own console, and the provider is also where
+   * restrictions appear.
+   */
+  async getCallSettings(
+    session: ApiSession,
+    channel: Channel = "whatsapp",
+  ): Promise<CallSettingsState> {
+    const binding = getProviderBinding(channel);
+    const fn = binding.provider.getCallSettings;
+    if (!fn) {
+      throw new BadRequestException({
+        error: "calling_settings_unsupported",
+        detail: `${channel} has no configurable calling settings.`,
+      });
+    }
+    const config = await binding.getSendConfig(session.teamId);
+    try {
+      return await fn(config);
+    } catch (err) {
+      throw new HttpException(
+        {
+          error: "provider_rejected",
+          detail: err instanceof Error ? err.message : String(err),
+        },
+        502,
+      );
+    }
+  }
+
+  /**
+   * Admin: change calling configuration. A PATCH — only the fields supplied are
+   * written, so an admin toggling the call icon doesn't silently reset their
+   * business hours.
+   */
+  async updateCallSettings(
+    session: ApiSession,
+    settings: CallSettings,
+    channel: Channel = "whatsapp",
+  ): Promise<CallSettingsState> {
+    const binding = getProviderBinding(channel);
+    const fn = binding.provider.updateCallSettings;
+    if (!fn) {
+      throw new BadRequestException({
+        error: "calling_settings_unsupported",
+        detail: `${channel} has no configurable calling settings.`,
+      });
+    }
+    const config = await binding.getSendConfig(session.teamId);
+    try {
+      return await fn(settings, config);
+    } catch (err) {
+      this.logger.warn(
+        `updateCallSettings failed for team=${session.teamId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+      throw new HttpException(
+        {
+          error: "provider_rejected",
+          detail: err instanceof Error ? err.message : String(err),
+        },
+        502,
+      );
+    }
+  }
+
+  /**
+   * Admin: the calling setup checklist.
+   *
+   * Every item is a real prerequisite that, when unmet, produces a confusing
+   * failure rather than a clear one. The worst is the webhook subscription:
+   * without it, enabling calling SUCCEEDS and calls place fine, but no
+   * lifecycle webhook ever arrives — calls ring into a void with nothing in the
+   * logs to explain it. Checking up front turns each of these into a sentence
+   * an admin can act on.
+   */
+  async getCallingReadiness(
+    session: ApiSession,
+    channel: Channel = "whatsapp",
+  ): Promise<CallingReadiness> {
+    const checks: CallingReadinessCheck[] = [];
+
+    // Business-initiated calling isn't offered in every market, and eligibility
+    // follows OUR number's country. A team here can still RECEIVE calls.
+    const businessCountry = await getBusinessNumberCountry(session.teamId);
+    const regionOk = isBicAllowedForBusinessNumber(businessCountry);
+    checks.push({
+      key: "region",
+      ok: regionOk,
+      label: "Outbound calling available in your number's country",
+      detail: regionOk
+        ? null
+        : `Business-initiated calling isn't offered for ${businessCountry ?? "this"} numbers. You can still receive calls from customers.`,
+    });
+
+    // Meta requires a 2,000-recipient daily messaging limit before calling can
+    // be enabled. We already track the tier from the broadcast work, so this
+    // costs no extra call.
+    const connection = await this.db.channelConnection.findUnique({
+      where: { teamId_channel: { teamId: session.teamId, channel } },
+      select: {
+        messagingDailyCap: true,
+        messagingTier: true,
+        callingRestrictedUntil: true,
+        callingRestrictionReason: true,
+        callingQualityWarning: true,
+      },
+    });
+    const cap = connection?.messagingDailyCap ?? null;
+    // Unknown tier is reported as met rather than failed: we'd rather not block
+    // a working setup on a stat we haven't synced yet, and the provider
+    // enforces it regardless.
+    const tierOk = cap === null || cap >= 2000;
+    checks.push({
+      key: "messaging_limit",
+      ok: tierOk,
+      label: "Messaging limit of 2,000+ unique recipients",
+      detail: tierOk
+        ? null
+        : `Your number is on ${connection?.messagingTier ?? "a lower tier"}. Calling requires a 2,000/day messaging limit — this rises automatically as your quality and volume grow.`,
+    });
+
+    // The provider's own view: is calling on, and is anything restricted?
+    let settings: CallSettingsState | null = null;
+    try {
+      settings = await this.getCallSettings(session, channel);
+    } catch {
+      // Leave null — reported as "unknown" below rather than failing the whole
+      // checklist on one unreachable read.
+    }
+    checks.push({
+      key: "calling_enabled",
+      ok: settings?.enabled ?? false,
+      label: "Calling enabled on your business number",
+      detail: settings
+        ? settings.enabled
+          ? null
+          : "Turn calling on below to start placing and receiving calls."
+        : "Couldn't read your calling settings — check that WhatsApp is still connected.",
+    });
+    // Restrictions from two sources: whatever the provider reports right now,
+    // and whatever its account webhook told us (which arrives the moment
+    // enforcement starts, without waiting for someone to open this page).
+    const liveRestriction = settings?.restrictions[0];
+    const storedRestrictedUntil = connection?.callingRestrictedUntil ?? null;
+    const storedActive =
+      storedRestrictedUntil !== null &&
+      storedRestrictedUntil.getTime() > Date.now();
+    const restricted = Boolean(liveRestriction) || storedActive;
+    checks.push({
+      key: "not_restricted",
+      ok: !restricted,
+      label: "No calling restrictions active",
+      detail: restricted
+        ? liveRestriction
+          ? `${liveRestriction.reason || liveRestriction.type}${
+              liveRestriction.expiresAt
+                ? ` Lifts ${liveRestriction.expiresAt.toISOString()}.`
+                : ""
+            }`
+          : `${connection?.callingRestrictionReason ?? "Calling is paused on your number."}${
+              storedRestrictedUntil
+                ? ` Lifts ${storedRestrictedUntil.toISOString()}.`
+                : ""
+            }`
+        : null,
+    });
+    // A warning is NOT a failure — calling still works. Surface it as a passing
+    // check with a detail, so the admin can act before it becomes a pause.
+    if (connection?.callingQualityWarning) {
+      checks.push({
+        key: "quality_warning",
+        ok: true,
+        label: "Call quality warning from WhatsApp",
+        detail:
+          "WhatsApp has flagged your call quality. Consider hiding call buttons or narrowing your call hours — repeated flags pause calling for 7 days.",
+      });
+    }
+
+    return {
+      ready: checks.every((c) => c.ok),
+      checks,
+      settings,
+    };
+  }
+
+  /**
+   * Send an explicit permission request to the contact, from the standalone
+   * POST /call-permission endpoint.
+   *
+   * The provider decides whether a request is allowed — it tracks the request
+   * quota (and resets it when a call connects), so re-deriving those windows
+   * locally could only ever disagree with it. If permission is already live we
+   * return it without sending anything: re-asking a customer who already said
+   * yes is both wasteful and annoying.
    */
   async requestPermission(
     session: ApiSession,
@@ -562,159 +821,340 @@ export class CallsService {
       where: { id: conversationId, teamId: session.teamId },
       select: {
         channel: true,
-        contact: { select: { id: true, phoneNumber: true } },
+        contact: { select: { id: true, phoneNumber: true, bsuid: true } },
+      },
+    });
+    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    const contact = conversation.contact;
+    if (!contact?.phoneNumber && !contact?.bsuid) {
+      throw new BadRequestException({
+        error: "contact has no phone number or user id",
+      });
+    }
+    const identity = {
+      ...(contact.phoneNumber ? { to: contact.phoneNumber } : {}),
+      ...(contact.bsuid ? { recipient: contact.bsuid } : {}),
+    };
+
+    const binding = getProviderBinding(conversation.channel);
+    const config = await binding.getSendConfig(session.teamId);
+
+    // Already permitted? Hand back the live grant rather than asking again.
+    const readPermission = binding.provider.getCallPermission;
+    if (readPermission) {
+      const permission = await readPermission(identity, config);
+      await this.syncPermissionCache(session.teamId, contact.id, permission);
+      if (permission.hasPermission) {
+        return {
+          permissionRequestId: "",
+          // A permanent grant has no expiry; surface the sentinel the caller
+          // already understands rather than inventing a far-future date.
+          expiresAt: permission.expiresAt?.toISOString() ?? "",
+        };
+      }
+      if (!permission.canRequestPermission) {
+        throw new ConflictException({ error: "permission_request_rate_limited" });
+      }
+    }
+
+    const sendPerm = requireProviderMethod(
+      binding.provider,
+      "sendCallPermissionRequest",
+      conversation.channel,
+    );
+    const out = await sendPerm(
+      { ...identity, bodyText: CALL_PERMISSION_REQUEST_BODY },
+      config,
+    );
+    await this.db.callPermissionRequest.create({
+      data: {
+        teamId: session.teamId,
+        contactId: contact.id,
+        externalRequestId: out.permissionRequestId,
+        expiresAt: out.expiresAt,
+        // Delivered, not granted. The customer still has to accept; their reply
+        // webhook is what flips this to `granted`.
+        status: CallPermissionStatus.pending,
+      },
+    });
+    return {
+      permissionRequestId: out.permissionRequestId,
+      expiresAt: out.expiresAt.toISOString(),
+    };
+  }
+
+
+  /**
+   * Team-scoped permission request, for callers with no user session (the
+   * external API). Same behaviour as the session route minus the session:
+   * the provider decides whether a request is allowed, and a live grant is
+   * returned rather than re-asking a customer who already said yes.
+   */
+  async requestPermissionForTeam(
+    teamId: string,
+    conversationId: string,
+  ): Promise<{ permissionRequestId: string; expiresAt: string }> {
+    const conversation = await this.db.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      select: {
+        channel: true,
+        contact: { select: { id: true, phoneNumber: true, bsuid: true } },
+      },
+    });
+    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    const contact = conversation.contact;
+    if (!contact?.phoneNumber && !contact?.bsuid) {
+      throw new BadRequestException({
+        error: "contact has no phone number or user id",
+      });
+    }
+    const identity = {
+      ...(contact.phoneNumber ? { to: contact.phoneNumber } : {}),
+      ...(contact.bsuid ? { recipient: contact.bsuid } : {}),
+    };
+
+    const binding = getProviderBinding(conversation.channel);
+    const config = await binding.getSendConfig(teamId);
+    const readPermission = binding.provider.getCallPermission;
+    if (readPermission) {
+      const permission = await readPermission(identity, config);
+      await this.syncPermissionCache(teamId, contact.id, permission);
+      if (permission.hasPermission) {
+        return {
+          permissionRequestId: "",
+          expiresAt: permission.expiresAt?.toISOString() ?? "",
+        };
+      }
+      if (!permission.canRequestPermission) {
+        throw new ConflictException({ error: "permission_request_rate_limited" });
+      }
+    }
+
+    const sendPerm = requireProviderMethod(
+      binding.provider,
+      "sendCallPermissionRequest",
+      conversation.channel,
+    );
+    const out = await sendPerm(
+      { ...identity, bodyText: CALL_PERMISSION_REQUEST_BODY },
+      config,
+    );
+    await this.db.callPermissionRequest.create({
+      data: {
+        teamId,
+        contactId: contact.id,
+        externalRequestId: out.permissionRequestId,
+        expiresAt: out.expiresAt,
+        status: CallPermissionStatus.pending,
+      },
+    });
+    return {
+      permissionRequestId: out.permissionRequestId,
+      expiresAt: out.expiresAt.toISOString(),
+    };
+  }
+
+  /**
+   * Send a call button — a CTA that starts a call TO us when tapped.
+   *
+   * Needs no calling permission at all (the customer is the caller), which
+   * makes it the right move for a cold contact: it also grants us callback
+   * permission as a side effect once they use it.
+   */
+  async sendCallButtonForTeam(
+    teamId: string,
+    conversationId: string,
+    input: {
+      bodyText: string;
+      displayText?: string;
+      ttlMinutes?: number;
+      payload?: string;
+    },
+  ): Promise<{ externalId: string }> {
+    const conversation = await this.db.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      select: {
+        channel: true,
+        contact: { select: { phoneNumber: true } },
       },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
     if (!conversation.contact?.phoneNumber) {
       throw new BadRequestException({ error: "contact has no phone number" });
     }
-
-    // Idempotency short-circuit — honor the doc-comment promise BEFORE hitting
-    // Meta. Mirrors initiateCall's pre-flight semantics exactly so both callers
-    // agree on what "already usable" means:
-    //   - a GRANTED + unexpired row → return it, no Meta hit (re-requesting a
-    //     live grant would burn the 1/24h quota and could 500 / cooldown).
-    //   - a recent rate-limit placeholder (rateLimitedUntil > now) → return it
-    //     instead of re-firing into the cooldown.
-    //   - a still-live pending request (not rate-limited, expiresAt > now) →
-    //     return it; the customer just hasn't accepted yet. Re-sending caps out.
-    // Only when nothing usable is on file do we fall through to Meta — the
-    // genuine first-request path, unchanged from before.
-    const now = Date.now();
-    const grantedPerm = await this.db.callPermissionRequest.findFirst({
-      where: {
-        teamId: session.teamId,
-        contactId: conversation.contact.id,
-        status: CallPermissionStatus.granted,
-        expiresAt: { gt: new Date(now) },
-      },
-      orderBy: { requestedAt: "desc" },
-      select: { id: true, externalRequestId: true, expiresAt: true },
-    });
-    if (grantedPerm) {
-      return {
-        permissionRequestId: grantedPerm.externalRequestId ?? grantedPerm.id,
-        expiresAt: grantedPerm.expiresAt.toISOString(),
-      };
+    const binding = getProviderBinding(conversation.channel);
+    if (!binding.provider.capabilities.calling) {
+      throw new BadRequestException({
+        error: "calling_not_supported",
+        detail: `Call buttons aren't available on ${conversation.channel}.`,
+      });
     }
-    const latest = await this.db.callPermissionRequest.findFirst({
-      where: { teamId: session.teamId, contactId: conversation.contact.id },
-      orderBy: { requestedAt: "desc" },
-      select: {
-        id: true,
-        externalRequestId: true,
-        status: true,
-        expiresAt: true,
-        rateLimitedUntil: true,
-      },
-    });
-    if (latest?.rateLimitedUntil && latest.rateLimitedUntil.getTime() > now) {
-      // Rate-limit placeholder rows are written with expiresAt = new Date(0)
-      // (epoch), so surface the real retry-at time (`rateLimitedUntil`) as the
-      // caller-facing timestamp — returning the epoch expiresAt made the UI
-      // render a permission that "expired" in 1970 / a huge negative countdown.
-      return {
-        permissionRequestId: latest.externalRequestId ?? latest.id,
-        expiresAt: latest.rateLimitedUntil.toISOString(),
-      };
-    }
-    if (
-      latest?.status === CallPermissionStatus.pending &&
-      !latest.rateLimitedUntil &&
-      latest.expiresAt.getTime() > now
-    ) {
-      return {
-        permissionRequestId: latest.externalRequestId ?? latest.id,
-        expiresAt: latest.expiresAt.toISOString(),
-      };
-    }
-
-    const result = await this.requestPermissionInternal(
-      session.teamId,
-      conversation.contact.id,
-      conversation.contact.phoneNumber,
+    const sendInteractive = requireProviderMethod(
+      binding.provider,
+      "sendInteractive",
       conversation.channel,
     );
-    return {
-      permissionRequestId: result.permissionRequestId,
-      expiresAt: result.expiresAt.toISOString(),
-    };
+    const config = await binding.getSendConfig(teamId);
+    const out = await sendInteractive(
+      {
+        to: conversation.contact.phoneNumber,
+        bodyText: input.bodyText,
+        kind: "voice_call",
+        options: [],
+        voiceCall: {
+          ...(input.displayText ? { displayText: input.displayText } : {}),
+          ...(input.ttlMinutes != null ? { ttlMinutes: input.ttlMinutes } : {}),
+          ...(input.payload ? { payload: input.payload } : {}),
+        },
+      },
+      config,
+    );
+    return { externalId: out.externalId };
   }
 
   /**
-   * Shared internal: sends the request to Meta, records the row, mirrors
-   * rate-limit on a 4xx. Channel defaults to whatsapp — the only channel
-   * with calling today.
+   * Fire a permission request as part of a call attempt. Best-effort: the
+   * agent is told to wait either way, and a transient failure must not 5xx the
+   * inbox's Call button. Returns whether the request actually went out, so the
+   * caller can distinguish "we asked them" from "we couldn't".
    */
-  private async requestPermissionInternal(
+  private async tryRequestPermission(
     teamId: string,
     contactId: string,
-    phoneNumber: string,
-    channel: Channel = "whatsapp",
-  ): Promise<{ permissionRequestId: string; expiresAt: Date }> {
-    // Calling is phone-channel-only today; a non-calling channel resolves to a
-    // provider without sendCallPermissionRequest and throws
-    // UnsupportedProviderOperationError below (defensive — the call button is
-    // already gated on capabilities.calling in the UI).
-    const binding = getProviderBinding(channel);
-    const sendPerm = requireProviderMethod(
-      binding.provider,
-      "sendCallPermissionRequest",
-      channel,
-    );
-    const config = await binding.getSendConfig(teamId);
+    channel: Channel,
+    identity: { to?: string; recipient?: string },
+  ): Promise<boolean> {
     try {
-      const out = await sendPerm({ to: phoneNumber }, config);
+      const binding = getProviderBinding(channel);
+      const sendPerm = binding.provider.sendCallPermissionRequest;
+      if (!sendPerm) return false;
+      const config = await binding.getSendConfig(teamId);
+      const out = await sendPerm(
+        {
+          ...(identity.to ? { to: identity.to } : {}),
+          ...(identity.recipient ? { recipient: identity.recipient } : {}),
+          bodyText: CALL_PERMISSION_REQUEST_BODY,
+        },
+        config,
+      );
       await this.db.callPermissionRequest.create({
         data: {
           teamId,
           contactId,
           externalRequestId: out.permissionRequestId,
           expiresAt: out.expiresAt,
-          // The request was DELIVERED — but it's not a grant yet. The customer
-          // still has to accept; the permission_granted webhook flips this to
-          // `granted`. The pre-flight gate keys on `granted`, so `pending` here
-          // surfaces a clear "waiting on the customer" state, not a green light.
           status: CallPermissionStatus.pending,
         },
       });
-      return out;
+      return true;
     } catch (err) {
-      // ONLY persist a rate-limit cooldown when Meta ACTUALLY rate-limited the
-      // request (its 1/24h or 2/7d cap → numeric code 4 / 80007, normalized to
-      // `rate_limited`). A transient failure — a 5xx, a network error, or the
-      // 20s metaFetch timeout (which throws a plain Error, not a MetaSendError)
-      // — must NOT brick outbound calling to this contact for 24h under a
-      // misleading "rate_limited" reason. Those rethrow with no row written, so
-      // the agent can simply retry. Previously EVERY failure wrote a 24h cooldown
-      // and initiateCall reads only the NEWEST row, so one network blip shadowed
-      // any valid grant for a full day.
-      const normalized = normalizeMetaSendError(err);
-      if (normalized?.code === "rate_limited") {
-        const rateLimitedUntil = new Date(Date.now() + 24 * 60 * 60 * 1000);
-        await this.db.callPermissionRequest.create({
-          data: {
-            teamId,
-            contactId,
-            expiresAt: new Date(0),
-            rateLimitedUntil,
-            // Never reached the customer → not a pending grant; the
-            // rateLimitedUntil timestamp is the discriminator the pre-flight
-            // reads to surface a "rate_limited" reason instead of "pending".
-            status: CallPermissionStatus.pending,
-          },
-        });
-      }
-      throw err;
+      this.logger.warn(
+        `sendCallPermissionRequest failed for team=${teamId} contact=${contactId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+      return false;
     }
   }
 
   /**
-   * Accept an incoming call. CAS-gated so multiple agents racing each
-   * other on the same incoming-call toast produce exactly one winner.
-   * On CAS success: pre_accept → accept Meta (in that order, REQUIRED),
-   * then publish call.answered_by_agent.
+   * Mirror the provider's permission verdict into our local rows.
+   *
+   * Purely a cache for the UI and the audit trail — nothing gates on it. It
+   * exists so the contact panel can say "calls allowed until Friday" without a
+   * provider round-trip per render, and so a grant the customer made outside
+   * our request flow (by calling us, or from the business profile) still shows
+   * up as a permission we know about. Best-effort: a failure here must never
+   * fail the call that triggered it.
+   */
+  private async syncPermissionCache(
+    teamId: string,
+    contactId: string,
+    permission: CallPermissionState,
+  ): Promise<void> {
+    try {
+      if (permission.hasPermission) {
+        // Clear any stale revocation and refresh/insert the cached grant.
+        await this.db.contact.updateMany({
+          where: { id: contactId, teamId },
+          data: { callPermissionRevokedUntil: null },
+        });
+        const live = await this.db.callPermissionRequest.findFirst({
+          where: {
+            teamId,
+            contactId,
+            status: CallPermissionStatus.granted,
+          },
+          orderBy: { requestedAt: "desc" },
+          select: { id: true },
+        });
+        const data = {
+          status: CallPermissionStatus.granted,
+          isPermanent: permission.status === "permanent",
+          // Non-null column; a permanent grant's value is never read.
+          expiresAt:
+            permission.expiresAt ??
+            new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        };
+        if (live) {
+          await this.db.callPermissionRequest.update({
+            where: { id: live.id },
+            data,
+          });
+        } else {
+          await this.db.callPermissionRequest.create({
+            data: { teamId, contactId, grantedAt: new Date(), ...data },
+          });
+        }
+      } else {
+        // Provider says no permission — retire any cached grant so the contact
+        // panel stops claiming the customer allowed calls.
+        await this.db.callPermissionRequest.updateMany({
+          where: {
+            teamId,
+            contactId,
+            status: CallPermissionStatus.granted,
+          },
+          data: { status: CallPermissionStatus.denied },
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `permission cache sync failed for team=${teamId} contact=${contactId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    }
+  }
+
+  /** Drop a cached grant the provider has just contradicted. Best-effort. */
+  private async invalidatePermissionCache(
+    teamId: string,
+    contactId: string,
+  ): Promise<void> {
+    await this.db.callPermissionRequest
+      .updateMany({
+        where: { teamId, contactId, status: CallPermissionStatus.granted },
+        data: { status: CallPermissionStatus.denied },
+      })
+      .catch(() => {
+        // Cache-only; the provider remains the authority on the next attempt.
+      });
+  }
+
+  /**
+   * Accept an incoming call. CAS-gated so multiple agents racing each other on
+   * the same incoming-call toast produce exactly one winner.
+   *
+   * This is only the FIRST half for WhatsApp: it issues `pre_accept`, which
+   * lets the WebRTC connection establish. The browser then reports its
+   * connection up and `completeAccept` issues the real `accept`. Splitting them
+   * is the entire purpose of pre_accept — media must not flow until accept
+   * returns, or the caller loses the first words of the call. Firing both
+   * back-to-back (as this used to) defeats it.
+   *
+   * `acceptPending` in the response tells the browser whether it still owes a
+   * completion call before unmuting.
    */
   async answerCall(
     session: ApiSession,
@@ -723,6 +1163,7 @@ export class CallsService {
   ): Promise<{
     ok: true;
     answeredByUserId: string;
+    acceptPending: boolean;
     sdpAnswer?: string;
     sdpRenegotiation?: string;
   }> {
@@ -782,11 +1223,16 @@ export class CallsService {
     // and the row reflects the truth.
     const binding = getProviderBinding(call.channel);
     const config = await binding.getSendConfig(session.teamId);
-    // WhatsApp: pre_accept + accept, both carrying the browser's SDP ANSWER,
-    // no return. Messenger: a single accept carrying the browser's SDP OFFER,
-    // returning the answer (+ renegotiation) for the browser to apply. The
-    // adapter hides which; `sdpAnswer` here is the browser's SDP either way.
-    let answerResult: { sdpAnswer?: string; sdpRenegotiation?: string };
+    // WhatsApp: pre_accept only, carrying the browser's SDP ANSWER — the real
+    // accept follows from completeAccept once media is up. Messenger: a single
+    // accept carrying the browser's SDP OFFER, returning the answer (+
+    // renegotiation) for the browser to apply. The adapter hides which;
+    // `sdpAnswer` here is the browser's SDP either way.
+    let answerResult: {
+      sdpAnswer?: string;
+      sdpRenegotiation?: string;
+      acceptPending: boolean;
+    };
     try {
       answerResult = await providerAnswerCall(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
@@ -851,11 +1297,69 @@ export class CallsService {
     return {
       ok: true,
       answeredByUserId: session.userId,
+      // True ⇒ the browser must call completeAccept once its peer connection
+      // reports connected, and must stay muted until that returns.
+      acceptPending: answerResult.acceptPending,
       // Messenger returns the SDP answer (+ optional renegotiation offer) from
       // the accept call for the browser to apply; WhatsApp's arrive via webhook.
       ...(answerResult.sdpAnswer ? { sdpAnswer: answerResult.sdpAnswer } : {}),
       ...(answerResult.sdpRenegotiation ? { sdpRenegotiation: answerResult.sdpRenegotiation } : {}),
     };
+  }
+
+  /**
+   * Complete a WhatsApp accept. The browser calls this the moment its peer
+   * connection reaches `connected`, and only starts sending audio after it
+   * returns — that ordering is what stops the caller's first words being lost.
+   *
+   * Idempotent: the provider treats a repeated (call_id, accept) as a no-op, and
+   * a call that has already gone terminal returns success rather than an error,
+   * because there is nothing for the browser to do about it either way.
+   */
+  async completeAccept(
+    session: ApiSession,
+    callId: string,
+    sdpAnswer: string,
+  ): Promise<{ ok: true }> {
+    const perms = resolvePermissions(session.role, session.rolePermissions);
+    if (!perms["calls:receive" as Capability]) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+    const call = await this.db.call.findFirst({
+      where: { id: callId, teamId: session.teamId },
+      select: {
+        id: true,
+        externalCallId: true,
+        channel: true,
+        status: true,
+        answeredByUserId: true,
+      },
+    });
+    if (!call) throw new NotFoundException({ error: "call not found" });
+    // Only the agent who won the answer race may complete it — the SDP belongs
+    // to their peer connection, and accepting with someone else's would break
+    // the media leg.
+    if (call.answeredByUserId !== session.userId) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+    if (call.status !== CallStatus.in_progress) return { ok: true };
+
+    const binding = getProviderBinding(call.channel);
+    const config = await binding.getSendConfig(session.teamId);
+    try {
+      await providerCompleteAccept(binding.provider, call.channel, config, {
+        externalCallId: call.externalCallId,
+        sdp: sdpAnswer,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `completeAccept provider error for call=${callId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+      throw new HttpException({ error: "provider_rejected" }, 502);
+    }
+    return { ok: true };
   }
 
   /**
@@ -1000,69 +1504,20 @@ export class CallsService {
   }
 
   /**
-   * Mark an OUTBOUND call connected (customer picked up), reported by the
-   * originating agent's browser the instant it detects real inbound audio.
+   * NOTE: there is deliberately no "mark outbound connected" endpoint.
    *
-   * Business-initiated calls give NO live pickup signal: Meta's `connect`
-   * webhook is just media setup (fires ~1s after dialing, BEFORE pickup) and
-   * the authoritative `start_time`/`duration` only arrive at terminate. So the
-   * browser's audio-flow detection is the live "they answered" moment. Stamping
-   * answeredAt here (set-once, CAS on a ringing row) makes a later agent hangup
-   * resolve to a real `completed` call instead of `missed`, and keeps the
-   * connected-call/daily-cap accounting honest. Mirrors inbound answerCall,
-   * minus the Meta pre_accept/accept (the media leg is already up from connect).
-   * Idempotent: count 0 (already connected/terminal/not-found) → success.
+   * There used to be one, driven by the browser watching for inbound RTP and
+   * declaring pickup when packets started flowing. That was built on the belief
+   * that the provider gives no live pickup signal for business-initiated calls.
+   * It does — the `ACCEPTED` call status webhook — and the browser heuristic
+   * could be fooled by ringback tone into starting the timer and burning
+   * connected-call quota on a call nobody answered.
+   *
+   * Pickup now has a single owner: the webhook ingest path
+   * (`lib/providers/ingest-call.ts`), which stamps `answeredAt` from the
+   * provider's own timestamp and publishes the answered frame. Do not
+   * re-introduce a client-reported variant.
    */
-  async markConnected(
-    session: ApiSession,
-    callId: string,
-  ): Promise<{ ok: true }> {
-    const perms = resolvePermissions(session.role, session.rolePermissions);
-    if (!perms["calls:make" as Capability]) {
-      throw new ForbiddenException({ error: "forbidden" });
-    }
-    const answeredAt = new Date();
-    const cas = await this.db.call.updateMany({
-      where: {
-        id: callId,
-        teamId: session.teamId,
-        direction: CallDirection.out,
-        status: CallStatus.ringing,
-        answeredAt: null,
-        // Only the agent who PLACED the call can report its pickup — the
-        // browser pickup signal is local to the originating peer connection.
-        // Without this scope, any teammate with the default-true calls:make
-        // capability could flip another agent's ringing call to connected
-        // (stamping answeredAt, burning the 5/24h connected-call cap, and
-        // flipping the thread pill to in_progress for every viewer on a call
-        // that may never have been picked up). count 0 (not the initiator) →
-        // idempotent success, same as the already-connected/terminal case.
-        initiatedByUserId: session.userId,
-      },
-      data: { status: CallStatus.in_progress, answeredAt },
-    });
-    if (cas.count === 0) return { ok: true };
-
-    const call = await this.db.call.findFirst({
-      where: { id: callId, teamId: session.teamId },
-      select: { conversationId: true },
-    });
-    if (call) {
-      // Reuse call.answered_by_agent → call:answered so every viewer's thread
-      // flips the activeCall pill to in_progress. The toast-dismiss it also
-      // triggers is a no-op outbound (there's no incoming toast). answeredByUserId
-      // = the agent on the call.
-      await this.bus.publish({
-        type: "call.answered_by_agent",
-        teamId: session.teamId,
-        conversationId: call.conversationId,
-        callId,
-        answeredByUserId: session.userId,
-        answeredAt: answeredAt.toISOString(),
-      });
-    }
-    return { ok: true };
-  }
 
   /**
    * Hang up an in-progress call. Idempotent — re-calling on an already-

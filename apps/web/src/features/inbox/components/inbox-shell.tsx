@@ -48,7 +48,6 @@ import { Sheet } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { CallsHistory } from "@/app/(app)/calls/calls-history";
 import { useCallApi } from "@/features/calls/call-provider";
-import { isBicAllowed } from "@ccp/shared/providers/calling-regions";
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import { toast } from "@/lib/toast";
 
@@ -72,13 +71,16 @@ function callReasonMessage(reason: string, channel?: Channel | null): string {
     case "permission_pending":
       return "Waiting on the customer to accept your call-permission request. Try again once they do.";
     case "bic_blocked_region":
-      return `Outbound ${label} calls aren't supported in this customer's country.`;
+      // Eligibility follows OUR business number's country, not the customer's.
+      return `Outbound ${label} calls aren't available for your business number's country. You can still receive calls from customers.`;
+    case "calling_restricted":
+      return `${label} has temporarily paused calling on your number. Check ${settings} for when it lifts.`;
     case "permission_revoked":
       return "Calling permission was revoked. Wait for the customer to message you first.";
     case "rate_limited":
-      return `${label} limits how often you can request call permission from this customer (roughly once a day). Wait for them to accept the request or message you first.`;
+      return `You've reached ${label}'s call limit for this customer. Try again later.`;
     case "daily_cap_reached":
-      return "Daily limit reached: 5 connected calls per customer per 24 hours.";
+      return `You've reached ${label}'s daily connected-call limit for this customer.`;
     case "provider_not_configured":
       return `${label} calling isn't configured for this team. Open ${settings}.`;
     case "provider_rejected":
@@ -1307,14 +1309,20 @@ export function InboxShell({
                   // hardcoded channel check — a future calling-capable channel
                   // lights the button up with no edit here. channel may be
                   // absent on legacy wire payloads; treat unknown as whatsapp.
-                  // The revocation check mirrors the backend initiateCall gate so
-                  // the button is hidden up-front instead of surfacing a
-                  // permission_revoked 4xx after the agent clicks.
+                  //
+                  // Region eligibility is a TEAM-level fact (it follows our own
+                  // business number's country, not the customer's), so it comes
+                  // from the team payload. Gating it per-contact — as this once
+                  // did — hides the button for customers we may legitimately
+                  // call and shows it for teams that can't call at all.
+                  //
+                  // The revocation check mirrors the backend gate so the button
+                  // is hidden up-front instead of surfacing a 4xx after a click.
                   canMakeCalls &&
                   CHANNEL_CAPABILITIES[
                     displayedThread.data.conversation.channel ?? "whatsapp"
                   ].calling &&
-                  isBicAllowed(displayedThread.data.contact.countryCode ?? null) &&
+                  team.outboundCallingAvailable !== false &&
                   !isCallPermissionRevoked(
                     displayedThread.data.contact.callPermissionRevokedUntil,
                   )

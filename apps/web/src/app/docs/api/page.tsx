@@ -32,6 +32,8 @@ const SCOPES: ReadonlyArray<{ scope: string; grants: string }> = [
   { scope: "read:catalog", grants: "read tags · fields · stages · channels · users" },
   { scope: "write:catalog", grants: "create / edit tags + custom fields" },
   { scope: "read:broadcasts", grants: "read broadcast campaigns + delivery reports" },
+  { scope: "read:calls", grants: "read call history + calling-permission state" },
+  { scope: "write:calls", grants: "request calling permission · send call buttons" },
 ];
 
 /**
@@ -264,6 +266,69 @@ export default function ApiDocsPage() {
         </Endpoint>
         <Endpoint
           method="POST"
+          path="/api/external/v1/contacts/export"
+          body={{ format: "xlsx", filters: { stageId: "stage_...", tagIds: ["tag_..."] } }}
+        >
+          Queue a CSV or Excel export and get back a <code>jobId</code>. Omit{" "}
+          <code>filters</code> for the whole directory, or pass{" "}
+          <code>ids: string[]</code> for an explicit set. Poll{" "}
+          <code>/contacts/transfers/:id</code>, then download. Handles 100,000+
+          contacts. 5/min.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/contacts/import/upload"
+          headers={{ "Content-Type": "multipart/form-data" }}
+        >
+          Upload a <code>file</code> (CSV or .xlsx, up to 50&nbsp;MB). Returns an{" "}
+          <code>uploadKey</code> plus the detected <code>headers</code>,{" "}
+          <code>sampleRows</code> and a <code>suggestedMapping</code>. Format is
+          detected from the file&apos;s content, not its name. 10/min.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/contacts/import"
+          headers={{ "Idempotency-Key": "<uuid>" }}
+          body={{
+            uploadKey: "...",
+            format: "xlsx",
+            mode: "create_and_update",
+            tagMode: "merge",
+            fireAutomations: true,
+            mapping: { Mobile: "phone_number", "Company Name": "field:company" },
+          }}
+        >
+          Queue the import. <code>mode</code>: <code>create_only</code> (default),{" "}
+          <code>create_and_update</code>, <code>update_only</code>. Contacts are
+          matched on phone number; <strong>blank cells never erase existing
+          values</strong>; an imported email is never used to merge two people.
+          Above 5,000 rows <code>fireAutomations</code> is forced off (a 100k
+          import would otherwise queue 100k workflow runs). Idempotency-Key
+          required. 5/min.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/contacts/transfers/:id">
+          Job status and counters — <code>status</code>, <code>processedRows</code>,{" "}
+          <code>created</code>, <code>updated</code>, <code>revived</code>,{" "}
+          <code>skipped</code>, <code>failed</code>, <code>automationsSkipped</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/contacts/transfers">
+          Recent import/export jobs. <code>?limit=20&amp;kind=export</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/contacts/transfers/:id/download">
+          302 to a short-lived signed URL for the produced file. Follow the
+          redirect, or read the <code>Location</code> header.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/contacts/transfers/:id/errors">
+          302 to the failed-rows report: your original columns plus{" "}
+          <code>_row</code> and <code>_error</code>, in the format you uploaded.
+          Fix it and re-import that file directly.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/contacts/transfers/:id/cancel">
+          Stop a queued or running job. Rows already imported stay imported.
+          Files are deleted after 7 days.
+        </Endpoint>
+        <Endpoint
+          method="POST"
           path="/api/external/v1/contacts/:id/assign"
           body={{ assignedUserId: "user_..." }}
         >
@@ -359,6 +424,62 @@ export default function ApiDocsPage() {
           everything). Report on <code>deliveryState</code>, not{" "}
           <code>sendStatus</code> — the latter is the send-side outcome and does
           not change when a message is later found undeliverable.
+        </Endpoint>
+      </Section>
+
+      <Section title="Calls">
+        <p className="mb-3 text-sm text-muted-foreground">
+          There is deliberately no &ldquo;place a call&rdquo; endpoint. A
+          WhatsApp call needs an SDP offer from a live WebRTC peer and a browser
+          to carry the audio, so an API client has nothing to place one with.
+          What&apos;s here is the part an integration can genuinely drive:
+          teeing up a call a human then makes or takes.
+        </p>
+        <Endpoint method="GET" path="/api/external/v1/calls">
+          Call history, newest first. <code>?conversationId=</code>,{" "}
+          <code>?from=</code>/<code>?to=</code> (ISO), <code>?cursor=</code>.
+          Report on <code>connected</code>, not <code>status</code> — a call can
+          complete without anyone picking up, and an agent can hang up a call
+          that did connect.
+        </Endpoint>
+        <Endpoint
+          method="GET"
+          path="/api/external/v1/conversations/:id/call-permission"
+        >
+          The customer&apos;s current calling permission, read live from
+          WhatsApp rather than from our records — permission can be granted in
+          ways that leave no trace on our side (the customer calling you, or
+          granting it from your business profile). Check{" "}
+          <code>can_start_call</code> rather than counting calls yourself: it is
+          WhatsApp&apos;s own verdict with every limit applied, and the
+          per-customer limit has changed three times in a year.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/conversations/:id/call-permission"
+        >
+          Ask the customer to allow calls. Sends a real, billable message, so an{" "}
+          <code>Idempotency-Key</code> is required. Returns the existing grant
+          without sending anything if permission is already live. A{" "}
+          <code>409</code> means WhatsApp&apos;s request cap is spent (1/day,
+          2/week, both reset by any connected call).
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/conversations/:id/call-button"
+          body={{
+            bodyText: "Questions about your order? Call us on WhatsApp.",
+            displayText: "Call us",
+            ttlMinutes: 1440,
+            payload: "order-1522",
+          }}
+        >
+          A tappable button that starts a WhatsApp call <em>to you</em>. Needs
+          no permission at all, and a customer who uses it grants you callback
+          permission as a side effect — often the better move for a cold
+          contact. <code>payload</code> comes back on the call webhooks so you
+          can trace an inbound call to what produced the button; older WhatsApp
+          clients drop it, so treat its absence as normal.
         </Endpoint>
       </Section>
 

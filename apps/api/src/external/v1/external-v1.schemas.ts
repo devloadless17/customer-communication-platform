@@ -504,3 +504,62 @@ export const ListBroadcastRecipientsQuerySchema = z.object({
 export type ListBroadcastRecipientsQueryInput = z.infer<
   typeof ListBroadcastRecipientsQuerySchema
 >;
+
+/**
+ * Start an import of a file previously staged through
+ * `POST /v1/contacts/import/upload`. Mirrors the in-app options exactly —
+ * /v1 parity with the UI is a locked rule (CLAUDE.md §12).
+ */
+export const ExternalStartImportSchema = z
+  .object({
+    uploadKey: z.string().min(1).max(400),
+    filename: z.string().max(300).default("contacts.csv"),
+    format: z.enum(["csv", "xlsx"]).default("csv"),
+    mode: z.enum(["create_only", "create_and_update", "update_only"]).default("create_only"),
+    tagMode: z.enum(["merge", "replace"]).default("merge"),
+    /** Per-row events (workflows + outbound webhooks). Forced off above the
+     *  server's fanout cap regardless of what's requested. */
+    fireAutomations: z.boolean().default(true),
+    mapping: z.record(z.string().max(200), z.string().max(120)).optional(),
+  })
+  .strict();
+export type ExternalStartImportInput = z.infer<typeof ExternalStartImportSchema>;
+
+/**
+ * Call history listing. Keyset cursor on (ringingAt DESC, id DESC), same wire
+ * form as the internal Calls page.
+ */
+export const ExternalListCallsQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    cursor: z.string().optional(),
+    /** Restrict to one conversation's calls. */
+    conversationId: z.string().min(1).optional(),
+    /** ISO instants bounding `ringingAt`. */
+    from: z.string().datetime().optional(),
+    to: z.string().datetime().optional(),
+  })
+  .strict();
+export type ExternalListCallsQueryInput = z.infer<
+  typeof ExternalListCallsQuerySchema
+>;
+
+/**
+ * A WhatsApp call button — a CTA that starts a call TO the business.
+ *
+ * `payload` is the attribution handle: it comes back on the call webhooks so
+ * an inbound call can be traced to the campaign or record that produced the
+ * button. Older WhatsApp clients drop it, so never depend on it arriving.
+ */
+export const ExternalCallButtonSchema = z
+  .object({
+    /** Context shown above the button. */
+    bodyText: z.string().trim().min(1).max(1024),
+    /** Button label. Provider default is "Call Now". */
+    displayText: z.string().trim().min(1).max(20).optional(),
+    /** How long the button stays tappable: 1 minute to 30 days. */
+    ttlMinutes: z.coerce.number().int().min(1).max(43_200).optional(),
+    payload: z.string().max(512).optional(),
+  })
+  .strict();
+export type ExternalCallButtonInput = z.infer<typeof ExternalCallButtonSchema>;

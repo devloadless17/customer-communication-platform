@@ -47,6 +47,18 @@ export interface Team {
    *  controls are hidden and auto-pause-on-human-reply is skipped. Optional for
    *  source-compat; absent = false. */
   aiAutopilotEnabled?: boolean;
+  /**
+   * False when this team's own business phone number sits in a market where
+   * business-initiated calling isn't offered, so the outbound Call button must
+   * be hidden everywhere.
+   *
+   * This is a TEAM-level fact, not a per-contact one: eligibility follows OUR
+   * number's country, and an eligible number may call customers anywhere. A
+   * per-contact check would refuse legitimate calls and permit impossible ones.
+   * Absent = allowed (we don't know the number's country and let the provider
+   * be the authority).
+   */
+  outboundCallingAvailable?: boolean;
 }
 
 /**
@@ -165,6 +177,19 @@ export interface Contact {
    * per-conversation contact load — the inbox-list mapper omits it.
    */
   callPermissionRevokedUntil?: string | null;
+  /**
+   * How many business-initiated calls in a row this customer hasn't answered.
+   * Resets on any connected call in either direction.
+   *
+   * Matters because WhatsApp acts on it: at 2 it nudges the customer to
+   * reconsider the permission they granted us, and at 4 it revokes that
+   * permission automatically. Surfacing the count lets an agent see the second
+   * unanswered call for what it is — one more and they lose the ability to call
+   * this person at all — instead of discovering it after the fact.
+   *
+   * Full per-conversation contact load only; the inbox-list mapper omits it.
+   */
+  consecutiveUnansweredOutCalls?: number;
   avatarUrl?: string;
   /** Social-channel profile signals (Instagram follower count / verified /
    *  follow relationship). Absent on WhatsApp/Messenger. See {@link SocialProfile}. */

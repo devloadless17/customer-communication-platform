@@ -204,6 +204,10 @@ export function mapContact(c: PrismaContact): Contact {
     // revoked contact doesn't show an enabled button the backend would reject.
     callPermissionRevokedUntil:
       c.callPermissionRevokedUntil?.toISOString() ?? null,
+    // Consecutive unanswered outbound calls. Surfaced so the agent can see the
+    // approaching cliff — WhatsApp nudges the customer at 2 and revokes calling
+    // permission outright at 4.
+    consecutiveUnansweredOutCalls: c.consecutiveUnansweredOutCalls,
     avatarUrl: c.avatarUrl ?? undefined,
     socialProfile: (c.socialProfile as SocialProfile | null) ?? undefined,
     email: c.email ?? undefined,

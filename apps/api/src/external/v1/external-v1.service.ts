@@ -1,5 +1,8 @@
 import { getBroadcastReport, recipientOutcomeWhere } from "@/lib/broadcast-report";
 import type {
+  ExternalCallButtonInput,
+  ExternalListCallsQueryInput,
+  ExternalStartImportInput,
   ListBroadcastRecipientsQueryInput,
   ListBroadcastsQueryInput,
 } from "./external-v1.schemas";
@@ -14,6 +17,7 @@ import {
 } from "@nestjs/common";
 
 import { MAX_CHAIN_DEPTH } from "@/lib/workflows/events";
+import { ContactTransferService } from "@/contacts/transfer.service";
 import { toExternalAvatarUrl } from "@/lib/blob-storage";
 
 import {
@@ -41,6 +45,8 @@ import { DbService } from "../../db/db.service";
 import { runWithConcurrency } from "../../common/concurrency";
 import { ApiIdempotencyService } from "./api-idempotency.service";
 import { ExternalV1MessagingService } from "./external-v1-messaging.service";
+import { getProviderBinding } from "@/lib/providers";
+import { CallsService } from "@/calls/calls.service";
 import type {
   ExternalAssignInput,
   ExternalBulkTagInput,
@@ -87,6 +93,8 @@ export class ExternalV1Service {
     private readonly bus: EventBus,
     private readonly messaging: ExternalV1MessagingService,
     private readonly idem: ApiIdempotencyService,
+    private readonly transfers: ContactTransferService,
+    private readonly calls: CallsService,
   ) {}
 
   /**
@@ -283,6 +291,187 @@ export class ExternalV1Service {
 
   deleteNote(teamId: string, conversationId: string, noteId: string) {
     return this.messaging.deleteNote(teamId, conversationId, noteId);
+  }
+
+
+  // ===========================================================================
+  // CALLS
+  // ===========================================================================
+
+  /** Call history, newest first. Keyset cursor `<ringingAtMs>_<id>`. */
+  async listCalls(teamId: string, query: ExternalListCallsQueryInput) {
+    const parsed = ((): { ringingAt: Date; id: string } | null => {
+      if (!query.cursor) return null;
+      const i = query.cursor.indexOf("_");
+      if (i <= 0) return null;
+      const ms = Number(query.cursor.slice(0, i));
+      const id = query.cursor.slice(i + 1);
+      return Number.isFinite(ms) && id ? { ringingAt: new Date(ms), id } : null;
+    })();
+
+    const ringingAt: Prisma.DateTimeFilter = {};
+    if (query.from) {
+      const d = new Date(query.from);
+      if (!Number.isNaN(d.getTime())) ringingAt.gte = d;
+    }
+    if (query.to) {
+      const d = new Date(query.to);
+      if (!Number.isNaN(d.getTime())) ringingAt.lte = d;
+    }
+
+    const where: Prisma.CallWhereInput = {
+      teamId,
+      ...(query.conversationId ? { conversationId: query.conversationId } : {}),
+      ...(ringingAt.gte || ringingAt.lte ? { ringingAt } : {}),
+      ...(parsed
+        ? {
+            OR: [
+              { ringingAt: { lt: parsed.ringingAt } },
+              { ringingAt: parsed.ringingAt, id: { lt: parsed.id } },
+            ],
+          }
+        : {}),
+    };
+
+    const rows = await this.db.call.findMany({
+      where,
+      orderBy: [{ ringingAt: "desc" }, { id: "desc" }],
+      take: query.limit + 1,
+      select: {
+        id: true,
+        conversationId: true,
+        channel: true,
+        direction: true,
+        status: true,
+        ringingAt: true,
+        answeredAt: true,
+        endedAt: true,
+        durationSeconds: true,
+        conversation: { select: { contactId: true } },
+      },
+    });
+    const hasMore = rows.length > query.limit;
+    const page = hasMore ? rows.slice(0, query.limit) : rows;
+    const last = page.at(-1);
+    return {
+      data: page.map((c) => ({
+        id: c.id,
+        conversation_id: c.conversationId,
+        contact_id: c.conversation.contactId,
+        channel: c.channel,
+        direction: c.direction,
+        status: c.status,
+        // A call that was picked up. Note this is NOT `status === "completed"`:
+        // an agent can hang up a connected call, and a call can complete
+        // without ever being answered.
+        connected: c.answeredAt !== null,
+        ringing_at: c.ringingAt.toISOString(),
+        answered_at: c.answeredAt?.toISOString() ?? null,
+        ended_at: c.endedAt?.toISOString() ?? null,
+        duration_seconds: c.durationSeconds,
+      })),
+      next_cursor:
+        hasMore && last ? `${last.ringingAt.getTime()}_${last.id}` : null,
+    };
+  }
+
+  /**
+   * The customer's live calling-permission state, straight from the provider.
+   *
+   * Deliberately not served from our own rows: permission can be granted in
+   * ways that touch nothing on our side (the customer calling us, or granting
+   * from their business profile), so a local answer would tell an integration
+   * "no permission" for someone perfectly callable.
+   */
+  async getCallPermission(teamId: string, conversationId: string) {
+    const conv = await this.db.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      select: {
+        channel: true,
+        contact: { select: { phoneNumber: true, bsuid: true } },
+      },
+    });
+    if (!conv) throw new NotFoundException({ error: "conversation_not_found" });
+    const binding = getProviderBinding(conv.channel);
+    const read = binding.provider.getCallPermission;
+    if (!read) {
+      throw new BadRequestException({
+        error: "calling_not_supported",
+        detail: `Calling isn't available on ${conv.channel}.`,
+      });
+    }
+    if (!conv.contact?.phoneNumber && !conv.contact?.bsuid) {
+      throw new BadRequestException({ error: "contact_has_no_callable_identity" });
+    }
+    const config = await binding.getSendConfig(teamId);
+    const permission = await read(
+      {
+        ...(conv.contact.phoneNumber ? { to: conv.contact.phoneNumber } : {}),
+        ...(conv.contact.bsuid ? { recipient: conv.contact.bsuid } : {}),
+      },
+      config,
+    );
+    return {
+      status: permission.status,
+      has_permission: permission.hasPermission,
+      can_start_call: permission.canStartCall,
+      can_request_permission: permission.canRequestPermission,
+      expires_at: permission.expiresAt?.toISOString() ?? null,
+      // Present only when the per-customer call quota is spent.
+      quota_resets_at: permission.startCallResetAt?.toISOString() ?? null,
+    };
+  }
+
+  /** Ask the customer for permission to call them. Sends a billable message. */
+  async requestCallPermission(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    idempotencyKey?: string,
+  ) {
+    return this.withIdempotency(
+      teamId,
+      apiKeyId,
+      idempotencyKey,
+      "POST /v1/conversations/:id/call-permission",
+      { conversationId },
+      async () => {
+        const out = await this.calls.requestPermissionForTeam(
+          teamId,
+          conversationId,
+        );
+        return {
+          ok: true as const,
+          permission_request_id: out.permissionRequestId,
+          expires_at: out.expiresAt,
+        };
+      },
+    );
+  }
+
+  /** Send a call button inviting the customer to call us. */
+  async sendCallButton(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalCallButtonInput,
+    idempotencyKey?: string,
+  ) {
+    return this.withIdempotency(
+      teamId,
+      apiKeyId,
+      idempotencyKey,
+      "POST /v1/conversations/:id/call-button",
+      { conversationId, ...input },
+      async () => {
+        const out = await this.calls.sendCallButtonForTeam(
+          teamId,
+          conversationId,
+          input,
+        );
+        return { ok: true as const, message_id: out.externalId };
+      },
+    );
   }
 
   // ===========================================================================
@@ -1258,6 +1447,50 @@ export class ExternalV1Service {
       action === "tag-add" ? "bulk_contact_tags_add" : "bulk_contact_tags_remove",
       { action, contactIds: input.contactIds, tagIds: input.tagIds },
       () => this.bulkContactTagsInternal(teamId, apiKeyId, action, input),
+    );
+  }
+
+  /**
+   * Queue a contact import for an API-key caller.
+   *
+   * Idempotency is MANDATORY at the controller. An import is a bulk, billed-in-
+   * effort, non-reversible mutation of the contact book: a partner retrying
+   * after a 5xx must replay the SAME job id, not queue a second run over the
+   * same 100k rows.
+   *
+   * `canManageTags: true` — an API key with `write:contacts` can already create
+   * contacts and tag them through the existing endpoints, so gating tag
+   * auto-creation here would only make imports behave differently from the rest
+   * of the surface for no security gain (the UI gate exists because a human
+   * agent's role may withhold `tags:manage`; a key has no role).
+   */
+  async startContactImport(
+    teamId: string,
+    apiKeyId: string,
+    input: ExternalStartImportInput,
+    idempotencyKey?: string,
+  ): Promise<{ jobId: string }> {
+    return this.withIdempotency(
+      teamId,
+      apiKeyId,
+      idempotencyKey,
+      "start_contact_import",
+      { uploadKey: input.uploadKey, mode: input.mode },
+      () =>
+        this.transfers.startImport({
+          teamId,
+          userId: null,
+          uploadKey: input.uploadKey,
+          filename: input.filename,
+          format: input.format,
+          options: {
+            mode: input.mode,
+            tagMode: input.tagMode,
+            fireAutomations: input.fireAutomations,
+            mapping: input.mapping,
+          },
+          canManageTags: true,
+        }),
     );
   }
 

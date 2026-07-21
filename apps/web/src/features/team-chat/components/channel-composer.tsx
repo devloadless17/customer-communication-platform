@@ -132,6 +132,16 @@ export function ChannelComposer({
     }
     setBody(restored);
     setCaret(restored.length);
+    // Everything else that belongs to the channel we just LEFT must go with
+    // it. This composer is not remounted on /team/A → /team/B (see above), so
+    // a staged attachment stayed on screen and the next Send uploaded it to
+    // the new channel — a private file could land in the wrong room with no
+    // warning. Drafts are text-only and deliberately per-channel; a picked
+    // file has nowhere to be saved, so it is dropped, not carried.
+    setPendingFile(null);
+    setEmojiOpen(false);
+    setTrigger(null);
+    setPopupPos(null);
 
     const persist = () => {
       try {
@@ -516,6 +526,12 @@ export function ChannelComposer({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
+              // A Radix tooltip is exposed as aria-describedby, not as the
+              // accessible NAME — and only while it's open, which on touch is
+              // never. Every sibling icon button here carries a label; this one
+              // was the miss.
+              aria-label="Attach file"
+              title="Attach file"
               className="flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
               <Paperclip className="size-4" />
@@ -542,10 +558,16 @@ export function ChannelComposer({
           </Tooltip>
           {/* Deliberately stays OPEN after a pick so several emoji can be
               inserted in a row — don't "fix" that into auto-close. */}
+          {/* `left-auto right-0`: this trigger sits at the RIGHT edge of the
+              composer, so the default left-anchored panel ran 250px off the
+              page (a real horizontal scrollbar on the whole app). `left-auto`
+              is required — `left-0` and `right-0` are different tailwind-merge
+              groups, so `right-0` alone wouldn't have won. */}
           <EmojiPopover
             open={emojiOpen}
             onClose={() => setEmojiOpen(false)}
             onPick={insertEmoji}
+            className="left-auto right-0"
           />
         </div>
         <input

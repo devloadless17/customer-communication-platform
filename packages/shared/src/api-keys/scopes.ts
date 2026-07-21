@@ -56,6 +56,16 @@ export const API_KEY_SCOPES = [
   // campaign via API is a separate feature with its own idempotency and
   // abuse-surface questions, and billed template sends are irreversible.
   "read:broadcasts",
+
+  // Calls — history, and a contact's current calling-permission state.
+  "read:calls",
+  // Asking a customer for calling permission, and sending them a call button.
+  //
+  // Deliberately NOT "place a call": a call needs an SDP offer from a live
+  // WebRTC peer and a browser to carry the audio, so an API client has nothing
+  // to place a call WITH. Everything here is the part an integration can
+  // genuinely drive — teeing up a call a human then makes or takes.
+  "write:calls",
 ] as const;
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];

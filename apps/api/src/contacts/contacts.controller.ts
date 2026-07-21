@@ -13,11 +13,8 @@ import {
   Put,
   Query,
   Res,
-  UploadedFile,
   UseGuards,
-  UseInterceptors,
 } from "@nestjs/common";
-import { FileInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
@@ -108,39 +105,6 @@ export class ContactsController {
     return this.contacts.bulk(session.teamId, session.userId, body);
   }
 
-  /**
-   * CSV import. multipart/form-data with a single `file` part. The 5MB cap
-   * is enforced both at the multer layer (hard cap on memory ingest) AND in
-   * the service (friendlier 400 message). Multer uses memoryStorage by
-   * default, so `file.buffer` is populated.
-   */
-  @Post("import")
-  @UseInterceptors(
-    FileInterceptor("file", { limits: { fileSize: 5 * 1024 * 1024 } }),
-  )
-  async import(
-    @CurrentSession() session: ApiSession,
-    @UploadedFile() file: Express.Multer.File | undefined,
-  ) {
-    if (!file) {
-      throw new BadRequestException({ error: "missing 'file' field" });
-    }
-    // CSV import auto-creates unknown tag names — gate that on the same
-    // `tags:manage` capability the tag CRUD endpoints require, so a user who
-    // can import but not manage tags can't create tags via the back door.
-    // Without it, import links only to EXISTING tags (unknown names skipped).
-    const canManageTags = !!resolvePermissions(
-      session.role,
-      session.rolePermissions,
-    )["tags:manage"];
-    return this.contacts.importCsv(
-      session.teamId,
-      session.userId,
-      file.buffer,
-      canManageTags,
-    );
-  }
-
   @Get("lookup")
   async lookup(
     @CurrentSession() session: ApiSession,
@@ -154,51 +118,6 @@ export class ContactsController {
     return { contacts };
   }
 
-  @Get("export")
-  @RequireCapability("contacts:export")
-  async exportCsv(
-    @CurrentSession() session: ApiSession,
-    @Res() res: Response,
-  ): Promise<void> {
-    const { csv, filename, truncated, total } = await this.contacts.exportCsv(
-      session.teamId,
-    );
-    res
-      .status(200)
-      .set("content-type", "text/csv; charset=utf-8")
-      .set("content-disposition", `attachment; filename="${filename}"`)
-      // Truncation signal for API/fetch consumers (the in-app export is an
-      // <a download> that can't read headers — its filename carries the cap).
-      .set("x-export-truncated", truncated ? "true" : "false")
-      .set("x-export-total", String(total))
-      .send(csv);
-  }
-
-  /**
-   * Blank import template. Header-only CSV listing every column the importer
-   * recognizes (built-in fields + the team's active custom fields). Drives
-   * the "Download template" button in the contact import dialog.
-   */
-  @Get("template")
-  async importTemplate(
-    @CurrentSession() session: ApiSession,
-    @Res() res: Response,
-  ): Promise<void> {
-    const { csv, filename } = await this.contacts.importTemplateCsv(session.teamId);
-    res
-      .status(200)
-      .set("content-type", "text/csv; charset=utf-8")
-      .set("content-disposition", `attachment; filename="${filename}"`)
-      .send(csv);
-  }
-
-  /**
-   * Total contact count for the team. Used by the broadcast wizard's "All
-   * contacts" card. Separate from /count (audience union) on purpose: that
-   * endpoint returns 0 when both tag/contact arrays are empty, which is the
-   * correct contract for "user picked nothing." This route answers "how many
-   * contacts are in this team" with no audience semantics.
-   */
   @Get("count-all")
   async countAll(@CurrentSession() session: ApiSession) {
     const count = await this.contacts.countAll(session.teamId);

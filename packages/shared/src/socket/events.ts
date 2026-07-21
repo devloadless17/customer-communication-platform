@@ -311,6 +311,34 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * Live progress for a contact import/export job, delivered ONLY to the
+   * `user:` room of whoever started it. Fires roughly every 2s while the job
+   * runs plus once on every terminal transition, so the wizard can show a real
+   * progress bar and auto-start the download without polling.
+   */
+  "contacts:transfer_progress": (payload: {
+    teamId: string;
+    job: {
+      id: string;
+      kind: "import" | "export";
+      format: "csv" | "xlsx";
+      status: "pending" | "running" | "completed" | "failed" | "canceled";
+      filename: string;
+      processedRows: number;
+      totalRows: number | null;
+      created: number;
+      updated: number;
+      revived: number;
+      skipped: number;
+      failed: number;
+      automationsSkipped: boolean;
+      hasArtifact: boolean;
+      hasErrorReport: boolean;
+      error: string | null;
+    };
+  }) => void;
+
+  /**
    * Conversation was read — team-wide unread counter resets to 0. Fires when
    * a teammate opens the thread or explicitly marks it read. CLAUDE.md flags
    * per-agent unread as deferred, so this is shared across the team.
@@ -783,12 +811,24 @@ export interface ServerToClientEvents {
    * Emitted ONLY to the two participants' `user:` rooms — never the team
    * room, because the existence of a DM between two people is itself private.
    *
-   * Deliberately ID-ONLY: no peer name, no avatar, no preview. The client
+   * Deliberately CONTENT-FREE: no peer name, no avatar, no preview. The client
    * responds by refetching `GET /api/team/channels/dms`, which is membership-
    * filtered server-side, so the frame itself can't disclose anything even if
-   * it were ever mis-routed. Do not "helpfully" enrich this payload.
+   * it were ever mis-routed. Do not "helpfully" enrich this payload further.
+   *
+   * `createdByUserId` is the one permitted addition and it is load-bearing:
+   * this frame reaches BOTH participants, so without an author the starter's
+   * own tab cannot tell "I just clicked New DM" from "someone DM'd me" — and a
+   * client-side marker stamped when the POST resolves always loses the race
+   * against the socket frame. It leaks nothing: it goes only to the two
+   * people in the DM, who already know who they are.
    */
-  "team:dm:created": (payload: { teamId: string; channelId: string }) => void;
+  "team:dm:created": (payload: {
+    teamId: string;
+    channelId: string;
+    /** Who opened it — lets the starter's own tab skip the toast/ding. */
+    createdByUserId: string;
+  }) => void;
 
   /**
    * Typing snapshot for a thread. Rides the channel room (so any tab with

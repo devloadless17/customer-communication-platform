@@ -84,6 +84,16 @@ export interface WhatsappHealthUpdate {
   messagingTier?: string | null;
   qualityRating?: string | null;
   throughputLevel?: string | null;
+  /**
+   * Calling enforcement. `null` clears a stored restriction/warning (the
+   * provider lifted it); `undefined` leaves it untouched, because these events
+   * carry partial state and a messaging-tier update must not wipe a live
+   * calling restriction.
+   */
+  callingRestrictedUntil?: Date | null;
+  callingRestrictionType?: string | null;
+  callingRestrictionReason?: string | null;
+  callingQualityWarning?: string | null;
 }
 
 /**
@@ -170,6 +180,10 @@ export async function persistWhatsappHealth(
     messagingDailyCap?: number | null;
     qualityRating?: string | null;
     throughputLevel?: string | null;
+    callingRestrictedUntil?: Date | null;
+    callingRestrictionType?: string | null;
+    callingRestrictionReason?: string | null;
+    callingQualityWarning?: string | null;
     messagingHealthUpdatedAt: Date;
   } = { messagingHealthUpdatedAt: new Date() };
 
@@ -190,6 +204,20 @@ export async function persistWhatsappHealth(
     data.throughputLevel = update.throughputLevel
       ? normalizeThroughputLevel(update.throughputLevel)
       : null;
+    touched = true;
+  }
+  // Calling enforcement. A restriction arrives with its own expiry and clears
+  // the earlier warning that preceded it — by the time calling is paused, the
+  // "quality is slipping" nudge is no longer the actionable message.
+  if (update.callingRestrictedUntil !== undefined) {
+    data.callingRestrictedUntil = update.callingRestrictedUntil;
+    data.callingRestrictionType = update.callingRestrictionType ?? null;
+    data.callingRestrictionReason = update.callingRestrictionReason ?? null;
+    data.callingQualityWarning = null;
+    touched = true;
+  }
+  if (update.callingQualityWarning !== undefined) {
+    data.callingQualityWarning = update.callingQualityWarning;
     touched = true;
   }
   if (!touched) return;

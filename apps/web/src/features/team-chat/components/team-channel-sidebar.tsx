@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import dynamic from "next/dynamic";
 
@@ -16,7 +16,6 @@ import type { User } from "@ccp/shared/types";
 import { ChannelList } from "./channel-list";
 import { NewChannelDialog } from "./channel-dialogs";
 import { DmList } from "./dm-list";
-import { markDmOpenedLocally } from "@/providers/team-chat-notifications";
 
 // Workspace-wide message search — heavy (its own debounced fetcher + result
 // chrome) and only opened on demand, so keep it out of the initial bundle.
@@ -62,7 +61,17 @@ export function TeamChannelSidebar({ currentUser }: { currentUser: User }) {
   const channels = useTeamChannels();
   const dms = useTeamDms();
   const teamMembers = useTeamMembers();
-  const activeChannelId = channelIdFromPathname(usePathname());
+  const routeChannelId = channelIdFromPathname(usePathname());
+  // Optimistic selection. `/team/[channelId]` is a dynamic RSC route, so the
+  // pathname — and with it the selected row — only moves once the server
+  // responds. That dead beat after a click is most of why switching channels
+  // felt heavy. Paint the target as selected immediately; the route catching
+  // up clears it, and a failed navigation just falls back to the real segment.
+  const [pendingChannelId, setPendingChannelId] = useState<string | null>(null);
+  useEffect(() => {
+    setPendingChannelId(null);
+  }, [routeChannelId]);
+  const activeChannelId = pendingChannelId ?? routeChannelId;
   const { onlineUserIds, availabilityByUserId } = usePresence(
     currentUser.teamId,
     currentUser.id,
@@ -81,6 +90,7 @@ export function TeamChannelSidebar({ currentUser }: { currentUser: User }) {
         <ChannelList
           channels={channels}
           activeChannelId={activeChannelId ?? ""}
+          onSelect={setPendingChannelId}
           onlinePresenceCount={onlineUserIds.size}
           onCreate={() => setShowNew(true)}
           onOpenWorkspaceSearch={() => setWorkspaceSearchOpen(true)}
@@ -89,6 +99,7 @@ export function TeamChannelSidebar({ currentUser }: { currentUser: User }) {
             <DmList
               dms={dms}
               activeChannelId={activeChannelId ?? ""}
+              onSelect={setPendingChannelId}
               onlineUserIds={onlineUserIds}
               availabilityByUserId={availabilityByUserId}
               onStartDm={() => setNewDmOpen(true)}
@@ -116,9 +127,6 @@ export function TeamChannelSidebar({ currentUser }: { currentUser: User }) {
           onClose={() => setNewDmOpen(false)}
           onOpened={(ch) => {
             setNewDmOpen(false);
-            // Suppress the `team:dm:created` self-toast — that frame reaches
-            // BOTH participants and carries no author to filter on.
-            markDmOpenedLocally(ch.id);
             router.push(`/team/${ch.id}`);
             // The DM may be brand-new; refresh so the layout's server-side DM
             // list includes it even if the socket frame is missed.

@@ -68,6 +68,50 @@ const DEFAULT_RTC_CONFIG: RTCConfiguration = {
   bundlePolicy: "max-bundle",
 };
 
+/**
+ * How long to wait for the peer connection before completing an accept anyway.
+ *
+ * The provider gives roughly 30-60s from the incoming-call webhook to accept,
+ * so this has to resolve well inside that. If ICE hasn't completed by now the
+ * call is likely doomed regardless — sending the accept is still the better
+ * move, since it at least lets the provider report a real failure instead of
+ * timing us out.
+ */
+const PEER_CONNECT_TIMEOUT_MS = 10_000;
+
+/**
+ * Resolve once the peer connection reports `connected`, or after a bounded
+ * wait. Resolves rather than rejects on timeout: the caller wants to proceed
+ * either way, and treating a slow connection as an error would abort a call
+ * that might still have come up.
+ */
+function waitForPeerConnected(pc: RTCPeerConnection): Promise<void> {
+  if (pc.connectionState === "connected") return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      pc.removeEventListener("connectionstatechange", onChange);
+      resolve();
+    };
+    const onChange = () => {
+      // `failed`/`closed` also release the wait — there is nothing left to wait
+      // for, and the caller's own teardown path handles the dead connection.
+      if (
+        pc.connectionState === "connected" ||
+        pc.connectionState === "failed" ||
+        pc.connectionState === "closed"
+      ) {
+        done();
+      }
+    };
+    const timer = window.setTimeout(done, PEER_CONNECT_TIMEOUT_MS);
+    pc.addEventListener("connectionstatechange", onChange);
+  });
+}
+
 export function useCall(): {
   liveCall: LiveCallState | null;
   error: string | null;
@@ -139,21 +183,14 @@ export function useCall(): {
     toast.error(msg);
   }, []);
 
-  // Outbound pickup detection. The SDP answer (call:sdp_offer) only means the
-  // media leg negotiated with Meta's server — it lands ~1s after dialing, BEFORE
-  // the human picks up. Meta gives NO live "answered" signal for business-
-  // initiated calls, so we infer pickup from the customer's audio actually
-  // flowing and only THEN start the timer + flip to in_progress. This is the fix
-  // for "the timer starts before the customer answers." Interval id; cleared on
-  // teardown so it can't leak into the next call.
-  const pickupWatchRef = useRef<number | null>(null);
-
-  const clearPickupWatch = useCallback(() => {
-    if (pickupWatchRef.current !== null) {
-      window.clearInterval(pickupWatchRef.current);
-      pickupWatchRef.current = null;
-    }
-  }, []);
+  // NOTE: there is deliberately no browser-side pickup detection.
+  //
+  // This hook used to poll inbound-rtp packet counts and declare the customer
+  // had answered once audio started flowing, on the belief that the provider
+  // sends no live "answered" signal for business-initiated calls. It does — the
+  // ACCEPTED call-status webhook — and the heuristic could be fooled by ringback
+  // tone into starting the timer on a call nobody picked up. Pickup now arrives
+  // as a `call:answered` frame like any other state change.
 
   // Grace timer for a TRANSIENT WebRTC `disconnected`. Per the spec
   // `disconnected` is frequently temporary (a brief packet-loss blip, a WiFi
@@ -185,7 +222,6 @@ export function useCall(): {
   // stream live — that leak is what keeps Chrome's mic indicator lit after a
   // call ends when calls overlap.
   const releaseMedia = useCallback(() => {
-    clearPickupWatch();
     clearDisconnectGrace();
     const pc = pcRef.current;
     if (pc) {
@@ -223,94 +259,7 @@ export function useCall(): {
       remoteAudioElRef.current.pause();
       remoteAudioElRef.current.srcObject = null;
     }
-  }, [clearPickupWatch, clearDisconnectGrace]);
-
-  // Customer answered (real inbound audio observed). Flip to in_progress + start
-  // the timer locally, flip the thread's activeCall pill for every viewer via a
-  // local call:answered dispatch, and tell the server (POST /connected) so a
-  // later agent-hangup is filed as a real connected call rather than "missed"
-  // (the server has no live pickup signal otherwise). Guarded to the still-
-  // ringing originating outbound call so a late/foreign frame can't misfire it.
-  const onOutboundPickup = useCallback((callId: string) => {
-    const live = liveCallRef.current;
-    if (
-      !live ||
-      live.callId !== callId ||
-      live.direction !== "out" ||
-      live.status !== "ringing"
-    ) {
-      return;
-    }
-    const answeredAt = Date.now();
-    setLiveCall((prev) =>
-      prev && prev.callId === callId && prev.status === "ringing"
-        ? { ...prev, status: "in_progress", answeredAt }
-        : prev,
-    );
-    dispatchLocalSocketEvent("call:answered", {
-      teamId: "",
-      conversationId: live.conversationId,
-      callId,
-      answeredByUserId: "",
-      answeredAt: new Date(answeredAt).toISOString(),
-    });
-    void fetchWithSessionGuard(`/api/calls/${callId}/connected`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{}",
-    }).catch(() => undefined);
-  }, []);
-
-  // Poll inbound-rtp audio after the media leg is up; declare pickup once packet
-  // counts grow across consecutive polls (a stray setup packet won't trip it).
-  // Re-armed per outbound call; self-stops on connect, teardown, status change,
-  // or a safety ceiling (the 60s ring timeout below handles a true no-answer).
-  const startOutboundPickupWatch = useCallback(
-    (callId: string) => {
-      clearPickupWatch();
-      let lastPackets = -1;
-      let growthHits = 0;
-      const startedAtMs = Date.now();
-      const id = window.setInterval(() => {
-        const live = liveCallRef.current;
-        const pc = pcRef.current;
-        if (!pc || !live || live.callId !== callId || live.status !== "ringing") {
-          clearPickupWatch();
-          return;
-        }
-        if (Date.now() - startedAtMs > 70_000) {
-          clearPickupWatch();
-          return;
-        }
-        void pc
-          .getStats()
-          .then((stats) => {
-            let packets = 0;
-            stats.forEach((report) => {
-              if (report.type === "inbound-rtp") {
-                const r = report as RTCInboundRtpStreamStats;
-                if (r.kind === "audio") {
-                  packets = Math.max(packets, r.packetsReceived ?? 0);
-                }
-              }
-            });
-            if (lastPackets >= 0 && packets > lastPackets && packets > 5) {
-              growthHits += 1;
-            } else if (packets <= lastPackets) {
-              growthHits = 0;
-            }
-            lastPackets = packets;
-            if (growthHits >= 2) {
-              clearPickupWatch();
-              onOutboundPickup(callId);
-            }
-          })
-          .catch(() => undefined);
-      }, 700);
-      pickupWatchRef.current = id;
-    },
-    [clearPickupWatch, onOutboundPickup],
-  );
+  }, [clearDisconnectGrace]);
 
   // Apply an outbound call's answer SDP to the live peer connection. Returns
   // true if applied. Matches STRICTLY on callId (live.callId === callId): the
@@ -338,19 +287,17 @@ export function useCall(): {
       }
       try {
         await pc.setRemoteDescription({ type: "answer", sdp });
-        // Media is now negotiated with Meta — but this answer is from Meta's
-        // media server and arrives BEFORE the human picks up. Stay "ringing"
-        // ("Calling…", no timer); the pickup watcher flips us to in_progress
-        // when the customer's audio actually flows. (Previously we flipped to
-        // in_progress here, which started the timer during ringing.)
-        startOutboundPickupWatch(callId);
+        // Media is now negotiated with the provider — but this answer comes
+        // from its media server and arrives BEFORE the human picks up. Stay
+        // "ringing" ("Calling…", no timer); the `call:answered` frame driven by
+        // the provider's ACCEPTED status is what flips us to in_progress.
         return true;
       } catch (err) {
         console.warn("[useCall] setRemoteDescription(answer) failed", err);
         return false;
       }
     },
-    [startOutboundPickupWatch],
+    [],
   );
 
   const tearDown = useCallback(() => {
@@ -647,6 +594,42 @@ export function useCall(): {
     return pc;
   }, [tearDown, releaseMedia, clearDisconnectGrace]);
 
+  /**
+   * Finish a two-hop accept: hold our audio, wait for the peer connection to
+   * come up, tell the server to issue the real `accept`, then speak.
+   *
+   * The muting is the point. The provider requires the accept to land after the
+   * WebRTC connection is established, and warns that media flowing before its
+   * 200 means the caller misses the start of the conversation — so the agent's
+   * mic stays disabled across the whole handshake.
+   *
+   * Falls through to unmuted on any failure: a call where the first word might
+   * clip is strictly better than one the agent can never be heard on. Respects
+   * an explicit mute — if the agent muted themselves during setup, we leave
+   * them muted.
+   */
+  const completePendingAccept = useCallback(
+    async (pc: RTCPeerConnection, callId: string, localSdp: string) => {
+      const stream = localStreamRef.current;
+      const held = stream?.getAudioTracks().filter((t) => t.enabled) ?? [];
+      for (const t of held) t.enabled = false;
+      try {
+        await waitForPeerConnected(pc);
+        await fetchWithSessionGuard(`/api/calls/${callId}/accept-media`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sdp: localSdp }),
+        });
+      } catch (err) {
+        console.warn("[useCall] completing accept failed", err);
+      } finally {
+        // Only re-enable tracks WE disabled, so a mid-handshake mute sticks.
+        for (const t of held) t.enabled = true;
+      }
+    },
+    [],
+  );
+
   const answerIncoming = useCallback(
     async (
       callId: string,
@@ -733,11 +716,19 @@ export function useCall(): {
         // WhatsApp completed its media locally above and returns no SDP body.
         // (A `sdpRenegotiation` offer, if Meta ever sends one, is not applied
         // here — the outbound path doesn't either; that's the media-update gap.)
-        if (isSocialAnswer) {
-          const body = (await res.json().catch(() => ({}))) as { sdpAnswer?: string };
-          if (body.sdpAnswer) {
-            await pc.setRemoteDescription({ type: "answer", sdp: body.sdpAnswer });
-          }
+        const answerBody = (await res.json().catch(() => ({}))) as {
+          sdpAnswer?: string;
+          acceptPending?: boolean;
+        };
+        if (isSocialAnswer && answerBody.sdpAnswer) {
+          await pc.setRemoteDescription({ type: "answer", sdp: answerBody.sdpAnswer });
+        }
+        // WhatsApp answers in two hops: the POST above was `pre_accept`, which
+        // lets the WebRTC connection establish; the real `accept` must follow
+        // once it has. Stay silent until that lands — media flowing before the
+        // accept costs the caller the first words they speak.
+        if (answerBody.acceptPending) {
+          await completePendingAccept(pc, callId, localSdp);
         }
         pendingOffersRef.current.delete(callId);
 
@@ -768,7 +759,7 @@ export function useCall(): {
         busyRef.current = false;
       }
     },
-    [setupPeer, tearDown, fail],
+    [setupPeer, tearDown, fail, completePendingAccept],
   );
 
   const initiateOutbound = useCallback(

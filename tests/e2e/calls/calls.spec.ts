@@ -4,6 +4,12 @@
  * terminal-state idempotency contracts. Lives next to the workflows
  * suite so the same prod:local stack at :8080 covers both.
  *
+ * ENVIRONMENT: the pre-flight specs need `CALLS_SKIP_PREFLIGHT` OFF. The dev
+ * `.env` sets it to 1 so QA can place repeat calls, and with it on the
+ * permission/quota gates are deliberately bypassed — suites B and C then fail
+ * for a reason that has nothing to do with the code under test. Run them
+ * against an API started with `CALLS_SKIP_PREFLIGHT=0`.
+ *
  * Specifically NOT in scope:
  *   - The actual Meta `placeCall` / `preAccept` / `accept` / `end` HTTP
  *     calls — the test team has no Meta credentials and we explicitly
@@ -12,12 +18,12 @@
  *     surface here.
  *
  * Suites:
- *   A. Outbound pre-flight: bic_blocked_region    — US contact → blocked
- *   B. Outbound pre-flight: permission_revoked     — future revocation → blocked
- *   C. Outbound pre-flight: daily_cap_reached      — 5 connected calls/24h → blocked
- *   D. answerCall CAS race                          — exactly one winner
- *   E. endCall idempotency                          — terminal row → 200 no-op
- *   F. Call history listing                         — descending ringingAt
+ *   A. Outbound pre-flight: bic_blocked_region  — OUR number's country → blocked
+ *   B. Outbound pre-flight: permission_revoked   — future revocation → blocked
+ *   C. Outbound pre-flight: calling_restricted   — provider paused our number
+ *   D. answerCall CAS race                        — exactly one winner
+ *   E. endCall idempotency                        — terminal row → 200 no-op
+ *   F. Call history listing                       — descending ringingAt
  */
 import { test, expect } from "@playwright/test";
 import { db, appAdmin, wipeTestData, pollUntil } from "../_helpers/db";
@@ -80,6 +86,33 @@ async function seedContactAndConversation(opts: {
   return { contactId: contact.id, conversationId: conv.id };
 }
 
+/**
+ * Point the team's WhatsApp connection at a business number in a given country.
+ *
+ * Business-initiated calling eligibility is decided by THIS number, so every
+ * region assertion has to set it explicitly rather than relying on the
+ * contact's own country. Upserts because the suite's team may have no
+ * connection row at all.
+ */
+async function setBusinessNumber(displayPhoneNumber: string): Promise<void> {
+  // Must be a REAL, parseable number for its country — libphonenumber rejects
+  // the +1-555 fictional exchange, which yields no country at all and makes the
+  // region gate silently un-testable.
+  const existing = await db().channelConnection.findUnique({
+    where: { teamId_channel: { teamId, channel: "whatsapp" } },
+    select: { config: true },
+  });
+  const config = {
+    ...((existing?.config as Record<string, unknown> | null) ?? {}),
+    displayPhoneNumber,
+  };
+  await db().channelConnection.upsert({
+    where: { teamId_channel: { teamId, channel: "whatsapp" } },
+    create: { teamId, channel: "whatsapp", config, secrets: {}, isActive: true },
+    update: { config },
+  });
+}
+
 // A fake SDP — InitiateCallSchema requires a non-empty string ≤ 64KB.
 // Whatever bytes we pass never reach Meta in the cases we hit; the
 // pre-flight gauntlet fails first.
@@ -89,29 +122,54 @@ const FAKE_SDP_ANSWER = FAKE_SDP_OFFER;
 // ═════════════════════════════════════════════════════════════════════════
 // A. Outbound pre-flight — bic_blocked_region
 // ═════════════════════════════════════════════════════════════════════════
+//
+// Eligibility follows OUR BUSINESS NUMBER's country, not the customer's. Meta:
+// "The business phone number's country code must be in this supported list. The
+// consumer phone number can be from any country where Cloud API is available."
+//
+// Both directions are asserted, because reading this rule backwards fails both
+// ways at once — it refuses legitimate calls to customers in blocked markets
+// AND waves through calls from a business number Meta will reject.
 test.describe("A. Outbound pre-flight — bic_blocked_region", () => {
-  test("US-coded contact → { ok: false, reason: bic_blocked_region } and NO Call row", async ({ request }) => {
-    // ARRANGE — contact with US country code (in BIC_BLOCKED_COUNTRY_CODES).
+  test("US BUSINESS number → blocked, even calling an allowed-country customer", async ({ request }) => {
+    await setBusinessNumber("+12125550100");
     const { conversationId } = await seedContactAndConversation({
-      phoneNumber: "+15551110001",
-      countryCode: "US",
+      phoneNumber: "+33611110001",
+      countryCode: "FR",
       insideWindow: true,
     });
 
-    // ACT
     const resp = await request.post(`/api/conversations/${conversationId}/call`, {
       data: { sdp: FAKE_SDP_OFFER },
     });
 
-    // ASSERT — the route returns 200 with the structured failure (no 5xx
-    // ever bubbles from the gauntlet, see calls.service.ts header).
+    // The route returns 200 with a structured failure — no 5xx ever bubbles
+    // out of the pre-flight (see the calls.service.ts header).
     expect(resp.status(), `body=${await resp.text().catch(() => "")}`).toBe(200);
-    const json = await resp.json();
-    expect(json).toEqual({ ok: false, reason: "bic_blocked_region" });
+    expect(await resp.json()).toEqual({ ok: false, reason: "bic_blocked_region" });
 
-    // Defense-in-depth: no Call row was inserted for this conversation.
-    const callCount = await db().call.count({ where: { conversationId } });
-    expect(callCount).toBe(0);
+    // Defense-in-depth: no Call row was inserted.
+    expect(await db().call.count({ where: { conversationId } })).toBe(0);
+  });
+
+  test("allowed BUSINESS number → a US customer is NOT blocked by region", async ({ request }) => {
+    await setBusinessNumber("+33600000000");
+    const { conversationId } = await seedContactAndConversation({
+      phoneNumber: "+15551110009",
+      countryCode: "US",
+      insideWindow: true,
+    });
+
+    const resp = await request.post(`/api/conversations/${conversationId}/call`, {
+      data: { sdp: FAKE_SDP_OFFER },
+    });
+
+    expect(resp.status()).toBe(200);
+    const json = await resp.json();
+    // It still fails — there are no real Meta credentials here — but it must
+    // NOT fail for the region reason. That is the whole point: this customer
+    // is callable, and the old per-contact gate refused them outright.
+    expect(json.reason).not.toBe("bic_blocked_region");
   });
 });
 
@@ -120,8 +178,9 @@ test.describe("A. Outbound pre-flight — bic_blocked_region", () => {
 // ═════════════════════════════════════════════════════════════════════════
 test.describe("B. Outbound pre-flight — permission_revoked", () => {
   test("contact with future callPermissionRevokedUntil → { ok: false, reason: permission_revoked }", async ({ request }) => {
-    // ARRANGE — revocation 1h in the future. Country code is intentionally
-    // an allowed region (FR) so the BIC gate doesn't short-circuit first.
+    // ARRANGE — revocation 1h in the future, behind a business number in an
+    // allowed market so the region gate doesn't short-circuit first.
+    await setBusinessNumber("+33600000000");
     const oneHourFromNow = new Date(Date.now() + 60 * 60 * 1000);
     const { conversationId } = await seedContactAndConversation({
       phoneNumber: "+33611110002",
@@ -147,56 +206,76 @@ test.describe("B. Outbound pre-flight — permission_revoked", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════
-// C. Outbound pre-flight — daily_cap_reached
+// C. Outbound pre-flight — calling_restricted
 // ═════════════════════════════════════════════════════════════════════════
-test.describe("C. Outbound pre-flight — daily_cap_reached", () => {
-  test("5 connected outbound Calls in last 24h → { ok: false, reason: daily_cap_reached }", async ({ request }) => {
-    // ARRANGE — inside-24h-window contact in an allowed region.
+//
+// Replaces the old "5 connected calls per 24h" spec. That cap is no longer
+// ours to enforce or to hardcode: the per-customer call quota comes back from
+// the provider's permission read (which knows the real number — it has moved
+// 5 → 10 → 100 in a year), so a local count could only ever disagree with it.
+//
+// What IS ours is the number-level restriction the provider pushes over its
+// account webhook, which pauses ALL calling for days.
+test.describe("C. Outbound pre-flight — calling_restricted", () => {
+  test("number restricted until a future time → blocked with the retry time, NO Call row", async ({ request }) => {
+    await setBusinessNumber("+33600000000");
+    const liftsAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+    await db().channelConnection.updateMany({
+      where: { teamId, channel: "whatsapp" },
+      data: {
+        callingRestrictedUntil: liftsAt,
+        callingRestrictionType: "RESTRICTED_BUSINESS_INITIATED_CALLING",
+        callingRestrictionReason: "High negative feedback from users.",
+      },
+    });
     const { conversationId } = await seedContactAndConversation({
       phoneNumber: "+33611110003",
       countryCode: "FR",
       insideWindow: true,
     });
 
-    // Seed 5 outbound, answered (= connected) Calls inside the 24h window.
-    // The service counts ONLY calls with answeredAt non-null + ringingAt
-    // within the last 24h, matching Meta's "5 connected per 24h" rule.
-    const now = new Date();
-    for (let i = 0; i < 5; i++) {
-      // Stagger ringingAt slightly so the timestamps differ and the
-      // externalCallId stays unique (the row has a UNIQUE on
-      // (teamId, channel, externalCallId)).
-      const ringingAt = new Date(now.getTime() - (i + 1) * 1000);
-      await db().call.create({
-        data: {
-          teamId,
-          conversationId,
-          externalCallId: `e2e-cap-${i}-${now.getTime()}`,
-          channel: "whatsapp",
-          direction: "out",
-          status: "completed",
-          ringingAt,
-          answeredAt: new Date(ringingAt.getTime() + 100),
-          endedAt: new Date(ringingAt.getTime() + 5_000),
-          durationSeconds: 5,
-          rawPayload: {},
-        },
-      });
-    }
-
-    // ACT
     const resp = await request.post(`/api/conversations/${conversationId}/call`, {
       data: { sdp: FAKE_SDP_OFFER },
     });
 
-    // ASSERT
     expect(resp.status()).toBe(200);
-    const json = await resp.json();
-    expect(json).toEqual({ ok: false, reason: "daily_cap_reached" });
+    expect(await resp.json()).toEqual({
+      ok: false,
+      reason: "calling_restricted",
+      retryAt: liftsAt.toISOString(),
+    });
+    expect(await db().call.count({ where: { conversationId } })).toBe(0);
 
-    // The five seed rows are still there; no 6th was added.
-    const callCount = await db().call.count({ where: { conversationId } });
-    expect(callCount).toBe(5);
+    // Clean up so later specs aren't blocked by the restriction.
+    await db().channelConnection.updateMany({
+      where: { teamId, channel: "whatsapp" },
+      data: { callingRestrictedUntil: null },
+    });
+  });
+
+  test("an EXPIRED restriction does not block", async ({ request }) => {
+    await setBusinessNumber("+33600000000");
+    await db().channelConnection.updateMany({
+      where: { teamId, channel: "whatsapp" },
+      data: { callingRestrictedUntil: new Date(Date.now() - 60_000) },
+    });
+    const { conversationId } = await seedContactAndConversation({
+      phoneNumber: "+33611110007",
+      countryCode: "FR",
+      insideWindow: true,
+    });
+
+    const resp = await request.post(`/api/conversations/${conversationId}/call`, {
+      data: { sdp: FAKE_SDP_OFFER },
+    });
+
+    expect(resp.status()).toBe(200);
+    expect((await resp.json()).reason).not.toBe("calling_restricted");
+
+    await db().channelConnection.updateMany({
+      where: { teamId, channel: "whatsapp" },
+      data: { callingRestrictedUntil: null },
+    });
   });
 });
 

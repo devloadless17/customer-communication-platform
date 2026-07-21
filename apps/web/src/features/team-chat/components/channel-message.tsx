@@ -338,11 +338,19 @@ function ChannelMessageImpl({
         // Spacer holding the avatar column, with the timestamp revealed on
         // hover — the Slack/Discord affordance that keeps a grouped run
         // scannable without repeating the header on every line.
-        <div className="w-9 shrink-0 select-none pt-0.5 text-right">
+        //
+        // `text-3xs leading-relaxed whitespace-nowrap` is load-bearing, not
+        // decoration: without it the 10px timestamp wrapped to two lines
+        // inside the 36px gutter AND each line box was inflated to the 16px
+        // root strut (24px), so an INVISIBLE (opacity-0) hover label forced
+        // every grouped row to 54px instead of ~28px. That was the phantom
+        // gap between consecutive messages. Setting the font size on the
+        // block (not just the inline label) is what shrinks the strut.
+        <div className="w-9 shrink-0 select-none whitespace-nowrap pt-1 text-right text-3xs leading-relaxed">
           <LocalTime
             iso={message.createdAt}
             format="messageTime"
-            className="text-3xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
+            className="text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
           />
         </div>
       ) : (
@@ -354,7 +362,10 @@ function ChannelMessageImpl({
         </Avatar>
       )}
 
-      <div className="min-w-0 flex-1">
+      {/* `text-sm leading-relaxed` on the COLUMN, not just on the body span:
+          a block's line boxes are floored by its own strut, so leaving the
+          column at the 16px/24px root made every text line 24px tall. */}
+      <div className="min-w-0 flex-1 text-sm leading-relaxed">
         <div className={cn("flex min-w-0 items-baseline gap-1", isContinuation && "hidden")}>
           <span className="min-w-0 truncate text-sm font-semibold">{authorName}</span>
           <LocalTime
@@ -362,9 +373,6 @@ function ChannelMessageImpl({
             format="messageTime"
             className="shrink-0 text-2xs text-muted-foreground"
           />
-          {message.editedAt && (
-            <span className="shrink-0 text-2xs text-muted-foreground">(edited)</span>
-          )}
           {message.pinned && !isThreadReply && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -409,13 +417,23 @@ function ChannelMessageImpl({
             </div>
           </div>
         ) : (
-          <div className="mt-0.5">
+          <div className={isContinuation ? undefined : "mt-0.5"}>
             <BodyRenderer
               body={message.body}
               highlightUserId={currentUser.id}
               searchQuery={searchQuery}
               displayNameById={displayNameById}
             />
+            {/* Slack-style trailing "(edited)". It lives next to the BODY, not
+                in the author header — the header is suppressed on grouped
+                (continuation) rows, so editing one of those showed no marker
+                at all. Inline also reads better: the label belongs to the
+                text that changed. */}
+            {message.editedAt && (
+              <span className="ml-1 align-baseline text-2xs text-muted-foreground">
+                (edited)
+              </span>
+            )}
             {message.media && <MediaAttachment media={message.media} />}
           </div>
         )}

@@ -30,6 +30,7 @@ const OVERSCAN = 8;
 export function ChannelList({
   channels,
   activeChannelId,
+  onSelect,
   onlinePresenceCount,
   onCreate,
   onOpenWorkspaceSearch,
@@ -38,6 +39,8 @@ export function ChannelList({
 }: {
   channels: TeamChannelListItemDto[];
   activeChannelId: string;
+  /** Optimistic selection — fires on click, before the route commits. */
+  onSelect: (channelId: string) => void;
   onlinePresenceCount: number;
   onCreate: () => void;
   /** Opens the public-channel browser. */
@@ -187,7 +190,12 @@ export function ChannelList({
           </div>
         ) : (
           <div
-            className="relative w-full px-2 pb-3"
+            // Horizontal padding lives on the ROW (below), not here: these
+            // rows are absolutely positioned, and `left-0`/`w-full` resolve
+            // against the containing block's PADDING BOX — so a `px-2` here
+            // was silently ignored and the active row's tint ran flush into
+            // the app rail, while the (non-virtualized) DM rows stayed inset.
+            className="relative w-full pb-3"
             style={{ height: `${totalHeight}px` }}
           >
             {renderItems.map((row) => {
@@ -197,10 +205,10 @@ export function ChannelList({
                   key={row.key}
                   ref={row.measured ? rowVirtualizer.measureElement : undefined}
                   data-index={row.index}
-                  className="absolute left-0 top-0 w-full"
+                  className="absolute left-0 top-0 w-full px-2"
                   style={{ transform: `translateY(${row.start}px)` }}
                 >
-                  <ChannelRow channel={c} active={c.id === activeChannelId} />
+                  <ChannelRow channel={c} active={c.id === activeChannelId} onSelect={onSelect} />
                 </div>
               );
             })}
@@ -224,13 +232,16 @@ export function ChannelList({
 const ChannelRow = memo(function ChannelRow({
   channel: c,
   active,
+  onSelect,
 }: {
   channel: TeamChannelListItemDto;
   active: boolean;
+  onSelect: (channelId: string) => void;
 }) {
   return (
     <Link
       href={`/team/${c.id}`}
+      onClick={() => onSelect(c.id)}
       className={cn(
         "group flex h-8 items-center gap-2 rounded-md px-2 text-sm transition-colors",
         active

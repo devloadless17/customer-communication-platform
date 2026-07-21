@@ -95,6 +95,12 @@ export function WorkspaceSearchDialog({
     const params = new URLSearchParams({
       jumpTo: hit.message.id,
       q: query.trim(),
+      // Nonce. The destination strips `jumpTo`/`q` with `history.replaceState`
+      // (deliberately — a `router.replace` would re-run the RSC page), which
+      // the App Router never learns about. So pushing the SAME jump URL a
+      // second time was a no-op navigation: the banner appeared but the feed
+      // never moved. A per-click value keeps every jump a distinct URL.
+      n: String(hit.message.id.length + Math.floor(performance.now())),
     });
     router.push(`/team/${hit.message.channelId}?${params.toString()}`);
   };

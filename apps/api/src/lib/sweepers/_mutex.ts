@@ -44,7 +44,8 @@ type SweeperName =
   | "outbound-webhook-delivery-cleanup"
   | "message-rawpayload-retention"
   | "broadcast-delivery-drift"
-  | "webchat-visitor-retention";
+  | "webchat-visitor-retention"
+  | "contact-transfer-artifacts";
 
 // Single in-process mutex; sweepers serialize through it. Boolean is enough
 // because Node's event loop is single-threaded — the only way two callers
@@ -73,6 +74,7 @@ const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
   "outbound-webhook-delivery-cleanup": 25 * 60 * 60 * 1000, // nightly cadence
   "message-rawpayload-retention": 25 * 60 * 60 * 1000, // 24h cadence (opt-in)
   "broadcast-delivery-drift": 7 * 60 * 60 * 1000, // 6h cadence
+  "contact-transfer-artifacts": 20 * 60 * 1000, // 15m cadence
   "webchat-visitor-retention": 25 * 60 * 60 * 1000, // 24h cadence
 };
 

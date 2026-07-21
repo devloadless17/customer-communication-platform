@@ -18,6 +18,10 @@ async function safeMetaText(res: Response): Promise<string> {
   }
 }
 import type {
+  CallHoursWindow,
+  CallPermissionState,
+  CallSettings,
+  CallSettingsState,
   CreateTemplateArgs,
   CreateTemplateResult,
   DeleteTemplateArgs,
@@ -217,6 +221,9 @@ interface MetaChangeValue {
    * dev-mode webhooks; partner docs corroborate this layout.) The shape is
    * parallel to `messages[]`: per-call rows carry their own id, from,
    * status, and (when applicable) sdp + ice candidates.
+   *
+   * Call PROGRESS does not arrive here — it comes through `statuses[]` with
+   * `type: "call"`.
    */
   calls?: MetaCall[];
   // `message_template_status_update` webhook fields. Meta sends these under a
@@ -247,6 +254,16 @@ interface MetaChangeValue {
   //     cap as a number).
   //   account_alerts → generic alert envelope (no reliable tier — we re-poll).
   current_limit?: string;
+  // `account_update` webhook fields — account-level enforcement. `event` above
+  // discriminates: ACCOUNT_VIOLATION is an early quality warning,
+  // ACCOUNT_RESTRICTION is an active pause with an expiry.
+  restriction_info?: Array<{
+    restriction_type?: string;
+    reason?: string;
+    /** Epoch seconds the restriction lifts. */
+    expiration?: number;
+  }>;
+  violation_info?: { violation_type?: string };
   // `user_preferences` webhook: Meta reports a WhatsApp user's marketing
   // messaging preference. `value` is "stop" | "resume"; `category` is
   // "marketing". This is the ONLY signal allowed to CLEAR an opt-out.
@@ -269,10 +286,13 @@ interface MetaChangeValue {
   message_echoes?: MetaMessage[];
   history?: MetaHistoryEntry[];
   state_sync?: MetaStateSyncEntry[];
-  // Value-level errors — the history-declined signal (code 2593109, "History
-  // sync is turned off by the business from the WhatsApp Business App") can
-  // surface here or per history entry; we check both.
-  errors?: Array<{ code?: number; title?: string; message?: string }>;
+  // Value-level errors, used by two unrelated signals:
+  //   - the history-declined code 2593109 ("History sync is turned off by the
+  //     business from the WhatsApp Business App"), which can surface here or
+  //     per history entry — we check both;
+  //   - the calling error on a FAILED call terminate, sitting alongside
+  //     `calls[]`, which is the only place Meta says WHY a call failed.
+  errors?: MetaStatus["errors"];
 }
 
 // One chunk of the Coexistence history backfill. Meta splits the past ~180 days
@@ -294,60 +314,93 @@ interface MetaStateSyncEntry {
 }
 
 /**
- * One call row inside a calling webhook. Field names mirror Meta's wire
- * format. The lifecycle field is `event` ("connect" → answered on outbound,
- * "ringing" → incoming, "terminate" → ended); we map this to our finer
- * `NormalizedCallEvent.phase` in the parser.
+ * One call row inside a `field: "calls"` webhook, under `value.calls[]`.
+ * Field names mirror Meta's wire format; the parser maps `event` to our finer
+ * `NormalizedCallEvent.phase`.
  *
- * Permission-related rows arrive as a separate event ("permission_granted"
- * / "permission_revoked") and are dispatched on a degraded path — those
- * don't carry SDP or ICE, just the permission status.
+ * NOTE: this array is NOT the whole calling webhook. Business-initiated call
+ * PROGRESS (ringing / accepted / rejected) arrives under `value.statuses[]`
+ * with `type: "call"` — see MetaStatus. And permission grants don't come
+ * through the calls webhook at all; they are interactive MESSAGES
+ * (`call_permission_reply`). Missing both of those was why outbound calling
+ * had no live pickup signal and no working permission flow.
  */
 interface MetaCall {
   id?: string;
   from?: string;
   to?: string;
+  /** BSUIDs, present since the 2026 rollout. The `from`/`to` phone fields are
+   *  omitted for customers who adopted a username, so these can be the ONLY
+   *  identity on the row. */
+  from_user_id?: string;
+  to_user_id?: string;
+  from_parent_user_id?: string;
+  to_parent_user_id?: string;
   timestamp?: string;
   /**
-   * Meta's call event values (verified live 2026-05-29):
-   *   "connect"    → inbound: customer rang us; outbound: customer picked up
-   *   "terminate"  → call ended (use `status` field below for the reason)
-   *   "permission_granted" / "permission_revoked" → permission lifecycle
+   * Documented `calls[]` event values:
+   *   "connect"      → inbound: customer rang us; outbound: media setup (NOT pickup)
+   *   "terminate"    → call ended (see `status` for the reason)
+   *   "call_created" → SIP-mode only; we never enable SIP, so it isn't handled
+   * Recording/transcription artifacts add more (see the unhandled-event log in
+   * mapMetaCallPhase, which exists so a new event is visible rather than lost).
    */
   event?: string;
   /** UPPER_CASE in real payloads ("USER_INITIATED" / "BUSINESS_INITIATED"). */
   direction?: string;
-  /** On `permission_granted`: the customer granted PERMANENTLY (not the default
-   *  72h). We then store a far-future expiry instead of grantedAt + 72h. */
-  is_permanent?: boolean;
   /**
-   * Top-level call status. On `event: "terminate"` Meta carries the
-   * reason here as UPPERCASE: "COMPLETED" | "FAILED" | "MISSED" | etc.
-   * The earlier `terminate_reason` field referenced in older docs is NOT
-   * what live webhooks use.
+   * Terminate-only status. Meta documents exactly two values, "COMPLETED" and
+   * "FAILED" — note that an UNANSWERED business-initiated call also terminates
+   * as COMPLETED, so this field alone cannot tell you whether anyone picked up.
+   * The timing fields below are the discriminator.
    */
   status?: string;
   /** SDP payload for setup. */
   session?: { sdp_type?: string; sdp?: string };
   /**
-   * Terminal-only timing. Meta includes these on the `terminate` webhook ONLY
-   * when the call actually connected (verified live 2026-06-02):
+   * Terminal-only timing, documented as present "only when the call was picked
+   * up by the other party":
    *   start_time — epoch seconds of REAL customer pickup
    *   end_time   — epoch seconds the call ended
    *   duration   — connected talk-time in seconds
-   * Their PRESENCE is the reliable "was this answered?" signal — a declined /
-   * no-answer call terminates as status:COMPLETED with NONE of these set.
+   * Their PRESENCE is therefore the authoritative "was this answered?" signal.
+   * This is doc-confirmed, not a heuristic — do not "simplify" it to read
+   * `status` instead.
    */
   duration?: number;
   start_time?: string | number;
   end_time?: string | number;
+  /** Echoed back from the `biz_opaque_callback_data` we send on connect/accept. */
+  biz_opaque_callback_data?: string;
+  /** Opaque attribution string from a call BUTTON the customer tapped. */
+  cta_payload?: string;
+  /** Opaque attribution string from a `wa.me/call/...?biz_payload=` deep link. */
+  deeplink_payload?: string;
 }
 
+/**
+ * A row under `value.statuses[]`. Meta reuses this array for TWO unrelated
+ * things, discriminated by `type`:
+ *
+ *   - absent/other → a MESSAGE delivery status (sent/delivered/read/failed)
+ *   - "call"       → a CALL progress status (RINGING / ACCEPTED / REJECTED)
+ *
+ * The call variant is the authoritative live signal for a business-initiated
+ * call: `ACCEPTED` is the moment the customer actually picked up. Routing the
+ * whole array into the message-status handler silently discarded it, which is
+ * why a browser-side audio heuristic was once used to guess at pickup.
+ */
 interface MetaStatus {
   id?: string;
   status?: string;
   timestamp?: string;
   recipient_id?: string;
+  /** "call" marks this as a call-progress status rather than a message status. */
+  type?: string;
+  /** BSUID of the callee on call statuses. */
+  recipient_user_id?: string;
+  /** Echoed from the `biz_opaque_callback_data` we sent when placing the call. */
+  biz_opaque_callback_data?: string;
   /**
    * Billing metadata Meta attaches to a status (usually `sent`). Carries the
    * conversation CATEGORY and whether it is billable — never a price, because
@@ -372,6 +425,31 @@ interface MetaStatus {
     message?: string;
     error_data?: { details?: string };
   }>;
+}
+
+/** The `calling` object in a phone-number settings response. */
+interface MetaCallingSettings {
+  status?: string;
+  call_icon_visibility?: string;
+  callback_permission_status?: string;
+  call_hours?: {
+    status?: string;
+    timezone_id?: string;
+    weekly_operating_hours?: Array<{
+      day_of_week?: string;
+      open_time?: string;
+      close_time?: string;
+    }>;
+  };
+  /** Present while Meta has paused calling on this number. */
+  restrictions?: {
+    restrictions_list?: Array<{
+      type?: string;
+      reason?: string;
+      /** Epoch seconds the restriction lifts. */
+      expiration?: number;
+    }>;
+  };
 }
 
 interface MetaContact {
@@ -414,11 +492,31 @@ interface MetaInteractivePayload {
    * string so the parser is forced to handle the unknown case rather than having
    * the compiler assure us it can't happen — it can, and it did.
    */
-  type?: "button_reply" | "list_reply" | (string & {});
+  type?:
+    | "button_reply"
+    | "list_reply"
+    | "call_permission_reply"
+    | (string & {});
   button_reply?: { id?: string; title?: string };
   list_reply?: { id?: string; title?: string; description?: string };
   /** WhatsApp Flows submission payload (JSON string). Retained via rawPayload. */
   nfm_reply?: { response_json?: string; name?: string };
+  /**
+   * The customer's answer to a call-permission request — this is how WhatsApp
+   * delivers permission grants and revocations. It is NOT a calling webhook,
+   * which is easy to get wrong and expensive when you do: treating it as an
+   * ordinary interactive reply means permission is never recorded and the
+   * customer's decision renders as a junk bubble in the thread.
+   */
+  call_permission_reply?: {
+    response?: "accept" | "reject" | (string & {});
+    /** True ⇒ the grant never expires. */
+    is_permanent?: boolean;
+    /** Epoch seconds; present only on a temporary grant. */
+    expiration_timestamp?: string | number;
+    /** `automatic` = Meta acted (callback grant, or revoke after unanswered calls). */
+    response_source?: "user_action" | "automatic" | (string & {});
+  };
 }
 
 interface MetaLocationPayload {
@@ -804,25 +902,32 @@ function mapMetaStatus(s: string | undefined): MessageStatus | null {
  * consumer free of this gotcha.
  */
 function rewriteSdpForBrowser(sdp: string): string {
-  return sdp.replace(/^a=setup:actpass$/gm, "a=setup:active");
+  // Meta's guidance is that WE act as the DTLS client, i.e. Meta is the DTLS
+  // server. `a=setup:passive` in Meta's answer is what tells the browser to be
+  // the client. (Meta's real answers already pin a concrete role, so this only
+  // fires on the malformed case this rewrite exists for.)
+  return sdp.replace(/^a=setup:actpass$/gm, "a=setup:passive");
 }
 
 /**
  * Translate Meta's call lifecycle vocabulary into our NormalizedCallEvent
  * phase. Direction is needed because `event: "connect"` means different
- * things in each leg (incoming-ring on inbound, customer-accepted on
- * outbound).
+ * things in each leg (incoming-ring on inbound, media setup on outbound).
  *
- * Unrecognized `event` returns null — caller drops the row rather than
- * fabricating a phase. Forward-compatible with future Meta additions.
+ * Unrecognized `event` returns null — the caller drops the row rather than
+ * fabricating a phase — but it is LOGGED first. A silent null here is how a
+ * whole feature goes missing: enabling call recording on the Meta side starts
+ * delivering `call_recording_available`, and without the log it would vanish
+ * with no trace that anything was ever sent.
  */
 function mapMetaCallPhase(
   event: string | undefined,
   direction: "in" | "out",
   status: string | undefined,
   /** True when the terminate webhook carried start_time/duration → the call
-   *  actually connected. The ONLY reliable "was answered" evidence Meta gives
-   *  for business-initiated calls (status is COMPLETED for declines too). */
+   *  actually connected. Meta documents those fields as present "only when the
+   *  call was picked up", and reports UNANSWERED business-initiated calls as
+   *  status:COMPLETED — so this, not `status`, is the answered discriminator. */
   hasConnectedSignal: boolean,
 ): NormalizedCallEvent["phase"] | null {
   switch (event) {
@@ -830,38 +935,112 @@ function mapMetaCallPhase(
       // Inbound: the customer is ringing us → "incoming".
       // Outbound: this is the Cloud-API media-server SDP answer establishing
       // our media leg — it arrives ~1s after we place the call, BEFORE the
-      // human picks up (verified live 2026-06-02). So it's "connecting", NOT
-      // answered: the browser uses the SDP to negotiate media, but the call
-      // stays ringing until a real pickup is observed at terminate.
+      // human picks up. So it's "connecting", NOT answered: the browser uses
+      // the SDP to negotiate media, but the call stays ringing until the
+      // `ACCEPTED` call status lands (see parseMetaCallStatus).
       return direction === "in" ? "incoming" : "connecting";
     case "terminate":
-      // Top-level `status` carries the reason (UPPERCASE in live payloads).
+      // Meta documents exactly two terminate statuses: COMPLETED and FAILED.
       switch (status?.toUpperCase()) {
-        case "REJECTED":
-        case "DECLINED":
-        case "BUSY":
-          return "rejected";
         case "FAILED":
-        case "ERROR":
           return "failed";
         default:
-          // COMPLETED / MISSED / ACCEPTED / unknown all collapse here: Meta
-          // reports unanswered business-initiated calls as status:COMPLETED,
-          // so the status string can't tell answered from not. The presence of
-          // a real call duration (start_time/duration) is the discriminator —
-          // present ⇒ connected ⇒ "completed"; absent ⇒ never answered ⇒
-          // "missed". Ingest further corrects via the row's own answeredAt
-          // (e.g. an inbound the agent accepted), so a missing-duration edge on
-          // an answered call still resolves correctly there.
+          // COMPLETED covers BOTH a real conversation and a call nobody
+          // answered, so the status string cannot tell them apart. The presence
+          // of connected timing is the documented discriminator: present ⇒
+          // "completed", absent ⇒ "missed". Ingest further corrects via the
+          // row's own answeredAt, so an answered call with missing timing still
+          // resolves correctly. This is doc-confirmed — don't "simplify" it.
           return hasConnectedSignal ? "completed" : "missed";
       }
-    case "permission_granted":
-      return "permission_granted";
-    case "permission_revoked":
-      return "permission_revoked";
+    case "call_created":
+      // SIP-mode only. We deliberately never enable SIP (it would disable the
+      // Graph calling endpoints this whole module is built on, along with
+      // Meta-side call recording), so reaching here means someone flipped SIP
+      // on out-of-band. Log it rather than blackholing the call.
+      console.warn(
+        "[meta] calls webhook: received SIP-only `call_created` — SIP appears " +
+          "to be enabled on this number, which disables the Graph calling API",
+      );
+      return null;
     default:
+      // Includes `call_recording_available` / `call_transcription_available`
+      // when those features are enabled on the Meta side but not yet consumed
+      // here. Visible, not lost.
+      console.warn(
+        `[meta] calls webhook: unhandled call event ${JSON.stringify(event)} — dropping row`,
+      );
       return null;
   }
+}
+
+/**
+ * Parse a call-progress row from `value.statuses[]` (`type: "call"`).
+ *
+ * This is the authoritative live signal for a business-initiated call:
+ * `ACCEPTED` is the moment the customer actually picked up. Meta gives no
+ * other real-time pickup indication — the `connect` webhook is media setup
+ * that fires before anyone answers, and the timing fields only arrive at
+ * terminate. Anything else (watching for inbound audio in the browser, say)
+ * is a guess that ringback tone can trip.
+ *
+ * Returns null for statuses that add nothing: RINGING duplicates the state the
+ * row already has from placeCall.
+ */
+function parseMetaCallStatus(
+  s: MetaStatus,
+  rawPayload: Record<string, unknown>,
+): NormalizedCallEvent | null {
+  const externalCallId = s.id;
+  if (!externalCallId) return null;
+  const phase = ((): NormalizedCallEvent["phase"] | null => {
+    switch (s.status?.toUpperCase()) {
+      case "ACCEPTED":
+        return "answered";
+      case "REJECTED":
+        return "rejected";
+      case "RINGING":
+        // No new information — we created the row as `ringing` when we placed
+        // the call, and re-asserting it risks downgrading a row that has since
+        // legitimately advanced.
+        return null;
+      default:
+        console.warn(
+          `[meta] calls webhook: unhandled call status ${JSON.stringify(s.status)}`,
+        );
+        return null;
+    }
+  })();
+  if (!phase) return null;
+
+  const tsSecs = s.timestamp ? Number(s.timestamp) : NaN;
+  const ts = Number.isFinite(tsSecs) ? new Date(tsSecs * 1000) : new Date();
+  const recipient = s.recipient_id?.trim();
+  const identityIsPhone = recipient ? !/\D/.test(recipient) : false;
+
+  return {
+    kind: "call",
+    externalCallId,
+    ...(recipient && identityIsPhone ? { contactPhone: recipient } : {}),
+    ...(s.recipient_user_id
+      ? { bsuid: s.recipient_user_id }
+      : recipient && !identityIsPhone
+        ? { bsuid: recipient }
+        : {}),
+    contactName: null,
+    // Only business-initiated calls produce these statuses.
+    direction: "out",
+    phase,
+    // `ACCEPTED` is real pickup, so it carries the connected time. This is what
+    // makes a later hangup resolve to `completed` rather than `missed`, and
+    // keeps connected-call accounting honest.
+    ...(phase === "answered" ? { connectedAt: ts } : {}),
+    ...(s.biz_opaque_callback_data
+      ? { correlationId: s.biz_opaque_callback_data }
+      : {}),
+    timestamp: ts,
+    rawPayload,
+  };
 }
 
 /**
@@ -873,6 +1052,10 @@ function mapMetaCallPhase(
 function parseMetaCall(
   c: MetaCall,
   rawPayload: Record<string, unknown>,
+  /** `value.contacts[]` — carries the customer's display name and BSUID. */
+  contacts: MetaContact[] = [],
+  /** `value.errors[]` — present only on a FAILED terminate. */
+  errors: MetaStatus["errors"] = undefined,
 ): NormalizedCallEvent | null {
   const externalCallId = c.id;
   if (!externalCallId) return null;
@@ -894,10 +1077,25 @@ function parseMetaCall(
   // stripping that would mint the phantom phone contact "946402411360800" —
   // a fabricated identity, detached from the person's real thread.
   const rawIdentity = (direction === "in" ? c.from : c.to)?.trim();
-  if (!rawIdentity) return null;
-  const identityIsPhone = !/\D/.test(rawIdentity);
+  const identityIsPhone = rawIdentity ? !/\D/.test(rawIdentity) : false;
   const phone = identityIsPhone ? rawIdentity : undefined;
-  const bsuid = identityIsPhone ? undefined : rawIdentity;
+  // A customer who adopted a WhatsApp username has NO phone on the row at all,
+  // so `from`/`to` alone is not a sufficient identity — fall back to the
+  // dedicated BSUID fields and then to `contacts[]`. Reading only `from` here
+  // dropped those calls entirely, making the caller invisible.
+  const contact = contacts[0];
+  const bsuid =
+    (identityIsPhone ? undefined : rawIdentity) ??
+    (direction === "in" ? c.from_user_id : c.to_user_id) ??
+    contact?.user_id;
+  if (!phone && !bsuid) return null;
+
+  // Meta supplies the customer's display name on inbound calls; without this we
+  // name a brand-new contact after their raw phone number.
+  const contactName = contact?.profile?.name?.trim() || null;
+
+  // Failure detail. Every failed call otherwise collapses to one opaque reason.
+  const firstError = errors?.[0];
 
   // Connected-call evidence. Meta puts `start_time` (epoch s, REAL pickup) +
   // `duration` (talk seconds) on the terminate webhook ONLY for calls that
@@ -942,16 +1140,92 @@ function parseMetaCall(
     externalCallId,
     ...(phone ? { contactPhone: phone } : {}),
     ...(bsuid ? { bsuid } : {}),
-    contactName: null,
+    contactName,
     direction,
     phase,
     ...(sdp ? { sdp } : {}),
     ...(connectedAt !== undefined ? { connectedAt } : {}),
     ...(durationSeconds !== undefined ? { durationSeconds } : {}),
-    ...(phase === "permission_granted" && c.is_permanent
-      ? { permanentPermission: true }
+    ...(phase === "failed" && firstError
+      ? {
+          ...(typeof firstError.code === "number"
+            ? { errorCode: firstError.code }
+            : {}),
+          ...(firstError.title ? { errorTitle: firstError.title } : {}),
+          ...(firstError.error_data?.details ?? firstError.message
+            ? {
+                errorDetail:
+                  firstError.error_data?.details ?? firstError.message ?? "",
+              }
+            : {}),
+        }
+      : {}),
+    // Attribution for user-initiated calls: which button or link produced this.
+    ...(c.cta_payload ? { ctaPayload: c.cta_payload } : {}),
+    ...(c.deeplink_payload ? { deeplinkPayload: c.deeplink_payload } : {}),
+    ...(c.biz_opaque_callback_data
+      ? { correlationId: c.biz_opaque_callback_data }
       : {}),
     timestamp: ts,
+    rawPayload,
+  };
+}
+
+/**
+ * Parse a `call_permission_reply` interactive message into a permission event.
+ *
+ * Permission decisions arrive as MESSAGES, not as calling webhooks — an earlier
+ * version of this file waited for `permission_granted` rows inside `calls[]`,
+ * which Meta never sends, so no grant was ever recorded and every out-of-window
+ * call was refused. It also meant the customer's "Allow" showed up in the inbox
+ * as a meaningless generic interactive-reply bubble.
+ *
+ * Covers both the customer acting and Meta acting on their behalf: a grant is
+ * automatic when they call us (with callback permission enabled), and a
+ * revocation is automatic after too many unanswered calls.
+ */
+function parseMetaCallPermissionReply(
+  reply: NonNullable<MetaInteractivePayload["call_permission_reply"]>,
+  identity: { contactPhone?: string; bsuid?: string },
+  contactName: string | null,
+  /** `context.id` — the permission-request message this answers, if any. */
+  requestExternalId: string | undefined,
+  timestamp: Date,
+  rawPayload: Record<string, unknown>,
+): NormalizedCallEvent | null {
+  const granted = reply.response === "accept";
+  if (!granted && reply.response !== "reject") return null;
+
+  const expSecs =
+    reply.expiration_timestamp != null
+      ? Number(reply.expiration_timestamp)
+      : NaN;
+
+  return {
+    kind: "call",
+    // Permission events aren't tied to a call, but the shared shape requires an
+    // id. Derive a stable one from the reply so at-least-once redelivery
+    // dedupes rather than double-applying.
+    externalCallId: `perm:${requestExternalId ?? timestamp.getTime()}`,
+    ...identity,
+    contactName,
+    // Permission is about calls WE place.
+    direction: "out",
+    phase: granted ? "permission_granted" : "permission_revoked",
+    ...(granted && reply.is_permanent ? { permanentPermission: true } : {}),
+    // Meta's own expiry, used verbatim. Never recompute this — Meta sends no
+    // webhook when a temporary permission lapses, so a locally-guessed duration
+    // silently discards days of a valid grant.
+    ...(granted && !reply.is_permanent && Number.isFinite(expSecs)
+      ? { permissionExpiresAt: new Date(expSecs * 1000) }
+      : {}),
+    ...(requestExternalId
+      ? { permissionRequestExternalId: requestExternalId }
+      : {}),
+    ...(reply.response_source === "automatic"
+      ? { permissionAutomatic: true }
+      : {}),
+    timestamp,
     rawPayload,
   };
 }
@@ -1019,7 +1293,8 @@ function parseTemplateCategoryUpdate(
 
 /**
  * Parse a number-health webhook (`phone_number_quality_update`,
- * `business_capability_update`, or `account_alerts`) into a NormalizedChannelHealth
+ * `business_capability_update`, `account_update`, or `account_alerts`) into a
+ * NormalizedChannelHealth
  * carrying whichever of tier/quality/throughput the payload actually contains.
  * Ingest merges the partial onto the WhatsApp ChannelConnection. Returns null
  * when nothing usable is present (e.g. a generic account_alerts envelope), so a
@@ -1032,6 +1307,44 @@ function parseChannelHealthUpdate(
   value: MetaChangeValue,
   rawPayload: Record<string, unknown>,
 ): NormalizedChannelHealth | null {
+  // `account_update` carries calling enforcement: a WARNING that call quality
+  // is trending badly, or an actual RESTRICTION pausing calling for ~7 days.
+  // Both matter — during a restriction every call and every permission request
+  // fails, and without ingesting this the tenant just sees a week of
+  // unexplained errors.
+  if (field === "account_update") {
+    if (value.event === "ACCOUNT_RESTRICTION") {
+      const calling = (value.restriction_info ?? []).find((r) =>
+        r.restriction_type?.includes("CALLING"),
+      );
+      if (calling) {
+        return {
+          kind: "channel_health",
+          callingRestrictedUntil: calling.expiration
+            ? new Date(calling.expiration * 1000)
+            : null,
+          callingRestrictionType: calling.restriction_type ?? null,
+          callingRestrictionReason: calling.reason ?? null,
+          rawPayload,
+        };
+      }
+      // A restriction on something OTHER than calling — leave calling state
+      // untouched rather than implying it was cleared.
+      return null;
+    }
+    if (value.event === "ACCOUNT_VIOLATION") {
+      const type = value.violation_info?.violation_type;
+      if (type?.includes("CALLING")) {
+        return {
+          kind: "channel_health",
+          callingQualityWarning: type,
+          rawPayload,
+        };
+      }
+      return null;
+    }
+    return null;
+  }
   let messagingTier: string | undefined;
   if (field === "phone_number_quality_update") {
     if (value.current_limit) messagingTier = value.current_limit;
@@ -1042,6 +1355,81 @@ function parseChannelHealthUpdate(
   }
   if (messagingTier === undefined) return null;
   return { kind: "channel_health", messagingTier, rawPayload };
+}
+
+/**
+ * Send a WhatsApp call button — a tappable CTA that starts a call TO us.
+ *
+ * The inverse of a permission request: instead of asking to call the customer,
+ * this invites them to call, which needs no permission at all and (with
+ * callback permission enabled) grants us permission as a side effect.
+ *
+ * The optional `payload` is the attribution handle — it comes back on the call
+ * webhooks as `cta_payload`, so an inbound call can be traced to the button
+ * that produced it. Older WhatsApp clients drop it, so never treat its absence
+ * as an error.
+ */
+async function sendVoiceCallButton(
+  args: SendInteractiveArgs,
+  config: MetaSendConfig,
+): Promise<SendTextResult> {
+  const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
+  const params: Record<string, unknown> = {};
+  // Meta caps the label at 20 chars and defaults it to "Call Now".
+  if (args.voiceCall?.displayText) {
+    params.display_text = args.voiceCall.displayText.slice(0, 20);
+  }
+  if (args.voiceCall?.ttlMinutes != null) {
+    // 1 minute to 30 days. Clamp rather than reject: a caller asking for a
+    // longer-lived button wants the longest one available, not an error.
+    params.ttl_minutes = Math.min(
+      43_200,
+      Math.max(1, Math.trunc(args.voiceCall.ttlMinutes)),
+    );
+  }
+  if (args.voiceCall?.payload) {
+    params.payload = args.voiceCall.payload.slice(0, 512);
+  }
+  const res = await metaFetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${config.accessToken}`,
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: args.to,
+      type: "interactive",
+      interactive: {
+        type: "voice_call",
+        body: { text: args.bodyText },
+        action: {
+          name: "voice_call",
+          ...(Object.keys(params).length ? { parameters: params } : {}),
+        },
+      },
+      ...(args.replyToExternalId
+        ? { context: { message_id: args.replyToExternalId } }
+        : {}),
+    }),
+  });
+  if (!res.ok) {
+    const text = await safeMetaText(res);
+    throw new MetaSendError(
+      `meta sendVoiceCallButton failed: ${res.status} ${text}`,
+      res.status,
+      text,
+    );
+  }
+  const json = (await res.json()) as { messages?: Array<{ id?: string }> };
+  const externalId = json.messages?.[0]?.id;
+  if (!externalId) {
+    throw new Error(
+      `meta sendVoiceCallButton missing message id: ${JSON.stringify(json)}`,
+    );
+  }
+  return { externalId, timestamp: new Date() };
 }
 
 export const metaProvider: MessagingProvider<MetaSendConfig> = {
@@ -1118,9 +1506,14 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // a generic envelope with no reliable tier — the periodic Graph poll
         // covers that. All three fell through the gate below (silently dropped)
         // before this block.
+        // `account_update` joins them because it carries calling ENFORCEMENT —
+        // an early quality warning, or an active ~7-day pause on calling during
+        // which every call and permission request fails. Storing it is what
+        // turns "calling randomly stopped working" into a dated explanation.
         if (
           change.field === "phone_number_quality_update" ||
           change.field === "business_capability_update" ||
+          change.field === "account_update" ||
           change.field === "account_alerts"
         ) {
           const evt = parseChannelHealthUpdate(
@@ -1417,6 +1810,27 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           // ask_question step to route on.
           if (m.type === "interactive") {
             const inner = m.interactive;
+            // Call-permission decision. Must be checked BEFORE the generic
+            // fallback below, which would otherwise turn the customer's
+            // "Allow calls" into a meaningless "💬 Interactive reply" bubble
+            // and leave the permission itself unrecorded.
+            if (
+              inner?.type === "call_permission_reply" &&
+              inner.call_permission_reply
+            ) {
+              const permEvent = parseMetaCallPermissionReply(
+                inner.call_permission_reply,
+                identity,
+                contactName,
+                // context.id is the request message we sent (or, for a callback
+                // grant, the missed call that triggered it).
+                replyToExternalId,
+                ts,
+                payload as Record<string, unknown>,
+              );
+              if (permEvent) events.push(permEvent);
+              continue;
+            }
             if (inner?.type === "button_reply" && inner.button_reply) {
               const { id: optId, title } = inner.button_reply;
               if (!optId || !title) continue;
@@ -1577,12 +1991,32 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         }
 
         for (const c of Array.isArray(value.calls) ? value.calls : []) {
-          const evt = parseMetaCall(c, payload as Record<string, unknown>);
+          const evt = parseMetaCall(
+            c,
+            payload as Record<string, unknown>,
+            Array.isArray(value.contacts) ? value.contacts : [],
+            // Sits alongside `calls[]` on a FAILED terminate and is the only
+            // place Meta says WHY the call failed.
+            Array.isArray(value.errors) ? value.errors : undefined,
+          );
           if (!evt) continue;
           events.push(evt);
         }
 
         for (const s of Array.isArray(value.statuses) ? value.statuses : []) {
+          // `statuses[]` is overloaded: `type: "call"` rows are CALL progress
+          // (RINGING/ACCEPTED/REJECTED), everything else is message delivery.
+          // Routing the whole array into the message-status path below silently
+          // dropped every call status, including `ACCEPTED` — the one
+          // authoritative "the customer picked up" signal Meta sends.
+          if (s.type === "call") {
+            const callEvt = parseMetaCallStatus(
+              s,
+              payload as Record<string, unknown>,
+            );
+            if (callEvt) events.push(callEvt);
+            continue;
+          }
           const status = mapMetaStatus(s.status);
           // Surface WHY Meta failed delivery — otherwise a `failed` status is a
           // silent red icon with no reason. These are the (#13xxxx) codes from
@@ -1702,6 +2136,12 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     args: SendInteractiveArgs,
     config: MetaSendConfig,
   ): Promise<SendTextResult> {
+    // A call button has no options — it's a single CTA that dials us — so it
+    // takes its own short path before the option-count checks below.
+    if (args.kind === "voice_call") {
+      return sendVoiceCallButton(args, config);
+    }
+
     // Pre-flight option-count check. Meta rejects with a cryptic 132xxx
     // error for "wrong option count"; failing fast with a clear message
     // saves the admin a debugging round-trip.
@@ -2506,21 +2946,46 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   },
 
   // -------------------------------------------------------------------------
-  // WhatsApp Business Calling (Phase 1: WebRTC)
+  // WhatsApp Business Calling
   //
-  // All seven methods share the `metaFetch` helper (timeout + transient-5xx
-  // retry) and the same `Bearer ${accessToken}` pattern as the messaging
-  // sends. Endpoints follow the Graph version-prefixed shape consistent
-  // with partner docs; the exact paths are verified at impl time against
-  // Meta's gated docs. Order MATTERS: pre_accept MUST precede accept; Meta
-  // returns 4xx if accept lands first. See plan caveats #4.
+  // Every method shares the `metaFetch` helper (timeout + transient-5xx retry)
+  // and the same `Bearer ${accessToken}` pattern as the messaging sends.
+  //
+  // Two shapes live here, and conflating them was the original sin of this
+  // file. CALL SIGNALING is `POST /{phoneNumberId}/calls` with an `action`
+  // discriminator (connect / pre_accept / accept / reject / terminate).
+  // PERMISSION is not a calling endpoint at all — requesting it is an ordinary
+  // interactive MESSAGE, and reading it is `GET /{phoneNumberId}/call_permissions`.
+  // There is no `/call_permission_requests` edge; an earlier version invented
+  // one, so no permission request ever reached a customer.
+  //
+  // Send only documented body fields. Graph rejects unknown parameters with
+  // `(#100) Invalid parameter`, which turns a stray field into a total request
+  // failure rather than a harmless no-op.
   // -------------------------------------------------------------------------
 
+  /**
+   * Ask the customer for permission to call them.
+   *
+   * This is a `type: "interactive"` message on the normal messages endpoint,
+   * NOT a calling endpoint — it is billed like any other message and its
+   * delivery is reported by the ordinary message-status webhook. Meta renders
+   * the Allow/Deny prompt itself; only `body.text` is ours to write.
+   *
+   * The returned id is the request MESSAGE's wamid, which the customer's
+   * `call_permission_reply` webhook echoes back in `context.id`. Persisting it
+   * is what lets a grant be matched to the exact request that produced it.
+   */
   async sendCallPermissionRequest(
-    args: { to: string },
+    args: { to?: string; recipient?: string; bodyText?: string },
     config: MetaSendConfig,
   ): Promise<{ permissionRequestId: string; expiresAt: Date }> {
-    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/call_permission_requests`;
+    if (!args.to && !args.recipient) {
+      throw new Error(
+        "meta sendCallPermissionRequest needs a phone number or a BSUID",
+      );
+    }
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
     const res = await metaFetch(url, {
       method: "POST",
       headers: {
@@ -2530,7 +2995,19 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       body: JSON.stringify({
         messaging_product: "whatsapp",
         recipient_type: "individual",
-        to: args.to,
+        // `to` takes precedence when both are present (Meta's rule); we send
+        // whichever identity the contact actually has. A cold caller Meta
+        // hasn't seen in 30 days has only a BSUID.
+        ...(args.to ? { to: args.to } : {}),
+        ...(args.recipient ? { recipient: args.recipient } : {}),
+        type: "interactive",
+        interactive: {
+          type: "call_permission_request",
+          action: { name: "call_permission_request" },
+          // Body is optional per Meta, but a bare permission prompt with no
+          // context reads as a scam to the customer. Callers always pass one.
+          ...(args.bodyText ? { body: { text: args.bodyText } } : {}),
+        },
       }),
     });
     if (!res.ok) {
@@ -2541,22 +3018,109 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         text,
       );
     }
-    const json = (await res.json()) as { id?: string };
-    if (!json.id) {
+    // Message-send response shape: the id lives at messages[0].id.
+    const json = (await res.json()) as {
+      messages?: Array<{ id?: string }>;
+    };
+    const permissionRequestId = json.messages?.[0]?.id;
+    if (!permissionRequestId) {
       throw new Error(
-        `meta sendCallPermissionRequest missing id: ${JSON.stringify(json)}`,
+        `meta sendCallPermissionRequest missing message id: ${JSON.stringify(json)}`,
       );
     }
-    // Meta's permission window is 72 hours from issue. Computed locally so
-    // the caller can write a single row without an extra round-trip.
-    const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000);
-    return { permissionRequestId: json.id, expiresAt };
+    // The REQUEST lapses 7 days after delivery if the customer never responds.
+    // This is not a grant and must never be treated as one — the grant's own
+    // expiry arrives on the reply webhook. (It also expires immediately if we
+    // send a newer request, which the caller handles by only ever reading the
+    // most recent row.)
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    return { permissionRequestId, expiresAt };
+  },
+
+  /**
+   * Read the customer's authoritative permission state + live quota.
+   *
+   * Meta returns `permission.status` plus a per-action `limits[]` breakdown
+   * with `can_perform_action` already computed across every window. Trusting
+   * that verdict is what keeps us correct when Meta changes a cap — the
+   * business-initiated call limit has moved 5 → 10 → 100 in a year, and any
+   * number hardcoded here would be wrong again by the next changelog entry.
+   */
+  async getCallPermission(
+    args: { to?: string; recipient?: string },
+    config: MetaSendConfig,
+  ): Promise<CallPermissionState> {
+    if (!args.to && !args.recipient) {
+      throw new Error("meta getCallPermission needs a phone number or a BSUID");
+    }
+    const query = args.to
+      ? `user_wa_id=${encodeURIComponent(args.to)}`
+      : `recipient=${encodeURIComponent(args.recipient!)}`;
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/call_permissions?${query}`;
+    const res = await metaFetch(url, {
+      method: "GET",
+      // Idempotent read — safe to replay on a transient 5xx, unlike the
+      // non-idempotent call/send POSTs.
+      retry: true,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta getCallPermission failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+    const json = (await res.json()) as {
+      permission?: { status?: string; expiration_time?: number };
+      actions?: Array<{
+        action_name?: string;
+        can_perform_action?: boolean;
+        limits?: Array<{ limit_expiration_time?: number }>;
+      }>;
+    };
+    const rawStatus = json.permission?.status;
+    const status: CallPermissionState["status"] =
+      rawStatus === "temporary" || rawStatus === "permanent"
+        ? rawStatus
+        : "no_permission";
+    const action = (name: string) =>
+      json.actions?.find((a) => a.action_name === name);
+    const startCall = action("start_call");
+    // Only present when the quota is actually exhausted, which is exactly when
+    // we want to tell the agent how long to wait.
+    const resetAt = startCall?.limits?.find((l) => l.limit_expiration_time)
+      ?.limit_expiration_time;
+    return {
+      status,
+      hasPermission: status !== "no_permission",
+      // Absent action ⇒ Meta didn't say no. Fall back to the permission status
+      // rather than hard-blocking on a response shape we didn't anticipate.
+      canStartCall: startCall?.can_perform_action ?? status !== "no_permission",
+      canRequestPermission:
+        action("send_call_permission_request")?.can_perform_action ?? true,
+      // Permanent permissions carry no expiration_time at all.
+      expiresAt:
+        status === "temporary" && json.permission?.expiration_time
+          ? new Date(json.permission.expiration_time * 1000)
+          : null,
+      startCallResetAt: resetAt ? new Date(resetAt * 1000) : null,
+    };
   },
 
   async placeCall(
-    args: { to: string; sdpOffer: string; from?: string },
+    args: {
+      to?: string;
+      recipient?: string;
+      sdpOffer: string;
+      correlationId?: string;
+    },
     config: MetaSendConfig,
   ): Promise<{ externalCallId: string }> {
+    if (!args.to && !args.recipient) {
+      throw new Error("meta placeCall needs a phone number or a BSUID");
+    }
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/calls`;
     const res = await metaFetch(url, {
       method: "POST",
@@ -2566,16 +3130,24 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       // Meta's outbound-call shape requires `session.sdp_type=offer` +
       // `session.sdp=<browser RTCPeerConnection.createOffer SDP>`. Without
-      // session.* the API returns 131009 "Missing session parameter". The
-      // `from` field is optional (Meta defaults to phoneNumberId's number);
-      // we forward it when caller supplies for parity with YCloud-shape
-      // clients but rely on Meta's default in the common case.
+      // session.* the API returns 131009 "Missing session parameter".
+      //
+      // These are the ONLY documented fields. A `from` field used to be sent
+      // here; it is not part of the contract (Meta always uses the number
+      // behind phoneNumberId) and an unknown parameter can fail the request
+      // outright.
       body: JSON.stringify({
         messaging_product: "whatsapp",
-        to: args.to,
+        ...(args.to ? { to: args.to } : {}),
+        ...(args.recipient ? { recipient: args.recipient } : {}),
         action: "connect",
-        ...(args.from ? { from: args.from } : {}),
         session: { sdp_type: "offer", sdp: args.sdpOffer },
+        // Echoed back on every status + terminate webhook for this call, so
+        // ingest can match a webhook to our row directly instead of racing the
+        // returned call id. Meta caps it at 512 chars; our ids are far shorter.
+        ...(args.correlationId
+          ? { biz_opaque_callback_data: args.correlationId }
+          : {}),
       }),
     });
     if (!res.ok) {
@@ -2666,7 +3238,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   },
 
   async rejectCall(
-    args: { externalCallId: string; reason?: "busy" | "declined" },
+    args: { externalCallId: string },
     config: MetaSendConfig,
   ): Promise<void> {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/calls`;
@@ -2678,11 +3250,14 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
       },
+      // call_id + action only. A `reject_reason` used to be appended here; it
+      // is not in Meta's contract, and an unknown parameter can fail the whole
+      // request — which would leave the customer's phone ringing after the
+      // agent declined. Any reason is recorded locally instead.
       body: JSON.stringify({
         messaging_product: "whatsapp",
         call_id: args.externalCallId,
         action: "reject",
-        ...(args.reason ? { reject_reason: args.reason } : {}),
       }),
     });
     if (!res.ok) {
@@ -2771,29 +3346,72 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     return { raw };
   },
 
+  /**
+   * Admin one-shot: turn calling on with defaults that make the number usable
+   * immediately — reachable around the clock, call icon shown, and callback
+   * permission on (a customer who calls us thereby lets us call them back,
+   * which is the cheapest legitimate source of calling permission there is).
+   *
+   * An admin can narrow any of it afterwards via `updateCallSettings`.
+   */
   async enableCalling(config: MetaSendConfig): Promise<{ ok: true; raw: unknown }> {
+    const state = await metaProvider.updateCallSettings!(
+      {
+        enabled: true,
+        callIconVisible: true,
+        callbackPermissionEnabled: true,
+        // No windows ⇒ call hours DISABLED ⇒ open 24/7.
+        hours: { timezoneId: "UTC", windows: [] },
+      },
+      config,
+    );
+    return { ok: true, raw: state.raw };
+  },
+
+  /**
+   * Write calling configuration. Only the fields present in `settings` are
+   * sent, so this serves both the one-time enable and targeted changes later.
+   */
+  async updateCallSettings(
+    settings: CallSettings,
+    config: MetaSendConfig,
+  ): Promise<CallSettingsState> {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/settings`;
-    // 24/7 calling hours. Meta REQUIRES both `timezone_id` and
-    // `weekly_operating_hours` even when status is set — confirmed by
-    // their schema-constraint error message. With `status: ENABLED` +
-    // every day fully open, the customer can reach us at any time. The
-    // alternative (calling without hours configured) means Meta auto-
-    // rejects every inbound call as "outside business hours".
-    const allWeek24h = [
-      "MONDAY",
-      "TUESDAY",
-      "WEDNESDAY",
-      "THURSDAY",
-      "FRIDAY",
-      "SATURDAY",
-      "SUNDAY",
-    ].map((day) => ({
-      day_of_week: day,
-      open_time: "0000",
-      close_time: "2359",
-    }));
-    // Idempotent settings write — Meta returns success even when already
-    // enabled (see method doc), so a transient-blip retry is safe.
+    const calling: Record<string, unknown> = {};
+    if (settings.enabled !== undefined) {
+      calling.status = settings.enabled ? "ENABLED" : "DISABLED";
+    }
+    if (settings.callIconVisible !== undefined) {
+      calling.call_icon_visibility = settings.callIconVisible
+        ? "DEFAULT"
+        : "DISABLE_ALL";
+    }
+    if (settings.callbackPermissionEnabled !== undefined) {
+      calling.callback_permission_status = settings.callbackPermissionEnabled
+        ? "ENABLED"
+        : "DISABLED";
+    }
+    if (settings.hours !== undefined) {
+      // No windows ⇒ reachable around the clock, which Meta expresses as call
+      // hours DISABLED ("if call hours are disabled, your business is
+      // considered open all 24 hours of the day, 7 days a week"). Do NOT model
+      // 24/7 as a 0000-2359 window: times are minute-granular, so that leaves
+      // calls refused for the last minute of every day, and no widening closes
+      // the gap.
+      calling.call_hours = settings.hours.windows.length
+        ? {
+            status: "ENABLED",
+            timezone_id: settings.hours.timezoneId,
+            weekly_operating_hours: settings.hours.windows.map((w) => ({
+              day_of_week: w.dayOfWeek,
+              open_time: w.openTime,
+              close_time: w.closeTime,
+            })),
+          }
+        : { status: "DISABLED" };
+    }
+    // Idempotent settings write — Meta returns success even when the value is
+    // already set, so the transient-blip retry is safe.
     const res = await metaFetch(url, {
       method: "POST",
       retry: true,
@@ -2801,24 +3419,32 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
       },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        calling: {
-          status: "ENABLED",
-          call_icon_visibility: "DEFAULT",
-          callback_permission_status: "ENABLED",
-          call_hours: {
-            status: "ENABLED",
-            timezone_id: "UTC",
-            weekly_operating_hours: allWeek24h,
-          },
-        },
-      }),
+      body: JSON.stringify({ calling }),
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta updateCallSettings failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+    // Read back rather than echoing our own input: Meta normalizes some values,
+    // and the response is where restrictions live.
+    return metaProvider.getCallSettings!(config);
+  },
+
+  async getCallSettings(config: MetaSendConfig): Promise<CallSettingsState> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/settings`;
+    const res = await metaFetch(url, {
+      method: "GET",
+      retry: true,
+      headers: { authorization: `Bearer ${config.accessToken}` },
     });
     const text = await safeMetaText(res);
     if (!res.ok) {
       throw new MetaSendError(
-        `meta enableCalling failed: ${res.status} ${text}`,
+        `meta getCallSettings failed: ${res.status} ${text}`,
         res.status,
         text,
       );
@@ -2827,9 +3453,50 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     try {
       raw = JSON.parse(text);
     } catch {
-      // ignore — keep as string
+      // Keep the string — the caller surfaces it verbatim for diagnosis.
     }
-    return { ok: true, raw };
+    const calling = (raw as { calling?: MetaCallingSettings } | null)?.calling;
+    const hours = calling?.call_hours;
+    return {
+      enabled: calling?.status === "ENABLED",
+      // Absent ⇒ Meta's default, which is to show the icon.
+      callIconVisible: calling?.call_icon_visibility !== "DISABLE_ALL",
+      callbackPermissionEnabled:
+        calling?.callback_permission_status === "ENABLED",
+      // Call hours DISABLED means "open 24/7", which we model as no windows.
+      hours:
+        hours?.status === "ENABLED"
+          ? {
+              timezoneId: hours.timezone_id ?? "UTC",
+              windows: (hours.weekly_operating_hours ?? []).flatMap((w) =>
+                w.day_of_week && w.open_time && w.close_time
+                  ? [
+                      {
+                        dayOfWeek: w.day_of_week as CallHoursWindow["dayOfWeek"],
+                        openTime: w.open_time,
+                        closeTime: w.close_time,
+                      },
+                    ]
+                  : [],
+              ),
+            }
+          : null,
+      // A restricted number rejects every call attempt. Without surfacing this,
+      // a paused tenant sees only a string of unexplained failures.
+      restrictions: (calling?.restrictions?.restrictions_list ?? []).flatMap(
+        (r) =>
+          r.type
+            ? [
+                {
+                  type: r.type,
+                  reason: r.reason ?? "",
+                  expiresAt: r.expiration ? new Date(r.expiration * 1000) : null,
+                },
+              ]
+            : [],
+      ),
+      raw,
+    };
   },
 
 };

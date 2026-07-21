@@ -33,12 +33,17 @@ import { withSweeperMutex } from "@/lib/sweepers/_mutex";
  */
 
 const SWEEP_INTERVAL_MS = 60 * 1000;
-// A ring that's been open this long is dead — Meta stops ringing well under a
-// minute; 5 min is a comfortable margin over the client's 60s ring timeout.
-const RINGING_STALE_MS = 5 * 60 * 1000;
-// An in-progress call open this long never got its terminate webhook. WhatsApp
-// voice calls don't run for hours; 2h is a generous ceiling that can only catch
-// a stuck row, never a real conversation.
+// A ring open this long is dead. Meta documents a 30-60s window from the call
+// webhook before it terminates the call itself with "Not Answered" and sends a
+// terminate webhook — so a row still ringing after 3 minutes means that webhook
+// never arrived, not that someone is still deciding. The margin over 60s covers
+// clock skew and delayed delivery; the terminal-state guard in ingest makes a
+// late terminate a harmless no-op if one does show up afterwards.
+const RINGING_STALE_MS = 3 * 60 * 1000;
+// An in-progress call open this long never got its terminate webhook. This
+// ceiling is OURS, not the provider's — no maximum call duration is documented
+// — so it's set generously enough that it can only ever catch a stuck row, not
+// cut off a real conversation.
 const INPROGRESS_MAX_MS = 2 * 60 * 60 * 1000;
 const BATCH = 100;
 

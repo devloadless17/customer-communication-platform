@@ -42,7 +42,11 @@ export function BodyRenderer({
   const tokens = tokenizeBody(body);
   const q = searchQuery?.trim() ?? "";
   return (
-    <span className="whitespace-pre-wrap wrap-break-words text-sm leading-relaxed">
+    // `wrap-break-word` — SINGULAR. The plural spelling isn't a Tailwind v4
+    // utility, so it emitted no CSS at all and a long unbroken string (a pasted
+    // URL, an id) ran straight out of the message column. Every other surface
+    // in the app spells it correctly; this one was the outlier.
+    <span className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed">
       {tokens.map((tok, i) =>
         tok.kind === "text" ? (
           <span key={i}>

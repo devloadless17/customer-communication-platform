@@ -8,8 +8,14 @@ import { notificationSound } from "@/lib/notifications/notification-sound";
 import { toast } from "@/lib/toast";
 
 /**
- * App-wide alerts for team chat: an @-mention or a DM should reach you on any
- * page, not just /team.
+ * App-wide alerts for team chat: an @-mention or a DM message should reach you
+ * on any page, not just /team.
+ *
+ * NOTE — creating a DM is deliberately SILENT. `team:dm:created` fans to both
+ * participants, but an empty DM is not news: the peer's sidebar already grows
+ * the row (the DM list refetches on that same frame), and alerting on it meant
+ * a toast + ding for a conversation with nothing in it. The first real message
+ * alerts through `team:channel:activity` below, like Slack.
  *
  * Null-rendering — mounted beside NotificationSoundProvider in the (app)
  * layout, modelled on it (same bounded-dedupe and visible-and-on-surface
@@ -28,16 +34,6 @@ import { toast } from "@/lib/toast";
  *  connection-state-recovery replay can't re-toast the same mention. */
 const DEDUP_CAP = 200;
 
-/**
- * DMs this tab just opened itself. `team:dm:created` fans to BOTH participants
- * and carries no author, so this is how the starter avoids being notified
- * about their own action. Entries expire — the frame arrives within ms.
- */
-const recentlyOpenedDmIds = new Set<string>();
-export function markDmOpenedLocally(channelId: string): void {
-  recentlyOpenedDmIds.add(channelId);
-  setTimeout(() => recentlyOpenedDmIds.delete(channelId), 15_000);
-}
 
 export function TeamChatNotificationsProvider({
   currentUserId,
@@ -58,8 +54,15 @@ export function TeamChatNotificationsProvider({
   // Refs so the socket effect binds once and still reads current values.
   const pathnameRef = useRef(pathname);
   pathnameRef.current = pathname;
-  const dmIdsRef = useRef(dmChannelIds);
-  dmIdsRef.current = dmChannelIds;
+  // LIVE set, not the server snapshot. `dmChannelIds` is rendered once by the
+  // (app) layout, which is a shared segment that does not re-render on client
+  // navigation — so a DM started AFTER this tab loaded was never in the set,
+  // and every message in it was silently unalerted for the rest of the
+  // session. `team:dm:created` (handled below) grows the set.
+  const dmIdsRef = useRef<Set<string>>(new Set(dmChannelIds));
+  useEffect(() => {
+    for (const id of dmChannelIds) dmIdsRef.current.add(id);
+  }, [dmChannelIds]);
 
   const seenRef = useRef<{ set: Set<string>; queue: string[] }>({
     set: new Set(),
@@ -116,38 +119,13 @@ export function TeamChatNotificationsProvider({
       });
     };
 
-    // A brand-new DM is itself the signal — there's no message yet to mention
-    // you. Note this frame goes to BOTH participants (it carries no author to
-    // filter on), so the starter would otherwise toast themselves: suppress by
-    // recognising the id we ourselves just navigated to, and dedupe so a
-    // connection-state-recovery replay can't re-fire it.
-    const onDmCreated: Parameters<typeof socket.on<"team:dm:created">>[1] = (payload) => {
-      const id = `dm:${payload.channelId}`;
-      const seen = seenRef.current;
-      if (seen.set.has(id)) return;
-      seen.set.add(id);
-      seen.queue.push(id);
-      if (seen.queue.length > DEDUP_CAP) {
-        const evicted = seen.queue.shift();
-        if (evicted !== undefined) seen.set.delete(evicted);
-      }
-
-      // The starter is mid-navigation when this lands, so a pathname check
-      // alone misses them. `justOpenedDmRef` is stamped by the New-DM dialog
-      // via the module-level helper below.
-      if (recentlyOpenedDmIds.has(payload.channelId)) return;
-
-      const visible =
-        typeof document === "undefined" || document.visibilityState === "visible";
-      if (visible && pathnameRef.current === `/team/${payload.channelId}`) return;
-
-      notificationSound.playTeamTone();
-      toast("New direct message", {
-        action: {
-          label: "Open",
-          onClick: () => router.push(`/team/${payload.channelId}`),
-        },
-      });
+    // Registration only — deliberately silent (see the note at the top of this
+    // file). Its job is to teach this tab that the channel is a DM, so the
+    // FIRST real message in it alerts through `onActivity` above.
+    const onDmCreated: Parameters<typeof socket.on<"team:dm:created">>[1] = (
+      payload,
+    ) => {
+      dmIdsRef.current.add(payload.channelId);
     };
 
     socket.on("team:channel:activity", onActivity);

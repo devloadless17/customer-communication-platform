@@ -34,7 +34,6 @@ import type {
 } from "@ccp/shared/team-chat/types";
 import type { Role } from "@ccp/shared/types";
 
-import { TypingIndicator } from "./typing-indicator";
 
 /**
  * Sticky header for the active channel: name + description + typing dots +
@@ -50,9 +49,6 @@ export function ChannelHeader({
   channel,
   currentRole,
   memberCount,
-  typingUserIds,
-  teamMemberNameById,
-  viewerUserId,
   onEdit,
   onDelete,
   onOpenSearch,
@@ -63,10 +59,6 @@ export function ChannelHeader({
   channel: TeamChannelDto;
   currentRole: Role;
   memberCount: number;
-  typingUserIds: string[];
-  teamMemberNameById: Map<string, string>;
-  /** The viewing agent — filtered out so they don't see their own name typing. */
-  viewerUserId: string;
   onEdit: () => void;
   onDelete: () => void;
   onOpenSearch: () => void;
@@ -138,11 +130,11 @@ export function ChannelHeader({
           <div className="text-xs text-muted-foreground">No description</div>
         )}
       </div>
-      <TypingIndicator
-        userIds={typingUserIds}
-        namesById={teamMemberNameById}
-        viewerUserId={viewerUserId}
-      />
+      {/* No TypingIndicator here. The workspace already renders one directly
+          above the composer (where Slack puts it, and where the person about
+          to reply is actually looking); a second copy in the header showed the
+          same "X is typing…" twice and squeezed the title row on narrow
+          widths. */}
       <Tooltip>
         <TooltipTrigger asChild>
           <Button

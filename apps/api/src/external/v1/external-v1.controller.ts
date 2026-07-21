@@ -10,8 +10,17 @@ import {
   Patch,
   Post,
   Query,
+  Res,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
+import { diskStorage } from "multer";
+import { tmpdir } from "node:os";
+import type { Response } from "express";
+
+import { TRANSFER_MAX_UPLOAD_BYTES } from "@ccp/shared/contacts/transfer-columns";
 
 import { ApiKeyGuard } from "../../auth/api-key.guard";
 import { CurrentApiKey } from "../../auth/current-session.decorator";
@@ -22,6 +31,13 @@ import { hasScope } from "@ccp/shared/api-keys/scopes";
 import { RateLimit } from "../../common/rate-limit.interceptor";
 import { zBody, zQuery } from "../../common/zod-validation.pipe";
 import { MAX_CHAIN_DEPTH, parseChainDepth } from "@/lib/workflows/events";
+import { ContactTransferService } from "@/contacts/transfer.service";
+import {
+  CreateExportSchema,
+  ListTransfersQuerySchema,
+  type CreateExportInput,
+  type ListTransfersQueryInput,
+} from "@/contacts/transfer.schemas";
 import { ExternalV1Service } from "./external-v1.service";
 import {
   ExternalAssignSchema,
@@ -34,10 +50,13 @@ import {
   ExternalCreateContactFieldSchema,
   ExternalCreateContactSchema,
   ExternalCreateTagSchema,
+  ExternalCallButtonSchema,
+  ExternalListCallsQuerySchema,
   ExternalNoteSchema,
   ExternalSendInteractiveSchema,
   ExternalSendMessageSchema,
   ExternalSetAiSchema,
+  ExternalStartImportSchema,
   ExternalStatusSchema,
   ExternalTopLevelSendMessageSchema,
   ExternalUpdateContactSchema,
@@ -58,10 +77,13 @@ import {
   type ExternalCreateContactFieldInput,
   type ExternalCreateContactInput,
   type ExternalCreateTagInput,
+  type ExternalCallButtonInput,
+  type ExternalListCallsQueryInput,
   type ExternalNoteInput,
   type ExternalSendInteractiveInput,
   type ExternalSendMessageInput,
   type ExternalSetAiInput,
+  type ExternalStartImportInput,
   type ExternalStatusInput,
   type ExternalTopLevelSendMessageInput,
   type ExternalUpdateTagInput,
@@ -131,7 +153,10 @@ import {
 // for read-heavy traffic — mutation routes override to 60/min below.
 @RateLimit({ perMinute: 600 })
 export class ExternalV1Controller {
-  constructor(private readonly api: ExternalV1Service) {}
+  constructor(
+    private readonly api: ExternalV1Service,
+    private readonly transfers: ContactTransferService,
+  ) {}
 
   /**
    * Cross-system loop guard for EVERY mutating /v1 route that publishes a
@@ -274,6 +299,122 @@ export class ExternalV1Controller {
       this.idemKey(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
+  }
+
+  // ---- Contacts: bulk import / export ---------------------------------
+  //
+  // Declared before the dynamic `:id` routes for the same longest-prefix
+  // reason as the bulk tag paths above.
+  //
+  // Full parity with the in-app UI is a locked rule (CLAUDE.md §12): every
+  // capability the UI has, the API has. These are the same jobs the contacts
+  // page queues, backed by the same runners.
+
+  /**
+   * Queue an export. Returns a job id immediately; poll
+   * `GET /v1/contacts/transfers/:id` and then fetch
+   * `GET /v1/contacts/transfers/:id/download` once `status` is `completed`.
+   *
+   * Rate-limited hard: each call can produce a full dump of the contact book,
+   * which is both expensive to generate and the single most sensitive payload
+   * this API can emit.
+   */
+  @Post("contacts/export")
+  @RequireScope("read:contacts")
+  @RateLimit({ perMinute: 5 })
+  async startContactExport(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(CreateExportSchema)) body: CreateExportInput,
+  ) {
+    // No acting user on an API-key call; the job records the key's team and is
+    // fetched back through the same team-scoped reads.
+    return this.transfers.startExport({ teamId: auth.teamId, userId: null, input: body });
+  }
+
+  /**
+   * Queue an import from a file already staged via `POST
+   * /v1/contacts/import/upload`. `Idempotency-Key` is REQUIRED: an import
+   * creates and mutates contacts in bulk, so a retried request that queued a
+   * second job would double-apply a 100k-row file.
+   */
+  @Post("contacts/import")
+  @RequireScope("write:contacts")
+  @RateLimit({ perMinute: 5 })
+  async startContactImport(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(ExternalStartImportSchema)) body: ExternalStartImportInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    return this.api.startContactImport(
+      auth.teamId,
+      auth.apiKeyId,
+      body,
+      this.idemKey(idempotencyKey),
+    );
+  }
+
+  /** Upload a CSV/XLSX and get back the staged key + detected mapping. */
+  @Post("contacts/import/upload")
+  @RequireScope("write:contacts")
+  @RateLimit({ perMinute: 10 })
+  @UseInterceptors(
+    FileInterceptor("file", {
+      storage: diskStorage({ destination: tmpdir() }),
+      limits: { fileSize: TRANSFER_MAX_UPLOAD_BYTES },
+    }),
+  )
+  async uploadContactImport(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ) {
+    return this.transfers.preview(auth.teamId, file);
+  }
+
+  @Get("contacts/transfers")
+  @RequireScope("read:contacts")
+  async listContactTransfers(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query(zQuery(ListTransfersQuerySchema)) query: ListTransfersQueryInput,
+  ) {
+    return this.transfers.list(auth.teamId, query);
+  }
+
+  @Get("contacts/transfers/:id")
+  @RequireScope("read:contacts")
+  async getContactTransfer(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+    return { job: await this.transfers.get(auth.teamId, id) };
+  }
+
+  /**
+   * 302 to a short-lived presigned URL. Partners that can't follow redirects
+   * can read the `Location` header directly.
+   */
+  @Get("contacts/transfers/:id/download")
+  @RequireScope("read:contacts")
+  async downloadContactTransfer(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    res.redirect(302, await this.transfers.downloadUrl(auth.teamId, id, "result"));
+  }
+
+  @Get("contacts/transfers/:id/errors")
+  @RequireScope("read:contacts")
+  async errorsContactTransfer(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    res.redirect(302, await this.transfers.downloadUrl(auth.teamId, id, "errors"));
+  }
+
+  @Post("contacts/transfers/:id/cancel")
+  @RequireScope("write:contacts")
+  async cancelContactTransfer(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+    return this.transfers.cancel(auth.teamId, id);
   }
 
   // ---- Contacts: create / upsert / update / delete ------------------
@@ -899,5 +1040,78 @@ export class ExternalV1Controller {
     @Param("noteId") noteId: string,
   ) {
     return this.api.deleteNote(auth.teamId, id, noteId);
+  }
+  // ---- Calls --------------------------------------------------------
+  //
+  // Read history and permission state, ask a customer for calling permission,
+  // and send them a call button. There is deliberately no "place a call": a
+  // call needs an SDP offer from a live WebRTC peer and a browser to carry the
+  // audio, so an API client has nothing to place one with. What's here is the
+  // part an integration can genuinely drive.
+
+  @Get("calls")
+  @RequireScope("read:calls")
+  async listCalls(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query(zQuery(ExternalListCallsQuerySchema)) query: ExternalListCallsQueryInput,
+  ) {
+    return this.api.listCalls(auth.teamId, query);
+  }
+
+  /**
+   * The customer's CURRENT calling permission, read live from the provider —
+   * including whether we may call them right now and when any quota resets.
+   * This is the same read the inbox pre-flight uses, so an integration can
+   * decide "is it worth queueing a call task?" without guessing.
+   */
+  @Get("conversations/:id/call-permission")
+  @RequireScope("read:calls")
+  async getCallPermission(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    return this.api.getCallPermission(auth.teamId, id);
+  }
+
+  /**
+   * Ask the customer for permission to call them. Sends a real (billable)
+   * message, so it takes an Idempotency-Key like every other send.
+   */
+  @Post("conversations/:id/call-permission")
+  @RequireScope("write:calls")
+  async requestCallPermission(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Headers("idempotency-key") idempotencyKey?: string,
+  ) {
+    return this.api.requestCallPermission(
+      auth.teamId,
+      auth.apiKeyId,
+      id,
+      this.idemKeyRequired(idempotencyKey),
+    );
+  }
+
+  /**
+   * Send a call button — a tappable CTA that starts a WhatsApp call TO the
+   * business. The inverse of a permission request: it needs no permission at
+   * all, and a customer who taps it grants us callback permission as a side
+   * effect.
+   */
+  @Post("conversations/:id/call-button")
+  @RequireScope("write:calls")
+  async sendCallButton(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(ExternalCallButtonSchema)) body: ExternalCallButtonInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
+  ) {
+    return this.api.sendCallButton(
+      auth.teamId,
+      auth.apiKeyId,
+      id,
+      body,
+      this.idemKeyRequired(idempotencyKey),
+    );
   }
 }

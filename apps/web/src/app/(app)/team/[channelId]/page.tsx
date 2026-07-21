@@ -56,10 +56,14 @@ export default async function ChannelPage({
       {/* The chat feed's channel header is a `<span>`, not a heading, so the
           desktop view has no top-level landmark (the mobile chrome owns the h1
           below `md`). Expose one for SR heading nav; scoped to desktop to avoid
-          a duplicate mobile h1. */}
-      <h1 className="sr-only max-md:hidden">
-        {channel.name ?? "Direct message"}
-      </h1>
+          a duplicate mobile h1.
+          DMs are handled by the workspace instead — a DM has no `name`, and
+          every one of them rendering the literal heading "Direct message" made
+          heading navigation useless the moment you had more than one open. The
+          workspace knows the peer; this server component does not. */}
+      {channel.name ? (
+        <h1 className="sr-only max-md:hidden">{channel.name}</h1>
+      ) : null}
       <TeamChatWorkspace
         currentUser={user}
         initialChannel={channel}

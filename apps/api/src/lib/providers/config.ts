@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { TtlCache } from "@/lib/providers/config-cache";
 import { getMetaConnection, resolveWebhookSecrets } from "@/lib/providers/meta-connection";
 import type { Channel } from "@ccp/shared/types";
+import { getCountryFromPhone } from "@ccp/shared/utils";
 
 /**
  * Per-team provider configuration. CLAUDE.md rule #6: secrets live in the DB,
@@ -48,6 +49,17 @@ export interface MetaSendConfig {
    * creating a template with a media header. Optional everywhere else.
    */
   appId?: string;
+  /**
+   * The business phone number in display form (e.g. "+1 555-0100").
+   *
+   * Needed because business-initiated calling eligibility is decided by OUR
+   * number's country, not the customer's — a business number in a blocked
+   * market cannot place calls anywhere, while an eligible one can call
+   * customers in any supported country. Optional: a connection saved before
+   * this was captured has none, and the caller treats unknown as "allow" and
+   * lets Meta be the authority.
+   */
+  displayPhoneNumber?: string;
 }
 
 export interface MetaWebhookConfig {
@@ -124,6 +136,7 @@ interface SendConfigCipher {
   accessTokenCipher: string;
   wabaId?: string;
   appId?: string;
+  displayPhoneNumber?: string;
 }
 interface WebhookConfigCipher {
   appSecretCipher: string;
@@ -165,6 +178,9 @@ async function loadSendCipher(teamId: string): Promise<CachedSend> {
       accessTokenCipher: secrets.accessToken!,
       ...(config.wabaId ? { wabaId: config.wabaId } : {}),
       ...(config.appId ? { appId: config.appId } : {}),
+      ...(config.displayPhoneNumber
+        ? { displayPhoneNumber: config.displayPhoneNumber }
+        : {}),
     },
   };
 }
@@ -197,6 +213,9 @@ function materializeSendConfig(
     graphVersion: DEFAULT_GRAPH_VERSION,
     ...(cipher.wabaId ? { wabaId: cipher.wabaId } : {}),
     ...(cipher.appId ? { appId: cipher.appId } : {}),
+    ...(cipher.displayPhoneNumber
+      ? { displayPhoneNumber: cipher.displayPhoneNumber }
+      : {}),
   };
 }
 
@@ -224,6 +243,32 @@ export async function getMetaSendConfig(teamId: string): Promise<MetaSendConfig>
     throw new ProviderNotConfiguredError(teamId, [...entry.missing]);
   }
   return materializeSendConfig(teamId, entry.cipher);
+}
+
+/**
+ * The ISO country of a team's own WhatsApp business number, or null when we
+ * don't know it (no connection, or no display number captured at onboarding).
+ *
+ * Exists so the domain layer can answer "may this team place business-initiated
+ * calls?" — eligibility follows OUR number's country, not the customer's —
+ * without unpacking the opaque send-config credential blob.
+ *
+ * Reads the row directly rather than going through the 60s send-config cache:
+ * this is not a hot path (a call is a deliberate human action), and a stale
+ * answer here means an admin who just reconnected with a new number watches
+ * the Call button stay wrong for a minute with nothing to explain it.
+ */
+export async function getBusinessNumberCountry(
+  teamId: string,
+): Promise<string | null> {
+  const conn = await db.channelConnection.findUnique({
+    where: { teamId_channel: { teamId, channel: "whatsapp" } },
+    select: { config: true },
+  });
+  const config = (conn?.config ?? {}) as MetaChannelConfig;
+  // Unknown country ⇒ the caller treats it as "don't gate" and lets the
+  // provider be the authority.
+  return getCountryFromPhone(config.displayPhoneNumber ?? null);
 }
 
 /**

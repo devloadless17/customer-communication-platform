@@ -110,7 +110,7 @@ Discipline that keeps this simple and safe:
 
 Real entities (`prisma/schema.prisma`; ERD in [docs/schema-erd.md](docs/schema-erd.md)):
 
-`Team → User → ChannelConnection`; `Contact → Conversation → Message`; plus `ContactStage`, `ContactFieldDefinition`, `Tag`, `AudienceGroup`, `Broadcast`/`BroadcastRecipient`, `InternalNote`, `Workflow`/`WorkflowRun`/`WorkflowContactState`, `TeamApiKey`, `OutboundWebhook`/`OutboundWebhookDelivery`, `OutboundEvent` (outbox), `ConversationEvent` (audit timeline), the team-chat models (a deliberately separate message graph — channels **and** 1:1 DMs share `TeamChannel` via a `kind` discriminator; see [docs/team-chat.md](docs/team-chat.md)), `Call`/`CallPermissionRequest`, `OutboundSendAttempt` (send-idempotency ledger).
+`Team → User → ChannelConnection`; `Contact → Conversation → Message`; plus `ContactStage`, `ContactFieldDefinition`, `Tag`, `AudienceGroup`, `Broadcast`/`BroadcastRecipient`, `InternalNote`, `Workflow`/`WorkflowRun`/`WorkflowContactState`, `TeamApiKey`, `OutboundWebhook`/`OutboundWebhookDelivery`, `OutboundEvent` (outbox), `ConversationEvent` (audit timeline), `ContactTransferJob` (contact import/export runs), the team-chat models (a deliberately separate message graph — channels **and** 1:1 DMs share `TeamChannel` via a `kind` discriminator; see [docs/team-chat.md](docs/team-chat.md)), `Call`/`CallPermissionRequest`, `OutboundSendAttempt` (send-idempotency ledger).
 
 **Non-negotiable data invariants:**
 - **`teamId` on every table**, and in the `where` of every query — sourced from `req.session.teamId` or `req.apiKey.teamId`, **never** from client input. There is no Prisma middleware / RLS; tenant isolation is manual and load-bearing.
@@ -309,6 +309,8 @@ Each links to the reasoning:
 | Website chat widget: **customer-facing** install guide (also in-app at `/docs/webchat-install`) | [docs/webchat-install-guide.md](docs/webchat-install-guide.md) |
 | Adding a channel: recipe + per-channel constraints | [docs/adding-a-channel.md](docs/adding-a-channel.md) |
 | Meta channels capability & gap matrix (WhatsApp/Messenger/Instagram) | [docs/meta-channels-capabilities.md](docs/meta-channels-capabilities.md) |
+| WhatsApp Calling: wire shapes, permission, region, accept handshake, recording/transcription | [docs/whatsapp-calling.md](docs/whatsapp-calling.md) |
+| Contact import/export: CSV + Excel, streaming, at 100k | [docs/contact-import-export.md](docs/contact-import-export.md) |
 | Data model ERD | [docs/schema-erd.md](docs/schema-erd.md) |
 | External API reference | [docs/organization-api.md](docs/organization-api.md) |
 | Local setup & dev matrix | [docs/local-setup.md](docs/local-setup.md) |

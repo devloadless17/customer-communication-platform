@@ -226,26 +226,39 @@ export function TeamChatWorkspace({
   const [showMembers, setShowMembers] = useState(false);
   // Live override on top of `initialChannel.memberCount`. Bumped optimistically
   // when the members dialog adds/removes someone so the header pill updates
-  // immediately, and reset when the parent re-renders against a fresher
-  // initialChannel.
+  // immediately.
   const [memberCountOverride, setMemberCountOverride] = useState<number | null>(
     null,
   );
   const [channelSearchOpen, setChannelSearchOpen] = useState(false);
   const [channelSearchQuery, setChannelSearchQuery] = useState("");
 
-  // `?q=` on the URL keeps inline highlight active when the user lands here
-  // from a workspace-search result. Mirrors what `channel-search.tsx` would
-  // set if the user opened in-channel search inside this channel.
-  const searchParams = useSearchParams();
-  const urlSearchQuery = searchParams?.get("q") ?? "";
+  // Everything above that is scoped to ONE channel has to be dropped on a
+  // switch. The workspace is rendered without a `key`, so it does NOT remount
+  // between /team/A and /team/B — state simply carries over. Left alone, the
+  // header pill kept showing channel A's member count on channel B (forever,
+  // since nothing else ever writes it), and the in-channel search bar stayed
+  // open, still pre-filled with A's query, silently re-running it against B.
+  useEffect(() => {
+    setMemberCountOverride(null);
+    setChannelSearchOpen(false);
+    setChannelSearchQuery("");
+  }, [initialChannel.id]);
 
-  // The query that drives bubble-level `<mark>` highlights. URL-supplied
-  // `?q=` wins when present; otherwise the in-channel search panel's live
+  // `?q=` on the URL turns inline highlight on when the user lands here from a
+  // workspace-search result. It is READ ONCE into component state and then
+  // stripped from the URL (below, alongside `?jumpTo=`): leaving it there made
+  // the highlight survive reloads and back-navigation forever, with no visible
+  // way to turn it off. Now it's a dismissible, session-only affordance.
+  const searchParams = useSearchParams();
+  const [jumpHighlight, setJumpHighlight] = useState<string>("");
+
+  // The query that drives bubble-level `<mark>` highlights. The search-result
+  // landing wins when present; otherwise the in-channel search panel's live
   // input drives it (only when the panel is open). Both routes land on the
   // same prop so ChannelMessage's memo only sees one identity change.
   const activeSearchQuery =
-    urlSearchQuery || (channelSearchOpen ? channelSearchQuery : "") || null;
+    jumpHighlight || (channelSearchOpen ? channelSearchQuery : "") || null;
 
   /**
    * Scroll the feed to a message and flash a highlight. Cheap path: the
@@ -324,22 +337,45 @@ export function TeamChatWorkspace({
     [channelState, flashHighlight],
   );
 
-  // Handle `?jumpTo=<id>` from a workspace-search result. Runs once per
+  // Handle `?jumpTo=<id>` + `?q=` from a workspace-search result. Runs once per
   // distinct id so a re-render with the same query param doesn't re-jump.
   const lastJumpedRef = useRef<string | null>(null);
   useEffect(() => {
     const jumpId = searchParams?.get("jumpTo");
-    if (!jumpId || lastJumpedRef.current === jumpId) return;
-    lastJumpedRef.current = jumpId;
-    void jumpToMessage(jumpId);
-    // Clean the URL so a refresh doesn't re-trigger and a back-button visit
-    // doesn't replay the jump. `router.replace` without the params resets
-    // history without a navigation.
+    const q = searchParams?.get("q") ?? "";
+    if (!jumpId && !q) return;
+    if (jumpId && lastJumpedRef.current !== jumpId) {
+      lastJumpedRef.current = jumpId;
+      void jumpToMessage(jumpId);
+    }
+    if (q) setJumpHighlight(q);
+    // Strip BOTH params so a refresh doesn't re-trigger the jump and doesn't
+    // resurrect the highlight. `history.replaceState` rewrites the URL without
+    // a navigation (and without re-running the RSC page).
     const next = new URL(window.location.href);
     next.searchParams.delete("jumpTo");
-    // Keep `?q=` so the inline highlight stays active until the user clears.
+    next.searchParams.delete("q");
+    next.searchParams.delete("n");
     window.history.replaceState(null, "", next.toString());
   }, [searchParams, jumpToMessage]);
+
+  // A search-result highlight belongs to the visit that produced it — drop it
+  // as soon as the user moves to another channel. `lastJumpedRef` clears with
+  // it: it exists only to stop ONE `?jumpTo=` from re-firing on re-render, and
+  // keeping it forever meant re-opening the same search hit a second time was
+  // a no-op (URL changed, banner appeared, feed never moved).
+  //
+  // Guarded on an ACTUAL id change rather than a bare `[initialChannel.id]`
+  // dep: effects run in declaration order, so on mount this one fires right
+  // after the `?q=` reader above and wiped the highlight the search landing
+  // had just set — the banner never appeared at all.
+  const highlightChannelRef = useRef(initialChannel.id);
+  useEffect(() => {
+    if (highlightChannelRef.current === initialChannel.id) return;
+    highlightChannelRef.current = initialChannel.id;
+    setJumpHighlight("");
+    lastJumpedRef.current = null;
+  }, [initialChannel.id]);
   const { deleteChannel, confirmDialog: deleteChannelDialog } = useDeleteChannel();
 
   /**
@@ -392,8 +428,17 @@ export function TeamChatWorkspace({
   const dms = useTeamDms();
   const dmPeer = useMemo(() => {
     if (initialChannel.kind !== "dm") return null;
-    return dms.find((d) => d.id === initialChannel.id)?.peer ?? null;
-  }, [dms, initialChannel.id, initialChannel.kind]);
+    // Live list first (it tracks renames / avatar changes without a reload),
+    // then the server-rendered peer on the channel itself. The fallback is what
+    // makes a JUST-created DM paint the right person immediately: the live list
+    // comes from the /team LAYOUT, which hasn't refetched yet at that moment, so
+    // on its own it rendered a blank avatar titled "Direct message".
+    return (
+      dms.find((d) => d.id === initialChannel.id)?.peer ??
+      initialChannel.peer ??
+      null
+    );
+  }, [dms, initialChannel.id, initialChannel.kind, initialChannel.peer]);
 
   const namesById = useMemo(
     () => new Map(teamMembers.map((u) => [u.id, u.name])),
@@ -422,14 +467,20 @@ export function TeamChatWorkspace({
           leaf so subscribing to the live channel list stays OFF this body's
           render path. */}
       <ChannelExistenceGuard channelId={initialChannel.id} />
+      {/* Landmark heading for a DM. The route's server component can only see
+          `channel.name` (null for every DM), so it hands this case over here
+          where the peer is resolved — otherwise heading navigation announced
+          the identical "Direct message" for every conversation. */}
+      {initialChannel.kind === "dm" && (
+        <h1 className="sr-only max-md:hidden">
+          {dmPeer ? `Direct message with ${dmPeer.name}` : "Direct message"}
+        </h1>
+      )}
       <div className="flex min-w-0 flex-1 flex-col">
         <ChannelHeader
           channel={initialChannel}
           currentRole={currentUser.role}
           memberCount={memberCountOverride ?? initialChannel.memberCount}
-          typingUserIds={channelState.typingUserIds}
-          teamMemberNameById={namesById}
-          viewerUserId={currentUser.id}
           onEdit={() => setShowEdit(true)}
           onDelete={() => {
             void deleteChannel(initialChannel.id, "/team");
@@ -461,7 +512,29 @@ export function TeamChatWorkspace({
             onJumpTo={jumpToMessage}
           />
         )}
+        {/* Search-landing highlight is stateful, so it needs a visible exit —
+            without one the `<mark>`s just looked like a stuck rendering bug. */}
+        {jumpHighlight && !channelSearchOpen && (
+          <div className="flex items-center gap-2 border-b border-border bg-warning-bg/40 px-4 py-1.5 text-xs">
+            <span className="min-w-0 truncate text-muted-foreground">
+              Highlighting matches for{" "}
+              <span className="font-medium text-foreground">“{jumpHighlight}”</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setJumpHighlight("")}
+              className="ml-auto shrink-0 rounded px-1.5 py-0.5 font-medium text-primary transition-colors hover:bg-accent"
+            >
+              Clear
+            </button>
+          </div>
+        )}
+        {/* Keyed by channel: the bar's expanded/collapsed default is derived
+            from the pin COUNT in a state initializer, and this workspace never
+            remounts on a channel switch — so a 1-pin channel's expanded bar
+            carried into a 14-pin channel and swallowed the feed. */}
         <PinnedBar
+          key={initialChannel.id}
           pins={pins}
           canPin={canPinInChannel(currentUser.role, initialChannel.kind)}
           onUnpin={unpinFromBar}
@@ -494,15 +567,29 @@ export function TeamChatWorkspace({
             viewerUserId={currentUser.id}
           />
         </div>
-        <ChannelComposer
-          channelId={initialChannel.id}
-          channelName={initialChannel.name}
-          currentUser={currentUser}
-          teamMembers={teamMembers}
-          onOptimisticAdd={channelState.addOptimistic}
-          onOptimisticFail={channelState.markOptimisticFailed}
-          onOptimisticConfirm={channelState.confirmOptimistic}
-        />
+        {/* A DM with someone who has left the team is read-only. This is the
+            contract `DirectMessagePeerDto.deactivated` has documented since it
+            was introduced ("history stays readable, composer disabled") — it
+            just was never wired, so agents could type a handover note into a
+            conversation nobody will ever open again. The server rejects the
+            send too; this is the affordance, not the enforcement. */}
+        {dmPeer?.deactivated ? (
+          <div className="border-t border-border px-4 py-3 text-center text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">{dmPeer.name}</span>{" "}
+            no longer has an account on this team. You can still read this
+            conversation, but you can&rsquo;t send new messages.
+          </div>
+        ) : (
+          <ChannelComposer
+            channelId={initialChannel.id}
+            channelName={initialChannel.name}
+            currentUser={currentUser}
+            teamMembers={teamMembers}
+            onOptimisticAdd={channelState.addOptimistic}
+            onOptimisticFail={channelState.markOptimisticFailed}
+            onOptimisticConfirm={channelState.confirmOptimistic}
+          />
+        )}
       </div>
 
       {liveThreadRoot && (

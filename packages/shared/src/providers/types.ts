@@ -254,7 +254,11 @@ export interface NormalizedCallEvent {
                       // media server (e.g. WhatsApp Cloud-API SDP answer).
                       // This is NOT customer pickup — it carries the SDP so
                       // the browser can negotiate media, but the call stays
-                      // `ringing` until a real answer is observed.
+                      // `ringing` until `answered` lands.
+    | "answered"      // the customer actually PICKED UP an outbound call.
+                      // Provider-reported and authoritative (WhatsApp: the
+                      // `ACCEPTED` call status). Do not infer this from media
+                      // flow — a browser hearing audio may just be ringback.
     | "completed"     // call connected then ended (carries connectedAt+duration)
     | "missed"        // never answered (declined / no-answer / timeout)
     | "rejected"      // explicitly declined (providers that distinguish it)
@@ -262,13 +266,57 @@ export interface NormalizedCallEvent {
     | "permission_granted"
     | "permission_revoked";
   /**
-   * Set on a `permission_granted` event when Meta marked the grant PERMANENT
-   * (`is_permanent: true` — the customer chose "always allow" rather than the
-   * default 72h window). Ingest then stores a far-future expiry instead of
-   * `grantedAt + 72h`, so a permanent grant isn't wrongly treated as expired.
-   * Absent/false ⇒ the standard 72h validity.
+   * Set on `permission_granted` when the customer granted PERMANENTLY rather
+   * than for a bounded window. A permanent grant never expires, so ingest must
+   * record it as such instead of stamping some far-future date that later reads
+   * as "expires in 99 years" in the UI.
    */
   permanentPermission?: boolean;
+  /**
+   * The provider's own expiry for a temporary grant, taken verbatim from the
+   * permission webhook. Authoritative — never recompute it locally. WhatsApp
+   * sends NO webhook when a temporary permission lapses, so this timestamp (or
+   * a fresh permission read) is the only way to know the grant is still live.
+   */
+  permissionExpiresAt?: Date;
+  /**
+   * The id of the permission-request message this reply answers, when the
+   * customer responded to one. Absent when they granted proactively from the
+   * business profile, or when the grant was automatic. Lets ingest correlate a
+   * grant to the exact request rather than guessing at the newest pending row.
+   */
+  permissionRequestExternalId?: string;
+  /**
+   * True when the provider generated this permission change itself rather than
+   * the customer acting — an automatic grant because the customer called us, or
+   * an automatic REVOCATION after too many unanswered calls. Worth
+   * distinguishing in the audit trail: "they withdrew consent" and "we burned
+   * through their patience" are different problems.
+   */
+  permissionAutomatic?: boolean;
+  /**
+   * Provider error detail on a `failed` terminal event. Without this, every
+   * failure — no permission, unreachable, bad SDP, calling disabled, outside
+   * call hours — collapses into one indistinguishable "provider error" and
+   * nobody can diagnose a broken call without reading raw webhook JSON.
+   */
+  errorCode?: number;
+  errorTitle?: string;
+  errorDetail?: string;
+  /**
+   * Opaque attribution strings the provider echoes back, identifying what drove
+   * a user-initiated call: `ctaPayload` from a call button we sent,
+   * `deeplinkPayload` from a `wa.me/call/...` link. Absent on older clients, so
+   * treat absence as normal rather than as an error.
+   */
+  ctaPayload?: string;
+  deeplinkPayload?: string;
+  /**
+   * Our own correlation id, echoed back by the provider on every webhook for a
+   * call we placed. Lets ingest find our row directly instead of racing the
+   * provider-assigned id back from the originating request.
+   */
+  correlationId?: string;
   /**
    * WebRTC SDP. For inbound calls: customer's `offer`. For outbound: the
    * provider's media-server `answer` (delivered at `connecting`, BEFORE the
@@ -324,6 +372,110 @@ export interface SocialCallPermission {
   canStartCall: boolean;
   canRequestPermission: boolean;
   expiresAt: Date | null;
+}
+
+/**
+ * One day's calling window on the business number. Times are local to
+ * `timezoneId` and expressed as 24h "HHMM" (e.g. "0900", "1730").
+ */
+export interface CallHoursWindow {
+  dayOfWeek:
+    | "MONDAY"
+    | "TUESDAY"
+    | "WEDNESDAY"
+    | "THURSDAY"
+    | "FRIDAY"
+    | "SATURDAY"
+    | "SUNDAY";
+  openTime: string;
+  closeTime: string;
+}
+
+/**
+ * Calling configuration on a business phone number.
+ *
+ * Every field is optional: this is a PATCH, and sending only what changed
+ * avoids clobbering settings an admin adjusted in the provider's own console.
+ */
+export interface CallSettings {
+  /** Master switch. Disabling it hides calling from customers entirely. */
+  enabled?: boolean;
+  /**
+   * Whether customers see a call icon on the business profile. `DISABLE_ALL`
+   * hides it everywhere — the documented remedy when a number is flagged for a
+   * low call-pickup rate.
+   */
+  callIconVisible?: boolean;
+  /**
+   * When true, a customer calling US automatically grants permission for us to
+   * call THEM back. Worth leaving on: it's a free, consent-respecting source of
+   * calling permission that needs no request message.
+   */
+  callbackPermissionEnabled?: boolean;
+  /**
+   * Business calling hours. Omit `windows` (or pass an empty array) to be
+   * reachable 24/7 — which is expressed to the provider as call hours DISABLED,
+   * not as a 00:00-23:59 window. That distinction matters: a "0000"-"2359"
+   * window leaves a one-minute dead zone every night during which calls are
+   * refused, and hours are minute-granular so it cannot be closed by widening.
+   */
+  hours?: {
+    timezoneId: string;
+    windows: CallHoursWindow[];
+  };
+}
+
+/**
+ * A restriction the provider has placed on this number's calling, with the
+ * time it lifts. Surfaced so a paused tenant sees why their calls are failing
+ * instead of a string of unexplained rejections.
+ */
+export interface CallRestriction {
+  type: string;
+  reason: string;
+  expiresAt: Date | null;
+}
+
+/** Current calling configuration + health, read back from the provider. */
+export interface CallSettingsState {
+  enabled: boolean;
+  callIconVisible: boolean;
+  callbackPermissionEnabled: boolean;
+  hours: { timezoneId: string; windows: CallHoursWindow[] } | null;
+  restrictions: CallRestriction[];
+  /** Unparsed provider response, for ops diagnosis. */
+  raw: unknown;
+}
+
+/**
+ * A phone channel's authoritative call-permission state, read straight from the
+ * provider rather than inferred from a local ledger.
+ *
+ * This exists because permission can be granted through paths that leave NO
+ * trace on our side: WhatsApp's `callback_permission_status` grants it
+ * automatically when the customer calls us, and the customer can grant it from
+ * the business profile at any time. A local request ledger therefore cannot be
+ * the gate — it will refuse perfectly callable contacts. The provider is the
+ * only source of truth, and it also returns the live quota, so the caller never
+ * has to hardcode a limit that Meta has since changed.
+ *
+ * Distinct from SocialCallPermission (Messenger's `messenger_call_permissions`)
+ * on purpose: different vendor API, different shape. The domain layer already
+ * branches on which calling model a channel uses.
+ */
+export interface CallPermissionState {
+  /** `permanent` never expires; `temporary` carries an expiry. */
+  status: "no_permission" | "temporary" | "permanent";
+  /** True for `temporary` or `permanent`. */
+  hasPermission: boolean;
+  /** The provider's own verdict, with every limit already applied. */
+  canStartCall: boolean;
+  /** False when a permission request would exceed the provider's request cap. */
+  canRequestPermission: boolean;
+  /** Null when permanent (no expiry) or when there is no permission at all. */
+  expiresAt: Date | null;
+  /** When `canStartCall` is false because a quota is exhausted, when it resets. */
+  startCallResetAt: Date | null;
 }
 
 /**
@@ -513,6 +665,28 @@ export interface NormalizedChannelHealth {
   qualityRating?: string;
   /** Throughput level: "STANDARD" | "HIGH". */
   throughputLevel?: string;
+  /**
+   * The provider has PAUSED calling on this number (typically for a week) over
+   * negative user feedback or a low call-pickup rate. While restricted, every
+   * call attempt AND every permission request fails.
+   *
+   * Worth storing rather than discovering per-attempt: without it a tenant sees
+   * only a week of unexplained rejections, and support has no way to tell a
+   * restriction apart from a bug. `null` explicitly CLEARS a stored restriction
+   * (the provider lifted it); `undefined` leaves it untouched, since this event
+   * carries partial state.
+   */
+  callingRestrictedUntil?: Date | null;
+  /** Machine-readable restriction type, when restricted. */
+  callingRestrictionType?: string | null;
+  /** Provider's human explanation, shown to the admin verbatim. */
+  callingRestrictionReason?: string | null;
+  /**
+   * An early WARNING that calling quality is trending badly — delivered before
+   * any restriction takes effect. Actionable: this is the moment to hide call
+   * buttons or narrow call hours, which is a change we can offer in one click.
+   */
+  callingQualityWarning?: string | null;
   rawPayload: Record<string, unknown>;
 }
 
@@ -619,8 +793,31 @@ export interface SendInteractiveArgs {
   to: string;
   /** Question / body text the contact sees above the options. */
   bodyText: string;
-  kind: "buttons" | "list";
+  /**
+   * `voice_call` renders a button that starts a WhatsApp call to us when
+   * tapped — a way to invite a customer to call rather than waiting for
+   * permission to call them. It carries no `options`.
+   */
+  kind: "buttons" | "list" | "voice_call";
+  /** Ignored for `voice_call`. */
   options: InteractiveOption[];
+  /**
+   * `voice_call` only. Every field is optional; the provider's defaults are
+   * sensible ("Call Now", 7 days).
+   */
+  voiceCall?: {
+    /** Button label, max 20 chars. */
+    displayText?: string;
+    /** How long the button stays tappable, 1 to 43200 minutes (30 days). */
+    ttlMinutes?: number;
+    /**
+     * Opaque attribution string echoed back on the call webhooks as
+     * `cta_payload`, so an inbound call can be traced to the button that
+     * produced it. Max 512 chars. Older WhatsApp clients drop it, so treat its
+     * absence as normal.
+     */
+    payload?: string;
+  };
   /** List only — label on the CTA button that opens the row sheet.
    *  Defaults to "Choose" if omitted. Ignored for buttons. */
   listCtaLabel?: string;
@@ -1186,20 +1383,45 @@ export interface MessagingProvider<SendConfig = unknown> {
   // and the browser (Meta uses ICE-lite, so trickle is unnecessary).
 
   /**
-   * Request a customer's permission to be called. Required before placeCall
-   * outside the 24h customer-service window. Meta rate-limits these:
-   * 1 / 24h / contact and 2 / 7d / contact, 72h validity once granted, and
-   * auto-revokes after 4 consecutive unanswered calls. The caller
-   * (CallsService) keeps a CallPermissionRequest row that mirrors this.
+   * Request a customer's permission to be called. Permission is required
+   * before EVERY business-initiated call — there is no service-window
+   * exemption; the window only decides how you may ask (a free-form message
+   * inside it, an approved template outside it).
    *
-   * Returns the provider's request id (for audit) and the absolute
-   * expiresAt the caller computed (Meta confirms 72h validity but doesn't
-   * echo a precise timestamp — we trust our `requestedAt + 72h` calc).
+   * The provider rate-limits these (1/24h and 2/7d per contact, both reset by
+   * any connected call). Don't mirror those caps locally — read them from
+   * `getCallPermission`, which returns the live quota.
+   *
+   * Identify the customer by `to` (phone) or `recipient` (business-scoped user
+   * id); at least one is required, and `to` wins if both are given. A cold
+   * caller the provider hasn't seen in 30 days has only a BSUID, so a
+   * phone-only signature would make them permanently unreachable.
+   *
+   * `bodyText` is optional context shown above the Allow/Deny prompt. The
+   * prompt itself is provider-rendered and cannot be customized.
+   *
+   * Returns the id of the request MESSAGE — the same id the customer's reply
+   * webhook echoes back as its context, which is how a grant is correlated to
+   * the exact request that produced it. `expiresAt` is the REQUEST's validity
+   * (it lapses if the customer never responds), NOT a grant: the grant's own
+   * expiry arrives on the reply webhook and is authoritative.
    */
   sendCallPermissionRequest?(
-    args: { to: string },
+    args: { to?: string; recipient?: string; bodyText?: string },
     config: SendConfig,
   ): Promise<{ permissionRequestId: string; expiresAt: Date }>;
+
+  /**
+   * Read the customer's CURRENT call-permission state and live quota from the
+   * provider. This is the authoritative pre-flight gate for an outbound call —
+   * see CallPermissionState for why a local ledger cannot serve that role.
+   *
+   * Identified by `to` (phone) or `recipient` (BSUID), same rule as above.
+   */
+  getCallPermission?(
+    args: { to?: string; recipient?: string },
+    config: SendConfig,
+  ): Promise<CallPermissionState>;
 
   /**
    * Initiate an outbound call. The BROWSER generates an SDP offer first
@@ -1209,21 +1431,30 @@ export interface MessagingProvider<SendConfig = unknown> {
    * a webhook with the SDP ANSWER, which the browser feeds into
    * `setRemoteDescription` to complete the WebRTC handshake.
    *
-   * This is the SHAPE FIX for Meta error 131009 "Missing session parameter"
-   * — the original placeCall { to } payload omitted the session.sdp field
-   * Meta requires for business-initiated calling.
+   * Identify the callee by `to` (phone) or `recipient` (BSUID) — at least one,
+   * `to` wins if both. `correlationId` is an opaque string the provider echoes
+   * back on every subsequent webhook for this call, which is what lets ingest
+   * match a webhook to the row we created without racing on the provider's id.
    */
   placeCall?(
-    args: { to: string; sdpOffer: string; from?: string },
+    args: {
+      to?: string;
+      recipient?: string;
+      sdpOffer: string;
+      correlationId?: string;
+    },
     config: SendConfig,
   ): Promise<{ externalCallId: string }>;
 
   /**
-   * REQUIRED preamble before acceptCall. Meta rejects `accept` sent without
-   * a prior `pre_accept` for the same call id. Both calls carry the SAME
-   * SDP answer (verified — pre_accept without session.sdp returns
-   * 131009 "Missing session parameter"). The two hops exist for media
-   * timing, not for separate payloads.
+   * Preamble before acceptCall, carrying the SAME SDP answer (pre_accept
+   * without session.sdp returns 131009 "Missing session parameter").
+   *
+   * Its POINT is media timing, and it only pays off if the two hops are
+   * actually separated: pre_accept lets the WebRTC connection establish, and
+   * `accept` is sent only once it has. Media must not flow until accept
+   * returns 200, or the caller loses the first words of the call. Firing both
+   * back-to-back defeats the mechanism entirely.
    */
   preAcceptCall?(
     args: { externalCallId: string; sdpAnswer: string },
@@ -1231,18 +1462,23 @@ export interface MessagingProvider<SendConfig = unknown> {
   ): Promise<void>;
 
   /**
-   * Accept an incoming call by delivering our SDP answer (already generated
-   * by the browser's RTCPeerConnection.createAnswer). After this, media
-   * flows DTLS+SRTP browser ↔ Meta.
+   * Accept an incoming call, once the WebRTC connection from `preAcceptCall`
+   * is established. Carries the same SDP answer. After the 200, media may
+   * flow DTLS+SRTP browser ↔ provider.
    */
   acceptCall?(
     args: { externalCallId: string; sdpAnswer: string },
     config: SendConfig,
   ): Promise<void>;
 
-  /** Decline an incoming call before any answer. */
+  /**
+   * Decline an incoming call before any answer. No reason is sent to the
+   * provider — its reject action takes only the call id, and passing an
+   * undocumented field risks the whole request being rejected. Record any
+   * decline reason locally instead.
+   */
   rejectCall?(
-    args: { externalCallId: string; reason?: "busy" | "declined" },
+    args: { externalCallId: string },
     config: SendConfig,
   ): Promise<void>;
 
@@ -1255,19 +1491,45 @@ export interface MessagingProvider<SendConfig = unknown> {
   ): Promise<void>;
 
   /**
-   * Admin helper: enable Calling on the provider's phone number via the
-   * settings endpoint. Required ONCE per number before placeCall works
-   * (else Meta returns 138000 "Calling API not enabled"). Distinct from
-   * the "Display call buttons" toggle in WhatsApp Manager (UI-only).
-   * Idempotent on the provider side.
+   * Admin one-shot: turn calling on with sensible defaults. Required once
+   * before any call can be placed or received (the provider otherwise rejects
+   * with "Calling API not enabled"). Idempotent.
+   *
+   * Kept distinct from `updateCallSettings` because what "enable" means differs
+   * by channel: on a phone number it writes calling settings, while on a
+   * Messenger Page it routes inbound calls to us and reports the Page's feature
+   * status. Channels with the richer settings surface implement both.
    */
   enableCalling?(config: SendConfig): Promise<{ ok: true; raw: unknown }>;
 
   /**
-   * Admin helper: GET the provider's stored phone-number settings.
-   * Diagnostic — lets ops see what calling fields are actually set on
-   * the provider side (status, call_icon_visibility, call_hours, etc.)
-   * to debug why inbound calls aren't arriving at the webhook.
+   * Admin: update calling configuration on the provider's phone number.
+   *
+   * Calling must be enabled at least once before any call can be placed (the
+   * provider otherwise rejects with "Calling API not enabled"). Idempotent, and
+   * a PATCH — only the fields present are written, so this can also be used for
+   * targeted changes like hiding the call icon.
+   *
+   * Changes can take up to 7 days to reach every customer's client, so the UI
+   * should not promise an immediate effect.
+   */
+  updateCallSettings?(
+    settings: CallSettings,
+    config: SendConfig,
+  ): Promise<CallSettingsState>;
+
+  /**
+   * Admin: read the provider's current calling configuration + any active
+   * restrictions. Both a diagnostic ("why aren't inbound calls arriving?") and
+   * the source of the Settings screen's truth — an admin can change these in
+   * the provider's own console, so a locally cached view drifts.
+   */
+  getCallSettings?(config: SendConfig): Promise<CallSettingsState>;
+
+  /**
+   * Admin helper: GET the provider's stored phone-number settings, unparsed.
+   * Kept alongside `getCallSettings` for raw ops diagnosis of fields we don't
+   * model.
    */
   getPhoneNumberSettings?(config: SendConfig): Promise<{ raw: unknown }>;
 

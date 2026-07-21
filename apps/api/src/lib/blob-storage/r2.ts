@@ -7,6 +7,8 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import type { Readable } from "node:stream";
 
 import { extFromMime } from "@/lib/media-storage";
@@ -177,6 +179,35 @@ export const r2Provider: BlobStorageProvider = {
       url: stableObjectUrl(input.key),
       sizeBytes: input.bytes.length,
     };
+  },
+
+  async putObjectFromFile(input): Promise<UploadResult> {
+    // Body is a read stream, so the file never lands in heap. S3/R2 needs an
+    // explicit ContentLength for a stream body (it can't seek to measure one),
+    // and without it the SDK falls back to buffering the whole stream to
+    // compute the length — silently undoing the streaming. stat first.
+    const { size } = await stat(input.path);
+    const controller = new AbortController();
+    // Scale the timeout with size: the flat 60s budget that suits a photo is
+    // not enough for a 25 MB export on a modest uplink, and a timeout here
+    // fails a job that did all its work. 60s floor + 1 minute per 10 MB.
+    const timeoutMs = UPLOAD_TIMEOUT_MS + Math.ceil(size / (10 * 1024 * 1024)) * 60_000;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      await getClient().send(
+        new PutObjectCommand({
+          Bucket: bucket(),
+          Key: input.key,
+          Body: createReadStream(input.path),
+          ContentLength: size,
+          ContentType: input.contentType,
+        }),
+        { abortSignal: controller.signal },
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+    return { key: input.key, url: stableObjectUrl(input.key), sizeBytes: size };
   },
 
   async getObject(keyOrUrl, opts): Promise<import("./types").BlobObjectStream> {

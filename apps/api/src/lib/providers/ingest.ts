@@ -175,6 +175,16 @@ export async function ingestEvents(
         await persistWhatsappHealth(teamId, {
           ...(evt.messagingTier !== undefined ? { messagingTier: evt.messagingTier } : {}),
           ...(evt.qualityRating !== undefined ? { qualityRating: evt.qualityRating } : {}),
+          ...(evt.callingRestrictedUntil !== undefined
+            ? {
+                callingRestrictedUntil: evt.callingRestrictedUntil,
+                callingRestrictionType: evt.callingRestrictionType ?? null,
+                callingRestrictionReason: evt.callingRestrictionReason ?? null,
+              }
+            : {}),
+          ...(evt.callingQualityWarning !== undefined
+            ? { callingQualityWarning: evt.callingQualityWarning }
+            : {}),
           ...(evt.throughputLevel !== undefined
             ? { throughputLevel: evt.throughputLevel }
             : {}),

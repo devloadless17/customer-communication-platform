@@ -501,7 +501,15 @@ export function useTeamChannelEvents(
       // swap (matching clientTempId) must always reconcile in-place so the
       // bubble stops showing as pending — that's a confirmation of THEIR
       // send, not a brand-new tail message from someone else.
-      if (anchoredRef.current && !tempId) {
+      // `clientTempId` is NOT a "this is mine" marker: the server echoes it on
+      // the frame sent to the WHOLE channel room (fanout-rules.ts), so every
+      // teammate's client sees a truthy tempId for any message composed in the
+      // web app. Testing it alone let other people's live messages append
+      // straight into the anchored historical slice — mixing "now" under a
+      // three-month-old day separator — and left the Jump-to-live pill with no
+      // count. Ownership is the author, not the presence of the id.
+      const isOwnEcho = !!tempId && payload.message.authorUserId === currentUserId;
+      if (anchoredRef.current && !isOwnEcho) {
         setPendingLiveCount((n) => n + 1);
         return;
       }
