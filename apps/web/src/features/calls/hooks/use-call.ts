@@ -484,6 +484,14 @@ export function useCall(): {
   //      navigation) — this is what frees the customer in the normal case;
   //   2. on mount, if this tab left a marker behind, the unload beacon either
   //      didn't fire or didn't land — release it now.
+  // Captured during the FIRST RENDER, before any effect runs. This ordering is
+  // load-bearing: the mirror effect below writes `null` on mount (liveCall is
+  // null then), so reading the marker from inside an effect would race against
+  // it being cleared and the reclaim would never fire.
+  const [orphanedCallId] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : readTabCallId(),
+  );
+
   useEffect(() => {
     writeTabCallId(liveCall?.callId ?? null);
   }, [liveCall?.callId]);
@@ -515,11 +523,8 @@ export function useCall(): {
   }, []);
 
   useEffect(() => {
-    const orphaned = readTabCallId();
-    if (!orphaned || orphaned.startsWith("tmp_")) {
-      writeTabCallId(null);
-      return;
-    }
+    const orphaned = orphanedCallId;
+    if (!orphaned || orphaned.startsWith("tmp_")) return;
     // This tab was mid-call when it reloaded. End the call — idempotent, and a
     // no-op if the unload beacon already did it or the customer hung up.
     writeTabCallId(null);
