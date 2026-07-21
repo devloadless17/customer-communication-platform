@@ -29,6 +29,16 @@ export interface ReplyPayload {
   shouldEscalate: boolean;
   /** Why escalation is needed (empty string when shouldEscalate is false). */
   escalationReason: string;
+  /**
+   * Model self-reported risk 0..1 that replyText states something NOT
+   * grounded in the company info / retrieved knowledge chunks (a fabricated
+   * price, policy, order detail, etc). Distinct from `confidence` (which
+   * covers correctness + policy fit broadly) — this is specifically about
+   * unverifiable claims, so an agent can spot-check just the risky ones.
+   */
+  hallucinationRisk: number;
+  /** The specific unverified claim(s), or empty string when risk is low/zero. */
+  hallucinationNotes: string;
 }
 
 // OpenAI strict structured outputs: every property listed in `required`,
@@ -47,6 +57,8 @@ export const REPLY_SCHEMA: Record<string, unknown> = {
     "confidence",
     "shouldEscalate",
     "escalationReason",
+    "hallucinationRisk",
+    "hallucinationNotes",
   ],
   properties: {
     replyText: { type: "string", description: "The reply to send to the customer." },
@@ -78,6 +90,16 @@ export const REPLY_SCHEMA: Record<string, unknown> = {
     escalationReason: {
       type: "string",
       description: "Reason for escalation, or an empty string when not escalating.",
+    },
+    hallucinationRisk: {
+      type: "number",
+      description:
+        "Risk between 0 and 1 that replyText states a fact (price, policy, order detail, availability) not actually grounded in the company info or retrieved knowledge snippets. 0 when every claim is grounded or the reply makes no factual claims.",
+    },
+    hallucinationNotes: {
+      type: "string",
+      description:
+        "The specific claim(s) in replyText that aren't grounded in the provided company info/knowledge, or an empty string when hallucinationRisk is 0.",
     },
   },
 };

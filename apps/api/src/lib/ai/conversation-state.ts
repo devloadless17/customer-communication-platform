@@ -7,12 +7,18 @@ import { publish } from "@/lib/events/bus";
  *   ai_active     — the assistant may auto-reply.
  *   human_active  — an agent replied; the assistant is quiet, but this is NOT a
  *                   permanent pause. It CANCELS any in-flight AI turn and yields.
- *   ai_paused     — an agent explicitly paused; sticky until an agent resumes.
- *   disabled      — the assistant is off for this thread entirely.
+ *   ai_paused     — an agent explicitly paused; sticky until an agent resumes,
+ *                   OR until the conversation closes and the customer reopens
+ *                   it (see `resumeOnReopen`, called from ingest.ts).
+ *
+ * There is deliberately no separate "disabled" action anymore — pause/resume
+ * is the only agent-facing control (removed 2026-07). `AiConvAutomationState`
+ * still carries a `disabled` DB enum member for historic rows only; nothing
+ * in application code sets it.
  *
  * Default resumption: a human reply -> human_active; the NEXT customer inbound
  * auto-resumes to ai_active. Only an explicit agent pause (ai_paused) survives
- * further customer messages.
+ * further customer messages — except a close+reopen, which also resumes it.
  */
 
 export type AiConvState = "ai_active" | "human_active" | "ai_paused" | "disabled";
@@ -137,15 +143,28 @@ export async function takeOverByAgent(teamId: string, conversationId: string, us
   return row;
 }
 
-export async function setDisabled(teamId: string, conversationId: string, disabled: boolean) {
-  await ensureState(teamId, conversationId);
-  const nextState: AiConvState = disabled ? "disabled" : "ai_active";
-  const row = await db.aiConversationState.update({
-    where: { conversationId },
-    data: { state: nextState, stateChangedAt: new Date() },
+/**
+ * A closed conversation reopened because the customer messaged again
+ * (ingest.ts). Native AI pause is sticky against everything EXCEPT this — a
+ * thread the customer walked away from and came back to should have the
+ * assistant listening again rather than silently staying paused forever.
+ * Only flips ai_paused -> ai_active; human_active is untouched (an agent who
+ * took the thread over stays in control across the reopen). No-op (and no
+ * event) when the conversation wasn't paused.
+ */
+export async function resumeOnReopen(teamId: string, conversationId: string): Promise<boolean> {
+  const res = await db.aiConversationState.updateMany({
+    where: { conversationId, state: "ai_paused" },
+    data: {
+      state: "ai_active",
+      pausedByUserId: null,
+      pausedAt: null,
+      stateChangedAt: new Date(),
+      autoReplyCount: 0,
+    },
   });
-  emitState(teamId, conversationId, nextState);
-  return row;
+  if (res.count > 0) emitState(teamId, conversationId, "ai_active");
+  return res.count > 0;
 }
 
 export async function incrementAutoReply(conversationId: string) {

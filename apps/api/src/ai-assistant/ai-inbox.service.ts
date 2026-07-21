@@ -9,12 +9,13 @@ import { sendTextInternal } from "@/lib/messaging/send-text-internal";
 import {
   pauseByAgent,
   resumeByAgent,
-  setDisabled,
   takeOverByAgent,
 } from "@/lib/ai/conversation-state";
+import { getConversationHallucinationSummary, HALLUCINATION_FLAG_THRESHOLD } from "@/lib/ai/hallucination";
 import { getInboundText, loadReplyContext } from "@/lib/ai/reply-context";
 import { generateReply } from "@/lib/ai/reply-service";
 import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
+import { summarizeRange } from "@/lib/ai/summary-job";
 import { persistSuggestion } from "@/lib/ai/suggestion-store";
 import {
   renderDraftAudio,
@@ -52,7 +53,7 @@ export class AiInboxService {
       where: { id: conv.contactId },
       select: { customerId: true },
     });
-    const [state, suggestion, summary, memory] = await Promise.all([
+    const [state, suggestion, summary, memory, hallucination] = await Promise.all([
       this.db.aiConversationState.findUnique({ where: { conversationId } }),
       this.db.aiReplySuggestion.findFirst({
         where: { teamId, conversationId, state: "pending" },
@@ -69,6 +70,7 @@ export class AiInboxService {
             take: 50,
           })
         : Promise.resolve([]),
+      getConversationHallucinationSummary(teamId, conversationId),
     ]);
     return {
       state: state?.state ?? "ai_active",
@@ -76,7 +78,26 @@ export class AiInboxService {
       summary,
       memory,
       customerId: contact?.customerId ?? null,
+      hallucination,
     };
+  }
+
+  /** On-demand summary for an agent-selected date range — see summary-job.ts. */
+  async rangeSummary(teamId: string, conversationId: string, from: Date, to: Date) {
+    await this.assertConversation(teamId, conversationId);
+    const summary = await summarizeRange(teamId, conversationId, from, to);
+    return { summary };
+  }
+
+  /** Single-message hallucination flag, for the thread bubble badge. */
+  async getMessageFlag(teamId: string, messageId: string) {
+    const row = await this.db.aiMessageMetadata.findFirst({
+      where: { teamId, messageId, aiGenerated: true },
+      select: { hallucinationRisk: true, hallucinationNotes: true },
+    });
+    const risk = row?.hallucinationRisk ?? null;
+    if (risk === null || risk < HALLUCINATION_FLAG_THRESHOLD) return { flag: null };
+    return { flag: { risk, notes: row?.hallucinationNotes ?? null } };
   }
 
   async setState(
@@ -93,10 +114,6 @@ export class AiInboxService {
         return resumeByAgent(teamId, conversationId);
       case "takeover":
         return takeOverByAgent(teamId, conversationId, userId);
-      case "disable":
-        return setDisabled(teamId, conversationId, true);
-      case "enable":
-        return setDisabled(teamId, conversationId, false);
       default:
         throw new BadRequestException({ error: "invalid_action" });
     }

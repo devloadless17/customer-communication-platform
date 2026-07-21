@@ -154,3 +154,56 @@ export async function runSessionSummary(conversationId: string): Promise<void> {
 
   void publish({ type: "ai.summary_changed", teamId: conv.teamId, conversationId }).catch(() => {});
 }
+
+// Messages beyond this in a selected range are dropped from the transcript
+// (oldest-first truncation) — bounds worst-case prompt size the same way
+// `loadRecentMessages(80)` bounds the incremental session summary above.
+const MAX_RANGE_MESSAGES = 400;
+
+/**
+ * On-demand summary for an AGENT-SELECTED date range (distinct from the
+ * incremental per-session summary above). Stateless: not persisted, no prior
+ * summary carried in — each call re-reads the range fresh, since the range
+ * itself is arbitrary and not tied to a "session". Returns null when there
+ * are no messages in range (nothing to summarize) or the model call fails.
+ */
+export async function summarizeRange(
+  teamId: string,
+  conversationId: string,
+  from: Date,
+  to: Date,
+): Promise<SummaryPayload | null> {
+  const messages = await db.message.findMany({
+    where: { teamId, conversationId, timestamp: { gte: from, lte: to } },
+    orderBy: { timestamp: "asc" },
+    take: MAX_RANGE_MESSAGES,
+    select: { id: true, direction: true, body: true },
+  });
+  if (!messages.length) return null;
+
+  const aiMeta = await db.aiMessageMetadata.findMany({
+    where: { messageId: { in: messages.map((m) => m.id) }, aiGenerated: true },
+    select: { messageId: true },
+  });
+  const aiSet = new Set(aiMeta.map((m) => m.messageId));
+  const transcript = messages
+    .map((m) => `${m.direction === "in" ? "Customer" : aiSet.has(m.id) ? "AI" : "Agent"}: ${m.body}`)
+    .join("\n")
+    .slice(0, 16000);
+
+  const system =
+    "You summarize a customer-support conversation for a SPECIFIC date range the agent selected — not the whole history, just what happened in this window. Be concise and factual. Return the structured fields; use empty strings/arrays where nothing applies.";
+  const user = `Messages between ${from.toISOString()} and ${to.toISOString()}:\n${transcript}\n\nProduce a summary of just this period.`;
+
+  const res = await chatJson<SummaryPayload>({
+    model: resolveModel("summary"),
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    schemaName: "range_summary",
+    schema: SUMMARY_SCHEMA,
+    maxTokens: 900,
+  });
+  return res.data ?? null;
+}

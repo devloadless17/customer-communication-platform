@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Res,
   UseGuards,
 } from "@nestjs/common";
@@ -14,17 +15,19 @@ import type { Response } from "express";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
-import { zBody } from "../common/zod-validation.pipe";
+import { zBody, zQuery } from "../common/zod-validation.pipe";
 import { AiInboxService } from "./ai-inbox.service";
 import {
   CorrectTranscriptionSchema,
   PatchMemorySchema,
   StateActionSchema,
   SuggestionDecisionSchema,
+  SummaryRangeQuerySchema,
   type CorrectTranscriptionInput,
   type PatchMemoryInput,
   type StateActionInput,
   type SuggestionDecisionInput,
+  type SummaryRangeQuery,
 } from "./ai-inbox.schemas";
 
 /**
@@ -41,6 +44,16 @@ export class AiInboxController {
   @Get("conversations/:id/overview")
   async overview(@CurrentSession() session: ApiSession, @Param("id") id: string) {
     return this.svc.overview(session.teamId, id);
+  }
+
+  /** On-demand summary for an agent-picked `from`/`to` date range. */
+  @Get("conversations/:id/summary")
+  async rangeSummary(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Query(zQuery(SummaryRangeQuerySchema)) query: SummaryRangeQuery,
+  ) {
+    return this.svc.rangeSummary(session.teamId, id, new Date(query.from), new Date(query.to));
   }
 
   @Post("conversations/:id/state")
@@ -111,6 +124,12 @@ export class AiInboxController {
   @Delete("memory/:id")
   async deleteMemory(@CurrentSession() session: ApiSession, @Param("id") id: string) {
     return this.svc.deleteMemory(session.teamId, id);
+  }
+
+  /** Whether a given (AI-authored) message was flagged as a hallucination risk. */
+  @Get("messages/:messageId/hallucination")
+  async messageFlag(@CurrentSession() session: ApiSession, @Param("messageId") messageId: string) {
+    return this.svc.getMessageFlag(session.teamId, messageId);
   }
 
   @Get("transcriptions/:messageId")

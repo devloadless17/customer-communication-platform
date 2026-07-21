@@ -2751,8 +2751,15 @@ enum AiContextDocStatus {
 // Per-conversation native-AI state machine (correction #2). A human reply
 // CANCELS the pending AI turn and moves the conversation to human_active, but
 // does NOT permanently pause: the next CUSTOMER inbound auto-resumes to
-// ai_active. ai_paused is the EXPLICIT agent pause (sticky until resumed);
-// disabled turns the assistant off for this thread entirely.
+// ai_active. ai_paused is the EXPLICIT agent pause (sticky until resumed —
+// EXCEPT a closed→reopened conversation, which force-resumes to ai_active;
+// see conversation-state.ts `resumeOnReopen`).
+//
+// `disabled` is RETAINED here for backward compat with historic rows only —
+// agents can no longer set it (removed 2026-07: the product now only exposes
+// pause/resume, not a separate full-disable). The migration that removed the
+// action also converts any pre-existing `disabled` rows to `ai_paused`, so no
+// live conversation is ever stuck in this state; it is otherwise dead.
 enum AiConvAutomationState {
   ai_active
   human_active
@@ -3068,6 +3075,14 @@ model AiMessageMetadata {
   intent        String?
   confidence    Float?
   interactionId String?
+  // Model self-reported risk (0..1) that this reply contains a claim not
+  // grounded in the company info / retrieved knowledge (see REPLY_SCHEMA).
+  // Null for replies generated before this field existed. A conversation's
+  // hallucination rate is the average across its scored AI messages (see
+  // lib/ai/hallucination.ts); messages at/above HALLUCINATION_FLAG_THRESHOLD
+  // are surfaced to the agent for review via `ai.message_flagged`.
+  hallucinationRisk  Float?
+  hallucinationNotes String? @db.Text
   createdAt     DateTime @default(now())
 
   @@index([teamId])

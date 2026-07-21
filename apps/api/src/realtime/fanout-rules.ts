@@ -668,6 +668,15 @@ export const FANOUT_RULES: FanoutRuleMap = {
       status: e.status,
     });
   },
+  "ai.message_flagged": (e, emitter) => {
+    emitter.emitToConversation(e.conversationId, "ai:flag", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      messageId: e.messageId,
+      risk: e.risk,
+      notes: e.notes,
+    });
+  },
 
   // ---- WhatsApp Business Calling -----------------------------------------
   // Room-scoping rules per call phase (mirrors the locked availability:*

@@ -1,8 +1,10 @@
 import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
 
 import { claimInbound, legacyAutopilotOwnsTeam } from "./automation-claim";
 import { getState, incrementAutoReply, onCustomerInbound } from "./conversation-state";
 import { decideMode } from "./decide-mode";
+import { HALLUCINATION_FLAG_THRESHOLD } from "./hallucination";
 import { aiGloballyEnabled } from "./models";
 import { openaiConfigured } from "./openai-client";
 import { openingStatus } from "./prompt-builder";
@@ -158,9 +160,24 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
             script: payload.replyScript,
             intent: payload.intent,
             confidence: payload.confidence,
+            hallucinationRisk: payload.hallucinationRisk,
+            hallucinationNotes: payload.hallucinationNotes || null,
           },
         })
         .catch(() => {});
+      // Surface to the agent for a later check (correction: flag, don't
+      // block send — the reply already went out under the team's configured
+      // auto-send/draft mode; this is a review signal, not a gate).
+      if (payload.hallucinationRisk >= HALLUCINATION_FLAG_THRESHOLD) {
+        void publish({
+          type: "ai.message_flagged",
+          teamId,
+          conversationId,
+          messageId: mid,
+          risk: payload.hallucinationRisk,
+          notes: payload.hallucinationNotes || null,
+        }).catch(() => {});
+      }
     }
     await incrementAutoReply(conversationId);
     await audit(teamId, conversationId, inboundMessageId, config.configVersion, {

@@ -14,6 +14,7 @@ import {
   createOutboundMessageIdempotentDetailed,
 } from "@/lib/messages/idempotent-create";
 import { ingestCallEvent } from "@/lib/providers/ingest-call";
+import { resumeOnReopen } from "@/lib/ai/conversation-state";
 import { applyContactShareFromReply } from "@/lib/identity/contact-share";
 import { resolveCustomerId } from "@/lib/identity/identity-service";
 import { ensureDefaultStage } from "@/lib/queries";
@@ -1721,6 +1722,7 @@ async function ingestInboundMessage(
         resumeRunIds,
         contactId: contact.id,
         conversationId: conversation.id,
+        reopened,
       };
     });
     // Post-commit: kick each awaiting run. Failure here just delays the
@@ -1734,6 +1736,20 @@ async function ingestInboundMessage(
         } catch (err) {
           console.error("[ingest][ask_question_resume]", { runId, err });
         }
+      }
+    }
+
+    // Post-commit: a reopen (closed -> pending on this inbound) also resumes
+    // native AI if it was paused — a thread the customer walked away from and
+    // came back to shouldn't stay silently paused forever (see
+    // conversation-state.ts `resumeOnReopen`). Best-effort/non-fatal, same
+    // reasoning as the resumeRunIds kicks above: a Redis/DB blip here just
+    // leaves the conversation paused until an agent notices, not catastrophic.
+    if (txResult?.reopened) {
+      try {
+        await resumeOnReopen(teamId, txResult.conversationId);
+      } catch (err) {
+        console.error("[ingest][ai_resume_on_reopen]", { conversationId: txResult.conversationId, err });
       }
     }
 

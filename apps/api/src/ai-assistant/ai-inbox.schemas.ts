@@ -1,9 +1,27 @@
 import { z } from "zod";
 
+// Agents can pause/resume/take-over the assistant — there is no separate
+// "disable" anymore (removed 2026-07; see conversation-state.ts).
 export const StateActionSchema = z
-  .object({ action: z.enum(["pause", "resume", "takeover", "enable", "disable"]) })
+  .object({ action: z.enum(["pause", "resume", "takeover"]) })
   .strict();
 export type StateActionInput = z.infer<typeof StateActionSchema>;
+
+/**
+ * GET .../summary query — agent-selected date range for an on-demand summary
+ * (distinct from the auto-generated "Latest Session Summary"). Stateless: not
+ * persisted, generated fresh from the messages in range on every call.
+ */
+export const SummaryRangeQuerySchema = z
+  .object({
+    from: z.string().datetime(),
+    to: z.string().datetime(),
+  })
+  .strict()
+  .refine((v) => new Date(v.from).getTime() <= new Date(v.to).getTime(), {
+    message: "from must be before to",
+  });
+export type SummaryRangeQuery = z.infer<typeof SummaryRangeQuerySchema>;
 
 export const SuggestionDecisionSchema = z
   .object({
