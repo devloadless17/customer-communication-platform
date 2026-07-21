@@ -7,6 +7,22 @@ export const StateActionSchema = z
   .strict();
 export type StateActionInput = z.infer<typeof StateActionSchema>;
 
+/**
+ * GET .../summary query — agent-selected date range for an on-demand summary
+ * spanning the WHOLE conversation (distinct from the auto-generated "Latest
+ * Session Summary"). Stateless: not persisted, generated fresh on every call.
+ */
+export const SummaryRangeQuerySchema = z
+  .object({
+    from: z.string().datetime(),
+    to: z.string().datetime(),
+  })
+  .strict()
+  .refine((v) => new Date(v.from).getTime() <= new Date(v.to).getTime(), {
+    message: "from must be before to",
+  });
+export type SummaryRangeQuery = z.infer<typeof SummaryRangeQuerySchema>;
+
 export const SuggestionDecisionSchema = z
   .object({
     action: z.enum(["accept", "reject"]),

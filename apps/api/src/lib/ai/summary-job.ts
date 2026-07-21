@@ -177,6 +177,59 @@ export async function runSessionSummary(conversationId: string): Promise<void> {
   void publish({ type: "ai.summary_changed", teamId: conv.teamId, conversationId }).catch(() => {});
 }
 
+// Messages beyond this in a selected range are dropped from the transcript
+// (oldest-first truncation) — bounds worst-case prompt size the same way
+// `loadRecentMessages(80)` bounds the incremental session summary above.
+const MAX_RANGE_MESSAGES = 400;
+
+/**
+ * On-demand summary for an AGENT-SELECTED date range, spanning the WHOLE
+ * conversation (not scoped to any one session) — distinct from the
+ * incremental per-session summary above. Stateless: not persisted, no prior
+ * summary carried in, since the range itself is arbitrary. Returns null when
+ * there are no messages in range or the model call fails.
+ */
+export async function summarizeRange(
+  teamId: string,
+  conversationId: string,
+  from: Date,
+  to: Date,
+): Promise<SummaryPayload | null> {
+  const messages = await db.message.findMany({
+    where: { teamId, conversationId, timestamp: { gte: from, lte: to } },
+    orderBy: { timestamp: "asc" },
+    take: MAX_RANGE_MESSAGES,
+    select: { id: true, direction: true, body: true },
+  });
+  if (!messages.length) return null;
+
+  const aiMeta = await db.aiMessageMetadata.findMany({
+    where: { messageId: { in: messages.map((m) => m.id) }, aiGenerated: true },
+    select: { messageId: true },
+  });
+  const aiSet = new Set(aiMeta.map((m) => m.messageId));
+  const transcript = messages
+    .map((m) => `${m.direction === "in" ? "Customer" : aiSet.has(m.id) ? "AI" : "Agent"}: ${m.body}`)
+    .join("\n")
+    .slice(0, 16000);
+
+  const system =
+    "You summarize a customer-support conversation for a SPECIFIC date range the agent selected — across the WHOLE conversation history in that window, not just the latest session. Be concise and factual. `overallBrief` is a 1-2 sentence brief of the relationship/customer as seen across the range. Return the structured fields; use empty strings/arrays where nothing applies.";
+  const user = `Messages between ${from.toISOString()} and ${to.toISOString()}:\n${transcript}\n\nProduce a summary of just this period.`;
+
+  const res = await chatJson<SummaryPayload>({
+    model: resolveModel("summary"),
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    schemaName: "range_summary",
+    schema: SUMMARY_SCHEMA,
+    maxTokens: 550,
+  });
+  return res.data ?? null;
+}
+
 /** First timestamp (ms) of the CURRENT session = the message right after the
  *  last >=12h idle gap. `messages` are ascending by time. Falls back to the
  *  oldest message (whole thread is one session). */

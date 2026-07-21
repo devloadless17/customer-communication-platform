@@ -14,6 +14,7 @@ import {
 import { getInboundText, loadReplyContext } from "@/lib/ai/reply-context";
 import { generateReply } from "@/lib/ai/reply-service";
 import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
+import { summarizeRange } from "@/lib/ai/summary-job";
 import { persistSuggestion } from "@/lib/ai/suggestion-store";
 import {
   renderDraftAudio,
@@ -77,6 +78,13 @@ export class AiInboxService {
       memory,
       customerId: contact?.customerId ?? null,
     };
+  }
+
+  /** On-demand summary for an agent-selected date range — see summary-job.ts. */
+  async rangeSummary(teamId: string, conversationId: string, from: Date, to: Date) {
+    await this.assertConversation(teamId, conversationId);
+    const summary = await summarizeRange(teamId, conversationId, from, to);
+    return { summary };
   }
 
   async setState(
