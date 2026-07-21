@@ -22,6 +22,19 @@ import {
   uploadAvatar,
 } from "../lib/blob-storage/avatar";
 import { AVAILABILITY_SELECT, applyAvailability } from "../lib/availability/apply";
+
+/** Exactly the columns `mapUser` reads — so the availability round-trips stop
+ *  pulling every User column (auth material included) to render ~10 fields. */
+const MAP_USER_SELECT = {
+  id: true,
+  teamId: true,
+  role: true,
+  name: true,
+  email: true,
+  avatarUrl: true,
+  deactivatedAt: true,
+  createdAt: true,
+} as const;
 import { teamScheduleOf } from "../lib/availability/schedule";
 import { mapUser } from "../lib/queries/_shared";
 import type {
@@ -193,7 +206,7 @@ export class UsersService {
   ): Promise<User> {
     const user = await this.db.user.findFirstOrThrow({
       where: { id: userId, teamId },
-      select: AVAILABILITY_SELECT,
+      select: { ...AVAILABILITY_SELECT, ...MAP_USER_SELECT },
     });
     const team = await this.db.team.findUnique({
       where: { id: teamId },
@@ -214,7 +227,12 @@ export class UsersService {
     // Re-read rather than trusting the pre-write row: applyAvailability may
     // have resolved the effective status differently from the pick (off shift),
     // and the caller renders what it returns.
-    const updated = await this.db.user.findUniqueOrThrow({ where: { id: userId } });
+    // Team-scoped, and SELECTED: the default select pulls every User column
+    // (including auth material) to feed mapUser, which reads ~10 fields.
+    const updated = await this.db.user.findFirstOrThrow({
+      where: { id: userId, teamId },
+      select: { ...AVAILABILITY_SELECT, ...MAP_USER_SELECT },
+    });
     return mapUser(updated);
   }
 
@@ -273,7 +291,10 @@ export class UsersService {
     });
 
     await this.resyncAvailability(teamId, [targetUserId]);
-    const updated = await this.db.user.findUniqueOrThrow({ where: { id: targetUserId } });
+    const updated = await this.db.user.findFirstOrThrow({
+      where: { id: targetUserId, teamId },
+      select: { ...AVAILABILITY_SELECT, ...MAP_USER_SELECT },
+    });
     return mapUser(updated);
   }
 
@@ -295,7 +316,7 @@ export class UsersService {
         deactivatedAt: null,
         ...(userIds ? { id: { in: userIds } } : {}),
       },
-      select: AVAILABILITY_SELECT,
+      select: { ...AVAILABILITY_SELECT, ...MAP_USER_SELECT },
     });
     const nowMs = Date.now();
     for (const user of users) {

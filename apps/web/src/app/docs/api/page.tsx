@@ -775,6 +775,28 @@ export default function ApiDocsPage() {
         </Endpoint>
         <Endpoint
           method="POST"
+          path="/api/external/v1/message-flag-definitions"
+          body={{ name: "Complaint", color: "rose" }}
+        >
+          Create a flag definition. Scope <code>write:catalog</code>.{" "}
+          <code>color</code> is one of the shared tag colors; anything
+          unrecognized normalizes to <code>slate</code>.
+        </Endpoint>
+        <Endpoint
+          method="PATCH"
+          path="/api/external/v1/message-flag-definitions/:id"
+          body={{ name: "Serious complaint" }}
+        >
+          Update <code>name</code>, <code>color</code>,{" "}
+          <code>description</code>, <code>sortOrder</code> or{" "}
+          <code>archivedAt</code>. Scope <code>write:catalog</code>.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/message-flag-definitions/:id">
+          Archive a definition. Existing flags keep resolving to it, so history
+          stays readable. Scope <code>write:catalog</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
           path="/api/external/v1/messages/:messageId/flags"
           body={{ definitionName: "Complaint", note: "Second time this month." }}
         >

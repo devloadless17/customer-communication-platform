@@ -86,3 +86,13 @@ For events that must survive a crash between the DB write and the fanout:
 - `kickOutbox()` / `setOutboxKickHandler` give an immediate-drain hook after a tx-context publish.
 
 Idempotency & ordering expectations: consumers must tolerate at-least-once redelivery (the drainer can re-dispatch a claimed-but-uncommitted row). Ordering is guaranteed only within the priority tiers of a single `publish`, not across events — never assume event A's subscribers ran before event B's.
+
+
+### `message.flag_changed`
+
+Published by `lib/message-flags/mutations.ts` — the ONLY publisher — whenever a
+triage flag is added, updated, reopened, resolved or removed. Carries the flag,
+the conversation id and the post-write `openFlagCount` so subscribers need no
+re-read. Audit keys on the TRANSITION (`action`), not the post-state. A
+re-raise that carries no new context publishes nothing at all, so an
+at-least-once replay can't fan a frame or an outbound webhook for a no-op.

@@ -481,6 +481,24 @@ curl -s "$CCP_BASE_URL/api/external/v1/message-flags?status=open&take=50" \
 
 **`GET /message-flag-definitions`** · `read:catalog` — the catalog (archived included). Resolve names to ids once and cache.
 
+**`POST /message-flag-definitions`** · `write:catalog` — create one.
+Body: `{ name, color?, description?, sortOrder? }`. `color` is one of the shared
+tag colors; anything unrecognized normalizes to `slate`.
+
+**`PATCH /message-flag-definitions/:id`** · `write:catalog` — update
+`name` / `color` / `description` / `sortOrder` / `archivedAt`.
+
+**`DELETE /message-flag-definitions/:id`** · `write:catalog` — archive it.
+Existing flags keep resolving to the archived definition, so history stays
+readable.
+
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/message-flag-definitions" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "name": "Complaint", "color": "rose" }'
+```
+
 ### Raising a flag
 
 **`POST /messages/:messageId/flags`** · `write:flags`

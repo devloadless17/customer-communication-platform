@@ -131,6 +131,25 @@ export function resolveEffectiveAvailability(
     };
   }
 
+  // "Appear offline" is a PRIVACY preference, not an absence note, so the
+  // schedule must not silently revoke it at the next shift start.
+  //
+  // busy/away describe a temporary state ("in a meeting"), and reclaiming
+  // those at 09:00 is the intended behavior — the note would be stale anyway.
+  // `offline` is categorically different: the user asked not to appear online
+  // at all. Letting the sweeper flip them back to `available` would put them
+  // back in the visible-online set, back in the widget's "an agent is here"
+  // dot, and back in the assignment engine's eligible tiers — without them
+  // ever touching the picker.
+  if (manualStatus === "offline") {
+    return {
+      status: "offline",
+      message: manualMessage,
+      source: manualSource,
+      overrideUntil: null,
+    };
+  }
+
   if (isWithinWorkHours(schedule, input.nowMs)) {
     return { status: "available", message: null, source: "schedule", overrideUntil: null };
   }

@@ -158,6 +158,26 @@ export function formatShortDate(iso: string, tz?: string): string {
   return dtf("sd", tz, { month: "short", day: "numeric", year: "numeric" }).format(new Date(iso));
 }
 
+/**
+ * A future instant expressed as a time, with a weekday prefix ONLY when it
+ * isn't today.
+ *
+ * Used for "your status holds until …". A bare `formatMessageTime` reads as
+ * today to everyone: an agent going busy at 14:00 on a Saturday with a
+ * Mon–Fri schedule sees their override expire Monday 09:00, and "until 09:00"
+ * is actively misleading. Same-day expiry stays terse ("until 17:00") because
+ * that is the common case and the weekday would be noise.
+ */
+export function formatUntil(iso: string, tz?: string, now?: number): string {
+  const then = new Date(iso);
+  const time = dtf("t", tz, { hour: "numeric", minute: "2-digit" }).format(then);
+  const a = calendarDay(now != null ? new Date(now) : new Date(), tz);
+  const b = calendarDay(then, tz);
+  if (a.y === b.y && a.m === b.m && a.d === b.d) return time;
+  const weekday = dtf("wd", tz, { weekday: "short" }).format(then);
+  return `${weekday} ${time}`;
+}
+
 /** Day separator label used between message clusters. */
 export function formatDaySeparator(iso: string, tz?: string, now?: number): string {
   const then = new Date(iso);

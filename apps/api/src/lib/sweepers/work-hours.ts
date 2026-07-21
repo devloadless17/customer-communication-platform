@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 
+import { invalidateSessionCache } from "@/auth/session.guard";
 import { db } from "@/lib/db";
 import { AVAILABILITY_SELECT, applyAvailability } from "@/lib/availability/apply";
 import { teamScheduleOf } from "@/lib/availability/schedule";
@@ -105,6 +106,13 @@ async function sweepOnce(): Promise<void> {
           teamSchedule,
           intent: { kind: "sync" },
           nowMs,
+          // Every other caller of applyAvailability busts the 15s ApiSession
+          // cache; the sweeper is the one path where NOBODY triggered the
+          // change, which is exactly where a stale read is most likely. Without
+          // this, an RSC render in the 15s after a shift boundary seeds the
+          // availability picker with the pre-boundary status while the socket
+          // frame has already said otherwise.
+          bustSessionCache: invalidateSessionCache,
         });
         if (result.changed) transitions++;
       }

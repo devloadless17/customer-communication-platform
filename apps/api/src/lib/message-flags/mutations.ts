@@ -129,6 +129,9 @@ async function raiseFlagOnce(
     let flagId: string;
     let delta: number;
     let action: "added" | "updated" | "reopened";
+    // Set by the idempotent-replay branch below when a re-raise carries no new
+    // context, so a true no-op emits no event.
+    let suppressPublish = false;
 
     if (!existing) {
       const created = await tx.messageFlag.create({
@@ -153,13 +156,28 @@ async function raiseFlagOnce(
       // Already open — this is the idempotent replay. Only fold in newly
       // supplied context (a note, an owner); never clobber existing values with
       // the undefined of a bare re-raise.
-      await tx.messageFlag.update({
-        where: { id: existing.id },
-        data: {
-          ...(args.note !== undefined ? { note: args.note } : {}),
-          ...(args.assignedToId !== undefined ? { assignedToId: args.assignedToId } : {}),
-        },
-      });
+      const folded: Prisma.MessageFlagUncheckedUpdateInput = {
+        ...(args.note !== undefined ? { note: args.note } : {}),
+        ...(args.assignedToId !== undefined ? { assignedToId: args.assignedToId } : {}),
+      };
+      // Skip the write entirely when there is nothing to fold in. A bare
+      // re-raise carries neither field — which is exactly what the UI sends on
+      // a double-click of "Flag as → Complaint", and what every at-least-once
+      // AI/API replay sends. Writing anyway still stamped @updatedAt, published
+      // `message.flag_changed`, fanned a team-wide frame, re-rendered every
+      // open thread, and delivered an outbound webhook to partners — all for a
+      // change that changed nothing.
+      const changed = Object.keys(folded).length > 0;
+      if (changed) {
+        await tx.messageFlag.update({ where: { id: existing.id }, data: folded });
+      } else {
+        // Nothing to fold in: don't write, and don't PUBLISH. Suppressing the
+        // event is the point — the write itself was cheap, but it stamped
+        // @updatedAt, fanned a team-wide `message:flag` frame, re-rendered
+        // every open thread and delivered an outbound webhook to partners for
+        // a change that changed nothing.
+        suppressPublish = true;
+      }
       flagId = existing.id;
       delta = 0;
       action = "updated";
@@ -187,7 +205,9 @@ async function raiseFlagOnce(
 
     const openFlagCount = await bumpOpenFlagCount(tx, conversationId, delta);
     const flag = await readFlag(tx, flagId);
-    await publishFlagEvent(tx, { args, flag, openFlagCount, action, conversationId });
+    if (!suppressPublish) {
+      await publishFlagEvent(tx, { args, flag, openFlagCount, action, conversationId });
+    }
     return { flag, openFlagCount, action };
   });
 
@@ -265,6 +285,28 @@ export async function updateFlag(db: Db, args: UpdateFlagArgs): Promise<FlagMuta
       where: { id: existing.id, status: existing.status },
       data,
     });
+
+    // Losing the CAS must not silently swallow the NON-lifecycle fields.
+    // `assignedToId` / `note` / `resolutionNote` aren't gated on status —
+    // there's no reason a concurrent resolve should discard an assignment.
+    // Previously the caller got a 200 with the flag unassigned: agent A routes
+    // a complaint to Sara, agent B resolves it a moment earlier, A's write
+    // matches 0 rows, and Sara never hears about it. Re-apply just those
+    // fields, unconditioned on status.
+    if (written.count === 0 && statusChanges) {
+      const metadataOnly: Prisma.MessageFlagUncheckedUpdateManyInput = {};
+      if (args.assignedToId !== undefined) metadataOnly.assignedToId = args.assignedToId;
+      if (args.note !== undefined) metadataOnly.note = args.note;
+      if (args.resolutionNote !== undefined) {
+        metadataOnly.resolutionNote = args.resolutionNote;
+      }
+      if (Object.keys(metadataOnly).length > 0) {
+        await tx.messageFlag.updateMany({
+          where: { id: existing.id },
+          data: metadataOnly,
+        });
+      }
+    }
 
     const delta =
       written.count === 1 && statusChanges

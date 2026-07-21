@@ -112,8 +112,17 @@ export class MessageFlagsCatalogService {
 
     try {
       const updated = await this.db.messageFlagDefinition.update({
-        where: { id },
-        data: input,
+        where: { id, teamId },
+        data: {
+          ...input,
+          // Normalize on UPDATE too, not just create. The internal schema
+          // refines `color` against TAG_COLORS but the `/v1` twin doesn't, so
+          // `PATCH /v1/message-flag-definitions/:id {"color":"anything"}`
+          // persisted an arbitrary string — two surfaces enforcing different
+          // contracts on one column. Cosmetic only (unknown keys fall back to
+          // slate) but it's the kind of drift that becomes a real bug later.
+          ...(input.color !== undefined ? { color: normalizeColor(input.color) } : {}),
+        },
         select: MESSAGE_FLAG_DEFINITION_SELECT,
       });
       await this.publishCatalogChanged(teamId);

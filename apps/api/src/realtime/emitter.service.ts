@@ -456,7 +456,36 @@ export class RealtimeEmitter {
   /** Re-emit `presence:update` to the team room with a fresh visibly-online
    *  set. Used by `user.availability_changed` fanout so toggling "appear
    *  offline" updates teammates' green dots in the same frame as the badge. */
-  async emitPresenceSnapshot(teamId: string): Promise<void> {
+  private presenceDebounceTimers = new Map<string, NodeJS.Timeout>();
+  private static readonly PRESENCE_DEBOUNCE_MS = 150;
+
+  /**
+   * Re-emit the team's presence snapshot, DEBOUNCED per team.
+   *
+   * This used to fire once per `user.availability_changed`, on the reasoning
+   * that availability changes are rare manual clicks. Working hours made that
+   * false: the schedule sweeper walks a whole team at a shift boundary, so a
+   * 30-person org produced ~30 identical team-wide broadcasts (plus a DB read
+   * and a widget relay each) at 09:00, again at 17:00, and again at local
+   * midnight when the "back tomorrow" text rolls over.
+   *
+   * Coalescing is safe because the snapshot is BUILT when the timer fires, so
+   * the single emitted frame carries the by-then current state — the same
+   * idempotence argument the viewers debounce above relies on.
+   */
+  emitPresenceSnapshot(teamId: string): void {
+    const existing = this.presenceDebounceTimers.get(teamId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.presenceDebounceTimers.delete(teamId);
+      void this.doEmitPresenceSnapshot(teamId);
+    }, RealtimeEmitter.PRESENCE_DEBOUNCE_MS);
+    // Don't hold the event loop open on shutdown for a presence frame.
+    timer.unref?.();
+    this.presenceDebounceTimers.set(teamId, timer);
+  }
+
+  private async doEmitPresenceSnapshot(teamId: string): Promise<void> {
     const io = this.server;
     const snapshot = this.presenceSnapshotter;
     if (!io || !snapshot) {

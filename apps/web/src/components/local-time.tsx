@@ -6,6 +6,7 @@ import {
   formatLocaleString,
   formatMessageTime,
   formatShortDate,
+  formatUntil,
 } from "@ccp/shared/utils";
 
 import { useTimezone, useTzNow } from "@/providers/tz-provider";
@@ -38,6 +39,7 @@ const FORMATTERS = {
   localeDate: formatLocaleDate,
   localeString: formatLocaleString,
   shortDate: formatShortDate,
+  until: formatUntil,
 } as const;
 
 export type LocalTimeFormat = keyof typeof FORMATTERS;

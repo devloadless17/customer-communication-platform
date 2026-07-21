@@ -215,7 +215,10 @@ export async function applyAvailability(
   }
 
   await db.user.update({
-    where: { id: user.id },
+    // §18: teamId belongs in the WHERE of every query. Redundant today (the
+    // caller already read this user team-scoped), but the invariant exists so
+    // it survives the next refactor that changes how `user` gets here.
+    where: { id: user.id, teamId: user.teamId },
     data: {
       availabilityStatus: effective.status,
       availabilityMessage: effective.message,

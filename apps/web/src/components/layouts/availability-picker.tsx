@@ -388,7 +388,7 @@ export function AvailabilityPicker({
             {until && (
               <>
                 {source === "admin" || source === "manual" ? " · until " : " · "}
-                <LocalTime iso={until} format="messageTime" />
+                <LocalTime iso={until} format="until" />
               </>
             )}
           </span>

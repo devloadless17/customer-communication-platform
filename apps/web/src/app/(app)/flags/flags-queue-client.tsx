@@ -113,14 +113,28 @@ export function FlagsQueueClient({
 
   // Live convergence. Every flag mutation — ours, a teammate's, or one made
   // from the inbox bubble — arrives here as the same frame.
+  //
+  // COALESCED, because `message:flag` is team-wide: one teammate bulk-triaging
+  // 20 flags fired 40 un-debounced requests per open tab, and `load()` does a
+  // full `setItems` replace, so a supervisor five pages deep got yanked back to
+  // page 1 on every frame. One trailing refresh per burst converges to the same
+  // state (both fetches read current server state when they run) at a fraction
+  // of the cost — `/counts` in particular is a groupBy over every open flag in
+  // the team. CLAUDE.md §10/§15: coalesce socket bursts.
   useEffect(() => {
     const socket = getClientSocket();
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const onFlag = () => {
-      void load();
-      void loadCounts();
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        void load();
+        void loadCounts();
+      }, 400);
     };
     socket.on("message:flag", onFlag);
     return () => {
+      if (timer) clearTimeout(timer);
       socket.off("message:flag", onFlag);
     };
   }, [load, loadCounts]);

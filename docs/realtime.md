@@ -122,3 +122,17 @@ A fresh manual pick sets `availabilityOverrideUntil` to the **next schedule boun
 **One writer**: `apps/api/src/lib/availability/apply.ts`. The self route, the admin route (`availability:manageOthers`), and the 60s `work-hours` sweeper all funnel through it, so the columns, the override expiry, and the `user.availability_changed` event can't drift apart. It no-ops (no write, no frame) when nothing actually changed — load-bearing, since the sweeper calls it for every scheduled member every minute.
 
 Client note: `user:availability:updated` carries an extra `manual` object. **Only the user's own availability picker reads it** — teammates render `status`/`message`. Without it, an off-shift agent's own note box would fill with "Outside working hours" and save that back as their personal note.
+
+
+### `message:flag`
+
+Team-scoped frame for triage-flag changes (add / update / resolve / remove).
+Carries `conversationId`, `messageId`, the flag and the conversation's
+`openFlagCount`.
+
+Consumers must COALESCE it: it is team-wide, so one agent bulk-triaging a queue
+produces a burst. The `/flags` queue debounces its refetch for exactly this
+reason; the inbox applies it through the shared thread reducers.
+
+Under agent conversation-visibility scoping the frame follows the same rule as
+every other conversation frame — see [assignment.md](assignment.md).

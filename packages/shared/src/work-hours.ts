@@ -273,7 +273,13 @@ function windowsForDay(
   const exception = schedule.exceptions?.find((e) => e.date === dateKey);
   if (exception) {
     if (exception.closed) return [];
-    if (exception.windows && exception.windows.length > 0) return exception.windows;
+    // An exception that EXPLICITLY carries `windows` replaces the weekday's
+    // set — including when that array is empty, which means "closed".
+    // Previously an empty array fell through to the weekly grid, so a `/v1`
+    // integration posting `{ date: "2026-12-25", windows: [] }` to close
+    // Christmas got a fully OPEN Christmas instead. `windows` absent (vs
+    // present-but-empty) still means "inherit the weekday".
+    if (exception.windows !== undefined) return exception.windows;
   }
   return schedule.weekly?.[day_key] ?? [];
 }
