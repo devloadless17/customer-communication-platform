@@ -851,7 +851,6 @@ export function ContactsClient({
           }}
           selectedIds={[...selectedIds]}
           filteredCount={list.totalCount ?? 0}
-          totalCount={list.totalCount ?? 0}
         />
       )}
 

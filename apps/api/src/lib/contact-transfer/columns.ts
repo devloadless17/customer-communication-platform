@@ -10,6 +10,8 @@
  */
 
 import {
+  collidesWithBuiltinColumn,
+  CUSTOM_FIELD_HEADER_PREFIX,
   isIgnoredTransferHeader,
   matchTransferColumn,
   TRANSFER_COLUMNS,
@@ -39,6 +41,21 @@ export interface TeamFieldDef {
 const MAX_ONE_OFF_COLUMNS = 200;
 
 /**
+ * The header a team custom field is written under.
+ *
+ * Normally the human-readable label. But a label that a built-in column would
+ * shadow on import ("Language" vs the built-in `language`) is emitted in the
+ * `custom:<key>` form instead — otherwise the file carries TWO columns that
+ * both resolve to the built-in, the last one wins, and the custom field's data
+ * is silently lost on re-import.
+ */
+export function fieldHeader(def: TeamFieldDef): string {
+  return collidesWithBuiltinColumn(def.label)
+    ? `${CUSTOM_FIELD_HEADER_PREFIX}${def.key}`
+    : def.label;
+}
+
+/**
  * Build the export column list for a team.
  *
  * The one-off keys come from ONE aggregate query rather than by scanning loaded
@@ -58,7 +75,7 @@ export async function resolveExportColumns(teamId: string): Promise<{
   });
 
   const baseColumns = TRANSFER_COLUMNS.map((c) => c.header);
-  const teamColumns = fieldDefs.map((d) => d.label);
+  const teamColumns = fieldDefs.map(fieldHeader);
 
   // A one-off bag key that shadows a base column ("phone_number") or a team
   // field label would emit a DUPLICATE header AND overwrite the built-in cell
@@ -111,6 +128,22 @@ export function resolveImportMapping(
     const override = overrides[header];
     if (override !== undefined) {
       mapping.set(header, parseOverride(override, keySet));
+      continue;
+    }
+
+    // `custom:<key>` wins over built-in matching by construction — that is the
+    // entire point of the prefix (see CUSTOM_FIELD_HEADER_PREFIX).
+    const trimmed = header.trim();
+    if (trimmed.toLowerCase().startsWith(CUSTOM_FIELD_HEADER_PREFIX)) {
+      const key = trimmed.slice(CUSTOM_FIELD_HEADER_PREFIX.length).trim();
+      if (keySet.has(key)) {
+        mapping.set(header, { kind: "field", key });
+        continue;
+      }
+      // Names a field that no longer exists — ignore it, and DO report it so
+      // the user isn't left wondering where the column went.
+      mapping.set(header, { kind: "ignore" });
+      unknownColumns.push(header);
       continue;
     }
 

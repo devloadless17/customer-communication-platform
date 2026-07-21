@@ -256,19 +256,18 @@ export class CallsService {
       );
     }
 
-    // Known revocation, mirrored from the provider's own revoke webhook (the
-    // customer withdrew consent, or it lapsed after four unanswered calls).
-    // A local fast path only — the provider read below is what actually
-    // authorizes a call — but it saves a pointless round-trip for a contact we
-    // already know said no, and gives the agent a precise reason.
-    if (
-      !isUnified &&
-      !skipPreflight &&
-      contact.callPermissionRevokedUntil &&
-      contact.callPermissionRevokedUntil.getTime() > Date.now()
-    ) {
-      return { ok: false, reason: "permission_revoked" };
-    }
+    // NOTE: `Contact.callPermissionRevokedUntil` is deliberately NOT consulted
+    // here. It is advisory context for the contact panel, not a gate.
+    //
+    // It was a gate briefly, and it refused customers the agent had just
+    // finished speaking to. Permission can come back at any moment through
+    // paths that write nothing on our side — the customer calling us (with
+    // callback permission on), or granting from their business profile — so a
+    // cached "revoked" flag reliably outlives the reality it describes. Same
+    // failure the local permission ledger had, in a smaller box. The provider
+    // read below is the authority; a genuinely revoked contact costs one Graph
+    // call to discover, which is nothing on a path a human deliberately
+    // triggered.
 
     // Everything past here needs provider credentials.
     let sendConfig: unknown;

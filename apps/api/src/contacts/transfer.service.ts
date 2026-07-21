@@ -18,9 +18,11 @@ import {
   type TransferFormat,
 } from "@ccp/shared/contacts/transfer-columns";
 
+import { Prisma } from "@prisma/client";
+
 import { DbService } from "@/db/db.service";
 import { blobStorage } from "@/lib/blob-storage";
-import { resolveExportColumns, suggestMapping } from "@/lib/contact-transfer/columns";
+import { fieldHeader, resolveExportColumns, suggestMapping } from "@/lib/contact-transfer/columns";
 import { createSink, createSource } from "@/lib/contact-transfer/formats";
 import {
   enqueueContactTransfer,
@@ -145,24 +147,21 @@ export class ContactTransferService {
 
     await this.assertNoRunningJob(args.teamId);
 
-    const job = await this.db.contactTransferJob.create({
-      data: {
-        teamId: args.teamId,
-        kind: "import",
-        format: args.format,
-        createdByUserId: args.userId,
-        filename: args.filename,
-        sourceKey: args.uploadKey,
-        options: {
-          mode: args.options.mode,
-          tagMode: args.options.tagMode,
-          fireAutomations: args.options.fireAutomations,
-          mapping: args.options.mapping ?? {},
-          canManageTags: args.canManageTags,
-        },
-        expiresAt: expiry(),
+    const job = await this.createJob({
+      teamId: args.teamId,
+      kind: "import",
+      format: args.format,
+      createdByUserId: args.userId,
+      filename: args.filename,
+      sourceKey: args.uploadKey,
+      options: {
+        mode: args.options.mode,
+        tagMode: args.options.tagMode,
+        fireAutomations: args.options.fireAutomations,
+        mapping: args.options.mapping ?? {},
+        canManageTags: args.canManageTags,
       },
-      select: { id: true },
+      expiresAt: expiry(),
     });
     await enqueueContactTransfer(job.id);
     return { jobId: job.id };
@@ -178,21 +177,18 @@ export class ContactTransferService {
 
     const format = args.input.format as TransferFormat;
     const stamp = new Date().toISOString().slice(0, 10);
-    const job = await this.db.contactTransferJob.create({
-      data: {
-        teamId: args.teamId,
-        kind: "export",
-        format,
-        createdByUserId: args.userId,
-        filename: `contacts-${stamp}.${format}`,
-        options: {
-          // Explicit selection wins over filters — see the schema's note.
-          ...(args.input.ids?.length ? { scopeIds: args.input.ids } : {}),
-          filters: args.input.filters ?? {},
-        },
-        expiresAt: expiry(),
+    const job = await this.createJob({
+      teamId: args.teamId,
+      kind: "export",
+      format,
+      createdByUserId: args.userId,
+      filename: `contacts-${stamp}.${format}`,
+      options: {
+        // Explicit selection wins over filters — see the schema's note.
+        ...(args.input.ids?.length ? { scopeIds: args.input.ids } : {}),
+        filters: args.input.filters ?? {},
       },
-      select: { id: true },
+      expiresAt: expiry(),
     });
     await enqueueContactTransfer(job.id);
     return { jobId: job.id };
@@ -282,12 +278,15 @@ export class ContactTransferService {
     const fieldDefs = await this.db.contactFieldDefinition.findMany({
       where: { teamId, isVisible: true },
       orderBy: [{ order: "asc" }, { createdAt: "asc" }],
-      select: { label: true },
+      select: { key: true, label: true },
     });
     // Importable columns only — a template containing `source`/`id` would
     // invite the user to fill in columns we ignore.
     const builtins = TRANSFER_COLUMNS.filter((c) => c.importable);
-    const columns = [...builtins.map((c) => c.header), ...fieldDefs.map((d) => d.label)];
+    // fieldHeader disambiguates a custom field whose label a built-in would
+    // shadow; without it the template offers two columns ("language" and
+    // "Language") that both land in the built-in.
+    const columns = [...builtins.map((c) => c.header), ...fieldDefs.map(fieldHeader)];
     const example: Record<string, string> = {};
     for (const c of builtins) example[c.header] = c.example ?? "";
 
@@ -340,19 +339,41 @@ export class ContactTransferService {
   // -------------------------------------------------------------------------
 
   /**
-   * One in-flight job per team. Enforced as a 409 rather than a silent queue
-   * so the user gets told "your other import is still running" instead of
-   * watching a job sit at 0% for ten minutes.
+   * One in-flight job per team. Reported as a 409 rather than a silent queue so
+   * the user is told "your other import is still running" instead of watching a
+   * job sit at 0% for ten minutes.
+   *
+   * This is the FRIENDLY path only. It's a read-then-write with no lock, so two
+   * requests arriving together both see zero and both proceed — the partial
+   * unique index `ContactTransferJob_teamId_active_key` is what actually
+   * enforces the invariant, and `createJob` maps its P2002 to this same error.
    */
   private async assertNoRunningJob(teamId: string): Promise<void> {
     const running = await this.db.contactTransferJob.count({
       where: { teamId, status: { in: ["pending", "running"] } },
     });
-    if (running >= MAX_CONCURRENT_TRANSFERS_PER_TEAM) {
-      throw new ConflictException({
-        error: "transfer_in_progress",
-        detail: "Another contact import or export is still running. Wait for it to finish.",
-      });
+    if (running >= MAX_CONCURRENT_TRANSFERS_PER_TEAM) throw transferInProgress();
+  }
+
+  /**
+   * Insert a job row, translating the active-transfer unique violation into the
+   * same 409 the pre-check produces. Without this a lost race surfaces as a
+   * raw 500 from the Prisma exception filter.
+   */
+  private async createJob(
+    data: Prisma.ContactTransferJobUncheckedCreateInput,
+  ): Promise<{ id: string }> {
+    try {
+      return await this.db.contactTransferJob.create({ data, select: { id: true } });
+    } catch (e) {
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === "P2002" &&
+        String(e.meta?.target ?? "").includes("active")
+      ) {
+        throw transferInProgress();
+      }
+      throw e;
     }
   }
 
@@ -385,6 +406,13 @@ export class ContactTransferService {
       throw e;
     }
   }
+}
+
+function transferInProgress(): ConflictException {
+  return new ConflictException({
+    error: "transfer_in_progress",
+    detail: "Another contact import or export is still running. Wait for it to finish.",
+  });
 }
 
 function expiry(): Date {

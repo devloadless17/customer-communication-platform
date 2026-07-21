@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import {
   BadRequestException,
   Body,
+  ConflictException,
   Controller,
   Get,
   Param,
@@ -218,11 +219,32 @@ export class ContactTransferController {
     @Res() res: Response,
   ): Promise<void> {
     const format: TransferFormat = formatRaw === "xlsx" ? "xlsx" : "csv";
-    const { jobId } = await this.transfers.startExport({
-      teamId: session.teamId,
-      userId: session.userId,
-      input: { format, filters: {} },
-    });
+    let jobId: string;
+    try {
+      ({ jobId } = await this.transfers.startExport({
+        teamId: session.teamId,
+        userId: session.userId,
+        input: { format, filters: {} },
+      }));
+    } catch (e) {
+      // The one-transfer-per-team gate would turn this legacy download link
+      // into a 409 whenever an unrelated import happens to be running — a
+      // scripted caller hitting a bookmarked URL has no idea what that means
+      // and nothing to retry against. Answer with the honest 503 + Retry-After
+      // instead, which every HTTP client already understands.
+      if (e instanceof ConflictException) {
+        res
+          .status(503)
+          .set("retry-after", "30")
+          .json({
+            error: "transfer_in_progress",
+            detail:
+              "Another contact import or export is running. Retry shortly, or use POST /api/contacts/export to queue one.",
+          });
+        return;
+      }
+      throw e;
+    }
     const done = await this.transfers.waitForTerminal(session.teamId, jobId, LEGACY_WAIT_MS);
     if (done?.status === "completed") {
       res.redirect(302, await this.transfers.downloadUrl(session.teamId, jobId, "result"));

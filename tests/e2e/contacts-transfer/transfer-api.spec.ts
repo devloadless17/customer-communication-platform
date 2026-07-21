@@ -283,6 +283,79 @@ test.describe("contact transfer — export flow", () => {
   });
 });
 
+test.describe("contact transfer — lifecycle invariants", () => {
+  test("export artifacts are excluded from the generic blob-orphan sweeper", async () => {
+    // Not an HTTP assertion — a STATIC one, because the failure is invisible:
+    // the blob-orphan sweeper deletes any key it can't find in Message.mediaKey
+    // after a 24h grace window, so without these prefixes a user's 7-day export
+    // is destroyed on day one and the download link 404s with no error anywhere.
+    // This repo has already shipped that exact bug twice (ai-knowledge/,
+    // ai-voice-draft/), which is why it's pinned here rather than trusted.
+    const fs = await import("node:fs/promises");
+    const src = await fs.readFile(
+      "apps/api/src/lib/sweepers/blob-orphan.ts",
+      "utf-8",
+    );
+    const list = src.slice(
+      src.indexOf("const URL_ONLY_KEY_PREFIXES"),
+      src.indexOf("] as const", src.indexOf("const URL_ONLY_KEY_PREFIXES")),
+    );
+    expect(list, "contact-exports/ must be excluded").toContain('"contact-exports/"');
+    expect(list, "contact-imports/ must be excluded").toContain('"contact-imports/"');
+  });
+
+  test("a second concurrent transfer is refused by the DB, not just the pre-check", async ({
+    request,
+  }) => {
+    await drainRunningJobs(request);
+    // Fire both without awaiting the first, so they race the COUNT pre-check.
+    // The partial unique index is the actual guarantee; at most one may win.
+    const [a, b] = await Promise.all([
+      request.post("/api/contacts/export", { data: { format: "csv" } }),
+      request.post("/api/contacts/export", { data: { format: "csv" } }),
+    ]);
+    const created = [a, b].filter((r) => r.status() === 201);
+    const refused = [a, b].filter((r) => r.status() === 409);
+    expect(created.length, "at most one transfer may start").toBeLessThanOrEqual(1);
+    expect(created.length + refused.length, "no 500s from a lost race").toBe(2);
+
+    for (const r of created) {
+      const { jobId } = (await r.json()) as { jobId: string };
+      await waitForJob(request, jobId);
+    }
+  });
+
+  test("the legacy export URL degrades to 503, not 409, while a job runs", async ({
+    request,
+  }) => {
+    await drainRunningJobs(request);
+    const started = await request.post("/api/contacts/import/preview", {
+      multipart: {
+        file: {
+          name: "busy.csv",
+          mimeType: "text/csv",
+          buffer: Buffer.from("phone_number,name\r\n15557770099,Busy"),
+        },
+      },
+    });
+    const { uploadKey } = (await started.json()) as { uploadKey: string };
+    const imp = await request.post("/api/contacts/import", {
+      data: { uploadKey, filename: "busy.csv", format: "csv", options: {} },
+    });
+    const { jobId } = (await imp.json()) as { jobId: string };
+
+    // Race the running import with the legacy download URL. If it finished
+    // first we get the normal 200; what must NEVER happen is a bare 409, which
+    // a bookmarked download link has no way to interpret or retry.
+    const legacy = await request.get("/api/contacts/export");
+    expect([200, 503], `got ${legacy.status()}`).toContain(legacy.status());
+    if (legacy.status() === 503) {
+      expect(legacy.headers()["retry-after"], "tells the client when to retry").toBeTruthy();
+    }
+    await waitForJob(request, jobId);
+  });
+});
+
 test.describe("contact transfer — isolation & validation", () => {
   test("an unknown job id 404s rather than leaking existence", async ({ request }) => {
     const res = await request.get("/api/contacts/transfers/clzzzzzzzzzzzzzzzzzzzzzzz");

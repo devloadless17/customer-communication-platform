@@ -112,6 +112,36 @@ function waitForPeerConnected(pc: RTCPeerConnection): Promise<void> {
   });
 }
 
+
+/**
+ * sessionStorage key holding the call this TAB currently has live.
+ *
+ * sessionStorage (not local) is deliberate: it is per-tab and survives a
+ * reload, which is exactly the distinction we need. An agent with the app open
+ * in two tabs must not have tab B's mount tear down tab A's call — tab B never
+ * wrote this key, so it never reclaims anything.
+ */
+const ACTIVE_CALL_TAB_KEY = "ccp.call.activeCallId";
+
+function readTabCallId(): string | null {
+  try {
+    return window.sessionStorage.getItem(ACTIVE_CALL_TAB_KEY);
+  } catch {
+    // Private mode / storage disabled — recovery degrades to the server-side
+    // stale-call sweeper, which is slower but still terminal.
+    return null;
+  }
+}
+
+function writeTabCallId(callId: string | null): void {
+  try {
+    if (callId) window.sessionStorage.setItem(ACTIVE_CALL_TAB_KEY, callId);
+    else window.sessionStorage.removeItem(ACTIVE_CALL_TAB_KEY);
+  } catch {
+    // Non-fatal; see readTabCallId.
+  }
+}
+
 export function useCall(): {
   liveCall: LiveCallState | null;
   error: string | null;
@@ -385,6 +415,39 @@ export function useCall(): {
       });
     };
 
+    /**
+     * The customer picked up an outbound call.
+     *
+     * This frame is the ONLY thing that starts the timer on a call we placed:
+     * the SDP answer arrives a second after dialing (media setup, not pickup),
+     * and the provider's authoritative pickup signal is its ACCEPTED call
+     * status, which reaches us as this frame. Without a handler here the panel
+     * sits on "Calling…" forever while the two parties are already talking.
+     */
+    const onAnswered = (payload: { callId: string; answeredAt: string }) => {
+      const answeredAtMs = Date.parse(payload.answeredAt);
+      setLiveCall((prev) => {
+        // Only our own still-ringing OUTBOUND call. Inbound calls set their own
+        // state when the agent answers, and this frame is fanned to the whole
+        // team, so every other agent's browser sees it too.
+        if (
+          !prev ||
+          prev.callId !== payload.callId ||
+          prev.direction !== "out" ||
+          prev.status !== "ringing"
+        ) {
+          return prev;
+        }
+        return {
+          ...prev,
+          status: "in_progress",
+          // Start the timer from the provider's real pickup time, not from
+          // when this frame happened to arrive.
+          answeredAt: Number.isFinite(answeredAtMs) ? answeredAtMs : Date.now(),
+        };
+      });
+    };
+
     const onEnded = (payload: { callId: string }) => {
       if (liveCallRef.current?.callId === payload.callId) {
         tearDown();
@@ -396,12 +459,92 @@ export function useCall(): {
     };
 
     socket.on("call:sdp_offer", onSdpOffer);
+    socket.on("call:answered", onAnswered);
     socket.on("call:ended", onEnded);
     return () => {
       socket.off("call:sdp_offer", onSdpOffer);
+      socket.off("call:answered", onAnswered);
       socket.off("call:ended", onEnded);
     };
   }, [tearDown, applyOutboundAnswer]);
+
+
+  // ── Surviving a reload / tab close ──────────────────────────────────────
+  //
+  // A page reload destroys the RTCPeerConnection, and a WebRTC session cannot
+  // be resumed across it — the SDP negotiation is gone and the provider holds
+  // the other end. So the media is provably dead the moment the page unloads,
+  // while our Call row still says `in_progress` and the CUSTOMER is sitting on
+  // a silent line. Left alone the stale-call sweeper only clears that after two
+  // hours, which is two hours of a customer being ignored by a call that looks
+  // live to everyone else on the team.
+  //
+  // Two layers, because neither alone is reliable:
+  //   1. on unload, release the call immediately (keepalive, so it survives the
+  //      navigation) — this is what frees the customer in the normal case;
+  //   2. on mount, if this tab left a marker behind, the unload beacon either
+  //      didn't fire or didn't land — release it now.
+  useEffect(() => {
+    writeTabCallId(liveCall?.callId ?? null);
+  }, [liveCall?.callId]);
+
+  useEffect(() => {
+    const release = () => {
+      const callId = liveCallRef.current?.callId;
+      // `tmp_` ids exist only until placeCall returns; there is no server-side
+      // call to end under that id yet. The mount-time reclaim below is the
+      // backstop for a reload inside that brief window.
+      if (!callId || callId.startsWith("tmp_")) return;
+      try {
+        // keepalive so the request outlives the page. sendBeacon can't set the
+        // session cookie policy we need, so this is a keepalive fetch.
+        void fetch(`/api/calls/${callId}/end`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+          credentials: "include",
+          keepalive: true,
+        });
+      } catch {
+        // Best effort — the mount-time reclaim covers a failure here.
+      }
+    };
+    // `pagehide` fires where `beforeunload` doesn't (bfcache, mobile Safari).
+    window.addEventListener("pagehide", release);
+    return () => window.removeEventListener("pagehide", release);
+  }, []);
+
+  useEffect(() => {
+    const orphaned = readTabCallId();
+    if (!orphaned || orphaned.startsWith("tmp_")) {
+      writeTabCallId(null);
+      return;
+    }
+    // This tab was mid-call when it reloaded. End the call — idempotent, and a
+    // no-op if the unload beacon already did it or the customer hung up.
+    writeTabCallId(null);
+    void fetchWithSessionGuard(`/api/calls/${orphaned}/end`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    })
+      .then((res) => {
+        // Only tell the agent when WE ended a call that was still live —
+        // otherwise every reload after a normal hangup would nag.
+        if (!res.ok) return;
+        return res
+          .json()
+          .then((body: { durationSeconds?: number | null }) => {
+            if (body?.durationSeconds != null) {
+              toast.message?.("Your call ended when the page reloaded.");
+            }
+          })
+          .catch(() => undefined);
+      })
+      .catch(() => undefined);
+    // Mount-only: this is reload recovery, not an ongoing subscription.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Hidden <audio> element for remote audio playback. Created once.
   useEffect(() => {

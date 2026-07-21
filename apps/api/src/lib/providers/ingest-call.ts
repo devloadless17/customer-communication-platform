@@ -872,32 +872,53 @@ async function handlePermissionEvent(
       }
     }
   } else if (evt.phase === "permission_revoked") {
-    // Far-future timestamp acts as "revoked until further notice" — Meta
-    // doesn't expire revocation on its own; the customer has to grant a
-    // fresh permission. We clear it on the next successful permission
-    // grant rather than letting a timer run out.
-    const farFuture = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
-    await db.contact.update({
-      where: { id: contact.id },
-      data: {
-        callPermissionRevokedUntil: farFuture,
-        // Reset the counter so the UI's warning state resolves once Meta
-        // confirms the revocation — they've already taken the action.
-        consecutiveUnansweredOutCalls: 0,
-      },
-    });
-    // Mark any live grant/pending request as `denied` so a stale `granted`
-    // row can't keep authorizing calls after Meta revoked permission. The
-    // Contact.callPermissionRevokedUntil gate already blocks the call, but
-    // keeping the request rows consistent prevents the pre-flight from
-    // disagreeing with itself if that column is ever cleared independently.
+    // Two very different things arrive as a "reject", and conflating them
+    // blocks calling to customers who never revoked anything:
+    //
+    //   user_action — the customer DECLINED a permission request. That is not
+    //     a standing revocation: they can still grant permission afterwards,
+    //     right up until the request expires. Only the request is dead.
+    //   automatic  — the provider WITHDREW permission itself, after too many
+    //     unanswered calls.
+    //
+    // Treating a single decline as a revocation is what made us refuse
+    // customers we had just spoken to.
+    const isAutomaticRevocation = evt.permissionAutomatic === true;
+
+    if (isAutomaticRevocation) {
+      // Record it so the contact panel can explain why calling stopped. This
+      // is ADVISORY ONLY — the provider remains the gate, because the customer
+      // can re-grant at any moment in ways that touch nothing on our side
+      // (calling us with callback permission on, or their business profile),
+      // and a local lock would outlive the reality it describes.
+      await db.contact.update({
+        where: { id: contact.id },
+        data: {
+          callPermissionRevokedUntil: new Date(
+            evt.timestamp.getTime() + 7 * 24 * 60 * 60 * 1000,
+          ),
+          // The counter has done its job; reset it so the "2 unanswered"
+          // warning doesn't sit alongside the revocation notice.
+          consecutiveUnansweredOutCalls: 0,
+        },
+      });
+    }
+
+    // Retire request rows either way — a declined request and a withdrawn
+    // permission are both dead as authorizations. Correlate to the exact
+    // request when the reply told us which one it answers; otherwise retire
+    // whatever is outstanding.
     await db.callPermissionRequest.updateMany({
       where: {
         teamId,
         contactId: contact.id,
-        status: {
-          in: [CallPermissionStatus.pending, CallPermissionStatus.granted],
-        },
+        ...(evt.permissionRequestExternalId
+          ? { externalRequestId: evt.permissionRequestExternalId }
+          : {
+              status: {
+                in: [CallPermissionStatus.pending, CallPermissionStatus.granted],
+              },
+            }),
       },
       data: { status: CallPermissionStatus.denied },
     });

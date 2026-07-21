@@ -349,12 +349,13 @@ export const r2Provider: BlobStorageProvider = {
     }
   },
 
-  async listKeys({ limit, cursor }) {
+  async listKeys({ limit, cursor, prefix }) {
     const res = await getClient().send(
       new ListObjectsV2Command({
         Bucket: bucket(),
         MaxKeys: limit,
         ...(cursor ? { ContinuationToken: cursor } : {}),
+        ...(prefix ? { Prefix: prefix } : {}),
       }),
     );
     const keys = (res.Contents ?? [])

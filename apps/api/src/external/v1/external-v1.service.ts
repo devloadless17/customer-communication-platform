@@ -16,6 +16,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 
+import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
 import { MAX_CHAIN_DEPTH } from "@/lib/workflows/events";
 import { ContactTransferService } from "@/contacts/transfer.service";
 import { toExternalAvatarUrl } from "@/lib/blob-storage";
@@ -1688,6 +1689,17 @@ export class ExternalV1Service {
     });
     if (existing.length >= 50) {
       throw new BadRequestException({ error: "too_many_contact_fields", detail: "at most 50 contact fields per team" });
+    }
+    // Same guard the internal contact-fields route applies. Without it /v1 can
+    // mint a field whose label shadows a built-in column ("Language", "City"),
+    // which renders two fields with the same name in the contact panel writing
+    // to different storage — and makes the field un-round-trippable through
+    // import/export except via the `custom:<key>` header form.
+    if (isReservedFieldKey(input.label)) {
+      throw new BadRequestException({
+        error: "reserved_field_label",
+        detail: `"${input.label}" collides with a built-in contact field. Pick a different label.`,
+      });
     }
     const baseKey = slugifyKey(input.label);
     if (!baseKey) {

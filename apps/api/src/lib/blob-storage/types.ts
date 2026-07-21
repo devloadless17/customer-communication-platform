@@ -166,6 +166,10 @@ export interface BlobStorageProvider {
   listKeys?(opts: {
     limit: number;
     cursor?: string;
+    /** Restrict the listing to one key namespace (e.g. `contact-imports/`).
+     *  Lets a category-owned sweeper walk only its own objects instead of
+     *  paging the whole bucket to find them. */
+    prefix?: string;
   }): Promise<{
     // Blob categories NOT cross-checked against a `mediaKey` column (avatars,
     // which persist only a URL) are told apart by KEY PREFIX (`avatars/`), so

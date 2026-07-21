@@ -83,6 +83,7 @@ async function main(): Promise<void> {
     await testExportImportRoundTrip(teamId);
     await testUpsertSemantics(teamId);
     await testIdentityInvariant(teamId);
+    await testCollidingCustomField(teamId);
     await testErrorReportAndCaps(teamId);
     await testTenantIsolation(teamId);
   } finally {
@@ -380,6 +381,113 @@ async function testIdentityInvariant(teamId: string): Promise<void> {
   );
 
   await unlink(path).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * A custom field whose LABEL a built-in column would shadow ("Language" vs the
+ * built-in `language`).
+ *
+ * The reserved-name guard rejects these at create time, but pre-guard rows and
+ * (until now) /v1-created rows exist in real databases — this team's dev DB had
+ * exactly one. Without the `custom:<key>` header form the export emits TWO
+ * columns that both resolve to the built-in on re-import, the last one wins,
+ * and the custom field's value is silently replaced by the built-in's.
+ */
+async function testCollidingCustomField(teamId: string): Promise<void> {
+  console.log("\ncustom field colliding with a built-in column");
+
+  // Insert directly — the API guard (correctly) refuses to create this.
+  await db.contactFieldDefinition.create({
+    data: { teamId, key: "language", label: "Language", order: 5 },
+  });
+  await db.contact.create({
+    data: {
+      teamId,
+      identityChannel: "whatsapp",
+      phoneNumber: "15556660006",
+      name: "Collide Case",
+      language: "en", // the BUILT-IN column
+      customFields: { language: "Klingon" }, // the CUSTOM field
+    },
+  });
+
+  const res = await runContactExport({
+    teamId,
+    jobId: `smoke-collide-${randomUUID().slice(0, 8)}`,
+    format: "csv",
+    scope: { filters: { search: "15556660006" } },
+  });
+  const path = join(tmpdir(), `smoke-collide-${randomUUID()}.csv`);
+  await downloadArtifact(res.artifactKey, path);
+  const src = createSource("csv", path);
+  const headers = await src.headers();
+  const rows: Array<Record<string, string>> = [];
+  for await (const r of src.rows()) rows.push(r.cells);
+  await src.close();
+
+  const lower = headers.map((h) => h.toLowerCase());
+  eq(
+    "no duplicate header (built-in vs colliding label)",
+    lower.length,
+    new Set(lower).size,
+  );
+  check("colliding field exported as custom:<key>", headers.includes("custom:language"), headers);
+  check("plain 'Language' label NOT emitted", !headers.includes("Language"), headers);
+
+  const row = rows[0] ?? {};
+  eq("built-in language kept its own value", row.language, "en");
+  eq("custom field kept its own value", row["custom:language"], "Klingon");
+
+  // Round-trip into a clean team: both values must survive, still separated.
+  const other = await db.team.create({
+    data: { name: `collide-${randomUUID().slice(0, 8)}` },
+    select: { id: true },
+  });
+  try {
+    await db.contactFieldDefinition.create({
+      data: { teamId: other.id, key: "language", label: "Language", order: 0 },
+    });
+    const key = `contact-imports/${other.id}/collide-${randomUUID().slice(0, 8)}.csv`;
+    await blobStorage.putObjectFromFile({ key, path, contentType: "text/csv" });
+    const run = await runContactImport({
+      teamId: other.id,
+      userId: null,
+      jobId: `smoke-collide-imp-${randomUUID().slice(0, 8)}`,
+      format: "csv",
+      sourceKey: key,
+      resumeFrom: 0,
+      options: {
+        mode: "create_and_update",
+        tagMode: "merge",
+        fireAutomations: false,
+        canManageTags: true,
+      },
+    });
+    eq("colliding-column file imports cleanly", run.failed, 0);
+    // The clean team has no "Company" field, so reporting THAT as unknown is
+    // correct. What must not happen is either language column being unknown.
+    check(
+      "neither language column reported unknown",
+      !run.unknownColumns.some((c) => c.toLowerCase().includes("language")),
+      run.unknownColumns,
+    );
+
+    const landed = await db.contact.findFirst({
+      where: { teamId: other.id, phoneNumber: "15556660006" },
+      select: { language: true, customFields: true },
+    });
+    eq("built-in language round-tripped", landed?.language, "en");
+    eq(
+      "custom field round-tripped SEPARATELY",
+      (landed?.customFields as Record<string, string>)?.language,
+      "Klingon",
+    );
+  } finally {
+    await db.team.delete({ where: { id: other.id } }).catch(() => {});
+    await unlink(path).catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------------------

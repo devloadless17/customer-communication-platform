@@ -173,6 +173,32 @@ export function isIgnoredTransferHeader(header: string): boolean {
   return IGNORED_HEADERS.has(header.trim().toLowerCase().replace(/\s+/g, " "));
 }
 
+/**
+ * Header prefix that forces a column to a CUSTOM FIELD by its stable key,
+ * bypassing built-in matching: `custom:language` → the team's `language`
+ * custom field, not the built-in Language column.
+ *
+ * Needed because a team can own a custom field whose label collides with a
+ * built-in ("Language", "City"). The reserved-name guard rejects those at
+ * create time on the internal route, but pre-guard rows and /v1-created rows
+ * exist in the wild. Without this prefix such a field is unexportable AND
+ * unimportable: every header spelling of it resolves to the built-in first, so
+ * the export emits two columns that both write to the built-in (last wins) and
+ * the custom field's data is silently lost on the round trip.
+ *
+ * Export only uses this form for a colliding field — ordinary custom fields
+ * keep their plain, human-readable label as the header.
+ */
+export const CUSTOM_FIELD_HEADER_PREFIX = "custom:";
+
+/**
+ * True when a custom-field label would be shadowed by a built-in column on
+ * import (case- and whitespace-insensitively, matching `matchTransferColumn`).
+ */
+export function collidesWithBuiltinColumn(label: string): boolean {
+  return matchTransferColumn(label) !== null;
+}
+
 /** Columns offered as mapping targets in the UI (built-ins only). */
 export const IMPORTABLE_TRANSFER_COLUMNS: readonly TransferColumn[] = TRANSFER_COLUMNS.filter(
   (c) => c.importable,

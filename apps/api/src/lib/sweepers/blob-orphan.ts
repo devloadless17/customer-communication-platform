@@ -82,7 +82,24 @@ const MAX_PAGES_PER_TICK = 4;
 // of risking the destructive direction to get there.
 // (`ai-voice/` — the SENT voice note — needs no entry: send-media-internal
 // stores it on `Message.mediaKey`, so the existing cross-check covers it.)
-const URL_ONLY_KEY_PREFIXES = ["avatars/", "ai-knowledge/", "ai-voice-draft/"] as const;
+//
+// `contact-exports/` and `contact-imports/` are here for the same reason, and
+// unlike the two above there is NO storage leak in excluding them: that
+// category owns its own lifecycle. Every object is referenced by a
+// `ContactTransferJob` row (`artifactKey` / `sourceKey` / `errorArtifactKey`)
+// which this cross-check doesn't query, and the dedicated
+// `contact-transfer-artifacts` sweeper deletes both the objects and the rows at
+// their 7-day `expiresAt`. Without this entry, a user's export would be
+// destroyed by THIS sweeper after the 24h grace window while its job row still
+// advertised a working download — the third instance of exactly the failure
+// this comment block already documents twice.
+const URL_ONLY_KEY_PREFIXES = [
+  "avatars/",
+  "ai-knowledge/",
+  "ai-voice-draft/",
+  "contact-exports/",
+  "contact-imports/",
+] as const;
 // URL-only categories that DON'T have a distinguishing key prefix. Template
 // header media (messages.service.ts `uploadTemplateHeaderMedia`) lives under the
 // shared `media/` prefix, but its stable URL is the only persisted reference —

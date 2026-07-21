@@ -32,6 +32,14 @@ const INITIAL_DELAY_MS = 90_000;
  */
 const STALL_MS = 15 * 60_000;
 
+/**
+ * A staged upload older than this with no job pointing at it is abandoned.
+ * Generous: a user can legitimately sit on the mapping step for a long time
+ * (checking a column against their CRM), and deleting the file under them turns
+ * "Import" into an unexplained failure.
+ */
+const ABANDONED_UPLOAD_MS = 6 * 3600_000;
+
 /** Rows per pass — bounded so a backlog can't turn one tick into a long
  *  transaction; the next tick picks up the rest. */
 const BATCH = 200;
@@ -43,6 +51,53 @@ let inFlight = false;
 async function sweepOnce(): Promise<void> {
   await failStalledRuns();
   await reapExpired();
+  await reapAbandonedUploads();
+}
+
+/**
+ * Reclaim staged import files whose wizard was abandoned.
+ *
+ * `POST /contacts/import/preview` uploads the file to
+ * `contact-imports/<teamId>/staged-<uuid>.<ext>` so the RUN call doesn't have
+ * to re-upload it. If the user closes the dialog at the mapping step, no
+ * ContactTransferJob row is ever created — so `reapExpired` (which walks job
+ * rows) never sees it, and the generic blob-orphan sweeper deliberately skips
+ * this whole prefix because THIS sweeper owns the category. Without this pass
+ * an abandoned 50 MB upload would sit in the bucket forever.
+ *
+ * Cross-checked against `sourceKey` before deleting: a file staged minutes ago
+ * and imported seconds ago must not be pulled out from under a running job.
+ */
+async function reapAbandonedUploads(): Promise<void> {
+  if (!blobStorage.listKeys) return; // provider can't enumerate — nothing to do
+
+  const cutoff = Date.now() - ABANDONED_UPLOAD_MS;
+  const { keys } = await blobStorage.listKeys({
+    limit: BATCH,
+    prefix: "contact-imports/",
+  });
+
+  // Only `staged-` objects: the `-errors.` reports are job-owned and reaped
+  // with their row.
+  const candidates = keys
+    .filter((k) => k.key.includes("/staged-") && k.uploadedAt > 0 && k.uploadedAt < cutoff)
+    .map((k) => k.key);
+  if (candidates.length === 0) return;
+
+  const referenced = await db.contactTransferJob.findMany({
+    where: { sourceKey: { in: candidates } },
+    select: { sourceKey: true },
+  });
+  const inUse = new Set(referenced.map((r) => r.sourceKey));
+  const orphans = candidates.filter((k) => !inUse.has(k));
+  if (orphans.length === 0) return;
+
+  try {
+    await blobStorage.delete(orphans);
+    console.warn(`[sweeper.contact-transfer] reclaimed ${orphans.length} abandoned upload(s)`);
+  } catch (err) {
+    console.error("[sweeper.contact-transfer] abandoned-upload delete failed", err);
+  }
 }
 
 async function failStalledRuns(): Promise<void> {

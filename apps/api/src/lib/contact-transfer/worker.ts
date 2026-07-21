@@ -220,7 +220,10 @@ async function handleTransfer(jobId: string): Promise<void> {
         await publish({
           type: "contact.bulk_updated",
           teamId: row.teamId,
-          contactIds: [],
+          // Bounded — empty above the cap. The inbox's conversation-list
+          // patcher uses these to refresh contact names in place; see
+          // ImportResult.touchedIds.
+          contactIds: result.touchedIds,
           changeKind: "mixed",
           changedByUserId: row.createdByUserId,
         });

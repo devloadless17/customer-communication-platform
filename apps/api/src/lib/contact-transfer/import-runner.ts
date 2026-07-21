@@ -59,6 +59,9 @@ const MAX_TAGS_PER_ROW = 25;
 /** Per-contact customFields ceiling, mirrored from contacts.schemas.ts. */
 const MAX_TOTAL_FIELDS = 100;
 
+/** Max contact ids carried on the coalesced socket frame — see `touchedIds`. */
+const BULK_FRAME_ID_CAP = 5_000;
+
 export interface ImportOptions {
   mode: ImportMode;
   tagMode: ImportTagMode;
@@ -81,6 +84,21 @@ export interface ImportCounters {
 
 export interface ImportResult extends ImportCounters {
   totalRows: number;
+  /**
+   * Ids of the contacts this run created or changed, capped at
+   * BULK_FRAME_ID_CAP.
+   *
+   * Carried on the coalesced `contact.bulk_updated` frame because the inbox's
+   * conversation-list patcher (`use-team-events`) looks up these ids to refresh
+   * contact names in place — it early-returns on an empty array, so omitting
+   * them leaves every renamed contact stale in the inbox until a reload.
+   *
+   * Empty above the cap: a 100k-id array in a socket frame broadcast to every
+   * connected tab is precisely the storm the coalesced frame exists to prevent.
+   * The contacts list refetches on the frame regardless of payload, so the only
+   * cost above the cap is that the inbox waits for its own next fetch.
+   */
+  touchedIds: string[];
   unknownColumns: string[];
   unknownStages: string[];
   extraSheets: string[];
@@ -203,6 +221,9 @@ export async function runContactImport(opts: {
     // exists at all.
     const seenPhones = new Set<string>();
 
+    // Ids for the coalesced socket frame, bounded (see `touchedIds`).
+    const touchedIds: string[] = [];
+
     // Distinct new tag names across the WHOLE file. A bad mapping (an order id
     // landing under a header named "tags") yields a unique value per row, which
     // would spawn one tag per contact and permanently pollute the catalog.
@@ -227,6 +248,10 @@ export async function runContactImport(opts: {
         fireEvents,
       });
 
+      for (const id of outcome.touchedIds) {
+        if (touchedIds.length >= BULK_FRAME_ID_CAP) break;
+        touchedIds.push(id);
+      }
       counters.created += outcome.created;
       counters.updated += outcome.updated;
       counters.revived += outcome.revived;
@@ -312,6 +337,9 @@ export async function runContactImport(opts: {
       unknownColumns,
       unknownStages: [...unknownStages].sort(),
       extraSheets: hasExtraSheets(source) ? source.extraSheets() : [],
+      // Above the cap we deliberately send none rather than a truncated,
+      // misleading subset.
+      touchedIds: touchedIds.length >= BULK_FRAME_ID_CAP ? [] : touchedIds,
       automationsSkipped,
       errorSample: errorRows.slice(0, 50).map((e) => ({ row: e.rowNumber, reason: e.reason })),
       errorArtifactKey,
@@ -462,6 +490,8 @@ interface BatchOutcome {
   revived: number;
   skipped: number;
   errors: Array<{ rowNumber: number; reason: string; raw: Row }>;
+  /** Contact ids this batch created or changed. */
+  touchedIds: string[];
 }
 
 async function applyBatch(args: {
@@ -473,7 +503,14 @@ async function applyBatch(args: {
   fireEvents: boolean;
 }): Promise<BatchOutcome> {
   const { teamId, userId, rows, options, resolveStage, fireEvents } = args;
-  const outcome: BatchOutcome = { created: 0, updated: 0, revived: 0, skipped: 0, errors: [] };
+  const outcome: BatchOutcome = {
+    created: 0,
+    updated: 0,
+    revived: 0,
+    skipped: 0,
+    errors: [],
+    touchedIds: [],
+  };
 
   const phones = rows.map((r) => r.phoneNumber);
 
@@ -623,6 +660,10 @@ async function applyBatch(args: {
   // ---- tags --------------------------------------------------------------
   const touched = [...toCreate, ...toRevive, ...toUpdate];
   const idByPhone = await linkTags({ teamId, rows: touched, options });
+  for (const r of touched) {
+    const id = idByPhone.get(r.phoneNumber);
+    if (id) outcome.touchedIds.push(id);
+  }
 
   // ---- events ------------------------------------------------------------
   if (fireEvents && touched.length > 0) {

@@ -50,6 +50,23 @@ Everything above `formats.ts` works on `Row = Record<string, string>` and never 
 
 **`styles: "cache"` is load-bearing** for dates and was found by measurement. **`useSharedStrings: false`** on the writer is load-bearing for memory — the shared-string table holds every distinct string in the workbook for the process lifetime, which is exactly the unbounded growth streaming exists to avoid.
 
+### Custom fields whose label collides with a built-in
+
+A team can own a custom field labelled "Language" or "City" — the reserved-name
+guard rejects those at create time on the internal route, but pre-guard rows
+exist (this repo's own dev DB had one) and `/v1` was missing the guard entirely
+until 2026-07-21.
+
+Such a field is a round-trip hazard: every header spelling of it resolves to the
+built-in column first, so a naive export writes TWO columns (`language` and
+`Language`) that both land in the built-in on re-import — last one wins, and the
+custom field's data is silently replaced.
+
+Handled with a header prefix: a colliding field is written as
+**`custom:<key>`**, and `resolveImportMapping` resolves that form *before*
+built-in matching. Non-colliding custom fields keep their plain, human-readable
+label. `fieldHeader()` in `columns.ts` is the single place that decides.
+
 ---
 
 ## Import
@@ -100,6 +117,8 @@ Scope is `ids` (an explicit selection) → wins over `filters` → falls back to
 - **Uploads use multer disk storage**, not memory — a 50 MB Buffer per concurrent upload is heap this container has no reason to spend.
 - **Format is sniffed from content** (`PK` = xlsx), not the filename; a legacy `.xls` (OLE2) is refused with an actionable message instead of failing deep inside a batch.
 - **Capabilities** — `contacts:export` and `contacts:import`, both defaulting exactly as `contacts:export` did, so no role loses an ability it had.
+- **One active transfer per team is a DB invariant**, not just a pre-check: the partial unique index `ContactTransferJob_teamId_active_key` (raw SQL — Prisma can't express partial uniques) makes a lost race a 409 instead of two concurrent 100k runs. The service maps the P2002 to the same friendly error.
+- **This category owns its own blob lifecycle.** `contact-exports/` and `contact-imports/` are excluded from the generic blob-orphan sweeper — that sweeper deletes anything absent from `Message.mediaKey` after 24h, which would destroy a user's 7-day export while its job row still advertised a working download. There's no storage leak from the exclusion: `reapExpired` deletes job-referenced objects at `expiresAt`, and `reapAbandonedUploads` reaps staged files from abandoned wizards after 6h.
 
 ---
 
@@ -133,4 +152,6 @@ Measured 2026-07-21 at 100,000 contacts, `--max-old-space-size=384`:
 
 384 MB is a quarter of the api container's ~1536 MB heap budget, so a transfer runs alongside the inbox rather than instead of it.
 
-**`tests/e2e/contacts-transfer/transfer-api.spec.ts`** — 16 tests over the HTTP surface: routes mount and are capability-gated, a real multipart upload survives multer → disk → R2 → parser, the worker picks the job up and finishes it, upload-key isolation, the concurrency gate, cancel, templates, and the legacy `GET /api/contacts/export` URL still returning a CSV.
+**`tests/e2e/contacts-transfer/transfer-api.spec.ts`** — 19 tests over the HTTP surface: routes mount and are capability-gated, a real multipart upload survives multer → disk → R2 → parser, the worker picks the job up and finishes it, upload-key isolation, the concurrency gate, cancel, templates, and the legacy `GET /api/contacts/export` URL still returning a CSV.
+
+Three of those are *lifecycle invariants* whose failure mode is silent, so they're pinned rather than trusted: the blob-orphan prefix exclusion (a static assertion on the sweeper's source), a genuine concurrent-POST race against the partial unique index, and the legacy URL degrading to 503-with-Retry-After rather than a bare 409 a bookmarked link can't interpret.

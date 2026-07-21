@@ -29,7 +29,7 @@ import { db } from "@/lib/db";
 import { blobStorage } from "@/lib/blob-storage";
 import { buildContactFilterWhere, type ListContactsOpts } from "@/lib/queries/contacts";
 
-import { resolveExportColumns } from "./columns";
+import { fieldHeader, resolveExportColumns } from "./columns";
 import { createSink, type Row } from "./formats";
 
 /** Rows per page. Matches the broadcast recipient export's proven page size. */
@@ -121,7 +121,9 @@ export async function runContactExport(opts: {
         };
         for (const def of fieldDefs) {
           const v = cf[def.key];
-          row[def.label] = typeof v === "string" ? v : "";
+          // fieldHeader, not def.label — a field whose label collides with a
+          // built-in is written under `custom:<key>` so it round-trips.
+          row[fieldHeader(def)] = typeof v === "string" ? v : "";
         }
         for (const key of oneOffKeys) {
           const v = cf[key];

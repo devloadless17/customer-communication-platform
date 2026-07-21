@@ -38,15 +38,12 @@ export function ExportContactsDialog({
   filters,
   selectedIds,
   filteredCount,
-  totalCount,
 }: {
   onClose: () => void;
   filters: ExportFilters;
   selectedIds: string[];
-  /** Rows matching the active filters. */
+  /** Rows matching the active filters — the list's own live total. */
   filteredCount: number;
-  /** Rows in the whole directory. */
-  totalCount: number;
 }) {
   const hasFilters = Object.values(filters).some((v) =>
     Array.isArray(v) ? v.length > 0 : Boolean(v),
@@ -59,8 +56,29 @@ export function ExportContactsDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const downloadedRef = useRef(false);
+  // The whole-directory total, which the LIST doesn't know: `filteredCount` is
+  // the count for the active filters, so showing it for both options would
+  // label two different scopes with the same number.
+  const [directoryTotal, setDirectoryTotal] = useState<number | null>(null);
 
   const { job, cancel } = useTransferJob(jobId);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await apiFetch("/api/contacts/count-all");
+        if (!res.ok || !alive) return;
+        const { count } = (await res.json()) as { count: number };
+        setDirectoryTotal(count);
+      } catch {
+        // Non-fatal — the option just renders without a count.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Auto-start the download the moment the artifact exists. The user asked for
   // a file; making them click a second button after waiting is friction with no
@@ -150,7 +168,10 @@ export function ExportContactsDialog({
                     Current filters ({filteredCount.toLocaleString()})
                   </option>
                 )}
-                <option value="all">All contacts ({totalCount.toLocaleString()})</option>
+                <option value="all">
+                  All contacts
+                  {directoryTotal !== null ? ` (${directoryTotal.toLocaleString()})` : ""}
+                </option>
               </Select>
             </div>
           </div>
