@@ -33,6 +33,272 @@ export class RealtimeEmitter {
     this.server = server;
   }
 
+  // ---------------------------------------------------------------------
+  // Agent conversation-visibility fanout
+  // ---------------------------------------------------------------------
+  //
+  // Under scoping, a restricted agent does NOT join the team room (see
+  // RealtimeGateway.handleConnection) — that room carries message bodies,
+  // contact PII and note text for the whole org. So every frame that is ABOUT
+  // one conversation must additionally target the assignee's `user:` room, or
+  // an agent would stop seeing their own work.
+  //
+  // One emit, two rooms: socket.io de-duplicates a socket that matches both, so
+  // an unrestricted team (still in the team room) never receives a frame twice.
+  //
+  // Cost discipline: teams that haven't turned scoping on take a purely
+  // synchronous path identical to `emitToTeam` — no lookup, no await, no
+  // ordering change. Only opted-in teams pay, and even they hit an in-process
+  // cache rather than the database on the hot path.
+
+  /** teamId → restricted?, with a short TTL. */
+  private readonly restrictedTeams = new Map<string, { at: number; value: boolean }>();
+  /** conversationId → assignee, invalidated whenever an assignment changes. */
+  private readonly assigneeCache = new Map<string, { at: number; value: string | null }>();
+  private static readonly SCOPE_TTL_MS = 30_000;
+
+  private scopeResolver:
+    | ((teamId: string) => Promise<boolean>)
+    | null = null;
+  private assigneeResolver:
+    | ((conversationId: string) => Promise<string | null>)
+    | null = null;
+  private contactAssigneeResolver:
+    | ((contactId: string) => Promise<string | null>)
+    | null = null;
+  /** contactId → assignee of that contact's conversation. */
+  private readonly contactAssigneeCache = new Map<
+    string,
+    { at: number; value: string | null }
+  >();
+
+  /** Bound on boot by RealtimeModule — keeps this service free of a Prisma
+   *  import and mirrors how `channelActivityResolver` is wired. */
+  bindVisibilityResolvers(
+    isTeamRestricted: (teamId: string) => Promise<boolean>,
+    assigneeOf: (conversationId: string) => Promise<string | null>,
+    assigneeOfContact: (contactId: string) => Promise<string | null>,
+  ): void {
+    this.scopeResolver = isTeamRestricted;
+    this.assigneeResolver = assigneeOf;
+    this.contactAssigneeResolver = assigneeOfContact;
+  }
+
+  /**
+   * Emit a frame that is ABOUT one contact (contact:updated / :created).
+   *
+   * These carry the contact's name, phone, email and custom fields, so they get
+   * the same boundary as the conversation frames — routed to staff plus the
+   * agent who owns that contact's conversation, so a restricted agent's contact
+   * panel still updates live for their own customers.
+   */
+  emitAboutContact<E extends keyof ServerToClientEvents>(
+    teamId: string,
+    contactId: string | null | undefined,
+    event: E,
+    ...args: Parameters<ServerToClientEvents[E]>
+  ): void {
+    const io = this.server;
+    if (!io) {
+      this.logger.warn(`emitAboutContact("${String(event)}") dropped — IO not ready yet`);
+      return;
+    }
+    const cachedScope = this.restrictedTeams.get(teamId);
+    const scopeFresh =
+      cachedScope && Date.now() - cachedScope.at < RealtimeEmitter.SCOPE_TTL_MS;
+    if (scopeFresh && !cachedScope.value) {
+      io.to(teamRoom(teamId)).emit(event, ...args);
+      return;
+    }
+    if (scopeFresh && cachedScope.value && contactId) {
+      const hit = this.contactAssigneeCache.get(contactId);
+      if (hit && Date.now() - hit.at < RealtimeEmitter.SCOPE_TTL_MS) {
+        this.emitToRooms(io, teamId, hit.value, event, args);
+        return;
+      }
+    }
+    void this.emitAboutContactSlow(teamId, contactId, event, args);
+  }
+
+  private async emitAboutContactSlow<E extends keyof ServerToClientEvents>(
+    teamId: string,
+    contactId: string | null | undefined,
+    event: E,
+    args: Parameters<ServerToClientEvents[E]>,
+  ): Promise<void> {
+    const io = this.server;
+    if (!io) return;
+    try {
+      let restricted = false;
+      if (this.scopeResolver) {
+        const hit = this.restrictedTeams.get(teamId);
+        restricted =
+          hit && Date.now() - hit.at < RealtimeEmitter.SCOPE_TTL_MS
+            ? hit.value
+            : await this.scopeResolver(teamId).then((v) => {
+                this.restrictedTeams.set(teamId, { at: Date.now(), value: v });
+                return v;
+              });
+      }
+      if (!restricted) {
+        io.to(teamRoom(teamId)).emit(event, ...args);
+        return;
+      }
+      let assignee: string | null = null;
+      if (contactId && this.contactAssigneeResolver) {
+        assignee = await this.contactAssigneeResolver(contactId);
+        this.contactAssigneeCache.set(contactId, { at: Date.now(), value: assignee });
+      }
+      this.emitToRooms(io, teamId, assignee, event, args);
+    } catch (err) {
+      this.logger.warn(
+        `emitAboutContact("${String(event)}") degraded to staff-only: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      io.to(teamRoom(teamId)).emit(event, ...args);
+    }
+  }
+
+  /** Called when an assignment changes so the next frame targets the new
+   *  owner immediately rather than up to a TTL later. */
+  invalidateConversationAssignee(conversationId: string): void {
+    this.assigneeCache.delete(conversationId);
+  }
+
+  /** Called when an admin flips the team setting. */
+  invalidateTeamScope(teamId: string): void {
+    this.restrictedTeams.delete(teamId);
+  }
+
+  /**
+   * Emit a frame that is ABOUT one conversation.
+   *
+   * Use this — never `emitToTeam` — for anything carrying a message, a note, a
+   * call, or a conversation's state. `emitToTeam` remains correct for genuinely
+   * team-wide, non-conversation frames (catalog changes, presence, broadcasts).
+   */
+  emitAboutConversation<E extends keyof ServerToClientEvents>(
+    teamId: string,
+    conversationId: string | null | undefined,
+    event: E,
+    ...args: Parameters<ServerToClientEvents[E]>
+  ): void {
+    this.emitAboutConversationAlso(teamId, conversationId, [], event, ...args);
+  }
+
+  /**
+   * As `emitAboutConversation`, plus extra user rooms.
+   *
+   * Exists for exactly one case that the assignee-only audience gets wrong:
+   * a REASSIGNMENT. The frame has to reach the PREVIOUS owner too, or their
+   * inbox keeps showing a row they can no longer open until their next
+   * refetch. The new owner is resolved as usual; the old one is passed in
+   * explicitly from the event payload.
+   */
+  emitAboutConversationAlso<E extends keyof ServerToClientEvents>(
+    teamId: string,
+    conversationId: string | null | undefined,
+    alsoUserIds: readonly (string | null | undefined)[],
+    event: E,
+    ...args: Parameters<ServerToClientEvents[E]>
+  ): void {
+    const io = this.server;
+    if (!io) {
+      this.logger.warn(`emitAboutConversation("${String(event)}") dropped — IO not ready yet`);
+      return;
+    }
+
+    const cachedScope = this.restrictedTeams.get(teamId);
+    const scopeFresh =
+      cachedScope && Date.now() - cachedScope.at < RealtimeEmitter.SCOPE_TTL_MS;
+
+    const extra = alsoUserIds.filter((u): u is string => typeof u === "string" && !!u);
+
+    // FAST PATH — known-unrestricted team: byte-identical to the old behavior.
+    if (scopeFresh && !cachedScope.value) {
+      io.to(teamRoom(teamId)).emit(event, ...args);
+      return;
+    }
+    // FAST PATH — restricted team whose assignee we already know.
+    if (scopeFresh && cachedScope.value && conversationId) {
+      const cachedAssignee = this.assigneeCache.get(conversationId);
+      if (cachedAssignee && Date.now() - cachedAssignee.at < RealtimeEmitter.SCOPE_TTL_MS) {
+        this.emitToRooms(io, teamId, cachedAssignee.value, event, args, extra);
+        return;
+      }
+    }
+
+    void this.emitAboutConversationSlow(teamId, conversationId, event, args, extra);
+  }
+
+  private emitToRooms<E extends keyof ServerToClientEvents>(
+    io: TypedIO,
+    teamId: string,
+    assignee: string | null,
+    event: E,
+    args: Parameters<ServerToClientEvents[E]>,
+    alsoUserIds: readonly string[] = [],
+  ): void {
+    // The team room still holds admins/managers (and, on an unrestricted team,
+    // everyone); the assignee room adds the one restricted agent who owns it;
+    // `alsoUserIds` covers a handover's PREVIOUS owner. socket.io de-duplicates
+    // a socket matching several of these, so nobody receives the frame twice.
+    const rooms = new Set<string>([teamRoom(teamId)]);
+    if (assignee) rooms.add(userRoom(assignee));
+    for (const uid of alsoUserIds) rooms.add(userRoom(uid));
+    io.to([...rooms]).emit(event, ...args);
+  }
+
+  private async emitAboutConversationSlow<E extends keyof ServerToClientEvents>(
+    teamId: string,
+    conversationId: string | null | undefined,
+    event: E,
+    args: Parameters<ServerToClientEvents[E]>,
+    alsoUserIds: readonly string[] = [],
+  ): Promise<void> {
+    const io = this.server;
+    if (!io) return;
+    try {
+      let restricted = false;
+      if (this.scopeResolver) {
+        const hit = this.restrictedTeams.get(teamId);
+        if (hit && Date.now() - hit.at < RealtimeEmitter.SCOPE_TTL_MS) {
+          restricted = hit.value;
+        } else {
+          restricted = await this.scopeResolver(teamId);
+          this.restrictedTeams.set(teamId, { at: Date.now(), value: restricted });
+        }
+      }
+      if (!restricted) {
+        io.to(teamRoom(teamId)).emit(event, ...args);
+        return;
+      }
+      let assignee: string | null = null;
+      if (conversationId && this.assigneeResolver) {
+        const hit = this.assigneeCache.get(conversationId);
+        if (hit && Date.now() - hit.at < RealtimeEmitter.SCOPE_TTL_MS) {
+          assignee = hit.value;
+        } else {
+          assignee = await this.assigneeResolver(conversationId);
+          this.assigneeCache.set(conversationId, { at: Date.now(), value: assignee });
+        }
+      }
+      this.emitToRooms(io, teamId, assignee, event, args, alsoUserIds);
+    } catch (err) {
+      // Fail CLOSED to the staff room. Dropping an agent's own frame is
+      // self-healing (the client reconciles on reconnect / next event);
+      // blasting it team-wide on a DB fault would be the leak this whole
+      // mechanism exists to prevent.
+      this.logger.warn(
+        `emitAboutConversation("${String(event)}") degraded to staff-only: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      io.to(teamRoom(teamId)).emit(event, ...args);
+    }
+  }
+
   emitToTeam<E extends keyof ServerToClientEvents>(
     teamId: string,
     event: E,

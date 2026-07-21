@@ -55,6 +55,10 @@ import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Channel } from "@ccp/shared/types";
 import { loadReplySnapshotById, mediaPreview } from "@/lib/providers/ingest";
 import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta";
+import {
+  isRestrictedViewer,
+  type ConversationViewer,
+} from "@/lib/conversations/visibility";
 import { getConversationWithRefs } from "@/lib/queries";
 import type {
   ConversationWithRefs,
@@ -507,9 +511,14 @@ export class MessagesService {
         await this.db.$transaction(async (tx) => {
           const result = await tx.conversation.updateMany({
             where: { id: conversationId, teamId, assignedUserId: null, status: previousStatus },
-            data: statusChanged
-              ? { assignedUserId: userId, status: nextStatus }
-              : { assignedUserId: userId },
+            // `lastAssignedUserId` mirrors the shared assignConversation
+            // mutation: an agent claiming a thread by replying is exactly the
+            // relationship continuity routing should remember later.
+            data: {
+              assignedUserId: userId,
+              lastAssignedUserId: userId,
+              ...(statusChanged ? { status: nextStatus } : {}),
+            },
           });
           if (result.count === 0) return; // lost the CAS race — someone else claimed/closed first
 
@@ -1294,7 +1303,19 @@ export class MessagesService {
     userId: string,
     form: SendMediaFormInput,
     file: Express.Multer.File,
+    /** Viewer for the agent conversation-visibility boundary. Enforced HERE
+     *  rather than by the controller guard because this route is multipart:
+     *  the body is parsed by the file interceptor, which runs AFTER guards, so
+     *  `req.body.conversationId` is not yet populated when the guard runs. */
+    viewer?: ConversationViewer,
   ): Promise<{ messageId: string | null; warning?: string }> {
+    if (viewer && isRestrictedViewer(viewer)) {
+      const visible = await this.db.conversation.findFirst({
+        where: { id: form.conversationId, teamId, assignedUserId: viewer.userId },
+        select: { id: true },
+      });
+      if (!visible) throw new NotFoundException({ error: "conversation not found" });
+    }
     return runWithSendIdempotency(
       {
         teamId,

@@ -47,6 +47,7 @@ const PRESET_LABELS: Record<PresetFilterId, string> = {
   mine: "Assigned to me",
   unassigned: "Unassigned",
   closed: "Closed",
+  flagged: "Flagged",
 };
 
 function ConversationListImpl({
@@ -290,7 +291,7 @@ function ConversationListImpl({
   const serverCounts = useConversationCounts();
   const headerTotal = useMemo<number | null>(() => {
     if (!serverCounts) return null;
-    if (filter.kind === "preset") return serverCounts[filter.id];
+    if (filter.kind === "preset") return serverCounts[filter.id] ?? 0;
     if (filter.kind === "stage") return serverCounts.byStage[filter.stageId] ?? 0;
     return null; // calls view doesn't render this list
   }, [serverCounts, filter]);

@@ -24,6 +24,7 @@ import { blobStorage } from "@/lib/blob-storage";
 import { r2Internal } from "@/lib/blob-storage/r2";
 
 import { streamBlob } from "../media/stream-blob";
+import { ScopedByConversation } from "../auth/conversation-visibility.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
@@ -63,6 +64,12 @@ import {
  */
 @Controller("api/messages")
 @UseGuards(SessionGuard)
+// Agent conversation-visibility boundary. These routes carry `conversationId`
+// in the BODY, and they WRITE — sending, reacting or forwarding inside a thread
+// the agent isn't allowed to see is a worse failure than reading it, so the
+// same guard that protects the read side protects these too. Routes without a
+// `conversationId` (media upload, template-header fetch) are unaffected.
+@ScopedByConversation("conversationId")
 // Meta's Cloud API hard cap is 80 msg/min per number; 60/min keeps headroom
 // AND bounds the cost of a runaway browser script firing the send endpoint.
 // Counts text+media+template+forward against one bucket (a user shouldn't be
@@ -148,6 +155,7 @@ export class MessagesController {
         session.userId,
         form,
         file,
+        session,
       );
       return {
         ok: true,

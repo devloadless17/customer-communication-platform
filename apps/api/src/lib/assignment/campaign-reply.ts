@@ -1,0 +1,143 @@
+import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
+import { assignConversation } from "@/lib/conversations/mutations";
+
+/**
+ * Apply a campaign's drawn assignee when the customer actually REPLIES.
+ *
+ * Why replies and not sends. A broadcast is overwhelmingly one-way: send
+ * 10,000 templates and a few hundred people answer. Assigning every recipient
+ * at send time would drop ~9,700 conversations nobody will ever respond to onto
+ * agents' plates — and those conversations are exactly what capacity limits and
+ * least-busy routing are measured against, so the whole routing system would be
+ * reading a number made of noise. Ali would look "full" because of a campaign he
+ * has nothing to do.
+ *
+ * So the split is DRAWN up front, at materialize time — that's what keeps
+ * "first 50 to Ali" exact and resumable — and APPLIED here, per person, only
+ * when they engage. A campaign can opt into the old behavior with
+ * `Broadcast.assignmentTrigger = "on_send"`, for outreach where owning the
+ * follow-up matters more than owning the reply.
+ *
+ * Called fire-and-forget from the inbound attribution path, which has already
+ * decided WHICH campaign earned the reply (direct quote, else last-touch inside
+ * the attribution window). This function never re-derives that.
+ */
+export async function applyCampaignAssigneeOnReply(args: {
+  teamId: string;
+  contactId: string;
+  /** The BroadcastRecipient the reply was just credited to. */
+  recipientId: string;
+}): Promise<void> {
+  const { teamId, contactId, recipientId } = args;
+
+  const recipient = await db.broadcastRecipient.findUnique({
+    where: { id: recipientId },
+    select: {
+      assignedUserId: true,
+      broadcast: {
+        select: { teamId: true, assignmentTrigger: true, assignmentOverwrite: true },
+      },
+    },
+  });
+  if (!recipient?.assignedUserId) return;
+  // BroadcastRecipient has no teamId of its own (it's scoped through Broadcast),
+  // so assert tenancy explicitly rather than relying on the caller.
+  if (recipient.broadcast.teamId !== teamId) return;
+  // "on_send" campaigns already assigned in the runner.
+  if (recipient.broadcast.assignmentTrigger !== "on_reply") return;
+
+  const conversation = await db.conversation.findFirst({
+    where: { teamId, contactId },
+    select: { id: true, assignedUserId: true },
+  });
+  if (!conversation) return;
+
+  // Never take a live conversation from the agent already handling it unless
+  // the campaign explicitly opted in.
+  if (conversation.assignedUserId && !recipient.broadcast.assignmentOverwrite) return;
+
+  // Shared mutation → same CAS, status side-effects, realtime frame, audit row
+  // and outbound webhook as a manual assign. NOT silent: campaign ownership is
+  // a real business change workflows and partners should see.
+  await assignConversation({
+    db,
+    publish,
+    teamId,
+    conversationId: conversation.id,
+    targetUserId: recipient.assignedUserId,
+    changedByUserId: null,
+  });
+}
+
+/**
+ * A campaign assignee still owed to this conversation.
+ *
+ * Consulted by `assignByPolicy` so a campaign's split can't be lost to a race
+ * or to the AI:
+ *
+ *   THE RACE. When a customer replies, TWO post-commit paths react to the same
+ *   inbound with no ordering guarantee between them — the auto-assign
+ *   subscriber (via `message.received`) and the attribution path (which is what
+ *   sets `repliedAt`). If this gated on `repliedAt`, the subscriber could win,
+ *   see no campaign draw, assign by policy, and then attribution would find the
+ *   conversation already owned and skip — silently discarding the admin's
+ *   split. So it matches on the SEND window instead, exactly like
+ *   `resolveAttributedRecipient` does, which makes both paths pick the same
+ *   person regardless of who runs first. Whoever wins, the answer is identical
+ *   and the loser no-ops.
+ *
+ *   THE AI. When the assistant answers the reply, no human is assigned yet
+ *   (correct — none is needed). This is what makes the thread land on the
+ *   drawn owner when the AI later escalates, instead of being re-routed by the
+ *   generic policy.
+ *
+ * Deliberately narrow: `on_reply` campaigns only, inside the attribution
+ * window, and only asked on the inbound/reopen/handoff paths. Returns null for
+ * everything else, which is the overwhelming majority of calls.
+ */
+export async function pendingCampaignAssignee(args: {
+  teamId: string;
+  conversationId: string;
+}): Promise<string | null> {
+  const conv = await db.conversation.findFirst({
+    where: { id: args.conversationId, teamId: args.teamId },
+    select: { contactId: true },
+  });
+  if (!conv) return null;
+
+  const cutoff = new Date(Date.now() - attributionWindowMs());
+  const recipient = await db.broadcastRecipient.findFirst({
+    where: {
+      contactId: conv.contactId,
+      assignedUserId: { not: null },
+      sentAt: { gte: cutoff },
+      // Only a message that actually reached the customer can earn a reply —
+      // same gate attribution applies.
+      deliveryState: { in: ["sent", "delivered", "read"] },
+    },
+    // Backed by @@index([contactId, sentAt desc]).
+    orderBy: { sentAt: "desc" },
+    select: {
+      assignedUserId: true,
+      broadcast: { select: { teamId: true, assignmentTrigger: true } },
+    },
+  });
+  if (!recipient) return null;
+  if (recipient.broadcast.teamId !== args.teamId) return null;
+  if (recipient.broadcast.assignmentTrigger !== "on_reply") return null;
+  return recipient.assignedUserId;
+}
+
+/**
+ * Attribution window, mirroring `lib/broadcast-attribution.ts`. Re-read from the
+ * env here rather than imported so this module stays free of a cycle
+ * (attribution imports THIS file). Same default and same clamp — a drift
+ * between the two would make a campaign owner and a campaign reply-credit
+ * disagree about which campaign a message belongs to.
+ */
+function attributionWindowMs(): number {
+  const raw = Number.parseInt(process.env.BROADCAST_REPLY_ATTRIBUTION_HOURS ?? "72", 10);
+  const hours = Number.isFinite(raw) && raw >= 1 && raw <= 168 ? raw : 72;
+  return hours * 60 * 60 * 1000;
+}

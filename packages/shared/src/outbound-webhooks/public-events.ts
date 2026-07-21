@@ -44,6 +44,7 @@ import type {
   ConversationStatusChangedEvent,
   DomainEvent,
   DomainEventType,
+  MessageFlagChangedEvent,
   MessageReceivedEvent,
   MessageSentEvent,
   MessageStatusChangedEvent,
@@ -79,6 +80,12 @@ export const PUBLIC_EVENT_TYPES = [
   "contact.deleted",
   "note.created",
   "note.deleted",
+  // A message triage flag was raised / resolved / dismissed / removed.
+  //
+  // THIS is the routing seam: subscribe to it and a "Complaint" raised in the
+  // inbox lands in another system the moment it happens, carrying the message,
+  // the contact and the flag's lifecycle state — no polling, no extra API call.
+  "message.flag_changed",
 ] as const;
 export type PublicEventType = (typeof PUBLIC_EVENT_TYPES)[number];
 
@@ -394,6 +401,43 @@ export const PUBLIC_EVENT_GROUPS: Array<{
           contact_id: "cmpcnt_01",
           conversation_ids: [],
           deleted_by_user_id: "cmpusr_01",
+        },
+      },
+    ],
+  },
+  {
+    group: "Message flags (triage)",
+    events: [
+      {
+        type: "message.flag_changed",
+        label: "On Message flagged / resolved",
+        description:
+          "A message was flagged for follow-up (\"Complaint\", \"Refund request\"), or an existing flag was reopened, resolved, dismissed or removed. `action` is the TRANSITION (`added` | `reopened` | `resolved` | `removed`, plus `updated` for owner/note edits that changed no lifecycle) — so a \"complaint closed\" automation can key on `action === \"resolved\"` without firing again when someone later edits the note. Route on `flag.definition_name` to push specific kinds of work into another system.",
+        samplePayload: {
+          action: "added",
+          conversation_id: "cmpconv_01",
+          message_id: "cmpmsg_01",
+          open_flag_count: 1,
+          flag: {
+            id: "cmpflag_01",
+            definition_id: "cmpflagdef_01",
+            definition_name: "Complaint",
+            definition_color: "rose",
+            status: "open",
+            source: "human",
+            confidence: null,
+            note: "Second time this month.",
+            assigned_to_id: null,
+            assigned_to_name: null,
+            resolved_by_id: null,
+            resolved_by_name: null,
+            resolved_at: null,
+            resolution_note: null,
+            created_by_id: "cmpusr_01",
+            created_by_name: "Sara",
+            created_at: "2026-07-22T11:05:00.000Z",
+            updated_at: "2026-07-22T11:05:00.000Z",
+          },
         },
       },
     ],
@@ -937,6 +981,42 @@ export function toPublicEnvelopes(
       });
       break;
     }
+    case "message.flag_changed": {
+      const e = event as MessageFlagChangedEvent;
+      out.push({
+        type: "message.flag_changed",
+        envelope: build(e.teamId, occurredAt, "message.flag_changed", {
+          action: e.action,
+          conversation_id: e.conversationId,
+          message_id: e.messageId,
+          open_flag_count: e.openFlagCount,
+          flag: {
+            id: e.flag.id,
+            // The definition is inlined (name + color), not just its id, so a
+            // receiver can route on the human name without first syncing our
+            // catalog — the whole point of making this the routing seam.
+            definition_id: e.flag.definition.id,
+            definition_name: e.flag.definition.name,
+            definition_color: e.flag.definition.color,
+            status: e.flag.status,
+            source: e.flag.source,
+            confidence: e.flag.confidence,
+            note: e.flag.note,
+            assigned_to_id: e.flag.assignedToId,
+            assigned_to_name: e.flag.assignedToName,
+            resolved_by_id: e.flag.resolvedById,
+            resolved_by_name: e.flag.resolvedByName,
+            resolved_at: e.flag.resolvedAt,
+            resolution_note: e.flag.resolutionNote,
+            created_by_id: e.flag.createdById,
+            created_by_name: e.flag.createdByName,
+            created_at: e.flag.createdAt,
+            updated_at: e.flag.updatedAt,
+          },
+        }),
+      });
+      break;
+    }
     case "note.deleted": {
       // Symmetric with note.created so a partner syncing internal notes can
       // remove the row on their side. The note is gone, so only the ids +
@@ -994,6 +1074,7 @@ export function busEventTypesToSubscribe(): DomainEventType[] {
     "contact.deleted",
     "note.created",
     "note.deleted",
+    "message.flag_changed",
   ];
 }
 
@@ -1568,6 +1649,37 @@ export function toWirePayload(
         noteId: d.note_id,
         deletedByUserId: d.deleted_by_user_id ?? null,
       };
+    case "message.flag_changed": {
+      const flag = (d.flag ?? {}) as Record<string, unknown>;
+      return {
+        event_type: type,
+        action: d.action,
+        conversationId: d.conversation_id,
+        messageId: d.message_id,
+        contact: wireContactLean(d.contact),
+        openFlagCount: d.open_flag_count,
+        flag: {
+          id: flag.id,
+          definitionId: flag.definition_id,
+          definitionName: flag.definition_name,
+          definitionColor: flag.definition_color,
+          status: flag.status,
+          source: flag.source,
+          confidence: flag.confidence ?? null,
+          note: flag.note ?? null,
+          assignedToId: flag.assigned_to_id ?? null,
+          assignedToName: flag.assigned_to_name ?? null,
+          resolvedById: flag.resolved_by_id ?? null,
+          resolvedByName: flag.resolved_by_name ?? null,
+          resolvedAt: toEpochMs(flag.resolved_at as string | undefined),
+          resolutionNote: flag.resolution_note ?? null,
+          createdById: flag.created_by_id ?? null,
+          createdByName: flag.created_by_name ?? null,
+          createdAt: toEpochMs(flag.created_at as string | undefined),
+          updatedAt: toEpochMs(flag.updated_at as string | undefined),
+        },
+      };
+    }
     default:
       return { event_type: type, ...(d as Record<string, unknown>) };
   }

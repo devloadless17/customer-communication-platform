@@ -5,8 +5,10 @@ import {
   BarChart3,
   Bell,
   Bot,
+  Flag,
   Layers,
   ListChecks,
+  Share2,
   MessagesSquare,
   Plug,
   ShieldCheck,
@@ -46,6 +48,7 @@ export function SettingsSubSidebar({
   const canFields = permissions["contactFields:manage"];
   const canSnippets = permissions["snippets:manage"];
   const canTags = permissions["tags:manage"];
+  const canMessageFlags = permissions["messageFlags:manage"];
   const canAiAssistant = permissions["aiAssistant:manage"];
 
   const isActive = (href: string) =>
@@ -88,6 +91,14 @@ export function SettingsSubSidebar({
             label="Role permissions"
             leading={<ShieldCheck className="size-4" />}
             active={isActive("/settings/permissions")}
+          />
+        )}
+        {isAdmin && (
+          <SubSidebarItem
+            href="/settings/assignment"
+            label="Assignment"
+            leading={<Share2 className="size-4" />}
+            active={isActive("/settings/assignment")}
           />
         )}
         {permissions["teamActivity:view"] && (
@@ -147,6 +158,14 @@ export function SettingsSubSidebar({
             label="Tags"
             leading={<TagIcon className="size-4" />}
             active={isActive("/settings/tags")}
+          />
+        )}
+        {canMessageFlags && (
+          <SubSidebarItem
+            href="/settings/message-flags"
+            label="Message flags"
+            leading={<Flag className="size-4" />}
+            active={isActive("/settings/message-flags")}
           />
         )}
         {canStages && (

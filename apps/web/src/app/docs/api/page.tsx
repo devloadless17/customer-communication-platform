@@ -29,11 +29,14 @@ const SCOPES: ReadonlyArray<{ scope: string; grants: string }> = [
   { scope: "read:messages", grants: "read messages" },
   { scope: "write:messages", grants: "send text / media / template" },
   { scope: "write:notes", grants: "add internal notes" },
+  { scope: "read:flags", grants: "read message triage flags + the flag queue" },
+  { scope: "write:flags", grants: "raise / resolve / dismiss / remove message flags" },
   { scope: "read:catalog", grants: "read tags · fields · stages · channels · users" },
   { scope: "write:catalog", grants: "create / edit tags + custom fields" },
   { scope: "read:broadcasts", grants: "read broadcast campaigns + delivery reports" },
   { scope: "read:calls", grants: "read call history + calling-permission state" },
   { scope: "write:calls", grants: "request calling permission · send call buttons" },
+  { scope: "write:users", grants: "set a teammate's availability · working hours" },
 ];
 
 /**
@@ -396,7 +399,27 @@ export default function ApiDocsPage() {
           List team members. Use this to populate an n8n assignment dropdown.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/users/:idOrEmail">
-          Find a user by id or by email.
+          Find a user by id or by email. Both reads include{" "}
+          <code>availabilityStatus</code>, <code>availabilityMessage</code>,{" "}
+          <code>availabilitySource</code> (<code>manual</code> ·{" "}
+          <code>admin</code> · <code>schedule</code>), <code>availabilityUntil</code>{" "}
+          and <code>workHoursMode</code>.
+        </Endpoint>
+        <Endpoint method="PATCH" path="/api/external/v1/users/:id/availability">
+          Set a member&apos;s status: <code>{`{ "status": "busy", "message": "On a call" }`}</code>.
+          While working hours are configured the pick expires automatically at their next
+          shift boundary (at local midnight if their schedule never closes, and it is
+          re-anchored if their schedule changes) — so a status set mid-shift can&apos;t
+          outlive the day. With no schedule it holds until changed. Send{" "}
+          <code>{`{ "followSchedule": true }`}</code> to drop the override immediately and
+          hand them back to their schedule. Needs <code>write:users</code>.
+        </Endpoint>
+        <Endpoint method="PUT" path="/api/external/v1/users/:id/work-hours">
+          Set a member&apos;s schedule:{" "}
+          <code>{`{ "mode": "inherit" | "custom" | "off", "workHours": { "timezone": "Asia/Beirut", "weekly": { "mon": [{ "open": "09:00", "close": "17:00" }] } } }`}</code>.
+          <code>custom</code> requires <code>workHours</code>; the other modes ignore it.
+          Outside their hours a member shows as away and is skipped by round-robin
+          assignment. Needs <code>write:users</code>.
         </Endpoint>
       </Section>
 
@@ -494,9 +517,19 @@ export default function ApiDocsPage() {
         <Endpoint
           method="POST"
           path="/api/external/v1/conversations/:id/assign"
-          body={{ assignedUserId: "user_..." }}
+          body={{ autoAssign: true }}
         >
-          Body: <code>{`{ assignedUserId: string | null }`}</code>.
+          Assign to a teammate with{" "}
+          <code>{`{ assignedUserId: string }`}</code>, unassign with{" "}
+          <code>{`{ assignedUserId: null }`}</code>, or let your routing decide
+          with <code>{`{ autoAssign: true }`}</code> — optionally pinned to a
+          named policy via <code>policyId</code>. Auto-routing runs the same
+          engine the inbox and the AI handoff use, so strategy, shares,
+          per-agent limits and eligibility all apply. Add{" "}
+          <code>{`{ overwrite: false }`}</code> to only fill an empty assignee.
+          When nobody is eligible the call still returns 200 and the
+          conversation stays in the Unassigned queue — that&apos;s the
+          policy&apos;s configured outcome, not an error.
         </Endpoint>
         <Endpoint
           method="POST"
@@ -514,6 +547,109 @@ export default function ApiDocsPage() {
           <code>{`{ aiEnabled: boolean }`}</code>. Set <code>false</code> to hand off
           to a human — every later <code>message.received</code> webhook then
           carries <code>ai_enabled: false</code> so your automation can skip it.
+        </Endpoint>
+      </Section>
+
+      <Section title="Assignment routing">
+        <p className="text-sm text-muted-foreground">
+          Full parity with Settings → Assignment. A <strong>policy</strong>
+          decides how to pick someone; a <strong>rule</strong> decides which
+          policy applies (top to bottom, first match wins, default policy as the
+          fallback); <strong>settings</strong> decide when routing runs at all.
+          Read needs <code>read:catalog</code>, writes need{" "}
+          <code>write:catalog</code>.
+        </p>
+        <Endpoint method="GET" path="/api/external/v1/assignment">
+          Everything at once: <code>{`{ policies, rules, settings, members }`}</code>.
+          Each member carries their live <code>openCount</code> — the number a
+          capacity limit is measured against.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/assignment/policies"
+          body={{
+            name: "Support — weighted",
+            strategy: "weighted",
+            defaultMaxOpen: 25,
+            members: [
+              { userId: "user_ali", weight: 50 },
+              { userId: "user_sara", weight: 20 },
+            ],
+          }}
+        >
+          <code>strategy</code>: <code>least_busy</code> (default) ·{" "}
+          <code>round_robin</code> · <code>weighted</code> · <code>fixed</code> ·{" "}
+          <code>manual</code>. <code>eligibility</code>:{" "}
+          <code>online_first</code> · <code>online_only</code> ·{" "}
+          <code>available_only</code> · <code>any_active</code>.{" "}
+          <code>overflow</code>: <code>leave_unassigned</code> ·{" "}
+          <code>ignore_capacity</code> · <code>fallback_user</code>. Weighted is
+          exact, not probabilistic: 50/20 over 70 conversations is 50 and 20.
+        </Endpoint>
+        <Endpoint
+          method="PUT"
+          path="/api/external/v1/assignment/policies/:id"
+          body={{ name: "Support", expectedVersion: 3 }}
+        >
+          Requires <code>expectedVersion</code> from your last read. A stale
+          version returns <code>409 version_conflict</code> instead of
+          overwriting a co-admin&apos;s edit.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/assignment/policies/:id/default">
+          Make this the fallback policy.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/assignment/policies/:id">
+          Archive. The default policy can&apos;t be archived.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/assignment/rules"
+          body={{
+            name: "VIP WhatsApp → senior pool",
+            policyId: "apol_...",
+            conditions: { channels: ["whatsapp"], tagIds: ["tag_vip"] },
+          }}
+        >
+          Clauses AND together; values inside one clause OR. Available:{" "}
+          <code>channels</code>, <code>tagIds</code>, <code>stageIds</code>,{" "}
+          <code>languages</code> (prefix match), <code>keywords</code>{" "}
+          (case-insensitive substring), <code>isNewContact</code>,{" "}
+          <code>sources</code>. An absent clause means &ldquo;don&apos;t
+          care&rdquo;, so <code>{`{}`}</code> is a catch-all.
+        </Endpoint>
+        <Endpoint method="PUT" path="/api/external/v1/assignment/rules/order" body={{ ruleIds: ["r1", "r2"] }}>
+          Full reorder — send the complete ordered id list.
+        </Endpoint>
+        <Endpoint method="PATCH" path="/api/external/v1/assignment/rules/:id">
+          Update <code>name</code>, <code>policyId</code>, <code>enabled</code>{" "}
+          or <code>conditions</code>.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/assignment/rules/:id">
+          Delete a rule.
+        </Endpoint>
+        <Endpoint
+          method="PATCH"
+          path="/api/external/v1/assignment/settings"
+          body={{ autoAssignOnNewConversation: true, skipWhenAiHandling: true }}
+        >
+          When routing runs: <code>autoAssignOnNewConversation</code>,{" "}
+          <code>skipWhenAiHandling</code> (AI answers first, a human is routed in
+          on escalation), <code>autoAssignOnReopen</code>,{" "}
+          <code>reassignOnOffline</code> +{" "}
+          <code>reassignOfflineAfterMinutes</code> +{" "}
+          <code>reassignOfflineOnlyPending</code>,{" "}
+          <code>reassignOnDeactivate</code>, and{" "}
+          <code>aiHandoffPolicyId</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/assignment/preview"
+          body={{ source: "inbound", channel: "whatsapp" }}
+        >
+          Dry run against live presence and workload: who would take a
+          conversation like this right now, and why. Read-only — it never
+          advances the rotation cursor or the weighted counters, so it&apos;s safe
+          to poll.
         </Endpoint>
       </Section>
 
@@ -603,6 +739,71 @@ export default function ApiDocsPage() {
           (symmetric with the create above, so a CRM mirror can complete a
           create→delete round-trip). Idempotent — a repeated delete returns{" "}
           <code>404 note_not_found</code>.
+        </Endpoint>
+      </Section>
+
+      <Section title="Message flags (triage)">
+        <p className="mb-4 text-sm text-muted-foreground">
+          A <strong>message flag</strong> marks one message as needing follow-up of a
+          named kind — “Complaint”, “Refund request” — and carries a lifecycle:{" "}
+          <code>open</code> → <code>resolved</code> or <code>dismissed</code>
+          {" "}(<code>dismissed</code> means “it wasn’t actually one”, so reporting can
+          exclude it). Distinct from contact <strong>tags</strong>, which label a person
+          and drive broadcast audiences.
+          <br />
+          <br />
+          The intended integration shape: subscribe to the{" "}
+          <code>message.flag_changed</code> webhook to be told the instant something is
+          flagged, route on <code>flag.definitionName</code>, then use these endpoints to
+          read the backlog and mark items handled from your own system.
+        </p>
+        <Endpoint method="GET" path="/api/external/v1/message-flags">
+          The triage queue, newest-first, keyset-paginated. Query:{" "}
+          <code>status</code> (repeatable or comma-joined; defaults to{" "}
+          <code>open</code>), <code>definitionId</code>, <code>assignedTo</code> (a user
+          id or the literal <code>unassigned</code>), <code>conversationId</code>,{" "}
+          <code>cursor</code>, <code>take</code> (max 50). Each row carries the contact
+          name, channel and a message excerpt, so a worklist renders without a second
+          call. Scope <code>read:flags</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/message-flags/counts">
+          Open counts, team-wide and per definition. Scope <code>read:flags</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/message-flag-definitions">
+          The flag catalog (archived included) — resolve names to ids once and cache.
+          Scope <code>read:catalog</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/messages/:messageId/flags"
+          body={{ definitionName: "Complaint", note: "Second time this month." }}
+        >
+          Raise a flag on a message. Provide <strong>exactly one</strong> of{" "}
+          <code>definitionId</code> or <code>definitionName</code> (the name form exists
+          so your config can say “Complaint” rather than a cuid). Optional{" "}
+          <code>note</code> and <code>assignedToId</code>.
+          <br />
+          <br />
+          <strong>Idempotent by construction</strong> — one flag of a given kind per
+          message — so no <code>Idempotency-Key</code> is required and a retry converges
+          on the same row rather than duplicating. Re-raising a resolved flag reopens
+          it. Scope <code>write:flags</code>.
+        </Endpoint>
+        <Endpoint
+          method="PATCH"
+          path="/api/external/v1/message-flags/:flagId"
+          body={{ status: "resolved", resolutionNote: "Refund issued, ticket #4192" }}
+        >
+          Resolve, dismiss, reopen, reassign, or edit the notes. Any subset of{" "}
+          <code>status</code>, <code>assignedToId</code> (<code>null</code> to unassign),{" "}
+          <code>note</code>, <code>resolutionNote</code>. Concurrency-safe: two clients
+          resolving the same flag both succeed and the open count moves exactly once.
+          Scope <code>write:flags</code>.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/message-flags/:flagId">
+          Remove a flag entirely — “this was flagged by mistake”. Different from{" "}
+          <code>dismissed</code>, which keeps the record that someone looked and decided
+          it wasn’t one. Scope <code>write:flags</code>.
         </Endpoint>
       </Section>
 

@@ -29,11 +29,13 @@ import type {
   ContactStage,
   ConversationWithRefs,
   CursorPage,
+  MessageFlagDefinition,
   Role,
   Tag,
   TemplateDto,
   User,
 } from "@ccp/shared/types";
+import type { MessageFlagDefinitionWithUsage } from "@ccp/shared/message-flags/types";
 
 /**
  * Inline DTOs that the API ships but apps/api defines locally in its
@@ -88,6 +90,8 @@ export interface CurrentTeam {
   aiHandoffAction: "none" | "unassign" | "assign_fixed" | "round_robin";
   aiHandoffAssigneeId: string | null;
   firstTouchGreeter: "ai" | "workflow";
+  /** Org-wide agent read boundary — "team" (default) or "assigned". */
+  agentConversationVisibility: "team" | "assigned";
 }
 
 export const getCurrentTeam = cache(async (): Promise<CurrentTeam> => {
@@ -102,6 +106,17 @@ export const getCurrentTeam = cache(async (): Promise<CurrentTeam> => {
 export const listTeamMembers = cache(async (): Promise<User[]> => {
   const { users } = await api<{ users: User[] }>("/api/users");
   return users;
+});
+
+/**
+ * The org's default working-hours schedule (null = none configured, which is
+ * the default and keeps availability purely manual). Read on its own rather
+ * than folded into `/api/team` because only the Team settings page needs the
+ * JSON grid.
+ */
+export const getTeamWorkHours = cache(async (): Promise<unknown> => {
+  const { workHours } = await api<{ workHours: unknown }>("/api/team/work-hours");
+  return workHours ?? null;
 });
 
 /** Period window for the team-activity report. `all` = all-time. */
@@ -170,6 +185,39 @@ export async function getPlatformAnalytics(): Promise<PlatformAnalytics> {
 export async function listTags(): Promise<Tag[]> {
   const { tags } = await api<{ tags: Tag[] }>("/api/team/tags");
   return tags;
+}
+
+/** Assignment policies, id + name only. Session-gated (not admin-gated) so the
+ *  workflow builder and the broadcast composer can offer a policy picker to any
+ *  member who can edit them. */
+export async function listAssignmentPolicies(): Promise<
+  Array<{ id: string; name: string; isDefault: boolean }>
+> {
+  const { policies } = await api<{
+    policies: Array<{ id: string; name: string; isDefault: boolean }>;
+  }>("/api/team/assignment-policies");
+  return policies;
+}
+
+/**
+ * The team's message-flag catalog — LIVE definitions only (archived ones are
+ * excluded server-side), for the inbox flag picker.
+ */
+export async function listMessageFlagDefinitions(): Promise<MessageFlagDefinition[]> {
+  const { definitions } = await api<{ definitions: MessageFlagDefinition[] }>(
+    "/api/team/message-flags",
+  );
+  return definitions;
+}
+
+/** Settings view of the same catalog — archived included, with usage counts. */
+export async function listMessageFlagDefinitionsWithUsage(): Promise<
+  MessageFlagDefinitionWithUsage[]
+> {
+  const { definitions } = await api<{ definitions: MessageFlagDefinitionWithUsage[] }>(
+    "/api/team/message-flags/usage",
+  );
+  return definitions;
 }
 
 export async function getTagUsage(): Promise<Record<string, number>> {
@@ -698,15 +746,18 @@ export async function loadWorkflowCatalogs(): Promise<{
   stages: Array<{ id: string; name: string; position: number }>;
   fields: Array<{ key: string; label: string }>;
   workflows: Array<{ id: string; name: string; trigger: WorkflowTriggerEvent }>;
+  assignmentPolicies: Array<{ id: string; name: string; isDefault: boolean }>;
 }> {
-  const [users, templates, tags, stages, fields, workflows] = await Promise.all([
-    listTeamMembers(),
-    listWhatsappTemplates(),
-    listTags(),
-    listContactStages(),
-    listContactFieldDefinitions(),
-    listWorkflows(),
-  ]);
+  const [users, templates, tags, stages, fields, workflows, assignmentPolicies] =
+    await Promise.all([
+      listTeamMembers(),
+      listWhatsappTemplates(),
+      listTags(),
+      listContactStages(),
+      listContactFieldDefinitions(),
+      listWorkflows(),
+      listAssignmentPolicies(),
+    ]);
   return {
     users: users
       .filter((u) => u.isActive)
@@ -728,6 +779,7 @@ export async function loadWorkflowCatalogs(): Promise<{
         name: w.name,
         trigger: w.trigger as WorkflowTriggerEvent,
       })),
+    assignmentPolicies,
   };
 }
 

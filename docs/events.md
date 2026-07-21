@@ -20,11 +20,14 @@ Framework-agnostic engine in `lib/events/bus.ts`; the NestJS seam is `EventBus` 
 REALTIME:           0
 AUDIT:             10
 ANALYTICS:         20
+  (auto-assign:    25)   ← AutoAssignSubscriber, on message.received only
 WORKFLOW_DISPATCH: 30
 OUTBOUND_WEBHOOKS: 50
 DEFAULT:          100
 ```
-Order matters because `workflow-dispatch` and `outbound-webhooks` re-read state that `analytics` writes (e.g. `closedCategory`, `firstResponseAt`, counters). `subscribe()` keeps each event's handler list sorted ascending; per-subscriber try/catch isolates failures.
+Order matters because `workflow-dispatch` and `outbound-webhooks` re-read state that `analytics` writes (e.g. `closedCategory`, `firstResponseAt`, counters).
+
+`AutoAssignSubscriber` (assignment routing, [docs/assignment.md](assignment.md)) sits at **25** — between analytics and workflow dispatch — for two reasons: the counters it may read are already written, and a `message_received` workflow (plus any `conversation_assigned` workflow) observes the routing decision instead of racing it. It publishes `conversation.assigned` through the shared mutation, so its own fanout follows the normal tier order. `subscribe()` keeps each event's handler list sorted ascending; per-subscriber try/catch isolates failures.
 
 > Historical note: tier `40` (`WEB_CACHE_REVALIDATE`) was removed 2026-06-01 — cross-process cache revalidation now goes through the HTTP `/api/internal/revalidate` bridge, not a bus tier.
 
@@ -45,6 +48,7 @@ Every payload carries `teamId` and **enough data for subscribers to react withou
 - **broadcasts**: `broadcast.status_changed`, `broadcast.progress`, `broadcast.recipient_message_sent`, `broadcast.conversation_reopened`
 - **team channels**: `team_channel.message_created` / `.message_edited` / `.message_deleted` / `.reaction_changed` / `.pin_changed` / `.read` / `.members_changed` / `.thread_reply_count_changed`
 - **users/team**: `user.profile_updated`, `user.availability_changed`, `team.catalog_changed`, `team.renamed`
+  - `user.availability_changed` carries the **effective** status/message plus `source` (`manual` · `admin` · `schedule`), `until` (when a manual pick expires back to the schedule) and `manual` (the user's own pick — read only by their own availability picker, so an off-shift agent's note box doesn't fill with the schedule's text). Three publishers, one writer: `lib/availability/apply.ts` (self route, admin route, work-hours sweeper).
 - **webhooks**: `webhook.subscription_disabled`, `webhook.subscription_recovered`
 - **calling**: `call.incoming`, `call.ringing_out`, `call.answered_by_agent`, `call.ended`, `call.missed`, `call.rejected`, `call.failed`, `call.sdp_offer`
 

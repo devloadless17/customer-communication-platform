@@ -93,3 +93,32 @@ Fix: `inbox-shell.tsx`'s `handleMarkRead` fires `dispatchLocalSocketEvent("conve
 ## 5. Team-chat parallels
 
 Team chat has its own (separate) realtime graph: `use-team-events.ts` (team room auto-joined + head-resync on every connect), `use-team-channel-events.ts`, `use-team-channels-events.ts`, `use-thread-events.ts`. Same reducer/converge philosophy, distinct from the customer-message graph — never cross-wire them.
+
+---
+
+## 6. Presence vs availability vs working hours
+
+Three orthogonal signals; keep them distinct.
+
+- **Presence** — "has ≥1 live socket". In-memory only (`PresenceService`), never persisted, broadcast as `presence:update`.
+- **Availability** — the per-user status badge (`available` / `busy` / `away` / `offline`), persisted on `User.availabilityStatus` and broadcast as `user:availability:updated` (+ a one-shot `user:availability:snapshot` on connect). `offline` is *"Appear offline"*, not "disconnected".
+- **Working hours** — an optional schedule (org default on `Team.workHours`, per-member override via `User.workHoursMode`/`workHours`) that *derives* availability.
+
+**`availabilityStatus` is the EFFECTIVE value** — what every reader renders (dots, sidebar, assignment dropdown, "also viewing", round-robin eligibility). What the person actually picked lives separately in `availabilityManualStatus`/`Message`, so an off-shift stretch never destroys the note they typed. The rule lives in exactly one function, `resolveEffectiveAvailability` (`@ccp/shared/presence`):
+
+1. No schedule → the manual pick, forever (identical to pre-working-hours behavior; the default for every un-configured team).
+2. `availabilityOverrideUntil` still in the future → the manual pick.
+3. On shift → `available`, manual note dropped.
+4. Off shift → `away` + "Outside working hours · back Mon 09:00".
+
+A fresh manual pick sets `availabilityOverrideUntil` to the **next schedule boundary**, so an override can never outlive the shift that motivated it — the whole point of the feature. Three cases the anchor has to get right, each with a test behind it:
+
+- **No schedule** → `null`, i.e. no expiry. The pick holds forever, exactly as availability behaved before working hours existed.
+- **A 24/7 schedule** (every day `00:00`–`00:00`, so the windows chain and it never closes) → there is no boundary, so the anchor falls back to the **next local midnight in the schedule's timezone**. Returning `null` here would be a bug, not a simplification: `null` means "no override", so the schedule would reclaim the status on the very next resolve and a round-the-clock team could never mark itself busy at all.
+- **The schedule changes while an override is live** → the expiry is **re-anchored** to the new schedule (`intent: "rescheduled"` in `apply.ts`, used by every schedule-edit path). Its old value pointed at a boundary that may no longer exist; without re-anchoring, shortening a shift from 17:00 to 12:00 leaves a 14:00 pick running until 17:00 — breaking the one invariant the feature exists for.
+
+**Round-robin**: an off-shift member is `away`, so they drop out of the "online + available" and "available" tiers. They are *not* excluded outright — the last-resort "any active member" tier still exists so a conversation is never orphaned when the whole team is off shift. Teams that want strict presence use the assignment policy's `eligibility` setting.
+
+**One writer**: `apps/api/src/lib/availability/apply.ts`. The self route, the admin route (`availability:manageOthers`), and the 60s `work-hours` sweeper all funnel through it, so the columns, the override expiry, and the `user.availability_changed` event can't drift apart. It no-ops (no write, no frame) when nothing actually changed — load-bearing, since the sweeper calls it for every scheduled member every minute.
+
+Client note: `user:availability:updated` carries an extra `manual` object. **Only the user's own availability picker reads it** — teammates render `status`/`message`. Without it, an off-shift agent's own note box would fill with "Outside working hours" and save that back as their personal note.

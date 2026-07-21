@@ -30,7 +30,7 @@ export class NotesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateNoteSchema)) body: CreateNoteInput,
   ) {
-    const out = await this.notes.create(session.teamId, session.userId, body);
+    const out = await this.notes.create(session.teamId, session.userId, body, session);
     return { ok: true, noteId: out.noteId };
   }
 
@@ -39,7 +39,7 @@ export class NotesController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.notes.remove(session.teamId, session.userId, session.role, id);
+    await this.notes.remove(session.teamId, session.userId, session.role, id, session);
     return { ok: true };
   }
 }

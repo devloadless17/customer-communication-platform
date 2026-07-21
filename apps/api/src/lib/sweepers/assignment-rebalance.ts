@@ -1,0 +1,209 @@
+import { assignByPolicy } from "@/lib/assignment/apply";
+import { loadAssignmentSettings } from "@/lib/assignment/resolve";
+import { getOnlineUserIds } from "@/lib/conversations/presence-bridge";
+import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
+import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+
+/**
+ * Offline rebalance: move work off an agent who is no longer there.
+ *
+ * The failure this exists to prevent is the expensive one for a busy floor —
+ * ten conversations sitting on someone who went home at 6pm, invisible in
+ * anyone's "Unassigned" queue, discovered the next morning.
+ *
+ * OFF by default (`AssignmentSettings.reassignOnOffline`). When on, every tick:
+ *   1. find teams that enabled it,
+ *   2. for each, find assignees who are NOT connected right now,
+ *   3. skip anyone who is merely between tabs — a candidate must have been
+ *      unreachable for the whole `reassignOfflineAfterMinutes` grace window,
+ *      which we prove with the conversation's own `lastAssignedAt`/message
+ *      timestamps rather than a presence timestamp we don't persist,
+ *   4. re-route their eligible conversations through the policy engine,
+ *      EXCLUDING the offline agent so it can't bounce straight back.
+ *
+ * Deliberate restraint, because a rebalancer that is too eager is worse than
+ * none at all:
+ *   - `reassignOfflineOnlyPending` (default ON) limits it to threads where no
+ *     agent has replied yet. A conversation mid-exchange stays with its agent;
+ *     yanking it mid-sentence loses context and confuses the customer.
+ *   - Conversations someone is actively VIEWING are never touched.
+ *   - Closed conversations are never touched (they have no owner anyway).
+ *   - A per-tick cap bounds the blast radius: a server restart that drops every
+ *     socket must not reassign the entire inbox before presence recovers.
+ *   - If the engine can't find anyone else, we leave it alone rather than
+ *     unassigning — "owned by someone offline" beats "owned by nobody" when
+ *     nobody is available either.
+ *
+ * PRESENCE IS PROCESS-LOCAL. `getOnlineUserIds` returns null when this process
+ * can't see sockets; the sweep then does NOTHING rather than concluding the
+ * whole team is offline. That check is the single most important line here.
+ */
+
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const INITIAL_DELAY_MS = 10 * 60 * 1000; // let presence re-establish after a boot
+/** Max conversations moved per team per tick. */
+const MAX_MOVES_PER_TEAM = 50;
+
+let timer: NodeJS.Timeout | null = null;
+let initialTimer: NodeJS.Timeout | null = null;
+let inFlight = false;
+
+export function startAssignmentRebalanceSweeper(): void {
+  if (timer || initialTimer) return;
+  initialTimer = setTimeout(() => {
+    initialTimer = null;
+    void runTick();
+    timer = setInterval(() => void runTick(), SWEEP_INTERVAL_MS);
+    timer.unref?.();
+  }, INITIAL_DELAY_MS);
+  initialTimer.unref?.();
+}
+
+export function stopAssignmentRebalanceSweeper(): void {
+  if (initialTimer) {
+    clearTimeout(initialTimer);
+    initialTimer = null;
+  }
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+}
+
+async function runTick(): Promise<void> {
+  if (inFlight) return;
+  inFlight = true;
+  try {
+    await withSweeperMutex("assignment-rebalance", sweepOnce);
+  } catch (err) {
+    console.error("[sweeper.assignment-rebalance] tick failed", err);
+  } finally {
+    inFlight = false;
+  }
+}
+
+async function sweepOnce(): Promise<void> {
+  const teams = await db.assignmentSettings.findMany({
+    where: { reassignOnOffline: true },
+    select: { teamId: true },
+  });
+  for (const { teamId } of teams) {
+    try {
+      await rebalanceTeam(teamId);
+    } catch (err) {
+      // Per-team isolation: one tenant's failure must not skip the rest.
+      console.warn(
+        `[sweeper.assignment-rebalance] team=${teamId} failed; continuing`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+}
+
+async function rebalanceTeam(teamId: string): Promise<void> {
+  const online = getOnlineUserIds(teamId);
+  // Presence unknown in this process → do nothing. Treating "I can't see
+  // sockets" as "everyone is offline" would reassign the entire inbox.
+  if (!online) return;
+
+  const settings = await loadAssignmentSettings(db, teamId);
+  if (!settings.reassignOnOffline) return; // raced a settings change
+
+  const graceCutoff = new Date(
+    Date.now() - settings.reassignOfflineAfterMinutes * 60_000,
+  );
+
+  const stale = await db.conversation.findMany({
+    where: {
+      teamId,
+      status: { not: "closed" },
+      assignedUserId: { not: null },
+      // The grace window. `lastAssignedAt` is the moment this agent took the
+      // thread; requiring it to be older than the window means a conversation
+      // assigned 30 seconds ago is never yanked because the agent happened to
+      // be refreshing their browser at that instant.
+      lastAssignedAt: { lt: graceCutoff },
+      // Don't touch a thread the agent is mid-exchange on (default).
+      ...(settings.reassignOfflineOnlyPending ? { firstResponseAt: null } : {}),
+    },
+    select: { id: true, assignedUserId: true },
+    orderBy: { lastAssignedAt: "asc" },
+    take: MAX_MOVES_PER_TEAM * 4, // over-fetch: most rows belong to ONLINE agents
+  });
+
+  let moved = 0;
+  for (const conv of stale) {
+    if (moved >= MAX_MOVES_PER_TEAM) break;
+    const owner = conv.assignedUserId;
+    if (!owner || online.has(owner)) continue;
+
+    const outcome = await assignByPolicy({
+      db,
+      publish,
+      teamId,
+      conversationId: conv.id,
+      source: "rebalance",
+      // This is the one sweep that MUST move an existing assignee — that's its
+      // entire purpose. The offline owner is excluded from the candidate pool
+      // so the pick can't hand it straight back to them.
+      onlyIfUnassigned: false,
+      context: { excludeUserIds: [owner] },
+      changedByUserId: null,
+    });
+    if (outcome.applied) moved++;
+    // Not applied (nobody else eligible) → deliberately leave it with the
+    // offline agent. Unassigning would trade a bad owner for no owner.
+  }
+
+  if (moved > 0) {
+    console.warn(
+      `[sweeper.assignment-rebalance] team=${teamId} moved ${moved} conversation(s) off offline agents`,
+    );
+  }
+}
+
+/**
+ * Deactivation rebalance — called synchronously from the user-deactivation
+ * flow, not on a timer. Deactivation is permanent and operator-initiated, so
+ * unlike the offline sweep this runs immediately, moves EVERY open thread, and
+ * is on by default.
+ *
+ * Best-effort by contract: deactivating a user must succeed even if routing
+ * their work fails. Anything left behind still surfaces — a deactivated
+ * assignee is excluded from every candidate pool, and the conversation stays
+ * visible in the team inbox.
+ */
+export async function rebalanceDeactivatedUser(
+  teamId: string,
+  userId: string,
+): Promise<number> {
+  const settings = await loadAssignmentSettings(db, teamId);
+  if (!settings.reassignOnDeactivate) return 0;
+
+  const open = await db.conversation.findMany({
+    where: { teamId, assignedUserId: userId, status: { not: "closed" } },
+    select: { id: true },
+    orderBy: { lastMessageAt: "desc" },
+    // Bounded: a departing manager with 5k threads shouldn't stall the
+    // deactivation request. The rest stay assigned to the (now inactive) user
+    // and are picked up by the offline sweep or manual triage.
+    take: 500,
+  });
+
+  let moved = 0;
+  for (const conv of open) {
+    const outcome = await assignByPolicy({
+      db,
+      publish,
+      teamId,
+      conversationId: conv.id,
+      source: "rebalance",
+      onlyIfUnassigned: false,
+      context: { excludeUserIds: [userId] },
+      changedByUserId: null,
+    }).catch(() => null);
+    if (outcome?.applied) moved++;
+  }
+  return moved;
+}

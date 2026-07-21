@@ -2,12 +2,15 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
 import { assignableRoles, canModifyUser } from "@ccp/shared/auth/permissions";
-import type { Role, User, UserAvailabilityStatus } from "@ccp/shared/types";
+import type { Role, User } from "@ccp/shared/types";
+
+import { rebalanceDeactivatedUser } from "@/lib/sweepers/assignment-rebalance";
 
 import { hashPassword, validatePasswordStructure } from "../auth/password";
 import { SessionInvalidationService } from "../auth/session-invalidation.service";
@@ -18,8 +21,12 @@ import {
   deleteAvatar,
   uploadAvatar,
 } from "../lib/blob-storage/avatar";
+import { AVAILABILITY_SELECT, applyAvailability } from "../lib/availability/apply";
+import { teamScheduleOf } from "../lib/availability/schedule";
 import { mapUser } from "../lib/queries/_shared";
 import type {
+  SetUserAvailabilityInput,
+  SetUserWorkHoursInput,
   UpdateMyAvailabilityInput,
   UpdateMyProfileInput,
   UpdateUserInput,
@@ -54,6 +61,8 @@ export interface MemberStat {
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     private readonly db: DbService,
     private readonly bus: EventBus,
@@ -116,15 +125,20 @@ export class UsersService {
   }
 
   /**
-   * Self-edit availability. Mirrors updateMyProfile's shape:
-   *   - Only mutates the fields actually sent (`status` → only status,
-   *     `message: null` clears, `message: "x"` sets, omitted = unchanged).
-   *   - Refuses an empty body via the Zod refine in users.schemas.ts.
-   *   - Publishes a dedicated `user.availability_changed` domain event so the
-   *     fanout subscriber can update teammates without piggybacking on
-   *     `user.profile_updated` (heavier subscribers don't need to run).
-   *   - Returns the full User row so the client can swap its local mirror
-   *     in one round-trip.
+   * Self-edit availability.
+   *   - Only mutates what's sent (`status` → only status, `message: null`
+   *     clears, omitted = unchanged); `followSchedule: true` drops the override
+   *     so working hours take over right now.
+   *   - Refuses an empty/contradictory body via the Zod refines in
+   *     users.schemas.ts.
+   *   - Returns the full User row so the client can swap its local mirror in
+   *     one round-trip.
+   *
+   * The pick itself is applied by `applyAvailability` — the single writer
+   * shared with the admin route and the working-hours sweeper. It owns the
+   * "available clears the note" rule, the override expiry, the write, and the
+   * `user.availability_changed` publish, so those can't drift between the
+   * three callers.
    *
    * Capability `availability:manage` is enforced at the controller via the
    * `@RequireCapability` decorator — not here, so the service stays
@@ -135,38 +149,169 @@ export class UsersService {
     userId: string,
     input: UpdateMyAvailabilityInput,
   ): Promise<User> {
-    const data: { availabilityStatus?: string; availabilityMessage?: string | null } = {};
-    if (typeof input.status === "string") data.availabilityStatus = input.status;
-    if (input.message !== undefined) data.availabilityMessage = input.message;
-    // A status note is context for being UNavailable ("eating", "back at 3pm").
-    // Coming back to "available" means it no longer applies, so clear it — a
-    // stale note sitting next to a green dot is exactly the confusion users
-    // hit. "available" wins over any `message` sent in the same PATCH.
-    if (input.status === "available") data.availabilityMessage = null;
+    return this.writeAvailability(teamId, userId, input, userId);
+  }
 
-    const updated = await this.db.user.update({
-      where: { id: userId },
-      data,
+  /**
+   * Admin/manager sets a TEAMMATE's availability — "he left without flipping
+   * off". Gated by `availability:manageOthers` at the controller, plus the same
+   * role-hierarchy check the role/deactivate route uses so a manager can't
+   * override an admin.
+   *
+   * The result is marked `availabilitySource: "admin"` and carries the actor's
+   * id, so the target (and everyone else) can see who set it rather than
+   * wondering why their status changed by itself.
+   */
+  async setUserAvailability(
+    teamId: string,
+    /** Null when the caller is an API key rather than a member. */
+    actorUserId: string | null,
+    actorRole: Role,
+    targetUserId: string,
+    input: SetUserAvailabilityInput,
+  ): Promise<User> {
+    const target = await this.db.user.findFirst({
+      where: { id: targetUserId, teamId },
+      select: { id: true, role: true },
     });
-    // Availability lives on the User row that `loadActiveUser` reads, so the
-    // next request from this user needs to see the new status without a 15s
-    // session-cache wait — matches the profile-update pattern.
-    this.sessionInvalidator.bustCache(userId);
+    if (!target) throw new NotFoundException({ error: "not_found" });
+    if (!canModifyUser(actorRole, target.role as Role)) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+    return this.writeAvailability(teamId, targetUserId, input, actorUserId);
+  }
 
-    // Broadcast `message` whenever it changed — sent explicitly in the PATCH, OR
-    // cleared implicitly by going available — so every client drops the note in
-    // the same frame. `updated.availabilityMessage` is the authoritative value.
-    const messageChanged =
-      input.message !== undefined || input.status === "available";
-    await this.bus.publish({
-      type: "user.availability_changed",
-      teamId,
-      userId,
-      status: (updated.availabilityStatus ?? "available") as UserAvailabilityStatus,
-      ...(messageChanged ? { message: updated.availabilityMessage } : {}),
+  /**
+   * Shared body of the two availability routes. `actorUserId === userId` is
+   * what makes the write count as the user's own pick rather than an admin's.
+   */
+  private async writeAvailability(
+    teamId: string,
+    userId: string,
+    input: UpdateMyAvailabilityInput,
+    actorUserId: string | null,
+  ): Promise<User> {
+    const user = await this.db.user.findFirstOrThrow({
+      where: { id: userId, teamId },
+      select: AVAILABILITY_SELECT,
+    });
+    const team = await this.db.team.findUnique({
+      where: { id: teamId },
+      select: { workHours: true },
     });
 
+    await applyAvailability({
+      db: this.db,
+      user,
+      teamSchedule: teamScheduleOf(team),
+      intent: input.followSchedule
+        ? { kind: "followSchedule" }
+        : { kind: "pick", status: input.status, message: input.message, actorUserId },
+      nowMs: Date.now(),
+      bustSessionCache: (id) => this.sessionInvalidator.bustCache(id),
+    });
+
+    // Re-read rather than trusting the pre-write row: applyAvailability may
+    // have resolved the effective status differently from the pick (off shift),
+    // and the caller renders what it returns.
+    const updated = await this.db.user.findUniqueOrThrow({ where: { id: userId } });
     return mapUser(updated);
+  }
+
+  /** A teammate's schedule config + the org default they'd inherit. */
+  async getUserWorkHours(
+    teamId: string,
+    userId: string,
+  ): Promise<{ mode: string; workHours: unknown; teamWorkHours: unknown }> {
+    const user = await this.db.user.findFirst({
+      where: { id: userId, teamId },
+      select: { workHoursMode: true, workHours: true },
+    });
+    if (!user) throw new NotFoundException({ error: "not_found" });
+    const team = await this.db.team.findUnique({
+      where: { id: teamId },
+      select: { workHours: true },
+    });
+    return {
+      mode: user.workHoursMode,
+      workHours: user.workHours ?? null,
+      teamWorkHours: team?.workHours ?? null,
+    };
+  }
+
+  /**
+   * Set a teammate's working-hours mode/schedule, then immediately re-resolve
+   * their availability so the change is visible now instead of at the next
+   * 60s sweeper tick.
+   */
+  async setUserWorkHours(
+    teamId: string,
+    actorRole: Role,
+    targetUserId: string,
+    input: SetUserWorkHoursInput,
+  ): Promise<User> {
+    const target = await this.db.user.findFirst({
+      where: { id: targetUserId, teamId },
+      select: { id: true, role: true },
+    });
+    if (!target) throw new NotFoundException({ error: "not_found" });
+    if (!canModifyUser(actorRole, target.role as Role)) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+
+    await this.db.user.update({
+      where: { id: targetUserId },
+      data: {
+        workHoursMode: input.mode,
+        // Keep a custom schedule on file when switching to inherit/off, so
+        // flipping back doesn't lose the grid someone filled in. Only an
+        // explicit `workHours: null` clears it.
+        ...(input.workHours !== undefined
+          ? { workHours: input.workHours ?? Prisma.DbNull }
+          : {}),
+      },
+    });
+
+    await this.resyncAvailability(teamId, [targetUserId]);
+    const updated = await this.db.user.findUniqueOrThrow({ where: { id: targetUserId } });
+    return mapUser(updated);
+  }
+
+  /**
+   * Re-resolve availability for the given users (or the whole team when no ids
+   * are passed) against the current clock and schedules. Called after any
+   * schedule edit so the effect is immediate; the sweeper does the same thing
+   * on its own cadence for the boundaries nobody is around to trigger.
+   */
+  async resyncAvailability(teamId: string, userIds?: string[]): Promise<void> {
+    const team = await this.db.team.findUnique({
+      where: { id: teamId },
+      select: { workHours: true },
+    });
+    const teamSchedule = teamScheduleOf(team);
+    const users = await this.db.user.findMany({
+      where: {
+        teamId,
+        deactivatedAt: null,
+        ...(userIds ? { id: { in: userIds } } : {}),
+      },
+      select: AVAILABILITY_SELECT,
+    });
+    const nowMs = Date.now();
+    for (const user of users) {
+      await applyAvailability({
+        db: this.db,
+        user,
+        teamSchedule,
+        // Every caller of this method is a SCHEDULE EDIT (org default or a
+        // member's own), so a live override must be re-anchored to the new
+        // schedule rather than keep an expiry pointing at the old one's
+        // boundary. The sweeper uses the plain "sync" intent instead.
+        intent: { kind: "rescheduled" },
+        nowMs,
+        bustSessionCache: (id) => this.sessionInvalidator.bustCache(id),
+      });
+    }
   }
 
   /**
@@ -486,6 +631,31 @@ export class UsersService {
       );
     } else {
       this.sessionInvalidator.bustCache(targetId);
+    }
+
+    // A deactivated agent's open conversations would otherwise sit on a person
+    // who can no longer log in — invisible in the Unassigned queue and owned by
+    // nobody in practice. Route them to someone real through the team's
+    // assignment policy (opt-out via AssignmentSettings.reassignOnDeactivate).
+    //
+    // Detached + best-effort ON PURPOSE: deactivation is a security action and
+    // must return immediately and succeed regardless. Anything that fails to
+    // re-route stays visible in the team inbox, and the deactivated user is
+    // excluded from every future candidate pool anyway.
+    if (deactivated) {
+      void rebalanceDeactivatedUser(teamId, targetId)
+        .then((moved) => {
+          if (moved > 0) {
+            this.logger.log(
+              `reassigned ${moved} conversation(s) from deactivated user ${targetId}`,
+            );
+          }
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `reassign-on-deactivate failed for ${targetId}: ${err instanceof Error ? err.message : err}`,
+          );
+        });
     }
 
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "members" });

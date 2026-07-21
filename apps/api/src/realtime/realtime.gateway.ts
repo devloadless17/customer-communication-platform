@@ -16,9 +16,15 @@ import type {
   ServerToClientEvents,
 } from "@ccp/shared/socket/events";
 import type { Role } from "@ccp/shared/types";
+import type { AvailabilitySource } from "@ccp/shared/work-hours";
 
 import { DbService } from "../db/db.service";
 import { getOnlineUserIds } from "@/lib/conversations/presence-bridge";
+import {
+  isRestrictedViewer,
+  registerVisibilityInvalidator,
+  visibilityWhere,
+} from "@/lib/conversations/visibility";
 import { PresenceService } from "./presence.service";
 import { RealtimeEmitter, type TypedIO } from "./emitter.service";
 import { channelRoom, conversationRoom, teamRoom, userRoom } from "./rooms";
@@ -57,6 +63,10 @@ interface TeamAvailabilityRow {
   id: string;
   availabilityStatus: string | null;
   availabilityMessage: string | null;
+  /** "manual" | "admin" | "schedule" — who decided the status above. */
+  availabilitySource: string | null;
+  /** When a manual/admin pick hands back to the working-hours schedule. */
+  availabilityOverrideUntil: Date | null;
 }
 
 @WebSocketGateway()
@@ -158,14 +168,41 @@ export class RealtimeGateway
   bindWidgetAvailabilityRelay(fn: (teamId: string, online: boolean) => void): void {
     this.widgetAvailabilityRelay = fn;
   }
-  private relayWidgetAvailability(teamId: string): void {
+  private async relayWidgetAvailability(teamId: string): Promise<void> {
     if (!this.widgetAvailabilityRelay) return;
-    this.widgetAvailabilityRelay(teamId, this.teamHasOnlineAgent(teamId));
+    this.widgetAvailabilityRelay(teamId, await this.teamHasAvailableAgent(teamId));
   }
 
-  /** True when ≥1 agent on the team is connected right now. Cheap, synchronous. */
-  teamHasOnlineAgent(teamId: string): boolean {
-    return (getOnlineUserIds(teamId)?.size ?? 0) > 0;
+  /**
+   * True when ≥1 agent on the team is connected AND actually available.
+   *
+   * This dot is a PROMISE TO A CUSTOMER — "someone is here, ask your question" —
+   * so it has to mean more than "a browser tab is open". A connected agent who
+   * is busy, away, appear-offline, or outside their working hours is not going
+   * to answer, and lighting the dot for them is a lie the visitor pays for in
+   * waiting. Same `=== "available"` rule the "also viewing" pill uses, so the
+   * two agent-reachability signals in the app can't disagree.
+   *
+   * Fail-soft on a DB error: fall back to raw presence (the old behavior).
+   * Over-showing the dot for one tick beats going dark on transient Postgres
+   * flapping — the visitor can still send, they just might wait.
+   */
+  async teamHasAvailableAgent(teamId: string): Promise<boolean> {
+    const connected = getOnlineUserIds(teamId);
+    if (!connected || connected.size === 0) return false;
+    try {
+      const rows = await this.teamAvailability(teamId);
+      const available = new Set(
+        rows
+          .filter((r) => (r.availabilityStatus ?? "available") === "available")
+          .map((r) => r.id),
+      );
+      for (const id of connected) if (available.has(id)) return true;
+      return false;
+    } catch (err) {
+      this.logger.error(`teamHasAvailableAgent lookup failed: ${err}`);
+      return true; // connected.size > 0 was already established
+    }
   }
 
   constructor(
@@ -189,6 +226,13 @@ export class RealtimeGateway
     // ever collapses reads that nothing invalidated (the reconnect storm).
     this.emitter.bindPresenceSnapshotter((teamId) => {
       this.invalidateTeamAvailability(teamId);
+      // An availability change can flip the widget's "an agent is available"
+      // dot too — a lone agent going busy/away, or the working-hours sweeper
+      // closing the shift, means nobody is there to answer a visitor. Before
+      // this, the relay only fired on socket connect/disconnect, so the dot
+      // stayed green after the last agent marked themselves away (or went off
+      // shift) until someone happened to open or close a tab.
+      void this.relayWidgetAvailability(teamId);
       return this.buildVisibleOnlineSnapshot(teamId);
     });
     // Same indirection for the per-conversation viewer pill — the
@@ -216,6 +260,42 @@ export class RealtimeGateway
         isDefault: channel.isDefault,
         memberUserIds: channel.members.map((m) => m.userId),
       };
+    });
+
+    // Agent conversation-visibility fanout resolvers. Bound here (rather than
+    // importing Prisma into the emitter) exactly like the channel-activity
+    // resolver above. All three reads are single-row and indexed, and the
+    // emitter caches them, so an opted-in team pays a lookup per conversation
+    // per 30s — not per frame.
+    this.emitter.bindVisibilityResolvers(
+      async (teamId) => {
+        const team = await this.db.team.findUnique({
+          where: { id: teamId },
+          select: { agentConversationVisibility: true },
+        });
+        return team?.agentConversationVisibility === "assigned";
+      },
+      async (conversationId) => {
+        const conv = await this.db.conversation.findUnique({
+          where: { id: conversationId },
+          select: { assignedUserId: true },
+        });
+        return conv?.assignedUserId ?? null;
+      },
+      async (contactId) => {
+        const conv = await this.db.conversation.findFirst({
+          where: { contactId },
+          select: { assignedUserId: true },
+        });
+        return conv?.assignedUserId ?? null;
+      },
+    );
+
+    // When an admin flips the org's agent-visibility setting, bust the
+    // emitter's per-team scope cache so fanout switches audience on the next
+    // frame instead of up to a TTL later.
+    registerVisibilityInvalidator((teamId) => {
+      this.emitter.invalidateTeamScope(teamId);
     });
 
     // realtime-added-1: start the outbound write-buffer reaper. Disconnects a
@@ -313,6 +393,11 @@ export class RealtimeGateway
         socket.data.userId = result.identity.userId;
         socket.data.teamId = result.identity.teamId;
         socket.data.role = result.identity.role;
+        // Decides team-firehose room membership on connect (see
+        // handleConnection). Stashed here so a recovered reconnect that skips
+        // the DB read still carries the boundary.
+        socket.data.agentConversationVisibility =
+          result.identity.agentConversationVisibility;
         return next();
       }
       if (result.kind === "unavailable") {
@@ -341,7 +426,9 @@ export class RealtimeGateway
       client.disconnect(true);
       return;
     }
-    const identity = { userId, teamId, role };
+    const agentConversationVisibility =
+      (client.data.agentConversationVisibility as string | undefined) ?? "team";
+    const identity = { userId, teamId, role, agentConversationVisibility };
 
     // Identity already stashed on socket.data by the auth middleware in
     // afterInit. Initialize the per-socket Sets that @SubscribeMessage
@@ -406,7 +493,25 @@ export class RealtimeGateway
     // Auto-join the team room on connect. No explicit subscribe:team
     // round-trip needed — clients always belong to one team for the
     // lifetime of the connection.
-    client.join(teamRoom(identity.teamId));
+    //
+    // EXCEPT under agent conversation-visibility scoping: a restricted agent
+    // must NOT be in the team firehose, because that room carries message
+    // bodies, contact PII and note text for the whole org. Enforcing this by
+    // ROOM MEMBERSHIP rather than by filtering at emit time is deliberate —
+    // membership is one decision made once per connection, whereas an emit
+    // filter has to be remembered at every one of ~30 fanout rules and will
+    // eventually be missed. A restricted agent still receives everything about
+    // their OWN conversations via their `user:` room, which every
+    // conversation-scoped rule co-targets.
+    const restrictedViewer = isRestrictedViewer({
+      userId: identity.userId,
+      teamId: identity.teamId,
+      role: identity.role,
+      agentConversationVisibility: identity.agentConversationVisibility,
+    });
+    if (!restrictedViewer) {
+      client.join(teamRoom(identity.teamId));
+    }
     // Per-user room (RT-1) — lets the server target this user across all their
     // tabs for membership-scoped fanout (private-channel activity badges)
     // without a team-wide broadcast that leaks metadata to non-members.
@@ -589,7 +694,13 @@ export class RealtimeGateway
     const p = this.db.user
       .findMany({
         where: { teamId, deactivatedAt: null },
-        select: { id: true, availabilityStatus: true, availabilityMessage: true },
+        select: {
+          id: true,
+          availabilityStatus: true,
+          availabilityMessage: true,
+          availabilitySource: true,
+          availabilityOverrideUntil: true,
+        },
       })
       .then((rows) => {
         this.availabilityCache.set(teamId, { at: Date.now(), rows });
@@ -657,7 +768,7 @@ export class RealtimeGateway
       onlineUserIds,
     });
     // Keep the widget's "an agent is available" dot in step with real presence.
-    this.relayWidgetAvailability(teamId);
+    void this.relayWidgetAvailability(teamId);
   }
 
   private async buildVisibleOnlineSnapshot(teamId: string): Promise<string[]> {
@@ -762,7 +873,12 @@ export class RealtimeGateway
     }
     const byUserId: Record<
       string,
-      { status: "available" | "busy" | "away" | "offline"; message?: string | null }
+      {
+        status: "available" | "busy" | "away" | "offline";
+        message?: string | null;
+        source?: AvailabilitySource;
+        until?: string | null;
+      }
     > = {};
     for (const r of rows) {
       const status = (r.availabilityStatus ?? "available") as
@@ -776,6 +892,14 @@ export class RealtimeGateway
       byUserId[r.id] = {
         status,
         ...(r.availabilityMessage !== null ? { message: r.availabilityMessage } : {}),
+        // Provenance rides along so a reconnecting tab can render "set by an
+        // admin" / "outside working hours" without a follow-up REST call.
+        ...(r.availabilitySource && r.availabilitySource !== "manual"
+          ? { source: r.availabilitySource as AvailabilitySource }
+          : {}),
+        ...(r.availabilityOverrideUntil
+          ? { until: r.availabilityOverrideUntil.toISOString() }
+          : {}),
       };
     }
     client.emit("user:availability:snapshot", { teamId, byUserId });
@@ -940,8 +1064,24 @@ export class RealtimeGateway
       // thread, the exact desync the always-emit design exists to prevent.
       if (!checkSubscribeBudget(client, "subscribe:conversation")) return;
       try {
+        // Ownership gate. Team scope defends against cross-tenant id-guessing;
+        // the visibility clause additionally stops a RESTRICTED agent from
+        // joining a thread that isn't theirs. That matters even though they're
+        // out of the team room: the conv room carries typing, viewers, AI
+        // suggestions/summaries and message status, so an agent who learned an
+        // id elsewhere could otherwise still listen in.
         const owns = await this.db.conversation.findFirst({
-          where: { id: body.conversationId, teamId },
+          where: {
+            id: body.conversationId,
+            teamId,
+            ...visibilityWhere({
+              userId: client.data.userId as string,
+              teamId,
+              role: client.data.role as Role,
+              agentConversationVisibility: client.data
+                .agentConversationVisibility as string | undefined,
+            }),
+          },
           select: { id: true, channel: true },
         });
         if (!owns) return; // silently drop — fail-soft posture

@@ -220,6 +220,59 @@ export function registerAuditSubscribers(): () => void {
     }
   });
 
+  // Message triage flag raised / resolved / removed. Unlike the tag and stage
+  // handlers above, no contact→conversation lookup is needed: the event already
+  // carries `conversationId` (the flag row denormalizes it).
+  //
+  // The definition NAME rides along in the payload's inlined definition, so it
+  // is snapshotted at write time for free — the timeline still reads "Flagged
+  // as Complaint" after that definition is renamed or archived. Same rule as
+  // tag_added/tag_removed, without the extra query those need.
+  //
+  // A pure metadata edit (reassigning the owner, editing the note) writes NO
+  // audit row: `action === "updated"` on a still-open flag isn't a lifecycle
+  // change, and logging it would churn the timeline the same way a no-op
+  // assignment would.
+  subscribe("message.flag_changed", async (e) => {
+    // Keyed on the TRANSITION (`action`), never on the post-state. Deriving it
+    // from `flag.status` was wrong twice over: a note edit on an already-
+    // resolved flag wrote a SECOND "resolved" row, and a genuine reopen wrote
+    // none at all — so the timeline could end at "resolved" while the flag was
+    // demonstrably open in the queue.
+    //
+    // `updated` (metadata only: owner, notes) writes nothing on purpose — it
+    // isn't a lifecycle change, and logging it would churn the timeline the
+    // same way a no-op assignment would.
+    const KIND_BY_ACTION = {
+      added: "flag_added",
+      reopened: "flag_reopened",
+      resolved: "flag_resolved",
+      removed: "flag_removed",
+      updated: null,
+    } as const;
+    const kind = KIND_BY_ACTION[e.action];
+    if (!kind) return;
+
+    const payload = {
+      flagId: e.flag.id,
+      messageId: e.messageId,
+      definitionId: e.flag.definition.id,
+      definitionName: e.flag.definition.name,
+      status: e.flag.status,
+      source: e.flag.source,
+    };
+    await recordConversationEvent({
+      conversationId: e.conversationId,
+      teamId: e.teamId,
+      userId: e.changedByUserId,
+      apiKeyId: e.changedByApiKeyId ?? null,
+      kind,
+      // `flag_removed` describes something that no longer exists, so its
+      // payload belongs in `before`; the other two describe the new state.
+      ...(kind === "flag_removed" ? { before: payload } : { after: payload }),
+    });
+  });
+
   // ---- WhatsApp Business Calling: terminal-state pills -------------------
   // One audit row per terminal call state so the timeline renders inline
   // pills the same way as message status / assignment changes. Carries

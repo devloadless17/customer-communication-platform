@@ -17,10 +17,12 @@ import type {
   InternalNote,
   MediaAttachment,
   Message,
+  MessageFlag,
   MessageStatus,
   User,
   UserAvailabilityStatus,
 } from "../types";
+import type { AvailabilitySource } from "../work-hours";
 
 // ---------------------------------------------------------------------------
 // Server → Client events.
@@ -113,6 +115,30 @@ export interface ServerToClientEvents {
     body: string | null;
     /** Customer 👍/👎 feedback on our outbound (Messenger response_feedback). */
     feedback?: "positive" | "negative" | null;
+  }) => void;
+
+  /**
+   * A triage flag on a message was raised, changed, resolved, or removed.
+   *
+   * TEAM-scoped, not conversation-scoped, for the same reason as
+   * `message:updated`: this event is in `THREAD_REDUCER_EVENTS`, so the inbox
+   * shell patches its CACHED background thread snapshots from it, and those
+   * conversations' rooms were never joined. It also drives the flags queue and
+   * the inbox-list flag badge, neither of which is inside any `conv:` room.
+   * Low volume (agent-initiated triage), so the team frame is free.
+   *
+   * `flag` is the state AFTER the change, present even for `removed` (the
+   * reducer matches on `flag.id` and the queue needs the definition to animate
+   * the row out). `openFlagCount` is the parent conversation's post-change
+   * count — the list badge reads it directly instead of recomputing.
+   */
+  "message:flag": (payload: {
+    teamId: string;
+    conversationId: string;
+    messageId: string;
+    action: "added" | "updated" | "reopened" | "resolved" | "removed";
+    flag: MessageFlag;
+    openFlagCount: number;
   }) => void;
 
   /**
@@ -411,6 +437,21 @@ export interface ServerToClientEvents {
     userId: string;
     status: UserAvailabilityStatus;
     message?: string | null;
+    /**
+     * Who decided it: "manual" (they picked it), "admin" (a teammate with
+     * `availability:manageOthers` set it for them), or "schedule" (their
+     * working hours flipped). Absent = "manual".
+     */
+    source?: AvailabilitySource;
+    /** ISO instant the manual/admin pick expires back to the schedule. */
+    until?: string | null;
+    /**
+     * The user's own pick, distinct from the effective status above. Read ONLY
+     * by that user's own availability picker — teammates render `status` /
+     * `message`. Lets the picker stay in sync across devices without showing
+     * the schedule's note as if the user had typed it.
+     */
+    manual?: { status: UserAvailabilityStatus; message: string | null };
   }) => void;
 
   /**
@@ -425,6 +466,8 @@ export interface ServerToClientEvents {
     byUserId: Record<string, {
       status: UserAvailabilityStatus;
       message?: string | null;
+      source?: AvailabilitySource;
+      until?: string | null;
     }>;
   }) => void;
 
@@ -547,6 +590,11 @@ export interface ServerToClientEvents {
     scope:
       | "stages"
       | "tags"
+      // The message-flag catalog (which triage flags exist). An open inbox's
+      // flag picker is populated once per session, so a create/rename/archive
+      // needs this frame to reach every tab — otherwise a new flag is invisible
+      // until reload.
+      | "message-flags"
       | "contact-fields"
       // Multi-step workflow definitions (canvas). Round 2 replaced
       // single-action "automations" with this.
@@ -1010,6 +1058,9 @@ export interface SocketData {
   teamId?: string;
   userId?: string;
   role?: import("../types").Role;
+  /** `Team.agentConversationVisibility` — decides whether this socket joins the
+   *  team firehose room. See RealtimeGateway.handleConnection. */
+  agentConversationVisibility?: string;
   /** Conversations this socket is currently flagged as typing in. */
   typingIn?: Set<string>;
   /** Channels (team chat) this socket is currently flagged as typing in. */

@@ -29,7 +29,7 @@ Organization (Team) → Users → Connected Channels → Customers/Contacts → 
 - **Conversation** — one thread per contact per channel. Closed threads **reopen**, they never fragment.
 - **Message** — one inbound/outbound message on a conversation.
 
-Collaboration primitives on a conversation: **assignment**, **status** (open/pending/closed), **stage** (pipeline), **tags**, **custom fields**, **internal notes**. Around them: **triggers → workflows → actions** (automation), **outbound webhooks** (notify external systems), **broadcasts** (bulk templated outbound), the external **`/v1` API** (n8n/Zapier/partners), and **calling** (WhatsApp Business Calling over WebRTC).
+Collaboration primitives on a conversation: **assignment** (manual, or routed by admin-configured policies — see [docs/assignment.md](docs/assignment.md)), **status** (open/pending/closed), **stage** (pipeline), **tags**, **custom fields**, **internal notes**. Around them: **triggers → workflows → actions** (automation), **outbound webhooks** (notify external systems), **broadcasts** (bulk templated outbound), the external **`/v1` API** (n8n/Zapier/partners), and **calling** (WhatsApp Business Calling over WebRTC).
 
 Everything in the app revolves around the conversation. The inbox is the heart of the product and must always be the highest-quality, most realtime surface.
 
@@ -277,6 +277,7 @@ Each links to the reasoning:
 - **No persisted `provider`/`vendor`** — the `Channel` enum is the only discriminator. — §5
 - **Providers hold no business logic**; app code only sees `NormalizedEvent`. — §5, §12
 - **Event tier order** (realtime → audit → analytics → workflow → webhooks); **never subscribe audit/workflow to `broadcast.*`**. — [docs/events.md](docs/events.md)
+- **Automated assignment never overrides a human**: every automated caller passes `onlyIfUnassigned`, and every automated assignment writes through `assignConversation` so it is indistinguishable downstream from a manual one. — [docs/assignment.md](docs/assignment.md)
 - **Realtime read-state convergence** (mark-read only when viewing; all recovery paths converge; local `conversation:read` drives the badge); **team-wide unread only**. — [docs/realtime.md](docs/realtime.md)
 - **Graceful shutdown**: `server.close()` before `app.close()`; keep the manual SIGTERM handler; `stop_grace_period ≥ ~100s` on api. — [docs/operations.md](docs/operations.md)
 - **Heap ≤ ~75% of the service's `mem_limit`** (api 2048/3g, web 1536/2g). — [docs/operations.md](docs/operations.md)
@@ -302,6 +303,7 @@ Each links to the reasoning:
 | Operations, deploy, heap, shutdown, queues, sweepers, Caddy | [docs/operations.md](docs/operations.md) |
 | Realtime: rooms, fanout scoping, reducers, read-state convergence | [docs/realtime.md](docs/realtime.md) |
 | Event bus: tiers, taxonomy, subscribers, outbox | [docs/events.md](docs/events.md) |
+| Assignment routing: policies, rules, capacity, campaign splits, rebalance | [docs/assignment.md](docs/assignment.md) |
 | Customer identity: unified model, auto-merge rules, migration | [docs/identity.md](docs/identity.md) |
 | Team chat: channels, 1:1 DMs, public/private visibility, invariants | [docs/team-chat.md](docs/team-chat.md) |
 | Website chat widget: embed modes, transport, media, identity | [docs/webchatwidget.md](docs/webchatwidget.md) |
@@ -318,3 +320,4 @@ Each links to the reasoning:
 | Meta manual onboarding: keys/IDs per channel + troubleshooting runbook | [docs/meta-manual-onboarding.md](docs/meta-manual-onboarding.md) |
 | Provider engine internals | [apps/api/src/lib/providers/README.md](apps/api/src/lib/providers/README.md) |
 | Workflow engine internals | [apps/api/src/lib/workflows/README.md](apps/api/src/lib/workflows/README.md) |
+| Assignment engine internals | [apps/api/src/lib/assignment/README.md](apps/api/src/lib/assignment/README.md) |

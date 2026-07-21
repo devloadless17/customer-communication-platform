@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { blobStorage } from "@/lib/blob-storage";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
+import { assignConversation } from "@/lib/conversations/mutations";
 import { createOutboundMessageIdempotent, isTransient } from "@/lib/messages/idempotent-create";
 import { getProviderBinding } from "@/lib/providers";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
@@ -905,6 +906,9 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     id: true,
     contactId: true,
     status: true,
+    // Pre-drawn campaign assignee (lib/assignment/broadcast-plan.ts), applied
+    // after a successful send.
+    assignedUserId: true,
     contact: {
       select: {
         id: true,
@@ -939,6 +943,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         id: true,
         contactId: true,
         status: true,
+        assignedUserId: true,
         contact: {
           select: {
             id: true,
@@ -1300,10 +1305,16 @@ async function processOneRecipient(
     templateCategory: string | null;
     bodyText: string | null;
     createdById: string | null;
+    /** Whether this campaign may take over an already-assigned conversation. */
+    assignmentOverwrite: boolean;
+    /** "on_reply" (default) or "on_send" — see the assignment block below. */
+    assignmentTrigger: string;
   },
   recipient: {
     id: string;
     contactId: string;
+    /** Assignee drawn at materialize time; null when the campaign assigns nobody. */
+    assignedUserId: string | null;
     contact: {
       id: string;
       name: string;
@@ -1909,6 +1920,58 @@ async function processOneRecipient(
       } catch (err) {
         console.error(
           `[broadcast ${broadcast.id}] deferred reopen failed for conversation ${conversationId} (message was sent)`,
+          err,
+        );
+      }
+    }
+
+    // Campaign assignment, "on_send" mode only.
+    //
+    // The assignee was DRAWN when the recipient row was built (see
+    // lib/assignment/broadcast-plan.ts) so an exact-count split is exact and a
+    // resumed run reuses the same draw. WHEN it's applied is the campaign's
+    // choice, and the DEFAULT is not here:
+    //
+    //   on_reply (default) — applied when the customer actually replies, in
+    //     lib/assignment/campaign-reply.ts. A campaign is overwhelmingly
+    //     one-way; assigning all 10,000 recipients here would bury agents in
+    //     conversations nobody will ever answer AND poison the
+    //     open-conversation counts that capacity limits and least-busy routing
+    //     read.
+    //   on_send — applied below, once the send definitively succeeded (same
+    //     reason the reopen is deferred: a campaign that failed to deliver must
+    //     not put work on anyone's plate).
+    //
+    // Routed through the shared `assignConversation` mutation, so the inbox
+    // updates live and the audit trail reads identically to a manual assign.
+    // `onlyIfUnassigned` unless the campaign explicitly opted into overwrite —
+    // a blast must not take a live support thread from the agent handling it.
+    if (recipient.assignedUserId && broadcast.assignmentTrigger === "on_send") {
+      try {
+        const current = await db.conversation.findFirst({
+          where: { id: conversationId, teamId: broadcast.teamId },
+          select: { assignedUserId: true },
+        });
+        const free = current != null && current.assignedUserId === null;
+        if (free || broadcast.assignmentOverwrite) {
+          await assignConversation({
+            db,
+            publish,
+            teamId: broadcast.teamId,
+            conversationId,
+            targetUserId: recipient.assignedUserId,
+            changedByUserId: null,
+            // NOT silent: campaign ownership is a real business change that
+            // workflows and partner webhooks should see. Note the invariant
+            // this respects — audit/workflow never subscribe to `broadcast.*`;
+            // this publishes `conversation.assigned`, which is a per-thread
+            // event and correctly fans out per assigned conversation only.
+          });
+        }
+      } catch (err) {
+        // Never fail a delivered send over assignment bookkeeping.
+        console.error(
+          `[broadcast ${broadcast.id}] assignment failed for conversation ${conversationId} (message was sent)`,
           err,
         );
       }

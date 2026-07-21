@@ -269,13 +269,30 @@ curl -s "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID" \
   -H "Authorization: Bearer $CCP_API_KEY"
 ```
 
-**Assign / unassign** — `POST /conversations/:id/assign` · `write:conversations`
-`assignedUserId` = a teammate id, or `null` to unassign.
+**Assign / unassign / auto-route** — `POST /conversations/:id/assign` · `write:conversations`
+
+| Body | Effect |
+|---|---|
+| `{ "assignedUserId": "USER_ID" }` | assign to that teammate |
+| `{ "assignedUserId": null }` | unassign (back to the triage queue) |
+| `{ "autoAssign": true }` | route with the team's assignment rules → default policy |
+| `{ "autoAssign": true, "policyId": "POLICY_ID" }` | route with a named policy |
+
+`autoAssign` runs the same engine the inbox, the AI handoff and workflows use —
+strategy, weights, per-agent limits and eligibility all apply, so an integration
+can't route in a way the org's settings forbid. It takes precedence over
+`assignedUserId` when both are sent.
+
+Add `"overwrite": false` to make it fill-an-empty-assignee-only (an explicit API
+call reassigns by default). When nobody is eligible — everyone offline or at
+their limit — the call still returns `200` and the conversation stays in the
+Unassigned queue: that's the policy's configured outcome, not an error.
+
 ```bash
 curl -s -X POST "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/assign" \
   -H "Authorization: Bearer $CCP_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{ "assignedUserId": "USER_ID" }'
+  -d '{ "autoAssign": true }'
 ```
 
 **Change status** — `POST /conversations/:id/status` · `write:conversations`
@@ -391,6 +408,123 @@ curl -s -X DELETE "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/n
   -H "Authorization: Bearer $CCP_API_KEY"
 ```
 
+---
+
+## 5b. Message flags (triage)
+
+A **message flag** marks ONE message as needing follow-up of a named kind — "Complaint", "Refund request", "Bug report" — and carries a lifecycle:
+
+```
+open  →  resolved      (it was a real one AND it was handled)
+      →  dismissed     (it was NOT actually one — a mis-flag)
+```
+
+Deliberately distinct from contact **tags**: a tag labels a *person* and drives broadcast audiences; a flag labels a *message* and has an open/resolved state you can report on. Keeping `dismissed` separate from `resolved` means "how many complaints did we get" never counts the non-complaints.
+
+**Routing work into another system.** This is the seam for that: subscribe to the `message.flag_changed` webhook (§9), route on `flag.definitionName`, then use the endpoints below to read the backlog and mark items handled from your own tooling. No polling required.
+
+Scopes: `read:flags`, `write:flags`. The flag *catalog* stays under `read:catalog` with every other catalog.
+
+### The queue
+
+**`GET /message-flags`** · `read:flags`
+
+Newest-first, keyset-paginated. Each row carries the contact name, channel and a message excerpt, so a worklist renders without a second call.
+
+| Query param | Meaning |
+|---|---|
+| `status` | Repeatable or comma-joined: `open` \| `resolved` \| `dismissed`. Defaults to `open`. |
+| `definitionId` | Repeatable or comma-joined. |
+| `assignedTo` | A user id, or the literal `unassigned`. |
+| `conversationId` | Narrow to one thread. |
+| `cursor` / `take` | Keyset pagination; `take` max 50. |
+
+```bash
+curl -s "$CCP_BASE_URL/api/external/v1/message-flags?status=open&take=50" \
+  -H "Authorization: Bearer $CCP_API_KEY"
+```
+
+```json
+{
+  "items": [
+    {
+      "id": "cmpflag_01",
+      "messageId": "cmpmsg_01",
+      "conversationId": "cmpconv_01",
+      "contactId": "cmpcon_01",
+      "contactName": "Layla H.",
+      "channel": "whatsapp",
+      "messageExcerpt": "This is the third time the order arrived late…",
+      "messageTimestamp": "2026-07-22T11:04:12.000Z",
+      "definition": { "id": "cmpflagdef_01", "name": "Complaint", "color": "rose", "description": null, "archived": false, "sortOrder": 0 },
+      "status": "open",
+      "source": "human",
+      "confidence": null,
+      "note": "Second time this month.",
+      "assignedToId": null,
+      "assignedToName": null,
+      "resolvedById": null,
+      "resolvedByName": null,
+      "resolvedAt": null,
+      "resolutionNote": null,
+      "createdById": "cmpusr_01",
+      "createdByName": "Sara",
+      "createdAt": "2026-07-22T11:05:00.000Z",
+      "updatedAt": "2026-07-22T11:05:00.000Z"
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+**`GET /message-flags/counts`** · `read:flags` — open counts, team-wide and per definition.
+
+**`GET /message-flag-definitions`** · `read:catalog` — the catalog (archived included). Resolve names to ids once and cache.
+
+### Raising a flag
+
+**`POST /messages/:messageId/flags`** · `write:flags`
+
+Provide **exactly one** of `definitionId` or `definitionName` — the name form exists so your config can say `"Complaint"` rather than a cuid. Optional `note`, `assignedToId`.
+
+**Idempotent by construction**: there can be at most one flag of a given kind per message, so no `Idempotency-Key` is required and a retry converges on the same row instead of duplicating. Re-raising a *resolved* flag reopens it (the same complaint came back).
+
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/messages/MESSAGE_ID/flags" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "definitionName": "Complaint", "note": "Second time this month." }'
+```
+
+Returns `{ "flag": { … }, "openFlagCount": 1 }` — `openFlagCount` is the parent conversation's unresolved-flag count after the change.
+
+### Resolving / reassigning
+
+**`PATCH /message-flags/:flagId`** · `write:flags`
+
+Any subset of `status`, `assignedToId` (`null` unassigns), `note`, `resolutionNote`.
+
+```bash
+curl -s -X PATCH "$CCP_BASE_URL/api/external/v1/message-flags/FLAG_ID" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "status": "resolved", "resolutionNote": "Refund issued, ticket #4192" }'
+```
+
+Concurrency-safe: two clients resolving the same flag both succeed, and the open count moves exactly once.
+
+**`DELETE /message-flags/:flagId`** · `write:flags` — remove a flag entirely ("flagged by mistake"). Different from `dismissed`, which keeps the record that someone looked and decided it wasn't one.
+
+| Error | Meaning |
+|---|---|
+| `404 message_not_found` | No such message in your org. |
+| `404 flag_not_found` | No such flag in your org. |
+| `404 message_flag_definition_not_found` | Unknown `definitionId` / `definitionName`. |
+| `409 message_flag_definition_archived` | That flag kind was retired and can't be raised any more. |
+| `400 assignee_not_found` | `assignedToId` isn't an active member of your org. |
+
+---
+
 > **Note on unified customers:** merging/splitting a `Customer` (linking channel contacts into one person) is currently a **UI-only** capability — there is no `/v1` customers resource yet. Auto-merge on a self-asserted strong key (exact phone/email) still happens automatically at ingest. Programmatic merge/split is a planned addition; until then, reconcile identities in the inbox.
 
 > **Note on broadcasts:** *creating* a broadcast is a **UI-only** capability — there is deliberately no `write:broadcasts` scope (billed template sends are irreversible), so to reach many contacts programmatically today you iterate the send routes above (each with its own `Idempotency-Key`). Read-only campaign/report/recipient endpoints **do** exist — see the [Broadcasts](#7-broadcasts-campaign-reporting) section below.
@@ -418,6 +552,79 @@ Reference data for the routes above. Scopes: `read:catalog`, `write:catalog`.
 
 Tag `color` must be one of: `slate`, `rose`, `amber`, `emerald`, `sky`, `violet`, `pink`, `lime`, `orange`.
 
+### Teammate availability & working hours
+
+Scope: `write:users` (reads stay under `read:catalog`).
+
+| Action | Request |
+|---|---|
+| Set a member's status | `PATCH /users/:id/availability` — `{ "status": "busy", "message": "On a call" }` |
+| Return them to their schedule | `PATCH /users/:id/availability` — `{ "followSchedule": true }` |
+| Set their working hours | `PUT /users/:id/work-hours` — `{ "mode": "custom", "workHours": { … } }` |
+
+`GET /users` and `GET /users/:idOrEmail` return the member's **effective**
+availability plus its provenance:
+
+| Field | Meaning |
+|---|---|
+| `availabilityStatus` | `available` · `busy` · `away` · `offline` — what teammates see |
+| `availabilityMessage` | The note shown next to the status |
+| `availabilitySource` | `manual` (they picked it) · `admin` (someone set it for them) · `schedule` (their working hours) |
+| `availabilityUntil` | ISO instant a manual/admin pick expires back to the schedule |
+| `workHoursMode` | `inherit` (org schedule) · `custom` · `off` |
+| `workHours` | Their own schedule, when `mode = custom` |
+
+**Working hours** are `{ timezone, weekly, exceptions? }`. `weekly` maps
+`mon`…`sun` to up to 4 windows (a split shift); a missing or empty day is a day
+off, and a window whose `close` is at or before its `open` (`22:00`–`06:00`)
+runs overnight. `exceptions` are dated overrides:
+`{ "date": "2026-08-15", "closed": true }`.
+
+Outside their hours a member automatically shows as `away` with an "Outside
+working hours" note and drops out of the preferred round-robin tiers; inside
+them they come back automatically. (They aren't excluded outright — the
+last-resort tier still exists so a conversation is never left unowned when the
+whole team is off shift.)
+
+A manual or admin pick outranks the schedule only **until the next shift
+boundary**, so a status set mid-shift can't outlive the day:
+
+| Situation | When the pick expires |
+|---|---|
+| No schedule (`mode: "off"`, or no org schedule) | Never — it holds until changed |
+| A normal schedule | At the next boundary (shift end if on shift, shift start if off) |
+| A 24/7 schedule (never closes) | At the next local midnight in the schedule's timezone |
+| The schedule is edited while the pick is live | Re-anchored to the new schedule's next boundary |
+
+Send `{ "followSchedule": true }` to drop the override immediately instead of
+waiting for it to expire.
+
+```bash
+# Mark a member busy — expires at the end of their shift
+curl -s -X PATCH "$CCP_BASE_URL/api/external/v1/users/$USER_ID/availability" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "status": "busy", "message": "In a meeting" }'
+
+# Put them on a Mon–Fri 09:00–17:00 Beirut schedule
+curl -s -X PUT "$CCP_BASE_URL/api/external/v1/users/$USER_ID/work-hours" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "mode": "custom",
+        "workHours": {
+          "timezone": "Asia/Beirut",
+          "weekly": {
+            "mon": [{ "open": "09:00", "close": "17:00" }],
+            "tue": [{ "open": "09:00", "close": "17:00" }],
+            "wed": [{ "open": "09:00", "close": "17:00" }],
+            "thu": [{ "open": "09:00", "close": "17:00" }],
+            "fri": [{ "open": "09:00", "close": "17:00" }]
+          }
+        }
+      }'
+```
+
 ```bash
 # Example: list tags, then create one
 curl -s "$CCP_BASE_URL/api/external/v1/tags" -H "Authorization: Bearer $CCP_API_KEY"
@@ -427,6 +634,116 @@ curl -s -X POST "$CCP_BASE_URL/api/external/v1/tags" \
   -H "Content-Type: application/json" \
   -d '{ "name": "VIP", "color": "sky" }'
 ```
+
+---
+
+## 6b. Assignment routing
+
+Full parity with **Settings → Assignment**: everything the UI can configure, the
+API can. Read: `read:catalog`. Write: `write:catalog`.
+
+A **policy** decides *how* to pick someone (strategy, per-member share, limits,
+who's eligible). A **rule** decides *which policy* applies to a given
+conversation — checked top to bottom, first match wins, with the default policy
+as the fallback. **Settings** decide *when* routing runs at all.
+
+**Read everything** — `GET /assignment`
+Returns `{ policies, rules, settings, members }`; each member carries their live
+`openCount`, which is what a capacity limit is measured against.
+
+**Create / update a policy** — `POST /assignment/policies` · `PUT /assignment/policies/:id`
+
+| Field | Values |
+|---|---|
+| `strategy` | `least_busy` (default) · `round_robin` · `weighted` · `fixed` · `manual` |
+| `eligibility` | `online_first` (default) · `online_only` · `available_only` · `any_active` |
+| `overflow` | `leave_unassigned` (default) · `ignore_capacity` · `fallback_user` |
+| `eligibleRoles` | `[]` = every role, or e.g. `["agent"]` |
+| `includeAllMembers` | `true` (rows are per-member tuning) / `false` (rows are the squad) |
+| `defaultMaxOpen` | concurrent open-conversation cap; `null` = no limit |
+| `members[]` | `{ userId, weight, maxOpen, enabled }` |
+
+`PUT` requires `expectedVersion` (the value from the last read). A stale version
+returns `409 version_conflict` rather than silently overwriting a co-admin's
+edit.
+
+```bash
+# "Support — weighted": Ali gets 50 of every 70, Sara 20, nobody over 25 open.
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/assignment/policies" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "Support — weighted",
+        "strategy": "weighted",
+        "eligibility": "online_first",
+        "defaultMaxOpen": 25,
+        "overflow": "leave_unassigned",
+        "members": [
+          { "userId": "ALI_ID",  "weight": 50, "enabled": true },
+          { "userId": "SARA_ID", "weight": 20, "enabled": true }
+        ]
+      }'
+```
+
+**Make a policy the default** — `POST /assignment/policies/:id/default`
+**Archive a policy** — `DELETE /assignment/policies/:id` (the default can't be archived)
+
+**Routing rules** — `POST /assignment/rules` · `PATCH /assignment/rules/:id` ·
+`DELETE /assignment/rules/:id` · `PUT /assignment/rules/order`
+
+`conditions` clauses AND together; values inside one clause OR. An absent clause
+means "don't care", so `{}` is a catch-all. A clause whose context is missing
+never matches — a `keywords` rule can't fire on a campaign assignment, which
+carries no message text.
+
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/assignment/rules" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "VIP WhatsApp → senior pool",
+        "policyId": "POLICY_ID",
+        "conditions": {
+          "channels": ["whatsapp"],
+          "tagIds": ["VIP_TAG_ID"],
+          "sources": ["inbound", "ai_handoff"]
+        }
+      }'
+```
+
+Available clauses: `channels`, `tagIds`, `stageIds`, `languages` (prefix match,
+so `en` catches `en-US`), `keywords` (case-insensitive substring),
+`isNewContact`, and `sources` — one of `inbound`, `reopen`, `ai_handoff`,
+`workflow`, `broadcast`, `api`, `manual`, `rebalance`.
+
+**When routing runs** — `PATCH /assignment/settings`
+
+| Field | Default | Meaning |
+|---|---|---|
+| `autoAssignOnNewConversation` | `false` | route a brand-new conversation on its first message |
+| `skipWhenAiHandling` | `true` | while the AI is answering, don't spend an agent's capacity — a human arrives on escalation |
+| `autoAssignOnReopen` | `false` | route an existing **unassigned** thread on a new message |
+| `reassignOnOffline` | `false` | move work off agents who disconnect |
+| `reassignOfflineAfterMinutes` | `15` | grace period, so a browser refresh isn't a stampede |
+| `reassignOfflineOnlyPending` | `true` | only threads no agent has replied to yet |
+| `reassignOnDeactivate` | `true` | re-route a deactivated teammate's open conversations |
+| `aiHandoffPolicyId` | `null` | pin AI escalations to a policy; `null` = use the routing rules |
+
+**Dry run** — `POST /assignment/preview` · `read:catalog`
+"Who would take a conversation like this, right now?" Runs against live presence
+and workload and returns `{ decision, user }`. Read-only — it never advances the
+rotation cursor or the weighted counters, so it's safe to poll.
+
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/assignment/preview" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "source": "inbound", "channel": "whatsapp", "tagIds": ["VIP_TAG_ID"] }'
+```
+
+`decision.reason` explains the outcome: `picked`, `fixed`, `fallback`,
+`overflow_uncapped`, `manual_strategy`, `no_policy`, `no_candidates`,
+`at_capacity`.
 
 ---
 
@@ -655,7 +972,7 @@ pick the events. We generate a signing secret (`ccp_whsec_…`) shown once.
 `conversation.assigned`, `conversation.opened`, `conversation.closed`,
 `conversation.status_changed`, `conversation.ai_changed`, `contact.created`,
 `contact.updated`, `contact.tag_changed`, `contact.lifecycle_changed`,
-`contact.deleted`, `note.created`, `note.deleted`.
+`contact.deleted`, `note.created`, `note.deleted`, `message.flag_changed`.
 
 **Example body — `message.received`:**
 ```jsonc
@@ -677,6 +994,37 @@ pick the events. We generate a signing secret (`ccp_whsec_…`) shown once.
   },
   "channel": { "id": "...", "name": "...", "waId": "961...", "profileName": "..." },
   "sender":  { "source": "contact", "apiKeyId": null }
+}
+```
+
+**Example body — `message.flag_changed`** (this is the one to subscribe to if you
+want flagged work to reach another system):
+```jsonc
+{
+  "team_id": "...",
+  "timestamp": 1753182300000,
+  "event_type": "message.flag_changed",
+  "action": "added",                   // added | updated | resolved | removed
+  "conversationId": "...",
+  "messageId": "...",
+  "contact": { "id": "...", "phoneNumber": "+961...", "name": "Layla H." },
+  "openFlagCount": 1,                  // the thread's unresolved-flag count AFTER the change
+  "flag": {
+    "id": "...",
+    "definitionId": "...",
+    "definitionName": "Complaint",     // route on THIS — no catalog sync needed
+    "definitionColor": "rose",
+    "status": "open",                  // open | resolved | dismissed
+    "source": "human",                 // human | ai | workflow | api
+    "confidence": null,                // 0..1 when source = "ai"
+    "note": "Second time this month.",
+    "assignedToId": null, "assignedToName": null,
+    "resolvedById": null, "resolvedByName": null,
+    "resolvedAt": null, "resolutionNote": null,
+    "createdById": "...", "createdByName": "Sara",
+    "createdAt": 1753182300000,
+    "updatedAt": 1753182300000
+  }
 }
 ```
 `message.sent` is the same minus the inbound-only flags. The other events carry

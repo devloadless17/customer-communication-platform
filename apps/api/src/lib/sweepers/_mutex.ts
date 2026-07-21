@@ -41,11 +41,14 @@ type SweeperName =
   | "inbound-media"
   | "stale-calls"
   | "conversation-analytics-drift"
+  | "message-flag-count-drift"
   | "outbound-webhook-delivery-cleanup"
   | "message-rawpayload-retention"
   | "broadcast-delivery-drift"
   | "webchat-visitor-retention"
-  | "contact-transfer-artifacts";
+  | "contact-transfer-artifacts"
+  | "work-hours"
+  | "assignment-rebalance";
 
 // Single in-process mutex; sweepers serialize through it. Boolean is enough
 // because Node's event loop is single-threaded — the only way two callers
@@ -60,6 +63,7 @@ const lastCompletion = new Map<SweeperName, number>();
 // runway because a skipped tick can take a full week to retry.
 const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
   "contact-drift": 25 * 60 * 60 * 1000, // 24h cadence
+  "message-flag-count-drift": 25 * 60 * 60 * 1000, // 24h cadence
   "customer-link": 5 * 60 * 1000, // 60s cadence
   "blob-orphan": 8 * 24 * 60 * 60 * 1000, // weekly cadence
   "outbound-event-retention": 25 * 60 * 60 * 1000,
@@ -76,6 +80,8 @@ const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
   "broadcast-delivery-drift": 7 * 60 * 60 * 1000, // 6h cadence
   "contact-transfer-artifacts": 20 * 60 * 1000, // 15m cadence
   "webchat-visitor-retention": 25 * 60 * 60 * 1000, // 24h cadence
+  "work-hours": 5 * 60 * 1000, // 60s cadence
+  "assignment-rebalance": 11 * 60 * 1000, // 5m cadence
 };
 
 // First time we ATTEMPTED each sweeper. Lets the stale-warn fire for a sweeper

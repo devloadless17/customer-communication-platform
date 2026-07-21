@@ -1664,6 +1664,11 @@ export function useConversationEvents(
       "conversation:ai",
       "contact:updated",
       "note:deleted",
+      // Raising / resolving / removing a flag writes a flag_added /
+      // flag_resolved / flag_removed audit row, so the timeline pill needs the
+      // same refresh. (A pure reassign / note edit writes no row — the fetch is
+      // then a no-op that mergeAuthoritativeEvents short-circuits by identity.)
+      "message:flag",
     ]);
     const runActivityFetch = () => {
       void fetchWithSessionGuard(`/api/conversations/${conversationId}/events`)

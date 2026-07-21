@@ -49,6 +49,9 @@ export interface ConversationCounts {
   mine: number;
   unassigned: number;
   closed: number;
+  /** Threads with at least one UNRESOLVED message triage flag. Optional so a
+   *  cached / version-skewed response from before flags shipped still parses. */
+  flagged?: number;
   byStage: Record<string, number>;
   /** Per-bucket count of conversations with unread messages (unreadCount>0) —
    *  drives the green unread pills on the sub-sidebar filters. */
@@ -58,6 +61,7 @@ export interface ConversationCounts {
     mine: number;
     unassigned: number;
     closed: number;
+    flagged?: number;
   };
 }
 
@@ -240,6 +244,10 @@ export function useConversationCounts(): ConversationCounts | null {
     socket.on("conversation:deleted", trigger);
     // A thread marked read clears its unreadCount → recompute the unread pills.
     socket.on("conversation:read", trigger);
+    // Raising / resolving a flag moves the "Flagged" bucket. `trigger` (not the
+    // skip-optimistic variant) because flags never touch the stage-settling
+    // window this hook guards.
+    socket.on("message:flag", trigger);
     socket.on("contact:updated", onContactUpdated);
     socket.on("contacts:bulk_updated", onBulkUpdated);
     socket.on("message:new", onMessageNew);
@@ -252,6 +260,7 @@ export function useConversationCounts(): ConversationCounts | null {
       socket.off("conversation:status", triggerSkipOptimistic);
       socket.off("conversation:deleted", trigger);
       socket.off("conversation:read", trigger);
+      socket.off("message:flag", trigger);
       socket.off("contact:updated", onContactUpdated);
       socket.off("contacts:bulk_updated", onBulkUpdated);
       socket.off("message:new", onMessageNew);

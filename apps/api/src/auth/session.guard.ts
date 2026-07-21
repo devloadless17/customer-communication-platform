@@ -43,6 +43,11 @@ export interface ApiSession {
    *  handler-level checks resolve permissions with ZERO extra DB read; the
    *  15s session cache bounds staleness after an admin edits the matrix. */
   rolePermissions: unknown;
+  /** `Team.agentConversationVisibility` ("team" | "assigned"). Carried on the
+   *  session so the read boundary in lib/conversations/visibility.ts costs ZERO
+   *  extra queries on every conversation read; the 15s session cache bounds
+   *  staleness after an admin flips it (and the flip busts the cache). */
+  agentConversationVisibility: string;
 }
 
 declare module "express-serve-static-core" {
@@ -328,7 +333,13 @@ export async function resolveSession(
       email: true,
       avatarUrl: true,
       deactivatedAt: true,
-      team: { select: { rolePermissions: true, status: true } },
+      team: {
+        select: {
+          rolePermissions: true,
+          status: true,
+          agentConversationVisibility: true,
+        },
+      },
     },
   });
   if (!user || user.deactivatedAt) return null;
@@ -343,6 +354,9 @@ export async function resolveSession(
     avatarUrl: user.avatarUrl ?? null,
     teamStatus: (user.team?.status ?? "active") as TeamStatus,
     rolePermissions: user.team?.rolePermissions ?? {},
+    // Default "team" = unrestricted, matching the column default, so a missing
+    // team row can never accidentally lock an org out of its own inbox.
+    agentConversationVisibility: user.team?.agentConversationVisibility ?? "team",
   };
   cacheSet(user.id, session);
   if (typeof cookieHeader === "string" && cookieHeader.length > 0) {

@@ -34,6 +34,12 @@ export const loadActiveUser = cache(async (userId: string) => {
       deactivatedAt: true,
       availabilityStatus: true,
       availabilityMessage: true,
+      // Schedule provenance, so the availability picker can explain an
+      // automatic status ("Outside working hours", "set by an admin") on the
+      // FIRST paint. Without these the context line only appeared once a socket
+      // frame happened to arrive — i.e. never, on a quiet page.
+      availabilitySource: true,
+      availabilityOverrideUntil: true,
       // `status` powers the org-approval gate in (app)/layout.tsx. Loaded here
       // (alongside rolePermissions) so the gate never has to call the now
       // org-gated /api/team endpoint for a pending/suspended org.

@@ -271,7 +271,11 @@ export class WebchatwidgetGateway
       config: data.resolved.config,
     });
     // Seed the availability dot for THIS visitor (the relay only fires on changes).
-    client.emit("agents", { online: this.realtime.teamHasOnlineAgent(data.teamId) });
+    // "online" here means an agent is connected AND available — not merely that
+    // someone has a tab open; see `teamHasAvailableAgent`.
+    client.emit("agents", {
+      online: await this.realtime.teamHasAvailableAgent(data.teamId),
+    });
     // Resume an existing conversation for this (widget, visitor): join its room
     // and replay recent history so replies sent while the widget was closed show
     // on reopen. Room is derived server-side from the resolved contact — a visitor

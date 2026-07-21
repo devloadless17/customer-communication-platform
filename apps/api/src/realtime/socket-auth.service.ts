@@ -16,6 +16,9 @@ export interface SocketIdentity {
   userId: string;
   teamId: string;
   role: Role;
+  /** `Team.agentConversationVisibility` — decides whether this socket may join
+   *  the team firehose room. See RealtimeGateway.handleConnection. */
+  agentConversationVisibility: string;
 }
 
 export type SocketAuthResult =
@@ -80,6 +83,7 @@ export class SocketAuthService {
           userId: cachedFromCookie.userId,
           teamId: cachedFromCookie.teamId,
           role: cachedFromCookie.role,
+          agentConversationVisibility: cachedFromCookie.agentConversationVisibility,
         },
       };
     }
@@ -120,7 +124,12 @@ export class SocketAuthService {
       sessionCacheSetByCookie(cookieHeader, userId, sessionId);
       return {
         kind: "ok",
-        identity: { userId, teamId: cached.teamId, role: cached.role },
+        identity: {
+          userId,
+          teamId: cached.teamId,
+          role: cached.role,
+          agentConversationVisibility: cached.agentConversationVisibility,
+        },
       };
     }
 
@@ -136,7 +145,13 @@ export class SocketAuthService {
           email: true,
           avatarUrl: true,
           deactivatedAt: true,
-          team: { select: { rolePermissions: true, status: true } },
+          team: {
+            select: {
+              rolePermissions: true,
+              status: true,
+              agentConversationVisibility: true,
+            },
+          },
         },
       });
     } catch (err) {
@@ -163,6 +178,7 @@ export class SocketAuthService {
       role: dbUser.role as Role,
       name: dbUser.name,
       email: dbUser.email,
+      agentConversationVisibility: dbUser.team?.agentConversationVisibility ?? "team",
       avatarUrl: dbUser.avatarUrl ?? null,
       teamStatus,
       rolePermissions: dbUser.team?.rolePermissions ?? {},
@@ -170,7 +186,13 @@ export class SocketAuthService {
     sessionCacheSetByCookie(cookieHeader, dbUser.id, sessionId);
     return {
       kind: "ok",
-      identity: { userId, teamId: dbUser.teamId, role: dbUser.role as Role },
+      identity: {
+        userId,
+        teamId: dbUser.teamId,
+        role: dbUser.role as Role,
+        agentConversationVisibility:
+          dbUser.team?.agentConversationVisibility ?? "team",
+      },
     };
   }
 }

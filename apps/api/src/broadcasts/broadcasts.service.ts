@@ -33,6 +33,7 @@ import {
   fetchWhatsappHealthFromGraph,
   getWhatsappHealth,
 } from "@/lib/providers/meta-health";
+import { buildBroadcastAssignmentPlan } from "@/lib/assignment/broadcast-plan";
 import { getBroadcastReport, recipientOutcomeWhere } from "@/lib/broadcast-report";
 import { csvHeader, csvRows } from "@/lib/csv";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
@@ -776,6 +777,21 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // why only some of their audience got the message.
       suppressedCount,
       templateCategory: template?.category ?? null,
+      // Campaign assignment (see BroadcastAssignmentMode). Stored on the row so
+      // the recipient draw — which happens where the recipient rows are built,
+      // in BOTH the sync path below and the materialize worker — reads one
+      // config, and so the campaign detail page can explain who owns the
+      // replies long after the fact.
+      assignmentMode: input.assignment?.mode ?? "none",
+      assignmentUserId: input.assignment?.userId ?? null,
+      assignmentPolicyId: input.assignment?.policyId ?? null,
+      // Prisma's nullable-Json input needs the explicit DbNull sentinel — a
+      // bare `null` is a type error, not "clear the column".
+      assignmentSplit: (input.assignment?.split ??
+        Prisma.DbNull) as Prisma.InputJsonValue,
+      assignmentLeftover: input.assignment?.leftover ?? "leave_unassigned",
+      assignmentTrigger: input.assignment?.trigger ?? "on_reply",
+      assignmentOverwrite: input.assignment?.overwrite ?? false,
     };
 
     // LARGE audience → async materialization. Inserting tens of thousands of
@@ -822,6 +838,26 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // plannable; all-or-nothing so a mid-write crash can't leave totalCount
     // disagreeing with the recipient rows). ≤5k recipients = ≤5 bounded inserts.
     const RECIPIENT_CHUNK = 1_000;
+    // Draw the campaign's assignees BEFORE opening the transaction — the plan
+    // needs its own reads (roster, policy pool) and doing them inside would add
+    // avoidable round-trips to a tx that already has a tight budget (P2028).
+    const assignmentPlan = await buildBroadcastAssignmentPlan({
+      db: this.db,
+      teamId,
+      total: recipientRows.length,
+      config: {
+        mode: commonData.assignmentMode,
+        assignmentUserId: commonData.assignmentUserId,
+        assignmentPolicyId: commonData.assignmentPolicyId,
+        assignmentSplit: commonData.assignmentSplit,
+        assignmentLeftover: commonData.assignmentLeftover,
+      },
+    }).catch((err: unknown) => {
+      // Assignment is a convenience on top of the send — never block it.
+      this.logger.error("broadcast assignment planning failed; sending unassigned", err);
+      return { perRecipient: [] as (string | null)[], totals: [] };
+    });
+
     const broadcast = await this.db.$transaction(async (tx) => {
       const created = await tx.broadcast.create({
         data: {
@@ -835,10 +871,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       for (let i = 0; i < recipientRows.length; i += RECIPIENT_CHUNK) {
         const slice = recipientRows.slice(i, i + RECIPIENT_CHUNK);
         await tx.broadcastRecipient.createMany({
-          data: slice.map((r) => ({
+          data: slice.map((r, j) => ({
             broadcastId: created.id,
             contactId: r.contactId,
             customerId: r.customerId,
+            assignedUserId: assignmentPlan.perRecipient[i + j] ?? null,
           })),
           skipDuplicates: true,
         });

@@ -42,6 +42,8 @@ export function AssignmentDropdown({
   currentUserName,
   onAlert,
   aiActive = false,
+  canAssignOthers,
+  currentUserId,
 }: {
   teamId: string;
   conversationId: string;
@@ -59,6 +61,13 @@ export function AssignmentDropdown({
   /** Actor name for the optimistic activity pill (the agent making the change). */
   currentUserName: string;
   onAlert: (title: string, description?: string) => Promise<void>;
+  /** `conversations:assignOthers`. False = this user may only claim the
+   *  conversation for themselves or release their own — the teammate list is
+   *  hidden rather than shown-and-rejected, so nobody discovers a permission
+   *  by being refused. */
+  canAssignOthers: boolean;
+  /** The viewer, so a restricted user can still claim/release their own. */
+  currentUserId: string;
 }) {
   const [pending, setPending] = useState(false);
   // Live online + availability for the team so the dropdown rows can show a
@@ -227,14 +236,22 @@ export function AssignmentDropdown({
       >
         <DropdownMenuLabel>Assign to…</DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void assign(null)}>
-          {currentId === null && <Check className="size-3.5" />}
-          <span className={cn("text-muted-foreground", currentId === null && "ml-1")}>
-            Unassigned
-          </span>
-        </DropdownMenuItem>
+        {/* Without `conversations:assignOthers` a user may only claim this
+            conversation or release their own — so we HIDE what they can't do
+            rather than offering it and rejecting the click. "Unassign" is
+            therefore only shown when the thread is actually theirs. */}
+        {(canAssignOthers || currentId === currentUserId) && (
+          <DropdownMenuItem onSelect={() => void assign(null)}>
+            {currentId === null && <Check className="size-3.5" />}
+            <span className={cn("text-muted-foreground", currentId === null && "ml-1")}>
+              Unassigned
+            </span>
+          </DropdownMenuItem>
+        )}
         <AssignableMembers
-          teamMembers={teamMembers}
+          teamMembers={
+            canAssignOthers ? teamMembers : teamMembers.filter((u) => u.id === currentUserId)
+          }
           currentId={currentId}
           onlineUserIds={onlineUserIds}
           availabilityByUserId={availabilityByUserId}

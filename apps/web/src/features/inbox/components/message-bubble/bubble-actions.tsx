@@ -5,6 +5,7 @@ import {
   AlertCircle,
   Copy,
   CornerUpLeft,
+  Flag,
   Forward,
   ListChecks,
   MoreHorizontal,
@@ -16,8 +17,13 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useMessageFlags } from "@/features/inbox/components/message-flags-context";
+import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { cn } from "@ccp/shared/utils";
 import { toast } from "@/lib/toast";
@@ -80,8 +86,19 @@ export function BubbleActions({
 
   const copyText = message.body.trim();
   const canCopy = copyText.length > 0;
+  // Flagging needs a real persisted message (the flag FKs to Message.id) and at
+  // least one definition to pick — a team that hasn't set any up sees no entry
+  // rather than an empty submenu.
+  const flagsCtx = useMessageFlags();
+  const alreadyFlagged = new Set((message.flags ?? []).map((f) => f.definition.id));
+  const flaggableDefinitions = (flagsCtx?.definitions ?? []).filter(
+    (d) => !alreadyFlagged.has(d.id),
+  );
+  const canFlag =
+    Boolean(flagsCtx) && !message.pending && !message.failed && flaggableDefinitions.length > 0;
   const hasMenu =
     canCopy ||
+    canFlag ||
     (canForward && Boolean(onForward)) ||
     (canSelect && Boolean(onStartSelect));
   if (!(canReply && onReply) && !hasMenu && !canReact) return null;
@@ -201,6 +218,37 @@ export function BubbleActions({
                 <Copy className="size-3.5" />
                 Copy
               </DropdownMenuItem>
+            )}
+            {canFlag && flagsCtx && (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <Flag className="size-3.5" />
+                  Flag as
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="w-52">
+                  {flaggableDefinitions.map((definition) => (
+                    <DropdownMenuItem
+                      key={definition.id}
+                      onSelect={() =>
+                        void flagsCtx
+                          .raise({ messageId: message.id, definitionId: definition.id })
+                          // The toast is already raised inside the context; swallow
+                          // here so an expected 4xx doesn't surface as an unhandled
+                          // rejection in the console.
+                          .catch(() => {})
+                      }
+                    >
+                      <span
+                        className={cn(
+                          "size-2 shrink-0 rounded-full",
+                          tagColorClasses(definition.color).solid,
+                        )}
+                      />
+                      <span className="truncate">{definition.name}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
             )}
             {canForward && onForward && (
               <DropdownMenuItem onSelect={() => onForward(message)}>

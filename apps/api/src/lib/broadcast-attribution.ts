@@ -9,6 +9,7 @@
  * reporting field must never lengthen it or be able to fail it.
  */
 
+import { applyCampaignAssigneeOnReply } from "@/lib/assignment/campaign-reply";
 import { db } from "@/lib/db";
 
 /**
@@ -95,7 +96,7 @@ export async function attributeInboundToBroadcast(ctx: InboundContext): Promise<
   // CAS on `repliedAt: null` → FIRST reply wins. This counts unique recipients
   // who replied, not messages; the report labels it "recipients who replied" so
   // the denominator is honest.
-  await db.broadcastRecipient.updateMany({
+  const credited = await db.broadcastRecipient.updateMany({
     where: { id: recipientId, repliedAt: null },
     data: {
       repliedAt: ctx.timestamp,
@@ -107,6 +108,19 @@ export async function attributeInboundToBroadcast(ctx: InboundContext): Promise<
       ...(isOptOutKeyword(ctx.body) ? { optedOutAt: ctx.timestamp } : {}),
     },
   });
+
+  // FIRST reply only (the CAS above returns 0 on any later message) — hand the
+  // conversation to the person this campaign drew for them. Best-effort: a
+  // reporting/assignment failure must never surface on the inbound path.
+  if (credited.count > 0) {
+    await applyCampaignAssigneeOnReply({
+      teamId: ctx.teamId,
+      contactId: ctx.contactId,
+      recipientId,
+    }).catch((err) => {
+      console.error("[broadcast-attribution] campaign assignment failed", err);
+    });
+  }
 }
 
 /**

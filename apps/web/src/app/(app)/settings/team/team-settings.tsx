@@ -4,11 +4,14 @@ import { useEffect, useMemo, useState, useTransition } from "react";
 import { useLiveTeamName } from "@/hooks/use-live-team-name";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
+  CalendarClock,
   Check,
+  Clock,
   Copy,
   KeyRound,
   Loader2,
   Mail,
+  Settings as SettingsIcon,
   ShieldAlert,
   Trash2,
   UserCheck,
@@ -34,8 +37,33 @@ import {
   canModifyUser,
   roleLabel,
 } from "@ccp/shared/auth/permissions";
-import type { Role } from "@ccp/shared/types";
-import { initials } from "@ccp/shared/utils";
+import {
+  ALL_AVAILABILITY_STATUSES,
+  AVAILABILITY_DOT_CLASSES,
+  AVAILABILITY_LABELS,
+} from "@ccp/shared/presence";
+import type { Role, UserAvailabilityStatus } from "@ccp/shared/types";
+import {
+  asWorkHours,
+  type AvailabilitySource,
+  type WorkHours,
+  type WorkHoursMode,
+} from "@ccp/shared/work-hours";
+import { cn, initials } from "@ccp/shared/utils";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Switch } from "@/components/ui/switch";
+import {
+  WorkHoursEditor,
+  defaultWorkHours,
+} from "@/features/settings/components/work-hours-editor";
 import { LocalTime } from "@/components/local-time";
 import {
   ResetPasswordDialog,
@@ -51,6 +79,13 @@ export interface TeamUserRow {
   createdAt: string;
   /** Serve-route path for the member's avatar, or null → initials fallback. */
   avatarUrl: string | null;
+  /** EFFECTIVE availability — manual pick, or schedule-derived once hours apply. */
+  availabilityStatus: UserAvailabilityStatus;
+  availabilityMessage: string | null;
+  availabilitySource: AvailabilitySource;
+  /** ISO instant a manual/admin pick hands back to the schedule. */
+  availabilityUntil: string | null;
+  workHoursMode: WorkHoursMode;
 }
 
 /** A still-redeemable invite — un-accepted and un-expired. */
@@ -75,6 +110,8 @@ export function TeamSettings({
   teamName,
   users,
   pendingInvites,
+  teamWorkHours,
+  canManageOthersAvailability,
 }: {
   currentUserId: string;
   currentUserRole: Role;
@@ -82,6 +119,10 @@ export function TeamSettings({
   users: TeamUserRow[];
   /** Empty for non-admins (they can't see this panel). */
   pendingInvites: PendingInviteRow[];
+  /** Org default schedule; null = none configured (availability stays manual). */
+  teamWorkHours: WorkHours | null;
+  /** Resolved `availability:manageOthers` capability. */
+  canManageOthersAvailability: boolean;
 }) {
   const softRefresh = useSoftRefresh();
   const [pending, startTransition] = useTransition();
@@ -307,6 +348,14 @@ export function TeamSettings({
       {canManage && <OrgNameCard currentName={liveTeamName} onRename={renameOrg} />}
 
       {canManage && (
+        <OrgWorkHoursCard
+          initial={teamWorkHours}
+          onSaved={refresh}
+          onError={setError}
+        />
+      )}
+
+      {canManage && (
         <InviteCard
           assignableRoles={inviteRoles}
           pending={pending}
@@ -350,6 +399,9 @@ export function TeamSettings({
               user={u}
               isSelf={u.id === currentUserId}
               actorRole={currentUserRole}
+              canManageAvailability={canManageOthersAvailability}
+              onAvailabilityChanged={refresh}
+              onAvailabilityError={setError}
               pending={pending}
               onPatch={async (body) => {
                 // Confirm a role change or a disable BEFORE mutating — both
@@ -436,6 +488,9 @@ function UserRow({
   user,
   isSelf,
   actorRole,
+  canManageAvailability,
+  onAvailabilityChanged,
+  onAvailabilityError,
   pending,
   onPatch,
   onDelete,
@@ -444,6 +499,9 @@ function UserRow({
   user: TeamUserRow;
   isSelf: boolean;
   actorRole: Role;
+  canManageAvailability: boolean;
+  onAvailabilityChanged: () => void;
+  onAvailabilityError: (message: string | null) => void;
   pending: boolean;
   onPatch: (body: { role?: Role; deactivated?: boolean }) => void;
   onDelete: () => void;
@@ -485,9 +543,40 @@ function UserRow({
             </Badge>
           )}
         </div>
-        <div className="truncate text-2xs text-muted-foreground">{user.email}</div>
+        <div className="flex items-center gap-2 truncate text-2xs text-muted-foreground">
+          <span className="truncate">{user.email}</span>
+          {!user.deactivated && (
+            <>
+              <span aria-hidden className="text-muted-foreground/40">
+                ·
+              </span>
+              <span className="flex shrink-0 items-center gap-1.5">
+                <span
+                  aria-hidden
+                  className={cn(
+                    "size-2 shrink-0 rounded-full",
+                    AVAILABILITY_DOT_CLASSES[user.availabilityStatus],
+                  )}
+                />
+                <span className="truncate">
+                  {user.availabilityMessage ||
+                    AVAILABILITY_LABELS[user.availabilityStatus]}
+                  {user.availabilitySource === "admin" && " · set by an admin"}
+                </span>
+              </span>
+            </>
+          )}
+        </div>
       </div>
       <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+        {canManageAvailability && !user.deactivated && (
+          <MemberAvailabilityMenu
+            user={user}
+            disabled={pending}
+            onChanged={onAvailabilityChanged}
+            onError={onAvailabilityError}
+          />
+        )}
         {editable && !isSelf ? (
           <Select
             value={user.role}
@@ -820,5 +909,314 @@ function PendingInvitesCard({
         ))}
       </ul>
     </div>
+  );
+}
+
+/**
+ * Org-default working hours. Off by default: a team with no schedule keeps the
+ * purely-manual availability it always had, so this card starts as an
+ * explicit opt-in rather than a pre-filled grid nobody asked for.
+ */
+function OrgWorkHoursCard({
+  initial,
+  onSaved,
+  onError,
+}: {
+  initial: WorkHours | null;
+  onSaved: () => void;
+  onError: (message: string | null) => void;
+}) {
+  const [enabled, setEnabled] = useState(initial !== null);
+  const [value, setValue] = useState<WorkHours>(initial ?? defaultWorkHours());
+  const [saving, setSaving] = useState(false);
+
+  async function save(next: WorkHours | null) {
+    setSaving(true);
+    onError(null);
+    try {
+      const res = await apiFetch("/api/team/work-hours", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workHours: next }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        onError(data.error ?? "Failed to save working hours");
+        return;
+      }
+      toast.success(next ? "Working hours saved" : "Working hours turned off");
+      // The server re-resolves every member's availability on save, so the
+      // roster rows (status dots) need re-reading.
+      onSaved();
+    } catch {
+      onError("Network error — try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-border">
+      <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-3">
+        <div>
+          <div className="text-sm font-medium">Working hours</div>
+          <div className="text-2xs text-muted-foreground">
+            Members show as away outside these hours and are skipped by round-robin —
+            no one has to remember to switch off at the end of the day.
+          </div>
+        </div>
+        <Switch
+          checked={enabled}
+          disabled={saving}
+          aria-label="Enable org working hours"
+          onCheckedChange={(next) => {
+            setEnabled(next);
+            // Turning OFF saves immediately (it's one unambiguous action).
+            // Turning ON only reveals the grid — an admin should review the
+            // default Mon–Fri 9–17 before it starts moving people around.
+            if (!next) void save(null);
+          }}
+        />
+      </div>
+      {enabled && (
+        <div className="space-y-4 px-4 py-4">
+          <WorkHoursEditor value={value} onChange={setValue} disabled={saving} />
+          <div className="flex justify-end">
+            <Button type="button" size="sm" disabled={saving} onClick={() => void save(value)}>
+              {saving && <Loader2 className="size-3.5 animate-spin" />}
+              Save working hours
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Per-member availability controls for a supervisor: set their status now,
+ * hand them back to their schedule, or edit which schedule they're on.
+ *
+ * The status actions are NOT optimistic — the resulting effective status
+ * depends on the member's schedule (setting "available" while they're off shift
+ * still resolves through the server rule), so the row re-reads instead of
+ * guessing.
+ */
+function MemberAvailabilityMenu({
+  user,
+  disabled,
+  onChanged,
+  onError,
+}: {
+  user: TeamUserRow;
+  disabled: boolean;
+  onChanged: () => void;
+  onError: (message: string | null) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [hoursOpen, setHoursOpen] = useState(false);
+
+  async function patch(body: Record<string, unknown>) {
+    setBusy(true);
+    onError(null);
+    try {
+      const res = await apiFetch(`/api/users/${user.id}/availability`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        onError(data.error ?? "Failed to update availability");
+        return;
+      }
+      onChanged();
+    } catch {
+      onError("Network error — try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={disabled || busy}
+            title={`Set ${user.name || "this member"}'s availability`}
+          >
+            {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Clock className="size-3.5" />}
+            Availability
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-52">
+          <DropdownMenuLabel>Set status</DropdownMenuLabel>
+          {ALL_AVAILABILITY_STATUSES.map((s) => (
+            <DropdownMenuItem key={s} onSelect={() => void patch({ status: s })}>
+              <span
+                aria-hidden
+                className={cn("size-2.5 rounded-full", AVAILABILITY_DOT_CLASSES[s])}
+              />
+              {AVAILABILITY_LABELS[s]}
+            </DropdownMenuItem>
+          ))}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            // Only meaningful while something is overriding the schedule;
+            // shown always so its absence isn't mistaken for "no schedule".
+            onSelect={() => void patch({ followSchedule: true })}
+          >
+            <CalendarClock className="size-3.5" />
+            Follow their schedule
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => setHoursOpen(true)}>
+            <SettingsIcon className="size-3.5" />
+            Working hours…
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {hoursOpen && (
+        <MemberWorkHoursDialog
+          user={user}
+          onClose={() => setHoursOpen(false)}
+          onSaved={() => {
+            setHoursOpen(false);
+            onChanged();
+          }}
+          onError={onError}
+        />
+      )}
+    </>
+  );
+}
+
+/**
+ * Per-member schedule editor. Loads the member's own config on open rather
+ * than carrying every member's JSON grid in the roster payload (it would ride
+ * along on every hot query that includes `assignedUser`).
+ */
+function MemberWorkHoursDialog({
+  user,
+  onClose,
+  onSaved,
+  onError,
+}: {
+  user: TeamUserRow;
+  onClose: () => void;
+  onSaved: () => void;
+  onError: (message: string | null) => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [mode, setMode] = useState<WorkHoursMode>(user.workHoursMode);
+  const [value, setValue] = useState<WorkHours>(defaultWorkHours());
+  const [teamHours, setTeamHours] = useState<WorkHours | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await apiFetch(`/api/users/${user.id}/work-hours`);
+        if (!res.ok || !alive) return;
+        const data = (await res.json()) as {
+          mode?: string;
+          workHours?: unknown;
+          teamWorkHours?: unknown;
+        };
+        if (!alive) return;
+        setMode((data.mode as WorkHoursMode) ?? "inherit");
+        const own = asWorkHours(data.workHours);
+        // Seed the grid from their own schedule, else the org one, else the
+        // Mon–Fri default — so switching to "custom" starts from something
+        // sensible instead of a blank week.
+        setValue(own ?? asWorkHours(data.teamWorkHours) ?? defaultWorkHours());
+        setTeamHours(asWorkHours(data.teamWorkHours));
+      } catch {
+        // Non-fatal: the dialog still works with the defaults above.
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [user.id]);
+
+  async function save() {
+    setSaving(true);
+    onError(null);
+    try {
+      const res = await apiFetch(`/api/users/${user.id}/work-hours`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          mode,
+          ...(mode === "custom" ? { workHours: value } : {}),
+        }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        onError(data.error ?? "Failed to save working hours");
+        return;
+      }
+      toast.success("Working hours saved");
+      onSaved();
+    } catch {
+      onError("Network error — try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open onClose={onClose}>
+      <DialogContent className="max-w-2xl" ariaLabel={`Working hours for ${user.name}`}>
+        <div className="border-b border-border px-5 py-4">
+          <div className="text-sm font-medium">Working hours · {user.name}</div>
+          <div className="text-2xs text-muted-foreground">
+            Outside their hours they show as away and are skipped by round-robin.
+          </div>
+        </div>
+        <div className="space-y-4 px-5 py-4">
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-muted-foreground">Schedule</span>
+            <Select
+              value={mode}
+              disabled={loading || saving}
+              onChange={(e) => setMode(e.target.value as WorkHoursMode)}
+              aria-label="Working hours mode"
+            >
+              <option value="inherit">
+                Follow the org schedule{teamHours ? "" : " (none set)"}
+              </option>
+              <option value="custom">Custom schedule</option>
+              <option value="off">No schedule — availability stays manual</option>
+            </Select>
+          </div>
+          {mode === "custom" && !loading && (
+            <WorkHoursEditor value={value} onChange={setValue} disabled={saving} />
+          )}
+          {mode === "inherit" && !teamHours && (
+            <p className="text-xs text-muted-foreground">
+              The org has no working hours set, so this member&apos;s availability stays
+              manual until one is configured above.
+            </p>
+          )}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-border px-5 py-3">
+          <Button type="button" variant="outline" size="sm" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button type="button" size="sm" onClick={() => void save()} disabled={loading || saving}>
+            {saving && <Loader2 className="size-3.5 animate-spin" />}
+            Save
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

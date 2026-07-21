@@ -40,7 +40,11 @@ export class InboxConversationController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    const page = await this.conversations.getInboxConversation(session.teamId, id);
+    const page = await this.conversations.getInboxConversation(
+      session.teamId,
+      id,
+      session,
+    );
     if (!page) throw new NotFoundException({ error: "Not found" });
     return page;
   }

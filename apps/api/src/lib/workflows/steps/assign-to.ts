@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
+import { assignByPolicy } from "@/lib/assignment/apply";
 import { assignConversation } from "@/lib/conversations/mutations";
-import { pickRoundRobinAssignee } from "@/lib/conversations/round-robin";
 
 import {
   type StepHandler,
@@ -17,11 +17,21 @@ import {
  *
  *   { mode: "user",       userId: string }   — specific teammate
  *   { mode: "unassign" }                     — remove current assignee
- *   { mode: "round_robin" }                  — next eligible agent (shared
- *                                              rotation; see round-robin.ts)
+ *   { mode: "round_robin" }                  — route with the team's routing
+ *                                              rules / default policy
+ *   { mode: "policy", policyId }             — route with a NAMED assignment
+ *                                              policy ("Escalations",
+ *                                              "Sales — weighted")
  *
- * Reserved for Round 2c:
- *   { mode: "ai", agentId: string } — assign to a configured AI agent
+ * `round_robin` and `policy` are the same code path — the only difference is
+ * whether the workflow pins a policy or lets the team's routing rules choose.
+ * Both honor strategy, weights, capacity, eligibility and overflow, so a
+ * workflow can't route in a way the admin's settings forbid.
+ *
+ * `overwrite` (default false) decides whether the step may move a conversation
+ * that ALREADY has an assignee. Automation defaults to "fill an empty slot
+ * only" so a workflow can't quietly take a thread away from the agent working
+ * it; set it when the workflow's whole purpose is a re-route (escalation).
  *
  * Idempotency: no-op short-circuit if the target equals the current
  * assignee. The wider re-dispatch into conversation_assigned happens in
@@ -35,7 +45,8 @@ import {
 export type AssignToStepConfig =
   | { mode: "user"; userId: string }
   | { mode: "unassign" }
-  | { mode: "round_robin" };
+  | { mode: "round_robin"; overwrite?: boolean }
+  | { mode: "policy"; policyId: string; overwrite?: boolean };
 
 export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
   type: "assign_to",
@@ -45,8 +56,15 @@ export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
       throw new StepConfigError("assign_to config must be an object");
     }
     const r = raw as Record<string, unknown>;
+    const overwrite = r.overwrite === true;
     if (r.mode === "unassign") return { mode: "unassign" };
-    if (r.mode === "round_robin") return { mode: "round_robin" };
+    if (r.mode === "round_robin") return { mode: "round_robin", overwrite };
+    if (r.mode === "policy") {
+      if (typeof r.policyId !== "string" || !r.policyId) {
+        throw new StepConfigError("assign_to.policyId required when mode=policy");
+      }
+      return { mode: "policy", policyId: r.policyId, overwrite };
+    }
     if (r.mode === "user") {
       if (typeof r.userId !== "string" || !r.userId) {
         throw new StepConfigError("assign_to.userId required when mode=user");
@@ -54,12 +72,13 @@ export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
       return { mode: "user", userId: r.userId };
     }
     throw new StepConfigError(
-      "assign_to.mode must be 'user', 'unassign', or 'round_robin'",
+      "assign_to.mode must be 'user', 'unassign', 'round_robin', or 'policy'",
     );
   },
   describeConfig(config) {
     if (config.mode === "unassign") return "Unassign";
-    if (config.mode === "round_robin") return "Assign (round-robin)";
+    if (config.mode === "round_robin") return "Assign (auto-route)";
+    if (config.mode === "policy") return `Assign via policy ${config.policyId}`;
     return `Assign to ${config.userId}`;
   },
   async run(envelope, config, ctx): Promise<StepResult> {
@@ -67,15 +86,50 @@ export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
     if (!conv) return advanceWithError(400, "envelope missing conversation");
     const conversationId = conv.id;
 
+    // Policy-driven modes go through the assignment engine, which owns the
+    // pick AND the write (validation retry, CAS-conflict handling, the
+    // "never steal from a human" guard). Doing the write there rather than
+    // resolving an id here is what keeps the workflow step in lockstep with
+    // the AI handoff and the auto-router — one implementation of the race
+    // rules, not three.
+    if (config.mode === "round_robin" || config.mode === "policy") {
+      const outcome = await assignByPolicy({
+        db,
+        publish,
+        teamId: ctx.teamId,
+        conversationId,
+        source: "workflow",
+        policyId: config.mode === "policy" ? config.policyId : null,
+        onlyIfUnassigned: config.overwrite !== true,
+        changedByUserId: null,
+        changedByWorkflowId: ctx.workflowId,
+        // silent so workflow-dispatch doesn't chain-trigger another workflow
+        // mid-run (audit + socket + analytics still fire) — same contract as
+        // the fixed-user branch below.
+        silent: true,
+      });
+      if (!outcome.applied) {
+        switch (outcome.skipped) {
+          case "not_found":
+            return advanceWithError(404, "conversation not found");
+          case "already_assigned":
+          case "lost_race":
+            return advance({ skipped: "already_assigned_to_target" });
+          default:
+            return advance({ skipped: "no_eligible_agent" });
+        }
+      }
+      return advance({
+        conversationId,
+        assignedUserId: outcome.userId,
+        assignedVia: outcome.decision.policyName,
+        ...(outcome.statusChanged ? { statusChangedTo: "pending" } : {}),
+      });
+    }
+
     let targetUserId: string | null = null;
     if (config.mode === "user") {
       targetUserId = config.userId;
-    } else if (config.mode === "round_robin") {
-      // Shared rotation primitive (also used by the customer-handoff policy).
-      targetUserId = await pickRoundRobinAssignee({ db, teamId: ctx.teamId });
-      if (!targetUserId) {
-        return advance({ skipped: "no_eligible_agent" });
-      }
     }
 
     // Shared business rule (member validation, CAS, status-flip on

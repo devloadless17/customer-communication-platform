@@ -524,11 +524,22 @@ export function AssignToEditor({
   config,
   onChange,
   users,
+  assignmentPolicies,
 }: {
-  config: { mode?: "user" | "unassign" | "round_robin"; userId?: string };
+  config: {
+    mode?: "user" | "unassign" | "round_robin" | "policy";
+    userId?: string;
+    policyId?: string;
+    overwrite?: boolean;
+  };
   onChange: (c: Record<string, unknown>) => void;
   users: BuilderCatalogs["users"];
+  assignmentPolicies: BuilderCatalogs["assignmentPolicies"];
 }) {
+  // Both auto-route modes share the overwrite switch — it's the one decision
+  // that changes whether the step can take a conversation away from the agent
+  // already working it.
+  const isAuto = config.mode === "round_robin" || config.mode === "policy";
   return (
     <Field label="Mode">
       <div className="flex flex-col gap-2">
@@ -561,10 +572,72 @@ export function AssignToEditor({
             type="radio"
             name="assign-mode"
             checked={config.mode === "round_robin"}
-            onChange={() => onChange({ mode: "round_robin" })}
+            onChange={() =>
+              onChange({ mode: "round_robin", overwrite: config.overwrite ?? false })
+            }
           />
-          Round-robin (next available agent)
+          Auto-route (use the team&apos;s assignment rules)
         </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="radio"
+            name="assign-mode"
+            checked={config.mode === "policy"}
+            onChange={() =>
+              onChange({
+                mode: "policy",
+                policyId:
+                  config.policyId ??
+                  assignmentPolicies.find((p) => p.isDefault)?.id ??
+                  assignmentPolicies[0]?.id ??
+                  "",
+                overwrite: config.overwrite ?? false,
+              })
+            }
+          />
+          Auto-route with a specific policy
+        </label>
+        {config.mode === "policy" && (
+          <Select
+            value={config.policyId ?? ""}
+            onChange={(e) =>
+              onChange({
+                mode: "policy",
+                policyId: e.target.value,
+                overwrite: config.overwrite ?? false,
+              })
+            }
+            className="h-8 px-2 pr-7"
+            wrapperClassName="ml-6"
+          >
+            <option value="">Select a policy…</option>
+            {assignmentPolicies.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+                {p.isDefault ? " (default)" : ""}
+              </option>
+            ))}
+          </Select>
+        )}
+        {isAuto && (
+          <label className="ml-6 flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={config.overwrite === true}
+              onChange={(e) => onChange({ ...config, overwrite: e.target.checked })}
+            />
+            <span>
+              Reassign even if someone already has it
+              <span className="mt-0.5 block text-xs text-muted-foreground">
+                Off (recommended): the step only fills an empty assignee, so it
+                can&apos;t take a conversation away from the agent working it. Turn
+                it on for an escalation workflow whose whole purpose is to move
+                the thread.
+              </span>
+            </span>
+          </label>
+        )}
         <label className="flex items-center gap-2 text-sm">
           <input
             type="radio"

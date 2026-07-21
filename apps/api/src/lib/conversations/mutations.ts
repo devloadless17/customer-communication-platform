@@ -208,9 +208,16 @@ export async function assignConversation(args: {
           assignedUserId: previousAssignedUserId,
           status: previousStatus,
         },
-        data: statusChanged
-          ? { assignedUserId: targetUserId, status: nextStatus }
-          : { assignedUserId: targetUserId },
+        // `lastAssignedUserId` is the DURABLE continuity pointer: set it
+        // whenever a real assignee is written, and never clear it. Closing a
+        // conversation nulls `assignedUserId`, so without this the "who
+        // handled this customer before" history would be destroyed exactly
+        // when it becomes useful. See AssignmentPolicy.preferPreviousAgent.
+        data: {
+          assignedUserId: targetUserId,
+          ...(statusChanged ? { status: nextStatus } : {}),
+          ...(targetUserId !== null ? { lastAssignedUserId: targetUserId } : {}),
+        },
         include: { assignedUser: true },
       });
 

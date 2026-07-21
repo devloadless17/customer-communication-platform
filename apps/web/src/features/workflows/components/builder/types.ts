@@ -102,6 +102,8 @@ export interface BuilderCatalogs {
   stages: Array<{ id: string; name: string; position: number }>;
   fields: Array<{ key: string; label: string }>;
   workflows: Array<{ id: string; name: string; trigger: Trigger }>;
+  /** Named assignment policies, for the `assign_to` step's policy mode. */
+  assignmentPolicies: Array<{ id: string; name: string; isDefault: boolean }>;
 }
 
 // Trigger + step metadata --------------------------------------------------

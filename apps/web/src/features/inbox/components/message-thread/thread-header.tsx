@@ -144,6 +144,8 @@ function ThreadHeaderImpl({
   canManageStages,
   canDeleteConversations,
   canMakeCalls,
+  canAssignOthers,
+  currentUserId,
   callChannel,
   onInitiateCall,
   onMobileBack,
@@ -193,6 +195,8 @@ function ThreadHeaderImpl({
    * False = hide button.
    */
   canMakeCalls: boolean;
+  canAssignOthers: boolean;
+  currentUserId: string;
   /** Channel of this thread — drives the call button's label ("Call on
    *  WhatsApp" / "Call on Messenger"). Defaults to WhatsApp copy if absent. */
   callChannel?: Channel;
@@ -308,6 +312,8 @@ function ThreadHeaderImpl({
           currentUserName={currentUserName}
           onAlert={onAlert}
           aiActive={aiState === "ai_active"}
+          canAssignOthers={canAssignOthers}
+          currentUserId={currentUserId}
         />
         <StatusDropdown
           teamId={teamId}

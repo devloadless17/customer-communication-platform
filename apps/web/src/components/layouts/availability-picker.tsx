@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Loader2 } from "lucide-react";
 
+import { LocalTime } from "@/components/local-time";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket, dispatchLocalSocketEvent } from "@/lib/socket-client";
 import { cn } from "@ccp/shared/utils";
@@ -12,6 +13,7 @@ import {
   AVAILABILITY_LABELS,
 } from "@ccp/shared/presence";
 import type { User, UserAvailabilityStatus } from "@ccp/shared/types";
+import type { AvailabilitySource } from "@ccp/shared/work-hours";
 
 /**
  * Availability picker rendered inside the AppRail user menu.
@@ -48,6 +50,8 @@ export function AvailabilityPicker({
   disabled,
   seedStatus,
   seedMessage,
+  seedSource,
+  seedUntil,
 }: {
   currentUser: User;
   disabled: boolean;
@@ -55,9 +59,23 @@ export function AvailabilityPicker({
    *  it reflects the last saved value, unlike the frozen session `currentUser`. */
   seedStatus: UserAvailabilityStatus;
   seedMessage: string | null;
+  /** Who decided the current status — drives the schedule context line. */
+  seedSource?: AvailabilitySource;
+  /** ISO instant a manual pick hands back to the schedule. */
+  seedUntil?: string | null;
 }) {
   const initialMessage = seedMessage ?? "";
   const [status, setStatus] = useState<UserAvailabilityStatus>(seedStatus);
+  // Schedule context. `source` tells the user WHY they look the way they do —
+  // an unexplained grey dot after a shift ends is the confusing part, not the
+  // dot itself.
+  const [source, setSource] = useState<AvailabilitySource>(seedSource ?? "manual");
+  const [until, setUntil] = useState<string | null>(seedUntil ?? null);
+  const [resetting, setResetting] = useState(false);
+  // The EFFECTIVE note (what teammates see) — distinct from `message` below,
+  // which is the user's own pick. While off shift these differ: teammates see
+  // "Outside working hours · back Mon 09:00", the user still owns "back at 3pm".
+  const [effectiveMessage, setEffectiveMessage] = useState<string | null>(seedMessage);
   // `message` is the live input; `committedMessage` is the last server-known
   // value. `dirty` (their inequality) drives the Save affordance.
   const [message, setMessage] = useState<string>(initialMessage);
@@ -91,6 +109,25 @@ export function AvailabilityPicker({
     >[1] = (payload) => {
       if (payload.userId !== currentUser.id) return;
       setStatus(payload.status);
+      if (payload.source !== undefined) setSource(payload.source);
+      if (payload.until !== undefined) setUntil(payload.until);
+      if (payload.message !== undefined) setEffectiveMessage(payload.message);
+      // The NOTE INPUT tracks the manual pair, never the effective one: the
+      // top-level message is what teammates see, so an off-shift frame would
+      // otherwise drop "Outside working hours · back Mon 09:00" into this
+      // user's own note box — and the next save would persist the schedule's
+      // text as their personal note.
+      //
+      // The selected STATUS stays effective (set above) so the picker always
+      // agrees with the dot everyone else is looking at; the context line
+      // underneath explains when that isn't what they picked.
+      if (payload.manual) {
+        const incoming = payload.manual.message ?? "";
+        setMessage((curr) => (curr === committedRef.current ? incoming : curr));
+        setCommittedMessage(incoming);
+        committedRef.current = incoming;
+        return;
+      }
       if (payload.message === null || typeof payload.message === "string") {
         const incoming = payload.message ?? "";
         setMessage((curr) => (curr === committedRef.current ? incoming : curr));
@@ -246,6 +283,35 @@ export function AvailabilityPicker({
     }
   }
 
+  /**
+   * "Follow my schedule" — drop the override so working hours take over right
+   * now instead of at the next boundary. Not optimistic: the resulting status
+   * depends on whether the schedule is currently open, which only the server
+   * knows, and guessing wrong would flash the wrong dot to the whole team.
+   */
+  async function followSchedule(): Promise<void> {
+    if (disabled || resetting) return;
+    setResetting(true);
+    setError(null);
+    try {
+      const res = await apiFetch("/api/users/me/availability", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ followSchedule: true }),
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        setError(res.status === 403 ? "Not allowed" : detail || "Couldn't reset");
+      }
+      // On success the server's own `user:availability:updated` frame lands and
+      // the subscriber above syncs status/source/until — no local guess needed.
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Network error");
+    } finally {
+      setResetting(false);
+    }
+  }
+
   function onMessageChange(value: string): void {
     setMessage(value);
     // Editing after a save should re-reveal the Save button immediately rather
@@ -307,6 +373,37 @@ export function AvailabilityPicker({
           );
         })}
       </div>
+      {/* Schedule context — only rendered once working hours actually apply, so
+          a team that never configured them sees the picker exactly as before. */}
+      {(source === "schedule" || source === "admin" || until) && (
+        <div className="mt-1.5 flex items-start justify-between gap-2 rounded-md bg-muted/40 px-2 py-1.5">
+          <span className="text-3xs leading-snug text-muted-foreground">
+            {source === "schedule"
+              ? status === "available"
+                ? "Following your working hours"
+                : (effectiveMessage ?? "Outside working hours")
+              : source === "admin"
+                ? "Set by an admin"
+                : null}
+            {until && (
+              <>
+                {source === "admin" || source === "manual" ? " · until " : " · "}
+                <LocalTime iso={until} format="messageTime" />
+              </>
+            )}
+          </span>
+          {until && !disabled && (
+            <button
+              type="button"
+              onClick={() => void followSchedule()}
+              disabled={resetting}
+              className="shrink-0 cursor-pointer text-3xs font-medium text-foreground/80 underline-offset-2 transition-colors hover:text-foreground hover:underline disabled:opacity-60"
+            >
+              {resetting ? "Resetting…" : "Follow schedule"}
+            </button>
+          )}
+        </div>
+      )}
       <div className="mt-1.5 px-1">
         <input
           type="text"

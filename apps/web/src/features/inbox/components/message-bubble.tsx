@@ -127,6 +127,7 @@ function viaAppLabel(channel: Channel): string {
 
 import { BubbleActions, FailedRecovery } from "./message-bubble/bubble-actions";
 import { BubbleMeta, SenderChip } from "./message-bubble/bubble-meta";
+import { FlagChips } from "./message-bubble/flag-chips";
 import { MediaBlock, StickerImage } from "./message-bubble/media-blocks";
 import { QuotedReply } from "./message-bubble/quoted-reply";
 import { StructuredBlock } from "./message-bubble/structured-block";
@@ -661,6 +662,16 @@ function BubbleContent({
             >
               {message.feedback === "positive" ? "👍 Helpful" : "👎 Not helpful"}
             </span>
+          </div>
+        )}
+
+        {/* Triage flags ("Complaint", "Refund request") with their open /
+            resolved state. Rendered under the bubble like reactions — visible
+            at a glance in the thread, and still visible once resolved so the
+            record of "we handled this" survives. */}
+        {message.flags && message.flags.length > 0 && (
+          <div className={cn("flex w-full", isOut ? "justify-end" : "justify-start")}>
+            <FlagChips flags={message.flags} />
           </div>
         )}
 

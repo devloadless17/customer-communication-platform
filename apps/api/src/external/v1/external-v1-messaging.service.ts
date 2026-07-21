@@ -19,6 +19,7 @@ import {
   EXTERNAL_CONVERSATION_INCLUDE,
   type ExternalMessage,
 } from "@/lib/external-shapes";
+import { assignByPolicy } from "@/lib/assignment/apply";
 import { toExternalMediaUrl } from "@/lib/blob-storage";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
@@ -234,7 +235,9 @@ export class ExternalV1MessagingService {
         idempotencyKey,
         this.idem.fingerprint("assign", {
           conversationId,
-          assignedUserId: input.assignedUserId,
+          assignedUserId: input.assignedUserId ?? null,
+          autoAssign: input.autoAssign === true,
+          policyId: input.policyId ?? null,
         }),
       );
       if (claim.kind === "replay") return claim.result;
@@ -257,6 +260,39 @@ export class ExternalV1MessagingService {
     conversationId: string,
     input: ExternalAssignInput,
   ): Promise<{ ok: true }> {
+    // Policy-routed assign: hand the whole thing to the assignment engine,
+    // which owns the pick AND the write (validation retry, CAS-conflict
+    // handling, the never-steal-from-a-human guard). One implementation shared
+    // with the AI handoff, the workflow step and the inbound auto-router — a
+    // partner integration gets exactly the routing the admin configured.
+    if (input.autoAssign === true) {
+      const outcome = await assignByPolicy({
+        db: this.db,
+        publish: (e) => this.bus.publish(e),
+        teamId,
+        conversationId,
+        source: "api",
+        policyId: input.policyId ?? null,
+        // An explicit API call is a deliberate instruction, so it reassigns by
+        // default — the opposite of internal automation's fill-empty-only.
+        onlyIfUnassigned: input.overwrite === false,
+        changedByUserId: null,
+        changedByApiKeyId: apiKeyId,
+        silent: input.silent === true,
+      });
+      if (!outcome.applied && outcome.skipped === "not_found") {
+        throw new NotFoundException({
+          error: "conversation_not_found",
+          detail: "conversation not found",
+        });
+      }
+      // `no_assignee` (nobody eligible / everyone at capacity) is NOT an error:
+      // it's the policy's configured outcome, and the conversation is sitting
+      // in the visible triage queue. Reporting a 4xx would make partners retry
+      // a call that behaved correctly.
+      return { ok: true };
+    }
+
     // Shared business rule (member validation, CAS on assignee+status,
     // status-flip on assign-to-closed → pending, gated event publishing) lives
     // in lib/conversations/mutations.ts so a partner /v1 POST, a UI click, and
@@ -270,7 +306,7 @@ export class ExternalV1MessagingService {
       publish: (e) => this.bus.publish(e),
       teamId,
       conversationId,
-      targetUserId: input.assignedUserId,
+      targetUserId: input.assignedUserId ?? null,
       changedByUserId: null,
       changedByApiKeyId: apiKeyId,
       silent: input.silent === true,
@@ -1002,7 +1038,10 @@ export class ExternalV1MessagingService {
       teamId,
       apiKeyId,
       conv.id,
-      { assignedUserId: input.assignedUserId, silent: input.silent },
+      // Pass the whole body through so the contact-keyed route supports every
+      // option the conversation-keyed one does (auto-route, named policy,
+      // overwrite) instead of silently dropping them.
+      input,
       idempotencyKey,
     );
     return { conversationId: conv.id };

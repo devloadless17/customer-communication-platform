@@ -21,6 +21,7 @@ import { Prisma } from "@prisma/client";
 import { Worker, type Job } from "bullmq";
 import type IORedis from "ioredis";
 
+import { buildBroadcastAssignmentPlan } from "@/lib/assignment/broadcast-plan";
 import { db } from "@/lib/db";
 import { recordJobFailure } from "@/common/job-failure-metrics";
 import { publish } from "@/lib/events/bus";
@@ -81,6 +82,11 @@ export async function materializeBroadcast(broadcastId: string): Promise<void> {
       status: true,
       scheduledAt: true,
       materializeRecipients: true,
+      assignmentMode: true,
+      assignmentUserId: true,
+      assignmentPolicyId: true,
+      assignmentSplit: true,
+      assignmentLeftover: true,
     },
   });
   if (!row) {
@@ -99,6 +105,28 @@ export async function materializeBroadcast(broadcastId: string): Promise<void> {
   }
 
   const staged = parseStaged(row.materializeRecipients);
+
+  // Campaign assignment: draw the whole audience ONCE, here, so an exact-count
+  // split is exact and a crash-retry reuses the same draw. `skipDuplicates`
+  // below means a retry never overwrites an already-inserted row's
+  // `assignedUserId`, which is what keeps the plan stable across attempts.
+  const plan = await buildBroadcastAssignmentPlan({
+    db,
+    teamId: row.teamId,
+    total: staged.length,
+    config: {
+      mode: row.assignmentMode,
+      assignmentUserId: row.assignmentUserId,
+      assignmentPolicyId: row.assignmentPolicyId,
+      assignmentSplit: row.assignmentSplit,
+      assignmentLeftover: row.assignmentLeftover,
+    },
+  }).catch((err) => {
+    // Assignment is a convenience on top of the send. If planning fails, the
+    // campaign must still go out — unassigned.
+    console.error(`[broadcast-materialize] assignment planning failed for ${broadcastId}`, err);
+    return { perRecipient: [] as (string | null)[], totals: [] };
+  });
   if (staged.length === 0) {
     // Nothing to insert — either the staging blob was already consumed+nulled by
     // a prior attempt that crashed before the flip, or a degenerate empty set.
@@ -143,10 +171,11 @@ export async function materializeBroadcast(broadcastId: string): Promise<void> {
     }
     const slice = staged.slice(i, i + RECIPIENT_CHUNK);
     await db.broadcastRecipient.createMany({
-      data: slice.map((r) => ({
+      data: slice.map((r, j) => ({
         broadcastId,
         contactId: r.contactId,
         customerId: r.customerId ?? null,
+        assignedUserId: plan.perRecipient[i + j] ?? null,
       })),
       skipDuplicates: true,
     });

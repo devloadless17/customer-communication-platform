@@ -36,7 +36,7 @@ import type {
   User,
 } from "@ccp/shared/types";
 import type { ContactFieldChange } from "@ccp/shared/events/types";
-import { TAG_COLORS, type TagColor } from "@ccp/shared/types";
+import { TAG_COLORS, type TagColor, type UserAvailabilityStatus } from "@ccp/shared/types";
 import { getCountryFromPhone } from "@ccp/shared/utils";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
@@ -48,6 +48,16 @@ import { ApiIdempotencyService } from "./api-idempotency.service";
 import { ExternalV1MessagingService } from "./external-v1-messaging.service";
 import { getProviderBinding } from "@/lib/providers";
 import { CallsService } from "@/calls/calls.service";
+import { UsersService } from "@/users/users.service";
+import {
+  asWorkHours,
+  type AvailabilitySource,
+  type WorkHoursMode,
+} from "@ccp/shared/work-hours";
+import type {
+  SetUserAvailabilityInput,
+  SetUserWorkHoursInput,
+} from "@/users/users.schemas";
 import type {
   ExternalAssignInput,
   ExternalBulkTagInput,
@@ -87,6 +97,35 @@ const MAX_TEXT = 500;
  * delegates so the controller still sees a single facade (zero churn at
  * the controller layer) while each half stays at a tractable size.
  */
+/**
+ * Availability + schedule fields on the external User shape. Emitted only when
+ * they carry information (same terse rule as the internal mapper) so a partner
+ * polling the roster isn't handed four nulls per member.
+ */
+function availabilityFields(u: {
+  availabilityStatus: string | null;
+  availabilityMessage: string | null;
+  availabilitySource: string | null;
+  availabilityOverrideUntil: Date | null;
+  workHoursMode: string;
+  workHours: unknown;
+}) {
+  return {
+    ...(u.availabilityStatus
+      ? { availabilityStatus: u.availabilityStatus as UserAvailabilityStatus }
+      : {}),
+    ...(u.availabilityMessage ? { availabilityMessage: u.availabilityMessage } : {}),
+    ...(u.availabilitySource && u.availabilitySource !== "manual"
+      ? { availabilitySource: u.availabilitySource as AvailabilitySource }
+      : {}),
+    ...(u.availabilityOverrideUntil
+      ? { availabilityUntil: u.availabilityOverrideUntil.toISOString() }
+      : {}),
+    workHoursMode: u.workHoursMode as WorkHoursMode,
+    ...(u.workHours ? { workHours: asWorkHours(u.workHours) } : {}),
+  };
+}
+
 @Injectable()
 export class ExternalV1Service {
   constructor(
@@ -96,6 +135,9 @@ export class ExternalV1Service {
     private readonly idem: ApiIdempotencyService,
     private readonly transfers: ContactTransferService,
     private readonly calls: CallsService,
+    // Availability writes go through the SAME service the internal admin route
+    // uses, so /v1 and the UI share one writer (and one set of rules).
+    private readonly users: UsersService,
   ) {}
 
   /**
@@ -1836,7 +1878,7 @@ export class ExternalV1Service {
   }
 
   // ===========================================================================
-  // USERS (read-only)
+  // USERS
   // ===========================================================================
 
   async listUsers(teamId: string): Promise<{ items: User[] }> {
@@ -1858,6 +1900,7 @@ export class ExternalV1Service {
             email: u.email,
             ...(avatarUrl ? { avatarUrl } : {}),
             isActive: u.deactivatedAt === null,
+            ...availabilityFields(u),
           };
         }),
       ),
@@ -1879,8 +1922,41 @@ export class ExternalV1Service {
         email: row.email,
         ...(avatarUrl ? { avatarUrl } : {}),
         isActive: row.deactivatedAt === null,
+        ...availabilityFields(row),
       },
     };
+  }
+
+  /**
+   * Set a teammate's availability, or hand them back to their schedule
+   * (`followSchedule: true`). Same service — and therefore the same single
+   * writer, the same override expiry, and the same `user.availability_changed`
+   * event — as the internal admin route, so a workforce-management integration
+   * and the settings UI can never diverge.
+   *
+   * Acts with superAdmin authority (an API key isn't a member, so there's no
+   * role hierarchy to compare against); `write:users` is the gate.
+   */
+  async setUserAvailability(
+    teamId: string,
+    userId: string,
+    input: SetUserAvailabilityInput,
+  ) {
+    const user = await this.users.setUserAvailability(
+      teamId,
+      // No member identity behind an API key — null keeps the write attributed
+      // as "admin" without falsely crediting it to the target themselves.
+      null,
+      "superAdmin",
+      userId,
+      input,
+    );
+    return { user };
+  }
+
+  async setUserWorkHours(teamId: string, userId: string, input: SetUserWorkHoursInput) {
+    const user = await this.users.setUserWorkHours(teamId, "superAdmin", userId, input);
+    return { user };
   }
 
   // ===========================================================================

@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 
 import { AdminModule } from "./admin/admin.module";
 import { AiAssistantRuntimeModule } from "./ai-assistant/ai-assistant-runtime.module";
+import { AssignmentModule } from "./assignment/assignment.module";
 import { AuthModule } from "./auth/auth.module";
 import { BroadcastsModule } from "./broadcasts/broadcasts.module";
 import { CallsModule } from "./calls/calls.module";
@@ -16,6 +17,7 @@ import { HealthModule } from "./health/health.module";
 import { InvitesModule } from "./invites/invites.module";
 import { MediaModule } from "./media/media.module";
 import { MessagesModule } from "./messages/messages.module";
+import { MessageFlagsModule } from "./message-flags/message-flags.module";
 import { NotesModule } from "./notes/notes.module";
 import { OutboundWebhooksModule } from "./outbound-webhooks/outbound-webhooks.module";
 import { DbModule } from "./db/db.module";
@@ -53,6 +55,7 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     AdminModule,
     ConversationsModule,
     NotesModule,
+    MessageFlagsModule,
     ContactsModule,
     CustomersModule,
     BroadcastsModule,
@@ -66,6 +69,7 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     // settings side is under TeamModule (team/ai-assistant/). Fully separate
     // from the legacy n8n autopilot.
     AiAssistantRuntimeModule,
+    AssignmentModule,
     // Public visitor surface for the website chat widget (/widget socket
     // namespace + /api/widget media endpoints). Admin onboarding lives under
     // TeamModule (team/webchatwidget/).

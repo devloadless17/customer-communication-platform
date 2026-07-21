@@ -4,10 +4,33 @@ import { useEffect, useState } from "react";
 
 import { getClientSocket } from "@/lib/socket-client";
 import type { UserAvailabilityStatus } from "@ccp/shared/types";
+import type { AvailabilitySource } from "@ccp/shared/work-hours";
 
 export interface TeammateAvailability {
   status: UserAvailabilityStatus;
   message?: string | null;
+  /**
+   * Who decided it — "manual" (they picked it), "admin" (a supervisor set it
+   * for them), "schedule" (their working hours). Absent = manual. Display-only
+   * context; the dot color still comes from `status`.
+   */
+  source?: AvailabilitySource;
+  /** ISO instant a manual/admin pick hands back to the schedule. */
+  until?: string | null;
+}
+
+/** True when two entries would render identically. */
+function sameAvailability(
+  a: TeammateAvailability | undefined,
+  b: TeammateAvailability | undefined,
+): boolean {
+  if (!a || !b) return false;
+  return (
+    a.status === b.status &&
+    (a.message ?? null) === (b.message ?? null) &&
+    (a.source ?? "manual") === (b.source ?? "manual") &&
+    (a.until ?? null) === (b.until ?? null)
+  );
 }
 
 // Module-scoped dedup of the reconnect presence:request. Every usePresence
@@ -107,14 +130,7 @@ export function usePresence(
         if (prevKeys.length === incomingKeys.length) {
           let same = true;
           for (const k of incomingKeys) {
-            const a = prev[k];
-            const b = incoming[k];
-            if (
-              !a ||
-              !b ||
-              a.status !== b.status ||
-              (a.message ?? null) !== (b.message ?? null)
-            ) {
+            if (!sameAvailability(prev[k], incoming[k])) {
               same = false;
               break;
             }
@@ -151,14 +167,20 @@ export function usePresence(
         const nextEntry: TeammateAvailability = {
           status: payload.status,
           ...(nextMessage !== null ? { message: nextMessage } : {}),
+          // Same unchanged-vs-cleared contract as `message`: undefined keeps
+          // what we had, an explicit value (including null) replaces it.
+          ...(payload.source !== undefined
+            ? { source: payload.source }
+            : existing?.source !== undefined
+              ? { source: existing.source }
+              : {}),
+          ...(payload.until !== undefined
+            ? { until: payload.until }
+            : existing?.until !== undefined
+              ? { until: existing.until }
+              : {}),
         };
-        if (
-          existing &&
-          existing.status === nextEntry.status &&
-          (existing.message ?? null) === (nextEntry.message ?? null)
-        ) {
-          return prev;
-        }
+        if (sameAvailability(existing, nextEntry)) return prev;
         return { ...prev, [payload.userId]: nextEntry };
       });
     };

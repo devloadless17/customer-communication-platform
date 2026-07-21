@@ -37,13 +37,25 @@ import {
   stopWhatsappHealthRefreshSweeper,
 } from "@/lib/sweepers/whatsapp-health-refresh";
 import {
+  startWorkHoursSweeper,
+  stopWorkHoursSweeper,
+} from "@/lib/sweepers/work-hours";
+import {
   startContactDriftSweeper,
   stopContactDriftSweeper,
 } from "@/lib/sweepers/contact-last-inbound-drift";
 import {
+  startMessageFlagCountDriftSweeper,
+  stopMessageFlagCountDriftSweeper,
+} from "@/lib/sweepers/message-flag-count-drift";
+import {
   startCustomerLinkSweeper,
   stopCustomerLinkSweeper,
 } from "@/lib/sweepers/customer-link-drift";
+import {
+  startAssignmentRebalanceSweeper,
+  stopAssignmentRebalanceSweeper,
+} from "@/lib/sweepers/assignment-rebalance";
 import {
   startConversationAnalyticsDriftSweeper,
   stopConversationAnalyticsDriftSweeper,
@@ -134,7 +146,9 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private awaitingReplySweeperStarted = false;
   private contactDriftSweeperStarted = false;
   private customerLinkSweeperStarted = false;
+  private assignmentRebalanceSweeperStarted = false;
   private analyticsDriftSweeperStarted = false;
+  private messageFlagCountDriftSweeperStarted = false;
   private broadcastDeliveryDriftSweeperStarted = false;
   private authCleanupSweeperStarted = false;
   private webhookDeliveryCleanupStarted = false;
@@ -151,6 +165,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private broadcastMaterializeWorkerStarted = false;
   private broadcastMaterializeDriftSweeperStarted = false;
   private whatsappHealthRefreshSweeperStarted = false;
+  private workHoursSweeperStarted = false;
 
   onModuleInit(): void {
     const inline = process.env.RUN_WORKER_INLINE !== "0";
@@ -215,6 +230,12 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       // reconciler covering every non-inline create path.
       startCustomerLinkSweeper();
       this.customerLinkSweeperStarted = true;
+
+      // Moves conversations off agents who went offline, for teams that opted
+      // in (AssignmentSettings.reassignOnOffline). No-ops entirely when this
+      // process can't see socket presence.
+      startAssignmentRebalanceSweeper();
+      this.assignmentRebalanceSweeperStarted = true;
       this.logger.log("Customer link sweeper started");
     } catch (err) {
       this.logger.error("Failed to start contact-drift sweeper", err);
@@ -229,6 +250,19 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log("Conversation analytics drift sweeper started");
     } catch (err) {
       this.logger.error("Failed to start analytics-drift sweeper", err);
+    }
+    try {
+      // Daily reconciler for `Conversation.openFlagCount`. The counter is
+      // maintained transactionally with every flag write, so this only catches
+      // the paths that bypass that code — chiefly a Message/Conversation
+      // hard-delete cascading MessageFlag rows away without decrementing the
+      // parent. Stale here would leave the "Flagged" inbox preset lying in
+      // either direction.
+      startMessageFlagCountDriftSweeper();
+      this.messageFlagCountDriftSweeperStarted = true;
+      this.logger.log("Message-flag count drift sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start message-flag-count-drift sweeper", err);
     }
     try {
       // Backstop for the campaign delivery denormalization: the live
@@ -393,6 +427,16 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start whatsapp-health-refresh sweeper", err);
     }
+    try {
+      // Moves members across their working-hours boundaries (and expires manual
+      // overrides at shift end). The ONLY thing that notices a schedule flip —
+      // an agent who went home isn't around to trigger a recompute.
+      startWorkHoursSweeper();
+      this.workHoursSweeperStarted = true;
+      this.logger.log("Working-hours availability sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start work-hours sweeper", err);
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -410,6 +454,13 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(
         `stopBroadcastMaterializeDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.workHoursSweeperStarted) stopWorkHoursSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopWorkHoursSweeper threw: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {
@@ -467,12 +518,20 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`stopOutboundWebhookDeliveryCleanup threw: ${err instanceof Error ? err.message : err}`);
     }
     try {
+      if (this.messageFlagCountDriftSweeperStarted) stopMessageFlagCountDriftSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopMessageFlagCountDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
       if (this.contactDriftSweeperStarted) stopContactDriftSweeper();
     } catch (err) {
       this.logger.warn(`stopContactDriftSweeper threw: ${err instanceof Error ? err.message : err}`);
     }
     try {
       if (this.customerLinkSweeperStarted) stopCustomerLinkSweeper();
+      if (this.assignmentRebalanceSweeperStarted) stopAssignmentRebalanceSweeper();
     } catch (err) {
       this.logger.warn(`stopCustomerLinkSweeper threw: ${err instanceof Error ? err.message : err}`);
     }

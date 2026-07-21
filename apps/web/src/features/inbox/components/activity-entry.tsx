@@ -5,6 +5,8 @@ import {
   ArrowRightLeft,
   Bot,
   CircleDot,
+  Flag,
+  FlagOff,
   RefreshCw,
   Tag,
   Trash2,
@@ -149,6 +151,57 @@ function describe(e: ConversationActivityEvent): {
         text: (
           <>
             {who} removed tag {name ? <b>{name}</b> : <i>tag</i>}
+          </>
+        ),
+      };
+    }
+    // Message triage flags. `definitionName` was snapshotted at audit-write
+    // time, so these lines stay correct after the definition is renamed or
+    // archived — same guarantee as tagName above.
+    case "flag_added": {
+      const name = (e.after?.definitionName as string | null | undefined) ?? null;
+      return {
+        icon: Flag,
+        text: (
+          <>
+            {who} flagged a message as {name ? <b>{name}</b> : <i>a flag</i>}
+          </>
+        ),
+      };
+    }
+    case "flag_reopened": {
+      const name = (e.after?.definitionName as string | null | undefined) ?? null;
+      return {
+        icon: Flag,
+        text: (
+          <>
+            {who} reopened the {name ? <b>{name}</b> : <i>flag</i>} flag
+          </>
+        ),
+      };
+    }
+    case "flag_resolved": {
+      const name = (e.after?.definitionName as string | null | undefined) ?? null;
+      // `dismissed` means "this wasn't actually one" — a materially different
+      // outcome from "handled", and worth distinguishing in the timeline.
+      const dismissed = e.after?.status === "dismissed";
+      return {
+        icon: dismissed ? FlagOff : Flag,
+        text: (
+          <>
+            {who} {dismissed ? "dismissed" : "resolved"} the{" "}
+            {name ? <b>{name}</b> : <i>flag</i>} flag
+          </>
+        ),
+      };
+    }
+    case "flag_removed": {
+      const name = (e.before?.definitionName as string | null | undefined) ?? null;
+      return {
+        icon: FlagOff,
+        text: (
+          <>
+            {who} removed the {name ? <b>{name}</b> : <i>flag</i>} flag
           </>
         ),
       };

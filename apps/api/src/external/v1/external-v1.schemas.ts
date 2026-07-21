@@ -150,10 +150,19 @@ export type ExternalTopLevelSendMessageInput = z.infer<typeof ExternalTopLevelSe
  * Conversation` nodes — both keyed by contactId. We resolve the contact's
  * (most-recent) conversation server-side and apply the existing action.
  */
-export const ExternalContactAssignSchema = z.object({
-  assignedUserId: z.string().min(1).nullable(),
-  silent: SilentFlag,
-});
+/** Contact-keyed assign. Same options as ExternalAssignSchema — kept in
+ *  lockstep so the two entry points can't drift. */
+export const ExternalContactAssignSchema = z
+  .object({
+    assignedUserId: z.string().min(1).nullable().optional(),
+    autoAssign: z.boolean().optional(),
+    policyId: z.string().min(1).nullable().optional(),
+    overwrite: z.boolean().optional(),
+    silent: SilentFlag,
+  })
+  .refine((v) => v.autoAssign === true || v.assignedUserId !== undefined, {
+    message: "provide assignedUserId (or null), or autoAssign: true",
+  });
 export type ExternalContactAssignInput = z.infer<typeof ExternalContactAssignSchema>;
 
 export const ExternalContactStatusSchema = z.object({
@@ -174,10 +183,36 @@ export const ExternalContactStageSchema = z.object({
 });
 export type ExternalContactStageInput = z.infer<typeof ExternalContactStageSchema>;
 
-export const ExternalAssignSchema = z.object({
-  assignedUserId: z.string().min(1).nullable(),
-  silent: SilentFlag,
-});
+/**
+ * Assign a conversation.
+ *
+ *   { assignedUserId: "usr_..." }          — a specific teammate
+ *   { assignedUserId: null }               — unassign
+ *   { autoAssign: true }                   — route with the team's assignment
+ *                                            policy (routing rules → default)
+ *   { autoAssign: true, policyId: "..." }  — route with a NAMED policy
+ *
+ * `autoAssign` is the API twin of the workflow `assign_to` auto-route mode and
+ * the inbox's automatic routing: same strategies, weights, capacity and
+ * eligibility, so a partner integration can't route in a way the admin's
+ * settings forbid. It takes precedence over `assignedUserId` when both are
+ * sent.
+ *
+ * `overwrite` (default TRUE here, unlike internal automation) — an explicit
+ * API call is a deliberate instruction, so it reassigns by default. Pass false
+ * to make it fill-an-empty-slot-only.
+ */
+export const ExternalAssignSchema = z
+  .object({
+    assignedUserId: z.string().min(1).nullable().optional(),
+    autoAssign: z.boolean().optional(),
+    policyId: z.string().min(1).nullable().optional(),
+    overwrite: z.boolean().optional(),
+    silent: SilentFlag,
+  })
+  .refine((v) => v.autoAssign === true || v.assignedUserId !== undefined, {
+    message: "provide assignedUserId (or null), or autoAssign: true",
+  });
 export type ExternalAssignInput = z.infer<typeof ExternalAssignSchema>;
 
 export const ExternalStatusSchema = z.object({
@@ -563,3 +598,101 @@ export const ExternalCallButtonSchema = z
   })
   .strict();
 export type ExternalCallButtonInput = z.infer<typeof ExternalCallButtonSchema>;
+
+// ---- Message flags ---------------------------------------------------------
+//
+// Per-message triage markers with an open/resolved lifecycle. The external twin
+// of the in-app inbox surface — same domain functions, apiKey actor.
+
+const ExternalFlagStatusSchema = z.enum(["open", "resolved", "dismissed"]);
+
+/**
+ * Raise a flag on a message. The definition may be given by id OR by name —
+ * a partner integration is configured by a human who knows "Complaint", not a
+ * cuid. Exactly one of the two is required.
+ */
+export const ExternalRaiseFlagSchema = z
+  .object({
+    definitionId: z.string().min(1).optional(),
+    definitionName: z.string().trim().min(1).max(40).optional(),
+    note: z.string().trim().max(1000).optional(),
+    assignedToId: z.string().min(1).nullable().optional(),
+  })
+  .strict()
+  .refine((b) => Boolean(b.definitionId) !== Boolean(b.definitionName), {
+    message: "Provide exactly one of definitionId or definitionName",
+  });
+export type ExternalRaiseFlagInput = z.infer<typeof ExternalRaiseFlagSchema>;
+
+export const ExternalUpdateFlagSchema = z
+  .object({
+    status: ExternalFlagStatusSchema.optional(),
+    // Explicit null clears the owner; omitted leaves it unchanged.
+    assignedToId: z.string().min(1).nullable().optional(),
+    note: z.string().trim().max(1000).nullable().optional(),
+    resolutionNote: z.string().trim().max(1000).nullable().optional(),
+  })
+  .strict()
+  .refine((b) => Object.keys(b).length > 0, { message: "nothing to update" });
+export type ExternalUpdateFlagInput = z.infer<typeof ExternalUpdateFlagSchema>;
+
+/** Repeatable `status` / `definitionId` params arrive as `string | string[]`
+ *  from Express; the preprocess also accepts the comma-joined form. */
+const ExternalFlagCsv = z.preprocess((v) => {
+  if (v === undefined || v === null || v === "") return undefined;
+  const parts = Array.isArray(v) ? v : String(v).split(",");
+  const cleaned = parts.map((p) => String(p).trim()).filter(Boolean);
+  return cleaned.length ? cleaned : undefined;
+}, z.array(z.string()).optional());
+
+export const ExternalListFlagsQuerySchema = z.object({
+  status: z.preprocess(
+    (v) =>
+      v === undefined || v === ""
+        ? undefined
+        : Array.isArray(v)
+          ? v
+          : String(v).split(","),
+    z.array(ExternalFlagStatusSchema).optional(),
+  ),
+  definitionId: ExternalFlagCsv,
+  /** A user id, or the literal `"unassigned"`. (`"me"` has no meaning for a
+   *  key — there is no user behind it.) */
+  assignedTo: z.string().min(1).optional(),
+  conversationId: z.string().min(1).optional(),
+  cursor: z.string().min(1).optional(),
+  take: z.coerce.number().int().min(1).max(50).optional(),
+});
+export type ExternalListFlagsQueryInput = z.infer<typeof ExternalListFlagsQuerySchema>;
+
+/**
+ * Message-flag CATALOG writes. Mirrors the in-app settings surface — parity is
+ * a locked rule (CLAUDE.md §12), and without these a partner provisioning a
+ * workspace can create tags and contact fields but not the "Complaint"
+ * definition it needs before it can flag anything.
+ */
+export const ExternalCreateFlagDefinitionSchema = z
+  .object({
+    name: z.string().trim().min(1).max(40),
+    color: z.string().optional(),
+    description: z.string().trim().max(200).optional(),
+    sortOrder: z.number().int().min(0).max(9999).optional(),
+  })
+  .strict();
+export type ExternalCreateFlagDefinitionInput = z.infer<
+  typeof ExternalCreateFlagDefinitionSchema
+>;
+
+export const ExternalUpdateFlagDefinitionSchema = z
+  .object({
+    name: z.string().trim().min(1).max(40).optional(),
+    color: z.string().optional(),
+    description: z.string().trim().max(200).nullable().optional(),
+    archived: z.boolean().optional(),
+    sortOrder: z.number().int().min(0).max(9999).optional(),
+  })
+  .strict()
+  .refine((b) => Object.keys(b).length > 0, { message: "nothing to update" });
+export type ExternalUpdateFlagDefinitionInput = z.infer<
+  typeof ExternalUpdateFlagDefinitionSchema
+>;

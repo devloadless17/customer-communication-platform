@@ -8,6 +8,7 @@ import { getCurrentSession } from "@/lib/auth";
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
 import type { Capability } from "@ccp/shared/auth/permissions";
 import type { TeamStatus, User, UserAvailabilityStatus } from "@ccp/shared/types";
+import type { AvailabilitySource } from "@ccp/shared/work-hours";
 
 /**
  * Server-component helper. Resolves the current authenticated user, or
@@ -81,6 +82,13 @@ export const getSession = cache(async (): Promise<Session> => {
         : {}),
       ...(row.availabilityMessage
         ? { availabilityMessage: row.availabilityMessage }
+        : {}),
+      // Same terse rule as the API mapper: only when it isn't the default.
+      ...(row.availabilitySource && row.availabilitySource !== "manual"
+        ? { availabilitySource: row.availabilitySource as AvailabilitySource }
+        : {}),
+      ...(row.availabilityOverrideUntil
+        ? { availabilityUntil: row.availabilityOverrideUntil.toISOString() }
         : {}),
     },
     teamId: row.teamId,

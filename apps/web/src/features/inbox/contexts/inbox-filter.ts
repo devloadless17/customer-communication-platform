@@ -23,6 +23,7 @@ const VALID_PRESETS: ReadonlySet<PresetFilterId> = new Set([
   "mine",
   "unassigned",
   "closed",
+  "flagged",
 ]);
 
 /**

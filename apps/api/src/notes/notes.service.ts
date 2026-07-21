@@ -2,6 +2,11 @@ import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/commo
 
 import type { InternalNote, Role } from "@ccp/shared/types";
 
+import {
+  visibilityWhere,
+  type ConversationViewer,
+} from "@/lib/conversations/visibility";
+
 import { DbService } from "../db/db.service";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 import type { CreateNoteInput } from "./notes.schemas";
@@ -18,9 +23,16 @@ export class NotesService {
     teamId: string,
     authorUserId: string,
     input: CreateNoteInput,
+    viewer?: ConversationViewer,
   ): Promise<{ noteId: string }> {
     const conversation = await this.db.conversation.findFirst({
-      where: { id: input.conversationId, teamId },
+      // Visibility boundary — a restricted agent can't leave a note on a
+      // thread they can't see (404, same as a missing conversation).
+      where: {
+        id: input.conversationId,
+        teamId,
+        ...(viewer ? visibilityWhere(viewer) : {}),
+      },
       select: { id: true },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
@@ -65,11 +77,18 @@ export class NotesService {
     requesterUserId: string,
     requesterRole: Role,
     id: string,
+    viewer?: ConversationViewer,
   ): Promise<void> {
     // Team scope via the parent conversation — defends against id-stuffing
     // across tenants without joining at the note level (which lacks teamId).
     const note = await this.db.internalNote.findFirst({
-      where: { id, conversation: { teamId } },
+      where: {
+        id,
+        conversation: {
+          teamId,
+          ...(viewer ? visibilityWhere(viewer) : {}),
+        },
+      },
       select: { id: true, conversationId: true, authorUserId: true },
     });
     if (!note) throw new NotFoundException({ error: "note not found" });

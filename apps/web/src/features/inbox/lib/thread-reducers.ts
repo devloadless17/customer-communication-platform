@@ -5,6 +5,7 @@ import type {
   ConversationStatus,
   ConversationWithRefs,
   MediaAttachment,
+  MessageFlag,
   MessageStatus,
   User,
 } from "@ccp/shared/types";
@@ -200,6 +201,70 @@ export function applyMessageReaction(
     nextMessages[idx] = rest;
   }
   return { ...prev, messages: nextMessages };
+}
+
+/**
+ * A triage flag was raised / changed / resolved / removed on a message.
+ *
+ * `removed` drops the flag from the message's list; every other action
+ * upserts it (matched on `flag.id`), so a re-delivered frame converges rather
+ * than duplicating. Returns `prev` by identity when the incoming state already
+ * matches — a resolve frame that lands twice must not re-render the thread.
+ */
+export function applyMessageFlag(
+  prev: ConversationWithRefs,
+  payload: {
+    messageId: string;
+    action: "added" | "updated" | "reopened" | "resolved" | "removed";
+    flag: MessageFlag;
+    openFlagCount: number;
+  },
+): ConversationWithRefs {
+  // The thread's open-flag counter is patched even when the flagged message
+  // itself isn't in the loaded window (an old message, deep in the history).
+  // Without this, resolving a flag from the queue would leave the list row's
+  // badge stale until a refetch.
+  const withCount =
+    prev.conversation.openFlagCount === payload.openFlagCount
+      ? prev
+      : {
+          ...prev,
+          conversation: { ...prev.conversation, openFlagCount: payload.openFlagCount },
+        };
+
+  const idx = withCount.messages.findIndex((m) => m.id === payload.messageId);
+  if (idx === -1) return withCount;
+  const prev_ = withCount;
+  const existing = prev_.messages[idx]!;
+  const flags = existing.flags ?? [];
+  const at = flags.findIndex((f) => f.id === payload.flag.id);
+
+  let nextFlags: MessageFlag[];
+  if (payload.action === "removed") {
+    if (at === -1) return prev_;
+    nextFlags = flags.filter((f) => f.id !== payload.flag.id);
+  } else if (at === -1) {
+    nextFlags = [...flags, payload.flag];
+  } else {
+    // `updatedAt` is the cheap equality check: the server stamps it on every
+    // write, so an identical value means this exact frame already landed.
+    if (flags[at]!.updatedAt === payload.flag.updatedAt) return prev_;
+    nextFlags = flags.slice();
+    nextFlags[at] = payload.flag;
+  }
+
+  const nextMessages = prev_.messages.slice();
+  // Drop the key entirely when empty so a flagless message keeps the same
+  // shape it has on a fresh hydration (which omits `flags`) — otherwise a
+  // raise-then-remove would leave `flags: []` behind and every deep-equality
+  // check downstream would see a "changed" message.
+  if (nextFlags.length) {
+    nextMessages[idx] = { ...existing, flags: nextFlags };
+  } else {
+    const { flags: _dropped, ...rest } = existing;
+    nextMessages[idx] = rest;
+  }
+  return { ...prev_, messages: nextMessages };
 }
 
 export function applyMessageUpdated(
@@ -455,6 +520,7 @@ export const THREAD_REDUCER_EVENTS = [
   reducerEntry({ event: "message:status", apply: applyMessageStatus }),
   reducerEntry({ event: "message:reaction", apply: applyMessageReaction }),
   reducerEntry({ event: "message:updated", apply: applyMessageUpdated }),
+  reducerEntry({ event: "message:flag", apply: applyMessageFlag }),
   reducerEntry({ event: "message:media:ready", apply: applyMessageMediaReady }),
   reducerEntry({ event: "note:deleted", apply: applyNoteDeleted }),
   reducerEntry({

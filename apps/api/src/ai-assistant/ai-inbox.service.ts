@@ -24,6 +24,11 @@ import {
 import { blobStorage } from "@/lib/blob-storage";
 import { publish } from "@/lib/events/bus";
 
+import {
+  visibilityWhere,
+  type ConversationViewer,
+} from "@/lib/conversations/visibility";
+
 import { DbService } from "../db/db.service";
 import type { StateActionInput } from "./ai-inbox.schemas";
 
@@ -36,9 +41,19 @@ import type { StateActionInput } from "./ai-inbox.schemas";
 export class AiInboxService {
   constructor(private readonly db: DbService) {}
 
-  private async assertConversation(teamId: string, conversationId: string) {
+  private async assertConversation(
+    teamId: string,
+    conversationId: string,
+    viewer?: ConversationViewer,
+  ) {
     const c = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
+      // Visibility boundary — the AI panel exposes suggestion + summary text
+      // for the thread, so it needs the same gate as the thread itself.
+      where: {
+        id: conversationId,
+        teamId,
+        ...(viewer ? visibilityWhere(viewer) : {}),
+      },
       select: { id: true, contactId: true },
     });
     if (!c) throw new NotFoundException({ error: "conversation_not_found" });
@@ -46,8 +61,8 @@ export class AiInboxService {
   }
 
   /** One call to hydrate the inbox AI surfaces for a conversation. */
-  async overview(teamId: string, conversationId: string) {
-    const conv = await this.assertConversation(teamId, conversationId);
+  async overview(teamId: string, conversationId: string, viewer?: ConversationViewer) {
+    const conv = await this.assertConversation(teamId, conversationId, viewer);
     const contact = await this.db.contact.findUnique({
       where: { id: conv.contactId },
       select: { customerId: true },
@@ -85,8 +100,9 @@ export class AiInboxService {
     conversationId: string,
     userId: string,
     action: StateActionInput["action"],
+    viewer?: ConversationViewer,
   ) {
-    await this.assertConversation(teamId, conversationId);
+    await this.assertConversation(teamId, conversationId, viewer);
     switch (action) {
       case "pause":
         return pauseByAgent(teamId, conversationId, userId);

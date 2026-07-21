@@ -1,0 +1,276 @@
+import type { PrismaClient } from "@prisma/client";
+
+import type { DomainEventOf, DomainEventType } from "@ccp/shared/events/types";
+import type {
+  AssignmentContext,
+  AssignmentDecision,
+  AssignmentSource,
+} from "@ccp/shared/assignment/types";
+
+import { assignConversation } from "@/lib/conversations/mutations";
+
+import { pendingCampaignAssignee } from "./campaign-reply";
+import { resolveAssignee } from "./resolve";
+
+/**
+ * The WRITE path: resolve a policy decision and actually assign the
+ * conversation. Every automated assignment in the product goes through here —
+ * AI handoff, the new-conversation router, the reopen router, the workflow
+ * `assign_to` policy mode, the rebalance sweeps and the `/v1` API.
+ *
+ * It exists so the hard parts are solved ONCE:
+ *
+ *   NEVER STEAL FROM A HUMAN. `onlyIfUnassigned` (default true for every
+ *   automated caller) means automation only ever fills an EMPTY slot. An agent
+ *   who claimed a thread keeps it, no matter what a policy or a late webhook
+ *   redelivery says. This is also what makes the whole surface idempotent
+ *   under at-least-once event delivery.
+ *
+ *   DEGRADE, DON'T DROP. A picked member who was deactivated between the
+ *   groupBy and the write is excluded and the pick is retried, rather than
+ *   giving up and leaving the customer unowned. Bounded to MAX_ATTEMPTS so a
+ *   pathologically broken team can't spin.
+ *
+ *   LOSE RACES GRACEFULLY. A CAS conflict means someone else changed the
+ *   conversation mid-flight. We re-read: if a human took it, we stop; if it's
+ *   still free, we try again with a fresh decision.
+ *
+ * The actual mutation is always `lib/conversations/mutations.assignConversation`,
+ * so an automated assignment is indistinguishable downstream from a manual one:
+ * same CAS, same status side-effects, same `conversation.assigned` event, same
+ * realtime frame, audit row, analytics and outbound webhook.
+ */
+
+type Db = Pick<
+  PrismaClient,
+  | "conversation"
+  | "user"
+  | "$transaction"
+  | "assignmentPolicy"
+  | "assignmentRule"
+  | "assignmentSettings"
+  | "assignmentPolicyMember"
+>;
+
+type Publish = <K extends DomainEventType>(event: DomainEventOf<K>) => Promise<void>;
+
+/** Retries cover "the member vanished between pick and write". Three is enough
+ *  to survive two concurrent deactivations; beyond that the team is broken and
+ *  triage is the right answer. */
+const MAX_ATTEMPTS = 3;
+
+export type AssignByPolicyOutcome =
+  | {
+      applied: true;
+      userId: string;
+      decision: AssignmentDecision;
+      /** True when the write also flipped closed→pending (reopen into triage). */
+      statusChanged: boolean;
+    }
+  | {
+      applied: false;
+      userId: null;
+      decision: AssignmentDecision | null;
+      skipped:
+        | "already_assigned"
+        | "not_found"
+        | "no_assignee"
+        | "lost_race"
+        | "exhausted";
+    };
+
+/**
+ * Build the rule-matching context from what's already on the conversation, so
+ * callers don't each hand-roll (and drift on) the same joins. Returns null when
+ * the conversation is gone.
+ */
+export async function buildAssignmentContext(
+  db: Db,
+  teamId: string,
+  conversationId: string,
+  source: AssignmentSource,
+  extra?: Partial<AssignmentContext>,
+): Promise<{
+  ctx: AssignmentContext;
+  assignedUserId: string | null;
+} | null> {
+  const conv = await db.conversation.findFirst({
+    where: { id: conversationId, teamId },
+    select: {
+      assignedUserId: true,
+      channel: true,
+      contact: {
+        select: {
+          stageId: true,
+          language: true,
+          createdAt: true,
+          tags: { select: { id: true } },
+        },
+      },
+    },
+  });
+  if (!conv) return null;
+
+  return {
+    assignedUserId: conv.assignedUserId,
+    ctx: {
+      source,
+      channel: conv.channel,
+      tagIds: conv.contact?.tags.map((t) => t.id) ?? [],
+      stageId: conv.contact?.stageId ?? null,
+      language: conv.contact?.language ?? null,
+      ...extra,
+    },
+  };
+}
+
+export async function assignByPolicy(args: {
+  db: Db;
+  publish: Publish;
+  teamId: string;
+  conversationId: string;
+  source: AssignmentSource;
+  /** Extra rule-matching context the caller has cheaply (message text, etc). */
+  context?: Partial<AssignmentContext>;
+  /** Force a specific policy (workflow step / campaign / API). */
+  policyId?: string | null;
+  /** Default TRUE. Automation must not take a thread away from a human. */
+  onlyIfUnassigned?: boolean;
+  changedByUserId?: string | null;
+  changedByApiKeyId?: string | null;
+  changedByWorkflowId?: string | null;
+  /** Default false: an auto-assignment is a real business change and SHOULD
+   *  drive workflows + outbound webhooks. Workflow steps pass true to avoid
+   *  chain-triggering themselves mid-run. */
+  silent?: boolean;
+}): Promise<AssignByPolicyOutcome> {
+  const {
+    db,
+    publish,
+    teamId,
+    conversationId,
+    source,
+    context,
+    policyId,
+    onlyIfUnassigned = true,
+    changedByUserId = null,
+    changedByApiKeyId,
+    changedByWorkflowId,
+    silent = false,
+  } = args;
+
+  const built = await buildAssignmentContext(db, teamId, conversationId, source, context);
+  if (!built) {
+    return { applied: false, userId: null, decision: null, skipped: "not_found" };
+  }
+  if (onlyIfUnassigned && built.assignedUserId) {
+    return { applied: false, userId: null, decision: null, skipped: "already_assigned" };
+  }
+
+  // A campaign draw outranks the policy on the paths where a human is being
+  // brought in for a customer who replied to a campaign. The admin said "these
+  // 50 people are Ali's"; that intent must survive the AI answering first and
+  // escalating later, which would otherwise re-route the thread generically.
+  // Only consulted on those paths — every other caller skips the query.
+  if (source === "ai_handoff" || source === "inbound" || source === "reopen") {
+    const drawn = await pendingCampaignAssignee({ teamId, conversationId }).catch(
+      () => null,
+    );
+    if (drawn) {
+      const result = await assignConversation({
+        db,
+        publish,
+        teamId,
+        conversationId,
+        targetUserId: drawn,
+        changedByUserId,
+        ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+        ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
+        silent,
+      });
+      if (result.ok) {
+        const decision: AssignmentDecision = {
+          userId: drawn,
+          reason: "fixed",
+          policyId: null,
+          policyName: "Campaign assignment",
+          ruleId: null,
+          ruleName: null,
+        };
+        return {
+          applied: true,
+          userId: drawn,
+          decision,
+          statusChanged: result.statusChanged,
+        };
+      }
+      // Anything else (the drawn member left, a CAS race) falls through to
+      // normal policy routing rather than leaving the customer unowned.
+    }
+  }
+
+  const excluded: string[] = [];
+  let lastDecision: AssignmentDecision | null = null;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const decision = await resolveAssignee({
+      db,
+      teamId,
+      ctx: { ...built.ctx, excludeUserIds: excluded },
+      policyId,
+      conversationId,
+    });
+    lastDecision = decision;
+    if (!decision.userId) {
+      return { applied: false, userId: null, decision, skipped: "no_assignee" };
+    }
+
+    const result = await assignConversation({
+      db,
+      publish,
+      teamId,
+      conversationId,
+      targetUserId: decision.userId,
+      changedByUserId,
+      ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+      ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
+      silent,
+    });
+
+    if (result.ok) {
+      return {
+        applied: true,
+        userId: decision.userId,
+        decision,
+        statusChanged: result.statusChanged,
+      };
+    }
+
+    switch (result.reason) {
+      case "invalid_user":
+        // Deactivated / removed between the pick and the write. Exclude and
+        // let the next attempt route to someone real.
+        excluded.push(decision.userId);
+        continue;
+      case "not_found":
+        return { applied: false, userId: null, decision, skipped: "not_found" };
+      case "conflict": {
+        // Someone else mutated the conversation mid-flight. If a human claimed
+        // it, we're done — automation never overrides that.
+        const now = await db.conversation.findFirst({
+          where: { id: conversationId, teamId },
+          select: { assignedUserId: true },
+        });
+        if (!now) {
+          return { applied: false, userId: null, decision, skipped: "not_found" };
+        }
+        if (onlyIfUnassigned && now.assignedUserId) {
+          return { applied: false, userId: null, decision, skipped: "lost_race" };
+        }
+        continue;
+      }
+    }
+  }
+
+  return { applied: false, userId: null, decision: lastDecision, skipped: "exhausted" };
+}

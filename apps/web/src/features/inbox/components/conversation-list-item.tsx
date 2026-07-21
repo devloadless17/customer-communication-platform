@@ -1,7 +1,7 @@
 "use client";
 
 import { memo } from "react";
-import { CornerUpLeft, Loader2 } from "lucide-react";
+import { CornerUpLeft, Flag, Loader2 } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ChannelBadge } from "./channel-badge";
@@ -58,6 +58,8 @@ function ConversationListItemImpl({
   // markAsRead zeroes that counter and it clears for EVERYONE. There is no
   // per-agent read state for the inbox — "read" means read for all.
   const unread = conversation.unreadCount > 0;
+  // Absent on rows fetched before flags shipped / by lean construction sites.
+  const openFlags = conversation.openFlagCount ?? 0;
 
   // Row 3 (status chip + assignment) only carries signal when there's a
   // pending/closed chip OR an assignee. The common open + unassigned case had
@@ -223,6 +225,20 @@ function ConversationListItemImpl({
               {conversation.unreadCount > 99 ? "99+" : conversation.unreadCount}
             </span>
           ) : null}
+          {/* Unresolved triage flags. Sits AFTER the unread badge and shows
+              alongside it — the two answer different questions ("nobody has
+              read this" vs "someone marked something here for follow-up"), and
+              a thread can easily be both. Icon-only + a count so it costs
+              almost no width in the row; the thread itself carries the detail. */}
+          {openFlags > 0 && (
+            <span
+              className="flex h-5 shrink-0 items-center gap-0.5 rounded-full bg-warning-bg px-1.5 text-2xs font-semibold tabular-nums text-warning-fg"
+              title={`${openFlags} unresolved flag${openFlags === 1 ? "" : "s"}`}
+            >
+              <Flag className="size-2.5" />
+              {openFlags > 9 ? "9+" : openFlags}
+            </span>
+          )}
         </div>
 
         {/* Row 3: status chip + assignment — rendered ONLY when it carries
@@ -311,6 +327,10 @@ export const ConversationListItem = memo(
     prev.conversation.lastMessagePreview === next.conversation.lastMessagePreview &&
     prev.conversation.lastMessageDirection === next.conversation.lastMessageDirection &&
     prev.conversation.unreadCount === next.conversation.unreadCount &&
+    // Without this the row keeps its stale flag badge when a teammate resolves
+    // the last open flag — every other field is unchanged, so the memo would
+    // short-circuit the re-render.
+    prev.conversation.openFlagCount === next.conversation.openFlagCount &&
     prev.conversation.status === next.conversation.status &&
     prev.conversation.assignedUserId === next.conversation.assignedUserId,
 );

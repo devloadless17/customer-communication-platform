@@ -9,6 +9,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   Res,
   UploadedFile,
@@ -38,7 +39,26 @@ import {
   type CreateExportInput,
   type ListTransfersQueryInput,
 } from "@/contacts/transfer.schemas";
+import { AssignmentService } from "@/assignment/assignment.service";
+import {
+  CreatePolicySchema,
+  CreateRuleSchema,
+  PreviewAssignmentSchema,
+  ReorderRulesSchema,
+  UpdateAssignmentSettingsSchema,
+  UpdatePolicySchema,
+  UpdateRuleSchema,
+  type CreatePolicyInput,
+  type CreateRuleInput,
+  type PreviewAssignmentInput,
+  type ReorderRulesInput,
+  type UpdateAssignmentSettingsInput,
+  type UpdatePolicyInput,
+  type UpdateRuleInput,
+} from "@/assignment/assignment.schemas";
+
 import { ExternalV1Service } from "./external-v1.service";
+import { ExternalV1FlagsService } from "./external-v1-flags.service";
 import {
   ExternalAssignSchema,
   ExternalBulkTagSchema,
@@ -51,7 +71,17 @@ import {
   ExternalCreateContactSchema,
   ExternalCreateTagSchema,
   ExternalCallButtonSchema,
+  ExternalCreateFlagDefinitionSchema,
+  ExternalUpdateFlagDefinitionSchema,
+  type ExternalCreateFlagDefinitionInput,
+  type ExternalUpdateFlagDefinitionInput,
   ExternalListCallsQuerySchema,
+  ExternalListFlagsQuerySchema,
+  ExternalRaiseFlagSchema,
+  ExternalUpdateFlagSchema,
+  type ExternalListFlagsQueryInput,
+  type ExternalRaiseFlagInput,
+  type ExternalUpdateFlagInput,
   ExternalNoteSchema,
   ExternalSendInteractiveSchema,
   ExternalSendMessageSchema,
@@ -94,6 +124,15 @@ import {
   type ListConversationsQueryInput,
   type ListMessagesQueryInput,
 } from "./external-v1.schemas";
+// Availability/work-hours payloads are validated by the SAME schemas the
+// internal routes use — a second copy here would be the drift the parity rule
+// exists to prevent.
+import {
+  SetUserAvailabilitySchema,
+  SetUserWorkHoursSchema,
+  type SetUserAvailabilityInput,
+  type SetUserWorkHoursInput,
+} from "@/users/users.schemas";
 
 /**
  * External /v1 API for n8n / Zapier / customer integrations.
@@ -123,9 +162,11 @@ import {
  *   GET    /v1/stages                         — list (assign one via POST /v1/contacts/:id/stage)
  *   GET    /v1/channels                       — list (single Meta row for now)
  *
- * Users (read-only):
- *   GET    /v1/users                          — list team members
+ * Users:
+ *   GET    /v1/users                          — list team members (incl. availability + schedule)
  *   GET    /v1/users/:idOrEmail               — find one
+ *   PATCH  /v1/users/:id/availability         — set status, or {followSchedule:true}
+ *   PUT    /v1/users/:id/work-hours           — inherit | custom | off
  *
  * Conversations / messages / notes (subset shipped earlier):
  *   GET    /v1/conversations
@@ -156,6 +197,8 @@ export class ExternalV1Controller {
   constructor(
     private readonly api: ExternalV1Service,
     private readonly transfers: ContactTransferService,
+    private readonly assignment: AssignmentService,
+    private readonly flags: ExternalV1FlagsService,
   ) {}
 
   /**
@@ -663,12 +706,41 @@ export class ExternalV1Controller {
     return this.api.listChannels(auth.teamId);
   }
 
-  // ---- Users (read-only) --------------------------------------------
+  // ---- Users --------------------------------------------------------
 
   @Get("users")
   @RequireScope("read:catalog")
   async listUsers(@CurrentApiKey() auth: ApiKeyContext) {
     return this.api.listUsers(auth.teamId);
+  }
+
+  /**
+   * Set a teammate's availability, or hand them back to their working hours
+   * with `{ "followSchedule": true }`. Parity with the in-app admin control —
+   * same service, same rules, same realtime frame to every open client.
+   *
+   * No Idempotency-Key requirement: this is a last-write-wins state set with no
+   * billing side effect, so a retried call converges rather than duplicating.
+   */
+  @Patch("users/:id/availability")
+  @RequireScope("write:users")
+  async setUserAvailability(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(SetUserAvailabilitySchema)) body: SetUserAvailabilityInput,
+  ) {
+    return this.api.setUserAvailability(auth.teamId, id, body);
+  }
+
+  /** Set a teammate's working-hours mode/schedule (inherit | custom | off). */
+  @Put("users/:id/work-hours")
+  @RequireScope("write:users")
+  async setUserWorkHours(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(SetUserWorkHoursSchema)) body: SetUserWorkHoursInput,
+  ) {
+    return this.api.setUserWorkHours(auth.teamId, id, body);
   }
 
   @Get("users/:idOrEmail")
@@ -678,6 +750,119 @@ export class ExternalV1Controller {
     @Param("idOrEmail") idOrEmail: string,
   ) {
     return this.api.findUser(auth.teamId, idOrEmail);
+  }
+
+  // ---- Assignment routing -------------------------------------------
+  //
+  // Full parity with Settings → Assignment (CLAUDE.md §12): every routing
+  // capability the UI has, the API has. Read is `read:catalog` (routing config
+  // is org catalog data, same tier as tags/fields); writes are `write:catalog`.
+  // Delegates to the SAME AssignmentService the internal controller uses, so
+  // validation, the version CAS and cache invalidation can't drift.
+
+  @Get("assignment")
+  @RequireScope("read:catalog")
+  async getAssignment(@CurrentApiKey() auth: ApiKeyContext) {
+    return this.assignment.getOverview(auth.teamId);
+  }
+
+  @Post("assignment/policies")
+  @RequireScope("write:catalog")
+  async createAssignmentPolicy(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(CreatePolicySchema)) body: CreatePolicyInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    return this.assignment.createPolicy(auth.teamId, body);
+  }
+
+  @Put("assignment/policies/:id")
+  @RequireScope("write:catalog")
+  async updateAssignmentPolicy(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(UpdatePolicySchema)) body: UpdatePolicyInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    return this.assignment.updatePolicy(auth.teamId, id, body);
+  }
+
+  @Post("assignment/policies/:id/default")
+  @RequireScope("write:catalog")
+  async setDefaultAssignmentPolicy(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    return this.assignment.setDefaultPolicy(auth.teamId, id);
+  }
+
+  @Delete("assignment/policies/:id")
+  @RequireScope("write:catalog")
+  async archiveAssignmentPolicy(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    return this.assignment.archivePolicy(auth.teamId, id);
+  }
+
+  @Post("assignment/rules")
+  @RequireScope("write:catalog")
+  async createAssignmentRule(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(CreateRuleSchema)) body: CreateRuleInput,
+  ) {
+    return this.assignment.createRule(auth.teamId, body);
+  }
+
+  // Before `rules/:id` — Nest matches in declaration order.
+  @Put("assignment/rules/order")
+  @RequireScope("write:catalog")
+  async reorderAssignmentRules(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(ReorderRulesSchema)) body: ReorderRulesInput,
+  ) {
+    return this.assignment.reorderRules(auth.teamId, body.ruleIds);
+  }
+
+  @Patch("assignment/rules/:id")
+  @RequireScope("write:catalog")
+  async updateAssignmentRule(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(UpdateRuleSchema)) body: UpdateRuleInput,
+  ) {
+    return this.assignment.updateRule(auth.teamId, id, body);
+  }
+
+  @Delete("assignment/rules/:id")
+  @RequireScope("write:catalog")
+  async deleteAssignmentRule(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    return this.assignment.deleteRule(auth.teamId, id);
+  }
+
+  @Patch("assignment/settings")
+  @RequireScope("write:catalog")
+  async updateAssignmentSettings(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(UpdateAssignmentSettingsSchema)) body: UpdateAssignmentSettingsInput,
+  ) {
+    return this.assignment.updateSettings(auth.teamId, body);
+  }
+
+  /** Dry run: "who would take a conversation like this?" Read-only — never
+   *  advances rotation or weighted counters, so it's safe to poll. */
+  @Post("assignment/preview")
+  @RequireScope("read:catalog")
+  async previewAssignment(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(PreviewAssignmentSchema)) body: PreviewAssignmentInput,
+  ) {
+    return this.assignment.preview(auth.teamId, body);
   }
 
   // ---- Conversations ------------------------------------------------
@@ -1041,6 +1226,103 @@ export class ExternalV1Controller {
   ) {
     return this.api.deleteNote(auth.teamId, id, noteId);
   }
+  // ---- Message flags ------------------------------------------------
+  //
+  // Per-message triage markers ("Complaint", "Refund request") with an
+  // open/resolved lifecycle. Full parity with the in-app inbox surface — the
+  // same domain functions run behind both, with an apiKey actor here.
+  //
+  // Typical integration shape: subscribe to the `message.flag_changed`
+  // outbound webhook to learn the moment something is flagged, then use these
+  // endpoints to read the backlog and mark items handled from your own system.
+
+  @Get("message-flags")
+  @RequireScope("read:flags")
+  async listMessageFlags(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query(zQuery(ExternalListFlagsQuerySchema)) query: ExternalListFlagsQueryInput,
+  ) {
+    return this.flags.list(auth.teamId, query);
+  }
+
+  /** Static segments before the `:flagId` routes below. */
+  @Get("message-flags/counts")
+  @RequireScope("read:flags")
+  async messageFlagCounts(@CurrentApiKey() auth: ApiKeyContext) {
+    return this.flags.counts(auth.teamId);
+  }
+
+  /** The flag CATALOG (which flags exist), archived included. Lives under
+   *  `read:catalog` with every other catalog read. */
+  @Get("message-flag-definitions")
+  @RequireScope("read:catalog")
+  async listMessageFlagDefinitions(@CurrentApiKey() auth: ApiKeyContext) {
+    return this.flags.listDefinitions(auth.teamId);
+  }
+
+  @Post("message-flag-definitions")
+  @RequireScope("write:catalog")
+  async createMessageFlagDefinition(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(ExternalCreateFlagDefinitionSchema)) body: ExternalCreateFlagDefinitionInput,
+  ) {
+    return this.flags.createDefinition(auth.teamId, body);
+  }
+
+  @Patch("message-flag-definitions/:id")
+  @RequireScope("write:catalog")
+  async updateMessageFlagDefinition(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(ExternalUpdateFlagDefinitionSchema)) body: ExternalUpdateFlagDefinitionInput,
+  ) {
+    return this.flags.updateDefinition(auth.teamId, id, body);
+  }
+
+  /** Only permitted while the definition has never been raised — otherwise 409
+   *  with `message_flag_definition_in_use`; archive it instead
+   *  (`PATCH … { "archived": true }`) so the triage history stays readable. */
+  @Delete("message-flag-definitions/:id")
+  @RequireScope("write:catalog")
+  async deleteMessageFlagDefinition(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    return this.flags.deleteDefinition(auth.teamId, id);
+  }
+
+  @Post("messages/:messageId/flags")
+  @RequireScope("write:flags")
+  async raiseMessageFlag(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("messageId") messageId: string,
+    @Body(zBody(ExternalRaiseFlagSchema)) body: ExternalRaiseFlagInput,
+  ) {
+    // No Idempotency-Key requirement here, unlike sends: raising a flag is
+    // idempotent by construction (@@unique([messageId, definitionId]) + upsert)
+    // and costs nothing, so demanding a key would be friction with no payoff.
+    return this.flags.raise(auth.teamId, auth.apiKeyId, messageId, body);
+  }
+
+  @Patch("message-flags/:flagId")
+  @RequireScope("write:flags")
+  async updateMessageFlag(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("flagId") flagId: string,
+    @Body(zBody(ExternalUpdateFlagSchema)) body: ExternalUpdateFlagInput,
+  ) {
+    return this.flags.update(auth.teamId, auth.apiKeyId, flagId, body);
+  }
+
+  @Delete("message-flags/:flagId")
+  @RequireScope("write:flags")
+  async deleteMessageFlag(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("flagId") flagId: string,
+  ) {
+    return this.flags.remove(auth.teamId, auth.apiKeyId, flagId);
+  }
+
   // ---- Calls --------------------------------------------------------
   //
   // Read history and permission state, ask a customer for calling permission,

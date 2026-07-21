@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -10,6 +11,11 @@ import {
 
 import { Prisma } from "@prisma/client";
 
+import {
+  visibilityScopeKey,
+  visibilityWhere,
+  type ConversationViewer,
+} from "@/lib/conversations/visibility";
 import { blobStorage } from "@/lib/blob-storage";
 import { getProviderBinding } from "@/lib/providers";
 import { resolveContactChannel } from "@/lib/providers/channel";
@@ -53,11 +59,13 @@ interface TeamCountsBlock {
   all: number;
   unassigned: number;
   closed: number;
+  flagged: number;
   stageGroups: Array<{ stageId: string | null; _count: number }>;
   uActive: number;
   uAll: number;
   uUnassigned: number;
   uClosed: number;
+  uFlagged: number;
 }
 
 @Injectable()
@@ -76,11 +84,14 @@ export class ConversationsService {
     teamId: string,
     viewerUserId: string,
     opts: {
+      /** The signed-in viewer, for the agent-visibility boundary. Optional so
+       *  server-to-server callers (which are never restricted) can omit it. */
+      viewer?: ConversationViewer;
       take?: number;
       cursor?: string | null;
       search?: string;
-      /** Preset (`active`/`all`/`mine`/`unassigned`/`closed`) or `stage:<id>`. */
-      filter?: "active" | "all" | "mine" | "unassigned" | "closed";
+      /** Preset (`active`/`all`/`mine`/`unassigned`/`closed`/`flagged`) or `stage:<id>`. */
+      filter?: "active" | "all" | "mine" | "unassigned" | "closed" | "flagged";
       stageId?: string;
     },
   ) {
@@ -97,6 +108,9 @@ export class ConversationsService {
       cursor: opts.cursor,
       search: opts.search,
       viewerUserId,
+      // Restricts an agent to their own conversations when the org asked for
+      // it; `{}` (a no-op) for everyone else.
+      ...(opts.viewer ? { visibility: visibilityWhere(opts.viewer) } : {}),
       ...(filter ? { filter } : {}),
     });
   }
@@ -136,12 +150,14 @@ export class ConversationsService {
   async counts(
     teamId: string,
     viewerUserId: string,
+    viewer?: ConversationViewer,
   ): Promise<{
     active: number;
     all: number;
     mine: number;
     unassigned: number;
     closed: number;
+    flagged: number;
     byStage: Record<string, number>;
     unread: {
       active: number;
@@ -149,6 +165,7 @@ export class ConversationsService {
       mine: number;
       unassigned: number;
       closed: number;
+      flagged: number;
     };
   }> {
     // Per-bucket UNREAD = conversations with unreadCount>0 in that bucket. Same
@@ -174,7 +191,7 @@ export class ConversationsService {
     // instinct and it is wrong here: the sidebar count must move the moment
     // YOU close or assign a thread, and CLAUDE.md holds the inbox to
     // "everything feels instant". `mine` is never memoized at all.
-    const team = await this.teamCounts(teamId, unreadWhere);
+    const team = await this.teamCounts(teamId, unreadWhere, viewer);
     const [mine, uMine] = await Promise.all([
       this.db.conversation.count({
         where: { teamId, status: { not: "closed" }, assignedUserId: viewerUserId },
@@ -188,11 +205,13 @@ export class ConversationsService {
         },
       }),
     ]);
-    const { active, all, unassigned, closed, stageGroups, uActive, uAll, uUnassigned, uClosed } =
-      team;
+    const {
+      active, all, unassigned, closed, flagged, stageGroups,
+      uActive, uAll, uUnassigned, uClosed, uFlagged,
+    } = team;
     return this.shapeCounts({
-      active, all, mine, unassigned, closed, stageGroups,
-      uActive, uAll, uMine, uUnassigned, uClosed,
+      active, all, mine, unassigned, closed, flagged, stageGroups,
+      uActive, uAll, uMine, uUnassigned, uClosed, uFlagged,
     });
   }
 
@@ -207,53 +226,79 @@ export class ConversationsService {
   private async teamCounts(
     teamId: string,
     unreadWhere: Prisma.ConversationWhereInput,
+    viewer?: ConversationViewer,
   ): Promise<TeamCountsBlock> {
-    const hit = this.teamCountsCache.get(teamId);
+    const scope = viewer ? visibilityWhere(viewer) : {};
+    // The memo key MUST include the scope. Keyed by teamId alone, a restricted
+    // agent would read another agent's cached totals — a leak no WHERE clause
+    // could catch, because the query never runs. Unrestricted viewers all share
+    // the "team" key, so the cache stays exactly as effective as before.
+    const key = `${teamId}::${viewer ? visibilityScopeKey(viewer) : "team"}`;
+    const hit = this.teamCountsCache.get(key);
     if (hit && Date.now() - hit.at < ConversationsService.COUNTS_TTL_MS) return hit.value;
-    const inFlight = this.teamCountsInFlight.get(teamId);
+    const inFlight = this.teamCountsInFlight.get(key);
     // Share the in-flight promise so a burst — which is exactly what a single
     // inbound event produces across N agents — collapses to ONE round of
     // queries instead of N.
     if (inFlight) return inFlight;
 
-    const p = this.loadTeamCounts(teamId, unreadWhere)
+    const p = this.loadTeamCounts(teamId, unreadWhere, scope)
       .then((value) => {
-        this.teamCountsCache.set(teamId, { at: Date.now(), value });
+        this.teamCountsCache.set(key, { at: Date.now(), value });
         return value;
       })
       .finally(() => {
-        this.teamCountsInFlight.delete(teamId);
+        this.teamCountsInFlight.delete(key);
       });
-    this.teamCountsInFlight.set(teamId, p);
+    this.teamCountsInFlight.set(key, p);
     return p;
   }
 
   private async loadTeamCounts(
     teamId: string,
     unreadWhere: Prisma.ConversationWhereInput,
+    scope: { assignedUserId?: string } = {},
   ): Promise<TeamCountsBlock> {
     const [
       active,
       all,
       unassigned,
       closed,
+      flagged,
       stageGroups,
       uActive,
       uAll,
       uUnassigned,
       uClosed,
+      uFlagged,
     ] = await Promise.all([
       this.db.conversation.count({
-        where: { teamId, status: { not: "closed" } },
+        where: { teamId, ...scope, status: { not: "closed" } },
       }),
       this.db.conversation.count({
-        where: { teamId },
+        where: { teamId, ...scope },
       }),
       this.db.conversation.count({
-        where: { teamId, status: { not: "closed" }, assignedUserId: null },
+        // AND, not a sibling spread: `assignedUserId: null` would otherwise
+        // overwrite the scope's `assignedUserId` (last-wins) and report the
+        // TEAM-wide unassigned count to a restricted agent. Under AND the two
+        // are contradictory, which is the correct answer — a restricted agent
+        // has no unassigned conversations by definition.
+        where: {
+          teamId,
+          AND: [scope, { status: { not: "closed" }, assignedUserId: null }],
+        },
       }),
       this.db.conversation.count({
-        where: { teamId, status: "closed" },
+        where: { teamId, ...scope, status: "closed" },
+      }),
+      // Threads with at least one unresolved triage flag. Rides the partial
+      // index Conversation_teamId_openFlag_idx, which spans only flagged rows —
+      // so this count reads a tiny index, not the team's conversation
+      // partition. Deliberately NOT status-narrowed: an unresolved complaint on
+      // a closed thread still needs triage (matches the list filter).
+      this.db.conversation.count({
+        where: { teamId, ...scope, openFlagCount: { gt: 0 } },
       }),
       this.db.contact.groupBy({
         by: ["stageId"],
@@ -262,33 +307,42 @@ export class ConversationsService {
         // listConversations stage filter (also deletedAt:null below). Stages
         // are a contact-directory concept — a tombstoned contact shouldn't
         // inflate the badge.
+        // Stage badge: a restricted agent counts only stages of contacts whose
+        // conversation is theirs, so the badge agrees with the list they see.
         where: {
           teamId,
           stageId: { not: null },
           deletedAt: null,
-          conversations: { some: {} },
+          conversations: { some: scope },
         },
         _count: true,
       }),
       this.db.conversation.count({
-        where: { teamId, status: { not: "closed" }, ...unreadWhere },
+        where: { teamId, ...scope, status: { not: "closed" }, ...unreadWhere },
       }),
       this.db.conversation.count({
-        where: { teamId, ...unreadWhere },
+        where: { teamId, ...scope, ...unreadWhere },
       }),
       this.db.conversation.count({
         where: {
           teamId,
-          status: { not: "closed" },
-          assignedUserId: null,
-          ...unreadWhere,
+          AND: [
+            scope,
+            { status: { not: "closed" }, assignedUserId: null, ...unreadWhere },
+          ],
         },
       }),
       this.db.conversation.count({
-        where: { teamId, status: "closed", ...unreadWhere },
+        where: { teamId, ...scope, status: "closed", ...unreadWhere },
+      }),
+      this.db.conversation.count({
+        where: { teamId, ...scope, openFlagCount: { gt: 0 }, ...unreadWhere },
       }),
     ]);
-    return { active, all, unassigned, closed, stageGroups, uActive, uAll, uUnassigned, uClosed };
+    return {
+      active, all, unassigned, closed, flagged, stageGroups,
+      uActive, uAll, uUnassigned, uClosed, uFlagged,
+    };
   }
 
   /** Fold the team block + the two viewer counts into the wire shape. */
@@ -298,12 +352,14 @@ export class ConversationsService {
     mine: number;
     unassigned: number;
     closed: number;
+    flagged: number;
     stageGroups: Array<{ stageId: string | null; _count: number }>;
     uActive: number;
     uAll: number;
     uMine: number;
     uUnassigned: number;
     uClosed: number;
+    uFlagged: number;
   }) {
     const byStage: Record<string, number> = {};
     for (const g of c.stageGroups) {
@@ -316,6 +372,7 @@ export class ConversationsService {
       mine: c.mine,
       unassigned: c.unassigned,
       closed: c.closed,
+      flagged: c.flagged,
       byStage,
       unread: {
         active: c.uActive,
@@ -323,6 +380,7 @@ export class ConversationsService {
         mine: c.uMine,
         unassigned: c.uUnassigned,
         closed: c.uClosed,
+        flagged: c.uFlagged,
       },
     };
   }
@@ -335,10 +393,19 @@ export class ConversationsService {
    * badge lit. One indexed aggregate; refetched client-side (debounced) on
    * message:new / conversation:read / conversation:status.
    */
-  async unreadTotal(teamId: string): Promise<{ unread: number }> {
+  async unreadTotal(
+    teamId: string,
+    viewer?: ConversationViewer,
+  ): Promise<{ unread: number }> {
     const agg = await this.db.conversation.aggregate({
       _sum: { unreadCount: true },
-      where: { teamId, status: { not: "closed" } },
+      // Scoped: the AppRail badge must count what this viewer can actually
+      // open, or a restricted agent sees a number they can never clear.
+      where: {
+        teamId,
+        ...(viewer ? visibilityWhere(viewer) : {}),
+        status: { not: "closed" },
+      },
     });
     return { unread: agg._sum.unreadCount ?? 0 };
   }
@@ -350,8 +417,17 @@ export class ConversationsService {
    * into its in-memory Map and render without a route navigation. Returns
    * null if the conversation isn't in the team's scope.
    */
-  getInboxConversation(teamId: string, conversationId: string) {
-    return getConversationWithRefs(teamId, conversationId);
+  getInboxConversation(
+    teamId: string,
+    conversationId: string,
+    viewer?: ConversationViewer,
+  ) {
+    // A restricted agent gets null → the controller's 404. This is the single
+    // richest payload in the product (full thread, notes, activity, contact
+    // PII), so it is scoped at the query rather than after the fact.
+    return getConversationWithRefs(teamId, conversationId, {
+      ...(viewer ? { visibility: visibilityWhere(viewer) } : {}),
+    });
   }
 
   /** Older or newer page. Exactly one of `before` / `after` must be set. */
@@ -421,26 +497,43 @@ export class ConversationsService {
   }
 
   // ---- Global (team-wide) search — the tabbed inbox search bar -----------
+  //
+  // "Team-wide" is now viewer-relative: for a restricted agent these return
+  // only their own conversations' messages, notes and contacts. This is the
+  // widest read surface in the product, so the boundary is applied at the
+  // query, not by filtering results afterwards.
 
   globalSearchContacts(
     teamId: string,
     opts: { query: string; take?: number; cursor?: string },
+    viewer?: ConversationViewer,
   ) {
-    return searchContacts(teamId, opts);
+    return searchContacts(teamId, {
+      ...opts,
+      ...(viewer ? { visibility: visibilityWhere(viewer) } : {}),
+    });
   }
 
   globalSearchMessages(
     teamId: string,
     opts: { query: string; take?: number; cursor?: string },
+    viewer?: ConversationViewer,
   ) {
-    return searchAllMessages(teamId, opts);
+    return searchAllMessages(teamId, {
+      ...opts,
+      ...(viewer ? { visibility: visibilityWhere(viewer) } : {}),
+    });
   }
 
   globalSearchNotes(
     teamId: string,
     opts: { query: string; take?: number; cursor?: string },
+    viewer?: ConversationViewer,
   ) {
-    return searchAllNotes(teamId, opts);
+    return searchAllNotes(teamId, {
+      ...opts,
+      ...(viewer ? { visibility: visibilityWhere(viewer) } : {}),
+    });
   }
 
   // ---- Bulk -----------------------------------------------------------
@@ -573,8 +666,33 @@ export class ConversationsService {
     actorUserId: string,
     conversationId: string,
     input: AssignConversationInput,
-    opts?: { silent?: boolean },
+    opts?: { silent?: boolean; canAssignOthers?: boolean },
   ): Promise<void> {
+    // AUTHORIZATION. Claiming work is always allowed; putting work on someone
+    // ELSE's plate is the supervisor action, gated by
+    // `conversations:assignOthers` (admin/manager by default). Enforced here
+    // rather than as a route decorator because the answer depends on the BODY
+    // — "assign to me" and "assign to Sara" hit the same endpoint.
+    //
+    // Unassigning is treated as a reassignment of someone else's work when the
+    // thread isn't yours: taking a conversation off a teammate and dropping it
+    // back in the queue is the same power, so it needs the same capability.
+    if (opts?.canAssignOthers !== true) {
+      const target = input.assignedUserId;
+      if (target !== null && target !== actorUserId) {
+        throw new ForbiddenException({ error: "cannot_assign_others" });
+      }
+      if (target === null) {
+        const current = await this.db.conversation.findFirst({
+          where: { id: conversationId, teamId },
+          select: { assignedUserId: true },
+        });
+        if (current?.assignedUserId && current.assignedUserId !== actorUserId) {
+          throw new ForbiddenException({ error: "cannot_unassign_others" });
+        }
+      }
+    }
+
     // Business rule (status-flip, CAS, event publishing) lives in the shared
     // lib helper so the workflow `assign_to` step and the /v1 API run the
     // EXACT same logic — see lib/conversations/mutations.ts. This method only

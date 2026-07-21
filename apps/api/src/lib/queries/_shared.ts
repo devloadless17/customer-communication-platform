@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { type MessageFlagRow, mapFlag } from "@/lib/message-flags/queries";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 import {
   ephemeralVisitorLabel,
@@ -25,6 +26,7 @@ import type {
   User,
   UserAvailabilityStatus,
 } from "@ccp/shared/types";
+import type { AvailabilitySource, WorkHoursMode } from "@ccp/shared/work-hours";
 
 export const MAX_TAKE = 100;
 
@@ -112,6 +114,9 @@ export const ASSIGNED_USER_SELECT = {
   deactivatedAt: true,
   availabilityStatus: true,
   availabilityMessage: true,
+  availabilitySource: true,
+  availabilityOverrideUntil: true,
+  workHoursMode: true,
 } as const;
 
 type MappableUser = Pick<PrismaUser, keyof typeof ASSIGNED_USER_SELECT>;
@@ -137,6 +142,18 @@ export function mapUser(u: MappableUser): User {
       ? { availabilityStatus: u.availabilityStatus as UserAvailabilityStatus }
       : {}),
     ...(u.availabilityMessage ? { availabilityMessage: u.availabilityMessage } : {}),
+    // Provenance travels with the status so a surface can say "set by an admin"
+    // or "outside working hours" instead of an unexplained grey dot. Same terse
+    // rule as above: only emitted when it's not the boring default.
+    ...(u.availabilitySource && u.availabilitySource !== "manual"
+      ? { availabilitySource: u.availabilitySource as AvailabilitySource }
+      : {}),
+    ...(u.availabilityOverrideUntil
+      ? { availabilityUntil: u.availabilityOverrideUntil.toISOString() }
+      : {}),
+    ...(u.workHoursMode && u.workHoursMode !== "inherit"
+      ? { workHoursMode: u.workHoursMode as WorkHoursMode }
+      : {}),
   };
 }
 
@@ -328,6 +345,10 @@ export function mapConversation(
     status: c.status as ConversationStatus,
     aiEnabled: c.aiEnabled,
     unreadCount: c.unreadCount,
+    // Only emitted when non-zero — the flagless majority of threads stays as
+    // terse on the wire as before flags existed, and the list-row badge treats
+    // absent as 0.
+    ...(c.openFlagCount > 0 ? { openFlagCount: c.openFlagCount } : {}),
     lastMessageAt: c.lastMessageAt.toISOString(),
     lastMessagePreview: c.lastMessagePreview,
     lastMessageDirection: c.lastMessageDirection,
@@ -347,6 +368,13 @@ export function mapConversation(
 // type doesn't carry it.
 export type PrismaMessageWithReply = Omit<PrismaMessage, "rawPayload"> & {
   replyTo?: ReplyToRow | null;
+  /**
+   * Triage flags, joined only by the per-thread hydration. Optional because the
+   * ingest / broadcast / send paths map a row that was created microseconds ago
+   * and therefore cannot carry flags — they'd be paying a join to prove an
+   * empty array. Same convention as `replyTo` above.
+   */
+  flags?: MessageFlagRow[];
 };
 
 export function mapMessage(m: PrismaMessageWithReply): Message {
@@ -440,6 +468,10 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
             : {}),
         }
       : {}),
+    // Only emitted when the caller actually joined flags AND there are some, so
+    // the overwhelmingly common flagless message stays exactly as terse on the
+    // wire as it was before flags existed.
+    ...(m.flags?.length ? { flags: m.flags.map(mapFlag) } : {}),
   };
 }
 

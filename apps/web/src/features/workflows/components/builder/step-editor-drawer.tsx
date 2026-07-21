@@ -198,7 +198,14 @@ function EditorForNode({
     case "add_comment":
       return <AddCommentEditor config={c} onChange={onChangeConfig} fields={catalogs.fields} trigger={trigger} />;
     case "assign_to":
-      return <AssignToEditor config={c} onChange={onChangeConfig} users={catalogs.users} />;
+      return (
+        <AssignToEditor
+          config={c}
+          onChange={onChangeConfig}
+          users={catalogs.users}
+          assignmentPolicies={catalogs.assignmentPolicies}
+        />
+      );
     case "set_status":
       return <SetStatusEditor config={c} onChange={onChangeConfig} />;
     case "open_conversation":

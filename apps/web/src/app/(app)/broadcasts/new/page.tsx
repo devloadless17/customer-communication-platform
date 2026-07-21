@@ -6,10 +6,12 @@ import {
   getBroadcast,
   getBroadcastRecipientContactIds,
   getTeamWhatsappConfig,
+  listAssignmentPolicies,
   listAudienceGroups,
   listContactFieldDefinitions,
   listContactStages,
   listTags,
+  listTeamMembers,
   listWhatsappTemplates,
   lookupContacts,
 } from "@/lib/api/queries";
@@ -113,6 +115,8 @@ export default async function NewBroadcastPage({
     stages,
     contactLabels,
     templatesResult,
+    members,
+    assignmentPolicies,
   ] = await Promise.all([
     getTeamWhatsappConfig(),
     countAllContacts(),
@@ -125,7 +129,14 @@ export default async function NewBroadcastPage({
     // first paint. Best-effort: a Meta/connectivity hiccup falls through to an
     // empty list and the form's "Refresh" button re-fetches from the client.
     listWhatsappTemplates().catch(() => null),
+    // Roster + routing policies for the campaign-assignment step. Best-effort:
+    // a failure just hides the step rather than blocking the composer.
+    listTeamMembers().catch(() => []),
+    listAssignmentPolicies().catch(() => []),
   ]);
+  const teamMembers = members
+    .filter((m) => m.isActive)
+    .map((m) => ({ id: m.id, name: m.name }));
 
   // Pre-flight: if WhatsApp isn't even connected, bounce to the settings
   // page so the user knows what to fix.
@@ -153,6 +164,8 @@ export default async function NewBroadcastPage({
       cloneKind={cloneMessageKind}
       cloneBodyText={clone?.bodyText ?? null}
       cloneChannel={clone?.channel ?? null}
+      teamMembers={teamMembers}
+      assignmentPolicies={assignmentPolicies}
     />
   );
 }

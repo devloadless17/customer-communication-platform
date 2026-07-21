@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, NotFoundException, Patch, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, NotFoundException, Patch, Put, UseGuards } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { CurrentSession } from "../auth/current-session.decorator";
@@ -8,6 +9,11 @@ import type { ApiSession } from "../auth/session.guard";
 import { zBody } from "../common/zod-validation.pipe";
 import { DbService } from "../db/db.service";
 import { TeamRootService } from "./team-root.service";
+import {
+  SetTeamWorkHoursSchema,
+  type SetTeamWorkHoursInput,
+} from "../users/users.schemas";
+import { UsersService } from "../users/users.service";
 import { getBusinessNumberCountry } from "@/lib/providers/config";
 import { isBicAllowedForBusinessNumber } from "@ccp/shared/providers/calling-regions";
 
@@ -50,6 +56,9 @@ export class TeamRootController {
   constructor(
     private readonly teamRoot: TeamRootService,
     private readonly db: DbService,
+    // Working-hours edits re-resolve availability through the one writer in
+    // UsersService rather than duplicating the rule here.
+    private readonly users: UsersService,
   ) {}
 
   @Get()
@@ -63,6 +72,10 @@ export class TeamRootController {
         aiHandoffAction: true,
         aiHandoffAssigneeId: true,
         firstTouchGreeter: true,
+        // Read by the inbox shell so the client can react to live handovers
+        // under agent-visibility scoping (the SERVER is the boundary; this is
+        // purely so the list updates correctly).
+        agentConversationVisibility: true,
       },
     });
     if (!team) throw new NotFoundException({ error: "team not found" });
@@ -108,6 +121,37 @@ export class TeamRootController {
   ) {
     const team = await this.teamRoot.updateAiSettings(session.teamId, body);
     return { ok: true, team };
+  }
+
+  /**
+   * The org's default working hours — the schedule every member inherits
+   * unless they're on `custom` or `off`. `workHours: null` clears it, which
+   * returns the whole team to purely manual availability.
+   *
+   * Re-resolves every member's availability right after saving so the change is
+   * visible immediately; the 60s sweeper then owns the ongoing boundaries.
+   */
+  @RequireRole("admin")
+  @Put("work-hours")
+  async setWorkHours(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(SetTeamWorkHoursSchema)) body: SetTeamWorkHoursInput,
+  ) {
+    await this.db.team.update({
+      where: { id: session.teamId },
+      data: { workHours: body.workHours ?? Prisma.DbNull },
+    });
+    await this.users.resyncAvailability(session.teamId);
+    return { ok: true, workHours: body.workHours };
+  }
+
+  @Get("work-hours")
+  async getWorkHours(@CurrentSession() session: ApiSession) {
+    const team = await this.db.team.findUnique({
+      where: { id: session.teamId },
+      select: { workHours: true },
+    });
+    return { workHours: team?.workHours ?? null };
   }
 
   @RequireRole("admin")

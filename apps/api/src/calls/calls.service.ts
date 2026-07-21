@@ -49,6 +49,11 @@ import type { Channel } from "@ccp/shared/types";
 const CALL_PERMISSION_REQUEST_BODY =
   "We'd like to call you to help with your request. Allow calls from us?";
 
+import {
+  conversationRelationWhere,
+  visibilityWhere,
+} from "@/lib/conversations/visibility";
+
 import { DbService } from "../db/db.service";
 import { EventBus } from "../events/event-bus.module";
 import type { ApiSession } from "../auth/session.guard";
@@ -1729,7 +1734,13 @@ export class CallsService {
 
     // Team scope via the conversation FK — defensive lookup.
     const conv = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId: session.teamId },
+      // Visibility boundary: a restricted agent can't read the call history of
+      // a thread they can't open (404, same as missing).
+      where: {
+        id: conversationId,
+        teamId: session.teamId,
+        ...visibilityWhere(session),
+      },
       select: { id: true },
     });
     if (!conv) throw new NotFoundException({ error: "conversation not found" });
@@ -1819,7 +1830,13 @@ export class CallsService {
           ],
         }
       : undefined;
-    const baseWhere: Prisma.CallWhereInput = { teamId: session.teamId };
+    // The team call log joins through to contact name + phone for every call
+    // in the org, so it carries the same PII weight as the conversation list
+    // and gets the same boundary.
+    const baseWhere: Prisma.CallWhereInput = {
+      teamId: session.teamId,
+      ...conversationRelationWhere(session),
+    };
 
     // Free-text filter: substring on the contact's NAME or PHONE, reached
     // through the conversation→contact relation (the same join the select uses).

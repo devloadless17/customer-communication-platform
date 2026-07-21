@@ -16,6 +16,7 @@ import type {
   ContactPanelBuiltins,
   ContactStage,
   ConversationWithRefs,
+  MessageFlagDefinition,
   SnippetItem,
   Tag,
   Team,
@@ -42,6 +43,7 @@ import { cn } from "@ccp/shared/utils";
 import { ConnectionBanner } from "./connection-banner";
 import { ConversationList } from "./conversation-list";
 import { SnippetsProvider } from "./snippets-context";
+import { MessageFlagsProvider } from "./message-flags-context";
 import { MessageThread } from "./message-thread";
 import { ContactPanel } from "./contact-panel";
 import { Sheet } from "@/components/ui/sheet";
@@ -199,6 +201,9 @@ export function InboxShell({
   conversations: initialConversations,
   nextConversationCursor,
   snippets,
+  messageFlagDefinitions,
+  initialJumpMessageId,
+  initialJumpNonce,
   stages,
   fieldDefinitions,
   contactPanelBuiltins,
@@ -207,6 +212,8 @@ export function InboxShell({
   canManageContactFields,
   canDeleteConversations,
   canMakeCalls,
+  canAssignOthers,
+  restrictedToOwnConversations,
   initialActiveConversationId,
   initialThread,
   initialContactPanelCollapsed,
@@ -219,6 +226,17 @@ export function InboxShell({
   conversations: ConversationWithRefs[];
   nextConversationCursor: string | null;
   snippets: SnippetItem[];
+  /** Team-wide triage-flag catalog (live definitions), for the bubble picker. */
+  messageFlagDefinitions: MessageFlagDefinition[];
+  /**
+   * `?m=` — open the thread anchored on this MESSAGE rather than at the bottom.
+   * Emitted by the flags queue ("open this complaint"). Everything downstream
+   * already handles a target deep in history: the thread fetches a context
+   * window, swaps the slice in, then scrolls + flashes it.
+   */
+  initialJumpMessageId: string | null;
+  /** `?n=` — bumped by the producer so re-opening the SAME message re-fires. */
+  initialJumpNonce: string | null;
   stages: ContactStage[];
   fieldDefinitions: ContactFieldDefinition[];
   contactPanelBuiltins: ContactPanelBuiltins;
@@ -230,6 +248,12 @@ export function InboxShell({
    *  region check on a per-thread basis to decide whether to show the
    *  Phone button. */
   canMakeCalls: boolean;
+  /** `conversations:assignOthers` — may hand a conversation to a TEAMMATE.
+   *  Everyone can always claim one for themselves. */
+  canAssignOthers: boolean;
+  /** Org restricts agents to their own conversations AND the viewer is an
+   *  agent. Server-enforced; the client uses it to react to live handovers. */
+  restrictedToOwnConversations: boolean;
   initialActiveConversationId: string | null;
   initialThread: CachedThread | null;
   /** Server-read cookie so the right panel SSRs in its persisted rail state. */
@@ -382,6 +406,52 @@ export function InboxShell({
     cache.set(initialActiveConversationId, initialThread);
     seededInitialRef.current = true;
   }
+
+  // ── `?m=` message anchor (the flags queue's "open this complaint") ──────
+  //
+  // Seeded from the URL rather than a click, so it has to survive the SSR sync
+  // above (which sets activeId/displayedId for the `?c=`). Keyed on the `?n=`
+  // nonce so re-opening the SAME message from the queue re-fires — the
+  // messageId alone is unchanged on a repeat, and the thread's handled-guard
+  // would treat it as already done.
+  //
+  // Deliberately NOT routed through openConversation: that early-returns when
+  // the conversation is already active AND nulls jumpTarget, so a queue click
+  // on the thread you're already viewing would clear the jump it just asked
+  // for. onOpenSearchResult sidesteps the same trap by setting jumpTarget
+  // AFTER the open; here the SSR sync has already done the opening.
+  const jumpKey =
+    initialJumpMessageId && initialActiveConversationId
+      ? `${initialActiveConversationId}:${initialJumpMessageId}:${initialJumpNonce ?? ""}`
+      : null;
+  // Seeded in an EFFECT, not during render. On a fresh mount the thread pins
+  // itself to the bottom (useChatScroll) as part of first paint; a jump target
+  // set during render is consumed before that pin and gets scrolled straight
+  // back off-screen. Running after paint puts the jump on the correct side of
+  // the pin. `jumpKey` carries the `?n=` nonce, so re-opening the SAME message
+  // from the queue still re-fires.
+  useEffect(() => {
+    if (!jumpKey || !initialJumpMessageId || !initialActiveConversationId) return;
+    jumpSeqRef.current += 1;
+    setJumpTarget({
+      conversationId: initialActiveConversationId,
+      messageId: initialJumpMessageId,
+      nonce: jumpSeqRef.current,
+    });
+  }, [jumpKey, initialJumpMessageId, initialActiveConversationId]);
+
+  // Strip `m`/`n` once consumed so a later hard refresh (or a Back press onto
+  // this entry) doesn't silently re-yank the thread to an old message. `?c=`
+  // stays — that's what keeps a refresh on this conversation. replaceState,
+  // not the router, so this costs no RSC round-trip.
+  useEffect(() => {
+    if (!jumpKey || typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("m") && !url.searchParams.has("n")) return;
+    url.searchParams.delete("m");
+    url.searchParams.delete("n");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+  }, [jumpKey]);
 
   const displayedThread = displayedId ? cache.get(displayedId) ?? null : null;
   // Reading `cacheTick` here is what couples cache writes to renders.
@@ -703,6 +773,7 @@ export function InboxShell({
     activeId,
     currentUser.id,
     filter,
+    restrictedToOwnConversations,
     displayedThread?.data ?? null,
   );
 
@@ -1178,6 +1249,7 @@ export function InboxShell({
 
   return (
     <SnippetsProvider snippets={snippets}>
+      <MessageFlagsProvider definitions={messageFlagDefinitions}>
       {/* AppRail + the inbox sub-sidebar + mobile chrome all live in
           /inbox/layout.tsx now (via SectionShell). This island is just the
           conversation list + thread workspace, mounted inside the layout's
@@ -1301,6 +1373,7 @@ export function InboxShell({
                 contactPanelBuiltins={contactPanelBuiltins}
                 canManageContactFields={canManageContactFields}
                 canDeleteConversations={canDeleteConversations}
+                canAssignOthers={canAssignOthers}
                 canMakeCalls={
                   // Per-thread gate: capability + WhatsApp channel + region
                   // (BIC blocklist via contact country) + no fresh revocation.
@@ -1361,6 +1434,7 @@ export function InboxShell({
             CallProvider in the (app) layout) so a call rings through on every
             page, not just here. */}
       </div>
+      </MessageFlagsProvider>
     </SnippetsProvider>
   );
 }
@@ -1440,6 +1514,7 @@ function ThreadWorkspace({
   canManageContactFields,
   canDeleteConversations,
   canMakeCalls,
+  canAssignOthers,
   aiAutopilotEnabled,
   onInitiateCall,
   tags,
@@ -1465,6 +1540,7 @@ function ThreadWorkspace({
   canManageContactFields: boolean;
   canDeleteConversations: boolean;
   canMakeCalls: boolean;
+  canAssignOthers: boolean;
   /** Team-level AI Autopilot opt-in — gates the header AI toggle visibility. */
   aiAutopilotEnabled: boolean;
   onInitiateCall: () => void | Promise<void>;
@@ -1541,6 +1617,7 @@ function ThreadWorkspace({
         canManageStages={canManageStages}
         canDeleteConversations={canDeleteConversations}
         canMakeCalls={canMakeCalls}
+        canAssignOthers={canAssignOthers}
         aiAutopilotEnabled={aiAutopilotEnabled}
         onInitiateCall={onInitiateCall}
         onMarkRead={onMarkRead}

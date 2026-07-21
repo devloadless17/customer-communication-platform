@@ -11,6 +11,7 @@ import {
 } from "@nestjs/common";
 import type { Response } from "express";
 
+import { ScopedByConversation } from "../auth/conversation-visibility.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
@@ -38,11 +39,16 @@ import {
 export class AiInboxController {
   constructor(private readonly svc: AiInboxService) {}
 
+  // `:id` here is a CONVERSATION id — scoped. (Deliberately NOT class-level:
+  // the suggestion / customer / transcription routes below also use `:id`, and
+  // a blanket guard would look those ids up as conversations and 404 them.)
+  @ScopedByConversation("id")
   @Get("conversations/:id/overview")
   async overview(@CurrentSession() session: ApiSession, @Param("id") id: string) {
     return this.svc.overview(session.teamId, id);
   }
 
+  @ScopedByConversation("id")
   @Post("conversations/:id/state")
   async setState(
     @CurrentSession() session: ApiSession,

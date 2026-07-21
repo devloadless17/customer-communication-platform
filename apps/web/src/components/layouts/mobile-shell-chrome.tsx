@@ -146,6 +146,9 @@ export function MobileShellChrome({
   const [liveAvailability, setLiveAvailability] = useState(() => ({
     status: resolveAvailabilityStatus(currentUser.availabilityStatus),
     message: currentUser.availabilityMessage ?? null,
+    // Schedule provenance, so the picker can explain an automatic status.
+    source: currentUser.availabilitySource ?? "manual",
+    until: currentUser.availabilityUntil ?? null,
   }));
   useEffect(() => {
     const socket = getClientSocket();
@@ -156,6 +159,8 @@ export function MobileShellChrome({
       setLiveAvailability((prev) => ({
         status: payload.status,
         message: payload.message === undefined ? prev.message : payload.message,
+        source: payload.source === undefined ? prev.source : payload.source,
+        until: payload.until === undefined ? prev.until : payload.until,
       }));
     };
     socket.on("user:availability:updated", handler);
@@ -288,6 +293,8 @@ export function MobileShellChrome({
                 disabled={!canManageAvailability}
                 seedStatus={liveAvailability.status}
                 seedMessage={liveAvailability.message}
+                seedSource={liveAvailability.source}
+                seedUntil={liveAvailability.until}
               />
             </div>
             <div className="mt-1 flex flex-col gap-0.5 border-t border-border pt-1">

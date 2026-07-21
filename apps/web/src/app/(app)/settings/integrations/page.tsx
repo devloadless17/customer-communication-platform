@@ -3,7 +3,6 @@ import { redirect } from "next/navigation";
 import {
   ArrowDown,
   ArrowRight,
-  Bot,
   ExternalLink,
   Plug,
   Webhook,
@@ -11,7 +10,7 @@ import {
 } from "lucide-react";
 
 import { getSession } from "@/lib/auth/current-user";
-import { listApiKeys, getCurrentTeam } from "@/lib/api/queries";
+import { listApiKeys } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 import { PageHeader } from "@/components/layouts/page-header";
 
@@ -39,21 +38,21 @@ export default async function IntegrationsLanding() {
   // One round-trip serves both the "Connect" status on tiles AND the
   // connect panel's already-connected detection. Cheap (single SELECT,
   // never returns plaintext) and the page is `force-dynamic` anyway.
-  const [keys, team] = await Promise.all([listApiKeys(), getCurrentTeam()]);
+  const keys = await listApiKeys();
   const n8nConnected = keys.some(
     (k) => !k.revokedAt && k.name === N8N_PRESET.defaultName,
   );
 
+  // The "AI Autopilot" tile is deliberately gone: it configured an EXTERNAL
+  // (n8n) AI flow, which the built-in AI Assistant replaces — that one lives in
+  // the product, needs no webhook wiring, and routes its human handoff through
+  // Settings → Assignment like every other assignment. Offering both invited
+  // orgs to configure two competing AIs and two competing handoff rules.
+  //
+  // The underlying flags and the /v1 endpoints stay for API stability, so any
+  // org still running an n8n flow keeps working — there is just no longer a UI
+  // to turn it ON for a new one.
   const tiles: Tile[] = [
-    {
-      href: "/settings/integrations/ai-autopilot",
-      icon: Bot,
-      title: "AI Autopilot",
-      description:
-        "Let an AI flow auto-reply, with auto-pause on agent reply, configurable human-handoff routing, and welcome-message coordination.",
-      cta: team.aiAutopilotEnabled ? "On" : "Off",
-      connected: team.aiAutopilotEnabled,
-    },
     {
       href: "/settings/integrations/webhooks",
       icon: Webhook,

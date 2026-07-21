@@ -10,6 +10,7 @@ import {
   listContactStages,
   listSnippets,
   listTags,
+  listMessageFlagDefinitions,
   listTeamMembers,
 } from "@/lib/api/queries";
 import { InboxShell } from "@/features/inbox/components/inbox-shell";
@@ -46,9 +47,18 @@ const CONTACT_PANEL_COLLAPSED_COOKIE = "contact-panel-collapsed";
 export default async function InboxPage({
   searchParams,
 }: {
-  searchParams: Promise<{ c?: string }>;
+  // `c` picks the thread. `m` optionally anchors it on a specific MESSAGE —
+  // emitted by the flags queue ("open this complaint") and by any future
+  // deep-link into a single message. `n` is a nonce the producer bumps so
+  // clicking the SAME row twice still re-fires the jump (the shell strips `m`
+  // from the URL after handling it, and an unchanged prop wouldn't re-trigger).
+  searchParams: Promise<{ c?: string; m?: string; n?: string }>;
 }) {
-  const { c: requestedConversationId } = await searchParams;
+  const {
+    c: requestedConversationId,
+    m: requestedMessageId,
+    n: jumpNonceParam,
+  } = await searchParams;
 
   // Fan everything out in one Promise.all — including the session lookup —
   // so the network/DB-bound queries are not serialized behind it. Each call
@@ -69,6 +79,7 @@ export default async function InboxPage({
     stages,
     contactFields,
     tags,
+    messageFlagDefinitions,
     initialThread,
     cookieStore,
   ] = await Promise.all([
@@ -80,6 +91,7 @@ export default async function InboxPage({
     listContactStages(),
     listContactFieldsWithBuiltins(),
     listTags(),
+    listMessageFlagDefinitions(),
     // Only SSR-fetch the picked thread when the URL carried `?c=<id>`. On the
     // empty inbox state (no query param), this is null and the shell renders
     // the "pick a conversation" placeholder.
@@ -138,10 +150,17 @@ export default async function InboxPage({
         fieldDefinitions={contactFields.definitions}
         contactPanelBuiltins={contactFields.builtins}
         tags={tags}
+        messageFlagDefinitions={messageFlagDefinitions}
+        initialJumpMessageId={requestedMessageId ?? null}
+        initialJumpNonce={jumpNonceParam ?? null}
         canManageStages={permissions["stages:manage"]}
         canManageContactFields={permissions["contactFields:manage"]}
         canDeleteConversations={permissions["conversations:delete"]}
         canMakeCalls={permissions["calls:make"]}
+        canAssignOthers={permissions["conversations:assignOthers"]}
+        restrictedToOwnConversations={
+          user.role === "agent" && team.agentConversationVisibility === "assigned"
+        }
         initialActiveConversationId={initialActiveConversationId}
         initialThread={initialThread}
         initialContactPanelCollapsed={contactPanelCollapsed}

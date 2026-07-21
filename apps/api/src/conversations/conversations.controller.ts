@@ -11,6 +11,10 @@ import {
 } from "@nestjs/common";
 
 import { RequireCapability } from "../auth/capability.guard";
+import { resolvePermissions } from "@ccp/shared/auth/permissions";
+
+import { ScopedByConversation } from "../auth/conversation-visibility.guard";
+
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
@@ -53,6 +57,10 @@ import {
  */
 @Controller("api/conversations")
 @UseGuards(SessionGuard)
+// Agent conversation-visibility boundary. Class-level so EVERY `:id` route
+// here is covered — including ones added later. Collection routes (list,
+// counts) have no `:id` and scope inside their own query instead.
+@ScopedByConversation("id")
 // Read-tier rate limit (1200/min ≈ 20/s) on its OWN token bucket — the bucket
 // key includes perMinute, so this never shares budget with the 300/min default
 // or the 60/min `messages.send`. A cold inbox open fires ~10-15 parallel reads
@@ -70,6 +78,7 @@ export class ConversationsController {
     @Query(zQuery(ListConversationsQuerySchema)) query: ListConversationsQuery,
   ) {
     return this.conversations.list(session.teamId, session.userId, {
+      viewer: session,
       take: query.take,
       cursor: query.cursor ?? null,
       search: query.search,
@@ -90,7 +99,7 @@ export class ConversationsController {
    */
   @Get("counts")
   async counts(@CurrentSession() session: ApiSession) {
-    return this.conversations.counts(session.teamId, session.userId);
+    return this.conversations.counts(session.teamId, session.userId, session);
   }
 
   /**
@@ -101,7 +110,7 @@ export class ConversationsController {
    */
   @Get("unread-count")
   async unreadCount(@CurrentSession() session: ApiSession) {
-    return this.conversations.unreadTotal(session.teamId);
+    return this.conversations.unreadTotal(session.teamId, session);
   }
 
   /**
@@ -225,7 +234,16 @@ export class ConversationsController {
     @Param("id") id: string,
     @Body(zBody(AssignConversationSchema)) body: AssignConversationInput,
   ) {
-    await this.conversations.assign(session.teamId, session.userId, id, body);
+    // Claiming a conversation is always allowed; handing one to a TEAMMATE is
+    // gated by `conversations:assignOthers` (admin/manager by default). The
+    // capability is resolved from the session — no extra DB read — and the
+    // body-dependent decision is made in the service.
+    const canAssignOthers = resolvePermissions(session.role, session.rolePermissions)[
+      "conversations:assignOthers"
+    ];
+    await this.conversations.assign(session.teamId, session.userId, id, body, {
+      canAssignOthers,
+    });
     return { ok: true };
   }
 

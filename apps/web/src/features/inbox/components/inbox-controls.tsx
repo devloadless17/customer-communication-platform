@@ -4,7 +4,17 @@
  * shape stays colocated with the inbox feature.
  */
 
-export type PresetFilterId = "active" | "all" | "mine" | "unassigned" | "closed";
+export type PresetFilterId =
+  | "active"
+  | "all"
+  | "mine"
+  | "unassigned"
+  | "closed"
+  // Threads carrying at least one UNRESOLVED message triage flag. Unlike the
+  // other working presets this deliberately includes CLOSED threads — an
+  // unresolved complaint on a closed conversation is exactly the thing that
+  // must not fall off the radar.
+  | "flagged";
 
 /**
  * Active inbox filter. Presets and stage filters are mutually exclusive —

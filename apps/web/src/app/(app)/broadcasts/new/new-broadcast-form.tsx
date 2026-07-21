@@ -22,6 +22,11 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@ccp/shared/utils";
+import {
+  CampaignAssignment,
+  EMPTY_CAMPAIGN_ASSIGNMENT,
+  type CampaignAssignmentValue,
+} from "@/features/broadcasts/components/campaign-assignment";
 import type { ContactFieldDefinition, ContactStage, Tag, TemplateDto } from "@ccp/shared/types";
 import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
 import { CHANNEL_CAPABILITIES, LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
@@ -91,8 +96,13 @@ export function NewBroadcastForm({
   cloneKind = null,
   cloneBodyText = null,
   cloneChannel = null,
+  teamMembers = [],
+  assignmentPolicies = [],
 }: {
   totalContactCount: number;
+  /** Active roster + saved routing policies, for the campaign-assignment step. */
+  teamMembers?: Array<{ id: string; name: string }>;
+  assignmentPolicies?: Array<{ id: string; name: string; isDefault: boolean }>;
   initialContactLabels: ContactLabel[];
   /** SSR-seeded approved templates so the Template step isn't blank-then-spinner
    *  on first paint. The form still re-fetches from the client (and offers a
@@ -204,6 +214,9 @@ export function NewBroadcastForm({
   // from a <input type="datetime-local"> (local wall-clock, no tz) which we
   // convert to an ISO string on submit.
   const [name, setName] = useState("");
+  const [assignment, setAssignment] = useState<CampaignAssignmentValue>(
+    EMPTY_CAMPAIGN_ASSIGNMENT,
+  );
   const [scheduleMode, setScheduleMode] = useState<"now" | "later">("now");
   const [scheduledLocal, setScheduledLocal] = useState("");
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -813,6 +826,21 @@ export function NewBroadcastForm({
                 }),
             ...(name.trim() ? { name: name.trim() } : {}),
             ...(scheduledAtIso ? { scheduledAt: scheduledAtIso } : {}),
+            // Omitted entirely when the campaign assigns nobody, so the request
+            // shape is unchanged for every existing caller.
+            ...(assignment.mode !== "none"
+              ? {
+                  assignment: {
+                    mode: assignment.mode,
+                    userId: assignment.userId,
+                    policyId: assignment.policyId,
+                    split: assignment.split,
+                    leftover: assignment.leftover,
+                    trigger: assignment.trigger,
+                    overwrite: assignment.overwrite,
+                  },
+                }
+              : {}),
             audience:
               audience.mode === "all"
                 ? { mode: "all" }
@@ -1115,6 +1143,27 @@ export function NewBroadcastForm({
             />
           </div>
         </StepCard>
+      )}
+
+      {/* Who owns the replies. Only offered when the team actually has members
+          to route to — a one-person org has nothing to decide here. */}
+      {teamMembers.length > 1 && (
+        <div className="rounded-xl border border-border bg-card p-4">
+          <h2 className="text-sm font-semibold">Assignment</h2>
+          <p className="mt-1 text-2xs text-muted-foreground">
+            Decide up front who handles the replies, so they don&apos;t all land in
+            one shared queue.
+          </p>
+          <div className="mt-3">
+            <CampaignAssignment
+              value={assignment}
+              onChange={setAssignment}
+              members={teamMembers}
+              policies={assignmentPolicies}
+              audienceSize={audienceCount}
+            />
+          </div>
+        </div>
       )}
 
       {/* Details & schedule — optional name + send-now / schedule-later. */}

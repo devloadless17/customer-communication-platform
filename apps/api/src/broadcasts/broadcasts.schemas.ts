@@ -70,6 +70,67 @@ export const BroadcastVariablesSchema = z.object({
 });
 export type BroadcastVariablesInput = z.infer<typeof BroadcastVariablesSchema>;
 
+/**
+ * Who owns the conversations a campaign creates.
+ *
+ *   none          — don't touch assignment (default; today's behavior)
+ *   fixed         — everything to `userId`
+ *   split_counts  — literal counts per member ("first 50 to Ali, next 10 to
+ *                   Sara"); recipients past the last count follow `leftover`
+ *   split_percent — proportional split of the WHOLE audience by weight,
+ *                   apportioned with largest-remainder so the parts sum exactly
+ *   policy        — run the named (or default) assignment policy over the
+ *                   audience, honoring its membership, roles and weights
+ *
+ * `overwrite` (default false) decides whether a campaign may take over a
+ * conversation that ALREADY has an assignee. Off by default so a marketing
+ * blast can never yank a live support thread away from the agent handling it.
+ */
+export const BroadcastAssignmentSchema = z
+  .object({
+    mode: z
+      .enum(["none", "fixed", "split_counts", "split_percent", "policy"])
+      .default("none"),
+    userId: z.string().min(1).nullable().optional(),
+    policyId: z.string().min(1).nullable().optional(),
+    split: z
+      .array(
+        z.object({
+          userId: z.string().min(1),
+          // 0 is pointless (it allocates nobody) and is rejected so a typo
+          // surfaces in the composer instead of silently dropping a member.
+          value: z.number().int().min(1).max(1_000_000),
+        }),
+      )
+      .max(200)
+      .optional(),
+    leftover: z.enum(["leave_unassigned", "policy"]).default("leave_unassigned"),
+    // WHEN the drawn assignee is applied. "on_reply" (default) waits until the
+    // customer actually answers — a campaign is mostly one-way, and assigning
+    // every recipient up front would bury agents in conversations nobody will
+    // reply to and skew the open-conversation counts that capacity limits and
+    // least-busy routing read. "on_send" applies right after a successful send.
+    trigger: z.enum(["on_reply", "on_send"]).default("on_reply"),
+    overwrite: z.boolean().default(false),
+  })
+  .refine((v) => v.mode !== "fixed" || Boolean(v.userId), {
+    message: "assignment.userId is required when mode = fixed",
+  })
+  .refine(
+    (v) =>
+      (v.mode !== "split_counts" && v.mode !== "split_percent") ||
+      (v.split?.length ?? 0) > 0,
+    { message: "assignment.split is required for a split mode" },
+  )
+  .refine(
+    (v) =>
+      v.mode !== "split_counts" && v.mode !== "split_percent"
+        ? true
+        : new Set(v.split!.map((s) => s.userId)).size === v.split!.length,
+    { message: "assignment.split cannot list the same member twice" },
+  );
+export type BroadcastAssignmentInput = z.infer<typeof BroadcastAssignmentSchema>;
+
 export const CreateBroadcastSchema = z
   .object({
     // `template` (WhatsApp, default — back-compat for existing callers) or
@@ -93,6 +154,8 @@ export const CreateBroadcastSchema = z
     // is treated as "now" by the service (clamped delay), so no strict future
     // validation here — the UI prevents past picks, the server is tolerant.
     scheduledAt: z.string().datetime().nullable().optional(),
+    // Who owns the replies. Omitted = unassigned (today's behavior).
+    assignment: BroadcastAssignmentSchema.optional(),
   })
   .refine(
     (v) => {

@@ -68,7 +68,8 @@ export type FanoutRuleMap = {
 export const FANOUT_RULES: FanoutRuleMap = {
   // ---- messages ---------------------------------------------------------
   "message.received": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "message:new", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "message:new", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       message: stripForWire(e.message),
@@ -88,7 +89,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "message.sent": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "message:new", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "message:new", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       message: stripForWire(e.message),
@@ -146,12 +148,38 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // carries no storm risk, and a persistent removable badge is worth converging
   // all three thread consumers (CLAUDE.md §10). `emoji` is null on removal.
   "message.reaction_changed": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "message:reaction", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "message:reaction", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       messageId: e.messageId,
       actor: e.actor,
       emoji: e.emoji,
+    });
+  },
+
+  // A triage flag was raised / changed / resolved / removed on a message.
+  // TEAM-room scoped for the same reason as message.reaction_changed —
+  // `message:flag` is in THREAD_REDUCER_EVENTS, so the inbox shell's LRU
+  // ThreadCache patches CACHED background snapshots from it, and those threads'
+  // sockets never joined `conv:<id>`. It ALSO feeds two surfaces that live
+  // outside any conversation room: the flags queue page and the inbox list's
+  // flag badge. Human-cadence (one frame per triage action), so the team frame
+  // carries no storm risk.
+  //
+  // `flag` is the post-change state and is present even on `removed` (the
+  // reducer matches on `flag.id`); `openFlagCount` is the parent conversation's
+  // post-change count, read inside the same transaction, so the list badge is
+  // exact without a follow-up query.
+  "message.flag_changed": (e, emitter) => {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "message:flag", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      messageId: e.messageId,
+      action: e.action,
+      flag: e.flag,
+      openFlagCount: e.openFlagCount,
     });
   },
 
@@ -169,7 +197,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // team frame (`conversation:preview`) that the inbox LIST consumes — the list
   // doesn't read thread events, and thread consumers don't read the preview.
   "message.updated": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "message:updated", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "message:updated", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       messageId: e.messageId,
@@ -179,7 +208,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
       ...(e.feedback !== undefined ? { feedback: e.feedback } : {}),
     });
     if (e.listPreview !== undefined) {
-      emitter.emitToTeam(e.teamId, "conversation:preview", {
+      emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "conversation:preview", {
         teamId: e.teamId,
         conversationId: e.conversationId,
         preview: e.listPreview,
@@ -193,7 +223,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // snapshot if it's not the displayed thread, and the active thread's
   // useConversationEvents hook applies markOptimisticFailed by clientTempId.
   "message.send_failed": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "message:failed", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "message:failed", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       ...(e.clientTempId ? { clientTempId: e.clientTempId } : {}),
@@ -214,7 +245,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // MEDIA message — well within the same budget as `message:new` (also team-
   // wide); a non-caching recipient drops it with one cheap find-by-id miss.
   "message.media_ready": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "message:media:ready", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "message:media:ready", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       messageId: e.messageId,
@@ -224,7 +256,17 @@ export const FANOUT_RULES: FanoutRuleMap = {
 
   // ---- conversations ----------------------------------------------------
   "conversation.assigned": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "conversation:assigned", {
+    // The assignee just changed — drop the emitter's cached owner so the NEXT
+    // frame targets the new one immediately instead of up to a TTL later.
+    // Without this, a reassigned conversation's messages would keep flowing to
+    // the PREVIOUS owner's room for up to 30 seconds.
+    emitter.invalidateConversationAssignee(e.conversationId);
+    // Target the PREVIOUS owner explicitly as well. Under visibility scoping
+    // the audience is resolved from the CURRENT assignee, so without this the
+    // agent who just lost the conversation never hears about it and keeps a row
+    // in their inbox that 404s when clicked.
+    emitter.emitAboutConversationAlso(e.teamId,
+      e.conversationId, [e.previousAssignedUserId], "conversation:assigned", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       assignedUser: e.assignedUser,
@@ -232,7 +274,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "conversation.status_changed": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "conversation:status", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "conversation:status", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       status: e.newStatus,
@@ -240,7 +283,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "conversation.ai_changed": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "conversation:ai", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "conversation:ai", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       aiEnabled: e.newAiEnabled,
@@ -248,14 +292,16 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "conversation.deleted": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "conversation:deleted", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "conversation:deleted", {
       teamId: e.teamId,
       conversationId: e.conversationId,
     });
   },
 
   "conversation.read": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "conversation:read", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "conversation:read", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       readByUserId: e.readByUserId,
@@ -269,7 +315,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // see the per-contact event for granular dispatch (they don't read this
     // flag) — only socket fanout is short-circuited.
     if (e.suppressSocketFanout) return;
-    emitter.emitToTeam(e.teamId, "contact:updated", {
+    emitter.emitAboutContact(e.teamId, e.contact?.id, "contact:updated", {
       teamId: e.teamId,
       contact: e.contact,
     });
@@ -294,7 +340,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // import doesn't storm every connected tab with 500 `contact:updated`
     // frames.
     if (e.suppressSocketFanout) return;
-    emitter.emitToTeam(e.teamId, "contact:updated", {
+    emitter.emitAboutContact(e.teamId, e.contact?.id, "contact:updated", {
       teamId: e.teamId,
       contact: e.contact,
     });
@@ -333,12 +379,13 @@ export const FANOUT_RULES: FanoutRuleMap = {
 
   "contact.deleted": (e, emitter) => {
     for (const cid of e.conversationIds) {
-      emitter.emitToTeam(e.teamId, "conversation:deleted", {
+      emitter.emitAboutConversation(e.teamId,
+          cid, "conversation:deleted", {
         teamId: e.teamId,
         conversationId: cid,
       });
     }
-    emitter.emitToTeam(e.teamId, "contact:deleted", {
+    emitter.emitAboutContact(e.teamId, e.contactId, "contact:deleted", {
       teamId: e.teamId,
       contactId: e.contactId,
     });
@@ -346,7 +393,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
 
   // ---- notes ------------------------------------------------------------
   "note.created": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "note:new", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "note:new", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       note: e.note,
@@ -354,7 +402,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "note.deleted": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "note:deleted", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "note:deleted", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       noteId: e.noteId,
@@ -634,7 +683,43 @@ export const FANOUT_RULES: FanoutRuleMap = {
         | "away"
         | "offline",
       ...(e.message !== undefined ? { message: e.message } : {}),
+      // Provenance ("who set this") + when a manual pick hands back to the
+      // schedule. Teammates render the first; the user's own picker renders
+      // both, plus `manual` so their note box shows what THEY typed rather
+      // than the schedule's "Outside working hours" text.
+      ...(e.source !== undefined
+        ? { source: e.source as "manual" | "admin" | "schedule" }
+        : {}),
     });
+    // `manual` (what the user typed) and `until` (when their override lapses)
+    // go ONLY to the user's own room, never to the team.
+    //
+    // The whole point of the schedule is that it MASKS the personal note:
+    // teammates should see "Outside working hours · back Mon 09:00", not
+    // "Doctor's appointment — back later". Putting `manual` on the team frame
+    // shipped the private text to every teammate's socket, with nothing but a
+    // client-side `if (userId !== me) return` keeping it off screen — it was
+    // still on the wire and readable in any teammate's devtools.
+    if (e.manual !== undefined || e.until !== undefined) {
+      emitter.emitToUser(e.userId, "user:availability:updated", {
+        teamId: e.teamId,
+        userId: e.userId,
+        status: e.status as "available" | "busy" | "away" | "offline",
+        ...(e.message !== undefined ? { message: e.message } : {}),
+        ...(e.source !== undefined
+          ? { source: e.source as "manual" | "admin" | "schedule" }
+          : {}),
+        ...(e.until !== undefined ? { until: e.until } : {}),
+        ...(e.manual !== undefined
+          ? {
+              manual: {
+                status: e.manual.status as "available" | "busy" | "away" | "offline",
+                message: e.manual.message,
+              },
+            }
+          : {}),
+      });
+    }
     // Toggling "Appear offline" — in EITHER direction, including offline→busy /
     // offline→away — shifts the visibly-online set (the snapshot filters only
     // status === "offline"), so re-emit a fresh presence snapshot to the team.
@@ -764,7 +849,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
   //                              avoids the "agent A clicked answer but the
   //                              SDP only went to agent B" race.
   "call.incoming": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "call:incoming", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "call:incoming", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       callId: e.callId,
@@ -785,7 +871,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // or their badge undercounts every outbound call's ring phase (≤60s) until
     // call:answered / call:ended fires. Payload is tiny; the team-wide fan is
     // a single frame per call, not a per-recipient storm.
-    emitter.emitToTeam(e.teamId, "call:ringing", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "call:ringing", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       callId: e.callId,
@@ -795,7 +882,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "call.answered_by_agent": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "call:answered", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "call:answered", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       callId: e.callId,
@@ -805,7 +893,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "call.ended": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "call:ended", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "call:ended", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       callId: e.callId,
@@ -817,7 +906,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
 
   "call.missed": (e, emitter) => {
     // Same wire frame as call:ended — status discriminates the bubble copy.
-    emitter.emitToTeam(e.teamId, "call:ended", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "call:ended", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       callId: e.callId,
@@ -828,7 +918,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "call.rejected": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "call:ended", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "call:ended", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       callId: e.callId,
@@ -846,7 +937,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // call:incoming — agents who saw the toast but aren't viewing the thread
     // are NOT in the conversation room, so a conversation-scoped frame would
     // leave them with a stuck phantom "Customer is calling you" toast.
-    emitter.emitToTeam(e.teamId, "call:ended", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "call:ended", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       callId: e.callId,
@@ -858,7 +950,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "call.sdp_offer": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "call:sdp_offer", {
+    emitter.emitAboutConversation(e.teamId,
+      e.conversationId, "call:sdp_offer", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       callId: e.callId,

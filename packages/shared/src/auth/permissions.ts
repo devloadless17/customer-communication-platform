@@ -101,12 +101,15 @@ export type Capability =
   | "stages:manage"
   | "contactFields:manage"
   | "tags:manage"
+  | "messageFlags:manage"
   | "snippets:manage"
   | "availability:manage"
+  | "availability:manageOthers"
   | "calls:make"
   | "calls:receive"
   | "teamActivity:view"
-  | "aiAssistant:manage";
+  | "aiAssistant:manage"
+  | "conversations:assignOthers";
 
 export const ALL_CAPABILITIES: Capability[] = [
   "conversations:delete",
@@ -119,12 +122,15 @@ export const ALL_CAPABILITIES: Capability[] = [
   "stages:manage",
   "contactFields:manage",
   "tags:manage",
+  "messageFlags:manage",
   "snippets:manage",
   "availability:manage",
+  "availability:manageOthers",
   "calls:make",
   "calls:receive",
   "teamActivity:view",
   "aiAssistant:manage",
+  "conversations:assignOthers",
 ];
 
 /** Roles whose capabilities an admin may edit. admin/superAdmin are fixed. */
@@ -143,12 +149,16 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   "stages:manage": "Manage lifecycle stages",
   "contactFields:manage": "Manage contact fields",
   "tags:manage": "Create & manage tags",
+  "messageFlags:manage": "Create & manage message flags",
   "snippets:manage": "Create & manage snippets",
   "availability:manage": "Set own availability (busy / away / offline)",
+  "availability:manageOthers": "Set teammates' availability & working hours",
   "calls:make": "Place outbound voice calls",
   "calls:receive": "Answer incoming voice calls",
   "teamActivity:view": "View team activity report",
   "aiAssistant:manage": "Configure the AI Assistant (company profile, knowledge, voice)",
+  "conversations:assignOthers":
+    "Assign conversations to other teammates (everyone can always claim one themselves)",
 };
 
 /**
@@ -187,11 +197,21 @@ export const DEFAULT_CAPABILITIES: Record<Role, Record<Capability, boolean>> = {
     // behavior exactly. An admin can flip them off in settings to lock down
     // team-wide tag/snippet management — the whole point of adding the gate.
     "tags:manage": true,
+    // The message-flag CATALOG (which flags exist) is a team-wide setting, so
+    // it follows tags:manage. Note this gates only the catalog — RAISING and
+    // RESOLVING a flag is triage every agent must be able to do and is
+    // deliberately ungated, like sending a message or leaving a note.
+    "messageFlags:manage": true,
     "snippets:manage": true,
     // Agents can manage THEIR OWN availability by default. An admin can flip
     // this off for teams that want fixed online presence (e.g. a call center
     // where agents shouldn't self-mark "away" mid-shift).
     "availability:manage": true,
+    // Setting SOMEONE ELSE's status or editing their working hours is a
+    // supervisor action — off for agents by default (admin/manager get it).
+    // An admin can grant it to agents for a small team where everyone covers
+    // for everyone.
+    "availability:manageOthers": false,
     // Calls: default true for all roles. A team that wants to scope outbound
     // calling to managers only can flip "calls:make" off via the settings
     // grid — same admin-configurable pattern as every other capability.
@@ -201,6 +221,12 @@ export const DEFAULT_CAPABILITIES: Record<Role, Record<Capability, boolean>> = {
     // default (admin/manager get it); an admin can grant it per role in
     // Settings → Role permissions.
     "teamActivity:view": false,
+    // Handing a conversation to SOMEONE ELSE is a supervisor action — an agent
+    // can always claim a conversation for themselves, and can always unassign
+    // themselves off one, but routing work onto a teammate's plate is off by
+    // default. Admin/manager get it. An admin can grant it to agents for a
+    // small team where everyone triages for everyone.
+    "conversations:assignOthers": false,
     // Configuring the AI Assistant (company profile, knowledge base, voice,
     // auto-reply behavior) is an admin/manager setting — off for agents by
     // default. Agents still OPERATE the assistant in the inbox (pause/resume,

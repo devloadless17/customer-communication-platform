@@ -44,11 +44,14 @@ const SCOPE_LABELS: Record<string, string> = {
   "write:messages": "Send messages",
   "read:notes": "Read notes",
   "write:notes": "Write notes",
+  "read:flags": "Read message flags",
+  "write:flags": "Raise / resolve message flags",
   "read:catalog": "Read tags / stages / fields",
   "write:catalog": "Write tags / stages / fields",
   "read:broadcasts": "Read broadcast campaigns + reports",
   "read:calls": "Read call history + calling permission",
   "write:calls": "Request calling permission / send call buttons",
+  "write:users": "Set teammates' availability + working hours",
 };
 
 interface Props {

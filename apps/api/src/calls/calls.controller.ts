@@ -15,6 +15,7 @@ import type { Channel } from "@ccp/shared/types";
 import { LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
 import { RequireCapability } from "../auth/capability.guard";
 import { RequireRole } from "../auth/role.guard";
+import { ScopedByConversation } from "../auth/conversation-visibility.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
@@ -79,6 +80,10 @@ export class CallsController {
 
   // --- Conversation-scoped ---------------------------------------------------
 
+  @ScopedByConversation("conversationId")
+  // Placing a call / requesting permission WRITES to a customer on this
+  // thread, so it needs the visibility boundary as much as reading does.
+  // Applied per-route because this controller also serves `api/calls/:callId/*`.
   @Post("api/conversations/:conversationId/call")
   @HttpCode(200)
   @RequireCapability("calls:make")
@@ -90,6 +95,7 @@ export class CallsController {
     return this.calls.initiateCall(session, conversationId, body.sdp);
   }
 
+  @ScopedByConversation("conversationId")
   @Post("api/conversations/:conversationId/call-permission")
   @HttpCode(200)
   @RequireCapability("calls:make")
@@ -101,6 +107,7 @@ export class CallsController {
     return this.calls.requestPermission(session, conversationId);
   }
 
+  @ScopedByConversation("conversationId")
   @Get("api/conversations/:conversationId/calls")
   async list(
     @CurrentSession() session: ApiSession,

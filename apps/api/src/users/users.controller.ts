@@ -13,6 +13,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   Res,
   UploadedFile,
@@ -34,11 +35,15 @@ import type { ApiSession } from "../auth/session.guard";
 import { zBody, zQuery } from "../common/zod-validation.pipe";
 import {
   ResetUserPasswordSchema,
+  SetUserAvailabilitySchema,
+  SetUserWorkHoursSchema,
   StatsQuerySchema,
   UpdateMyAvailabilitySchema,
   UpdateMyProfileSchema,
   UpdateUserSchema,
   type ResetUserPasswordInput,
+  type SetUserAvailabilityInput,
+  type SetUserWorkHoursInput,
   type StatsQuery,
   type UpdateMyAvailabilityInput,
   type UpdateMyProfileInput,
@@ -201,6 +206,68 @@ export class UsersController {
     } finally {
       await unlink(file.path).catch(() => undefined);
     }
+  }
+
+  /**
+   * Set a TEAMMATE's availability — the lever an admin never had. Two shapes:
+   * a status/note ("he went home without flipping off"), or
+   * `{ followSchedule: true }` to hand them back to their working hours.
+   *
+   * Separate route from `PATCH :id` (role/deactivate) because the gate is a
+   * capability, not a role: a manager running the floor should be able to fix a
+   * teammate's status without being able to change their role. `canModifyUser`
+   * in the service still stops a manager from overriding an admin.
+   */
+  @RequireCapability("availability:manageOthers")
+  @Patch(":id/availability")
+  async setAvailability(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body(zBody(SetUserAvailabilitySchema)) body: SetUserAvailabilityInput,
+  ) {
+    const user = await this.users.setUserAvailability(
+      session.teamId,
+      session.userId,
+      session.role,
+      id,
+      body,
+    );
+    return { user };
+  }
+
+  /**
+   * A teammate's own schedule config, for the edit dialog. Deliberately NOT on
+   * the roster payload: the JSON grid would ride along on every hot inbox query
+   * that includes `assignedUser`, for a value only this dialog reads.
+   */
+  @RequireCapability("availability:manageOthers")
+  @Get(":id/work-hours")
+  async getWorkHours(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    return this.users.getUserWorkHours(session.teamId, id);
+  }
+
+  /**
+   * Set a teammate's working hours: inherit the org schedule, run a custom one,
+   * or opt out entirely. Re-resolves their availability immediately so the
+   * change lands now rather than at the next sweeper tick.
+   */
+  @RequireCapability("availability:manageOthers")
+  @Put(":id/work-hours")
+  async setWorkHours(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body(zBody(SetUserWorkHoursSchema)) body: SetUserWorkHoursInput,
+  ) {
+    const user = await this.users.setUserWorkHours(
+      session.teamId,
+      session.role,
+      id,
+      body,
+    );
+    return { user };
   }
 
   @RequireRole("admin")

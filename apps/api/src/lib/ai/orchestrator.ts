@@ -1,5 +1,5 @@
-import { assignConversation } from "@/lib/conversations/mutations";
-import { pickRoundRobinAssignee } from "@/lib/conversations/round-robin";
+import { assignByPolicy } from "@/lib/assignment/apply";
+import { loadAssignmentSettings } from "@/lib/assignment/resolve";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 
@@ -176,26 +176,46 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
     }
 
     if (mode === "escalate") {
-      // Support hand-off: after SENDING the acknowledgment, auto-assign to an
-      // available agent (round-robin: online + available tiers) and hand the
-      // thread off — a STICKY pause so the assistant won't resume on the next
-      // inbound. Best-effort: a failure here must not lose the sent reply/audit.
+      // Support hand-off: after SENDING the acknowledgment, route the thread to
+      // a human through the team's ASSIGNMENT POLICY and hand it off — a STICKY
+      // pause so the assistant won't resume on the next inbound. Best-effort: a
+      // failure here must not lose the sent reply/audit.
+      //
+      // Which human is entirely admin-controlled (settings → Assignment):
+      // strategy, weights, capacity, eligibility and routing rules all apply,
+      // and the escalation can be pinned to a dedicated policy via
+      // `AssignmentSettings.aiHandoffPolicyId` ("escalations go to the senior
+      // pool"). A policy with strategy `manual` is the supported way to say
+      // "escalate, but leave it in the triage queue".
+      //
+      // `onlyIfUnassigned: false` because an escalation is a deliberate
+      // re-route: a thread still carrying a stale owner from an earlier session
+      // must land on someone available now.
+      //
+      // NOT silent: an escalation is a real business event, so workflows and
+      // outbound webhooks watching `conversation.assigned` see it.
+      let agentId: string | null = null;
       try {
-        const agentId = await pickRoundRobinAssignee({ db, teamId });
-        if (agentId) {
-          await assignConversation({
-            db,
-            publish,
-            teamId,
-            conversationId,
-            targetUserId: agentId,
-            changedByUserId: null,
-            silent: true,
-          });
-        }
-        await handoffToHuman(teamId, conversationId, agentId);
+        const settings = await loadAssignmentSettings(db, teamId);
+        const outcome = await assignByPolicy({
+          db,
+          publish,
+          teamId,
+          conversationId,
+          source: "ai_handoff",
+          policyId: settings.aiHandoffPolicyId,
+          onlyIfUnassigned: false,
+          changedByUserId: null,
+          context: { messageText: job.text },
+        });
+        agentId = outcome.applied ? outcome.userId : null;
       } catch {
         // The agent can still take over manually.
+      }
+      try {
+        await handoffToHuman(teamId, conversationId, agentId);
+      } catch {
+        // Pause bookkeeping only — the assignment (if any) already committed.
       }
       await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
         ...auditBase,

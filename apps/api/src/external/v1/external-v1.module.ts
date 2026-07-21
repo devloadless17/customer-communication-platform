@@ -6,7 +6,11 @@ import { ApiIdempotencyService } from "./api-idempotency.service";
 import { ExternalV1Controller } from "./external-v1.controller";
 import { ExternalV1MessagingService } from "./external-v1-messaging.service";
 import { ExternalV1Service } from "./external-v1.service";
+import { ExternalV1FlagsService } from "./external-v1-flags.service";
 import { CallsModule } from "@/calls/calls.module";
+import { AssignmentModule } from "@/assignment/assignment.module";
+import { UsersModule } from "@/users/users.module";
+import { MessageFlagsCatalogModule } from "@/team/message-flags/message-flags-catalog.module";
 
 @Module({
   // ContactsModule exports ContactTransferService — /v1 import/export runs the
@@ -15,9 +19,30 @@ import { CallsModule } from "@/calls/calls.module";
   // CallsModule for the /v1 calling surface — the permission read/request and
   // the call button reuse the same domain service the inbox does, so the rules
   // can't drift between the two entry points.
-  imports: [ContactsModule, CallsModule],
+  // AssignmentModule exports AssignmentService — the /v1 routing-config routes
+  // reuse the SAME service the settings page calls, which is what makes the
+  // parity rule real instead of a second implementation that drifts.
+  // UsersModule exports UsersService — the /v1 availability + working-hours
+  // writes run through the SAME single writer the settings UI does, so the
+  // override-expiry rule and the domain event can't diverge between them.
+  // MessageFlagsCatalogModule exports MessageFlagsCatalogService — the /v1
+  // flag-catalog writes run through the SAME service the settings page calls,
+  // so the archive-not-delete rule and the catalog-changed fanout can't drift
+  // between the two entry points.
+  imports: [
+    ContactsModule,
+    CallsModule,
+    AssignmentModule,
+    UsersModule,
+    MessageFlagsCatalogModule,
+  ],
   controllers: [ExternalV1Controller],
-  providers: [ApiIdempotencyService, ExternalV1Service, ExternalV1MessagingService],
+  providers: [
+    ApiIdempotencyService,
+    ExternalV1Service,
+    ExternalV1MessagingService,
+    ExternalV1FlagsService,
+  ],
   exports: [ExternalV1Service],
 })
 export class ExternalV1Module {}

@@ -81,6 +81,20 @@ enum MessageStatus {
   failed
 }
 
+// Lifecycle of a MessageFlag — a triage marker raised on a single message.
+//   open      — raised, still needs follow-up. The only state that counts
+//               toward Conversation.openFlagCount and shows in the queue.
+//   resolved  — it was a real complaint/request AND it was handled.
+//   dismissed — it was NOT actually one (a mis-flag, or the AI got it wrong).
+// The split between resolved and dismissed matters: "how many complaints did we
+// get" must not count the ones that were never complaints. Additive by design —
+// an in_progress / snoozed state can be appended later without a rewrite.
+enum MessageFlagStatus {
+  open
+  resolved
+  dismissed
+}
+
 // How an OUTBOUND message came to exist. `api` = sent through this platform
 // (an agent, an automation/workflow, a broadcast, or the /v1 API) — the vast
 // majority, and the value every legacy row defaults to. `business_app` = the
@@ -258,6 +272,16 @@ enum ConversationEventKind {
   stage_changed
   note_added
   note_deleted
+  // Message triage flags (MessageFlag). `after` carries
+  // { flagId, messageId, definitionId, definitionName, status, source } —
+  // definitionName is resolved at WRITE time so the timeline still reads
+  // correctly after the definition is renamed or archived (same reason
+  // tag_added/tag_removed snapshot the tag name). Rendered as inline timeline
+  // pills by activity-entry.tsx.
+  flag_added
+  flag_reopened
+  flag_resolved
+  flag_removed
   // A website-widget visitor deliberately started a fresh conversation (the
   // "Start a new conversation" control). Written when the new conversation's
   // first message arrives carrying the client's `startedNew` flag, so an agent
@@ -468,6 +492,30 @@ model Team {
   // editable, so the org owner can't be locked out of their own org.
   rolePermissions        Json    @default("{}")
 
+  // Org-default working hours — the schedule every member inherits unless they
+  // set `workHoursMode = "custom"` (or opt out with "off"). Null = the team has
+  // no schedule, which is the default and reproduces pre-feature behavior
+  // exactly: availability stays purely manual until an admin fills this in.
+  // Shape: @ccp/shared/work-hours `WorkHours`.
+  workHours              Json?
+
+  // Can an AGENT see the whole team's conversations, or only the ones assigned
+  // to them?
+  //
+  //   "team"     — everyone sees everything (default; today's behavior).
+  //   "assigned" — role `agent` sees ONLY conversations currently assigned to
+  //                them. admin / manager / superAdmin always see everything.
+  //
+  // This is a RESTRICTION, so it is deliberately NOT modelled as a Capability:
+  // that system is a grant matrix whose defaults are all-true to preserve
+  // legacy behavior, and inverting one entry there would read backwards.
+  //
+  // Scoping keys on the CURRENT assignee, never on message authorship. That is
+  // what makes a hand-off work: when an admin moves a thread from Ali to Sara,
+  // Sara sees the ENTIRE history — every message, note and event, including
+  // Ali's — and simply continues. Ali drops out of it at the same moment.
+  agentConversationVisibility String @default("team")
+
   // AI Autopilot opt-in. OFF for every new org — the per-conversation AI
   // controls (the inbox toggle, auto-pause-on-human-reply, the activity pills)
   // only appear once an admin turns this on after wiring their AI/n8n flow.
@@ -506,6 +554,8 @@ model Team {
   messageTemplates        MessageTemplate[]
   broadcasts              Broadcast[]
   tags                    Tag[]
+  messageFlagDefinitions  MessageFlagDefinition[]
+  messageFlags            MessageFlag[]
   audienceGroups          AudienceGroup[]
   workflows               Workflow[]
   workflowRuns            WorkflowRun[]
@@ -526,6 +576,9 @@ model Team {
   calls                   Call[]
   callPermissionRequests  CallPermissionRequest[]
   customerIdentityEvents  CustomerIdentityEvent[]
+  assignmentPolicies      AssignmentPolicy[]
+  assignmentRules         AssignmentRule[]
+  assignmentSettings      AssignmentSettings?
   aiHandoffAssignee       User?                     @relation("AiHandoffAssignee", fields: [aiHandoffAssigneeId], references: [id], onDelete: SetNull)
 
   // --- Native AI Assistant subsystem (SEPARATE from the legacy autopilot/n8n
@@ -704,16 +757,52 @@ model User {
   // they come back, but they appear away. Plain string column rather than a
   // Prisma enum so adding a new state (e.g. "in_a_meeting") is a non-migration
   // change; the Zod schema at the API boundary is the validation gate.
+  //
+  // NOTE since working hours landed: this pair is the EFFECTIVE status — what
+  // teammates actually see. It equals the manual pick below when no schedule
+  // applies, and the schedule-derived value once one does. Every reader (the
+  // realtime gateway, round-robin, mapUser, every UI dot) reads THIS and never
+  // recomputes the rule. Writers all go through lib/availability/apply.ts.
   availabilityStatus  String?  @default("available")
   // Optional free-form note teammates see ("Back at 3pm", "On a call").
   // Bounded to 100 chars at the API; column is short for sane payloads.
   availabilityMessage String?
+
+  // --- Working hours & the manual pick behind the effective status ---
+  //
+  // What the person (or an admin acting for them) actually chose. Kept apart
+  // from the effective pair so an off-shift stretch doesn't destroy the note
+  // they typed — when the shift starts again their own pick is still here.
+  availabilityManualStatus  String?
+  availabilityManualMessage String?
+  // "manual" | "admin" | "schedule" — who decided the effective status.
+  availabilitySource        String?   @default("manual")
+  // The admin who set it, when source = "admin". Plain id, NO relation: the
+  // same discipline as Team.statusUpdatedById — deleting the acting admin must
+  // never cascade into, or null out, a teammate's availability row.
+  availabilitySetByUserId   String?
+  // While in the future, the manual pick out-ranks the schedule. Set to the
+  // next schedule boundary on every manual pick, so "set busy at 2pm and drive
+  // home at 5" self-corrects at shift end instead of lasting forever. Null
+  // when no schedule applies (the pick then holds indefinitely, as it always
+  // did).
+  availabilityOverrideUntil DateTime?
+  // "inherit" (team default) | "custom" (own `workHours`) | "off" (no schedule).
+  workHoursMode             String    @default("inherit")
+  // Own schedule when mode = "custom". Shape: @ccp/shared/work-hours WorkHours
+  // ({ timezone, weekly, exceptions }). JSON, not columns, because it's a
+  // whole-value setting always read and written together — same reasoning as
+  // AiAssistantConfig's opening hours.
+  workHours                 Json?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
   team                    Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
   authoredMsgs            Message[]                 @relation("AuthoredMessages")
   authoredNotes           InternalNote[]
+  createdMessageFlags     MessageFlag[]             @relation("CreatedMessageFlags")
+  assignedMessageFlags    MessageFlag[]             @relation("AssignedMessageFlags")
+  resolvedMessageFlags    MessageFlag[]             @relation("ResolvedMessageFlags")
   assignedConvos          Conversation[]            @relation("AssignedConversations")
   createdInvites          Invite[]                  @relation("InvitedBy")
   createdBroadcasts       Broadcast[]               @relation("CreatedBroadcasts")
@@ -747,6 +836,7 @@ model User {
   // mode). SetNull on delete so removing the member degrades the team setting
   // to "leave unassigned" rather than orphaning the FK.
   aiHandoffForTeams       Team[]                    @relation("AiHandoffAssignee")
+  assignmentMemberships   AssignmentPolicyMember[]  @relation("AssignmentPolicyMemberships")
 
   @@index([teamId])
 }
@@ -1329,6 +1419,13 @@ model Conversation {
   // delete so removing a widget config never deletes its conversation history.
   webchatWidgetId    String?
   assignedUserId     String?
+  // Durable "who handled this customer last" — set whenever an assignee is
+  // written, and NEVER cleared (closing a conversation clears `assignedUserId`,
+  // which is exactly when this history would otherwise be lost). Powers
+  // AssignmentPolicy.preferPreviousAgent so a returning customer goes back to
+  // the person who already knows them. Plain id, no FK: a removed member must
+  // degrade to "no continuity", not cascade into the thread.
+  lastAssignedUserId String?
   // New chats land in `pending` so they sit in the triage column until an
   // agent claims them (→ open) or closes them out. The webhook ingest, the
   // broadcast runner, and the message-forward path all rely on this
@@ -1387,6 +1484,17 @@ model Conversation {
   outgoingMessagesCount Int       @default(0)
   responsesCount        Int       @default(0)
 
+  // Number of MessageFlag rows on this thread still in `open`. Denormalized so
+  // the inbox list's "Flagged" filter and the row badge are a plain column
+  // predicate instead of a nested EXISTS over Message — the conversation list is
+  // the hottest read in the app and a correlated subquery over the largest table
+  // would show up immediately. Unlike unreadCount this is bumped only on FLAG
+  // writes (rare, agent-initiated), never on the per-message hot path, so it
+  // costs nothing on ingest. Maintained in the same transaction as the flag
+  // status change (lib/message-flags/mutations.ts) and reconciled by the
+  // message-flag-count-drift sweeper.
+  openFlagCount         Int       @default(0)
+
   team         Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
   contact      Contact                   @relation(fields: [contactId], references: [id], onDelete: Cascade)
   assignedUser User?                     @relation("AssignedConversations", fields: [assignedUserId], references: [id], onDelete: SetNull)
@@ -1401,6 +1509,8 @@ model Conversation {
   // Voice calls placed/received on this thread. Cascade with the parent —
   // deleting a conversation drops its call history alongside its messages.
   calls        Call[]
+  // Triage flags raised on this thread's messages. Cascade with the parent.
+  messageFlags MessageFlag[]
 
   @@index([teamId, status, lastMessageAt(sort: Desc)])
   @@index([teamId, assignedUserId])
@@ -1430,6 +1540,16 @@ model Conversation {
   // (open / pending / closed) but doesn't help the unfiltered list — the
   // planner needs status to participate in WHERE for that one to be useful.
   @@index([teamId, lastMessageAt(sort: Desc), id(sort: Desc)])
+  // The "Flagged" inbox preset (WHERE teamId = $1 AND openFlagCount > 0, same
+  // keyset ORDER BY) is served by a PARTIAL index Prisma can't express:
+  //   Conversation_teamId_openFlag_idx ON (teamId, lastMessageAt DESC, id DESC)
+  //   WHERE "openFlagCount" > 0
+  // created in raw SQL by migration 20260722120000_message_flags. A plain
+  // composite would be useless here — `openFlagCount > 0` is a range predicate,
+  // so it can't sit between teamId and the sort key without killing the ordered
+  // scan. Partial keeps the index to just the flagged rows (a tiny fraction),
+  // which is both smaller and faster. Same pattern as
+  // Message_conversationId_timestamp_inbound_idx.
   // ONE conversation per contact — the core invariant, DB-enforced (a Contact
   // is already channel-siloed, so this is "one conversation per channel per
   // contact"). Closed threads REOPEN (→ pending) rather than fragment. Code
@@ -1601,6 +1721,8 @@ model Message {
   replyToMessageId String?
   replyTo          Message?  @relation("MessageReply", fields: [replyToMessageId], references: [id], onDelete: SetNull)
   replies          Message[] @relation("MessageReply")
+  // Triage flags raised on this message. Cascade with the parent.
+  flags            MessageFlag[]
 
   team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -1957,6 +2079,43 @@ model Broadcast {
   // and for every terminal/queued row. Shape: Array<{ contactId: string;
   // customerId?: string | null }>.
   materializeRecipients Json?
+
+  // --- Campaign assignment (see BroadcastAssignmentMode) --------------------
+  // Who owns the replies this campaign generates. Resolved per recipient ONCE,
+  // when BroadcastRecipient rows are built, and stored on the recipient row —
+  // so an exact-count split is guaranteed and a resume/retry can't re-draw.
+  assignmentMode      BroadcastAssignmentMode @default(none)
+  // Target for mode = fixed. Plain id (no FK) — a removed member degrades the
+  // campaign to "no assignment", it never breaks the send.
+  assignmentUserId    String?
+  // Target for mode = policy.
+  assignmentPolicyId  String?
+  // Split table for mode = split_counts / split_percent. Shape:
+  // `Array<{ userId: string; value: number }>` — `value` is a literal recipient
+  // count (split_counts) or a relative weight (split_percent).
+  assignmentSplit     Json?
+  // WHEN the drawn assignee is applied.
+  //   "on_reply" (default) — only once the customer actually replies. A
+  //     campaign is mostly one-way: assigning all 10,000 recipients at send
+  //     time would put thousands of conversations nobody will ever answer onto
+  //     agents' plates, inflating the open-conversation counts that capacity
+  //     limits and least-busy routing are measured against. The split is still
+  //     DRAWN up front (so "50 to Ali" stays exact) — it's only APPLIED to the
+  //     people who engage.
+  //   "on_send" — apply immediately after a successful send. For campaigns
+  //     where ownership of the outreach itself matters (a sales sequence an
+  //     agent is expected to follow up on) rather than ownership of replies.
+  // String, not an enum, so adding a trigger later is a code change not a
+  // migration — same reasoning as Broadcast.pausedReason.
+  assignmentTrigger   String                  @default("on_reply")
+  // What to do with recipients left over after an exact-count split is
+  // exhausted: "leave_unassigned" (default) or "policy" (run the team default
+  // policy for the remainder).
+  assignmentLeftover  String                  @default("leave_unassigned")
+  // Whether to overwrite a conversation that ALREADY has an assignee. Default
+  // false: a campaign never steals a thread a human is already handling.
+  assignmentOverwrite Boolean                 @default(false)
+
   createdAt         DateTime        @default(now())
   startedAt         DateTime?
   completedAt       DateTime?
@@ -1988,6 +2147,13 @@ model BroadcastRecipient {
   // design: the broadcast's audit trail must outlive a thread an agent later
   // deletes. The detail UI tolerates a 404 when following a dangled id.
   conversationId String?
+  // Pre-drawn assignee for this recipient (see BroadcastAssignmentMode). Set
+  // when the recipient rows are built — NOT at send time — so an exact-count
+  // split ("first 50 to Ali") is deterministic and a resumed run reuses the
+  // same draw instead of redistributing. The runner applies it AFTER a
+  // successful send, via the shared `assignConversation` mutation. Plain id
+  // (no FK): a removed member degrades to "no assignment", never a broken row.
+  assignedUserId String?
   status         BroadcastRecipientStatus @default(queued)
   // Meta wamid of the sent message — links back to the Message row.
   externalId     String?
@@ -2124,6 +2290,136 @@ model InternalNote {
   // the ORDER BY (timestamp DESC, id DESC) so a broad term doesn't sort a large
   // GIN bitmap in memory.
   @@index([teamId, timestamp(sort: Desc), id(sort: Desc)], map: "InternalNote_teamId_timestamp_id_idx")
+}
+
+// ---------------------------------------------------------------------------
+// Message flags (triage)
+// ---------------------------------------------------------------------------
+//
+// A flag marks ONE MESSAGE as needing follow-up of a named kind ("Complaint",
+// "Refund request", "Bug report") and carries a resolution lifecycle, so the
+// team can come back later and know whether it was handled.
+//
+// Why this is NOT the Tag table: `Tag` labels a CONTACT and feeds broadcast
+// audience targeting (AudienceGroup.tags) plus the tag-usage settings screen.
+// Putting "Complaint" in there would make it a selectable broadcast segment and
+// pollute segmentation, and `Tag` has nowhere to hang open/resolved, an owner,
+// or who resolved it. Different noun, different lifecycle, different table.
+//
+// Why message-level and not conversation-level: a thread is long-lived and
+// reopens forever (one conversation per contact). "This customer complained" is
+// not useful; "THIS message is a complaint" points at the exact thing to act on
+// and is what an agent — or later the AI, mid-chat — actually observes.
+
+// A flag definition the team can raise. Team-scoped catalog, modelled on `Tag`.
+//
+// `color` is a named slot ("rose", "amber", …) NOT a hex, so the UI maps to a
+// safelist of Tailwind classes without dynamic class strings — same contract as
+// Tag.color, sharing TAG_COLORS from @ccp/shared.
+model MessageFlagDefinition {
+  id          String   @id @default(cuid())
+  teamId      String
+  name        String
+  color       String   @default("slate")
+  // Shown as helper text in the flag picker — "what does this one mean", so a
+  // new agent picks the right one.
+  description String?
+  // Soft-retire instead of delete. A definition with history must stay
+  // renderable in old threads and in the audit timeline, so the service only
+  // permits a hard delete when the definition has zero flags (409 otherwise)
+  // and steers everything else here. Archived definitions disappear from the
+  // picker but keep rendering on existing flags.
+  archived    Boolean  @default(false)
+  // Manual ordering in the picker and the queue rail. Ties broken by name.
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  team  Team          @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  flags MessageFlag[]
+
+  // (teamId, name) unique already serves teamId-prefix lookups, so no separate
+  // @@index([teamId]) — same call as Tag.
+  @@unique([teamId, name])
+}
+
+// One raised flag. Modelled on InternalNote (the canonical "attached to a
+// conversation by a user, survives that user leaving" shape).
+model MessageFlag {
+  id             String            @id @default(cuid())
+  // Tenant scope, same stable denorm rationale as InternalNote.teamId — every
+  // read is teamId-scoped, and the queue lists flags across conversations so it
+  // needs teamId directly rather than through a join.
+  teamId         String
+  messageId      String
+  // Denormalized from the message. The queue list groups/filters by thread and
+  // the openFlagCount maintenance needs the parent id inside the same write —
+  // both would otherwise join Message purely to read one column.
+  conversationId String
+  definitionId   String
+
+  status         MessageFlagStatus @default(open)
+  // Who raised it: "human" | "ai" | "workflow" | "api". A plain string, not an
+  // enum, because the set is provenance metadata rather than behaviour — new
+  // sources must not require a migration + enum rollout. Nothing branches on it
+  // beyond rendering an "AI" chip.
+  source         String            @default("human")
+  // 0..1, AI-raised flags only; null for every human flag. Lets the UI show a
+  // low-confidence AI flag as a suggestion rather than a fact.
+  confidence     Float?
+  // Why it was flagged, written when raising it.
+  note           String?
+
+  // All four actor columns are nullable + SetNull: a flag is triage history and
+  // must outlive the departure of whoever touched it (same rule as
+  // InternalNote.authorUserId).
+  createdById    String?
+  // Who owns following this up. Independent of Conversation.assignedUserId — the
+  // thread can belong to one agent while a specific complaint on it is owned by
+  // someone else.
+  assignedToId   String?
+  resolvedById   String?
+  resolvedAt     DateTime?
+  resolutionNote String?
+
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  team         Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  message      Message               @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  conversation Conversation          @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  // Restrict, not Cascade: deleting a definition must never silently erase the
+  // triage history raised under it. The service enforces the friendly version of
+  // this (delete only when unused, else archive); this is the backstop.
+  definition   MessageFlagDefinition @relation(fields: [definitionId], references: [id], onDelete: Restrict)
+  createdBy    User?                 @relation("CreatedMessageFlags", fields: [createdById], references: [id], onDelete: SetNull)
+  assignedTo   User?                 @relation("AssignedMessageFlags", fields: [assignedToId], references: [id], onDelete: SetNull)
+  resolvedBy   User?                 @relation("ResolvedMessageFlags", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  // One flag of a given kind per message. This is the idempotency key: raising
+  // the same flag twice (a double-click, a retried API call, an at-least-once
+  // AI job) upserts instead of duplicating. Two DIFFERENT definitions on the
+  // same message are fine — a message can be both a complaint and a refund
+  // request.
+  @@unique([messageId, definitionId])
+  // The triage queue: WHERE teamId = $1 AND status = 'open'
+  // ORDER BY createdAt DESC, id DESC — keyset-paginated, so the sort key rides
+  // along and the scan stops at `take`.
+  @@index([teamId, status, createdAt(sort: Desc), id(sort: Desc)])
+  // "Assigned to me, still open" — the queue's default personal view.
+  @@index([teamId, assignedToId, status])
+  // Thread hydration loads flags for the current page of messages
+  // (WHERE messageId IN (...)), and the drift sweeper reconciles per
+  // conversation.
+  @@index([messageId])
+  @@index([conversationId])
+  // FK indexes for the SetNull / Restrict relations — without them, deleting a
+  // teammate or a definition seq-scans this table. Same rationale as
+  // Message_senderUserId_idx (migration 20260611130100).
+  @@index([definitionId])
+  @@index([createdById])
+  @@index([assignedToId])
+  @@index([resolvedById])
 }
 
 // ---------------------------------------------------------------------------
@@ -3571,4 +3867,275 @@ model AiReplySuggestion {
   // SQL in the migration (Prisma can't express partial uniques).
   @@index([teamId, inboundMessageId, attempt])
   @@index([teamId, conversationId, state])
+}
+
+// ---------------------------------------------------------------------------
+// Assignment routing (2026-07-21)
+// ---------------------------------------------------------------------------
+//
+// Who gets a conversation, and by what rule. Before this, "who" was one
+// hardcoded algorithm (least-busy round-robin, `lib/conversations/round-robin.ts`)
+// shared by the AI handoff and the workflow `assign_to` step. Admins running
+// real support floors need to shape that: weight a senior agent 50 vs a junior
+// 20, cap how many open chats anyone carries, route VIP tags to a different
+// pool, and pre-assign a campaign's replies.
+//
+// The model is deliberately three small tables, not one JSON blob:
+//   AssignmentPolicy        — a named strategy ("Support — weighted")
+//   AssignmentPolicyMember  — per-member weight + capacity inside that policy
+//   AssignmentRule          — first-match-wins routing INTO a policy
+//   AssignmentSettings      — the per-team switchboard (when auto-assign fires)
+//
+// Every team gets a seeded `isDefault` policy whose settings reproduce the old
+// round-robin EXACTLY, so turning this on changes nothing until an admin edits
+// it. See apps/api/src/lib/assignment/README.md.
+
+// How a policy picks among its eligible, under-capacity candidates.
+enum AssignmentStrategy {
+  // Strict turn-taking: the next eligible member after the rotation cursor,
+  // REGARDLESS of how loaded they are. Predictable ("everyone gets one in
+  // turn") — pick this when fairness of count matters more than balance.
+  round_robin
+  // Fewest currently-open conversations wins; ties broken by the rotation
+  // cursor so equal-load teams still spread evenly. This is the historical
+  // behavior and the default — it self-balances when chats have uneven length.
+  least_busy
+  // Proportional share by `AssignmentPolicyMember.weight` — a member with
+  // weight 50 receives ~5x the volume of one with weight 10. Implemented as
+  // deficit-based selection (lowest served/weight ratio wins), so the split is
+  // exact over time rather than probabilistic.
+  weighted
+  // Always `fixedUserId` (a triage lead / a single owner).
+  fixed
+  // Never auto-assigns. Use to disable routing for a slice of traffic while
+  // keeping the rest automated.
+  manual
+}
+
+// Which members are considered candidates at pick time.
+enum AssignmentEligibility {
+  // Tiered (historical): online+available → available → any active member.
+  // Never lands nowhere as long as ONE member exists.
+  online_first
+  // Only agents with a live socket AND availability "available". May yield
+  // nobody (→ overflow rule) — correct for teams that want strict presence.
+  online_only
+  // DB availability only, ignore sockets (correct for a standalone worker).
+  available_only
+  // Any active member, ignore presence and availability entirely.
+  any_active
+}
+
+// What happens when no candidate has capacity (or none is eligible at all).
+enum AssignmentOverflow {
+  // Land in the Unassigned triage queue. Safe default — visible, never lost.
+  leave_unassigned
+  // Ignore the caps and assign to the least-loaded candidate anyway. For teams
+  // that would rather overload someone than leave a customer unowned.
+  ignore_capacity
+  // Assign to `AssignmentPolicy.fallbackUserId` (a supervisor).
+  fallback_user
+}
+
+model AssignmentPolicy {
+  id          String  @id @default(cuid())
+  teamId      String
+  name        String
+  description String?
+
+  // Exactly one policy per team carries isDefault — the fallback when no rule
+  // matches, and what a caller that names no policy gets. Enforced by a partial
+  // unique index (WHERE "isDefault") added in raw SQL in the migration.
+  isDefault Boolean @default(false)
+
+  // Default = least_busy: it reproduces the historical hardcoded behavior
+  // exactly (fewest open conversations, rotation as the tie-break).
+  strategy    AssignmentStrategy    @default(least_busy)
+  eligibility AssignmentEligibility @default(online_first)
+
+  // Role filter — empty = every role is eligible. Lets an admin route only to
+  // `agent`s and keep managers out of the rotation.
+  eligibleRoles Role[] @default([])
+
+  // Membership. `includeAllMembers` (default) means the policy pool is every
+  // active team member and `members` rows are OPTIONAL per-member overrides
+  // (weight / cap / opt-out). When false, ONLY members with an enabled row are
+  // candidates — an explicit squad.
+  includeAllMembers Boolean @default(true)
+
+  // Capacity. Per-member cap defaults to this when the member row leaves
+  // `maxOpen` null. Null = uncapped.
+  defaultMaxOpen Int?
+
+  overflow       AssignmentOverflow @default(leave_unassigned)
+  // Target for overflow = fallback_user. Plain id (no FK) so removing that user
+  // degrades to leave_unassigned instead of cascading into the policy.
+  fallbackUserId String?
+  // Target for strategy = fixed. Same no-FK reasoning.
+  fixedUserId    String?
+
+  // Rotation cursor (last user picked) — PER POLICY, so two policies rotate
+  // independently. Replaces the single team-wide Team.aiRoundRobinCursorUserId.
+  cursorUserId String?
+
+  // CONTINUITY. When a returning customer already has a history with someone,
+  // send them back to that person instead of starting over with a stranger —
+  // the single biggest quality difference between a support floor that feels
+  // like a team and one that feels like a lottery.
+  //
+  // It is a PREFERENCE, not an override: the previous agent still has to be
+  // eligible (active, in this policy, right role, present per `eligibility`)
+  // and under their capacity limit. If they're offline or full, routing falls
+  // straight through to the normal strategy — a customer waiting for someone
+  // who has gone home is worse than a fresh agent who is here now.
+  //
+  // Defaults ON because it is what customers expect and what every mature
+  // product does; it can only ever fire for a contact who HAS a history, so a
+  // new org is unaffected.
+  preferPreviousAgent Boolean @default(true)
+  // How long a relationship stays "warm". Past this, the previous agent is
+  // treated as cold and the normal strategy decides — a 6-month-old thread
+  // shouldn't pin a customer to someone who has since changed teams.
+  previousAgentWindowDays Int @default(30)
+
+  // Optimistic-concurrency token for the settings UI (same pattern as
+  // AiAssistantConfig.configVersion): a save carrying a stale version is
+  // rejected rather than clobbering a co-admin's edit.
+  version Int @default(1)
+
+  // Soft delete — a policy referenced by historical broadcasts/rules is
+  // archived, never destroyed, so audit trails keep resolving its name.
+  archivedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  team    Team                     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  members AssignmentPolicyMember[]
+  rules   AssignmentRule[]
+
+  @@index([teamId, archivedAt])
+  @@index([teamId, isDefault])
+}
+
+model AssignmentPolicyMember {
+  id       String @id @default(cuid())
+  teamId   String
+  policyId String
+  userId   String
+
+  // Relative share for strategy = weighted. 0 = never picked (a clean way to
+  // pause someone without deleting their row/history). Ignored by the other
+  // strategies, which use `enabled` + capacity only.
+  weight Int @default(1)
+
+  // Per-member concurrent-open cap; null falls back to policy.defaultMaxOpen.
+  maxOpen Int?
+
+  // Opt a member out without losing their weight/cap configuration.
+  enabled Boolean @default(true)
+
+  // Deficit counter for weighted selection: how many conversations this policy
+  // has routed to this member. The picker compares `served / weight` ratios and
+  // renormalizes (subtracts the pool minimum) so this can't grow unbounded.
+  served Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  policy AssignmentPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  user   User             @relation("AssignmentPolicyMemberships", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([policyId, userId])
+  @@index([teamId])
+}
+
+model AssignmentRule {
+  id       String @id @default(cuid())
+  teamId   String
+  name     String
+  policyId String
+
+  // First match wins; ascending. Ties broken by id for determinism.
+  position Int     @default(0)
+  enabled  Boolean @default(true)
+
+  // Match conditions — ALL present clauses must match (AND); within a clause,
+  // ANY value matches (OR). Absent/empty clause = "don't care". Shape mirrors
+  // `AssignmentRuleConditions` in packages/shared/src/assignment/types.ts:
+  //   { channels?: Channel[]; tagIds?: string[]; stageIds?: string[];
+  //     sources?: ("inbound"|"ai_handoff"|"broadcast"|"workflow"|"api")[];
+  //     keywords?: string[]; languages?: string[]; isNewContact?: boolean }
+  // JSON (not columns) because the clause set is expected to grow and each
+  // clause is a pure list — there is no query that filters ON a clause.
+  conditions Json @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  team   Team             @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  policy AssignmentPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, enabled, position])
+}
+
+model AssignmentSettings {
+  // One row per team, id == teamId (same shape as a settings singleton).
+  teamId String @id
+
+  // Route a BRAND-NEW conversation the moment its first inbound lands.
+  autoAssignOnNewConversation Boolean @default(false)
+
+  // Skip that routing while the built-in AI is going to handle the thread —
+  // the conversation only gets a human when the AI escalates. This is the
+  // "AI first, human when needed" posture; turn it off to give every new chat
+  // a human owner immediately even while the AI answers.
+  skipWhenAiHandling Boolean @default(true)
+
+  // Route an EXISTING unassigned conversation when a new customer message
+  // arrives (covers reopened/closed threads and ones a human unassigned).
+  autoAssignOnReopen Boolean @default(false)
+
+  // Move work off an agent who goes offline. `reassignOfflineAfterMinutes` is
+  // the grace period (a browser refresh must not trigger a stampede) and
+  // `reassignOfflineOnlyPending` limits it to threads with no agent reply yet,
+  // so an in-flight conversation isn't yanked mid-sentence.
+  reassignOnOffline           Boolean @default(false)
+  reassignOfflineAfterMinutes Int     @default(15)
+  reassignOfflineOnlyPending  Boolean @default(true)
+
+  // Reassign an agent's open conversations when they're DEACTIVATED. Separate
+  // from the offline sweep: deactivation is permanent, so this defaults ON.
+  reassignOnDeactivate Boolean @default(true)
+
+  // Which policy the built-in AI uses when it escalates to a human. Null = the
+  // team's default policy. Plain id (no FK) — a deleted policy degrades to the
+  // default rather than breaking the handoff.
+  aiHandoffPolicyId String?
+
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+}
+
+// How a broadcast pre-assigns the conversations it touches. Resolved ONCE per
+// recipient at materialize time (stored on BroadcastRecipient.assignedUserId),
+// never at send time — so an exact "50 to Ali, 10 to Sara" split is guaranteed
+// and a resumed/retried run can't double-count.
+enum BroadcastAssignmentMode {
+  // Don't touch assignment (today's behavior).
+  none
+  // Every recipient to one member.
+  fixed
+  // Literal counts per member: first 50 → Ali, next 10 → Sara, remainder per
+  // `assignmentOverflow`.
+  split_counts
+  // Proportional split of the WHOLE audience by weight, distributed with the
+  // largest-remainder method so the totals add up exactly.
+  split_percent
+  // Run each recipient through an AssignmentPolicy (respects capacity,
+  // presence and weights at materialize time).
+  policy
 }

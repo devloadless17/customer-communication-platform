@@ -8,6 +8,16 @@
  * IDs are strings to match Prisma's cuid() defaults.
  */
 
+import type { MessageFlag } from "./message-flags/types";
+import type { AvailabilitySource, WorkHours, WorkHoursMode } from "./work-hours";
+
+export type {
+  MessageFlag,
+  MessageFlagDefinition,
+  MessageFlagSource,
+  MessageFlagStatus,
+} from "./message-flags/types";
+
 export type Role = "superAdmin" | "admin" | "manager" | "agent";
 export type Plan = "free" | "starter" | "advanced" | "enterprise";
 // Org-approval lifecycle. `pending` = created, awaiting super-admin approval
@@ -92,10 +102,25 @@ export interface User {
    * boolean — not the date — to keep the client payload lean.
    */
   isActive: boolean;
-  /** User-set availability. Absent = treat as "available". */
+  /**
+   * EFFECTIVE availability — what teammates see. Absent = treat as "available".
+   * This is the manual pick when nothing is scheduled, and the schedule-derived
+   * value once working hours are configured (see @ccp/shared/presence
+   * `resolveEffectiveAvailability`). Clients render this field and nothing else.
+   */
   availabilityStatus?: UserAvailabilityStatus;
   /** Optional free-form note teammates see alongside the status. */
   availabilityMessage?: string;
+  /** Who decided the current status: the user, an admin, or their schedule. */
+  availabilitySource?: AvailabilitySource;
+  /** ISO instant a manual/admin override stops winning over the schedule. */
+  availabilityUntil?: string;
+  /** Name of the admin who set the status, when `availabilitySource` is "admin". */
+  availabilitySetByName?: string;
+  /** Where this user's schedule comes from. Absent = "inherit". */
+  workHoursMode?: WorkHoursMode;
+  /** The schedule actually in force for this user (team default or their own). */
+  workHours?: WorkHours | null;
 }
 
 /** How this contact got into the DB. See ContactSource enum on the schema. */
@@ -615,6 +640,18 @@ export interface Message {
    * label the customer saw. Absent / null for every plain text or media message.
    */
   interactive?: { kind: string; id: string; title: string } | null;
+  /**
+   * Triage flags raised on this message ("Complaint", "Refund request", …) with
+   * their resolution state. Rendered as chips under the bubble.
+   *
+   * OPTIONAL and defaulted to `[]` by every consumer: only the per-thread
+   * hydration (`getConversationWithRefs`) joins them. The ingest/broadcast
+   * fanout paths construct a `Message` for a row that was created microseconds
+   * ago and therefore cannot have flags, so they leave it undefined rather than
+   * paying a join to prove it's empty. Same convention as
+   * `ConversationWithRefs.events`.
+   */
+  flags?: MessageFlag[];
   // ----- Optimistic UI (client-side only — never persisted by the server) -----
   /**
    * Round-tripped through the API + socket emit so the client can match an
@@ -694,7 +731,15 @@ export type ConversationEventKind =
   | "call_completed"
   | "call_missed"
   | "call_rejected"
-  | "call_failed";
+  | "call_failed"
+  // Message triage flags. `after` carries { flagId, messageId, definitionId,
+  // definitionName, status, source }; definitionName is snapshotted at write
+  // time so the pill still reads correctly after a rename/archive (same rule as
+  // tag_added/tag_removed).
+  | "flag_added"
+  | "flag_reopened"
+  | "flag_resolved"
+  | "flag_removed";
 
 /**
  * Who triggered the change.
@@ -793,6 +838,17 @@ export interface Conversation {
    * (team chat has its own; see TeamChannelReadReceipt).
    */
   unreadCount: number;
+  /**
+   * How many triage flags on this thread's messages are still `open`.
+   * Denormalized server-side (see the schema note on Conversation) so the
+   * "Flagged" inbox preset and the list-row flag badge are a plain column read
+   * rather than a nested EXISTS over Message. Kept live by the
+   * `message:flag` frame, which carries the post-change count.
+   *
+   * Optional + defaults to 0: list rows built before flags existed, and the
+   * lean construction sites that don't select it, must stay valid.
+   */
+  openFlagCount?: number;
   lastMessageAt: string;
   lastMessagePreview: string;
   /**

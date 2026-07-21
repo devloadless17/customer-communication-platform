@@ -76,6 +76,13 @@ export function rowMatchesFilterFor(
   if (filter.kind === "calls") return false;
   if (filter.id === "all") return true; // truly everything, closed included
   if (filter.id === "closed") return row.conversation.status === "closed";
+  // Flagged is checked BEFORE the closed bail, because unlike every other
+  // working preset it deliberately spans open AND closed threads — an
+  // unresolved complaint on a thread someone closed is exactly what must not
+  // fall off the radar. Without this case it fell through to the final
+  // `return true`, so any conversation receiving a message would splice itself
+  // into the Flagged view.
+  if (filter.id === "flagged") return (row.conversation.openFlagCount ?? 0) > 0;
   if (row.conversation.status === "closed") return false;
   if (filter.id === "mine") return row.conversation.assignedUserId === currentUserId;
   if (filter.id === "unassigned") return row.conversation.assignedUserId === null;
@@ -134,6 +141,20 @@ export function useTeamEvents(
    * first filter change after mount triggers a clean refetch.
    */
   filter?: Filter,
+  /**
+   * Set when this org restricts agents to their own conversations
+   * (`Team.agentConversationVisibility = "assigned"` and the viewer is an
+   * agent). The SERVER is the security boundary — it already refuses to list,
+   * fetch or emit anything else — but the client must still react correctly to
+   * a live handover, which is a UI concern the server can't fix for it:
+   *
+   *   assigned AWAY from me → drop the row immediately, whatever the filter
+   *   assigned TO me        → the row was never in my slice, so go fetch it
+   *
+   * Without this a reassigned thread would linger in the previous owner's list
+   * until their next refetch, and the new owner wouldn't see it arrive at all.
+   */
+  restrictedToOwn?: boolean,
   /**
    * Full ConversationWithRefs for the conversation the user is currently
    * viewing (from the LRU thread cache). Used by the per-event handlers
@@ -1080,6 +1101,12 @@ export function useTeamEvents(
       optimistic,
     }) => {
       const nextAssignedUserId = assignedUser?.id ?? null;
+      // Restricted agent, handover TO me: the row can't be in my slice (the
+      // server never sent it), so fetch it rather than trying to synthesize.
+      // recoverConversation dedupes and filter-checks before splicing.
+      if (restrictedToOwn && nextAssignedUserId === currentUserId) {
+        recoverConversation(conversationId);
+      }
       setConversations((prev) => {
         const idx = prev.findIndex((c) => c.conversation.id === conversationId);
         if (idx === -1) {
@@ -1106,6 +1133,12 @@ export function useTeamEvents(
           return prev;
         }
         const existing = prev[idx]!;
+        // Restricted agent, handover AWAY from me: drop it now, regardless of
+        // the active filter. I can no longer open it, so leaving it visible
+        // would only produce a row that 404s on click.
+        if (restrictedToOwn && nextAssignedUserId !== currentUserId) {
+          return prev.filter((c) => c.conversation.id !== conversationId);
+        }
         // With server-side filtering, an assignment change can knock the
         // row out of the current view (e.g. filter is "mine" and a teammate
         // took the thread). Splice OUT when the new assignment no longer
@@ -1147,6 +1180,49 @@ export function useTeamEvents(
       // Without this gate the user reports the list "vibrating" on every
       // assign as the row patches → reverts → patches again.
       if (!optimistic) scheduleFilterResync();
+    };
+
+    // A triage flag was raised / resolved / removed. The list cares about ONE
+    // field — `openFlagCount`, which drives the row's flag badge and membership
+    // of the "Flagged" preset. The frame carries the authoritative post-change
+    // count, so there's nothing to recompute.
+    const onFlag: Parameters<typeof socket.on<"message:flag">>[1] = ({
+      conversationId,
+      openFlagCount,
+    }) => {
+      setConversations((prev) => {
+        const idx = prev.findIndex((c) => c.conversation.id === conversationId);
+        if (idx === -1) {
+          // Not in the loaded slice. If it's the thread we're looking at and it
+          // just became flagged while the Flagged filter is active, splice it
+          // in — same courtesy onStatus does for a status change.
+          const active = activeThreadRef.current;
+          if (active && active.conversation.id === conversationId) {
+            const nextRow: ConversationWithRefs = {
+              ...active,
+              conversation: { ...active.conversation, openFlagCount },
+            };
+            if (rowMatchesFilter(nextRow)) return insertByRecency(prev, nextRow);
+          }
+          return prev;
+        }
+        const existing = prev[idx]!;
+        // Idempotent: a re-delivered frame with the same count is a no-op, and
+        // returning `prev` by identity keeps the memoized rows from rerendering.
+        if ((existing.conversation.openFlagCount ?? 0) === openFlagCount) return prev;
+        const nextRow: ConversationWithRefs = {
+          ...existing,
+          conversation: { ...existing.conversation, openFlagCount },
+        };
+        // Resolving the last flag while viewing "Flagged" drops the row out of
+        // the list, mirroring how a close drops it out of "Active".
+        if (!rowMatchesFilter(nextRow)) {
+          return [...prev.slice(0, idx), ...prev.slice(idx + 1)];
+        }
+        const next = prev.slice();
+        next[idx] = nextRow;
+        return next;
+      });
     };
 
     const onStatus: Parameters<typeof socket.on<"conversation:status">>[1] = ({
@@ -1417,6 +1493,7 @@ export function useTeamEvents(
       });
     };
 
+    socket.on("message:flag", onFlag);
     socket.on("message:new", onMessageNew);
     socket.on("conversation:assigned", onAssigned);
     socket.on("conversation:status", onStatus);
@@ -1456,6 +1533,7 @@ export function useTeamEvents(
       }
       document.removeEventListener("visibilitychange", onVisible);
       socket.off("connect", onConnect);
+      socket.off("message:flag", onFlag);
       socket.off("message:new", onMessageNew);
       socket.off("conversation:assigned", onAssigned);
       socket.off("conversation:status", onStatus);

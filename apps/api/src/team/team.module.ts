@@ -8,6 +8,7 @@ import { OutboundWebhooksAdminModule } from "./outbound-webhooks/outbound-webhoo
 import { PermissionsModule } from "./permissions/permissions.module";
 import { SnippetsModule } from "./snippets/snippets.module";
 import { StagesModule } from "./stages/stages.module";
+import { MessageFlagsCatalogModule } from "./message-flags/message-flags-catalog.module";
 import { TagsModule } from "./tags/tags.module";
 import { TeamRootController } from "./team-root.controller";
 import { TeamRootService } from "./team-root.service";
@@ -17,6 +18,7 @@ import { MetaModule } from "./meta/meta.module";
 import { TeamWebchatwidgetModule } from "./webchatwidget/webchatwidget.module";
 import { WhatsappModule } from "./whatsapp/whatsapp.module";
 import { WorkflowsModule as TeamWorkflowsModule } from "./workflows/workflows.module";
+import { UsersModule } from "../users/users.module";
 
 /**
  * Aggregates the `/api/team/*` catalog routes. Each sub-module owns a
@@ -30,6 +32,7 @@ import { WorkflowsModule as TeamWorkflowsModule } from "./workflows/workflows.mo
 @Module({
   imports: [
     TagsModule,
+    MessageFlagsCatalogModule,
     SnippetsModule,
     StagesModule,
     ContactFieldsModule,
@@ -44,6 +47,9 @@ import { WorkflowsModule as TeamWorkflowsModule } from "./workflows/workflows.mo
     TeamWorkflowsModule,
     PermissionsModule,
     AiAssistantModule,
+    // The org work-hours route re-resolves availability via UsersService — the
+    // single writer — rather than re-implementing the rule here.
+    UsersModule,
   ],
   controllers: [TeamRootController],
   providers: [TeamRootService],

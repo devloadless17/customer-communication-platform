@@ -406,6 +406,7 @@ function MessageThreadImpl({
   canManageStages,
   canDeleteConversations,
   canMakeCalls,
+  canAssignOthers,
   aiAutopilotEnabled,
   onInitiateCall,
   onMarkRead,
@@ -440,6 +441,7 @@ function MessageThreadImpl({
   /** Whether to show the Phone button in the header. Set by the shell from
    *  capability check + channel + contact country gate. */
   canMakeCalls: boolean;
+  canAssignOthers: boolean;
   /** Team-level AI Autopilot opt-in. Gates the header AI toggle's visibility —
    *  hidden for orgs that haven't enabled the AI flow. */
   aiAutopilotEnabled: boolean;
@@ -1752,6 +1754,8 @@ function MessageThreadImpl({
         canManageStages={canManageStages}
         canDeleteConversations={canDeleteConversations}
         canMakeCalls={canMakeCalls}
+        canAssignOthers={canAssignOthers}
+        currentUserId={currentUser.id}
         callChannel={conversation.channel ?? undefined}
         onInitiateCall={onInitiateCall}
         onMobileBack={onMobileBack}

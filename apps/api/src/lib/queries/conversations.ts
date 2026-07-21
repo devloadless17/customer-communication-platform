@@ -19,6 +19,7 @@ import {
   mapUser,
   REPLY_TO_INCLUDE,
 } from "./_shared";
+import { MESSAGE_FLAG_SELECT } from "@/lib/message-flags/queries";
 import {
   encodeConvoCursor,
   encodeMessageCursor,
@@ -78,7 +79,10 @@ const NON_PILL_EVENT_KINDS: ConversationEventKind[] = [
  * thread page hydrates those separately to keep the list query lean).
  */
 export type ListConversationsFilter =
-  | { kind: "preset"; id: "active" | "all" | "mine" | "unassigned" | "closed" }
+  | {
+      kind: "preset";
+      id: "active" | "all" | "mine" | "unassigned" | "closed" | "flagged";
+    }
   | { kind: "stage"; stageId: string };
 
 export async function listConversations(
@@ -93,6 +97,14 @@ export async function listConversations(
      * server-to-server reads (broadcasts, automations, external API).
      */
     viewerUserId?: string;
+    /**
+     * Read boundary from `lib/conversations/visibility.ts`. `{}` for an
+     * unrestricted viewer (so the query is byte-identical to before this
+     * existed); `{ assignedUserId }` for an agent limited to their own
+     * conversations. ANDed into the outer WHERE below, so it composes with —
+     * and cannot be escaped by — any preset filter or search term.
+     */
+    visibility?: { assignedUserId?: string };
     /**
      * Server-side preset / stage narrowing. Without it the list is the
      * full team-recency feed. With it, "Mine" returns only my threads
@@ -175,6 +187,20 @@ export async function listConversations(
       case "closed":
         filterClause = { status: "closed" };
         break;
+      case "flagged":
+        // Threads carrying at least one UNRESOLVED triage flag. Reads the
+        // denormalized counter rather than a nested EXISTS over Message ->
+        // MessageFlag: this is the hottest query in the app and a correlated
+        // subquery against the largest table would be the wrong shape here.
+        // Served by the PARTIAL index Conversation_teamId_openFlag_idx, which
+        // carries the list's (lastMessageAt DESC, id DESC) sort key and spans
+        // only the flagged rows.
+        //
+        // Unlike the other working presets this does NOT exclude closed
+        // threads: an unresolved complaint on a conversation someone closed is
+        // precisely the thing that must not disappear from triage.
+        filterClause = { openFlagCount: { gt: 0 } };
+        break;
     }
   } else if (opts.filter?.kind === "stage") {
     // deletedAt:null so the stage-filtered list matches the stage badge count
@@ -188,11 +214,27 @@ export async function listConversations(
   const composedClauses = [keysetClause, searchClause, filterClause].filter(
     (c): c is Prisma.ConversationWhereInput => c !== null,
   );
+  // The visibility fragment joins the AND array — it must NOT be a top-level
+  // sibling spread.
+  //
+  // Why: when exactly ONE composed clause survives, it is spread at the top
+  // level, and object spread means LAST WINS. The `unassigned` preset sets
+  // `assignedUserId: null`, so a sibling spread would have overwritten the
+  // restriction with `null` and shown a restricted agent EVERY unassigned
+  // conversation in the org. Inside AND, the two clauses are independent
+  // predicates and the restriction can never be clobbered — `unassigned`
+  // correctly yields nothing for a restricted agent, because a conversation
+  // cannot be both unassigned and assigned to them.
+  const visibilityClause = opts.visibility ?? {};
+  const allClauses =
+    Object.keys(visibilityClause).length > 0
+      ? [...composedClauses, visibilityClause as Prisma.ConversationWhereInput]
+      : composedClauses;
   const where: Prisma.ConversationWhereInput = {
     teamId,
-    ...(composedClauses.length > 1
-      ? { AND: composedClauses }
-      : composedClauses[0] ?? {}),
+    ...(allClauses.length > 1
+      ? { AND: allClauses }
+      : allClauses[0] ?? {}),
   };
 
   const rows = await db.conversation.findMany({
@@ -288,12 +330,15 @@ export async function listConversations(
 export async function getConversationWithRefs(
   teamId: string,
   conversationId: string,
-  opts: { messageLimit?: number } = {},
+  opts: { messageLimit?: number; visibility?: { assignedUserId?: string } } = {},
 ): Promise<{ data: ConversationWithRefs; nextOlderCursor: string | null } | null> {
   const limit = clampTake(opts.messageLimit, MESSAGES_PAGE);
 
   const row = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
+    // A restricted agent gets `null` here — which the caller maps to 404, the
+    // same as a genuinely missing thread. Never a 403: that would confirm the
+    // conversation exists to someone who isn't allowed to know it does.
+    where: { id: conversationId, teamId, ...(opts.visibility ?? {}) },
     include: {
       webchatWidget: { select: { name: true } },
       contact: { include: { tags: { select: { id: true } } } },
@@ -303,7 +348,11 @@ export async function getConversationWithRefs(
         orderBy: [{ timestamp: "desc" }, { id: "desc" }],
         take: limit + 1,
         omit: { rawPayload: true },
-        include: { replyTo: REPLY_TO_INCLUDE },
+        // Triage flags for the loaded page of messages. Prisma resolves this as
+        // ONE extra query (`WHERE messageId IN (…)`) bounded by the page size,
+        // the same cost profile as the replyTo include beside it — not an N+1.
+        // Most messages carry no flags, so the result set is typically tiny.
+        include: { replyTo: REPLY_TO_INCLUDE, flags: { select: MESSAGE_FLAG_SELECT } },
       },
       notes: { orderBy: { timestamp: "asc" } },
       // Inline activity log. Bounded to the most recent ACTIVITY_WINDOW events
@@ -557,7 +606,10 @@ export async function listOlderMessages(
 
   const rows = await db.message.findMany({
     omit: { rawPayload: true },
-    include: { replyTo: REPLY_TO_INCLUDE },
+    // Flags ride along on the older-messages page too — scrolling up a thread
+    // must not reveal un-flagged copies of messages the first page showed
+    // flagged.
+    include: { replyTo: REPLY_TO_INCLUDE, flags: { select: MESSAGE_FLAG_SELECT } },
     where: {
       conversationId,
       OR: [
@@ -682,7 +734,10 @@ export async function listNewerMessages(
     : { conversationId, timestamp: { gte: afterDate } };
   const rows = await db.message.findMany({
     omit: { rawPayload: true },
-    include: { replyTo: REPLY_TO_INCLUDE },
+    // This is a RECOVERY path (delta backfill on thread open / reconnect), so
+    // it has to converge to full server state — a message flagged while this
+    // client was away must come back carrying its flags, not stripped of them.
+    include: { replyTo: REPLY_TO_INCLUDE, flags: { select: MESSAGE_FLAG_SELECT } },
     where,
     orderBy: [{ timestamp: "asc" }, { id: "asc" }],
     // `take + 1` so `rows.length > take` detects a truncated (over-a-page) delta

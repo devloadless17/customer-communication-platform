@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Flag,
   Inbox as InboxIcon,
   Layers,
   type LucideIcon,
@@ -51,6 +52,10 @@ const PRESETS: PresetDef[] = [
   { id: "mine", label: "Mine", icon: AtSign },
   { id: "unassigned", label: "Unassigned", icon: UserPlus },
   { id: "closed", label: "Closed", icon: CheckCircle2 },
+  // Triage: threads with an unresolved message flag. Last in the list because
+  // it's a cross-cutting view rather than a status bucket — and it's the only
+  // preset that spans open AND closed threads.
+  { id: "flagged", label: "Flagged", icon: Flag },
 ];
 
 export function InboxSubSidebar({
@@ -133,7 +138,11 @@ export function InboxSubSidebar({
     // `?.unread` (not just `serverCounts`): a counts response from before this
     // field shipped (cached, or a version-skewed server mid-deploy) has no
     // `unread` — fall back to the loaded-slice derivation instead of crashing.
-    if (serverCounts?.unread) return serverCounts.unread;
+    // `flagged ?? 0` normalizes the optional field (absent on a response from
+    // before flags shipped) into the exhaustive Record the rail iterates.
+    if (serverCounts?.unread) {
+      return { ...serverCounts.unread, flagged: serverCounts.unread.flagged ?? 0 };
+    }
     const c = conversations.map((x) => x.conversation);
     const u = (x: (typeof c)[number]) => x.unreadCount > 0;
     return {
@@ -146,6 +155,7 @@ export function InboxSubSidebar({
         (x) => x.status !== "closed" && x.assignedUserId === null && u(x),
       ).length,
       closed: c.filter((x) => x.status === "closed" && u(x)).length,
+      flagged: c.filter((x) => (x.openFlagCount ?? 0) > 0 && u(x)).length,
     };
   }, [serverCounts, conversations, currentUser.id]);
 
@@ -162,6 +172,9 @@ export function InboxSubSidebar({
         mine: serverCounts.mine,
         unassigned: serverCounts.unassigned,
         closed: serverCounts.closed,
+        // `?? 0`: a counts response from before flags shipped (cached, or a
+        // version-skewed server mid-deploy) has no `flagged` field.
+        flagged: serverCounts.flagged ?? 0,
       };
     }
     const c = conversations.map((x) => x.conversation);
@@ -175,6 +188,7 @@ export function InboxSubSidebar({
         (x) => x.status !== "closed" && x.assignedUserId === null,
       ).length,
       closed: c.filter((x) => x.status === "closed").length,
+      flagged: c.filter((x) => (x.openFlagCount ?? 0) > 0).length,
     };
   }, [serverCounts, conversations, currentUser.id]);
 

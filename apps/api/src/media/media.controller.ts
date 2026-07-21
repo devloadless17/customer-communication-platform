@@ -15,6 +15,8 @@ import { extFromMime } from "@/lib/media-storage";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
+import { conversationRelationWhere } from "@/lib/conversations/visibility";
+
 import { DbService } from "../db/db.service";
 import { probeBlob, streamBlob } from "./stream-blob";
 
@@ -47,7 +49,14 @@ export class MediaController {
     @Res() res: Response,
   ): Promise<void> {
     const message = await this.db.message.findFirst({
-      where: { id: messageId, teamId: session.teamId },
+      // Visibility boundary: a restricted agent may only stream media that
+      // belongs to a conversation assigned to them. Without this, message ids
+      // leaked by any surface become a direct file-read.
+      where: {
+        id: messageId,
+        teamId: session.teamId,
+        ...conversationRelationWhere(session),
+      },
       select: { mediaKey: true, mediaFilename: true, mediaKind: true, mediaMimeType: true },
     });
     if (!message?.mediaKey) {
@@ -86,7 +95,14 @@ export class MediaController {
     @Res() res: Response,
   ): Promise<void> {
     const message = await this.db.message.findFirst({
-      where: { id: messageId, teamId: session.teamId },
+      // Visibility boundary: a restricted agent may only stream media that
+      // belongs to a conversation assigned to them. Without this, message ids
+      // leaked by any surface become a direct file-read.
+      where: {
+        id: messageId,
+        teamId: session.teamId,
+        ...conversationRelationWhere(session),
+      },
       select: { mediaThumbnailKey: true },
     });
     if (!message?.mediaThumbnailKey) {

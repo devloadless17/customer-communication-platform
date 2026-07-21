@@ -13,7 +13,14 @@ const takeQuery = z.coerce.number().int().min(1).max(200).optional();
  * `unassigned` exclude closed; `closed` is the only preset that shows
  * exclusively closed threads.
  */
-const PresetFilterIdSchema = z.enum(["active", "all", "mine", "unassigned", "closed"]);
+const PresetFilterIdSchema = z.enum([
+  "active",
+  "all",
+  "mine",
+  "unassigned",
+  "closed",
+  "flagged",
+]);
 export type PresetFilterId = z.infer<typeof PresetFilterIdSchema>;
 
 export const ListConversationsQuerySchema = z.object({

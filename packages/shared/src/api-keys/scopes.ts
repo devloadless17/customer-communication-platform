@@ -45,6 +45,15 @@ export const API_KEY_SCOPES = [
   "read:notes",
   "write:notes",
 
+  // Message flags — per-message triage markers ("Complaint", "Refund request")
+  // and their open/resolved lifecycle. Their own scope rather than folding into
+  // read/write:messages, because this is the surface an EXTERNAL system polls
+  // or receives to pick up work: a partner that should see complaints must not
+  // thereby gain the ability to send billed messages. The flag CATALOG (which
+  // flags exist) stays under read/write:catalog with every other catalog.
+  "read:flags",
+  "write:flags",
+
   // Catalogs — tags / stages / contact fields / templates / snippets etc.
   // Most partners only need read here; the bulk of mutations come through
   // the contacts/messages/conversations surfaces above.
@@ -66,6 +75,15 @@ export const API_KEY_SCOPES = [
   // to place a call WITH. Everything here is the part an integration can
   // genuinely drive — teeing up a call a human then makes or takes.
   "write:calls",
+
+  // Team members — setting a teammate's availability or working hours. Read
+  // stays under "read:catalog" (where GET /v1/users already lives); this is
+  // write-only so a workforce-management integration can push shift changes
+  // without also being able to edit tags, stages or templates.
+  //
+  // Deliberately NOT "create/delete users": inviting and removing members is
+  // an auth-boundary action with its own email flow and seat-cap enforcement.
+  "write:users",
 ] as const;
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];

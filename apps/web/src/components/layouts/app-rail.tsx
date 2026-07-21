@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ContactRound,
+  Flag,
   Inbox,
   LogOut,
   type LucideIcon,
@@ -38,6 +39,7 @@ import {
 } from "@ccp/shared/presence";
 import { cn, initials } from "@ccp/shared/utils";
 import type { Team, User, UserAvailabilityStatus } from "@ccp/shared/types";
+import type { AvailabilitySource } from "@ccp/shared/work-hours";
 import { AvailabilityPicker } from "./availability-picker";
 
 const STORAGE_KEY = "app-rail-collapsed";
@@ -178,6 +180,11 @@ const PRIMARY_ITEMS: RailItem[] = [
   { href: "/inbox", label: "Inbox", icon: Inbox },
   { href: "/team", label: "Team chat", icon: MessageSquareText },
   { href: "/contacts", label: "Contacts", icon: ContactRound },
+  // Triage queue for message flags. Its own rail entry rather than a tab
+  // inside the inbox: it answers "what individual complaints are still open
+  // across every conversation", which is a supervisor's question, not a
+  // thread-by-thread one.
+  { href: "/flags", label: "Flagged", icon: Flag },
   {
     href: "/broadcasts",
     label: "Broadcasts",
@@ -227,6 +234,10 @@ export function AppRail({
   const [liveAvailability, setLiveAvailability] = useState(() => ({
     status: resolveAvailabilityStatus(currentUser.availabilityStatus),
     message: currentUser.availabilityMessage ?? null,
+    // Schedule provenance rides along so the picker can explain an automatic
+    // status ("outside working hours") instead of showing a bare grey dot.
+    source: currentUser.availabilitySource ?? "manual",
+    until: currentUser.availabilityUntil ?? null,
   }));
   useEffect(() => {
     const socket = getClientSocket();
@@ -238,6 +249,8 @@ export function AppRail({
         status: payload.status,
         message:
           payload.message === undefined ? prev.message : payload.message,
+        source: payload.source === undefined ? prev.source : payload.source,
+        until: payload.until === undefined ? prev.until : payload.until,
       }));
     };
     socket.on("user:availability:updated", handler);
@@ -432,6 +445,8 @@ export function AppRail({
           canManageAvailability={canManageAvailability}
           liveStatus={liveAvailability.status}
           liveMessage={liveAvailability.message}
+          liveSource={liveAvailability.source}
+          liveUntil={liveAvailability.until}
         >
           <button
             type="button"
@@ -578,6 +593,8 @@ function UserMenu({
   canManageAvailability,
   liveStatus,
   liveMessage,
+  liveSource,
+  liveUntil,
   children,
 }: {
   currentUser: User;
@@ -585,6 +602,8 @@ function UserMenu({
   canManageAvailability: boolean;
   liveStatus: UserAvailabilityStatus;
   liveMessage: string | null;
+  liveSource: AvailabilitySource;
+  liveUntil: string | null;
   children: React.ReactNode;
 }) {
   const { trigger: signOut, overlay } = useSignOutOverlay();
@@ -619,6 +638,8 @@ function UserMenu({
             disabled={!canManageAvailability}
             seedStatus={liveStatus}
             seedMessage={liveMessage}
+            seedSource={liveSource}
+            seedUntil={liveUntil}
           />
           <DropdownMenuSeparator />
           {/* One Settings entry → the single grouped /settings landing. (Was

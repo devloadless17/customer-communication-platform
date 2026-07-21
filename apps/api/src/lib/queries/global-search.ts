@@ -62,7 +62,20 @@ function snippet(text: string): string {
  */
 export async function searchContacts(
   teamId: string,
-  opts: { query: string; take?: number; cursor?: string | null },
+  opts: {
+    query: string;
+    take?: number;
+    cursor?: string | null;
+    /**
+     * Agent conversation-visibility boundary (lib/conversations/visibility.ts).
+     * `{}` for unrestricted viewers, so an un-configured org's search is
+     * unchanged; `{ assignedUserId }` restricts an agent to their own threads.
+     * Global search is the widest read surface in the product — it returns
+     * message bodies, note bodies and contact PII across the whole org — so it
+     * must be scoped as tightly as the conversation list itself.
+     */
+    visibility?: { assignedUserId?: string };
+  },
 ): Promise<ContactSearchPage> {
   const take = clampTake(opts.take, DEFAULT_TAKE);
   const query = opts.query.trim();
@@ -70,6 +83,12 @@ export async function searchContacts(
 
   const cursor = parseContactCursor(opts.cursor ?? null);
   const overFetch = take * 4 + 1;
+  // A restricted agent may only find contacts they actually own a conversation
+  // with. `some` (not `every`) because one contact has exactly one conversation
+  // per channel and owning any of them is enough to know the person.
+  const visibilityClause = opts.visibility?.assignedUserId
+    ? { conversations: { some: { assignedUserId: opts.visibility.assignedUserId } } }
+    : {};
   const matchOr = [
     { name: { contains: query, mode: "insensitive" as const } },
     { phoneNumber: { contains: query } },
@@ -80,12 +99,17 @@ export async function searchContacts(
     db.contact.findMany({
       // The match OR and the keyset OR must BOTH hold, so nest both inside AND —
       // a single top-level `OR` key can't hold two independent disjunctions.
+      // `visibilityClause` goes inside AND, never spread at the top level:
+      // `directoryContactWhere` is itself an OR node, and a sibling spread
+      // would widen rather than narrow it (a bug this codebase has already
+      // paid for once — see docs/identity.md).
       where: from
         ? {
             teamId,
             deletedAt: null,
             AND: [
               directoryContactWhere,
+              visibilityClause,
               { OR: matchOr },
               {
                 OR: [
@@ -95,7 +119,11 @@ export async function searchContacts(
               },
             ],
           }
-        : { teamId, deletedAt: null, AND: [directoryContactWhere, { OR: matchOr }] },
+        : {
+            teamId,
+            deletedAt: null,
+            AND: [directoryContactWhere, visibilityClause, { OR: matchOr }],
+          },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       // Over-fetch: we paginate CONTACTS but display PEOPLE, and a person can span
       // several channel-contacts. Fetch enough contacts to still fill a full page
@@ -273,7 +301,20 @@ export async function searchContacts(
  */
 export async function searchAllMessages(
   teamId: string,
-  opts: { query: string; take?: number; cursor?: string | null },
+  opts: {
+    query: string;
+    take?: number;
+    cursor?: string | null;
+    /**
+     * Agent conversation-visibility boundary (lib/conversations/visibility.ts).
+     * `{}` for unrestricted viewers, so an un-configured org's search is
+     * unchanged; `{ assignedUserId }` restricts an agent to their own threads.
+     * Global search is the widest read surface in the product — it returns
+     * message bodies, note bodies and contact PII across the whole org — so it
+     * must be scoped as tightly as the conversation list itself.
+     */
+    visibility?: { assignedUserId?: string };
+  },
 ): Promise<GlobalMessageSearchPage> {
   const take = clampTake(opts.take, DEFAULT_TAKE);
   const query = opts.query.trim();
@@ -282,6 +323,9 @@ export async function searchAllMessages(
   const cursor = parseMessageCursor(opts.cursor ?? null);
   const matchBody = {
     body: { contains: query, mode: "insensitive" as const },
+    ...(opts.visibility?.assignedUserId
+      ? { conversation: { assignedUserId: opts.visibility.assignedUserId } }
+      : {}),
   };
 
   const rows = await db.message.findMany({
@@ -353,7 +397,20 @@ export async function searchAllMessages(
  */
 export async function searchAllNotes(
   teamId: string,
-  opts: { query: string; take?: number; cursor?: string | null },
+  opts: {
+    query: string;
+    take?: number;
+    cursor?: string | null;
+    /**
+     * Agent conversation-visibility boundary (lib/conversations/visibility.ts).
+     * `{}` for unrestricted viewers, so an un-configured org's search is
+     * unchanged; `{ assignedUserId }` restricts an agent to their own threads.
+     * Global search is the widest read surface in the product — it returns
+     * message bodies, note bodies and contact PII across the whole org — so it
+     * must be scoped as tightly as the conversation list itself.
+     */
+    visibility?: { assignedUserId?: string };
+  },
 ): Promise<NoteSearchPage> {
   const take = clampTake(opts.take, DEFAULT_TAKE);
   const query = opts.query.trim();
@@ -368,6 +425,9 @@ export async function searchAllNotes(
   const matchWhere = {
     teamId,
     body: { contains: query, mode: "insensitive" as const },
+    ...(opts.visibility?.assignedUserId
+      ? { conversation: { assignedUserId: opts.visibility.assignedUserId } }
+      : {}),
   };
 
   const rows = await db.internalNote.findMany({

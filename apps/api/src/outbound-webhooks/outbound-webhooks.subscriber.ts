@@ -696,6 +696,14 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
           if (data.conversation_id) pushConversation(data.conversation_id, data);
           break;
         }
+        case "message.flag_changed": {
+          // Without this the flag webhook ships `contact: null`, forcing every
+          // receiver into a callback just to learn WHO complained — the exact
+          // round-trip this enrichment exists to remove, and the opposite of
+          // what the event promises ("route flagged work with no extra call").
+          if (data.conversation_id) pushConversation(data.conversation_id, data);
+          break;
+        }
         default:
           break;
       }

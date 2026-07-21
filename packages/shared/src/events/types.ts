@@ -23,6 +23,7 @@ import type {
   ConversationWithRefs,
   InternalNote,
   MediaAttachment,
+  MessageFlag,
   MessageStatus,
   User,
 } from "../types";
@@ -631,6 +632,56 @@ export interface NoteCreatedEvent {
   skipOutboundWebhook?: boolean;
 }
 
+/**
+ * A message triage flag was raised, changed, resolved, or removed.
+ *
+ * ONE publisher: apps/api/src/lib/message-flags/mutations.ts. Nothing that
+ * subscribes to this mutates a flag, so there is no recursive chain.
+ *
+ * The payload inlines the whole flag (which itself inlines its definition) plus
+ * the post-change `openFlagCount`, so every subscriber — socket fanout, audit,
+ * outbound webhooks — reacts without a DB re-read.
+ */
+export interface MessageFlagChangedEvent {
+  teamId: string;
+  conversationId: string;
+  messageId: string;
+  /**
+   * The TRANSITION that happened — never merely the post-state.
+   *   `added`    — the flag did not exist and now does.
+   *   `reopened` — a resolved/dismissed flag went back to `open`.
+   *   `resolved` — it reached a terminal state (`flag.status` says which).
+   *   `updated`  — metadata only (owner, notes); the lifecycle did NOT move.
+   *   `removed`  — the flag was deleted outright.
+   *
+   * The `updated` / lifecycle split is load-bearing: the audit subscriber and
+   * partner automations must not treat "someone edited the resolution note"
+   * as a second close, and must not miss a reopen.
+   */
+  action: "added" | "updated" | "reopened" | "resolved" | "removed";
+  /**
+   * The flag AFTER the change. Present even for `removed` — the socket
+   * consumer needs the id to drop it, and the audit/webhook subscribers need
+   * the definition name for a readable record of what was deleted.
+   */
+  flag: MessageFlag;
+  /**
+   * The conversation's `openFlagCount` AFTER the change, read inside the same
+   * transaction. The inbox list badge and the "Flagged" filter both key off it,
+   * so shipping it here keeps them exact without a follow-up query.
+   */
+  openFlagCount: number;
+  /** Who made the change. null for AI / workflow / API actors. */
+  changedByUserId: string | null;
+  /** Set on /v1 mutations for audit attribution. */
+  changedByApiKeyId?: string | null;
+  /** Skip workflow chain-trigger dispatch. See ContactTagChangedEvent.silent. */
+  silent?: boolean;
+  /** Gate outbound-webhook delivery independently of `silent`. Defaults to
+   *  `silent` when unset. See ContactTagChangedEvent.skipOutboundWebhook. */
+  skipOutboundWebhook?: boolean;
+}
+
 export interface NoteDeletedEvent {
   teamId: string;
   conversationId: string;
@@ -973,6 +1024,19 @@ export interface UserAvailabilityChangedEvent {
   status: string;
   /** Optional free-form note; null when cleared, undefined when unchanged. */
   message?: string | null;
+  /**
+   * Who decided this status — "manual" | "admin" | "schedule". Absent on
+   * events published before working hours existed; treat absent as "manual".
+   */
+  source?: string;
+  /** ISO instant a manual/admin override expires back to the schedule. */
+  until?: string | null;
+  /**
+   * The user's OWN pick, as distinct from the effective status above. Only the
+   * availability picker reads it (so an off-shift agent's note box shows what
+   * they typed, not "Outside working hours"). Absent on legacy events.
+   */
+  manual?: { status: string; message: string | null };
 }
 
 /**
@@ -1022,6 +1086,10 @@ export interface TeamCatalogChangedEvent {
   scope:
     | "stages"
     | "tags"
+    // The message-flag catalog (which triage flags exist). Same treatment as
+    // "tags": a create/rename/archive changes what every open inbox's flag
+    // picker should offer, so it needs the team-wide refresh frame.
+    | "message-flags"
     | "contact-fields"
     | "workflows"
     | "members"
@@ -1216,6 +1284,7 @@ export interface DomainEventMap {
   "message.reaction_changed": MessageReactionChangedEvent;
   "message.updated": MessageUpdatedEvent;
   "message.media_ready": MessageMediaReadyEvent;
+  "message.flag_changed": MessageFlagChangedEvent;
   "conversation.assigned": ConversationAssignedEvent;
   "conversation.status_changed": ConversationStatusChangedEvent;
   "conversation.ai_changed": ConversationAiChangedEvent;
