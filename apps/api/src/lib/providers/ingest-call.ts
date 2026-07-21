@@ -856,7 +856,7 @@ async function handlePermissionEvent(
           status: CallPermissionStatus.granted,
           OR: [{ isPermanent: true }, { expiresAt: { gt: grantedAt } }],
         },
-        select: { id: true },
+        select: { id: true, isPermanent: true, expiresAt: true },
       });
       if (!existingGrant) {
         await db.callPermissionRequest.create({
@@ -867,6 +867,30 @@ async function handlePermissionEvent(
             grantedAt,
             expiresAt: grantExpiresAt,
             isPermanent,
+          },
+        });
+      } else if (
+        // A live grant already exists, but this reply may STRENGTHEN it: the
+        // customer can upgrade a temporary permission to permanent, or re-grant
+        // and push the expiry out, both from their business profile. Skipping
+        // outright would leave us treating a now-permanent permission as
+        // expiring, and re-asking a customer who already said "always".
+        //
+        // Only ever widen — never shorten. A redelivery of the SAME grant then
+        // stays a true no-op, which is what the idempotency guard is for.
+        (isPermanent && !existingGrant.isPermanent) ||
+        (!existingGrant.isPermanent &&
+          !isPermanent &&
+          grantExpiresAt.getTime() > existingGrant.expiresAt.getTime())
+      ) {
+        await db.callPermissionRequest.update({
+          where: { id: existingGrant.id },
+          data: {
+            grantedAt,
+            isPermanent,
+            // A permanent grant's expiry is never read; keep the column
+            // coherent rather than absurd.
+            expiresAt: grantExpiresAt,
           },
         });
       }

@@ -9,6 +9,7 @@ import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { initials } from "@ccp/shared/utils";
 import type { Channel } from "@ccp/shared/types";
 import { getClientSocket } from "@/lib/socket-client";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { notificationSound } from "@/lib/notifications/notification-sound";
 import { useNotificationSounds } from "@/providers/notification-sound-provider";
 import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
@@ -85,6 +86,70 @@ export function IncomingCallToast({
       clearTimeout(t);
       expiryTimers.current.delete(callId);
     }
+  }, []);
+
+
+  // ── Surviving a reload while a call is ringing ──────────────────────────
+  //
+  // The card is driven purely by the `call:incoming` frame, which fires once.
+  // Reload during a ringing call and it is gone for good — the customer's phone
+  // keeps ringing while the agent has no way to answer, and nothing on screen
+  // says a call was ever there.
+  //
+  // Re-seed from the server on mount. Bounded to calls that started inside the
+  // ring window so a row the sweeper hasn't reached yet can't resurrect a card
+  // for a call that stopped ringing minutes ago.
+  useEffect(() => {
+    if (!canReceiveCalls) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await apiFetch("/api/calls?take=10");
+        if (!res.ok || !alive) return;
+        const body = (await res.json()) as {
+          items?: Array<{
+            id: string;
+            conversationId: string;
+            contactName: string | null;
+            contactPhone: string | null;
+            direction: "in" | "out";
+            status: string;
+            ringingAt: string;
+          }>;
+        };
+        const stillRinging = (body.items ?? []).filter(
+          (c) =>
+            c.direction === "in" &&
+            c.status === "ringing" &&
+            Date.now() - Date.parse(c.ringingAt) < RING_EXPIRY_MS,
+        );
+        if (!stillRinging.length || !alive || !receiveCallsRef.current) return;
+        setCalls((prev) => {
+          const known = new Set(prev.map((c) => c.callId));
+          const restored = stillRinging
+            .filter((c) => !known.has(c.id))
+            .map((c) => ({
+              callId: c.id,
+              conversationId: c.conversationId,
+              // The list row carries no channel; calling is WhatsApp-only on
+              // phone numbers today, and answerIncoming only uses this to pick
+              // the answer signaling.
+              channel: "whatsapp" as Channel,
+              contactName: c.contactName ?? c.contactPhone ?? "Unknown",
+              ringingAt: c.ringingAt,
+            }));
+          return restored.length ? [...prev, ...restored] : prev;
+        });
+      } catch {
+        // Best-effort recovery — a failure just leaves the agent where the
+        // reload left them.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // Mount-only: reload recovery, not an ongoing subscription.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {

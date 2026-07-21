@@ -19,7 +19,7 @@
  *
  * Suites:
  *   A. Outbound pre-flight: bic_blocked_region  — OUR number's country → blocked
- *   B. Outbound pre-flight: permission_revoked   — future revocation → blocked
+ *   B. Local revocation is advisory        — a stale flag must NOT gate
  *   C. Outbound pre-flight: calling_restricted   — provider paused our number
  *   D. answerCall CAS race                        — exactly one winner
  *   E. endCall idempotency                        — terminal row → 200 no-op
@@ -174,12 +174,21 @@ test.describe("A. Outbound pre-flight — bic_blocked_region", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════
-// B. Outbound pre-flight — permission_revoked
+// B. A locally-recorded revocation is CONTEXT, not a gate
 // ═════════════════════════════════════════════════════════════════════════
-test.describe("B. Outbound pre-flight — permission_revoked", () => {
-  test("contact with future callPermissionRevokedUntil → { ok: false, reason: permission_revoked }", async ({ request }) => {
-    // ARRANGE — revocation 1h in the future, behind a business number in an
-    // allowed market so the region gate doesn't short-circuit first.
+//
+// This spec used to assert the opposite, and that assertion was the bug.
+//
+// `Contact.callPermissionRevokedUntil` was consulted as a hard gate ahead of
+// the provider read, and it refused customers the agent had just finished
+// speaking to. Permission comes back through paths that write nothing on our
+// side — the customer calling us with callback permission on, or granting from
+// their business profile — so a cached "revoked" reliably outlives the reality
+// it describes. It is advisory context for the contact panel; WhatsApp decides.
+test.describe("B. Local revocation is advisory, not a gate", () => {
+  test("a future callPermissionRevokedUntil does NOT by itself refuse the call", async ({
+    request,
+  }) => {
     await setBusinessNumber("+33600000000");
     const oneHourFromNow = new Date(Date.now() + 60 * 60 * 1000);
     const { conversationId } = await seedContactAndConversation({
@@ -189,19 +198,19 @@ test.describe("B. Outbound pre-flight — permission_revoked", () => {
       insideWindow: true,
     });
 
-    // ACT
     const resp = await request.post(`/api/conversations/${conversationId}/call`, {
       data: { sdp: FAKE_SDP_OFFER },
     });
 
-    // ASSERT
     expect(resp.status()).toBe(200);
     const json = await resp.json();
-    expect(json).toEqual({ ok: false, reason: "permission_revoked" });
+    // It still fails — there are no real WhatsApp credentials here — but it must
+    // NOT fail because of the stale local flag. Reaching the provider read is
+    // the whole point: that is what lets a re-granted customer through.
+    expect(json.reason).not.toBe("permission_revoked");
 
-    // No Call row created.
-    const callCount = await db().call.count({ where: { conversationId } });
-    expect(callCount).toBe(0);
+    // And no phantom Call row from the attempt.
+    expect(await db().call.count({ where: { conversationId } })).toBe(0);
   });
 });
 
