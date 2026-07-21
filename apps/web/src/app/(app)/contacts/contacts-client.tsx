@@ -8,6 +8,7 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import {
   Download,
   ListChecks,
+  History,
   Loader2,
   MessageSquare,
   MoreHorizontal,
@@ -71,8 +72,25 @@ import dynamic from "next/dynamic";
 // Three dialogs that only open via explicit user action — defer them out
 // of the initial contacts-page bundle. SSR-disabled because they're
 // interactive-only.
-const ImportContactsDialog = dynamic(
-  () => import("./import-dialog").then((m) => m.ImportContactsDialog),
+const ImportContactsWizard = dynamic(
+  () =>
+    import("@/features/contacts/components/transfer/import-wizard").then(
+      (m) => m.ImportContactsWizard,
+    ),
+  { ssr: false },
+);
+const ExportContactsDialog = dynamic(
+  () =>
+    import("@/features/contacts/components/transfer/export-dialog").then(
+      (m) => m.ExportContactsDialog,
+    ),
+  { ssr: false },
+);
+const TransferHistorySheet = dynamic(
+  () =>
+    import("@/features/contacts/components/transfer/transfer-history").then(
+      (m) => m.TransferHistorySheet,
+    ),
   { ssr: false },
 );
 const NewContactDialog = dynamic(
@@ -213,6 +231,8 @@ export function ContactsClient({
   const [allMatching, setAllMatching] = useState(false);
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [showTransfers, setShowTransfers] = useState(false);
   // Contact id whose detail drawer is open — null = closed. Storing the id
   // (not the row) means a list reconcile mid-edit doesn't lose the drawer.
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -572,18 +592,18 @@ export function ContactsClient({
                 </DropdownMenuItem>
               )}
               {canExportContacts && (
-                <DropdownMenuItem asChild>
-                  {/* Plain anchor: lets the browser handle Content-Disposition
-                      and save the file without a fetch + Blob round-trip. */}
-                  <a href="/api/contacts/export" download>
-                    <Download className="size-4" />
-                    Export CSV
-                  </a>
+                <DropdownMenuItem onSelect={() => setExporting(true)}>
+                  <Download className="size-4" />
+                  Export contacts
                 </DropdownMenuItem>
               )}
               <DropdownMenuItem onSelect={() => setImporting(true)}>
                 <Upload className="size-4" />
-                Import CSV
+                Import contacts
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setShowTransfers(true)}>
+                <History className="size-4" />
+                Imports &amp; exports
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -795,20 +815,46 @@ export function ContactsClient({
       )}
 
       {importing && (
-        <ImportContactsDialog
+        <ImportContactsWizard
           onClose={() => setImporting(false)}
           onImported={() => {
-            setImporting(false);
-            // Refetch the client list from the server so imported rows appear
-            // immediately — don't rely on the one-shot `contacts:bulk_updated`
-            // socket frame (a dropped/disconnected frame would leave them
-            // invisible until a filter change). softRefresh reconciles the rest
-            // of the RSC (e.g. SSR-seeded counts).
+            // NOTE: the wizard stays OPEN — it's showing the result summary and
+            // the failed-rows download. Only refresh the list underneath.
+            //
+            // Refetch from the server so imported rows appear immediately —
+            // don't rely on the one-shot `contacts:bulk_updated` socket frame
+            // (a dropped/disconnected frame would leave them invisible until a
+            // filter change). softRefresh reconciles the rest of the RSC (e.g.
+            // SSR-seeded counts).
             list.refetch();
             softRefresh();
           }}
         />
       )}
+
+      {exporting && (
+        <ExportContactsDialog
+          onClose={() => setExporting(false)}
+          // Each filter carries an "all"/"any" sentinel meaning "not filtering";
+          // those must become `undefined`, not be sent as a literal value the
+          // server would try to match a column against.
+          filters={{
+            search: list.search || undefined,
+            source: list.sourceFilter === "all" ? undefined : list.sourceFilter,
+            channel: list.channelFilter === "any" ? undefined : list.channelFilter,
+            window: list.windowFilter === "any" ? undefined : list.windowFilter,
+            // "none" is a REAL filter (contacts with no stage) — only "any" opts out.
+            stageId: list.stageFilter === "any" ? undefined : list.stageFilter,
+            tagIds: list.tagIds.length > 0 ? list.tagIds : undefined,
+            fieldKey: list.fieldFilter?.key,
+            fieldValue: list.fieldFilter?.value,
+          }}
+          selectedIds={[...selectedIds]}
+          filteredCount={list.totalCount ?? 0}
+        />
+      )}
+
+      {showTransfers && <TransferHistorySheet onClose={() => setShowTransfers(false)} />}
 
       <BulkActionBar
         selectedCount={selectedIds.size}

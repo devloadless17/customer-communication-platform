@@ -104,7 +104,10 @@ export function ThreadPanel({
       </div>
 
       <ScrollArea className="flex-1">
-        <div className="flex flex-col py-1">
+        {/* pt-4: every message bubble hangs its hover toolbar at `-top-3`, so
+            the FIRST row needs headroom inside the scroller — otherwise the
+            toolbar rode up under the "Thread" header bar. */}
+        <div className="flex flex-col pb-1 pt-4">
           {/* Root message anchors the thread — same bubble component, with
               thread actions hidden. */}
           <ChannelMessage

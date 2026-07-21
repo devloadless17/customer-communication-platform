@@ -258,6 +258,14 @@ enum ConversationEventKind {
   stage_changed
   note_added
   note_deleted
+  // A website-widget visitor deliberately started a fresh conversation (the
+  // "Start a new conversation" control). Written when the new conversation's
+  // first message arrives carrying the client's `startedNew` flag, so an agent
+  // opening the fresh thread knows the person chose to start over (new topic /
+  // shared computer) rather than this being their first-ever contact. Rendered
+  // as a normal timeline pill (activity-entry.tsx). Actor is the visitor → no
+  // userId, so it reads as a self-contained "Visitor started…" line.
+  visitor_started_conversation
   // AI Autopilot toggled off / on for this conversation (by a human in the
   // inbox, by the AI on escalation via /v1, or auto-paused on a human reply).
   // Rendered as an inline timeline pill, same as status/assignment.
@@ -493,6 +501,7 @@ model Team {
   messages                Message[]
   invites                 Invite[]
   contactFieldDefinitions ContactFieldDefinition[]
+  contactTransferJobs     ContactTransferJob[]
   contactStages           ContactStage[]
   messageTemplates        MessageTemplate[]
   broadcasts              Broadcast[]
@@ -582,6 +591,21 @@ model ChannelConnection {
   // When the snapshot above was last refreshed (webhook or poll).
   messagingHealthUpdatedAt DateTime?
 
+  // Calling enforcement, mirrored from the provider's account webhooks.
+  //
+  // While a restriction is active, every call attempt AND every call-permission
+  // request fails. Storing it turns "calling stopped working" into a dated,
+  // explainable banner — without it a tenant sees a week of unexplained
+  // rejections and support can't distinguish enforcement from a bug.
+  // Null = unrestricted; otherwise the provider's own expiry.
+  callingRestrictedUntil   DateTime?
+  callingRestrictionType   String?
+  callingRestrictionReason String?
+  // The provider's EARLY warning that call quality is trending badly, sent
+  // before any restriction bites. Actionable while it's still only a warning:
+  // hiding call icons or narrowing call hours can head off the pause.
+  callingQualityWarning    String?
+
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
   team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
@@ -609,7 +633,21 @@ model WebchatWidget {
   // indexed lookup instead of scanning JSON.
   publicKey String @unique
   // Origins allowed to embed this widget: "example.com" or "*.example.com".
+  // EMPTY = permissive (any site), deliberately: a brand-new widget must work on
+  // the customer's page before they've configured anything. See `firstSeenOrigin`
+  // for how that gets closed without breaking first-run.
   allowedOrigins String[] @default([])
+  // Host of the FIRST non-loopback page that ever embedded this widget, recorded
+  // write-once and only while `allowedOrigins` is still empty.
+  //
+  // The site key is public by design (it sits in the page source of every customer
+  // site), so an unlocked widget can be lifted and embedded on a phishing page —
+  // the visitor believes they're talking to the brand and the agent sees an
+  // ordinary conversation. Requiring a domain up front would instead break every
+  // widget before its first message, so we do trust-on-first-use: observe the real
+  // domain, then let Settings offer a one-click lock at the moment the value is
+  // obviously correct. Purely a SUGGESTION — it never gates a connection itself.
+  firstSeenOrigin String?
   // Non-secret appearance + pre-chat config the widget fetches (theme,
   // welcomeMessage, headerTitle, suggestedQuestions, preChatFields, showBranding).
   config    Json     @default("{}")
@@ -680,6 +718,7 @@ model User {
   createdInvites          Invite[]                  @relation("InvitedBy")
   createdBroadcasts       Broadcast[]               @relation("CreatedBroadcasts")
   createdAudienceGroups   AudienceGroup[]           @relation("CreatedAudienceGroups")
+  contactTransferJobs     ContactTransferJob[]      @relation("ContactTransferJobs")
   createdSnippets         Snippet[]                 @relation("CreatedSnippets")
   // Audit-log authorship. Nullable on the event row + SetNull so deleting a
   // user keeps the audit trail; the timeline just renders "Removed user".
@@ -1170,6 +1209,105 @@ model ContactFieldDefinition {
 
   @@unique([teamId, key])
   @@index([teamId, order])
+}
+
+enum ContactTransferKind {
+  import
+  export
+}
+
+enum ContactTransferFormat {
+  csv
+  xlsx
+}
+
+enum ContactTransferStatus {
+  pending
+  running
+  completed
+  failed
+  canceled
+}
+
+// One row per contact import/export run. Both directions share a model because
+// their observable shape is identical (status, progress, counters, an R2
+// artifact, an error report) and a `kind` discriminator is far less code than
+// two near-duplicate tables plus two controllers plus two UIs.
+//
+// Why a table at all instead of leaning on BullMQ job state: the job row
+// survives a Redis flush, it's what the artifact-expiry sweeper walks, and it
+// backs the visible transfer history + the "download the rows that failed"
+// link — none of which a transient queue entry can provide.
+model ContactTransferJob {
+  id              String                @id @default(cuid())
+  teamId          String
+  kind            ContactTransferKind
+  format          ContactTransferFormat
+  status          ContactTransferStatus @default(pending)
+  // Null when a job outlives its creator (user deleted) — SetNull, not Cascade:
+  // losing the audit trail of a 100k-row import because an agent left is worse
+  // than a dangling name.
+  createdByUserId String?
+  // Import: the uploaded file's original name. Export: the generated filename.
+  filename        String
+
+  // R2 object keys. `sourceKey` is the uploaded import file (streamed straight
+  // to R2 so a 50 MiB upload never sits in API heap across the request);
+  // `artifactKey` is the produced export; `errorArtifactKey` is the
+  // failed-rows report, in the SAME format the user uploaded.
+  sourceKey        String?
+  artifactKey      String?
+  errorArtifactKey String?
+  // Byte size of `artifactKey`, so the UI can show it before presigning.
+  artifactBytes    Int?
+
+  // Run options: { mode, tagMode, fireAutomations, mapping, filters, scope }.
+  // Json rather than columns because the shape differs by `kind` and is only
+  // ever read back whole by the runner that wrote it.
+  options Json @default("{}")
+
+  // Progress + outcome counters. `processedRows` doubles as the RESUME cursor:
+  // a retried job skips rows below it, and counters are only advanced after a
+  // batch commits, so a mid-run crash can't double-count.
+  totalRows     Int? // null until the source is counted (import) / query counted (export)
+  processedRows Int  @default(0)
+  created       Int  @default(0)
+  updated       Int  @default(0)
+  revived       Int  @default(0)
+  skipped       Int  @default(0)
+  failed        Int  @default(0)
+
+  // True when the row count exceeded IMPORT_EVENT_FANOUT_CAP so per-row
+  // contact.created/updated events (and therefore workflows + outbound
+  // webhooks) were deliberately NOT published. Surfaced in the UI — a silent
+  // skip would look like broken automations.
+  automationsSkipped Boolean @default(false)
+
+  // First N row failures inline for the summary panel; the full set lives in
+  // errorArtifactKey. Shape: [{ row: number, reason: string }].
+  errorSample Json @default("[]")
+  // Whole-job failure message (not row-level). Null on success.
+  error       String?
+
+  // Heartbeat, so the sweeper can fail a job whose worker died mid-run without
+  // waiting for a BullMQ stall timeout.
+  heartbeatAt DateTime?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  // Artifacts + this row are reaped after this instant by the
+  // contact-transfer-artifacts sweeper. Contact exports are a bulk PII dump;
+  // they must not sit in the bucket forever.
+  expiresAt   DateTime
+
+  team    Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  creator User? @relation("ContactTransferJobs", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([teamId, createdAt(sort: Desc)])
+  // Drives the sweeper's two scans: expired rows, and running rows with a
+  // stale heartbeat.
+  @@index([status, heartbeatAt])
+  @@index([expiresAt])
 }
 
 model Conversation {
@@ -2930,8 +3068,11 @@ model CallPermissionRequest {
   id                String               @id @default(cuid())
   teamId            String
   contactId         String
-  // Meta's permission-request id when the request succeeded; null when we
-  // still have an in-flight error / rate-limit on file.
+  // The id of the request MESSAGE we sent (permission requests are ordinary
+  // interactive messages, not a calling endpoint). The customer's reply webhook
+  // echoes this back as its context, which is how a grant is matched to the
+  // exact request that produced it. Null when we still have an in-flight error
+  // or rate-limit placeholder on file.
   externalRequestId String?
   // Grant lifecycle. `pending` the instant we send the request; flips to
   // `granted`/`denied` when Meta's permission webhook lands. The placeCall
@@ -2940,13 +3081,23 @@ model CallPermissionRequest {
   // (it never reached the customer); rateLimitedUntil is the discriminator.
   status            CallPermissionStatus @default(pending)
   requestedAt       DateTime             @default(now())
-  // requestedAt + 72h. Pre-computed so the placeCall pre-flight is one
-  // indexed read, not a date-arithmetic SELECT. Until the grant webhook lands
-  // this is only the request's own validity window, NOT proof of a grant —
-  // the `status` field is what gates calling.
+  // While `pending`: the REQUEST's own validity (it lapses 7 days after
+  // delivery if the customer never answers). Once `granted`: the provider's
+  // own grant expiry, taken verbatim from the permission webhook — never
+  // recomputed locally, because no webhook is sent when a temporary permission
+  // lapses, so a guessed duration silently throws away days of a live grant.
+  // Ignored entirely when `isPermanent`.
+  //
+  // This is a CACHE, not the gate. Permission can also be granted in ways that
+  // touch no row here at all (automatically when the customer calls us, or from
+  // the business profile), so the authoritative pre-flight reads the provider.
   expiresAt         DateTime
-  // Stamped when Meta's permission_granted webhook lands (the real grant time).
-  // Null until then. The 72h validity clock for calling runs from here.
+  // True when the customer granted ONGOING permission rather than a bounded
+  // window. A permanent grant has no expiry — modelled as a flag rather than a
+  // far-future `expiresAt` so the UI can say "always allowed" instead of
+  // rendering a countdown to the next century.
+  isPermanent       Boolean              @default(false)
+  // Stamped when the provider's grant webhook lands (the real grant time).
   grantedAt         DateTime?
   // Set when Meta returned 1/24h or 2/7d; cleared on next successful request.
   rateLimitedUntil  DateTime?

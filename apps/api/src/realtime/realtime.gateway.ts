@@ -18,6 +18,7 @@ import type {
 import type { Role } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
+import { getOnlineUserIds } from "@/lib/conversations/presence-bridge";
 import { PresenceService } from "./presence.service";
 import { RealtimeEmitter, type TypedIO } from "./emitter.service";
 import { channelRoom, conversationRoom, teamRoom, userRoom } from "./rooms";
@@ -111,6 +112,60 @@ export class RealtimeGateway
       conversationId,
       on,
     });
+  }
+
+  // A website visitor's socket connected/disconnected → tell the agents viewing
+  // that conversation, so they can see whether the visitor is still there instead
+  // of waiting on a dead thread. Called by WebchatwidgetGateway on connect/
+  // disconnect. Ephemeral (like typing) — not persisted.
+  //
+  // The last-known state is ALSO cached here so an agent who opens the thread AFTER
+  // the visitor connected (having missed the live frame) still gets seeded on
+  // subscribe:conversation. Bounded: single process, ~30 orgs, short chats; a light
+  // cap evicts the oldest offline entries so it can't grow without limit.
+  private readonly visitorPresence = new Map<string, { present: boolean; leftAt: number | null }>();
+  private static readonly VISITOR_PRESENCE_CAP = 5_000;
+
+  notifyVisitorPresence(conversationId: string, present: boolean): void {
+    const leftAt = present ? null : Date.now();
+    this.visitorPresence.set(conversationId, { present, leftAt });
+    if (this.visitorPresence.size > RealtimeGateway.VISITOR_PRESENCE_CAP) this.evictPresence();
+    this.emitter.emitToConversation(conversationId, "conversation:visitor_presence", {
+      conversationId,
+      present,
+      leftAt,
+    });
+  }
+
+  /** Drop offline entries (oldest leftAt first) once the map exceeds its cap — a
+   *  currently-present visitor is always kept. */
+  private evictPresence(): void {
+    const offline = [...this.visitorPresence.entries()]
+      .filter(([, v]) => !v.present)
+      .sort((a, b) => (a[1].leftAt ?? 0) - (b[1].leftAt ?? 0));
+    for (const [id] of offline) {
+      if (this.visitorPresence.size <= RealtimeGateway.VISITOR_PRESENCE_CAP) break;
+      this.visitorPresence.delete(id);
+    }
+  }
+
+  // ── Agent availability → the widget ────────────────────────────────────────
+  // The visitor's green dot should mean "an agent is reachable", not "my socket is
+  // up". WebchatwidgetGateway binds a relay that pushes availability to that team's
+  // visitor sockets; we call it whenever a team's presence flips (broadcastPresence),
+  // so the dot updates live as agents come and go.
+  private widgetAvailabilityRelay: ((teamId: string, online: boolean) => void) | null = null;
+  bindWidgetAvailabilityRelay(fn: (teamId: string, online: boolean) => void): void {
+    this.widgetAvailabilityRelay = fn;
+  }
+  private relayWidgetAvailability(teamId: string): void {
+    if (!this.widgetAvailabilityRelay) return;
+    this.widgetAvailabilityRelay(teamId, this.teamHasOnlineAgent(teamId));
+  }
+
+  /** True when ≥1 agent on the team is connected right now. Cheap, synchronous. */
+  teamHasOnlineAgent(teamId: string): boolean {
+    return (getOnlineUserIds(teamId)?.size ?? 0) > 0;
   }
 
   constructor(
@@ -357,6 +412,19 @@ export class RealtimeGateway
     // without a team-wide broadcast that leaks metadata to non-members.
     client.join(userRoom(identity.userId));
 
+    // connectionStateRecovery re-joins this socket's previous rooms with no
+    // handler involved, so a membership revoked while it was disconnected was
+    // never enforced. Re-validate the restored channel rooms immediately
+    // rather than waiting for the client to re-subscribe (which it may never
+    // do — a backgrounded tab just keeps receiving). Detached: a slow DB read
+    // must not hold up the connect path.
+    if (client.recovered) {
+      void this.pruneRecoveredChannelRooms(client, identity.teamId, identity.userId).catch(
+        (err) =>
+          this.logger.error(`pruneRecoveredChannelRooms failed: ${err}`),
+      );
+    }
+
     const cameOnline = this.presence.add(
       identity.teamId,
       identity.userId,
@@ -394,6 +462,56 @@ export class RealtimeGateway
     // emit even though the onlineUserIds list didn't change.
     if (presenceSeq !== null) {
       this.broadcastPresence(identity.teamId, presenceSeq, onlineUserIds);
+    }
+  }
+
+  /**
+   * Drop any `chan:` room a recovered socket was re-joined to that its user is
+   * no longer entitled to. See the call site in `handleConnection` for why
+   * recovery makes this necessary; `subscribe:channel` enforces the same rule
+   * on the client-driven path.
+   *
+   * One query for the channels, one for the memberships — not per room.
+   */
+  private async pruneRecoveredChannelRooms(
+    client: Socket,
+    teamId: string,
+    userId: string,
+  ): Promise<void> {
+    const channelIds: string[] = [];
+    for (const room of client.rooms) {
+      if (room.startsWith("chan:")) channelIds.push(room.slice("chan:".length));
+    }
+    if (channelIds.length === 0) return;
+
+    const [channels, memberships] = await Promise.all([
+      this.db.teamChannel.findMany({
+        where: { id: { in: channelIds }, teamId },
+        select: { id: true, isDefault: true },
+      }),
+      this.db.teamChannelMember.findMany({
+        where: { channelId: { in: channelIds }, userId },
+        select: { channelId: true },
+      }),
+    ]);
+    const memberOf = new Set(memberships.map((m) => m.channelId));
+    const defaults = new Set(
+      channels.filter((c) => c.isDefault).map((c) => c.id),
+    );
+    // A channel that no longer exists (or belongs to another team) is not in
+    // `channels` at all — that also fails the check, which is what we want.
+    const visible = new Set(channels.map((c) => c.id));
+
+    for (const channelId of channelIds) {
+      const allowed =
+        visible.has(channelId) &&
+        (defaults.has(channelId) || memberOf.has(channelId));
+      if (!allowed) {
+        client.leave(channelRoom(channelId));
+        this.logger.warn(
+          `pruned recovered socket ${client.id} from chan:${channelId} (user ${userId} not a member)`,
+        );
+      }
     }
   }
 
@@ -538,6 +656,8 @@ export class RealtimeGateway
       teamId,
       onlineUserIds,
     });
+    // Keep the widget's "an agent is available" dot in step with real presence.
+    this.relayWidgetAvailability(teamId);
   }
 
   private async buildVisibleOnlineSnapshot(teamId: string): Promise<string[]> {
@@ -822,14 +942,27 @@ export class RealtimeGateway
       try {
         const owns = await this.db.conversation.findFirst({
           where: { id: body.conversationId, teamId },
-          select: { id: true },
+          select: { id: true, channel: true },
         });
         if (!owns) return; // silently drop — fail-soft posture
+        client.join(room);
+        // Seed website-widget visitor presence to THIS agent. The live frame only
+        // fires on the visitor's connect/disconnect, so an agent opening a thread
+        // whose visitor is already connected would otherwise never see the chip.
+        // Emit the last-known state (Online / Left Xm ago), or "Away" when we've
+        // never seen this visitor's socket this process.
+        if (owns.channel === "webchatwidget") {
+          const p = this.visitorPresence.get(body.conversationId);
+          client.emit("conversation:visitor_presence", {
+            conversationId: body.conversationId,
+            present: p?.present ?? false,
+            leftAt: p?.present ? null : p?.leftAt ?? null,
+          });
+        }
       } catch (err) {
         this.logger.error(`subscribe:conversation lookup failed: ${err}`);
         return;
       }
-      client.join(room);
     }
 
     // Always re-emit typing snapshot — handles both first-subscribe and
@@ -988,31 +1121,52 @@ export class RealtimeGateway
     // showing stale typing pills until the next change ticked.
     const alreadyJoined = client.rooms.has(room);
 
-    if (!alreadyJoined) {
-      if (!checkSubscribeBudget(client, "subscribe:channel")) return;
-      try {
-        // Membership check mirrors `requireChannelMembership` in
-        // ChannelsService — default channels short-circuit; everyone else
-        // must have a TeamChannelMember row. Silently no-op on failure
-        // (don't teach a non-member that the channel exists).
-        const channel = await this.db.teamChannel.findFirst({
-          where: { id: body.channelId, teamId },
-          select: { id: true, isDefault: true },
+    // Only a NEW join costs budget — a reconnect re-subscribe shouldn't be
+    // charged for a room it is already in.
+    if (!alreadyJoined && !checkSubscribeBudget(client, "subscribe:channel")) {
+      return;
+    }
+
+    // Membership is re-checked on EVERY subscribe, including the re-subscribe
+    // that follows a reconnect. It used to be skipped whenever the socket was
+    // already in the room — but socket.io's connectionStateRecovery RESTORES a
+    // socket's rooms without running any handler, and `evictUserFromChannelRoom`
+    // can only reach sockets that are live at the moment membership is revoked.
+    // So: revoke someone's access to a private channel while their laptop is
+    // asleep, and on wake their socket was silently back in `chan:<id>` and
+    // stayed there — receiving every message in a channel they'd been removed
+    // from, indefinitely, because the "already joined" short-circuit meant the
+    // check never ran again. Now a failed check LEAVES the room.
+    // (Residual, inherent to recovery: frames buffered during the ≤30s
+    // disconnect window are replayed before any handler runs. Closing that
+    // completely means turning recovery off — a separate tradeoff.)
+    try {
+      // Mirrors `requireChannelMembership` in ChannelsService — default
+      // channels short-circuit; everyone else must have a TeamChannelMember
+      // row. Silently no-op on failure (don't teach a non-member that the
+      // channel exists).
+      const channel = await this.db.teamChannel.findFirst({
+        where: { id: body.channelId, teamId },
+        select: { id: true, isDefault: true },
+      });
+      let allowed = channel !== null;
+      if (channel && !channel.isDefault) {
+        const member = await this.db.teamChannelMember.findUnique({
+          where: { channelId_userId: { channelId: body.channelId, userId } },
+          select: { userId: true },
         });
-        if (!channel) return;
-        if (!channel.isDefault) {
-          const member = await this.db.teamChannelMember.findUnique({
-            where: { channelId_userId: { channelId: body.channelId, userId } },
-            select: { userId: true },
-          });
-          if (!member) return;
-        }
-      } catch (err) {
-        this.logger.error(`subscribe:channel lookup failed: ${err}`);
+        allowed = member !== null;
+      }
+      if (!allowed) {
+        if (alreadyJoined) client.leave(room);
         return;
       }
-      client.join(room);
+    } catch (err) {
+      this.logger.error(`subscribe:channel lookup failed: ${err}`);
+      return;
     }
+
+    if (!alreadyJoined) client.join(room);
 
     client.emit("team:channel:typing:update", {
       channelId: body.channelId,

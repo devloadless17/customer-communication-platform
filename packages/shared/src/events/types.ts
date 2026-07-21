@@ -457,6 +457,44 @@ export interface ContactUpdatedEvent {
  * Workflow + audit subscribers do NOT subscribe to this — they read per-
  * contact `contact.updated` events for granular trigger dispatch.
  */
+/**
+ * Progress / terminal state of a contact import or export job.
+ *
+ * Realtime ONLY. Deliberately has no audit, analytics, workflow, or outbound-
+ * webhook subscriber: it fires every couple of seconds for the duration of a
+ * run, and wiring it to the background tiers would turn one 100k-row import
+ * into a stream of audit rows and webhook deliveries — the same failure mode
+ * the "never subscribe audit or workflow to broadcast.*" invariant exists to
+ * prevent (CLAUDE.md §9).
+ *
+ * Fans out to the INITIATOR's `user:` room, not the team room: an agent's
+ * export progress is not something every open tab needs a frame for.
+ */
+export interface ContactTransferUpdatedEvent {
+  teamId: string;
+  /** The user who started the job — the only socket recipient. */
+  userId: string;
+  job: {
+    id: string;
+    kind: "import" | "export";
+    format: "csv" | "xlsx";
+    status: "pending" | "running" | "completed" | "failed" | "canceled";
+    filename: string;
+    processedRows: number;
+    totalRows: number | null;
+    created: number;
+    updated: number;
+    revived: number;
+    skipped: number;
+    failed: number;
+    /** Row count crossed the fanout cap, so per-row events were NOT published. */
+    automationsSkipped: boolean;
+    hasArtifact: boolean;
+    hasErrorReport: boolean;
+    error: string | null;
+  };
+}
+
 export interface ContactBulkUpdatedEvent {
   teamId: string;
   contactIds: string[];
@@ -787,6 +825,18 @@ export interface TeamChannelMessageEditedEvent {
   messageId: string;
   body: string;
   editedAt: string;
+  /** Author of the message, so the activity fanout below can be attributed. */
+  authorUserId?: string | null;
+  /**
+   * Users this edit @-mentioned who were NOT mentioned before it. An edit that
+   * ADDS a mention is the only way to be mentioned without a new message, and
+   * it used to be completely silent — no frame, and the unread-mention counter
+   * joins on the message's original `createdAt`, which is already behind the
+   * reader's receipt. Carried so the fanout can badge exactly those people and
+   * nobody else (re-badging everyone on a typo fix would resurrect read
+   * mentions).
+   */
+  newlyMentionedUserIds?: string[];
 }
 
 export interface TeamChannelMessageDeletedEvent {
@@ -863,6 +913,15 @@ export interface TeamChannelDmCreatedEvent {
   teamId: string;
   channelId: string;
   memberUserIds: string[];
+  /**
+   * Who opened the DM. The frame fans out to BOTH participants, so without an
+   * author the starter's own client can't tell "someone DM'd me" from "I just
+   * clicked New DM" — and toasted/dinged itself. Carried on the payload rather
+   * than inferred client-side because the socket frame routinely beats the
+   * POST response back to the starter's tab, so any local "I did this" marker
+   * is a race.
+   */
+  createdByUserId: string;
 }
 
 /**
@@ -1167,6 +1226,7 @@ export interface DomainEventMap {
   "contact.tag_changed": ContactTagChangedEvent;
   "contact.lifecycle_changed": ContactLifecycleChangedEvent;
   "contact.bulk_updated": ContactBulkUpdatedEvent;
+  "contact.transfer_updated": ContactTransferUpdatedEvent;
   "contact.deleted": ContactDeletedEvent;
   "note.created": NoteCreatedEvent;
   "note.deleted": NoteDeletedEvent;

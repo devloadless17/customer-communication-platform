@@ -36,6 +36,13 @@ export const ALLOWED_MIME_BY_KIND: Record<string, ReadonlySet<string>> = {
     "video/mp4",
     "video/3gpp",
     "video/quicktime",
+    // webm is what a desktop screen recording and MediaRecorder produce, and the
+    // website widget renders it natively. This set is the STORAGE guard (its job
+    // is blocking scriptable types like SVG — webm is benign raster), so it is the
+    // wrong place to encode WhatsApp's mp4-only rule: that lives per channel in
+    // `policy.videoMime`, which already lists webm for the permissive channels.
+    // Without it a visitor's screen recording failed with a bare "Upload failed."
+    "video/webm",
   ]),
   audio: new Set([
     "audio/aac",

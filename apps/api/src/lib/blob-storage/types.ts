@@ -99,6 +99,22 @@ export interface BlobStorageProvider {
     contentType: string;
   }): Promise<UploadResult>;
   /**
+   * Same as `putObject` but streams the body from a LOCAL FILE PATH instead of
+   * taking it as bytes. For first-party artifacts too large to hold in heap —
+   * a 100k-contact export is ~25 MB as CSV, and reading that into a Uint8Array
+   * just to hand it to the SDK defeats the point of having streamed it to disk
+   * in the first place (the API container's limit is 2 GB and it also serves
+   * the inbox, CLAUDE.md §16).
+   *
+   * The file must exist and be stable for the duration of the call; the caller
+   * owns deleting it afterwards.
+   */
+  putObjectFromFile(input: {
+    key: string;
+    path: string;
+    contentType: string;
+  }): Promise<UploadResult>;
+  /**
    * Stream a stored object back for a same-origin proxy response (how browsers
    * fetch media — we never hand the browser a storage URL). Accepts a key or
    * one of our own stable object URLs. `range` forwards the client's Range
@@ -150,6 +166,10 @@ export interface BlobStorageProvider {
   listKeys?(opts: {
     limit: number;
     cursor?: string;
+    /** Restrict the listing to one key namespace (e.g. `contact-imports/`).
+     *  Lets a category-owned sweeper walk only its own objects instead of
+     *  paging the whole bucket to find them. */
+    prefix?: string;
   }): Promise<{
     // Blob categories NOT cross-checked against a `mediaKey` column (avatars,
     // which persist only a URL) are told apart by KEY PREFIX (`avatars/`), so

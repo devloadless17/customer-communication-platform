@@ -35,6 +35,21 @@ export interface OutboxLagReport {
 }
 
 /**
+ * Redis memory headroom against the configured `maxmemory` cap. PING stays green
+ * right up to 100% under `noeviction` (reads still work), so without this the
+ * first observable symptom of a full Redis is platform-wide 503s on sends,
+ * workflow and broadcast enqueues — behind an `ok:true` health body.
+ */
+export interface RedisMemoryReport {
+  /**
+   * `used_memory` as a % of `maxmemory`. Null when maxmemory is 0 (unbounded, so
+   * there is no watermark to breach) or the INFO probe failed — either way we do
+   * not degrade on it.
+   */
+  usedPercent: number | null;
+}
+
+/**
  * Thresholds for `degraded`. Chosen to fire BEFORE users notice, not after:
  * a pool at 85% still serves requests but is one burst from queueing them.
  */
@@ -56,6 +71,14 @@ const DEGRADED_JOB_FAILURES_LAST_HOUR = 25;
  */
 export const DEGRADED_BROADCAST_PAUSED_MIN = 35;
 
+/**
+ * Redis at this % of `maxmemory` needs attention BEFORE it hits the cap: under
+ * `noeviction` a full Redis fails every write (send/workflow/broadcast enqueue)
+ * platform-wide, and PING keeps reporting healthy the whole way up. Fire early
+ * so operators see the climb instead of the cliff.
+ */
+export const DEGRADED_REDIS_MEMORY_PERCENT = 80;
+
 /** Pure — shared by the endpoint and the watchdog so both agree by construction. */
 export function computeDegradations(report: {
   db: boolean;
@@ -65,10 +88,25 @@ export function computeDegradations(report: {
   jobFailures: Record<string, JobFailureReport>;
   ffmpeg: { active: number; queued: number };
   stuckBroadcasts: StuckBroadcastReport;
+  /**
+   * Optional so the endpoint can wire the INFO-memory probe in without a
+   * lockstep change here; omitted/null = no maxmemory watermark to check.
+   */
+  redisMemory?: RedisMemoryReport;
 }): string[] {
   const out: string[] = [];
   if (!report.db) out.push("postgres unreachable");
   if (!report.redis) out.push("redis unreachable — queues, workflows and sends are dark");
+  // WHY: PING passes at 100% maxmemory under noeviction, so degrade on the
+  // memory watermark itself — 100% fails every enqueue platform-wide.
+  if (
+    report.redisMemory?.usedPercent != null &&
+    report.redisMemory.usedPercent >= DEGRADED_REDIS_MEMORY_PERCENT
+  ) {
+    out.push(
+      `redis memory ${report.redisMemory.usedPercent}% of maxmemory — enqueues fail at 100%`,
+    );
+  }
   if (report.pgPool.saturationPercent >= DEGRADED_POOL_SATURATION_PERCENT) {
     out.push(`db pool ${report.pgPool.saturationPercent}% saturated`);
   }

@@ -94,6 +94,7 @@ export type Capability =
   | "conversations:delete"
   | "contacts:delete"
   | "contacts:export"
+  | "contacts:import"
   | "broadcasts:manage"
   | "templates:manage"
   | "audienceGroups:manage"
@@ -111,6 +112,7 @@ export const ALL_CAPABILITIES: Capability[] = [
   "conversations:delete",
   "contacts:delete",
   "contacts:export",
+  "contacts:import",
   "broadcasts:manage",
   "templates:manage",
   "audienceGroups:manage",
@@ -133,7 +135,8 @@ export type EditableRole = (typeof EDITABLE_ROLES)[number];
 export const CAPABILITY_LABELS: Record<Capability, string> = {
   "conversations:delete": "Delete conversations",
   "contacts:delete": "Delete contacts",
-  "contacts:export": "Export the contact book (CSV)",
+  "contacts:export": "Export the contact book (CSV / Excel)",
+  "contacts:import": "Import contacts from a CSV / Excel file",
   "broadcasts:manage": "Create & manage broadcasts",
   "templates:manage": "Create & manage templates",
   "audienceGroups:manage": "Manage audience groups",
@@ -169,6 +172,11 @@ export const DEFAULT_CAPABILITIES: Record<Role, Record<Capability, boolean>> = {
     // the full contact CSV), so default `true` preserves today's behavior. An
     // admin can flip it off to stop low-trust agents exfiltrating the book.
     "contacts:export": true,
+    // Import was likewise UNGATED before this capability existed, so `true`
+    // preserves today's behavior for every existing team. Mirrors
+    // contacts:export deliberately — an admin locking down bulk contact
+    // movement almost always wants both directions closed together.
+    "contacts:import": true,
     "broadcasts:manage": true,
     "templates:manage": true,
     "audienceGroups:manage": true,

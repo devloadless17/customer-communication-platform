@@ -15,8 +15,10 @@ import { widgetVisitorSocketCount } from "../webchatwidget/widget-metrics";
 import {
   computeDegradations,
   type PgPoolReport,
+  type RedisMemoryReport,
   type StuckBroadcastReport,
 } from "./health-thresholds";
+import { probeRedisMemory } from "./redis-memory";
 import { probeStuckBroadcasts, STUCK_BROADCAST_PROBE_MIN } from "./stuck-broadcasts";
 
 interface HealthReport {
@@ -55,6 +57,12 @@ interface HealthReport {
   ffmpeg: { active: number; queued: number };
   /** Broadcasts parked `paused` past the alert threshold — see stuck-broadcasts.ts. */
   stuckBroadcasts: StuckBroadcastReport;
+  /** Redis memory as a % of maxmemory. Under `noeviction` (BullMQ requires it),
+   *  a PING still succeeds at 100% while every enqueue FAILS — so reachability
+   *  alone hides the most dangerous Redis failure mode. `usedPercent: null` when
+   *  maxmemory is unbounded or the INFO probe failed. Feeds degraded[] at ≥80%;
+   *  never 503s (the api still serves reads/realtime with a full Redis). */
+  redisMemory: RedisMemoryReport;
   /**
    * Human-readable list of breached thresholds — empty when healthy.
    *
@@ -85,9 +93,10 @@ export class HealthController {
 
   @Get()
   async check(): Promise<HealthReport> {
-    const [dbOk, redisOk, outboxLag, stuckBroadcasts] = await Promise.all([
+    const [dbOk, redisOk, redisMemory, outboxLag, stuckBroadcasts] = await Promise.all([
       this.pingDb(),
       this.pingRedis(),
+      this.probeRedisMemory(),
       this.probeOutboxLag(),
       probeStuckBroadcasts(this.db, STUCK_BROADCAST_PROBE_MIN),
     ]);
@@ -116,6 +125,7 @@ export class HealthController {
       widgetVisitorSockets: widgetVisitorSocketCount(),
       ffmpeg,
       stuckBroadcasts,
+      redisMemory,
       degraded: computeDegradations({
         db: dbOk,
         redis: redisOk,
@@ -124,6 +134,7 @@ export class HealthController {
         jobFailures,
         ffmpeg,
         stuckBroadcasts,
+        redisMemory,
       }),
     };
     if (!dbOk) {
@@ -223,5 +234,11 @@ export class HealthController {
         }
       })(),
     );
+  }
+
+  /** Redis memory watermark — shared with the HealthWatchdog so both degrade on
+   *  the same signal (see redis-memory.ts). Bounded by the same 2s probe budget. */
+  private async probeRedisMemory(): Promise<RedisMemoryReport> {
+    return probeRedisMemory(getRedisConnection(), HealthController.PROBE_TIMEOUT_MS);
   }
 }

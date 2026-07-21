@@ -1310,7 +1310,7 @@ function MessageThreadImpl({
     [alert, confirm, conversation.id, conversation.teamId, softRefresh],
   );
 
-  const { typingUserIds, visitorTyping, notifyTyping, stopTyping } = useTyping(
+  const { typingUserIds, visitorTyping, visitorPresent, visitorLeftAt, notifyTyping, stopTyping } = useTyping(
     conversation.id,
     currentUser.id,
   );
@@ -1726,6 +1726,9 @@ function MessageThreadImpl({
         {inboundAnnouncement}
       </p>
       <ThreadHeader
+        channel={conversation.channel ?? undefined}
+        visitorPresent={visitorPresent}
+        visitorLeftAt={visitorLeftAt}
         teamId={conversation.teamId}
         conversationId={conversation.id}
         contactId={contact.id}

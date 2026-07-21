@@ -1,10 +1,17 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import {
+  ephemeralVisitorLabel,
+  isEphemeralChannel,
   isSocialContactPlaceholder,
   socialContactPlaceholder,
 } from "@ccp/shared/providers/capabilities";
 import type { Channel } from "@ccp/shared/types";
 
+import { toContactWire } from "@/lib/queries/_shared";
+import { workflowContactSnapshot } from "@/lib/workflows/events";
+
+import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
 
 /**
@@ -26,6 +33,19 @@ function isRealContactName(
 }
 
 /** A channel-contact under a customer, shaped for the profile's channel switcher. */
+/** A possible same-person match for an agent to confirm. Never auto-applied. */
+export interface LinkSuggestion {
+  contactId: string;
+  customerId: string | null;
+  name: string;
+  identityChannel: string;
+  matchedOn: "phone" | "email";
+  matchedValue: string | null;
+  /** False when either side is a self-asserted (website widget) value. */
+  verified: boolean;
+  lastInboundAt: string | null;
+}
+
 export interface CustomerContactView {
   id: string;
   name: string;
@@ -69,7 +89,47 @@ export interface CustomerProfile {
 @Injectable()
 export class CustomersService {
   private readonly logger = new Logger(CustomersService.name);
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly bus: EventBus,
+  ) {}
+
+  /**
+   * Announce a manual merge/split re-point. link/unlink move `Contact.customerId`
+   * but nothing on the bus said so — so other agents' open contact panels, the
+   * group-by-person rollup, and identity-syncing partner webhooks kept the
+   * pre-merge view until a manual reload. Publish the same `contact.updated` the
+   * contact-share re-point does (docs/identity.md §6) so the existing socket
+   * fanout + outbound-webhook subscriber converge with no new wiring.
+   * Best-effort: a publish failure must never undo a committed merge.
+   */
+  private async publishContactUpdated(
+    teamId: string,
+    contactId: string,
+    actorUserId: string | null,
+  ): Promise<void> {
+    try {
+      const fresh = await this.db.contact.findFirst({
+        where: { id: contactId, teamId },
+        include: { tags: { select: { id: true } } },
+      });
+      if (!fresh) return;
+      await this.bus.publish({
+        type: "contact.updated",
+        teamId,
+        contact: toContactWire(fresh, { tagIds: fresh.tags.map((t) => t.id) }),
+        previousStageId: fresh.stageId,
+        fieldChanges: [],
+        changedByUserId: actorUserId,
+        workflowContact: workflowContactSnapshot(fresh),
+      });
+    } catch (err) {
+      this.logger.error(
+        `publish(contact.updated) failed for contact ${contactId} (team ${teamId})`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
+  }
 
   private async loadProfile(teamId: string, customerId: string): Promise<CustomerProfile> {
     const customer = await this.db.customer.findFirst({
@@ -112,9 +172,15 @@ export class CustomersService {
       const convo = c.conversations[0] ?? null;
       // Substitute the friendly placeholder for a still-un-enriched contact whose
       // name is its raw id — so the switcher never shows "1932759190769573".
+      // Same fallback chain as the contact wire mapper (queries/_shared.ts):
+      // real name → self-asserted email/phone → per-visitor label for an ephemeral
+      // channel → channel placeholder. Kept in step so the switcher and the inbox
+      // never disagree about what to call the same person.
       const contactName = isRealContactName(c.name, c.externalContactId)
         ? c.name
-        : socialContactPlaceholder(c.identityChannel as Channel | null);
+        : isEphemeralChannel(c.identityChannel as Channel)
+          ? c.email || c.phoneNumber || ephemeralVisitorLabel(c.externalContactId)
+          : socialContactPlaceholder(c.identityChannel as Channel | null);
       return {
         id: c.id,
         name: contactName,
@@ -235,13 +301,82 @@ export class CustomersService {
    * contact's `customerId`; if its previous customer is left with no contacts,
    * that empty customer is dropped. Reversible via `unlink`.
    */
+  /**
+   * Other contacts that look like the SAME PERSON as `contactId`, for an agent to
+   * confirm — never applied automatically.
+   *
+   * Two situations produce this, and they're the same query:
+   *   - The same visitor chats from three browsers and types their phone each time.
+   *     Each browser is its own `vis_<uuid>`, so each is its own Contact; without a
+   *     hint the agent sees three unrelated people with one phone number.
+   *   - A widget visitor claims a phone/email belonging to an existing customer.
+   *
+   * `verified` is the load-bearing field. A value typed into the widget's public
+   * pre-chat box proves nothing — anyone can type anyone's number — so a match that
+   * involves an ephemeral channel on EITHER side is reported as unverified, and the
+   * UI says so. This is deliberately a suggestion and not an auto-merge: auto-merging
+   * on an unverified key is the impersonation hole that `webchat-prechat.ts` and the
+   * `findExistingCustomerIdByStrongKey` candidate filter both exist to prevent.
+   * Confirming calls the ordinary, reversible `linkContact`.
+   */
+  async suggestLinks(teamId: string, contactId: string): Promise<LinkSuggestion[]> {
+    const me = await this.db.contact.findFirst({
+      where: { id: contactId, teamId, deletedAt: null },
+      select: { id: true, phoneNumber: true, email: true, customerId: true, identityChannel: true },
+    });
+    if (!me) return [];
+    const keys: Prisma.ContactWhereInput[] = [];
+    if (me.phoneNumber) keys.push({ phoneNumber: me.phoneNumber });
+    if (me.email) keys.push({ email: me.email });
+    if (keys.length === 0) return [];
+
+    const others = await this.db.contact.findMany({
+      where: {
+        teamId,
+        deletedAt: null,
+        id: { not: me.id },
+        // Already the same person — nothing to suggest.
+        ...(me.customerId ? { customerId: { not: me.customerId } } : {}),
+        OR: keys,
+      },
+      select: {
+        id: true, name: true, identityChannel: true, phoneNumber: true, email: true,
+        externalContactId: true, customerId: true, lastInboundAt: true,
+      },
+      orderBy: { lastInboundAt: "desc" },
+      take: 10,
+    });
+
+    const mineEphemeral = isEphemeralChannel(me.identityChannel as Channel);
+    return others.map((o) => {
+      const matchedOn: "phone" | "email" =
+        me.phoneNumber && o.phoneNumber === me.phoneNumber ? "phone" : "email";
+      const otherEphemeral = isEphemeralChannel(o.identityChannel as Channel);
+      return {
+        contactId: o.id,
+        customerId: o.customerId,
+        name: isRealContactName(o.name, o.externalContactId)
+          ? o.name
+          : otherEphemeral
+            ? o.email || o.phoneNumber || ephemeralVisitorLabel(o.externalContactId)
+            : socialContactPlaceholder(o.identityChannel as Channel | null),
+        identityChannel: o.identityChannel,
+        matchedOn,
+        matchedValue: matchedOn === "phone" ? o.phoneNumber : o.email,
+        // Self-asserted on either side ⇒ the agent must not treat it as proof.
+        verified: !mineEphemeral && !otherEphemeral,
+        lastInboundAt: o.lastInboundAt?.toISOString() ?? null,
+      };
+    });
+  }
+
   async linkContact(
     teamId: string,
     customerId: string,
     contactId: string,
     actorUserId: string | null = null,
   ): Promise<CustomerProfile> {
-    await this.db.$transaction(async (tx) => {
+    const moved = await this.db.$transaction(async (tx) => {
       const [customer, contact] = await Promise.all([
         tx.customer.findFirst({ where: { id: customerId, teamId }, select: { id: true } }),
         tx.contact.findFirst({
@@ -251,7 +386,7 @@ export class CustomersService {
       ]);
       if (!customer) throw new NotFoundException({ error: "customer_not_found" });
       if (!contact) throw new NotFoundException({ error: "contact_not_found" });
-      if (contact.customerId === customerId) return; // already linked — no-op
+      if (contact.customerId === customerId) return false; // already linked — no-op
 
       const previousCustomerId = contact.customerId;
       // Capture the source person's name BEFORE the reap below deletes its row.
@@ -289,8 +424,12 @@ export class CustomersService {
           await tx.customer.deleteMany({ where: { id: previousCustomerId, teamId } });
         }
       }
+      return true;
     });
     this.logger.log(`link contact ${contactId} → customer ${customerId} (team ${teamId})`);
+    // Only after the re-point commits, and only when it actually moved (never a
+    // speculative/unchanged frame for a no-op re-link).
+    if (moved) await this.publishContactUpdated(teamId, contactId, actorUserId);
     return this.loadProfile(teamId, customerId);
   }
 
@@ -355,6 +494,9 @@ export class CustomersService {
       return fresh.id;
     });
     this.logger.log(`unlink contact ${contactId} → new customer ${newCustomerId} (team ${teamId})`);
+    // The split re-pointed the contact to a fresh customer — announce it so
+    // panels/rollup/webhooks converge (see publishContactUpdated).
+    await this.publishContactUpdated(teamId, contactId, actorUserId);
     return { customerId: newCustomerId };
   }
 }

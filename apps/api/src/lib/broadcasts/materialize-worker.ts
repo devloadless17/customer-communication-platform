@@ -185,7 +185,19 @@ async function finalizeMaterialized(
     where: { id: broadcastId, status: "materializing" },
     data: { status: nextStatus, totalCount, materializeRecipients: Prisma.DbNull },
   });
-  if (flipped.count === 0) return; // canceled / already flipped by a prior attempt
+  if (flipped.count === 0) {
+    // CAS lost to a racing cancel (or a prior attempt already flipped). If a cancel
+    // landed between the last chunk-boundary status check and this finalize, the
+    // final chunk's rows were inserted AFTER cancel()'s one-shot finalize and are
+    // stranded `queued` in a canceled broadcast — reconcile them so the counters
+    // stay honest, same as the mid-loop branch. No-op when there's nothing to clean.
+    const cur = await db.broadcast.findUnique({
+      where: { id: broadcastId },
+      select: { status: true },
+    });
+    if (cur?.status === "canceled") await reconcileCanceledMaterialize(broadcastId);
+    return;
+  }
 
   if (isFuture && scheduledAt) {
     try {

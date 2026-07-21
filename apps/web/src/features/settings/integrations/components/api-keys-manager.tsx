@@ -46,6 +46,9 @@ const SCOPE_LABELS: Record<string, string> = {
   "write:notes": "Write notes",
   "read:catalog": "Read tags / stages / fields",
   "write:catalog": "Write tags / stages / fields",
+  "read:broadcasts": "Read broadcast campaigns + reports",
+  "read:calls": "Read call history + calling permission",
+  "write:calls": "Request calling permission / send call buttons",
 };
 
 interface Props {

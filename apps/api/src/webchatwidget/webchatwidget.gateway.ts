@@ -22,8 +22,11 @@ import { publish } from "@/lib/events/bus";
 import { mapMessage } from "@/lib/queries/_shared";
 import { REPLY_TO_INCLUDE } from "@/lib/queries/_shared";
 import { applyWebchatPreChatIdentity } from "@/lib/identity/webchat-prechat";
+import { recordConversationEvent } from "@/lib/inbox/events";
 import {
+  recordFirstSeenOrigin,
   resolveWebchatwidgetByPublicKey,
+  widgetAllowsMediaKind,
   type WebchatwidgetResolved,
 } from "@/lib/providers/webchatwidget-config";
 import { createTokenBucket } from "../common/token-bucket";
@@ -37,6 +40,31 @@ const CHANNEL = "webchatwidget" as const;
 const HISTORY_LIMIT = 50;
 /** Max chars accepted on a single visitor message (matches the capability cap). */
 const MAX_BODY_CHARS = 4096;
+
+/** How far back a client-claimed send time may reach (the offline-outbox window). */
+const MAX_CLIENT_BACKDATE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * When the visitor typed a message, for messages that queued offline.
+ *
+ * Stamping `new Date()` at ingest was wrong for the offline case: three messages
+ * typed while disconnected all landed at reconnect time and could interleave, so
+ * the agent saw them out of the order they were written. The client therefore
+ * sends the time it composed the message.
+ *
+ * That value is UNTRUSTED — a visitor controls their own clock, and a wild one
+ * would sort their thread to the top of the inbox forever (or bury it). So it is
+ * only honoured when it is in the past, within the outbox window, and never in
+ * the future; anything else falls back to server time. Worst case a skewed clock
+ * costs that visitor slightly-off ordering inside their own thread, which is the
+ * same failure they already had.
+ */
+function resolveClientTimestamp(clientTs: number | undefined): Date {
+  const now = Date.now();
+  if (typeof clientTs !== "number" || !Number.isFinite(clientTs)) return new Date(now);
+  if (clientTs > now || clientTs < now - MAX_CLIENT_BACKDATE_MS) return new Date(now);
+  return new Date(clientTs);
+}
 
 /** Handshake rate limit: generous per-IP so a reconnect flap is fine, but bounded. */
 const handshakeBucket = createTokenBucket({ perMin: 120 });
@@ -93,8 +121,18 @@ interface VisitorMessageBody {
     voice?: boolean;
   };
   replyToExternalId?: string;
+  /**
+   * When the visitor actually typed this, epoch ms. Only meaningful for a message
+   * that sat in the offline outbox — see `resolveClientTimestamp`. Untrusted.
+   */
+  clientTs?: number;
   /** Sent only on the FIRST message (pre-chat form). */
-  preChat?: { name?: string; email?: string; phone?: string };
+  /** Sent only on the FIRST message (pre-chat form). `custom` holds any non-
+   *  identity ("text") fields, keyed by label → contact custom field. */
+  preChat?: { name?: string; email?: string; phone?: string; custom?: Record<string, string> };
+  /** True when this first message follows the visitor's explicit "Start a new
+   *  conversation" — records a timeline note on the fresh conversation. */
+  startedNew?: boolean;
 }
 
 /**
@@ -133,6 +171,16 @@ export class WebchatwidgetGateway
     this.realtime.bindWidgetTypingRelay((conversationId, on) =>
       this.deliverToVisitor(conversationId, "typing", { on }),
     );
+    // Agent availability → every visitor socket of that team, so the widget's dot
+    // means "an agent is reachable" rather than "my own socket is up". Fired when
+    // the team's presence flips (realtime broadcastPresence).
+    this.realtime.bindWidgetAvailabilityRelay((teamId, online) => {
+      if (!this.server) return;
+      for (const sock of this.server.sockets.values()) {
+        const d = sock.data as WidgetSocketData | undefined;
+        if (d?.teamId === teamId) sock.emit("agents", { online });
+      }
+    });
     // Handshake auth runs as namespace middleware so a rejection delivers a typed
     // `connect_error` to the widget. The site key + origin allow-list IS the auth
     // (no cookies). Per-IP token bucket bounds a hostile reconnect loop.
@@ -180,6 +228,13 @@ export class WebchatwidgetGateway
             next(new Error("origin_not_allowed"));
             return;
           }
+          // Trust-on-first-use: learn the domain this widget is really embedded on
+          // so Settings can offer a one-click origin lock. Fire-and-forget — a
+          // visitor's handshake must never wait on (or fail from) a bookkeeping
+          // write, and the helper no-ops once the widget is locked or already known.
+          void recordFirstSeenOrigin(siteKey, resolved, origin).catch((err) =>
+            this.logger.warn(`first-seen-origin record failed: ${err}`),
+          );
           const data: WidgetSocketData = {
             teamId: resolved.teamId,
             widgetId: resolved.widgetId,
@@ -215,6 +270,8 @@ export class WebchatwidgetGateway
       name: data.resolved.name,
       config: data.resolved.config,
     });
+    // Seed the availability dot for THIS visitor (the relay only fires on changes).
+    client.emit("agents", { online: this.realtime.teamHasOnlineAgent(data.teamId) });
     // Resume an existing conversation for this (widget, visitor): join its room
     // and replay recent history so replies sent while the widget was closed show
     // on reopen. Room is derived server-side from the resolved contact — a visitor
@@ -224,6 +281,8 @@ export class WebchatwidgetGateway
       if (conversationId) {
         data.conversationId = conversationId;
         await client.join(widgetRoom(conversationId));
+        // Tell agents viewing this thread the visitor is back on the page.
+        this.realtime.notifyVisitorPresence(conversationId, true);
         client.emit("history", await this.history(data.teamId, conversationId));
       } else {
         client.emit("history", { messages: [], hasMore: false });
@@ -251,6 +310,12 @@ export class WebchatwidgetGateway
     const text = typeof body.body === "string" ? body.body.slice(0, MAX_BODY_CHARS) : "";
     const hasMedia = body.media && typeof body.media.mediaKey === "string";
     if (!text && !hasMedia) return { ok: false, error: "empty" };
+    // Re-check the org's attachment policy at SEND time, not just at upload. The
+    // upload endpoint is the primary gate, but a client could hold a mediaKey from
+    // before the policy changed — this makes the two agree.
+    if (hasMedia && !widgetAllowsMediaKind(data.resolved.config, body.media!.kind)) {
+      return { ok: false, error: "media_kind_not_allowed" };
+    }
 
     // TENANT GATE (§7): `mediaKey` arrives from the browser, so it is untrusted
     // input — without this check a visitor could name ANY key in the bucket
@@ -299,7 +364,7 @@ export class WebchatwidgetGateway
       externalContactId: data.externalContactId,
       contactName: body.preChat?.name?.trim() || null,
       body: text,
-      timestamp: new Date(),
+      timestamp: resolveClientTimestamp(body.clientTs),
       rawPayload: { source: "webchatwidget", clientMsgId: body.clientMsgId } as Record<
         string,
         unknown
@@ -335,6 +400,10 @@ export class WebchatwidgetGateway
     if (!conversationId) return { ok: false, error: "no_conversation" };
     data.conversationId = conversationId;
     await client.join(widgetRoom(conversationId));
+    // A brand-new visitor's conversation is created HERE (not on connect, which ran
+    // before it existed), so announce presence now — otherwise an agent opening this
+    // fresh thread would see "Away" while the visitor is actively typing to them.
+    this.realtime.notifyVisitorPresence(conversationId, true);
     // Stamp which widget this conversation came from (writes once — the filter
     // matches only while it's still null).
     await this.db.conversation
@@ -343,6 +412,18 @@ export class WebchatwidgetGateway
         data: { webchatWidgetId: data.widgetId },
       })
       .catch((err) => this.logger.error(`stamp widgetId failed: ${err}`));
+
+    // The visitor deliberately started over ("Start a new conversation") → drop a
+    // timeline note on this fresh thread so an agent knows it's a restart, not a
+    // first-ever contact. Only on a genuinely new conversation, best-effort.
+    if (isNewConversation && body.startedNew === true) {
+      await recordConversationEvent({
+        conversationId,
+        teamId: data.teamId,
+        userId: null,
+        kind: "visitor_started_conversation",
+      });
+    }
 
     if (body.preChat) {
       const contactId = await this.contactIdFor(data.teamId, data.externalContactId);
@@ -383,6 +464,11 @@ export class WebchatwidgetGateway
   ): void {
     const data = client.data as WidgetSocketData | undefined;
     if (!data?.conversationId) return;
+    // Rate-gate like the other visitor frames: the on/off state-flip dedupe below
+    // is bypassed by an attacker alternating {on:true}/{on:false}, so without a
+    // bucket one anonymous socket can flood notifyVisitorTyping at wire speed. A
+    // real typist's ~2 flips/sec never trips the shared 120/min bucket.
+    if (!this.allowCheapFrame(data)) return;
     const on = body?.on === true;
     if (on === (data.typingOn ?? false)) return;
     data.typingOn = on;
@@ -392,9 +478,17 @@ export class WebchatwidgetGateway
   /** Clear a lingering "customer is typing…" if the visitor drops mid-type. */
   handleDisconnect(client: Socket): void {
     const data = client.data as WidgetSocketData | undefined;
-    if (data?.conversationId && data.typingOn) {
-      data.typingOn = false;
-      this.realtime.notifyVisitorTyping(data.conversationId, false);
+    if (data?.conversationId) {
+      if (data.typingOn) {
+        data.typingOn = false;
+        this.realtime.notifyVisitorTyping(data.conversationId, false);
+      }
+      // The visitor's tab closed / navigated away → agents stop waiting on them.
+      // Only when THIS was the visitor's last socket for the conversation (a
+      // reconnect/second tab must not flap "left"): re-check room membership.
+      if (this.server && this.server.adapter.rooms.get(widgetRoom(data.conversationId)) == null) {
+        this.realtime.notifyVisitorPresence(data.conversationId, false);
+      }
     }
   }
 
@@ -427,7 +521,7 @@ export class WebchatwidgetGateway
 
   /**
    * Rate gate for the non-message visitor frames (`visitor:received`,
-   * `visitor:read`, `visitor:loadOlder`).
+   * `visitor:read`, `visitor:loadOlder`, `visitor:typing`).
    *
    * These were completely UNLIMITED on an anonymous socket, while the agent
    * gateway rate-limits every one of its handlers. `visitor:read` is the
@@ -555,9 +649,23 @@ export class WebchatwidgetGateway
       });
       for (const u of users) names.set(u.id, u.name);
     }
+    // Which outbound messages were AI-authored, so a refresh keeps the "AI" label.
+    // History omits rawPayload (where the live path reads `sentVia`), so we read the
+    // canonical `AiMessageMetadata.aiGenerated` — written after the send, thus always
+    // present for past messages. One indexed query for the page's outbound ids.
+    const outIds = asc.filter((r) => r.direction === "out").map((r) => r.id);
+    const aiIds = new Set<string>();
+    if (outIds.length > 0) {
+      const meta = await this.db.aiMessageMetadata.findMany({
+        where: { messageId: { in: outIds }, aiGenerated: true },
+        select: { messageId: true },
+      });
+      for (const m of meta) aiIds.add(m.messageId);
+    }
     const messages = asc.map((r) =>
       frameFromMessage(mapMessage(r), {
         senderName: r.senderUserId ? (names.get(r.senderUserId) ?? null) : null,
+        ai: aiIds.has(r.id),
       }),
     );
     return { messages, hasMore };
@@ -576,8 +684,10 @@ export class WebchatwidgetGateway
       return { messages: [], hasMore: false };
     }
     // Two findMany's per call on an anonymous socket — same budget as the
-    // receipts. An empty page also stops the widget's scroll-triggered loop.
-    if (!this.allowCheapFrame(data)) return { messages: [], hasMore: false };
+    // receipts. On throttle echo hasMore:true (not false): a false ack is
+    // persisted by widget.js and would permanently hide "Load earlier" for the
+    // session even though more history exists — so a re-tap retries after refill.
+    if (!this.allowCheapFrame(data)) return { messages: [], hasMore: true };
     // An unparseable timestamp makes Prisma throw, so the ack never fires and the
     // widget's `loadingOlder` latch stays true — "Load earlier" is then stuck on
     // "Loading…" for the rest of the session. Fail closed with an empty page.

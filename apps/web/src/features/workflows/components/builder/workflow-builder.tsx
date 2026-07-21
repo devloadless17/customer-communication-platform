@@ -664,6 +664,18 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   // Live = the dispatcher runs it (published). Draft otherwise.
   const isLive = published;
 
+  // Publish/step errors arrive keyed by each failing node's internal cuid
+  // (`step[<id>]: <msg>` from parse.ts). Rewrite that prefix to the author-facing
+  // step name so the banner names the node to fix instead of an opaque id — the
+  // canvas labels unnamed nodes by that same id, so it stays locatable either way.
+  function humanizeTopError(line: string): string {
+    return line.replace(/^step\[([^\]]+)\]:/, (_m, id: string) => {
+      const node = graph.nodes.find((n) => n.id === id);
+      const label = node?.name?.trim() || id;
+      return `Step “${label}”:`;
+    });
+  }
+
   return (
     <form className="flex h-[calc(100svh-3rem)] flex-col md:h-svh" onSubmit={handleSave}>
       {/* Top bar */}
@@ -758,7 +770,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
         <div className="border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-xs text-destructive">
           <ul className="ml-4 list-disc">
             {topErrors.map((e, i) => (
-              <li key={i}>{e}</li>
+              <li key={i}>{humanizeTopError(e)}</li>
             ))}
           </ul>
         </div>

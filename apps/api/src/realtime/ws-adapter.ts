@@ -2,7 +2,7 @@ import { INestApplicationContext } from "@nestjs/common";
 import { IoAdapter } from "@nestjs/platform-socket.io";
 import { Server, ServerOptions } from "socket.io";
 
-import { SOCKET_PATH } from "@ccp/shared/socket/events";
+import { SOCKET_PATH, WIDGET_HANDSHAKE_FLAG } from "@ccp/shared/socket/events";
 
 /**
  * IoAdapter subclass that centralizes Socket.io server tuning. One file to
@@ -39,18 +39,43 @@ export class WsAdapter extends IoAdapter {
       ...(options ?? {}),
       path: SOCKET_PATH,
       serveClient: false,
-      cors: {
-        // Mirror the HTTP CORS posture (main.ts): pin to BETTER_AUTH_URL (the
-        // canonical public origin Caddy fronts) when set — which validateEnv
-        // makes mandatory in prod — and fall back to the explicit dev origins
-        // only when it's absent. NEVER reflect-any (`|| true`) WITH
-        // `credentials: true`: that combo would let any site open a
-        // credentialed socket. The previous `|| true` was dead in prod (env is
-        // required) but a latent footgun if that gate ever weakened.
-        origin: process.env.BETTER_AUTH_URL
-          ? [process.env.BETTER_AUTH_URL]
-          : ["http://localhost:3000", "http://127.0.0.1:3000"],
-        credentials: true,
+      // CORS is a DELEGATE, not a static object, because two very different
+      // clients share this one Socket.io server (there is no per-namespace CORS):
+      //
+      //   - The agent app is same-origin and cookie-authenticated → pin the origin
+      //     and allow credentials.
+      //   - The website widget runs on a CUSTOMER's domain and is anonymous. It
+      //     used to be websocket-only, which sidesteps CORS entirely — but that
+      //     meant any corporate proxy blocking the WS upgrade left the visitor
+      //     stuck on "Reconnecting…" forever. Polling is plain XHR and IS
+      //     CORS-checked, so supporting it needs the third-party origin reflected.
+      //
+      // Reflecting is safe HERE ONLY because `credentials: false` rides with it:
+      // the browser sends no cookies, so this can never become the
+      // reflect-any + credentials combo that would let any site open an
+      // authenticated socket. Widget authorization is unchanged and enforced where
+      // it always was — site key + `originAllowed` in the gateway's handshake
+      // middleware, which runs on every transport. Mirrors the same posture
+      // `app.use("/api/widget", …)` already takes for the widget's HTTP routes.
+      //
+      // A forged `widget=1` on an agent socket only DROPS its credentials, so the
+      // cookie never arrives and auth fails closed.
+      cors: (req, cb) => {
+        // @types/cors models the request as `{ method, headers }` only, but the
+        // value engine.io passes is a real IncomingMessage, which carries `url`.
+        const url = (req as unknown as { url?: string }).url ?? "";
+        const isWidget = url.includes(`${WIDGET_HANDSHAKE_FLAG}=1`);
+        cb(
+          null,
+          isWidget
+            ? { origin: true, credentials: false, methods: ["GET", "POST"] }
+            : {
+                origin: process.env.BETTER_AUTH_URL
+                  ? [process.env.BETTER_AUTH_URL]
+                  : ["http://localhost:3000", "http://127.0.0.1:3000"],
+                credentials: true,
+              },
+        );
       },
       transports: ["websocket", "polling"],
       connectionStateRecovery: {

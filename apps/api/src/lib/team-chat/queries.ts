@@ -210,7 +210,14 @@ async function listChannelRowsForUser<T extends Prisma.TeamChannelInclude | unde
         ON r."channelId" = m."channelId" AND r."userId" = ${userId}
       WHERE mn."mentionedUserId" = ${userId}
         AND m."teamId" = ${teamId}
-        AND (r."lastReadAt" IS NULL OR m."createdAt" > r."lastReadAt")
+        -- COALESCE(editedAt, createdAt) — see the matching comment on
+        -- ChannelsService.unreadMentionCount. An edit can ADD a mention, and by
+        -- then the message's createdAt is older than the reader's receipt, so
+        -- comparing createdAt alone dropped it silently and forever.
+        AND (
+          r."lastReadAt" IS NULL
+          OR COALESCE(m."editedAt", m."createdAt") > r."lastReadAt"
+        )
       GROUP BY m."channelId"
     `,
   ]);
@@ -290,54 +297,68 @@ export async function listDirectMessagesForUser(
     [{ lastMessageAt: "desc" }],
     {
       members: {
-        select: {
-          userId: true,
-          user: {
-            select: { id: true, name: true, avatarUrl: true, deactivatedAt: true },
-          },
-        },
+        select: DM_MEMBER_SELECT,
       },
     },
   );
 
   return rows.map(({ row, item }) => {
-    // The shared row loader types its include loosely (it merges the caller's
-    // include with a _count), so name the shape we asked for here.
-    type DmMemberRow = {
-      userId: string;
-      user: {
-        id: string;
-        name: string | null;
-        avatarUrl: string | null;
-        deactivatedAt: Date | null;
-      } | null;
-    };
     const members = (row as unknown as { members: DmMemberRow[] }).members;
-
-    // The peer is the non-viewer member. A self-DM has exactly one member
-    // row (the viewer), so fall back to it and flag isSelf.
-    const other = members.find((m) => m.userId !== userId) ?? null;
-    const isSelf = other === null;
-    const source = other ?? members.find((m) => m.userId === userId) ?? null;
-
-    const peer: DirectMessagePeerDto = source?.user
-      ? {
-          userId: source.user.id,
-          name: source.user.name ?? "Unnamed",
-          avatarUrl: source.user.avatarUrl,
-          deactivated: source.user.deactivatedAt !== null,
-          isSelf,
-        }
-      : {
-          userId: null,
-          name: "Removed user",
-          avatarUrl: null,
-          deactivated: true,
-          isSelf,
-        };
-
-    return { ...item, peer };
+    return { ...item, peer: mapDmPeer(members, userId) };
   });
+}
+
+/**
+ * Membership rows as the DM queries select them. The shared row loader types
+ * its `include` loosely (it merges the caller's include with a `_count`), so
+ * the shape we actually asked for is named here.
+ */
+type DmMemberRow = {
+  userId: string;
+  user: {
+    id: string;
+    name: string | null;
+    avatarUrl: string | null;
+    deactivatedAt: Date | null;
+  } | null;
+};
+
+/** Select clause that produces a `DmMemberRow`. Shared so the list query and
+ *  the by-id query can't drift apart. */
+const DM_MEMBER_SELECT = {
+  userId: true,
+  user: { select: { id: true, name: true, avatarUrl: true, deactivatedAt: true } },
+} as const;
+
+/**
+ * The other participant in a DM, from its membership rows.
+ *
+ * The peer is the non-viewer member. A self-DM ("notes to self") has exactly
+ * one member row — the viewer — so fall back to it and flag `isSelf`. A peer
+ * whose User row was HARD-deleted leaves no membership row at all (the cascade
+ * removes it) while the DM and its history survive, because deleting those
+ * would destroy the survivor's own messages; that case renders as a tombstone.
+ */
+function mapDmPeer(members: DmMemberRow[], userId: string): DirectMessagePeerDto {
+  const other = members.find((m) => m.userId !== userId) ?? null;
+  const isSelf = other === null;
+  const source = other ?? members.find((m) => m.userId === userId) ?? null;
+
+  return source?.user
+    ? {
+        userId: source.user.id,
+        name: source.user.name ?? "Unnamed",
+        avatarUrl: source.user.avatarUrl,
+        deactivated: source.user.deactivatedAt !== null,
+        isSelf,
+      }
+    : {
+        userId: null,
+        name: "Removed user",
+        avatarUrl: null,
+        deactivated: true,
+        isSelf,
+      };
 }
 
 /**
@@ -359,7 +380,18 @@ export async function getChannelById(
     },
   });
   if (!row) return null;
-  return mapChannel(row, row._count.members, row.receipts[0]?.lastReadAt ?? null);
+  const dto = mapChannel(row, row._count.members, row.receipts[0]?.lastReadAt ?? null);
+  if (row.kind !== "dm") return dto;
+  // DM only, and as a second query rather than a blanket `include`: a DM has at
+  // most two membership rows, while a busy channel can have hundreds that this
+  // DTO has no use for. Resolving the peer HERE is what lets the channel page
+  // server-render the right name and avatar on first paint instead of waiting
+  // for the layout's client-side DM list to catch up.
+  const members = await db.teamChannelMember.findMany({
+    where: { channelId },
+    select: DM_MEMBER_SELECT,
+  });
+  return { ...dto, peer: mapDmPeer(members, userId) };
 }
 
 /**

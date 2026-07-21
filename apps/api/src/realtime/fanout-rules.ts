@@ -319,6 +319,18 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
+  // Import/export progress → the INITIATOR only. A team-wide frame every 2s
+  // for the duration of someone else's export is pure noise on every open tab,
+  // and fanout scope in this app is a deliberate choice, not a default
+  // (CLAUDE.md §10). Note there is no audit/analytics/workflow/webhook
+  // subscriber for this event — see the type's docblock.
+  "contact.transfer_updated": (e, emitter) => {
+    emitter.emitToUser(e.userId, "contacts:transfer_progress", {
+      teamId: e.teamId,
+      job: e.job,
+    });
+  },
+
   "contact.deleted": (e, emitter) => {
     for (const cid of e.conversationIds) {
       emitter.emitToTeam(e.teamId, "conversation:deleted", {
@@ -461,7 +473,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
     }
   },
 
-  "team_channel.message_edited": (e, emitter) => {
+  "team_channel.message_edited": async (e, emitter) => {
     emitter.emitToChannel(e.channelId, "team:channel:message:edited", {
       teamId: e.teamId,
       channelId: e.channelId,
@@ -469,6 +481,26 @@ export const FANOUT_RULES: FanoutRuleMap = {
       body: e.body,
       editedAt: e.editedAt,
     });
+    // An edit that ADDED an @-mention has to reach the newly-mentioned people
+    // the same way a new message would — the channel-room frame above only
+    // lands in a tab that already has this channel open. Scoped to the ADDED
+    // ids: badging every prior mention again on a typo fix would un-read
+    // mentions people had already cleared.
+    const newly = e.newlyMentionedUserIds ?? [];
+    if (newly.length > 0) {
+      await emitter.emitChannelActivity(e.channelId, e.teamId, {
+        teamId: e.teamId,
+        channelId: e.channelId,
+        authorUserId: e.authorUserId ?? null,
+        mentionedUserIds: newly,
+        // Nothing moved in the channel ordering — no new message was posted.
+        lastMessageAt: null,
+        // `isReply` is the client's "mention-only, don't bump the unread dot"
+        // flag (use-team-channels-events.ts). An edit wants exactly that
+        // behaviour: badge the mention, leave the unread dot alone.
+        isReply: true,
+      });
+    }
   },
 
   "team_channel.message_deleted": (e, emitter) => {
@@ -539,14 +571,32 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
-  "team_channel.members_changed": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "team:channel:members:changed", {
+  "team_channel.members_changed": async (e, emitter) => {
+    // minor#10 / RT-1: never blast private-channel roster metadata (channelId,
+    // added/removed userIds, actor) to the whole team room — that's the exact
+    // metadata-on-the-wire leak RT-1 closed for activity/read frames. Route the
+    // frame membership-scoped (default channel → team-wide, since everyone's a
+    // member anyway; gated channel → members only). A REMOVED user is no longer
+    // a member at emit time, so emitChannelScoped won't reach them — address
+    // their user room directly so they still get the immediate prune frame.
+    const payload = {
       teamId: e.teamId,
       channelId: e.channelId,
       action: e.action,
       userIds: e.userIds,
       changedById: e.changedById,
-    });
+    };
+    await emitter.emitChannelScoped(
+      e.channelId,
+      e.teamId,
+      "team:channel:members:changed",
+      payload,
+    );
+    if (e.action === "removed") {
+      for (const uid of e.userIds) {
+        emitter.emitToUser(uid, "team:channel:members:changed", payload);
+      }
+    }
     // Catalog tick so the channel list (memberCount, visibility) refreshes
     // for everyone — including the just-added users who need to start seeing
     // this channel and the just-removed users who need to stop seeing it.
@@ -567,6 +617,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
       emitter.emitToUser(uid, "team:dm:created", {
         teamId: e.teamId,
         channelId: e.channelId,
+        createdByUserId: e.createdByUserId,
       });
     }
   },

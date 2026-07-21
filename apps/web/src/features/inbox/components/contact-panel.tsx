@@ -4,7 +4,7 @@ import { memo, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { useNow } from "@/hooks/use-now";
-import { AtSign, BadgeCheck, ChevronLeft, Mail, Paperclip, Phone, MapPin, Clock, FileText, Heart, Loader2, MessageSquare, PanelRightClose, RefreshCw, Sparkles, User as UserIcon, Globe, Flag, Users } from "lucide-react";
+import { AtSign, BadgeCheck, ChevronLeft, Mail, Paperclip, Phone, PhoneOff, MapPin, Clock, FileText, Heart, Loader2, MessageSquare, PanelRightClose, RefreshCw, Sparkles, User as UserIcon, Globe, Flag, Users } from "lucide-react";
 
 import {
   AddFieldRow,
@@ -1479,6 +1479,11 @@ function ContactPanelImpl({
             so duplicating them in this rail was redundant. The contacts-page
             ContactDetailDrawer still owns the stage UI for off-inbox editing. */}
 
+        <CallPermissionWarning
+          unanswered={contact.consecutiveUnansweredOutCalls ?? 0}
+          revokedUntil={contact.callPermissionRevokedUntil ?? null}
+        />
+
         <Section title="Tags">
           <div ref={tagBoxRef} className="relative flex flex-wrap items-center gap-1.5">
             {appliedTags.map((t) => (
@@ -1668,3 +1673,68 @@ export const ContactPanel = memo(ContactPanelImpl, (prev, next) => {
   if (a.messageCount !== b.messageCount) return false;
   return true;
 });
+
+/**
+ * Warn the agent before they lose the ability to call this customer.
+ *
+ * WhatsApp acts on consecutive unanswered business-initiated calls: at 2 it
+ * nudges the customer to reconsider the permission they granted, and at 4 it
+ * revokes that permission outright. The count resets on any connected call in
+ * either direction.
+ *
+ * Surfacing it turns a silent cliff into a visible one — otherwise the second
+ * unanswered call looks exactly like the first, and the agent only learns what
+ * happened once calling has already stopped working.
+ */
+function CallPermissionWarning({
+  unanswered,
+  revokedUntil,
+}: {
+  unanswered: number;
+  revokedUntil: string | null;
+}) {
+  const revoked =
+    revokedUntil !== null && new Date(revokedUntil).getTime() > Date.now();
+  // Below 2, there is nothing actionable to say.
+  if (!revoked && unanswered < 2) return null;
+
+  return (
+    <div className="px-5 py-3">
+      <div
+        className={cn(
+          "flex items-start gap-2 rounded-lg border p-2.5 text-xs",
+          revoked
+            ? "border-destructive/40 bg-destructive/5"
+            : "border-amber-500/40 bg-amber-500/10",
+        )}
+      >
+        <PhoneOff
+          className={cn(
+            "mt-0.5 size-3.5 shrink-0",
+            revoked ? "text-destructive" : "text-amber-600",
+          )}
+        />
+        <p className="text-muted-foreground">
+          {revoked ? (
+            <>
+              <span className="font-medium text-foreground">
+                Calling permission revoked.
+              </span>{" "}
+              WhatsApp withdrew it after repeated unanswered calls. Wait for this
+              customer to message or call you.
+            </>
+          ) : (
+            <>
+              <span className="font-medium text-foreground">
+                {unanswered} unanswered calls in a row.
+              </span>{" "}
+              {unanswered >= 3
+                ? "One more and WhatsApp will revoke your permission to call this customer."
+                : "WhatsApp revokes calling permission after 4."}
+            </>
+          )}
+        </p>
+      </div>
+    </div>
+  );
+}

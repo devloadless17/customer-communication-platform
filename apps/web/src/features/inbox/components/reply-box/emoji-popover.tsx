@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 
 import { cn } from "@ccp/shared/utils";
@@ -272,8 +272,35 @@ export function EmojiPopover({
   const [activeIdx, setActiveIdx] = useState(0);
   const [query, setQuery] = useState("");
   const [recents, setRecents] = useState<string[]>([]);
+  const [placeBelow, setPlaceBelow] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * Flip below the trigger when opening upward would run the panel off the top
+   * of its clipping ancestor. The reply box always has room above; a message
+   * hover-toolbar near the top of a scrolled feed (team chat's thread panel,
+   * most visibly) does not, and the panel was simply cut off by the scroller's
+   * overflow. Measured in a LAYOUT effect so the flip happens before paint —
+   * no visible jump.
+   */
+  useLayoutEffect(() => {
+    if (!open) {
+      setPlaceBelow(false);
+      return;
+    }
+    const el = popoverRef.current;
+    if (!el) return;
+    let clipTop = 0;
+    for (let node = el.parentElement; node; node = node.parentElement) {
+      const overflowY = window.getComputedStyle(node).overflowY;
+      if (overflowY === "auto" || overflowY === "scroll" || overflowY === "hidden") {
+        clipTop = node.getBoundingClientRect().top;
+        break;
+      }
+    }
+    if (el.getBoundingClientRect().top < clipTop + 4) setPlaceBelow(true);
+  }, [open]);
 
   // Load recents + reset transient UI each time the popover opens, and
   // autofocus the search box for keyboard-first use.
@@ -364,7 +391,8 @@ export function EmojiPopover({
       animate={{ opacity: 1 }}
       transition={{ duration: 0.1, ease: "easeOut" }}
       className={cn(
-        "absolute bottom-full left-0 z-50 mb-2 w-72 overflow-hidden rounded-xl border border-border bg-popover shadow-xl",
+        "absolute left-0 z-50 w-72 overflow-hidden rounded-xl border border-border bg-popover shadow-xl",
+        placeBelow ? "top-full mt-2" : "bottom-full mb-2",
         className,
       )}
     >

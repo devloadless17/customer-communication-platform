@@ -5,6 +5,7 @@ import { DbService } from "../db/db.service";
 import { ffmpegSlotStats } from "../lib/media/ffmpeg-slots";
 import { getRedisConnection } from "../lib/workflows/queue";
 import { computeDegradations, type OutboxLagReport } from "./health-thresholds";
+import { probeRedisMemory } from "./redis-memory";
 import { probeStuckBroadcasts, STUCK_BROADCAST_PROBE_MIN } from "./stuck-broadcasts";
 
 /**
@@ -81,9 +82,10 @@ export class HealthWatchdogService implements OnModuleInit, OnModuleDestroy {
     if (this.ticking) return;
     this.ticking = true;
     try {
-      const [dbOk, redisOk, outboxLag, stuckBroadcasts] = await Promise.all([
+      const [dbOk, redisOk, redisMemory, outboxLag, stuckBroadcasts] = await Promise.all([
         this.pingDb(),
         this.pingRedis(),
+        probeRedisMemory(getRedisConnection(), HealthWatchdogService.PROBE_TIMEOUT_MS),
         this.probeOutboxLag(),
         probeStuckBroadcasts(this.db, STUCK_BROADCAST_PROBE_MIN),
       ]);
@@ -105,6 +107,10 @@ export class HealthWatchdogService implements OnModuleInit, OnModuleDestroy {
         jobFailures: getJobFailureMetrics(),
         ffmpeg: ffmpegSlotStats(),
         stuckBroadcasts,
+        // Same watermark as the /health endpoint — under noeviction PING stays
+        // green to 100% while enqueues fail, so the proactive alert MUST key off
+        // memory, not reachability.
+        redisMemory,
       });
 
       const signature = degraded.join(" | ");

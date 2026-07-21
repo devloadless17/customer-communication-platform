@@ -56,9 +56,14 @@ function phaseToStatus(phase: NormalizedCallEvent["phase"]): CallStatus | null {
     case "connecting":
       // `connecting` = the outbound media leg came up (provider's SDP answer),
       // NOT the human picking up. The row stays `ringing`; the SDP is forwarded
-      // to the browser regardless of status (see the sdp block below). answeredAt
-      // is stamped later, from the terminate's real pickup time.
+      // to the browser regardless of status (see the sdp block below).
       return CallStatus.ringing;
+    case "answered":
+      // The customer genuinely picked up an outbound call — the provider's own
+      // authoritative signal, carrying the pickup time as `connectedAt`. This
+      // is what makes a later hangup resolve to `completed` rather than
+      // `missed`, and keeps connected-call accounting honest.
+      return CallStatus.in_progress;
     case "completed":
       return CallStatus.completed;
     case "missed":
@@ -318,6 +323,9 @@ export async function ingestCallEvent(
           direction: true,
           answeredAt: true,
           answeredByUserId: true,
+          // Needed to attribute the customer-answered frame on an outbound
+          // call: the agent who placed it is the one on the line.
+          initiatedByUserId: true,
         },
       });
 
@@ -450,6 +458,12 @@ export async function ingestCallEvent(
           // when it isn't a downgrade: a terminal phase always wins
           // (alreadyTerminal is excluded above), and the sole non-terminal
           // target (`ringing`) is written only when the row is still ringing.
+          // A row that already reached `in_progress` must not be pushed back to
+          // `ringing` by a redelivered `connecting` webhook — the stale-calls
+          // sweeper would then terminalize a LIVE call as missed and tear down
+          // the agent's panel. So the only non-terminal write allowed is onto a
+          // still-`ringing` row, which also covers the ringing→in_progress
+          // advance from `answered`.
           const canWriteStatus =
             isTerminalPhase || existing.status === CallStatus.ringing;
           callRow = await tx.call.update({
@@ -583,6 +597,29 @@ export async function ingestCallEvent(
           ringingAt: evt.timestamp.toISOString(),
         });
       }
+      // The customer picked up an outbound call. Publishing the same
+      // answered frame the inbound path uses flips every viewer's thread pill
+      // to in-progress and starts the live timer at the REAL pickup moment.
+      //
+      // Gated on a genuine ringing→in_progress transition so an at-least-once
+      // redelivery of the ACCEPTED status is a no-op. Attribution is the agent
+      // who placed the call — they're the one on the line; the webhook itself
+      // carries no user context.
+      if (
+        evt.phase === "answered" &&
+        existing &&
+        existing.status === CallStatus.ringing
+      ) {
+        await publishInTx(tx, {
+          type: "call.answered_by_agent",
+          teamId,
+          conversationId: conversation.id,
+          callId: callRow.id,
+          answeredByUserId: existing.initiatedByUserId ?? "",
+          answeredAt: (evt.connectedAt ?? evt.timestamp).toISOString(),
+        });
+      }
+
       // Terminal phase-events + the unanswered-counter mutation fire ONLY on a
       // genuine non-terminal→terminal transition. `alreadyTerminal` means this
       // is a duplicate/redundant terminal webhook (Meta at-least-once) landing
@@ -738,7 +775,7 @@ async function handlePermissionEvent(
     ? {
         teamId,
         OR: [
-          ...(evt.contactPhone ? [{ phoneNumber: evt.contactPhone }] : []),
+          ...(evt.contactPhone ? [{ identityChannel: channel, phoneNumber: evt.contactPhone }] : []),
           ...(evt.bsuid ? [{ identityChannel: channel, bsuid: evt.bsuid }] : []),
         ],
       }
@@ -757,28 +794,36 @@ async function handlePermissionEvent(
         consecutiveUnansweredOutCalls: 0,
       },
     });
-    // Flip the matching outstanding request to `granted`. Without this the
-    // CallPermissionRequest row stayed `pending` forever and the placeCall
-    // pre-flight (which now gates on `granted`) would never let a call out
-    // even after the customer accepted. We can't correlate the webhook to a
-    // specific request id (the normalized event carries only the contact), so
-    // we grant the newest still-pending, non-rate-limited request — there's at
-    // most one live one per contact (Meta caps requests at 1/24h). The 72h
-    // calling-validity window runs from the REAL grant time, so we re-stamp
-    // expiresAt from now rather than the request-time +72h.
+    // Flip the matching outstanding request to `granted`.
+    //
+    // Correlate by the request MESSAGE id the reply echoes back whenever it's
+    // present — that identifies the exact request the customer answered.
+    // Fall back to the newest still-pending row only when the reply carries no
+    // context (a proactive grant from the business profile, or an automatic
+    // callback grant), where there is nothing to correlate against.
     const grantedAt = evt.timestamp;
-    // A PERMANENT grant (customer chose "always allow") never expires — store a
-    // far-future expiry so the out-of-window placeCall gate keeps authorizing.
-    // Otherwise the standard 72h calling-validity window from the real grant.
-    const grantExpiresAt = evt.permanentPermission
-      ? new Date(grantedAt.getTime() + 100 * 365 * 24 * 60 * 60 * 1000)
-      : new Date(grantedAt.getTime() + 72 * 60 * 60 * 1000);
+    const isPermanent = evt.permanentPermission === true;
+    // The provider's OWN expiry, verbatim. Never computed here: no webhook is
+    // sent when a temporary permission lapses, so a locally-guessed duration is
+    // unverifiable and silently discards days of a valid grant. If the provider
+    // somehow omits it on a temporary grant, fall back to the documented 7-day
+    // window rather than inventing a shorter one.
+    const grantExpiresAt = isPermanent
+      ? // Unused while isPermanent is set (the gate short-circuits on the flag),
+        // but the column is non-null, so keep it consistent rather than absurd.
+        new Date(grantedAt.getTime() + 7 * 24 * 60 * 60 * 1000)
+      : evt.permissionExpiresAt ??
+        new Date(grantedAt.getTime() + 7 * 24 * 60 * 60 * 1000);
     const pending = await db.callPermissionRequest.findFirst({
       where: {
         teamId,
         contactId: contact.id,
-        status: CallPermissionStatus.pending,
-        rateLimitedUntil: null,
+        ...(evt.permissionRequestExternalId
+          ? { externalRequestId: evt.permissionRequestExternalId }
+          : {
+              status: CallPermissionStatus.pending,
+              rateLimitedUntil: null,
+            }),
       },
       orderBy: { requestedAt: "desc" },
       select: { id: true },
@@ -790,6 +835,7 @@ async function handlePermissionEvent(
           status: CallPermissionStatus.granted,
           grantedAt,
           expiresAt: grantExpiresAt,
+          isPermanent,
         },
       });
     } else {
@@ -797,20 +843,20 @@ async function handlePermissionEvent(
       // request that predated this tracking, or the row was pruned). Record a
       // synthetic granted row so the pre-flight has a live grant to read.
       //
-      // Idempotency (F16): Meta delivers permission_granted at-least-once. A
-      // redelivery finds no `pending` row (the first delivery flipped/created a
-      // `granted` one), so it would fall here and CREATE a second synthetic
-      // granted row — duplicating the row AND extending the 72h window from the
-      // redelivery time. Short-circuit if a live (granted + unexpired) request
-      // already exists so the redelivery is a true no-op for the request rows.
+      // Idempotency: the provider delivers this at-least-once. A redelivery
+      // finds no `pending` row (the first delivery flipped/created a `granted`
+      // one), so it would fall here and CREATE a second synthetic granted row —
+      // duplicating the row AND extending the window from the redelivery time.
+      // Short-circuit if a live grant already exists so the redelivery is a
+      // true no-op. A permanent grant is always live.
       const existingGrant = await db.callPermissionRequest.findFirst({
         where: {
           teamId,
           contactId: contact.id,
           status: CallPermissionStatus.granted,
-          expiresAt: { gt: grantedAt },
+          OR: [{ isPermanent: true }, { expiresAt: { gt: grantedAt } }],
         },
-        select: { id: true },
+        select: { id: true, isPermanent: true, expiresAt: true },
       });
       if (!existingGrant) {
         await db.callPermissionRequest.create({
@@ -820,37 +866,83 @@ async function handlePermissionEvent(
             status: CallPermissionStatus.granted,
             grantedAt,
             expiresAt: grantExpiresAt,
+            isPermanent,
+          },
+        });
+      } else if (
+        // A live grant already exists, but this reply may STRENGTHEN it: the
+        // customer can upgrade a temporary permission to permanent, or re-grant
+        // and push the expiry out, both from their business profile. Skipping
+        // outright would leave us treating a now-permanent permission as
+        // expiring, and re-asking a customer who already said "always".
+        //
+        // Only ever widen — never shorten. A redelivery of the SAME grant then
+        // stays a true no-op, which is what the idempotency guard is for.
+        (isPermanent && !existingGrant.isPermanent) ||
+        (!existingGrant.isPermanent &&
+          !isPermanent &&
+          grantExpiresAt.getTime() > existingGrant.expiresAt.getTime())
+      ) {
+        await db.callPermissionRequest.update({
+          where: { id: existingGrant.id },
+          data: {
+            grantedAt,
+            isPermanent,
+            // A permanent grant's expiry is never read; keep the column
+            // coherent rather than absurd.
+            expiresAt: grantExpiresAt,
           },
         });
       }
     }
   } else if (evt.phase === "permission_revoked") {
-    // Far-future timestamp acts as "revoked until further notice" — Meta
-    // doesn't expire revocation on its own; the customer has to grant a
-    // fresh permission. We clear it on the next successful permission
-    // grant rather than letting a timer run out.
-    const farFuture = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
-    await db.contact.update({
-      where: { id: contact.id },
-      data: {
-        callPermissionRevokedUntil: farFuture,
-        // Reset the counter so the UI's warning state resolves once Meta
-        // confirms the revocation — they've already taken the action.
-        consecutiveUnansweredOutCalls: 0,
-      },
-    });
-    // Mark any live grant/pending request as `denied` so a stale `granted`
-    // row can't keep authorizing calls after Meta revoked permission. The
-    // Contact.callPermissionRevokedUntil gate already blocks the call, but
-    // keeping the request rows consistent prevents the pre-flight from
-    // disagreeing with itself if that column is ever cleared independently.
+    // Two very different things arrive as a "reject", and conflating them
+    // blocks calling to customers who never revoked anything:
+    //
+    //   user_action — the customer DECLINED a permission request. That is not
+    //     a standing revocation: they can still grant permission afterwards,
+    //     right up until the request expires. Only the request is dead.
+    //   automatic  — the provider WITHDREW permission itself, after too many
+    //     unanswered calls.
+    //
+    // Treating a single decline as a revocation is what made us refuse
+    // customers we had just spoken to.
+    const isAutomaticRevocation = evt.permissionAutomatic === true;
+
+    if (isAutomaticRevocation) {
+      // Record it so the contact panel can explain why calling stopped. This
+      // is ADVISORY ONLY — the provider remains the gate, because the customer
+      // can re-grant at any moment in ways that touch nothing on our side
+      // (calling us with callback permission on, or their business profile),
+      // and a local lock would outlive the reality it describes.
+      await db.contact.update({
+        where: { id: contact.id },
+        data: {
+          callPermissionRevokedUntil: new Date(
+            evt.timestamp.getTime() + 7 * 24 * 60 * 60 * 1000,
+          ),
+          // The counter has done its job; reset it so the "2 unanswered"
+          // warning doesn't sit alongside the revocation notice.
+          consecutiveUnansweredOutCalls: 0,
+        },
+      });
+    }
+
+    // Retire request rows either way — a declined request and a withdrawn
+    // permission are both dead as authorizations. Correlate to the exact
+    // request when the reply told us which one it answers; otherwise retire
+    // whatever is outstanding.
     await db.callPermissionRequest.updateMany({
       where: {
         teamId,
         contactId: contact.id,
-        status: {
-          in: [CallPermissionStatus.pending, CallPermissionStatus.granted],
-        },
+        ...(evt.permissionRequestExternalId
+          ? { externalRequestId: evt.permissionRequestExternalId }
+          : {
+              status: {
+                in: [CallPermissionStatus.pending, CallPermissionStatus.granted],
+              },
+            }),
       },
       data: { status: CallPermissionStatus.denied },
     });

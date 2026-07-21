@@ -20,6 +20,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { CallingSettings } from "./calling-settings";
 import { formatPhone } from "@ccp/shared/utils";
 
 export interface WhatsappCurrent {
@@ -244,6 +245,16 @@ export function WhatsappSettings({
         <p className="text-xs text-muted-foreground">
           Only admins can change the WhatsApp connection.
         </p>
+      )}
+
+      {/* Calling lives on the same number and is configured against the same
+          connection, so it belongs on this page rather than a separate one.
+          Renders nothing until WhatsApp is connected. */}
+      {current.connected && (
+        <CallingSettings
+          displayNumber={current.displayNumber}
+          canManage={canManage}
+        />
       )}
 
       {embeddedSignupCard}

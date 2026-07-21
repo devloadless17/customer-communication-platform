@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { loadEnvConfig } from "@next/env";
@@ -189,8 +190,28 @@ const nextConfig: NextConfig = {
   turbopack: {},
   async rewrites() {
     const apiUpstream = process.env.INTERNAL_API_URL ?? "http://127.0.0.1:4000";
+    // Serve the MINIFIED widget when a build has produced one (28.8 KB → 16.0 KB
+    // gzipped, on a script that loads on every page of every customer's site).
+    //
+    // `public/widget.js` stays the readable source of truth — its comments each
+    // record a production failure they prevent — and `prebuild` emits
+    // `widget.min.js` beside it. This rewrite is CONDITIONAL on that artifact
+    // existing, which is what makes the arrangement safe: `next dev` has no
+    // prebuild step, finds no min file, and serves the source, so a developer
+    // always debugs readable code and can never be served a stale build. The two
+    // cannot drift — the min is regenerated from the source on every build.
+    // Gated on BOTH prod and the artifact existing. The `isProd` half is
+    // load-bearing: a developer who has ever run `pnpm build` locally leaves
+    // `widget.min.js` on disk, and without this check their next `next dev` would
+    // silently serve minified code — breakpoints landing in mangled output, and a
+    // stale artifact masking the source they are editing.
+    const minifiedWidget =
+      isProd && existsSync(resolve(process.cwd(), "public/widget.min.js"))
+        ? [{ source: "/widget.js", destination: "/widget.min.js" }]
+        : [];
     return {
       beforeFiles: [
+        ...minifiedWidget,
         // Lives on NestJS, but Next.js's `/api/auth/[...all]` Better Auth
         // catch-all would otherwise swallow it — beforeFiles takes priority
         // over filesystem routes.

@@ -39,6 +39,19 @@ export class CustomersController {
     return { customer };
   }
 
+  /**
+   * Possible same-person matches for a contact, for the agent to confirm.
+   * Declared before `:id` so "by-contact" isn't captured as a customer id.
+   */
+  @Get("by-contact/:contactId/suggestions")
+  async suggestions(
+    @CurrentSession() session: ApiSession,
+    @Param("contactId") contactId: string,
+  ) {
+    const suggestions = await this.customers.suggestLinks(session.teamId, contactId);
+    return { suggestions };
+  }
+
   @Get(":id")
   async get(@CurrentSession() session: ApiSession, @Param("id") id: string) {
     const customer = await this.customers.getProfile(session.teamId, id);

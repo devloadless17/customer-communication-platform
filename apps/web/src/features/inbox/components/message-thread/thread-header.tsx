@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { ChevronLeft, Info, Phone, Search as SearchIcon } from "lucide-react";
 
 import { AiStateControl } from "../ai/ai-state-control";
@@ -39,6 +39,45 @@ import { StatusDropdown } from "./status-dropdown";
  * viewer by name. Stable identity per-userId so the avatar row doesn't
  * reshuffle on every membership change.
  */
+/**
+ * Live presence of a WEBSITE-WIDGET visitor, so an agent knows whether the person
+ * is still on the page instead of waiting on a dead thread.
+ *
+ *   online  → the visitor's browser is connected right now.
+ *   away    → their socket dropped (tab hidden, navigated, closed). Shows how long
+ *             ago, ticking, because "left just now" and "left 20m ago" mean very
+ *             different things for whether to keep the thread open.
+ *   (nothing) until the first frame — never guess.
+ *
+ * Ephemeral: from the socket, not persisted. A refresh re-derives it on reconnect.
+ */
+function VisitorPresenceChip({ present, leftAt }: { present?: boolean | null; leftAt?: number | null }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (present !== false) return;
+    const t = setInterval(() => tick((n) => n + 1), 30_000); // refresh "Xm ago"
+    return () => clearInterval(t);
+  }, [present]);
+
+  if (present == null) return null; // unknown — no frame yet
+  if (present) {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-2xs font-medium text-emerald-600 dark:text-emerald-400">
+        <span className="size-1.5 rounded-full bg-emerald-500" />
+        Online
+      </span>
+    );
+  }
+  const ago = leftAt ? Math.max(0, Math.round((Date.now() - leftAt) / 60000)) : 0;
+  const label = !leftAt ? "Away" : ago < 1 ? "Left just now" : `Left ${ago}m ago`;
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-muted-foreground">
+      <span className="size-1.5 rounded-full bg-muted-foreground/50" />
+      {label}
+    </span>
+  );
+}
+
 function ConversationViewersPill({ viewers }: { viewers: User[] }) {
   if (viewers.length === 0) return null;
   const shown = viewers.slice(0, 3);
@@ -109,6 +148,9 @@ function ThreadHeaderImpl({
   onInitiateCall,
   onMobileBack,
   onOpenContactDetails,
+  channel,
+  visitorPresent,
+  visitorLeftAt,
 }: {
   teamId: string;
   conversationId: string;
@@ -161,6 +203,11 @@ function ThreadHeaderImpl({
   /** Opens the contact details Sheet. Only rendered when set + below lg (the
    *  desktop contact rail is hidden there, so this is the only way in). */
   onOpenContactDetails?: () => void;
+  /** Channel of this conversation — presence chip is webchatwidget-only. */
+  channel?: Channel;
+  /** Website visitor presence (null until a frame arrives). */
+  visitorPresent?: boolean | null;
+  visitorLeftAt?: number | null;
 }) {
   // Disable the Phone button while any call is live/in-flight. The single
   // useCall instance lives in the app-wide CallProvider; `liveCall` is non-null
@@ -197,6 +244,9 @@ function ThreadHeaderImpl({
         <div className="flex items-center gap-2">
           <h2 className="truncate text-sm font-semibold">{contactName}</h2>
           <ConversationViewersPill viewers={otherViewers} />
+          {channel === "webchatwidget" && (
+            <VisitorPresenceChip present={visitorPresent} leftAt={visitorLeftAt} />
+          )}
         </div>
         <div className="truncate font-mono text-2xs tabular-nums text-muted-foreground">
           {formatPhone(phone)}

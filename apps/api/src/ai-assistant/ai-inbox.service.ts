@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 
-import { sendTextInternal } from "@/lib/messaging/send-text-internal";
+import { sendTextInternal, SendTextValidationError } from "@/lib/messaging/send-text-internal";
 import {
   pauseByAgent,
   resumeByAgent,
@@ -135,42 +135,104 @@ export class AiInboxService {
 
     const edited = (editedText ?? "").trim();
     const body = edited || s.text;
+    const targetState = edited ? "edited" : "accepted";
+
+    // Load the voice config BEFORE the CAS claim. loadAiConfig can throw a raw
+    // (non-SendTextValidationError) transient error, and the post-claim catch
+    // only reverts on typed pre-send validation codes — so a config-load blip
+    // AFTER claiming would strand the suggestion in accepted/edited with nothing
+    // sent and the agent locked out (state != pending). Acquiring it first keeps
+    // the row `pending` and retryable on that failure. (Text path has no such
+    // pre-claim acquisition; its internal raw throws stay keep-the-claim, which
+    // is the safe side of the ambiguity — a raw throw there could be a Meta
+    // network error that already billed, so we must not re-arm and double-send.)
+    const voiceConfig = sendAs === "voice" ? await loadAiConfig(teamId) : null;
+
+    // CLAIM before sending, with a CAS on state=pending. This is the only
+    // customer-visible send path that was read-then-act: two concurrent accepts
+    // both saw state=pending above and both sent, double-billing the customer.
+    // updateMany returns count=0 for the loser (or a re-submit after decision),
+    // so exactly one request proceeds to the send. We move straight to the
+    // terminal state (accepted/edited) as the claim and revert ONLY on a
+    // provably-pre-send validation error below, so a send that may have reached
+    // Meta is never re-attempted.
+    const claim = await this.db.aiReplySuggestion.updateMany({
+      where: { id, teamId, state: "pending" },
+      data: {
+        state: targetState,
+        editedText: edited || null,
+        decidedByUserId: userId,
+        decidedAt: new Date(),
+      },
+    });
+    if (claim.count === 0) {
+      const cur = await this.db.aiReplySuggestion.findFirst({
+        where: { id, teamId },
+        select: { state: true },
+      });
+      throw new ConflictException({
+        error: "suggestion_already_decided",
+        state: cur?.state ?? "unknown",
+      });
+    }
 
     let messageId: string;
-    if (sendAs === "voice") {
-      const config = await loadAiConfig(teamId);
-      const out = await sendSuggestionAsVoice({
-        teamId,
-        conversationId: s.conversationId,
-        inboundMessageId: s.inboundMessageId,
-        text: body,
-        audioR2Key: s.audioR2Key,
-        reuseAudio: !edited, // reuse the pre-rendered draft only when unchanged
-        config,
-      });
-      messageId = out.messageId;
-    } else {
-      const result = await sendTextInternal({
-        teamId,
-        conversationId: s.conversationId,
-        body,
-        sentVia: "ai-assistant/suggestion",
-      });
-      messageId = result.messageId;
+    try {
+      if (sendAs === "voice") {
+        const config = voiceConfig!;
+        const out = await sendSuggestionAsVoice({
+          teamId,
+          conversationId: s.conversationId,
+          inboundMessageId: s.inboundMessageId,
+          text: body,
+          audioR2Key: s.audioR2Key,
+          reuseAudio: !edited, // reuse the pre-rendered draft only when unchanged
+          config,
+        });
+        messageId = out.messageId;
+      } else {
+        const result = await sendTextInternal({
+          teamId,
+          conversationId: s.conversationId,
+          body,
+          sentVia: "ai-assistant/suggestion",
+        });
+        messageId = result.messageId;
+      }
+    } catch (err) {
+      // Release the claim back to pending ONLY on a PROVABLY pre-send validation
+      // error, so the agent can retry. `conversation_not_found` is deliberately
+      // EXCLUDED: send-text-internal throws that same code from commitOutboundSend's
+      // onMissing AFTER the Meta send already billed (conversation deleted/merged
+      // mid-send), so reverting on it would re-arm the suggestion and a retry would
+      // double-send + double-bill — the exact class this CAS guards against. On
+      // that (rare) post-send case we keep the claim; the reply may or may not have
+      // landed, but we never risk a duplicate. All other codes below are raised
+      // before any provider call.
+      const preSendRevertCodes = new Set([
+        "empty_body",
+        "message_too_long",
+        "contact_has_no_phone",
+        "provider_not_configured",
+        "outside_24h_window",
+        "contact_share_not_supported",
+        "message_not_found",
+      ]);
+      if (err instanceof SendTextValidationError && preSendRevertCodes.has(err.code)) {
+        await this.db.aiReplySuggestion.updateMany({
+          where: { id, teamId, state: targetState },
+          data: { state: "pending", decidedByUserId: null, decidedAt: null, editedText: null },
+        });
+      }
+      throw err;
     }
 
     await this.db.aiMessageMetadata
       .create({ data: { teamId, messageId, aiGenerated: true } })
       .catch(() => {});
 
-    const accepted = await this.db.aiReplySuggestion.update({
-      where: { id },
-      data: {
-        state: edited ? "edited" : "accepted",
-        editedText: edited || null,
-        decidedByUserId: userId,
-        decidedAt: new Date(),
-      },
+    const accepted = await this.db.aiReplySuggestion.findFirst({
+      where: { id, teamId },
     });
     void publish({
       type: "ai.suggestion_changed",

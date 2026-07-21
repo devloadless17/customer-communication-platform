@@ -32,6 +32,7 @@ import { ChannelsService } from "./channels.service";
 import {
   AddChannelMembersSchema,
   BrowseChannelsQuerySchema,
+  ChannelListQuerySchema,
   CreateChannelSchema,
   CreateDmSchema,
   EditChannelMessageSchema,
@@ -40,6 +41,7 @@ import {
   UpdateChannelSchema,
   type AddChannelMembersInput,
   type BrowseChannelsQuery,
+  type ChannelListQuery,
   type CreateChannelInput,
   type CreateDmInput,
   type EditChannelMessageInput,
@@ -142,13 +144,11 @@ export class ChannelsController {
   @Get("search")
   async searchAll(
     @CurrentSession() session: ApiSession,
-    @Query("q") q?: string,
-    @Query("before") before?: string,
-    @Query("take") take?: string,
+    @Query(zQuery(ChannelListQuerySchema)) query: ChannelListQuery,
   ) {
-    return this.channels.searchAllMessages(session.teamId, session.userId, q ?? "", {
-      before,
-      take: take ? Number.parseInt(take, 10) : undefined,
+    return this.channels.searchAllMessages(session.teamId, session.userId, query.q ?? "", {
+      before: query.before,
+      take: query.take,
     });
   }
 
@@ -288,14 +288,12 @@ export class ChannelsController {
   async listMessages(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
-    @Query("after") after?: string,
-    @Query("before") before?: string,
-    @Query("take") take?: string,
+    @Query(zQuery(ChannelListQuerySchema)) query: ChannelListQuery,
   ) {
     return this.channels.listMessages(session.teamId, session.userId, id, {
-      after,
-      before,
-      take: take ? Number.parseInt(take, 10) : undefined,
+      after: query.after,
+      before: query.before,
+      take: query.take,
     });
   }
 
@@ -381,12 +379,11 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
     @Param("mid") mid: string,
-    @Query("after") after?: string,
-    @Query("take") take?: string,
+    @Query(zQuery(ChannelListQuerySchema)) query: ChannelListQuery,
   ) {
     return this.channels.listThreadReplies(session.teamId, session.userId, id, mid, {
-      after,
-      take: take ? Number.parseInt(take, 10) : undefined,
+      after: query.after,
+      take: query.take,
     });
   }
 
@@ -400,13 +397,11 @@ export class ChannelsController {
   async searchMessages(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
-    @Query("q") q?: string,
-    @Query("before") before?: string,
-    @Query("take") take?: string,
+    @Query(zQuery(ChannelListQuerySchema)) query: ChannelListQuery,
   ) {
-    return this.channels.searchMessages(session.teamId, session.userId, id, q ?? "", {
-      before,
-      take: take ? Number.parseInt(take, 10) : undefined,
+    return this.channels.searchMessages(session.teamId, session.userId, id, query.q ?? "", {
+      before: query.before,
+      take: query.take,
     });
   }
 
@@ -420,15 +415,18 @@ export class ChannelsController {
   async getMessagesAround(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
-    @Query("messageId") messageId?: string,
-    @Query("take") take?: string,
+    @Query(zQuery(ChannelListQuerySchema)) query: ChannelListQuery,
   ) {
-    if (!messageId) {
+    if (!query.messageId) {
       throw new BadRequestException({ error: "messageId required" });
     }
-    return this.channels.getMessagesAround(session.teamId, session.userId, id, messageId, {
-      take: take ? Number.parseInt(take, 10) : undefined,
-    });
+    return this.channels.getMessagesAround(
+      session.teamId,
+      session.userId,
+      id,
+      query.messageId,
+      { take: query.take },
+    );
   }
 
   /**

@@ -287,6 +287,7 @@ export function validateEnv(label: "api" | "web" = "api"): void {
       { name: "WORKFLOW_PER_TEAM_CONCURRENCY", min: 1, max: 1000 },
       { name: "WEBHOOK_WORKER_CONCURRENCY", min: 1, max: 1000 },
       { name: "WEBHOOK_DELIVERY_RETENTION_DAYS", min: 1, max: 3650 },
+      { name: "WEBCHAT_VISITOR_RETENTION_DAYS", min: 1, max: 3650 },
       { name: "WEBHOOK_ORPHAN_GRACE_MS", min: 1000, max: 86_400_000 },
       // SigV4 presigned URLs cap at 7 days (604800s). Keep the default (3600)
       // unless a slow Meta broadcast-header fetch needs longer.

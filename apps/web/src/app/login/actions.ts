@@ -43,7 +43,11 @@ export async function loginAction(
 }
 
 function safeNext(next: string): string {
-  if (!next.startsWith("/") || next.startsWith("//")) return "/inbox";
+  // Reject any backslash too: a leading "/\" (or an encoded "/%5C") is
+  // normalized by URL parsers to a protocol-relative "//" authority, so the
+  // "//"-only check alone is an open-redirect hole (next=/\evil.com → evil.com).
+  if (!next.startsWith("/") || next.startsWith("//") || next.includes("\\"))
+    return "/inbox";
   // "/" is an RSC that redirects to /inbox. Chaining the action's redirect
   // into the RSC's redirect causes the legacy "unexpected response" bug —
   // normalize here so the redirect lands directly at /inbox.

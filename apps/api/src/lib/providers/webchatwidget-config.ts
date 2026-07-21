@@ -20,6 +20,30 @@ import { TtlCache } from "@/lib/providers/config-cache";
  *     `WebchatWidget.publicKey` (one lookup), cached against visitor storms.
  */
 
+/**
+ * Attachment kinds an organization can allow or forbid on their widget. Mirrors the
+ * `MediaKind`s the channel supports (`media-caps.ts`) minus `sticker`, which the
+ * widget never sends.
+ */
+export const WEBCHATWIDGET_MEDIA_KINDS = ["image", "video", "audio", "document"] as const;
+export type WebchatwidgetMediaKind = (typeof WEBCHATWIDGET_MEDIA_KINDS)[number];
+
+/**
+ * Is `kind` allowed on this widget? Absent config = everything allowed, so existing
+ * widgets keep working untouched.
+ */
+export function widgetAllowsMediaKind(
+  config: WebchatwidgetConfig | undefined,
+  kind: string,
+): boolean {
+  const allowed = config?.allowedMediaKinds;
+  if (!Array.isArray(allowed)) return true;
+  // `sticker` is a legacy classification of an image (see classifyWebpAsImage) —
+  // gate it with images so an old row can't sneak past an images-off policy.
+  const effective = kind === "sticker" ? "image" : kind;
+  return allowed.includes(effective as WebchatwidgetMediaKind);
+}
+
 /** A profile field the pre-chat form can collect (self-asserted). */
 export interface WebchatwidgetPreChatField {
   /** Stable id (cuid) so responses map back to the field. */
@@ -59,9 +83,40 @@ export interface WebchatwidgetConfig {
   themeMode?: "light" | "dark" | "auto";
   /** Play a subtle chime in the widget when an agent replies (visitor opt-in). */
   soundEnabled?: boolean;
+  /**
+   * Which attachment kinds a VISITOR may send, e.g. `["image","document"]`.
+   *
+   * Absent = all kinds (the default, and what every existing widget gets).
+   * `[]` = a text-only chat: the attach and mic buttons disappear entirely.
+   *
+   * This is a real control, not a UI hint — it is enforced server-side on the
+   * upload endpoint, because the widget runs on someone else's page and nothing
+   * it does can be trusted. Hiding the button is only the courtesy half.
+   */
+  allowedMediaKinds?: WebchatwidgetMediaKind[];
+  /** Shown when no agent is online. */
+  awayMessage?: string;
+  /**
+   * Per-widget AI-autopilot switch. Absent/false = OFF (default): the assistant
+   * never auto-answers this widget's conversations even when the team has AI
+   * configured. Gated in ai-reply.subscriber.ts via `webchatwidgetAiAllowed`.
+   */
+  aiEnabled?: boolean;
+  /**
+   * Hide the chat header on an EMBEDDED (inline / full-page) widget — a "just chat"
+   * surface where the host page already provides the title/branding. Ignored for a
+   * floating bubble (it needs the header's close/expand controls). Default: shown.
+   */
+  showHeader?: boolean;
   // ---- launcher / placement defaults (used by the settings UI to generate the
   //      embed snippet; the widget itself reads these from data-* attributes) ----
-  launcher?: "bubble" | "off";
+  /**
+   * Deploy mode, one per page (the widget is a singleton):
+   * `bubble` floating launcher · `off` opened from the host's own button ·
+   * `inline` embedded in a container on their page. Settings uses this to show
+   * the ONE matching install snippet.
+   */
+  launcher?: "bubble" | "off" | "inline";
   position?: "right" | "left";
   launcherLabel?: string;
 }
@@ -76,6 +131,8 @@ export interface WebchatwidgetResolved {
   name: string;
   allowedOrigins: string[];
   config: WebchatwidgetConfig;
+  /** Already-observed embed host, or null. Cached so the hot path skips a write. */
+  firstSeenOrigin: string | null;
 }
 
 const connectedCache = new TtlCache<boolean>();
@@ -131,7 +188,7 @@ export async function resolveWebchatwidgetByPublicKey(
   if (cached !== undefined) return cached;
   const widget = await db.webchatWidget.findUnique({
     where: { publicKey },
-    select: { id: true, teamId: true, name: true, allowedOrigins: true, config: true, isActive: true },
+    select: { id: true, teamId: true, name: true, allowedOrigins: true, config: true, isActive: true, firstSeenOrigin: true },
   });
   const resolved: WebchatwidgetResolved | null =
     widget && widget.isActive
@@ -141,8 +198,82 @@ export async function resolveWebchatwidgetByPublicKey(
           name: widget.name,
           allowedOrigins: widget.allowedOrigins,
           config: (widget.config ?? {}) as WebchatwidgetConfig,
+          firstSeenOrigin: widget.firstSeenOrigin,
         }
       : null;
   byKeyCache.set(publicKey, resolved);
   return resolved;
+}
+
+/**
+ * Is AI-autopilot allowed to answer THIS conversation?
+ *
+ * The AI reply subscriber calls this before enqueuing. For a conversation that is
+ * NOT a widget one (`webchatWidgetId` null) it returns `true` — this gate only
+ * governs the website widget; every other channel is unaffected. For a widget
+ * conversation the answer is the widget's per-widget switch, which DEFAULTS OFF:
+ * AI runs only when an admin explicitly set `config.aiEnabled = true` on an active
+ * widget. A deleted/deactivated source widget (the `SetNull` relation leaves the
+ * id but the row inactive/gone) is treated as OFF.
+ *
+ * One indexed lookup, and only reached on the AI path (team already has AI
+ * configured), so it never touches the general inbound hot path.
+ */
+export async function webchatwidgetAiAllowed(conversationId: string): Promise<boolean> {
+  const conv = await db.conversation.findUnique({
+    where: { id: conversationId },
+    select: {
+      webchatWidgetId: true,
+      webchatWidget: { select: { isActive: true, config: true } },
+    },
+  });
+  // Not a widget conversation → this gate doesn't apply.
+  if (!conv?.webchatWidgetId) return true;
+  const w = conv.webchatWidget;
+  if (!w || !w.isActive) return false;
+  const cfg = (w.config ?? {}) as WebchatwidgetConfig;
+  return cfg.aiEnabled === true;
+}
+
+/**
+ * Remember the first real domain that embeds a widget (trust-on-first-use).
+ *
+ * A new widget ships with an EMPTY allow-list, which is permissive — it has to be,
+ * or it would refuse the customer's very first page load. But the site key is
+ * public (it sits in the page source), so an unlocked widget can be lifted onto a
+ * phishing page that impersonates the brand. Rather than demand a domain during
+ * onboarding — data we don't collect, and a step that blocks first-run — we
+ * observe the domain the widget is actually used on and let Settings offer a
+ * one-click lock at the point the value is self-evidently right.
+ *
+ * Deliberately inert: this only ever RECORDS. It never rejects a connection, so a
+ * wrong guess can't lock a customer out of their own widget.
+ *
+ * Cheap on the hot path — skipped entirely once the widget is locked or the origin
+ * is already known (both read from the cached resolve). The write is a CAS
+ * (`firstSeenOrigin: null`), so concurrent handshakes race harmlessly and the
+ * FIRST one wins.
+ */
+export async function recordFirstSeenOrigin(
+  publicKey: string,
+  resolved: WebchatwidgetResolved,
+  origin: string | null,
+): Promise<void> {
+  // Already locked down, or already observed → nothing to learn.
+  if (resolved.allowedOrigins.length > 0 || resolved.firstSeenOrigin || !origin) return;
+  let host: string;
+  try {
+    host = new URL(origin).hostname.toLowerCase();
+  } catch {
+    return;
+  }
+  // Loopback is the developer testing their own embed, not the site to lock to.
+  if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") return;
+  const written = await db.webchatWidget.updateMany({
+    where: { id: resolved.widgetId, firstSeenOrigin: null },
+    data: { firstSeenOrigin: host },
+  });
+  // Refresh the cache so the next handshake short-circuits above instead of
+  // re-running this no-op UPDATE for the rest of the TTL.
+  if (written.count > 0) invalidateWebchatwidgetKey(publicKey);
 }

@@ -35,8 +35,16 @@ export function getHistoryQueue(): Queue<HistoryJobData> {
     defaultJobOptions: {
       attempts: 5,
       backoff: { type: "exponential", delay: 5_000 },
-      removeOnComplete: { age: 24 * 3600, count: 1000 },
-      removeOnFail: { age: 7 * 24 * 3600, count: 5000 },
+      // Each job carries a FULL raw Meta history payload (thousands of past
+      // messages per chunk) as job data inside the 200mb noeviction Redis. A
+      // large backfill retaining 1000 completed + 5000 failed such payloads
+      // could hit maxmemory, at which point EVERY BullMQ write in the process
+      // fails (send/workflow/broadcast enqueues) and the wedge can't self-heal.
+      // The payload has zero replay value once ingested — dedup is by wamid —
+      // so drop completed jobs almost immediately and keep only a small failed
+      // window for triage.
+      removeOnComplete: { age: 3600, count: 50 },
+      removeOnFail: { age: 24 * 3600, count: 500 },
     },
   });
   return state.queue;

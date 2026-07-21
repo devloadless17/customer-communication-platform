@@ -59,6 +59,13 @@ import type {
   UpdateChannelInput,
 } from "./channels.schemas";
 
+/**
+ * Distinct emoji allowed on one message. Slack tops out around 25; this is
+ * generous for any real conversation and exists only to bound a scripted
+ * client (see the check in `toggleReaction`).
+ */
+const MAX_DISTINCT_REACTIONS_PER_MESSAGE = 40;
+
 @Injectable()
 export class ChannelsService {
   private readonly logger = new Logger(ChannelsService.name);
@@ -124,7 +131,17 @@ export class ChannelsService {
       WHERE mn."mentionedUserId" = ${userId}
         AND m."teamId" = ${teamId}
         AND (mem."userId" IS NOT NULL OR c."isDefault" = TRUE)
-        AND (r."lastReadAt" IS NULL OR m."createdAt" > r."lastReadAt")
+        -- COALESCE(editedAt, createdAt), not createdAt alone. An edit can ADD a
+        -- mention, and the message's original createdAt is by definition older
+        -- than the reader's receipt by then — so a mention added by an edit was
+        -- filtered out here and the reader was never told about it, permanently.
+        -- The cost of using the later timestamp is that editing a message whose
+        -- mention was already read re-badges it once; that clears the moment the
+        -- reader opens the channel, which is the right way to be wrong.
+        AND (
+          r."lastReadAt" IS NULL
+          OR COALESCE(m."editedAt", m."createdAt") > r."lastReadAt"
+        )
     `;
     return Number(rows[0]?.count ?? 0);
   }
@@ -611,6 +628,7 @@ export class ChannelsService {
         teamId,
         channelId: created.id,
         memberUserIds: memberIds,
+        createdByUserId: actorUserId,
       });
       return mapChannel(created, memberIds.length);
     } catch (err) {
@@ -792,8 +810,9 @@ export class ChannelsService {
     const { teamId, userId } = session;
     const receivedAt = new Date();
 
-    const [, validMentionIds] = await Promise.all([
+    const [, , validMentionIds] = await Promise.all([
       this.requireChannelMembership(teamId, userId, channelId),
+      this.assertChannelWritable(teamId, userId, channelId),
       this.validateMentions(teamId, channelId, input.body),
     ]);
 
@@ -919,6 +938,18 @@ export class ChannelsService {
     // The mentions validator is also channel-scoped so an editor can't @ users
     // who aren't in this channel.
     const validMentionIds = await this.validateMentions(teamId, channelId, input.body);
+    // Who this edit newly @-mentions. Read BEFORE the transaction replaces the
+    // rows: an edit is the one way to be mentioned without a new message, and
+    // it used to notify nobody. Only the ADDED ids are alerted — re-badging
+    // everyone on a typo fix would resurrect mentions people already cleared.
+    const priorMentions = await this.db.teamChannelMention.findMany({
+      where: { messageId },
+      select: { mentionedUserId: true },
+    });
+    const priorMentionIds = new Set(priorMentions.map((m) => m.mentionedUserId));
+    const newlyMentionedUserIds = validMentionIds.filter(
+      (uid) => !priorMentionIds.has(uid) && uid !== userId,
+    );
     const editedAt = new Date();
 
     // Defense-in-depth: teamId is added to every mutate WHERE even though
@@ -971,6 +1002,8 @@ export class ChannelsService {
       messageId,
       body: input.body,
       editedAt: editedAt.toISOString(),
+      authorUserId: existing.authorUserId,
+      newlyMentionedUserIds,
     });
     const dto = await loadMessageForEmit(messageId, teamId);
     return { message: dto };
@@ -1051,11 +1084,17 @@ export class ChannelsService {
       await this.db.teamChannelMessage.deleteMany({
         where: { id: messageId, teamId },
       });
-      const latest = await this.db.teamChannelMessage.findFirst({
-        where: { channelId, teamId, threadRootId: null },
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        select: { body: true, mediaKind: true, createdAt: true },
-      });
+      const [latest, channelRow] = await Promise.all([
+        this.db.teamChannelMessage.findFirst({
+          where: { channelId, teamId, threadRootId: null },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          select: { body: true, mediaKind: true, createdAt: true },
+        }),
+        this.db.teamChannel.findFirst({
+          where: { id: channelId, teamId },
+          select: { createdAt: true },
+        }),
+      ]);
       await this.db.teamChannel.updateMany({
         where: { id: channelId, teamId },
         data: latest
@@ -1063,7 +1102,16 @@ export class ChannelsService {
               lastMessageAt: latest.createdAt,
               lastMessagePreview: buildMessagePreview(latest.body, !!latest.mediaKind),
             }
-          : { lastMessagePreview: "" },
+          // Deleting the LAST message empties the channel, so the timestamp has
+          // to roll back with the preview. `lastMessageAt === createdAt` is the
+          // schema's "no messages yet" sentinel (see the unreadForMe fallback in
+          // lib/team-chat/queries.ts); leaving it on the deleted row's time kept
+          // that comparison true, so a member who had never opened the channel
+          // saw it badged unread forever over a blank preview with nothing in it.
+          : {
+              lastMessagePreview: "",
+              ...(channelRow ? { lastMessageAt: channelRow.createdAt } : {}),
+            },
       });
     }
 
@@ -1229,6 +1277,19 @@ export class ChannelsService {
         // rather than a P2025.
         await tx.teamChannelReaction.deleteMany({ where: { id: existing.id } });
       } else {
+        // Ceiling on DISTINCT emoji per message. Adding one is unbounded work
+        // for everyone else — each new value is a permanent chip rendered under
+        // the message for every member and a frame to the whole channel room —
+        // so a scripted client could bury a message under hundreds of them at
+        // the 300/min rate limit. Well above any real conversation; only a
+        // NEW emoji is gated, so joining an existing reaction always works.
+        const distinct = await tx.teamChannelReaction.groupBy({
+          by: ["emoji"],
+          where: { messageId },
+        });
+        if (distinct.length >= MAX_DISTINCT_REACTIONS_PER_MESSAGE) {
+          throw new BadRequestException({ error: "too_many_reactions" });
+        }
         try {
           await tx.teamChannelReaction.create({
             data: { messageId, userId, emoji },
@@ -1473,8 +1534,9 @@ export class ChannelsService {
     const receivedAt = new Date();
 
     // Membership gate + root validation + mention check in parallel.
-    const [, root, validMentionIds] = await Promise.all([
+    const [, , root, validMentionIds] = await Promise.all([
       this.requireChannelMembership(teamId, userId, channelId),
+      this.assertChannelWritable(teamId, userId, channelId),
       this.requireThreadRoot(teamId, channelId, rootMessageId),
       this.validateMentions(teamId, channelId, input.body),
     ]);
@@ -1580,8 +1642,8 @@ export class ChannelsService {
       threadRootId: string | null;
     },
   ) {
-    const receivedAt = new Date();
     await this.requireChannelMembership(teamId, userId, channelId);
+    await this.assertChannelWritable(teamId, userId, channelId);
 
     if (args.threadRootId) {
       const root = await this.db.teamChannelMessage.findFirst({
@@ -1631,6 +1693,11 @@ export class ChannelsService {
 
     const validMentionIds = await this.validateMentions(teamId, channelId, args.body);
     const preview = buildMessagePreview(args.body, true);
+    // Stamp AFTER the (potentially slow) blob upload so createdAt / lastMessageAt
+    // reflect commit time, not upload start. A method-entry stamp backdates the
+    // message and moves lastMessageAt backwards past activity that happened during
+    // a large upload (breaking unread + the timestamp-delta backfill).
+    const receivedAt = new Date();
     let created: { id: string; threadReplyCount: number };
     try {
       created = await this.db.$transaction(async (tx) => {
@@ -1668,6 +1735,17 @@ export class ChannelsService {
           await tx.teamChannel.update({
             where: { id: channelId },
             data: { lastMessageAt: receivedAt, lastMessagePreview: preview },
+          });
+          // Same reason postMessage does this (see its comment): the upload
+          // just moved `lastMessageAt`, and `unreadForMe` compares that to the
+          // reader's receipt — so without advancing the AUTHOR's receipt, the
+          // sender's own sidebar badged the channel unread for a file they
+          // themselves posted. The client can't compensate: it deliberately
+          // skips markRead for its own sends.
+          await tx.teamChannelReadReceipt.upsert({
+            where: { userId_channelId: { userId, channelId } },
+            create: { userId, channelId, lastReadAt: receivedAt },
+            update: { lastReadAt: receivedAt },
           });
           return { id: msg.id, threadReplyCount: 0 };
         }
@@ -1797,6 +1875,44 @@ export class ChannelsService {
       select: { userId: true },
     });
     if (!member) throw new NotFoundException({ error: "channel not found" });
+  }
+
+  /**
+   * A DM whose other participant has left the team is READ-ONLY.
+   *
+   * `DirectMessagePeerDto.deactivated` has documented this since it was
+   * introduced ("history stays readable, composer disabled") but nothing
+   * enforced it on either side, so an agent could type a handover note into a
+   * conversation whose only other reader no longer has an account. The UI now
+   * swaps the composer for an explanation; this is the rule behind it, so the
+   * `/v1`-style direct-POST path can't bypass the affordance.
+   *
+   * Reads are deliberately untouched — the whole point is that the history
+   * stays available. Only the three send paths call this.
+   *
+   * A self-DM ("notes to self") has no other member, so `peer` is null and the
+   * check passes — that conversation must keep working.
+   */
+  private async assertChannelWritable(
+    teamId: string,
+    userId: string,
+    channelId: string,
+  ): Promise<void> {
+    const channel = await this.db.teamChannel.findFirst({
+      where: { id: channelId, teamId },
+      select: { kind: true },
+    });
+    if (channel?.kind !== "dm") return;
+    const peer = await this.db.teamChannelMember.findFirst({
+      where: { channelId, userId: { not: userId } },
+      select: { user: { select: { name: true, deactivatedAt: true } } },
+    });
+    if (peer?.user.deactivatedAt) {
+      throw new UnprocessableEntityException({
+        error: "dm_peer_deactivated",
+        detail: `${peer.user.name ?? "That teammate"} no longer has an account on this team.`,
+      });
+    }
   }
 
   /**

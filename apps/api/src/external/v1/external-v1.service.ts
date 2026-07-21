@@ -1,5 +1,8 @@
 import { getBroadcastReport, recipientOutcomeWhere } from "@/lib/broadcast-report";
 import type {
+  ExternalCallButtonInput,
+  ExternalListCallsQueryInput,
+  ExternalStartImportInput,
   ListBroadcastRecipientsQueryInput,
   ListBroadcastsQueryInput,
 } from "./external-v1.schemas";
@@ -13,7 +16,9 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 
+import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
 import { MAX_CHAIN_DEPTH } from "@/lib/workflows/events";
+import { ContactTransferService } from "@/contacts/transfer.service";
 import { toExternalAvatarUrl } from "@/lib/blob-storage";
 
 import {
@@ -41,6 +46,8 @@ import { DbService } from "../../db/db.service";
 import { runWithConcurrency } from "../../common/concurrency";
 import { ApiIdempotencyService } from "./api-idempotency.service";
 import { ExternalV1MessagingService } from "./external-v1-messaging.service";
+import { getProviderBinding } from "@/lib/providers";
+import { CallsService } from "@/calls/calls.service";
 import type {
   ExternalAssignInput,
   ExternalBulkTagInput,
@@ -87,6 +94,8 @@ export class ExternalV1Service {
     private readonly bus: EventBus,
     private readonly messaging: ExternalV1MessagingService,
     private readonly idem: ApiIdempotencyService,
+    private readonly transfers: ContactTransferService,
+    private readonly calls: CallsService,
   ) {}
 
   /**
@@ -285,6 +294,187 @@ export class ExternalV1Service {
     return this.messaging.deleteNote(teamId, conversationId, noteId);
   }
 
+
+  // ===========================================================================
+  // CALLS
+  // ===========================================================================
+
+  /** Call history, newest first. Keyset cursor `<ringingAtMs>_<id>`. */
+  async listCalls(teamId: string, query: ExternalListCallsQueryInput) {
+    const parsed = ((): { ringingAt: Date; id: string } | null => {
+      if (!query.cursor) return null;
+      const i = query.cursor.indexOf("_");
+      if (i <= 0) return null;
+      const ms = Number(query.cursor.slice(0, i));
+      const id = query.cursor.slice(i + 1);
+      return Number.isFinite(ms) && id ? { ringingAt: new Date(ms), id } : null;
+    })();
+
+    const ringingAt: Prisma.DateTimeFilter = {};
+    if (query.from) {
+      const d = new Date(query.from);
+      if (!Number.isNaN(d.getTime())) ringingAt.gte = d;
+    }
+    if (query.to) {
+      const d = new Date(query.to);
+      if (!Number.isNaN(d.getTime())) ringingAt.lte = d;
+    }
+
+    const where: Prisma.CallWhereInput = {
+      teamId,
+      ...(query.conversationId ? { conversationId: query.conversationId } : {}),
+      ...(ringingAt.gte || ringingAt.lte ? { ringingAt } : {}),
+      ...(parsed
+        ? {
+            OR: [
+              { ringingAt: { lt: parsed.ringingAt } },
+              { ringingAt: parsed.ringingAt, id: { lt: parsed.id } },
+            ],
+          }
+        : {}),
+    };
+
+    const rows = await this.db.call.findMany({
+      where,
+      orderBy: [{ ringingAt: "desc" }, { id: "desc" }],
+      take: query.limit + 1,
+      select: {
+        id: true,
+        conversationId: true,
+        channel: true,
+        direction: true,
+        status: true,
+        ringingAt: true,
+        answeredAt: true,
+        endedAt: true,
+        durationSeconds: true,
+        conversation: { select: { contactId: true } },
+      },
+    });
+    const hasMore = rows.length > query.limit;
+    const page = hasMore ? rows.slice(0, query.limit) : rows;
+    const last = page.at(-1);
+    return {
+      data: page.map((c) => ({
+        id: c.id,
+        conversation_id: c.conversationId,
+        contact_id: c.conversation.contactId,
+        channel: c.channel,
+        direction: c.direction,
+        status: c.status,
+        // A call that was picked up. Note this is NOT `status === "completed"`:
+        // an agent can hang up a connected call, and a call can complete
+        // without ever being answered.
+        connected: c.answeredAt !== null,
+        ringing_at: c.ringingAt.toISOString(),
+        answered_at: c.answeredAt?.toISOString() ?? null,
+        ended_at: c.endedAt?.toISOString() ?? null,
+        duration_seconds: c.durationSeconds,
+      })),
+      next_cursor:
+        hasMore && last ? `${last.ringingAt.getTime()}_${last.id}` : null,
+    };
+  }
+
+  /**
+   * The customer's live calling-permission state, straight from the provider.
+   *
+   * Deliberately not served from our own rows: permission can be granted in
+   * ways that touch nothing on our side (the customer calling us, or granting
+   * from their business profile), so a local answer would tell an integration
+   * "no permission" for someone perfectly callable.
+   */
+  async getCallPermission(teamId: string, conversationId: string) {
+    const conv = await this.db.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      select: {
+        channel: true,
+        contact: { select: { phoneNumber: true, bsuid: true } },
+      },
+    });
+    if (!conv) throw new NotFoundException({ error: "conversation_not_found" });
+    const binding = getProviderBinding(conv.channel);
+    const read = binding.provider.getCallPermission;
+    if (!read) {
+      throw new BadRequestException({
+        error: "calling_not_supported",
+        detail: `Calling isn't available on ${conv.channel}.`,
+      });
+    }
+    if (!conv.contact?.phoneNumber && !conv.contact?.bsuid) {
+      throw new BadRequestException({ error: "contact_has_no_callable_identity" });
+    }
+    const config = await binding.getSendConfig(teamId);
+    const permission = await read(
+      {
+        ...(conv.contact.phoneNumber ? { to: conv.contact.phoneNumber } : {}),
+        ...(conv.contact.bsuid ? { recipient: conv.contact.bsuid } : {}),
+      },
+      config,
+    );
+    return {
+      status: permission.status,
+      has_permission: permission.hasPermission,
+      can_start_call: permission.canStartCall,
+      can_request_permission: permission.canRequestPermission,
+      expires_at: permission.expiresAt?.toISOString() ?? null,
+      // Present only when the per-customer call quota is spent.
+      quota_resets_at: permission.startCallResetAt?.toISOString() ?? null,
+    };
+  }
+
+  /** Ask the customer for permission to call them. Sends a billable message. */
+  async requestCallPermission(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    idempotencyKey?: string,
+  ) {
+    return this.withIdempotency(
+      teamId,
+      apiKeyId,
+      idempotencyKey,
+      "POST /v1/conversations/:id/call-permission",
+      { conversationId },
+      async () => {
+        const out = await this.calls.requestPermissionForTeam(
+          teamId,
+          conversationId,
+        );
+        return {
+          ok: true as const,
+          permission_request_id: out.permissionRequestId,
+          expires_at: out.expiresAt,
+        };
+      },
+    );
+  }
+
+  /** Send a call button inviting the customer to call us. */
+  async sendCallButton(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalCallButtonInput,
+    idempotencyKey?: string,
+  ) {
+    return this.withIdempotency(
+      teamId,
+      apiKeyId,
+      idempotencyKey,
+      "POST /v1/conversations/:id/call-button",
+      { conversationId, ...input },
+      async () => {
+        const out = await this.calls.sendCallButtonForTeam(
+          teamId,
+          conversationId,
+          input,
+        );
+        return { ok: true as const, message_id: out.externalId };
+      },
+    );
+  }
+
   // ===========================================================================
   // CONTACTS — read
   // ===========================================================================
@@ -323,7 +513,14 @@ export class ExternalV1Service {
     if (q.phone) {
       const normalized = normalizePhoneE164(q.phone) ?? q.phone;
       const rows = await this.db.contact.findMany({
-        where: { teamId, deletedAt: null, ...directoryContactWhere, phoneNumber: normalized },
+        // Phone is the WhatsApp identity (the partial unique on
+        // (teamId, phoneNumber) fires only for identityChannel='whatsapp'). The
+        // same number can also sit on a social/widget contact via contact-share
+        // or widget pre-chat; scope to whatsapp so a partner "who is +…?" lookup
+        // is deterministic and returns the phone's canonical owner, not a row
+        // that merely borrowed it. (Safe scalar AND — directoryContactWhere's OR
+        // has no sibling OR here.)
+        where: { teamId, deletedAt: null, ...directoryContactWhere, identityChannel: "whatsapp", phoneNumber: normalized },
         include: EXTERNAL_CONTACT_INCLUDE,
         take: 1,
       });
@@ -595,7 +792,8 @@ export class ExternalV1Service {
     },
   ): Promise<ExternalContact | null> {
     const existing = await this.db.contact.findFirst({
-      where: { teamId, phoneNumber: phone, deletedAt: { not: null } },
+      // whatsapp-scoped: the phone unique slot this revives is WhatsApp-only.
+      where: { teamId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: { not: null } },
       select: { id: true },
     });
     if (!existing) return null;
@@ -794,8 +992,27 @@ export class ExternalV1Service {
       const next = newCustom[key] ?? null;
       if (prev !== next) fieldChanges.push({ key, previous: prev, next });
     }
+    // Built-in column diffs too — the internal UI path includes these, so the
+    // /v1 path must match or the same mutation emits a different event payload
+    // by entry point. (The workflow-dispatch guard already excludes built-in
+    // keys, so this adds payload fidelity without a workflow re-trigger risk.)
+    for (const key of ["name", "firstName", "lastName", "email", "language", "countryCode", "location"] as const) {
+      const prev = (existing[key] as string | null) ?? null;
+      const next = (updated[key] as string | null) ?? null;
+      if (prev !== next) fieldChanges.push({ key, previous: prev, next });
+    }
 
     const contact: DomainContact = toContactWire(updated, { tagIds });
+
+    // No-op guard: a CRM re-sync that PATCHes the same values it already holds
+    // changed nothing (no field diffs, same stage). Publishing contact.updated
+    // anyway fans a signed delivery to every outbound webhook per idle re-sync —
+    // a storm with zero information. Skip the fanout entirely on a true no-op.
+    // (The version was bumped by the CAS above; that's a cheap idempotent write,
+    // and the realistic storm is the webhook fanout, which this suppresses.)
+    if (fieldChanges.length === 0 && existing.stageId === updated.stageId) {
+      return toExternalContact(updated, tagIds);
+    }
 
     // `silent: true` → skip reactions on every event this update fans out, so
     // a partner that edits a contact via /v1 doesn't re-trigger a workflow
@@ -875,7 +1092,11 @@ export class ExternalV1Service {
       });
     }
     const existing = await this.db.contact.findFirst({
-      where: { teamId, phoneNumber: phone },
+      // Scope to whatsapp — the create path below stamps identityChannel:
+      // 'whatsapp', so the whole /v1 phone-keyed contact CRUD surface is
+      // WhatsApp-semantic. Without this a re-sync could patch/revive a
+      // social/widget contact that merely borrowed the phone.
+      where: { teamId, phoneNumber: phone, identityChannel: "whatsapp" },
       select: { id: true, deletedAt: true },
     });
     // Not found OR soft-deleted → go through createContact. For a tombstoned
@@ -895,7 +1116,7 @@ export class ExternalV1Service {
         // path instead of surfacing the 409 to the partner.
         if (err instanceof ConflictException) {
           const winner = await this.db.contact.findFirst({
-            where: { teamId, phoneNumber: phone, deletedAt: null },
+            where: { teamId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: null },
             select: { id: true },
           });
           if (!winner) throw err;
@@ -987,7 +1208,11 @@ export class ExternalV1Service {
       select: { id: true, phoneNumber: true, identityChannel: true, externalContactId: true },
     });
     if (!c) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
-    if (!c.phoneNumber) return { items: [] };
+    // A social/widget contact has no phoneNumber but IS on a channel — its
+    // identityChannel + externalContactId prove it. Returning [] for every
+    // Messenger/Instagram/webchatwidget contact wrongly reported them as having
+    // no channel; only a row with NEITHER identity (which shouldn't exist) is [].
+    if (!c.phoneNumber && !c.externalContactId) return { items: [] };
     return {
       items: [
         {
@@ -1226,6 +1451,50 @@ export class ExternalV1Service {
     );
   }
 
+  /**
+   * Queue a contact import for an API-key caller.
+   *
+   * Idempotency is MANDATORY at the controller. An import is a bulk, billed-in-
+   * effort, non-reversible mutation of the contact book: a partner retrying
+   * after a 5xx must replay the SAME job id, not queue a second run over the
+   * same 100k rows.
+   *
+   * `canManageTags: true` — an API key with `write:contacts` can already create
+   * contacts and tag them through the existing endpoints, so gating tag
+   * auto-creation here would only make imports behave differently from the rest
+   * of the surface for no security gain (the UI gate exists because a human
+   * agent's role may withhold `tags:manage`; a key has no role).
+   */
+  async startContactImport(
+    teamId: string,
+    apiKeyId: string,
+    input: ExternalStartImportInput,
+    idempotencyKey?: string,
+  ): Promise<{ jobId: string }> {
+    return this.withIdempotency(
+      teamId,
+      apiKeyId,
+      idempotencyKey,
+      "start_contact_import",
+      { uploadKey: input.uploadKey, mode: input.mode },
+      () =>
+        this.transfers.startImport({
+          teamId,
+          userId: null,
+          uploadKey: input.uploadKey,
+          filename: input.filename,
+          format: input.format,
+          options: {
+            mode: input.mode,
+            tagMode: input.tagMode,
+            fireAutomations: input.fireAutomations,
+            mapping: input.mapping,
+          },
+          canManageTags: true,
+        }),
+    );
+  }
+
   private async bulkContactTagsInternal(
     teamId: string,
     apiKeyId: string,
@@ -1420,6 +1689,17 @@ export class ExternalV1Service {
     });
     if (existing.length >= 50) {
       throw new BadRequestException({ error: "too_many_contact_fields", detail: "at most 50 contact fields per team" });
+    }
+    // Same guard the internal contact-fields route applies. Without it /v1 can
+    // mint a field whose label shadows a built-in column ("Language", "City"),
+    // which renders two fields with the same name in the contact panel writing
+    // to different storage — and makes the field un-round-trippable through
+    // import/export except via the `custom:<key>` header form.
+    if (isReservedFieldKey(input.label)) {
+      throw new BadRequestException({
+        error: "reserved_field_label",
+        detail: `"${input.label}" collides with a built-in contact field. Pick a different label.`,
+      });
     }
     const baseKey = slugifyKey(input.label);
     if (!baseKey) {
@@ -1618,13 +1898,28 @@ export class ExternalV1Service {
         const cfg = (c.config ?? {}) as {
           phoneNumberId?: string;
           displayPhoneNumber?: string;
+          pageId?: string;
+          pageName?: string;
+          igUserId?: string;
+          igUsername?: string;
+          siteKey?: string;
+          widgetName?: string;
         };
-        if (!cfg.phoneNumberId) return null;
-        return {
-          id: cfg.phoneNumberId,
-          channel: c.channel,
-          display: cfg.displayPhoneNumber ?? cfg.phoneNumberId,
-        };
+        // Every LIVE channel is a real connection the UI shows — not just
+        // WhatsApp. Derive a stable per-channel id + display from whatever
+        // identity that channel carries, instead of dropping every non-WA row
+        // (which made teams on messenger/instagram/webchatwidget see an empty
+        // or WhatsApp-only channel list through the API).
+        const id =
+          cfg.phoneNumberId ?? cfg.pageId ?? cfg.igUserId ?? cfg.siteKey ?? null;
+        if (!id) return null;
+        const display =
+          cfg.displayPhoneNumber ??
+          (cfg.igUsername ? `@${cfg.igUsername}` : undefined) ??
+          cfg.pageName ??
+          cfg.widgetName ??
+          id;
+        return { id, channel: c.channel, display };
       })
       .filter((x): x is NonNullable<typeof x> => x !== null);
     return { items };
@@ -1840,6 +2135,8 @@ function broadcastToExternal(b: {
   id: string;
   status: string;
   name: string | null;
+  kind: string;
+  targetMode: string;
   templateName: string | null;
   templateLanguage: string | null;
   templateCategory: string | null;
@@ -1854,14 +2151,22 @@ function broadcastToExternal(b: {
   completedAt: Date | null;
   scheduledAt: Date | null;
 }) {
+  // `targetMode:"customer"` (People / best-channel) campaigns store an inert
+  // channel:"whatsapp" — surfacing kind + targetMode lets a partner tell an
+  // omnichannel campaign apart from a WhatsApp one (the API claims never to
+  // disagree with the UI), and channel is null'd for customer mode so it can't
+  // be mistaken for a real per-channel send.
+  const isCustomerMode = b.targetMode === "customer";
   return {
     id: b.id,
     status: b.status,
     name: b.name,
+    kind: b.kind,
+    targetMode: b.targetMode,
     templateName: b.templateName,
     templateLanguage: b.templateLanguage,
     templateCategory: b.templateCategory,
-    channel: b.channel,
+    channel: isCustomerMode ? null : b.channel,
     audienceMode: b.audienceMode,
     totalCount: b.totalCount,
     sentCount: b.sentCount,

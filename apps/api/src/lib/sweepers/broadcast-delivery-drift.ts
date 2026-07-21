@@ -91,7 +91,9 @@ async function sweepOnce(): Promise<void> {
     },
     orderBy: { createdAt: "desc" },
     take: MAX_BROADCASTS_PER_TICK,
-    select: { id: true },
+    // teamId comes along so the join below can lean on the Message dedupe index
+    // (teamId, channel, externalId) instead of seq-scanning the whole table.
+    select: { id: true, teamId: true },
   });
   if (broadcasts.length === 0) return;
 
@@ -114,7 +116,14 @@ async function sweepOnce(): Promise<void> {
             "metaErrorCode" = COALESCE(r."metaErrorCode",
               CASE WHEN m.status = 'failed' THEN m."statusErrorCode" ELSE NULL END)
         FROM "Message" m
-        WHERE m."externalId" = r."externalId"
+        -- teamId scopes the join onto the leading column of Message's
+        -- (teamId, channel, externalId) unique index, turning a full-table scan
+        -- into a per-team index range scan. NOT constrained on channel: a
+        -- customer-mode broadcast sends each recipient on their best channel, so
+        -- m.channel can differ from broadcast.channel — matching on it would
+        -- silently skip those recipients.
+        WHERE m."teamId" = ${b.teamId}
+          AND m."externalId" = r."externalId"
           AND r."broadcastId" = ${b.id}
           AND r."externalId" IS NOT NULL
           AND r.status = 'sent'

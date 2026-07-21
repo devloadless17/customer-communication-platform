@@ -22,7 +22,7 @@ import {
   attributeInboundToBroadcast,
   clearOptOut,
 } from "@/lib/broadcast-attribution";
-import { resolveCustomerId } from "@/lib/identity/identity-service";
+import { resolveCustomerId, findExistingCustomerIdByStrongKey } from "@/lib/identity/identity-service";
 import { ensureDefaultStage } from "@/lib/queries";
 import {
   mapReplySnapshot,
@@ -175,6 +175,16 @@ export async function ingestEvents(
         await persistWhatsappHealth(teamId, {
           ...(evt.messagingTier !== undefined ? { messagingTier: evt.messagingTier } : {}),
           ...(evt.qualityRating !== undefined ? { qualityRating: evt.qualityRating } : {}),
+          ...(evt.callingRestrictedUntil !== undefined
+            ? {
+                callingRestrictedUntil: evt.callingRestrictedUntil,
+                callingRestrictionType: evt.callingRestrictionType ?? null,
+                callingRestrictionReason: evt.callingRestrictionReason ?? null,
+              }
+            : {}),
+          ...(evt.callingQualityWarning !== undefined
+            ? { callingQualityWarning: evt.callingQualityWarning }
+            : {}),
           ...(evt.throughputLevel !== undefined
             ? { throughputLevel: evt.throughputLevel }
             : {}),
@@ -272,6 +282,7 @@ export function isTransientDbError(err: unknown): boolean {
     return (
       err.code === "P2024" /* pool timeout (Rust engine only — see below) */ ||
       err.code === "P2034" /* write conflict / deadlock */ ||
+      err.code === "P2028" /* interactive-tx maxWait/timeout — rolled back, retry-safe */ ||
       err.code === "P1001" /* server unreachable */ ||
       err.code === "P1002" /* connection timeout */ ||
       err.code === "P1008" /* operation timeout */
@@ -657,7 +668,12 @@ async function ingestReadWatermark(
   });
   if (msgs.length === 0) return;
   await db.message.updateMany({
-    where: { id: { in: msgs.map((m) => m.id) } },
+    // Repeat the status predicate: between the findMany above and this write a
+    // concurrent status webhook could have advanced a row (e.g. to failed, or a
+    // later read), and an id-only updateMany would clobber it — regressing the
+    // status at the DB level. Only promote rows still sent/delivered. (Any
+    // resulting over-publish below is absorbed by the client's monotonic guard.)
+    where: { id: { in: msgs.map((m) => m.id) }, status: { in: ["sent", "delivered"] } },
     data: { status: "read" },
   });
   const occurredAt = new Date().toISOString();
@@ -713,7 +729,10 @@ async function ingestDeliveredWatermark(
   });
   if (msgs.length === 0) return;
   await db.message.updateMany({
-    where: { id: { in: msgs.map((m) => m.id) } },
+    // Repeat the status predicate so a row a concurrent read-webhook already
+    // advanced to `read`/`failed` between the findMany and this write isn't
+    // regressed back to `delivered` (id-only would clobber it).
+    where: { id: { in: msgs.map((m) => m.id) }, status: "sent" },
     data: { status: "delivered" },
   });
   const occurredAt = new Date().toISOString();
@@ -1562,6 +1581,35 @@ async function ingestInboundMessage(
           // tagIds — without this the relation is absent and tagIds is [].
           include: { tags: { select: { id: true } } },
         });
+        // Cold→warm strong-key adoption. When the backfill just gave this row a
+        // phone it never had, that phone may already identify a Customer under a
+        // sibling channel (the person messaged us on WhatsApp before, or on
+        // Messenger with a shared number). resolveCustomerId only ran at CREATE,
+        // so without this the person stays split across two Customers forever.
+        // Adopt-only + reap-empty, exactly like applyContactShareFromReply.
+        if (identityBackfill.phoneNumber) {
+          const adoptedCustomerId = await findExistingCustomerIdByStrongKey(
+            teamId,
+            { id: contact.id, name: contact.name, phoneNumber: identityBackfill.phoneNumber, email: null },
+            tx,
+          );
+          if (adoptedCustomerId && adoptedCustomerId !== contact.customerId) {
+            const priorCustomerId = contact.customerId;
+            contact = await tx.contact.update({
+              where: { id: contact.id },
+              data: { customerId: adoptedCustomerId },
+              include: { tags: { select: { id: true } } },
+            });
+            // The Customer it used to sit alone under is now childless — reap it.
+            // The `contacts: none` guard leaves a real merge target (one that
+            // still owns other channel contacts) intact.
+            if (priorCustomerId) {
+              await tx.customer.deleteMany({
+                where: { id: priorCustomerId, teamId, contacts: { none: {} } },
+              });
+            }
+          }
+        }
       } else {
         contact = await tx.contact.create({
           data: {
@@ -2191,11 +2239,19 @@ async function ingestOutboundEcho(
   }
   const { firstName, lastName } = splitContactName(identityLabel);
 
-  const { contact, conversation, isNewContact, wasRevived, isNewConversation } =
+  const { contact, conversation, isNewContact, wasRevived, isNewConversation, reopened } =
     await runWithSerializableRetry(async (tx) => {
       const found = await tx.contact.findFirst({
+        // Scope by identityChannel exactly like the inbound / call / history
+        // paths (see the comment at the inbound lookup ~1490): the partial
+        // unique on (teamId, phoneNumber) fires ONLY for identityChannel=
+        // 'whatsapp', so contact-share (or a widget pre-chat) can stamp this
+        // same phone onto a messenger/instagram/webchatwidget contact. Without
+        // the channel scope this coexistence echo could resolve to that social/
+        // widget contact and fold a WhatsApp echo thread onto the wrong
+        // channel's conversation.
         where: isPhone
-          ? { teamId, phoneNumber: evt.contactPhone }
+          ? { teamId, identityChannel: channel, phoneNumber: evt.contactPhone }
           : { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
         include: { tags: { select: { id: true } } },
       });
@@ -2250,6 +2306,9 @@ async function ingestOutboundEcho(
         orderBy: { lastMessageAt: "desc" },
       });
       const isNewConversation = !existingConvo;
+      // Whether THIS echo won the closed→pending reopen CAS (drives the
+      // conversation.status_changed publish + splice-in below).
+      let reopened = false;
       let conversation = existingConvo;
       if (!conversation) {
         conversation = await tx.conversation.create({
@@ -2267,13 +2326,14 @@ async function ingestOutboundEcho(
       } else if (conversation.status === "closed") {
         // Reopen: the owner is chatting this contact again. CAS so a racing
         // inbound reopen doesn't double-flip; either way the thread ends pending.
-        await tx.conversation.updateMany({
+        const flip = await tx.conversation.updateMany({
           where: { id: conversation.id, status: "closed" },
           data: { status: "pending", assignedUserId: null },
         });
+        reopened = flip.count > 0;
         conversation = { ...conversation, status: "pending", assignedUserId: null };
       }
-      return { contact: contact!, conversation, isNewContact, wasRevived, isNewConversation };
+      return { contact: contact!, conversation, isNewContact, wasRevived, isNewConversation, reopened };
     });
 
   // Strict-monotonic timestamp so a phone reply landing in the same second as
@@ -2349,8 +2409,9 @@ async function ingestOutboundEcho(
 
   // Splice-in row so a brand-new / reopened phone-initiated thread appears in a
   // teammate's loaded list without a refetch (same mechanism the inbound path
-  // uses on first contact). unreadCount 0 — we clear it just below.
-  const newConversation: ConversationWithRefs | undefined = isNewConversation
+  // uses on first contact). A reopened thread also needs the splice — it left
+  // the open list when it closed. unreadCount 0 — we clear it just below.
+  const newConversation: ConversationWithRefs | undefined = isNewConversation || reopened
     ? {
         conversation: toDomainConversation({
           ...conversation,
@@ -2390,6 +2451,33 @@ async function ingestOutboundEcho(
       // already written. Swallow — no optimistic UI is waiting on this.
     },
   });
+
+  // A phone-initiated echo that reopened a CLOSED thread must announce the
+  // status change like the inbound reopen path does — otherwise clients keep
+  // showing the thread as closed and workflows / outbound webhooks never see
+  // the reopen. Only the CAS winner publishes (reopened === true). Same
+  // snapshot shape as the inbound reopen (status applied, close fields nulled).
+  if (reopened) {
+    const reopenSnapshot = workflowConversationSnapshotAfterStatusChange(
+      {
+        ...conversation,
+        status: "pending",
+        lastMessageAt: messageTimestamp,
+        unreadCount: conversation.unreadCount,
+      },
+      { previousStatus: "closed", changedByUserId: null },
+    );
+    await publish({
+      type: "conversation.status_changed",
+      teamId,
+      conversationId: conversation.id,
+      previousStatus: "closed",
+      newStatus: "pending",
+      changedByUserId: null,
+      contact: toWorkflowContact(contact),
+      conversation: reopenSnapshot,
+    });
+  }
 
   // Clear team-wide unread: the owner read the thread on their phone to reply.
   // CAS so a concurrent inbound bump isn't clobbered; publish conversation.read

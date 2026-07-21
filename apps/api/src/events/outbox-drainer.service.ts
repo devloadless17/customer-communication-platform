@@ -1,8 +1,8 @@
 import {
   Injectable,
   Logger,
+  type OnApplicationBootstrap,
   type OnModuleDestroy,
-  type OnModuleInit,
 } from "@nestjs/common";
 
 import { runWithCorrelationContext, withCorrelation } from "@/common/correlation";
@@ -54,12 +54,14 @@ import { EventBus } from "./event-bus.service";
  * single-claim tick = ~40 events/s. Non-tx `publish()` calls dispatch
  * synchronously and aren't bounded by this.
  *
- * Lifecycle: started on module init, stopped on shutdown via
- * `OnModuleDestroy` (main.ts's manual SIGTERM/SIGINT handler calls
+ * Lifecycle: started on application bootstrap (NOT module init), stopped on
+ * shutdown via `OnModuleDestroy` (main.ts's manual SIGTERM/SIGINT handler calls
  * `app.close()`, which fires the NestJS lifecycle hooks).
  */
 @Injectable()
-export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
+export class OutboxDrainerService
+  implements OnApplicationBootstrap, OnModuleDestroy
+{
   private readonly logger = new Logger(OutboxDrainerService.name);
 
   /**
@@ -146,7 +148,16 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
 
   constructor(private readonly bus: EventBus) {}
 
-  onModuleInit(): void {
+  // Start on onApplicationBootstrap, NOT onModuleInit: Nest fires
+  // onApplicationBootstrap only AFTER every module's onModuleInit has
+  // completed, so by the time the first tick can run, WorkflowsModule
+  // (audit/analytics/workflow-dispatch), OutboundWebhooksModule, the AI
+  // runtime, and Webchatwidget have all registered their bus subscribers.
+  // Kicking off the poll in onModuleInit instead lets its +100ms timer fire
+  // before those later modules subscribe — draining any boot-pending outbox
+  // rows into an empty/partial handler list and stamping them fully green
+  // (published+dispatched) with the fanout silently skipped.
+  onApplicationBootstrap(): void {
     // Register the immediate-drain hook so a tx-context publish dispatches the
     // instant it commits, instead of waiting out the poll. The poll stays as
     // the durable fallback (a missed/early kick is harmless — see kick()).

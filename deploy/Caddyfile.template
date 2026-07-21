@@ -120,10 +120,12 @@ __DOMAIN__ {
 		X-Frame-Options "SAMEORIGIN"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		# microphone=(self) — voice notes in the inbox composer need
-		# getUserMedia. Empty allowlist `()` policy-blocks even same-
-		# origin calls so the prompt grant is useless. Browsers intersect
-		# Permissions-Policy headers from app + proxy: both must allow.
-		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
+		# getUserMedia. geolocation=(self) — "Send location → My location"
+		# in the composer needs navigator.geolocation. Empty allowlist `()`
+		# policy-blocks even same-origin calls so the prompt grant is
+		# useless. Browsers intersect Permissions-Policy headers from app +
+		# proxy: both must allow — keep aligned with apps/web/next.config.ts.
+		Permissions-Policy "camera=(), microphone=(self), geolocation=(self)"
 		-Server
 	}
 

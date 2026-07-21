@@ -104,6 +104,22 @@ export interface ChannelMediaPolicy {
   videoMime: ReadonlySet<string>;
   /** Outbound document mime allow-list. */
   documentMime: ReadonlySet<string>;
+  /**
+   * Classify `image/webp` as a plain `image` instead of a `sticker`.
+   *
+   * The global mapping routes webp → sticker because on the META channels that is
+   * what a webp USUALLY is (WhatsApp stickers are webp, and WhatsApp image messages
+   * accept only JPEG/PNG). But webp is also Chrome's default "Save image as" format,
+   * so on a channel with no sticker concept that mapping misfires on ordinary
+   * photos: the kind gate rejects the send outright, and an inbound one renders as
+   * a file row instead of a picture.
+   *
+   * Set this ONLY for first-party channels where we own the renderer and a webp is
+   * just an image (browsers display it natively). Do NOT set it for Messenger —
+   * that exclusion is deliberate (an outbound Meta sticker needs a catalog
+   * `sticker_id`, so failing loudly beats silently sending a still frame).
+   */
+  classifyWebpAsImage?: boolean;
 }
 
 // Messenger accepts the common web image set; Instagram + WhatsApp are png/jpeg
@@ -193,6 +209,11 @@ const WEBCHATWIDGET_MEDIA_POLICY: ChannelMediaPolicy = {
   audioMime: WEBCHATWIDGET_AUDIO_MIME,
   videoMime: PERMISSIVE_VIDEO_MIME,
   documentMime: META_DOCUMENT_MIME_ALLOWED,
+  // First-party channel: we render it ourselves and every browser paints webp, so
+  // a .webp here is an ordinary photo, not a sticker. Without this an agent
+  // attaching one got "Website widget doesn't support sending stickers" (the kind
+  // set at media-caps.ts has no `sticker`), and a visitor's webp rendered as a 📄.
+  classifyWebpAsImage: true,
 };
 
 const CHANNEL_MEDIA_POLICY: Partial<Record<Channel, ChannelMediaPolicy>> = {
@@ -218,9 +239,23 @@ export const MEDIA_KIND_BY_MIME_PREFIX: Array<[string, MediaKind]> = [
   ["audio/", "audio"],
 ];
 
-/** Best-effort kind from a mime type. Falls back to "document". */
-export function kindFromMime(mime: string): MediaKind {
+/**
+ * Best-effort kind from a mime type. Falls back to "document".
+ *
+ * `channel` is OPTIONAL and only changes one thing: on a channel whose policy sets
+ * `classifyWebpAsImage`, `image/webp` resolves to `image` rather than `sticker`
+ * (see that flag for why). Omit it — as the channel-agnostic callers do
+ * (`reconcileInboundMediaMime`, team chat) — to get the global mapping unchanged.
+ */
+export function kindFromMime(mime: string, channel?: Channel): MediaKind {
   const lower = mime.toLowerCase();
+  if (
+    lower === "image/webp" &&
+    channel &&
+    mediaPolicyForChannel(channel).classifyWebpAsImage
+  ) {
+    return "image";
+  }
   for (const [prefix, kind] of MEDIA_KIND_BY_MIME_PREFIX) {
     if (lower === prefix || lower.startsWith(prefix)) return kind;
   }

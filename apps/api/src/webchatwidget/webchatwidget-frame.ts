@@ -20,6 +20,10 @@ export interface WidgetMessageFrame {
    *  visitor's own messages and for system/automation sends). Lets the widget
    *  render "Sarah replied" with an initial avatar. */
   senderName?: string | null;
+  /** True when this outbound reply was written by the AI assistant (not a human
+   *  agent). The widget discloses it with an "AI" label so a visitor calibrates
+   *  their expectations — the bot-disclosure guideline. */
+  ai?: boolean;
   media?: {
     kind: string;
     mimeType: string;
@@ -46,7 +50,7 @@ export interface WidgetMessageFrame {
  *  agent-authored outbound messages. */
 export function frameFromMessage(
   m: Message,
-  opts?: { senderName?: string | null },
+  opts?: { senderName?: string | null; ai?: boolean },
 ): WidgetMessageFrame {
   const frame: WidgetMessageFrame = {
     id: m.id,
@@ -57,6 +61,7 @@ export function frameFromMessage(
     createdAt: m.timestamp,
   };
   if (m.direction === "out" && opts?.senderName) frame.senderName = opts.senderName;
+  if (m.direction === "out" && opts?.ai) frame.ai = true;
   if (m.media) {
     frame.media = {
       kind: m.media.kind,

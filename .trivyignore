@@ -13,3 +13,24 @@
 # against OUR committed lockfile (no attacker-supplied manifest), and we do not
 # use `configDependencies`. Revisit when we migrate to pnpm 11.x.
 CVE-2026-55697
+
+# corepack's BUNDLED pnpm distribution (/opt/corepack/v1/pnpm/10.34.4/dist/
+# node_modules/) vendors its own copies of these. They are NOT in our lockfile,
+# so `pnpm.overrides` cannot reach them — the only real fixes are a pnpm release
+# that re-bundles them, or dropping corepack from the runtime image (which the
+# base stage's `RUN pnpm --version` guard deliberately prevents; see
+# apps/api/Dockerfile).
+#
+# Not exploitable here: both are denial-of-service via attacker-supplied input
+# to pnpm ITSELF, and pnpm never runs at runtime (the CMD is a direct `node`
+# invocation, no pnpm/sh wrapper). At build time pnpm only installs from OUR
+# committed lockfile with --frozen-lockfile, so no attacker-controlled tarball
+# or manifest ever reaches its tar/glob code paths.
+#
+# OUR OWN copies of these packages ARE patched via pnpm.overrides in the root
+# package.json (brace-expansion 1.1.16 / 2.1.2 / 5.0.7, js-yaml 4.3.0) — this
+# entry covers only the vendored duplicates inside the pnpm bundle.
+# Re-check on every pnpm bump; drop these lines once the bundle ships fixes.
+CVE-2026-59873
+CVE-2026-59874
+CVE-2026-13149

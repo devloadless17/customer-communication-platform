@@ -50,7 +50,7 @@ import {
   isBroadcastable,
 } from "@ccp/shared/providers/capabilities";
 import { checkTextCap } from "../lib/messaging/text-cap";
-import { resolveAudienceGroupMembers } from "@/lib/queries";
+import { directoryContactWhere, resolveAudienceGroupMembers } from "@/lib/queries";
 import {
   parseVariableBindings,
   resolveBinding,
@@ -480,12 +480,25 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // OOM-restart the container for ALL tenants. Counting first rejects the
       // oversized audience for the cost of one index-only scan, and the `take`
       // bounds the fetch even if the count races an import.
+      // Exclude ANONYMOUS ephemeral (widget) sessions from BOTH the cap count
+      // and the fetch — they're never sent to, so counting them inflated the
+      // total against the policy cap and rejected large mixed-channel tenants
+      // whose actual reachable audience was under the limit. Use the canonical
+      // directory filter (identityChannel-not-ephemeral OR phone OR email) rather
+      // than a blanket channel exclusion, so a widget visitor who SELF-IDENTIFIED
+      // (gained a phone/email → promoted into the directory) still counts. Safe
+      // scalar AND — directoryContactWhere's OR has no sibling OR here.
+      const allModeWhere: Prisma.ContactWhereInput = {
+        teamId,
+        deletedAt: null,
+        ...directoryContactWhere,
+      };
       await this.assertAudienceWithinCap(
-        this.db.contact.count({ where: { teamId, deletedAt: null } }),
+        this.db.contact.count({ where: allModeWhere }),
       );
       recipientIds = (
         await this.db.contact.findMany({
-          where: { teamId, deletedAt: null },
+          where: allModeWhere,
           select: { id: true },
           take: MAX_RECIPIENTS_IN_PROCESS + 1,
         })
@@ -1179,6 +1192,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         id: b.id,
         status: b.status,
         name: b.name,
+        // kind/channel let the list build a title for freeform / People
+        // broadcasts, which have no templateName (else the row title is blank).
+        kind: b.kind,
+        channel: b.channel,
+        targetMode: b.targetMode,
         scheduledAt: b.scheduledAt?.toISOString() ?? null,
         templateName: b.templateName,
         templateLanguage: b.templateLanguage,
@@ -1369,8 +1387,30 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       ? row.recipients.slice(0, RECIPIENTS_INLINE_CAP)
       : row.recipients;
 
+    // Real (retryable) failures only — excludes recipients finalized by cancel()
+    // (marked with CANCEL_RECIPIENT_MARKER), which retryFailed() also excludes.
+    // Without this the detail page shows a "Retry N failed" button for a canceled
+    // broadcast whose click 409s ("no failed recipients"). Cheap single-broadcast
+    // count (indexed on broadcastId+status).
+    const genuineFailedCount = await this.db.broadcastRecipient.count({
+      where: {
+        broadcastId: row.id,
+        status: "failed",
+        NOT: { errorMessage: CANCEL_RECIPIENT_MARKER },
+      },
+    });
+
     return {
       id: row.id,
+      // Message identity — freeform / People (customer-mode) broadcasts have no
+      // templateName, so the UI needs kind+channel to build a fallback title and
+      // bodyText to actually show the message (both were previously omitted, so
+      // those broadcasts rendered blank).
+      kind: row.kind,
+      channel: row.channel,
+      targetMode: row.targetMode,
+      bodyText: row.bodyText,
+      genuineFailedCount,
       status: row.status,
       name: row.name,
       scheduledAt: row.scheduledAt?.toISOString() ?? null,

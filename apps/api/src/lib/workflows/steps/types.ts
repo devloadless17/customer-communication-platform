@@ -64,6 +64,14 @@ export interface StepRunContext {
    *  one whose output `$var.previousStep.X` should reference). Undefined
    *  on the start node. */
   previousStepId?: string | null;
+  /** 0-based ordinal of THIS execution of the step within the run: the count of
+   *  prior TERMINAL stepLog entries for this stepId. Stable across BullMQ retries
+   *  of the same execution (the current execution hasn't written its terminal
+   *  entry yet), but distinct per jump_to_step re-entry. Handlers that emit an
+   *  idempotency key to an external system (http_request's X-CCP-Delivery) MUST
+   *  fold this in, or a partner deduping on the key silently drops every loop
+   *  iteration after the first. */
+  executionIndex: number;
 }
 
 /**

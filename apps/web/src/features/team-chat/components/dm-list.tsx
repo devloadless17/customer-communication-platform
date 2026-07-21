@@ -26,12 +26,15 @@ import type { TeamDmListItemDto } from "@ccp/shared/team-chat/types";
 export function DmList({
   dms,
   activeChannelId,
+  onSelect,
   onlineUserIds,
   availabilityByUserId,
   onStartDm,
 }: {
   dms: TeamDmListItemDto[];
   activeChannelId: string;
+  /** Optimistic selection — fires on click, before the route commits. */
+  onSelect: (channelId: string) => void;
   onlineUserIds: Set<string>;
   availabilityByUserId?: Record<string, { status: UserAvailabilityStatus }>;
   onStartDm: () => void;
@@ -65,6 +68,7 @@ export function DmList({
               key={dm.id}
               dm={dm}
               active={dm.id === activeChannelId}
+              onSelect={onSelect}
               // Resolve to a per-row BOOLEAN here rather than passing the Set
               // down: the Set gets a new identity on every presence frame,
               // which would defeat DmRow's memo and re-render every row.
@@ -87,11 +91,13 @@ const DmRow = memo(function DmRow({
   active,
   online,
   availability,
+  onSelect,
 }: {
   dm: TeamDmListItemDto;
   active: boolean;
   online: boolean;
   availability: UserAvailabilityStatus | null;
+  onSelect: (channelId: string) => void;
 }) {
   const { peer } = dm;
   const label = peer.isSelf ? `${peer.name} (you)` : peer.name;
@@ -99,6 +105,7 @@ const DmRow = memo(function DmRow({
   return (
     <Link
       href={`/team/${dm.id}`}
+      onClick={() => onSelect(dm.id)}
       className={cn(
         "group flex h-9 items-center gap-2 rounded-md px-2 text-sm transition-colors",
         active

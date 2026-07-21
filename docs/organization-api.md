@@ -38,7 +38,7 @@ curl -s "$CCP_BASE_URL/api/external/v1/conversations?limit=5" \
 | **Auth** | `Authorization: Bearer $CCP_API_KEY` on every request |
 | **Scopes** | Each route needs a scope (listed per endpoint). A **Full access** key has all of them. |
 | **Idempotency** | The three **send** routes (`POST /messages`, `POST /conversations/:id/messages`, `POST /conversations/:id/interactive`) **require** an `Idempotency-Key` header — reuse the same value on a retry and we won't double-send. Use something stable per logical send (e.g. the inbound message id). |
-| **Rate limit** | **60 req/min per key**, across *all* routes — over it returns `429 {"error":"rate_limited"}`. Sends carry an extra **30/min per conversation** loop-guard. Missing/bad keys are throttled separately at 30/min per IP. |
+| **Rate limit** | **60 req/min per key**, across *all* routes — over it returns `429 {"error":"rate_limited"}`. Sends carry an extra **30/min per conversation** loop-guard, and the bulk tag routes (`POST /contacts/tags/add\|remove`) are additionally capped at **20/min per key**. Missing/bad keys are throttled separately at 30/min per IP. |
 | **24-hour window** | Free-form text/media only sends to a customer who messaged you within the channel's window (WhatsApp 24h; Messenger/Instagram 24h + a 7-day human-agent extension). Outside it, WhatsApp needs a **template**; Messenger/Instagram have no templates — wait for the customer to message again. |
 | **Pagination** | List routes take `?limit=&cursor=`. The response includes `nextCursor` (null when done) — pass it back as `cursor`. |
 | **Errors** | Non-2xx returns `{ "error": "code", "detail": "..." }`. Common: `401` (missing/invalid key), `403 insufficient_scope` (key lacks the route's scope), `404` (not found / wrong org), `409 duplicate_phone` (create on an existing number), `422`/`400` (validation), `429 rate_limited` / `chain_depth_exceeded`. |
@@ -162,6 +162,93 @@ curl -s -X POST "$CCP_BASE_URL/api/external/v1/contacts/tags/add" \
   -d '{ "contactIds": ["C1","C2"], "tagIds": ["TAG_ID"] }'
 ```
 
+
+### Bulk import / export (CSV + Excel)
+
+The same jobs the in-app Contacts page runs. Both directions are **asynchronous**: you get a job id back immediately, poll it, then download the artifact. A 100,000-contact export is a normal thing to ask for here.
+
+**Queue an export** — `POST /contacts/export` · `read:contacts` · 5/min
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/contacts/export" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "format": "xlsx", "filters": { "stageId": "STAGE_ID", "tagIds": ["TAG_ID"] } }'
+# → { "jobId": "..." }
+```
+`format` is `csv` (default) or `xlsx`. Omit `filters` to export the whole directory, or pass `"ids": ["C1","C2"]` to export an explicit set. Anonymous website-widget visitors (no phone, no email) are never included — they aren't directory contacts.
+
+**Upload a file to import** — `POST /contacts/import/upload` · `write:contacts` · 10/min
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/contacts/import/upload" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -F "file=@contacts.xlsx"
+# → { "uploadKey": "...", "headers": [...], "suggestedMapping": {...}, "sampleRows": [...], "format": "xlsx" }
+```
+Up to 50 MB. The format is detected from the file's CONTENT, not its name. `suggestedMapping` is our guess at which column is which — send it back as-is, or edit it first.
+
+**Queue the import** — `POST /contacts/import` · `write:contacts` · 5/min · **`Idempotency-Key` required**
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/contacts/import" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{
+        "uploadKey": "UPLOAD_KEY_FROM_ABOVE",
+        "format": "xlsx",
+        "mode": "create_and_update",
+        "tagMode": "merge",
+        "fireAutomations": true,
+        "mapping": { "Mobile": "phone_number", "Company Name": "field:company" }
+      }'
+# → { "jobId": "..." }
+```
+
+| Field | Values | Meaning |
+|---|---|---|
+| `mode` | `create_only` (default) · `create_and_update` · `update_only` | What to do when the phone number already exists |
+| `tagMode` | `merge` (default) · `replace` | Add to the contact's tags, or replace them |
+| `fireAutomations` | `true` (default) · `false` | Publish per-contact events, so workflows and outbound webhooks fire |
+| `mapping` | `{ "<header>": "<target>" }` | `ignore`, a built-in column id (`phone_number`, `name`, `email`, `tags`, `stage`, …), or `field:<key>` for a custom field |
+
+Rules worth knowing before you rely on them:
+
+- **Contacts are matched on phone number**, and imported rows are created as WhatsApp contacts. Phone is the only identity a spreadsheet can carry; social channels key on a vendor-issued id.
+- **An imported email is never used to merge people.** It's stored on the contact, but only a self-asserted address (via the in-chat contact-share chip) counts as a strong identity key. A hand-typed address in a spreadsheet cannot fold two customers into one.
+- **Blank cells never erase data.** In `create_and_update`, only non-empty cells are written; a column you left empty leaves the existing value alone.
+- **Above 5,000 rows, `fireAutomations` is forced off.** A 100k-row import would otherwise queue 100k workflow runs and 100k webhook deliveries. The response's `automationsSkipped` tells you it happened.
+- Limits: 200,000 rows per import, 100 new tags auto-created per import, 100 custom-field columns.
+
+**Check a job** — `GET /contacts/transfers/:id` · `read:contacts`
+```bash
+curl -s "$CCP_BASE_URL/api/external/v1/contacts/transfers/JOB_ID" \
+  -H "Authorization: Bearer $CCP_API_KEY"
+```
+```json
+{ "job": { "id": "...", "kind": "import", "status": "completed",
+           "processedRows": 100000, "totalRows": 100000,
+           "created": 240, "updated": 99500, "revived": 0, "skipped": 250, "failed": 10,
+           "automationsSkipped": true, "hasArtifact": false, "hasErrorReport": true,
+           "details": { "unknownColumns": [], "unknownStages": [], "extraSheets": [] } } }
+```
+`status` is `pending` · `running` · `completed` · `failed` · `canceled`.
+
+**List recent jobs** — `GET /contacts/transfers?limit=20&kind=export` · `read:contacts`
+
+**Download** — `GET /contacts/transfers/:id/download` · `read:contacts`
+Redirects (302) to a short-lived signed URL. Follow it, or read the `Location` header.
+```bash
+curl -sL "$CCP_BASE_URL/api/external/v1/contacts/transfers/JOB_ID/download" \
+  -H "Authorization: Bearer $CCP_API_KEY" -o contacts.xlsx
+```
+
+**Download the rows that failed** — `GET /contacts/transfers/:id/errors` · `read:contacts`
+Same redirect. The file has your original columns plus `_row` and `_error`, in the format you uploaded — fix it and re-import that file directly.
+
+**Cancel** — `POST /contacts/transfers/:id/cancel` · `write:contacts`
+Stops within a batch. Rows already imported stay imported; the counters tell you how many.
+
+> Files (exports, uploads, and error reports) are **deleted after 7 days**.
+
 ---
 
 ## 4. Conversations
@@ -236,6 +323,8 @@ curl -s -X POST "$CCP_BASE_URL/api/external/v1/messages" \
   }'
 ```
 Media instead of text — **ROADMAP, not yet supported.** URL-based media send via `/v1/messages` currently returns `400 media_not_yet_supported`; the URL → upload → send pipeline is on the roadmap. Send media via the inbox UI for now.
+
+> **UI send types not yet exposed on `/v1` (roadmap, tracked exceptions to the UI↔API parity rule):** direct **media upload**, **location**, **contact-card**, **reaction** (and dismiss), and **message forward**. These exist in the inbox composer but have no `/v1` twin yet. Text, template, and interactive sends have full `/v1` parity. Use the inbox UI for the above until they land.
 ```bash
 # NOT YET SUPPORTED — returns 400 media_not_yet_supported
   -d '{ "contact": { "phone": "+96170123456" },
@@ -304,7 +393,7 @@ curl -s -X DELETE "$CCP_BASE_URL/api/external/v1/conversations/CONVERSATION_ID/n
 
 > **Note on unified customers:** merging/splitting a `Customer` (linking channel contacts into one person) is currently a **UI-only** capability — there is no `/v1` customers resource yet. Auto-merge on a self-asserted strong key (exact phone/email) still happens automatically at ingest. Programmatic merge/split is a planned addition; until then, reconcile identities in the inbox.
 
-> **Note on broadcasts:** bulk templated/free-form outbound (**Broadcasts**) is currently a **UI-only** capability — there is no `/v1` broadcasts resource yet. To reach many contacts programmatically today, iterate the send routes above (each with its own `Idempotency-Key`). A `/v1` broadcast trigger is a planned addition.
+> **Note on broadcasts:** *creating* a broadcast is a **UI-only** capability — there is deliberately no `write:broadcasts` scope (billed template sends are irreversible), so to reach many contacts programmatically today you iterate the send routes above (each with its own `Idempotency-Key`). Read-only campaign/report/recipient endpoints **do** exist — see the [Broadcasts](#7-broadcasts-campaign-reporting) section below.
 
 ---
 
@@ -353,8 +442,11 @@ API is a separate feature, and billed template sends are irreversible.
 GET /api/external/v1/broadcasts?status=completed&since=2026-07-01T00:00:00Z&limit=50&cursor=...
 ```
 
-Returns `{ items, nextCursor }`, newest first. Use `since` to poll incrementally
-("what finished since my last sync") instead of re-pulling history.
+Returns `{ items, nextCursor }`, newest first. `since` filters on **broadcast
+creation time** (`createdAt`), not completion — use it to poll for campaigns
+**created** since your last sync. (A campaign created before your window but
+completing inside it will not appear; page without `since` if you need
+completion-time semantics.)
 
 ### One campaign
 
@@ -411,7 +503,132 @@ poll with `updatedSince` rather than treating the numbers as final at completion
 
 ---
 
-## 8. Outbound webhooks (events we send you)
+## 8. Calls
+
+Scopes: `read:calls` for history and permission state, `write:calls` to ask a
+customer for calling permission or send them a call button.
+
+There is deliberately **no "place a call" endpoint**. A WhatsApp call needs an
+SDP offer from a live WebRTC peer and a browser to carry the audio, so an API
+client has nothing to place one with. What's here is the part an integration
+can genuinely drive: teeing up a call a human then makes or takes.
+
+### List calls
+
+```
+GET /api/external/v1/calls?conversationId=...&from=2026-07-01T00:00:00Z&limit=50&cursor=...
+```
+
+Newest first. Returns `{ data, next_cursor }`; pass `next_cursor` back as
+`cursor` until it's `null`.
+
+```json
+{
+  "data": [
+    {
+      "id": "clx...",
+      "conversation_id": "clx...",
+      "contact_id": "clx...",
+      "channel": "whatsapp",
+      "direction": "out",
+      "status": "completed",
+      "connected": true,
+      "ringing_at": "2026-07-21T09:00:00.000Z",
+      "answered_at": "2026-07-21T09:00:07.000Z",
+      "ended_at": "2026-07-21T09:04:31.000Z",
+      "duration_seconds": 264
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+`connected` is **not** the same as `status === "completed"` — a call can
+complete without anyone picking up, and an agent can hang up a call that did
+connect. Use `connected` for "did they actually talk".
+
+### Get calling permission
+
+```
+GET /api/external/v1/conversations/{id}/call-permission
+```
+
+```json
+{
+  "status": "temporary",
+  "has_permission": true,
+  "can_start_call": true,
+  "can_request_permission": false,
+  "expires_at": "2026-07-28T09:00:00.000Z",
+  "quota_resets_at": null
+}
+```
+
+Read live from WhatsApp, not from our records — permission can be granted in
+ways that leave no trace on our side (the customer calling you, or granting it
+from your business profile), so anything cached would tell you "no permission"
+for people you can perfectly well call.
+
+- `status` — `no_permission` · `temporary` (expires) · `permanent` (never does)
+- `can_start_call` — WhatsApp's own verdict, with every limit already applied.
+  **Check this rather than counting calls yourself**: the per-customer limit has
+  changed three times in a year.
+- `quota_resets_at` — set only when `can_start_call` is false because the
+  per-customer call quota is spent.
+
+### Request calling permission
+
+```
+POST /api/external/v1/conversations/{id}/call-permission
+Idempotency-Key: <uuid>
+```
+
+Sends the customer a message asking them to allow calls. This is a real,
+**billable** message, hence the mandatory `Idempotency-Key`.
+
+Returns `{ ok, permission_request_id, expires_at }`. If permission is already
+live, nothing is sent and `permission_request_id` is empty — re-asking someone
+who already said yes is both wasteful and annoying. A `409
+permission_request_rate_limited` means WhatsApp's request cap is spent (1 per
+day, 2 per week, both reset by any connected call).
+
+You'll know they accepted when `can_start_call` flips to `true`; WhatsApp sends
+no webhook when a temporary permission later lapses, so re-read rather than
+assuming.
+
+### Send a call button
+
+```
+POST /api/external/v1/conversations/{id}/call-button
+Idempotency-Key: <uuid>
+
+{
+  "bodyText": "Questions about order #1522? Call us — it's free on WhatsApp.",
+  "displayText": "Call us",
+  "ttlMinutes": 1440,
+  "payload": "order-1522"
+}
+```
+
+A tappable button that starts a WhatsApp call **to you**. The inverse of a
+permission request: it needs no permission at all, and a customer who uses it
+grants you callback permission as a side effect. Often the better move for a
+cold contact.
+
+- `bodyText` — required, max 1024 chars
+- `displayText` — button label, max 20 chars (default "Call Now")
+- `ttlMinutes` — how long the button stays tappable, 1 to 43200 (30 days),
+  default 7 days
+- `payload` — opaque attribution string, max 512 chars. Comes back to you on
+  the call webhooks, so you can trace an inbound call to the campaign or record
+  that produced the button. Older WhatsApp clients drop it — treat its absence
+  as normal, never as an error.
+
+Returns `{ ok, message_id }`.
+
+---
+
+## 9. Outbound webhooks (events we send you)
 
 **Set up:** **Settings → Integrations → Webhooks → Create** — paste your receiving URL,
 pick the events. We generate a signing secret (`ccp_whsec_…`) shown once.
@@ -481,7 +698,7 @@ Sign over the **raw request bytes** — don't re-serialize the parsed JSON.
 
 ---
 
-## 9. Integrations
+## 10. Integrations
 
 - **n8n (AI Autopilot):** step-by-step flow — receive `message.received`, branch on
   `ai_enabled`, reply via `POST /conversations/:id/messages`, hand off to a human.

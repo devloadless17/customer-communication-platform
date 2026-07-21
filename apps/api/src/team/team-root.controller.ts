@@ -8,6 +8,8 @@ import type { ApiSession } from "../auth/session.guard";
 import { zBody } from "../common/zod-validation.pipe";
 import { DbService } from "../db/db.service";
 import { TeamRootService } from "./team-root.service";
+import { getBusinessNumberCountry } from "@/lib/providers/config";
+import { isBicAllowedForBusinessNumber } from "@ccp/shared/providers/calling-regions";
 
 /**
  * Current-team root.
@@ -64,7 +66,18 @@ export class TeamRootController {
       },
     });
     if (!team) throw new NotFoundException({ error: "team not found" });
-    return { team };
+    // Whether this org may place business-initiated calls at all. Follows OUR
+    // business number's country — a number registered in a market where
+    // business-initiated calling isn't offered can't call anyone, while an
+    // eligible one can call customers anywhere. Sent once here rather than
+    // derived per contact in the UI, because it is not a per-contact fact.
+    const businessCountry = await getBusinessNumberCountry(session.teamId);
+    return {
+      team: {
+        ...team,
+        outboundCallingAvailable: isBicAllowedForBusinessNumber(businessCountry),
+      },
+    };
   }
 
   // Admin toggles whether the org uses AI Autopilot. Default false; flipping it

@@ -17,10 +17,18 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function initials(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  const first = parts[0]?.[0] ?? "";
-  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] ?? "" : "";
-  return (first + last).toUpperCase();
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  // First CODE POINT of a word (not `w[0]`) + letters/numbers only, so an
+  // emoji-led name (common as WhatsApp push names, e.g. "🌸 Sara") doesn't
+  // render a broken half-surrogate. Mirrors contact-composer.tsx's local copy
+  // — that duplicate should be deleted in favour of this shared version.
+  const glyph = (w: string | undefined) => {
+    const ch = w ? Array.from(w)[0] ?? "" : "";
+    return /\p{L}|\p{N}/u.test(ch) ? ch : "";
+  };
+  const first = glyph(parts[0]);
+  const last = parts.length > 1 ? glyph(parts[parts.length - 1]) : "";
+  return (first + last).toUpperCase() || "?";
 }
 
 // All time formatters take `(iso, tz?, now?)`:

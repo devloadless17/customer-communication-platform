@@ -76,7 +76,9 @@ export function ReactionPicker({
             // the point — a reaction is a single act, so close after picking.
             setShowFull(false);
           }}
-          className={align === "left" ? "left-0" : "right-0"}
+          // `left-auto` matters: left-0 and right-0 land in different
+          // tailwind-merge groups, so right-0 alone loses to the base class.
+          className={align === "left" ? "left-0" : "left-auto right-0"}
         />
       </div>
     </div>

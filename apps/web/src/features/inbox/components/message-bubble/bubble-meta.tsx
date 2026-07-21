@@ -91,12 +91,18 @@ function StatusTicks({
   }
   switch (message.status) {
     case "failed":
-      return (
-        <AlertCircle
-          className="size-3 text-destructive"
-          aria-label={reason ? `Failed to send: ${reason}` : "Failed to send"}
-          {...(reason ? { title: reason } : {})}
-        />
+      // `title` must sit on an HTML element — a bare <svg> ignores the global
+      // title attribute, so the Meta rejection reason (e.g. 24h-window 131047)
+      // was invisible on hover. Wrap in a <span> so sighted agents get the why.
+      return reason ? (
+        <span title={reason} className="inline-flex">
+          <AlertCircle
+            className="size-3 text-destructive"
+            aria-label={`Failed to send: ${reason}`}
+          />
+        </span>
+      ) : (
+        <AlertCircle className="size-3 text-destructive" aria-label="Failed to send" />
       );
     case "sent":
       // A channel with NO delivery receipt (Instagram) never reports

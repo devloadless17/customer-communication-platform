@@ -39,15 +39,70 @@ function unproject(x: number, y: number, z: number): { lat: number; lon: number 
 const BOX_W = 288;
 const BOX_H = 180;
 
+/**
+ * Last confirmed device position, so the NEXT open starts there instead of at a
+ * world view. Geolocation is inherently async — there is no way to know where
+ * the agent is on the first paint — so the honest options are "show something
+ * neutral and wait" or "show where they were last time". The latter is right
+ * for this composer: an agent who sends locations sends them from the same
+ * place nearly every time, and the live fix (which arrives in well under a
+ * second thanks to `maximumAge`) corrects it before they can act on it.
+ *
+ * Only real geolocation fixes are stored — never a manual pin. A pin dropped on
+ * a CUSTOMER's address is not "where I am", and reopening there would be
+ * actively misleading.
+ */
+const LAST_FIX_KEY = "ccp:location-composer:last-fix";
+
+/**
+ * Above this radius (metres) the first fix is treated as coarse and a precise
+ * one is chased in the background. A cached GPS fix comes back well under this;
+ * a wifi/IP-derived one comes back well above it.
+ */
+const COARSE_ACCURACY_M = 100;
+
+interface StoredFix {
+  lat: number;
+  lon: number;
+  zoom: number;
+}
+
+function readLastFix(): StoredFix | null {
+  try {
+    const raw = window.localStorage.getItem(LAST_FIX_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as Partial<StoredFix>;
+    if (typeof v.lat !== "number" || typeof v.lon !== "number") return null;
+    if (!Number.isFinite(v.lat) || !Number.isFinite(v.lon)) return null;
+    if (v.lat < -90 || v.lat > 90 || v.lon < -180 || v.lon > 180) return null;
+    return { lat: v.lat, lon: v.lon, zoom: typeof v.zoom === "number" ? v.zoom : 16 };
+  } catch {
+    // Private mode / storage disabled / corrupt value — fall back to the
+    // neutral view. Never let a cache read break the composer.
+    return null;
+  }
+}
+
+function writeLastFix(fix: StoredFix): void {
+  try {
+    window.localStorage.setItem(LAST_FIX_KEY, JSON.stringify(fix));
+  } catch {
+    // Quota or private mode — losing the hint is not worth an error.
+  }
+}
+
 function PickMap({
   lat,
   lon,
   zoom,
+  showPin,
   onPick,
 }: {
   lat: number;
   lon: number;
   zoom: number;
+  /** Hide the marker until there's a real pin — see the call site. */
+  showPin: boolean;
   onPick: (lat: number, lon: number) => void;
 }) {
   const n = 2 ** zoom;
@@ -89,16 +144,26 @@ function PickMap({
           />
         );
       })}
-      <svg
-        viewBox="0 0 24 24"
-        className="pointer-events-none absolute left-1/2 top-1/2 size-7 -translate-x-1/2 -translate-y-full drop-shadow"
-        fill="#EA4335"
-        stroke="#fff"
-        strokeWidth="1.5"
-      >
-        <path d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7z" />
-        <circle cx="12" cy="9" r="2.5" fill="#fff" stroke="none" />
-      </svg>
+      {/* The marker renders ONLY once there's a real pin. Drawing it over a
+          provisional view (the restored-last-fix or fallback centre) reads as
+          "a pin is placed here", which is exactly the confusion this composer
+          had: the map opened on a wide view with a confident red pin over a
+          country the agent had never been to. Send is disabled in that state
+          anyway — the marker must say the same thing the button does. */}
+      {showPin ? (
+        <svg
+          viewBox="0 0 24 24"
+          className="pointer-events-none absolute left-1/2 top-1/2 size-7 -translate-x-1/2 -translate-y-full drop-shadow"
+          fill="#EA4335"
+          stroke="#fff"
+          strokeWidth="1.5"
+        >
+          <path d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7z" />
+          <circle cx="12" cy="9" r="2.5" fill="#fff" stroke="none" />
+        </svg>
+      ) : (
+        <span className="pointer-events-none absolute left-1/2 top-1/2 size-5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-dashed border-foreground/40" />
+      )}
       <span className="pointer-events-none absolute bottom-0 right-0 bg-background/70 px-1 text-[8px] text-muted-foreground">
         © OpenStreetMap · CARTO
       </span>
@@ -114,10 +179,13 @@ interface Props {
 }
 
 export function LocationComposer({ open, onClose, conversationId, onSent }: Props) {
-  // Default view: a wide look until the agent picks / uses their location.
-  const [lat, setLat] = useState(25);
-  const [lon, setLon] = useState(45);
-  const [zoom, setZoom] = useState(4);
+  // Opening view. Lazy initializer so localStorage is read once, on mount, and
+  // never during SSR. A remembered fix means the map is already showing the
+  // agent's area on the very first frame; without one we sit at a neutral world
+  // view (NOT a confident pin somewhere arbitrary) until the fix lands.
+  const [lat, setLat] = useState(() => readLastFix()?.lat ?? 20);
+  const [lon, setLon] = useState(() => readLastFix()?.lon ?? 0);
+  const [zoom, setZoom] = useState(() => (readLastFix() ? 15 : 2));
   const [picked, setPicked] = useState(false);
   const [name, setName] = useState("");
   const [address, setAddress] = useState("");
@@ -132,18 +200,28 @@ export function LocationComposer({ open, onClose, conversationId, onSent }: Prop
   const userInteractedRef = useRef(false);
 
   useEffect(() => {
-    if (open) {
-      setPicked(false);
-      setName("");
-      setAddress("");
-      setError(null);
-      userInteractedRef.current = false;
-      // Default to the agent's location — request it automatically on open, and
-      // silently fall back to the pick-map if denied/unavailable (they can click
-      // the map or the "My location" button). Requires the geolocation
-      // Permissions-Policy allowlist to include `self`.
-      locate({ silent: true });
+    if (!open) return;
+    setPicked(false);
+    setName("");
+    setAddress("");
+    setError(null);
+    userInteractedRef.current = false;
+
+    // Re-centre on the remembered fix every open, not just on mount — the
+    // component stays mounted between opens, so without this a manual pin from
+    // the previous open would still be on screen.
+    const last = readLastFix();
+    if (last) {
+      setLat(last.lat);
+      setLon(last.lon);
+      setZoom(last.zoom);
     }
+
+    // Default to the agent's location — requested automatically on open, and
+    // silently falling back to the pick-map if denied/unavailable (they can
+    // click the map or the "My location" button). Requires the geolocation
+    // Permissions-Policy allowlist to include `self` (deploy/Caddyfile*).
+    locate({ silent: true });
   }, [open]);
 
   useFocusTrap(wrapperRef, open, onClose);
@@ -159,6 +237,27 @@ export function LocationComposer({ open, onClose, conversationId, onSent }: Prop
     };
   }, [open, onClose]);
 
+  /**
+   * Resolve the device position in TWO stages.
+   *
+   * The original single call used `{ enableHighAccuracy: true }` with no
+   * `maximumAge`, which defaults to 0 — that combination explicitly forbids the
+   * browser from reusing a position it already has and forces a fresh GPS
+   * acquisition on every open. That is the slowest request the API can make
+   * (2–8s outdoors, worse indoors) and it is why the map sat on a wide default
+   * view and then jumped.
+   *
+   *   Stage 1 — coarse, cache-allowed. `maximumAge` lets the browser hand back
+   *   a position it already holds, so this typically resolves in a few
+   *   milliseconds and the map is on the agent's area immediately.
+   *
+   *   Stage 2 — precise, in the background. Refines the pin to GPS accuracy
+   *   without anyone waiting on it. Skipped entirely if stage 1 was already
+   *   precise enough to send.
+   *
+   * Both stages honour `userInteractedRef`: a late fix must never yank the map
+   * away from a pin the agent deliberately dropped while it was pending.
+   */
   function locate({ silent }: { silent?: boolean } = {}) {
     if (!navigator.geolocation) {
       if (!silent) setError("Geolocation isn't available in this browser.");
@@ -168,27 +267,53 @@ export function LocationComposer({ open, onClose, conversationId, onSent }: Prop
     // is not (and must yield to a pick made while it's still pending).
     if (!silent) userInteractedRef.current = true;
     setLocating(true);
+
+    const applyFix = (pos: GeolocationPosition, stage: 1 | 2): boolean => {
+      // A late fix must not overwrite a pin the agent already dropped (or a
+      // manual locate they kicked off after this one started).
+      if (silent && userInteractedRef.current) return false;
+      const nextZoom = 16;
+      setLat(pos.coords.latitude);
+      setLon(pos.coords.longitude);
+      setZoom(nextZoom);
+      setPicked(true);
+      setError(null);
+      // Remember it for the next open. Stage 2 overwrites stage 1's entry with
+      // the better fix.
+      writeLastFix({ lat: pos.coords.latitude, lon: pos.coords.longitude, zoom: nextZoom });
+      void stage;
+      return true;
+    };
+
+    const refine = () => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => applyFix(pos, 2),
+        () => {
+          // The coarse fix already stands; a failed refinement is not an error
+          // worth showing.
+        },
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 15_000 },
+      );
+    };
+
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        // A late silent auto-locate must not overwrite a pin the agent already
-        // dropped (or a manual locate they kicked off after).
-        if (silent && userInteractedRef.current) {
-          setLocating(false);
-          return;
-        }
-        setLat(pos.coords.latitude);
-        setLon(pos.coords.longitude);
-        setZoom(16);
-        setPicked(true);
+        const applied = applyFix(pos, 1);
         setLocating(false);
+        // Only chase a better fix if the coarse one is actually coarse. A
+        // cached high-accuracy position comes back with a small `accuracy`, and
+        // re-running GPS for it would spin the radio for nothing.
+        if (applied && (pos.coords.accuracy ?? Infinity) > COARSE_ACCURACY_M) refine();
       },
       () => {
+        setLocating(false);
         // On the auto-request we stay quiet — the agent can still click the map
         // or the button; only a manual click surfaces the "couldn't get" hint.
         if (!silent) setError("Couldn't get your location — click the map to place a pin.");
-        setLocating(false);
       },
-      { enableHighAccuracy: true, timeout: 8000 },
+      // A cached fix up to 5 minutes old is more than good enough to CENTRE the
+      // map; stage 2 sharpens it.
+      { enableHighAccuracy: false, maximumAge: 300_000, timeout: 8000 },
     );
   }
 
@@ -258,6 +383,7 @@ export function LocationComposer({ open, onClose, conversationId, onSent }: Prop
           lat={lat}
           lon={lon}
           zoom={zoom}
+          showPin={picked}
           onPick={(la, lo) => {
             userInteractedRef.current = true;
             setLat(la);
@@ -275,6 +401,17 @@ export function LocationComposer({ open, onClose, conversationId, onSent }: Prop
             <Minus className="size-3.5" />
           </IconBtn>
         </div>
+        {/* Only while we genuinely have nothing to show. Once a fix (or a
+            remembered one) has centred the map this would just be noise over a
+            view the agent can already use. */}
+        {locating && !picked ? (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-md bg-background/55">
+            <span className="inline-flex items-center gap-1.5 rounded-md bg-background/90 px-2 py-1 text-2xs font-medium shadow">
+              <Loader2 className="size-3 animate-spin" />
+              Finding your location…
+            </span>
+          </div>
+        ) : null}
         <button
           type="button"
           onClick={() => locate()}
@@ -288,7 +425,9 @@ export function LocationComposer({ open, onClose, conversationId, onSent }: Prop
       <p className="mt-1.5 text-2xs text-muted-foreground">
         {picked
           ? `Pin: ${lat.toFixed(5)}, ${lon.toFixed(5)} — click the map to adjust.`
-          : "Click the map to drop a pin, or use your location."}
+          : locating
+            ? "Finding your location…"
+            : "Click the map to drop a pin, or use your location."}
       </p>
 
       <input

@@ -490,11 +490,17 @@ export interface WebchatWidgetView {
     fontFamily?: "system" | "rounded" | "serif";
     themeMode?: "light" | "dark" | "auto";
     soundEnabled?: boolean;
-    launcher?: "bubble" | "off";
+    allowedMediaKinds?: Array<"image" | "video" | "audio" | "document">;
+    awayMessage?: string;
+    aiEnabled?: boolean;
+    showHeader?: boolean;
+    launcher?: "bubble" | "off" | "inline";
     position?: "right" | "left";
     launcherLabel?: string;
   };
   isActive: boolean;
+  /** Host of the first real site that embedded this widget; null until observed. */
+  firstSeenOrigin: string | null;
   conversationCount: number;
   createdAt: string;
 }
@@ -521,9 +527,13 @@ export interface BroadcastListItem {
   id: string;
   status: string;
   name: string | null;
+  // freeform / People (customer-mode) broadcasts carry no template — null here.
+  kind: "template" | "freeform";
+  channel: string;
+  targetMode: "contact" | "customer";
   scheduledAt: string | null;
-  templateName: string;
-  templateLanguage: string;
+  templateName: string | null;
+  templateLanguage: string | null;
   audienceMode: string;
   totalCount: number;
   sentCount: number;
@@ -536,7 +546,10 @@ export interface BroadcastListItem {
 }
 
 export interface BroadcastDetail extends BroadcastListItem {
-  templateId: string;
+  templateId: string | null;
+  bodyText: string | null;
+  /** Retryable failures only (excludes cancel-finalized recipients). */
+  genuineFailedCount: number;
   audienceTagIds: string[];
   audienceGroupId: string | null;
   variables: unknown;

@@ -91,6 +91,7 @@ Queue discipline: bounded retries, dead-letter via `removeOnFail` retention, ide
 Started by `WorkflowWorkerService.onModuleInit` (files under `apps/api/src/lib/sweepers/`). Each is defense-in-depth reconciliation, not the primary write path:
 
 `inbound-media`, `stale-calls`, `workflow-waiting`, `workflow-awaiting-reply`, `contact-last-inbound-drift`, `conversation-analytics-drift`, `auth-table-cleanup`, `outbound-webhook-delivery-cleanup`, `api-idempotency-cleanup`, `blob-orphan`, `outbound-event-retention` (bus outbox TTL), `outbound-send-attempt-retention`, `workflow-run-retention`, `conversation-event-retention`, `message-rawpayload-retention` (opt-in), `broadcast-schedule-drift`, `orphan-webhook-delivery`.
+- `webchat-visitor-retention` — deletes ANONYMOUS website-widget visitors (no phone/email) idle > `WEBCHAT_VISITOR_RETENTION_DAYS` (default 90); cascades their conversation + messages; never touches identified/promoted visitors. Bounds the one channel whose rows grow without bound.
 
 Example: `contact-last-inbound-drift` runs daily, reconciles `Contact.lastInboundAt` against `MAX(Message.timestamp)`, and self-disables after 7 days of zero drift (re-enables on process restart).
 

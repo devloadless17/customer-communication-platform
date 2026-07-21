@@ -785,10 +785,14 @@ export class MetaWebhookController implements OnModuleDestroy {
       // WhatsApp's caps allow, so use the per-channel policy here too.
       const cap = mediaPolicyForChannel(channel).caps[mediaKind];
       try {
-        const fetched = await retry(() => fetchUrlBytes(media.sourceUrl!, cap), {
-          attempts: 3,
-          baseMs: 250,
-        });
+        // Same process-wide download slot as the WhatsApp path — a parallel
+        // burst of social attachments (25MB each) buffers just as much RAM.
+        const fetched = await withMediaDownloadSlot(() =>
+          retry(() => fetchUrlBytes(media.sourceUrl!, cap), {
+            attempts: 3,
+            baseMs: 250,
+          }),
+        );
         if (fetched.bytes.length > cap) {
           this.logger.warn(
             `[${teamId}] dropping social ${mediaKind} over cap (${fetched.bytes.length} > ${cap})`,
@@ -989,10 +993,18 @@ export class MetaWebhookController implements OnModuleDestroy {
         // 4-wide batch of large docs). The post-buffer check below stays as the
         // authoritative cap for the case where the CDN omits/understates the
         // header.
-        const fetched = await retry(
-          () =>
-            getMetaProvider().fetchMedia!(evt.media!.externalMediaId, sendConfig, cap),
-          { attempts: 3, baseMs: 250 },
+        // Hold a process-wide download slot for the fetch: the per-batch
+        // runWithConcurrency(4) only bounds THIS webhook, but Meta fans
+        // deliveries out in parallel across all tenants, so a redelivery burst
+        // can put dozens of full binary Buffers in flight at once. The slot caps
+        // the aggregate; a wait-timeout throws into the catch below → retriable
+        // outcome → sweeper re-attempts. See withMediaDownloadSlot.
+        const fetched = await withMediaDownloadSlot(() =>
+          retry(
+            () =>
+              getMetaProvider().fetchMedia!(evt.media!.externalMediaId, sendConfig, cap),
+            { attempts: 3, baseMs: 250 },
+          ),
         );
         if (fetched.bytes.length > cap) {
           this.logger.warn(
@@ -1142,6 +1154,86 @@ async function retry<T>(
     }
   }
   throw lastErr;
+}
+
+/**
+ * Process-wide gate on concurrent inbound-media DOWNLOADS.
+ *
+ * WHY: each download buffers the whole binary in memory (up to the per-kind cap
+ * — 100MB for a WhatsApp document, 25MB for social). The per-webhook-batch
+ * `runWithConcurrency(4)` bounds ONE delivery, but Meta fans webhooks out in
+ * parallel across all ~30 tenants, so a redelivery burst after downtime can put
+ * dozens of full Buffers in flight at once — external memory that is NOT counted
+ * against `--max-old-space-size`, so RSS can blow past the 3g cgroup and
+ * OOM-kill the api (the same failure class ffmpeg-slots.ts guards for the decode
+ * stage). A counting semaphore with a bounded wait caps the aggregate. On
+ * wait-timeout the acquire throws into each download's existing catch, which
+ * records the outcome (retriable for WhatsApp → the inbound-media sweeper
+ * re-fetches; a labeled bubble for social) — no message row is lost. Single
+ * process, like every in-memory gate here (CLAUDE.md §16); a second app instance
+ * would need a shared counter.
+ */
+const MEDIA_DOWNLOAD_WAIT_MS = 15_000;
+
+function mediaDownloadMaxConcurrent(): number {
+  const raw = Number.parseInt(process.env.MEDIA_DOWNLOAD_CONCURRENCY ?? "8", 10);
+  return Number.isFinite(raw) && raw > 0 && raw <= 32 ? raw : 8;
+}
+
+let mediaDownloadsActive = 0;
+const mediaDownloadWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+
+function releaseMediaDownloadSlot(): void {
+  const next = mediaDownloadWaiters.shift();
+  if (next) {
+    // Hand the slot straight to the next waiter — do NOT decrement first, or a
+    // caller arriving between the decrement and the handoff can steal it and
+    // push `active` over the cap (same discipline as ffmpeg-slots.ts).
+    next.resolve();
+    return;
+  }
+  mediaDownloadsActive = Math.max(0, mediaDownloadsActive - 1);
+}
+
+function acquireMediaDownloadSlot(waitMs: number): Promise<void> {
+  if (mediaDownloadsActive < mediaDownloadMaxConcurrent()) {
+    mediaDownloadsActive += 1;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve, reject) => {
+    const entry = {
+      resolve: () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      reject,
+    };
+    const timer = setTimeout(() => {
+      const i = mediaDownloadWaiters.indexOf(entry);
+      if (i >= 0) mediaDownloadWaiters.splice(i, 1);
+      reject(
+        new Error(
+          `media download slot wait exceeded ${waitMs}ms (${mediaDownloadsActive} active, ${mediaDownloadWaiters.length} queued)`,
+        ),
+      );
+    }, waitMs);
+    timer.unref();
+    mediaDownloadWaiters.push(entry);
+  });
+}
+
+/**
+ * Run `fn` (a single media download) holding one process-wide slot. Throws if no
+ * slot frees within the wait budget; both callers already treat a throw as a
+ * failed download and record the appropriate outcome.
+ */
+async function withMediaDownloadSlot<T>(fn: () => Promise<T>): Promise<T> {
+  await acquireMediaDownloadSlot(MEDIA_DOWNLOAD_WAIT_MS);
+  try {
+    return await fn();
+  } finally {
+    releaseMediaDownloadSlot();
+  }
 }
 
 /**

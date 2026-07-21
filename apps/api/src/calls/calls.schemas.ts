@@ -49,13 +49,59 @@ export const MediaUpdateSchema = z
   .strict();
 export type MediaUpdateInput = z.infer<typeof MediaUpdateSchema>;
 
-/** Reject body — optional reason ("busy" | "declined"). */
+/**
+ * Reject body — an optional reason recorded LOCALLY only. The provider's reject
+ * action accepts nothing but the call id, so this never goes on the wire.
+ */
 export const RejectCallSchema = z
   .object({
     reason: z.enum(["busy", "declined"]).optional(),
   })
   .strict();
 export type RejectCallInput = z.infer<typeof RejectCallSchema>;
+
+/** A single day's calling window. Times are 24h "HHMM" in the chosen timezone. */
+const CallHoursWindowSchema = z
+  .object({
+    dayOfWeek: z.enum([
+      "MONDAY",
+      "TUESDAY",
+      "WEDNESDAY",
+      "THURSDAY",
+      "FRIDAY",
+      "SATURDAY",
+      "SUNDAY",
+    ]),
+    openTime: z.string().regex(/^([01]\d|2[0-3])[0-5]\d$/, "expected HHMM"),
+    closeTime: z.string().regex(/^([01]\d|2[0-3])[0-5]\d$/, "expected HHMM"),
+  })
+  .strict();
+
+/**
+ * Calling-settings PATCH. Every field optional so a partial update can't reset
+ * settings the admin didn't touch.
+ *
+ * An empty `hours.windows` means "reachable 24/7" — do not model that as a
+ * 0000-2359 window, which would leave calls refused for the last minute of
+ * every day.
+ */
+export const UpdateCallSettingsSchema = z
+  .object({
+    channel: z.string().optional(),
+    enabled: z.boolean().optional(),
+    callIconVisible: z.boolean().optional(),
+    callbackPermissionEnabled: z.boolean().optional(),
+    hours: z
+      .object({
+        timezoneId: z.string().min(1).max(64),
+        // Up to two windows per day (e.g. a lunch break) across seven days.
+        windows: z.array(CallHoursWindowSchema).max(14),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type UpdateCallSettingsInput = z.infer<typeof UpdateCallSettingsSchema>;
 
 /** End body — no fields. */
 export const EndCallSchema = z.object({}).strict();

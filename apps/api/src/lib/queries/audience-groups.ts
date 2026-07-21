@@ -120,6 +120,11 @@ export async function listAudienceGroups(teamId: string): Promise<AudienceGroupD
       ON c.id = mem.contact_id
      AND c."teamId" = g."teamId"
      AND c."deletedAt" IS NULL
+     -- Scope to BROADCASTABLE channels, matching countAudienceContacts'
+     -- no-channel default, so list / detail / composer all report the same
+     -- number — an unscoped count folds in webchatwidget visitors the runner
+     -- drops, inflating memberCount above actual reach.
+     AND c."identityChannel" = ANY(${BROADCASTABLE_LIST}::"Channel"[])
     WHERE g."teamId" = ${teamId}
     GROUP BY g.id
   `;

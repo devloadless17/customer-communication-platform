@@ -43,6 +43,18 @@ export interface TeamChannelDto {
    * mount, so a live-updating value would erase the divider before it paints.
    */
   lastReadAt: string | null;
+  /**
+   * The other participant, present only on a DM fetched by id (`getChannelById`).
+   * Server-resolved so the DM header renders correctly on the FIRST paint.
+   * Without it the header could only read the client-side DM list, which is a
+   * layout-level snapshot — a DM opened seconds ago wasn't in it yet, so a
+   * brand-new conversation painted a blank avatar and the literal title
+   * "Direct message" until a refresh landed.
+   *
+   * Absent on list endpoints (they already carry `peer` on the DM list item)
+   * and on non-DM channels.
+   */
+  peer?: DirectMessagePeerDto | null;
 }
 
 export interface TeamChannelListItemDto extends TeamChannelDto {

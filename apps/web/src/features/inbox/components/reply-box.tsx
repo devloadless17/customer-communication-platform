@@ -1227,8 +1227,14 @@ function ReplyBoxImpl({
 
     // Clear input now so the user can keep typing. Skip clearing `value`
     // when this is a voice-only send so the user's draft in the textarea
-    // survives.
-    if (!overrideFile) setValue("");
+    // survives. Also skip it when a "sends-alone" attachment (WhatsApp
+    // audio/sticker, ALL Messenger/IG media) just went out WITHOUT the
+    // typed text: with no inline caption and no separate follow-up, that
+    // text was never delivered, so wiping it here would silently destroy
+    // the agent's reply (and the persisted draft with it). Leaving it lets
+    // a second Send deliver it — exactly what the placeholder instructs.
+    const textWentUnsent = file != null && !attachmentInlineCaption && trimmed !== "";
+    if (!overrideFile && !textWentUnsent) setValue("");
     setAttachment(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (reply) onCancelReply?.();
@@ -1891,7 +1897,14 @@ function ReplyBoxImpl({
                 size="icon"
                 className="size-8 pointer-coarse:size-9 text-muted-foreground"
                 type="button"
-                /* emojis are valid in notes too — always enabled */
+                /* Emojis are valid in NOTES regardless of the messaging
+                   window (a note is internal, never sent to the customer), so
+                   this is gated only on the reply-mode window — matching the
+                   textarea it types into. Leaving it always-enabled let an
+                   agent open the picker and "insert" into a disabled composer
+                   on a closed window: the character appeared and could not be
+                   sent. Templates stay the one action a closed window allows. */
+                disabled={!isNote && windowClosed}
                 aria-label="Insert emoji"
                 title="Insert emoji"
                 onClick={() => setEmojiOpen((v) => !v)}

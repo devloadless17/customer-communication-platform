@@ -311,6 +311,34 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * Live progress for a contact import/export job, delivered ONLY to the
+   * `user:` room of whoever started it. Fires roughly every 2s while the job
+   * runs plus once on every terminal transition, so the wizard can show a real
+   * progress bar and auto-start the download without polling.
+   */
+  "contacts:transfer_progress": (payload: {
+    teamId: string;
+    job: {
+      id: string;
+      kind: "import" | "export";
+      format: "csv" | "xlsx";
+      status: "pending" | "running" | "completed" | "failed" | "canceled";
+      filename: string;
+      processedRows: number;
+      totalRows: number | null;
+      created: number;
+      updated: number;
+      revived: number;
+      skipped: number;
+      failed: number;
+      automationsSkipped: boolean;
+      hasArtifact: boolean;
+      hasErrorReport: boolean;
+      error: string | null;
+    };
+  }) => void;
+
+  /**
    * Conversation was read — team-wide unread counter resets to 0. Fires when
    * a teammate opens the thread or explicitly marks it read. CLAUDE.md flags
    * per-agent unread as deferred, so this is shared across the team.
@@ -421,6 +449,21 @@ export interface ServerToClientEvents {
   "conversation:visitor_typing": (payload: {
     conversationId: string;
     on: boolean;
+  }) => void;
+
+  /**
+   * A website-widget visitor's socket connected (`present:true`) or dropped
+   * (`present:false`). Lets an agent see whether the visitor is still on the page
+   * instead of waiting on a dead thread. Conversation-scoped, ephemeral.
+   */
+  "conversation:visitor_presence": (payload: {
+    conversationId: string;
+    present: boolean;
+    /** Epoch ms the visitor's last socket dropped (present=false). Carried so an
+     *  agent who opens the thread AFTER the visitor left still sees an accurate
+     *  "Left Xm ago" rather than "just now". null when currently present, or when
+     *  the visitor was never seen this session (renders "Away"). */
+    leftAt?: number | null;
   }) => void;
 
   /**
@@ -768,12 +811,24 @@ export interface ServerToClientEvents {
    * Emitted ONLY to the two participants' `user:` rooms — never the team
    * room, because the existence of a DM between two people is itself private.
    *
-   * Deliberately ID-ONLY: no peer name, no avatar, no preview. The client
+   * Deliberately CONTENT-FREE: no peer name, no avatar, no preview. The client
    * responds by refetching `GET /api/team/channels/dms`, which is membership-
    * filtered server-side, so the frame itself can't disclose anything even if
-   * it were ever mis-routed. Do not "helpfully" enrich this payload.
+   * it were ever mis-routed. Do not "helpfully" enrich this payload further.
+   *
+   * `createdByUserId` is the one permitted addition and it is load-bearing:
+   * this frame reaches BOTH participants, so without an author the starter's
+   * own tab cannot tell "I just clicked New DM" from "someone DM'd me" — and a
+   * client-side marker stamped when the POST resolves always loses the race
+   * against the socket frame. It leaks nothing: it goes only to the two
+   * people in the DM, who already know who they are.
    */
-  "team:dm:created": (payload: { teamId: string; channelId: string }) => void;
+  "team:dm:created": (payload: {
+    teamId: string;
+    channelId: string;
+    /** Who opened it — lets the starter's own tab skip the toast/ding. */
+    createdByUserId: string;
+  }) => void;
 
   /**
    * Typing snapshot for a thread. Rides the channel room (so any tab with
@@ -976,3 +1031,15 @@ export interface SocketData {
 
 /** Path Socket.io binds to. Kept here so client and server cannot drift. */
 export const SOCKET_PATH = "/api/socket";
+
+/**
+ * Handshake query flag marking a socket as the anonymous WEBSITE WIDGET rather
+ * than the agent app. Both share one Socket.io server, and CORS is resolved on the
+ * HTTP handshake before any namespace is known — so the transport-level CORS
+ * delegate in `ws-adapter.ts` needs this to tell them apart and reflect the
+ * customer's third-party origin WITHOUT credentials (see the rationale there).
+ *
+ * `apps/web/public/widget.js` is plain, un-bundled JS served as a static asset, so
+ * it cannot import this — it hardcodes the literal `widget=1`. Change both together.
+ */
+export const WIDGET_HANDSHAKE_FLAG = "widget";

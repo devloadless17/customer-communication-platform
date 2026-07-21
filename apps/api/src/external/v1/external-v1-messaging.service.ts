@@ -20,6 +20,7 @@ import {
   type ExternalMessage,
 } from "@/lib/external-shapes";
 import { toExternalMediaUrl } from "@/lib/blob-storage";
+import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
 import { SendTextValidationError } from "@/lib/messaging/send-text-internal";
@@ -962,7 +963,13 @@ export class ExternalV1MessagingService {
       });
     }
     const row = await this.db.contact.findFirst({
-      where: { teamId, phoneNumber: phone, deletedAt: null },
+      // Scope to the phone-owning channel (whatsapp). The partial unique on
+      // (teamId, phoneNumber) fires only for identityChannel='whatsapp', so the
+      // same phone can also sit on a social/widget contact via contact-share or
+      // widget pre-chat. Without this scope a billed partner send could resolve
+      // to that social/widget row instead of the WhatsApp contact. Mirrors
+      // ingest.ts's channel-scoped phone lookup.
+      where: { teamId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: null },
       select: { id: true },
     });
     if (!row) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
@@ -1412,30 +1419,37 @@ export class ExternalV1MessagingService {
     }
     const authorUserId: string = u.id;
 
-    const note = await this.db.internalNote.create({
-      data: { teamId, conversationId, authorUserId, body: input.body },
+    // Insert + event commit atomically via publishInTx — same durability the
+    // internal NotesService.create uses. A bare create()-then-publish() dropped
+    // the audit row AND the outbound-webhook delivery permanently on any crash
+    // between the DB commit and the emit; the transactional outbox guarantees
+    // at-least-once. kickOutbox() drains it in ~1ms so the note still appears live.
+    const note = await this.db.$transaction(async (tx) => {
+      const row = await tx.internalNote.create({
+        data: { teamId, conversationId, authorUserId, body: input.body },
+      });
+      const notePayload = {
+        id: row.id,
+        conversationId,
+        authorUserId,
+        body: input.body,
+        timestamp: row.timestamp.toISOString(),
+      };
+      await publishInTx(tx, {
+        type: "note.created",
+        teamId,
+        conversationId,
+        note: notePayload,
+        // Honor `silent: true` so a partner whose `note.created` webhook
+        // receiver creates ANOTHER note (loop) can break their own echo
+        // chain without depending on chain-depth alone.
+        silent: input.silent === true,
+      });
+      return notePayload;
     });
+    kickOutbox();
 
-    const notePayload = {
-      id: note.id,
-      conversationId,
-      authorUserId,
-      body: input.body,
-      timestamp: note.timestamp.toISOString(),
-    };
-
-    await this.bus.publish({
-      type: "note.created",
-      teamId,
-      conversationId,
-      note: notePayload,
-      // Honor `silent: true` so a partner whose `note.created` webhook
-      // receiver creates ANOTHER note (loop) can break their own echo
-      // chain without depending on chain-depth alone.
-      silent: input.silent === true,
-    });
-
-    return { note: notePayload };
+    return { note };
   }
 
   /**
@@ -1454,15 +1468,21 @@ export class ExternalV1MessagingService {
     });
     if (!note) throw new NotFoundException({ error: "note_not_found", detail: "note not found" });
 
-    await this.db.internalNote.delete({ where: { id: note.id } });
-    await this.bus.publish({
-      type: "note.deleted",
-      teamId,
-      conversationId: note.conversationId,
-      noteId: note.id,
-      // API-driven deletion has no human actor — the API key is the actor.
-      deletedByUserId: null,
+    // Delete + event commit atomically (see createNoteInternal) so a crash
+    // between the row delete and the emit can't drop the audit row + partner
+    // webhook.
+    await this.db.$transaction(async (tx) => {
+      await tx.internalNote.delete({ where: { id: note.id } });
+      await publishInTx(tx, {
+        type: "note.deleted",
+        teamId,
+        conversationId: note.conversationId,
+        noteId: note.id,
+        // API-driven deletion has no human actor — the API key is the actor.
+        deletedByUserId: null,
+      });
     });
+    kickOutbox();
     return { ok: true as const, deleted: note.id };
   }
 
@@ -1505,6 +1525,30 @@ export class ExternalV1MessagingService {
         { refuseStaleOnAmbiguity: true },
       );
       if (claim.kind === "replay") return claim.result;
+    }
+
+    // Per-conversation send ceiling — SAME gate as the text/template paths. This
+    // was the only customer-facing /v1 send entry point without it, breaking
+    // parity (a partner hot-potato of interactive sends bypassed the cap).
+    // Claimed idempotency above is released on rate-limit so a retry after
+    // Retry-After can re-claim fresh.
+    try {
+      consumeConversationSendBudget(teamId, conversationId);
+    } catch (err) {
+      if (err instanceof ConversationSendRateLimitedError) {
+        if (idempotencyKey) {
+          await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+        }
+        throw new HttpException(
+          {
+            error: "conversation_rate_limited",
+            detail: err.message,
+            retryAfter: err.retryAfter,
+          },
+          429,
+        );
+      }
+      throw err;
     }
 
     try {

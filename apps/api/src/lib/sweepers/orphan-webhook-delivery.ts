@@ -1,6 +1,9 @@
 import { db } from "@/lib/db";
 
-import { enqueueWebhookDelivery } from "@/lib/outbound-webhooks/queue";
+import {
+  enqueueWebhookDelivery,
+  getWebhookDeliverQueue,
+} from "@/lib/outbound-webhooks/queue";
 
 /**
  * Recover orphaned `OutboundWebhookDelivery` rows.
@@ -100,8 +103,27 @@ async function sweepOnce(): Promise<void> {
   // Re-enqueue in parallel — each is an independent Redis write and the
   // queue's own idempotency (we never see the same row twice with attempt=0
   // after the worker picks it up) keeps this safe under double-runs.
+  //
+  // I-11: enqueueWebhookDelivery collapses on `jobId=deliver-<id>`, so if the
+  // row's prior job FAILED its full 7-attempt ladder (a DB outage spanning the
+  // ~31min retry window fails every attempt BEFORE deliverOnce bumps
+  // attemptCount) the failed hash lingers 7 days and a blind re-add silently
+  // no-ops — the row stays orphaned while we log "recovered N" every tick.
+  // Clear the terminal hash first so the re-add actually re-creates the job.
+  // A live (waiting/delayed/active) job is left untouched; deliverOnce is
+  // row-driven, so a rare double-run just re-reads current state.
+  const q = getWebhookDeliverQueue();
   const results = await Promise.allSettled(
-    orphans.map((o) => enqueueWebhookDelivery(o.id, o.chainDepth, o.webhook.teamId)),
+    orphans.map(async (o) => {
+      const existing = await q.getJob(`deliver-${o.id}`);
+      if (existing) {
+        const st = await existing.getState();
+        if (st === "failed" || st === "completed") {
+          await existing.remove().catch(() => {});
+        }
+      }
+      return enqueueWebhookDelivery(o.id, o.chainDepth, o.webhook.teamId);
+    }),
   );
   const recovered = results.filter((r) => r.status === "fulfilled").length;
   const failed = results.length - recovered;

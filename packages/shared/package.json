@@ -14,6 +14,7 @@
     "./auth/password-policy": "./src/auth/password-policy.ts",
     "./api-keys/scopes": "./src/api-keys/scopes.ts",
     "./contacts/reserved-fields": "./src/contacts/reserved-fields.ts",
+    "./contacts/transfer-columns": "./src/contacts/transfer-columns.ts",
     "./presence": "./src/presence.ts",
     "./providers/types": "./src/providers/types.ts",
     "./providers/capabilities": "./src/providers/capabilities.ts",

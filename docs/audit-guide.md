@@ -14,12 +14,20 @@ disagree, `CLAUDE.md` wins and this file should be corrected.
 
 ## What the product is (one paragraph)
 
-A multi-tenant SaaS shared inbox for WhatsApp (think Front/Intercom for the
-Meta WhatsApp Cloud API). NestJS API (`apps/api`, :4000) owns every backend
-concern — REST, the Socket.io gateway, webhook ingest, BullMQ workers, the
-workflow engine. Next.js (`apps/web`, :3000) owns pages + Better Auth only.
-Postgres (Prisma) + Redis (BullMQ), single VPS, two app containers behind host
-Caddy. One pilot customer. Multi-tenancy via `teamId` on every row.
+A multi-tenant SaaS **multi-channel** shared inbox (think Respond.io / Trengo /
+Front / Intercom). **Four LIVE channels:** WhatsApp, Facebook Messenger,
+Instagram (all on the Meta Graph) + the first-party **webchatwidget** (an
+embeddable website chat widget). Telegram / email / SMS are designed-for (enum +
+capability maps exist) but not live. NestJS API (`apps/api`, :4000) owns every
+backend concern — REST, the Socket.io gateway (incl. the public `/widget`
+namespace), webhook ingest, BullMQ workers, the workflow engine. Next.js
+(`apps/web`, :3000) owns pages + Better Auth only. Postgres (Prisma) + Redis
+(BullMQ), single VPS, two app containers behind host Caddy. Multi-tenancy via
+`teamId` on every row. The `Channel` enum is the ONLY discriminator — no stored
+`provider`/`vendor` column. See `CLAUDE.md` §5 and `docs/perfection-audit-prompt.md`
+for the current channel model; the note below about "no cross-channel merge" is
+**superseded** — unified `Customer` identity is now SHIPPED (deterministic
+strong-key auto-merge only; see `docs/identity.md`).
 
 ---
 
@@ -66,8 +74,12 @@ Caddy. One pilot customer. Multi-tenancy via `teamId` on every row.
   `ChannelConnection.channel`. `MessagingProvider` + `getProviderBinding(channel)`
   is the impl layer. Adding a channel = new enum value + a registered provider +
   a `ChannelConnection` row.
-- **Contact = one channel identity, not a human.** Contacts are siloed per
-  channel; NO cross-channel merge / Person super-entity. One conversation per
+- **Contact = one channel identity.** Contacts are channel-scoped (a WhatsApp
+  number, an IG handle). **SUPERSEDED (see intro):** unified `Customer` identity
+  is SHIPPED — many channel-scoped `Contact` rows roll up to one `Customer`
+  (person) via deterministic strong-key auto-merge (exact phone always; exact
+  email only when self-asserted; no fuzzy matching). Threads stay per-contact;
+  histories are never merged. One conversation per
   contact (`@@unique([teamId, contactId])`); closed conversations REOPEN, never
   fragment.
 - **Socket.io lives in NestJS** (same process as REST + webhooks + workflows →

@@ -9,6 +9,15 @@ import { frameFromMessage } from "./webchatwidget-frame";
 
 const CHANNEL = "webchatwidget";
 
+/** Was this outbound written by the AI assistant? The native orchestrator + the
+ *  accepted-suggestion path both stamp `rawPayload.sentVia = "ai-assistant/…"`
+ *  synchronously at send time (voice-delivery.ts / ai-inbox.service.ts), so this
+ *  is readable in the realtime frame with no extra read. */
+function isAiSend(rawPayload: Record<string, unknown> | undefined): boolean {
+  const via = rawPayload?.sentVia;
+  return typeof via === "string" && via.startsWith("ai-assistant");
+}
+
 /**
  * Delivers webchatwidget domain events to the visitor's browser.
  *
@@ -65,12 +74,16 @@ export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestr
         "message.sent",
         async (e) => {
           if (e.message.channel !== CHANNEL) return;
-          // Attribute the reply to the agent (skip system/automation sends).
+          // Attribute the reply to the agent (skip system/automation sends). An AI
+          // reply carries no senderUserId; we detect it from the send provenance
+          // (`rawPayload.sentVia = "ai-assistant/…"`), which is set synchronously on
+          // the message, so the widget can disclose the bot without a DB read.
           const senderName = e.senderUserId ? await this.nameFor(e.senderUserId) : null;
+          const ai = isAiSend(e.message.rawPayload);
           this.gateway.deliverToVisitor(
             e.conversationId,
             "message",
-            frameFromMessage(e.message, { senderName }),
+            frameFromMessage(e.message, { senderName, ai }),
           );
         },
         SubscriberPriority.REALTIME,

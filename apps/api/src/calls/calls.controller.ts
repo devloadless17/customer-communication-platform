@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   Param,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -28,6 +29,7 @@ import {
   ListTeamCallsQuerySchema,
   MediaUpdateSchema,
   RejectCallSchema,
+  UpdateCallSettingsSchema,
   RequestCallPermissionSchema,
   type AnswerCallInput,
   type EndCallInput,
@@ -36,6 +38,7 @@ import {
   type ListTeamCallsQuery,
   type MediaUpdateInput,
   type RejectCallInput,
+  type UpdateCallSettingsInput,
   type RequestCallPermissionInput,
 } from "./calls.schemas";
 
@@ -153,19 +156,7 @@ export class CallsController {
     @CurrentSession() session: ApiSession,
     @Query("channel") channel?: string,
   ) {
-    // Validate the requested channel instead of silently coercing everything
-    // that isn't "messenger" to WhatsApp (which would enable the WRONG channel
-    // for `?channel=instagram` or a typo). Default WhatsApp for the no-arg call;
-    // reject an unknown channel here, and let the service's `capabilities.calling`
-    // gate reject a live-but-non-calling channel (Instagram) with a clear error.
-    const raw = channel ?? "whatsapp";
-    if (!LIVE_CHANNELS.has(raw as Channel)) {
-      throw new BadRequestException({
-        error: "invalid_channel",
-        detail: `Unknown or unsupported channel: ${raw}`,
-      });
-    }
-    return this.calls.enableCallingForTeam(session, raw as Channel);
+    return this.calls.enableCallingForTeam(session, this.channelOf(channel));
   }
 
   /**
@@ -180,14 +171,57 @@ export class CallsController {
     @CurrentSession() session: ApiSession,
     @Query("channel") channel?: string,
   ) {
-    const raw = channel ?? "whatsapp";
-    if (!LIVE_CHANNELS.has(raw as Channel)) {
+    return this.calls.getPhoneNumberSettings(session, this.channelOf(channel));
+  }
+
+  /**
+   * The calling setup checklist + current configuration, for the Settings
+   * screen. ADMIN-only — it discloses the team's full calling configuration.
+   */
+  @Get("api/calls/admin/readiness")
+  @RequireRole("admin")
+  async readiness(
+    @CurrentSession() session: ApiSession,
+    @Query("channel") channel?: string,
+  ) {
+    return this.calls.getCallingReadiness(session, this.channelOf(channel));
+  }
+
+  /**
+   * Change calling configuration (enable/disable, call icon, callback
+   * permission, business hours). A PATCH — only the supplied fields are
+   * written, so toggling one setting can't reset another. ADMIN-only.
+   */
+  @Patch("api/calls/admin/settings")
+  @HttpCode(200)
+  @RequireRole("admin")
+  async updateSettings(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(UpdateCallSettingsSchema)) body: UpdateCallSettingsInput,
+    @Query("channel") channel?: string,
+  ) {
+    const { channel: _ignored, ...settings } = body;
+    return this.calls.updateCallSettings(
+      session,
+      settings,
+      this.channelOf(channel),
+    );
+  }
+
+  /**
+   * Validate a `?channel=` query param instead of silently coercing anything
+   * unrecognized to WhatsApp — a typo would otherwise configure the wrong
+   * channel. Defaults to WhatsApp when absent.
+   */
+  private channelOf(raw: string | undefined): Channel {
+    const value = raw ?? "whatsapp";
+    if (!LIVE_CHANNELS.has(value as Channel)) {
       throw new BadRequestException({
         error: "invalid_channel",
-        detail: `Unknown or unsupported channel: ${raw}`,
+        detail: `Unknown or unsupported channel: ${value}`,
       });
     }
-    return this.calls.getPhoneNumberSettings(session, raw as Channel);
+    return value as Channel;
   }
 
   // --- Call-scoped -----------------------------------------------------------
@@ -215,23 +249,24 @@ export class CallsController {
   }
 
   /**
-   * Mark an OUTBOUND call connected — the originating agent's browser calls
-   * this the instant it detects real two-way audio (the customer picked up).
-   * It's the ONLY live pickup signal for business-initiated calls: Meta's
-   * `connect` webhook is just media setup (pre-pickup) and the authoritative
-   * start_time/duration arrive only at terminate. Stamps answeredAt + flips to
-   * in_progress so a later agent hangup is recorded as a real (completed) call
-   * and the connected-call accounting is correct. `calls:make` — outbound agent.
+   * Complete the accept of an INBOUND call. The answering agent's browser calls
+   * this the moment its peer connection reaches `connected`, and holds its
+   * audio until this returns — the provider requires the accept to land after
+   * the WebRTC connection is up, and media flowing before it costs the caller
+   * the first words of the call.
+   *
+   * (There is no outbound equivalent. Customer pickup is reported by the
+   * provider's own call-status webhook, not guessed at by the browser.)
    */
-  @Post("api/calls/:callId/connected")
+  @Post("api/calls/:callId/accept-media")
   @HttpCode(200)
-  @RequireCapability("calls:make")
-  async connected(
+  @RequireCapability("calls:receive")
+  async acceptMedia(
     @CurrentSession() session: ApiSession,
     @Param("callId") callId: string,
-    @Body(zBody(EndCallSchema)) _body: EndCallInput,
+    @Body(zBody(AnswerCallSchema)) body: AnswerCallInput,
   ) {
-    return this.calls.markConnected(session, callId);
+    return this.calls.completeAccept(session, callId, body.sdp);
   }
 
   @Post("api/calls/:callId/end")

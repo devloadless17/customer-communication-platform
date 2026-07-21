@@ -51,6 +51,7 @@ export type MetaErrorCode =
   | "message_unavailable"  // social 10900/9000001 — referenced message deleted/unavailable
   | "unsupported_message"  // 131009 — content type not supported on this account
   | "duplicate_button_title" // 131009 + "Duplicate button title" — interactive buttons reuse a title
+  | "call_permission_required" // WA 138006 — customer hasn't granted calling permission
   | "provider_rejected";   // catch-all for anything else MetaSendError-shaped
 
 export interface NormalizedSendError {
@@ -132,6 +133,21 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
       code: "per_user_marketing_cap",
       message:
         "Meta didn't deliver this marketing message — the recipient is over WhatsApp's per-user marketing frequency cap right now.",
+      detail,
+      httpStatus,
+    };
+  }
+  // ── Calling permission ───────────────────────────────────────────────────
+  // WhatsApp 138006 — the customer hasn't granted this business number
+  // permission to call them. Terminal for THIS attempt and separately
+  // actionable ("ask them for permission"), so it must not fold into the
+  // generic `provider_rejected` bucket that renders as an unexplained failure.
+  // Also tells the caller its cached grant is stale and should be dropped.
+  if (numericCode === 138006) {
+    return {
+      code: "call_permission_required",
+      message:
+        "This customer hasn't allowed calls from you yet — send them a call permission request first.",
       detail,
       httpStatus,
     };

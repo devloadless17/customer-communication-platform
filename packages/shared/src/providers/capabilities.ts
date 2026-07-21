@@ -266,6 +266,26 @@ const CHANNEL_CONTACT_PLACEHOLDER: Partial<Record<Channel, string>> = {
   webchatwidget: "Website visitor",
 };
 
+/**
+ * A stable, human-friendly label for an ANONYMOUS ephemeral visitor.
+ *
+ * Every website visitor previously rendered as the same "Website visitor" string,
+ * so an inbox with five live widget chats showed five identical rows — an agent
+ * could not tell who they were replying to, or refer to one in a note. Crisp and
+ * Drift both solve this with a short per-visitor tag; this is the same idea,
+ * derived from the visitor id so it is deterministic (no storage, no migration,
+ * and the SAME label every time that browser returns).
+ *
+ * Takes the last 4 alphanumerics of the id — `…cb6df817017f` → "Visitor 017F".
+ * Collisions are possible in principle but cosmetic: the id remains the identity,
+ * this is only a display handle.
+ */
+export function ephemeralVisitorLabel(externalContactId: string | null | undefined): string {
+  const compact = (externalContactId ?? "").replace(/[^a-zA-Z0-9]/g, "");
+  if (compact.length < 4) return "Website visitor";
+  return `Visitor ${compact.slice(-4).toUpperCase()}`;
+}
+
 export function socialContactPlaceholder(channel: Channel | null | undefined): string {
   return (channel ? CHANNEL_CONTACT_PLACEHOLDER[channel] : undefined) ?? "New contact";
 }
