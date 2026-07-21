@@ -41,7 +41,13 @@
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
-		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
+		# geolocation=(self) mirrors Caddyfile.template. It was `()` here, which
+		# silently disabled the inbox's "Send a location" composer whenever the
+		# app was exercised through the local Caddy — a policy-blocked
+		# getCurrentPosition rejects with PERMISSION_DENIED and looks exactly
+		# like the user refusing the prompt, so local testing would "reproduce" a
+		# bug that doesn't exist in prod (and hide one that does).
+		Permissions-Policy "camera=(), microphone=(self), geolocation=(self)"
 		-Server
 	}
 

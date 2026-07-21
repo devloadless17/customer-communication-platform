@@ -25,6 +25,12 @@ test.beforeAll(async () => {
       identityChannel: "whatsapp",
       phoneNumber: `9999${Date.now().toString().slice(-8)}`,
       name: `${PREFIX}Contact`,
+      // Open messaging window. This spec is about popover PLACEMENT, and
+      // without it the fixture was silently exercising a CLOSED window, where
+      // the whole reply composer (textarea included) is disabled — so it was
+      // asserting emoji insertion into a composer the agent could never
+      // actually type in.
+      lastInboundAt: new Date(),
     },
     select: { id: true },
   });

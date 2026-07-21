@@ -1891,7 +1891,14 @@ function ReplyBoxImpl({
                 size="icon"
                 className="size-8 pointer-coarse:size-9 text-muted-foreground"
                 type="button"
-                /* emojis are valid in notes too — always enabled */
+                /* Emojis are valid in NOTES regardless of the messaging
+                   window (a note is internal, never sent to the customer), so
+                   this is gated only on the reply-mode window — matching the
+                   textarea it types into. Leaving it always-enabled let an
+                   agent open the picker and "insert" into a disabled composer
+                   on a closed window: the character appeared and could not be
+                   sent. Templates stay the one action a closed window allows. */
+                disabled={!isNote && windowClosed}
                 aria-label="Insert emoji"
                 title="Insert emoji"
                 onClick={() => setEmojiOpen((v) => !v)}
