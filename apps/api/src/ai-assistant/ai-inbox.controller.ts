@@ -138,12 +138,12 @@ export class AiInboxController {
   /** Whether a given (AI-authored) message was flagged as a hallucination risk. */
   @Get("messages/:messageId/hallucination")
   async messageFlag(@CurrentSession() session: ApiSession, @Param("messageId") messageId: string) {
-    return this.svc.getMessageFlag(session.teamId, messageId);
+    return this.svc.getMessageFlag(session.teamId, messageId, session);
   }
 
   @Get("transcriptions/:messageId")
   async getTranscription(@CurrentSession() session: ApiSession, @Param("messageId") messageId: string) {
-    const transcription = await this.svc.getTranscription(session.teamId, messageId);
+    const transcription = await this.svc.getTranscription(session.teamId, messageId, session);
     return { transcription };
   }
 

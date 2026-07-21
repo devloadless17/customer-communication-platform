@@ -26,6 +26,7 @@ import { blobStorage } from "@/lib/blob-storage";
 import { publish } from "@/lib/events/bus";
 
 import {
+  conversationRelationWhere,
   visibilityWhere,
   type ConversationViewer,
 } from "@/lib/conversations/visibility";
@@ -106,9 +107,19 @@ export class AiInboxService {
   }
 
   /** Single-message hallucination flag, for the thread bubble badge. */
-  async getMessageFlag(teamId: string, messageId: string) {
+  async getMessageFlag(teamId: string, messageId: string, viewer?: ConversationViewer) {
     const row = await this.db.aiMessageMetadata.findFirst({
-      where: { teamId, messageId, aiGenerated: true },
+      // Visibility boundary: keyed by messageId, so it needs the RELATION form
+      // — a restricted agent must not read the assistant's notes about a
+      // message on a thread they can't open.
+      where: {
+        teamId,
+        messageId,
+        aiGenerated: true,
+        ...(viewer
+          ? { message: { conversation: conversationRelationWhere(viewer).conversation } }
+          : {}),
+      },
       select: { hallucinationRisk: true, hallucinationNotes: true },
     });
     const risk = row?.hallucinationRisk ?? null;
@@ -373,12 +384,22 @@ export class AiInboxService {
     return { ok: true };
   }
 
-  async getTranscription(teamId: string, messageId: string) {
-    return this.db.aiMessageTranscription.findFirst({ where: { messageId, teamId } });
+  async getTranscription(teamId: string, messageId: string, viewer?: ConversationViewer) {
+    return this.db.aiMessageTranscription.findFirst({
+      where: { messageId, teamId, ...(viewer ? conversationRelationWhere(viewer) : {}) },
+    });
   }
 
-  async correctTranscription(teamId: string, userId: string, messageId: string, correctedText: string) {
-    const row = await this.db.aiMessageTranscription.findFirst({ where: { messageId, teamId } });
+  async correctTranscription(
+    teamId: string,
+    userId: string,
+    messageId: string,
+    correctedText: string,
+    viewer?: ConversationViewer,
+  ) {
+    const row = await this.db.aiMessageTranscription.findFirst({
+      where: { messageId, teamId, ...(viewer ? conversationRelationWhere(viewer) : {}) },
+    });
     if (!row) throw new NotFoundException({ error: "transcription_not_found" });
     return this.db.aiMessageTranscription.update({
       where: { messageId },
