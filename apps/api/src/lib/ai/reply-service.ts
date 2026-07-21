@@ -131,6 +131,10 @@ function normalize(p: ReplyPayload): ReplyPayload {
     confidence: clamp01(typeof p.confidence === "number" ? p.confidence : 0),
     shouldEscalate: p.shouldEscalate === true,
     escalationReason: (p.escalationReason ?? "").trim(),
+    hallucinationRisk: clamp01(
+      typeof p.hallucinationRisk === "number" ? p.hallucinationRisk : 0,
+    ),
+    hallucinationNotes: (p.hallucinationNotes ?? "").trim(),
   };
 }
 

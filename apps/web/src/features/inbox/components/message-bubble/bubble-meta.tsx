@@ -9,6 +9,8 @@ import { cn, formatLocaleString, initials } from "@ccp/shared/utils";
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import type { Message } from "@ccp/shared/types";
 
+import { AiHallucinationBadge } from "../ai/ai-hallucination-badge";
+
 export function BubbleMeta({
   message,
   isOut,
@@ -45,6 +47,7 @@ export function BubbleMeta({
             SenderChip header) so "which teammate" is answered at the top of a
             burst, not buried under its last bubble. The tail keeps time + ticks. */}
         {isOut && <StatusTicks message={message} reason={failureReason} />}
+        {isOut && <AiHallucinationBadge messageId={message.id} />}
       </div>
     </div>
   );
