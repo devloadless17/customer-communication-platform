@@ -9,7 +9,6 @@ import { sendTextInternal, SendTextValidationError } from "@/lib/messaging/send-
 import {
   pauseByAgent,
   resumeByAgent,
-  setDisabled,
   takeOverByAgent,
 } from "@/lib/ai/conversation-state";
 import { getInboundText, loadReplyContext } from "@/lib/ai/reply-context";
@@ -94,10 +93,6 @@ export class AiInboxService {
         return resumeByAgent(teamId, conversationId);
       case "takeover":
         return takeOverByAgent(teamId, conversationId, userId);
-      case "disable":
-        return setDisabled(teamId, conversationId, true);
-      case "enable":
-        return setDisabled(teamId, conversationId, false);
       default:
         throw new BadRequestException({ error: "invalid_action" });
     }

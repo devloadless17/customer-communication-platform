@@ -1,7 +1,9 @@
 import { z } from "zod";
 
+// Agents can pause/resume/take-over the assistant — there is no separate
+// "disable" anymore (removed 2026-07; see conversation-state.ts).
 export const StateActionSchema = z
-  .object({ action: z.enum(["pause", "resume", "takeover", "enable", "disable"]) })
+  .object({ action: z.enum(["pause", "resume", "takeover"]) })
   .strict();
 export type StateActionInput = z.infer<typeof StateActionSchema>;
 
