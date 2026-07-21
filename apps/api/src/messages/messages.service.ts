@@ -84,6 +84,7 @@ import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
 import type {
   ForwardMessagesInput,
+  RefineInput,
   SendMediaFormInput,
   SendTemplateInput,
   SendTextInput,
@@ -131,6 +132,14 @@ const TEMPLATE_HEADER_MIME_HINT: Record<
   video: "A template video header must be MP4 or 3GP.",
   document:
     "A template document header must be a PDF, Word, Excel, PowerPoint, text, or CSV file.",
+};
+
+/** Rewrite instruction per `refine()` mode — the composer's AI-polish menu. */
+const REFINE_INSTRUCTIONS: Record<RefineInput["mode"], string> = {
+  formal: "Rewrite it in a more formal, professional tone.",
+  friendly: "Rewrite it in a warmer, friendlier, more conversational tone.",
+  shorten: "Rewrite it to be noticeably more concise without losing any information.",
+  grammar: "Fix spelling, grammar, and punctuation only — keep the tone and wording otherwise unchanged.",
 };
 
 @Injectable()
@@ -203,6 +212,59 @@ export class MessagesService {
       }
       this.logger.warn(`Translate error: ${String(err)}`);
       throw new BadGatewayException("Translation failed. Try again.");
+    }
+  }
+
+  /**
+   * Refine composer text via the Claude API (Gmail-"Polish"-style rewrite:
+   * Formalise / Friendly / Shorten / Fix grammar). Stateless — same shape as
+   * `translate()` above, transforms the draft only, doesn't send or persist
+   * anything. Shares the lazy `this.anthropic` client and the same
+   * exception mapping.
+   */
+  async refine(input: RefineInput): Promise<{ text: string }> {
+    const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+    if (!apiKey) {
+      throw new ServiceUnavailableException(
+        "AI refinement isn't configured — set ANTHROPIC_API_KEY.",
+      );
+    }
+    if (!this.anthropic) this.anthropic = new Anthropic({ apiKey });
+
+    const instruction = REFINE_INSTRUCTIONS[input.mode];
+
+    try {
+      const message = await this.anthropic.messages.create({
+        model: "claude-opus-4-8",
+        max_tokens: 8192,
+        system:
+          `You rewrite a customer-support agent's draft reply. ${instruction} ` +
+          `Preserve the original meaning, language, line breaks, emoji, @mentions, URLs, and any placeholders. ` +
+          `Output ONLY the rewritten text — no preamble, no explanation, no quotes, no notes.`,
+        messages: [{ role: "user", content: input.text }],
+      });
+
+      const text = message.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("")
+        .trim();
+
+      if (!text) throw new BadGatewayException("Refinement returned no result.");
+      return { text };
+    } catch (err) {
+      if (err instanceof HttpException) throw err; // our own 502 above
+      if (err instanceof Anthropic.APIError) {
+        this.logger.warn(`Anthropic refine failed: ${err.status} ${err.message}`);
+        if (err instanceof Anthropic.RateLimitError) {
+          throw new ServiceUnavailableException(
+            "Refinement is busy — try again in a moment.",
+          );
+        }
+        throw new BadGatewayException("Refinement failed. Try again.");
+      }
+      this.logger.warn(`Refine error: ${String(err)}`);
+      throw new BadGatewayException("Refinement failed. Try again.");
     }
   }
 

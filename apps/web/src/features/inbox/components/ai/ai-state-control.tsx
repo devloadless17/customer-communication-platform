@@ -7,26 +7,29 @@ import { getClientSocket } from "@/lib/socket-client";
 
 /**
  * Conversation-header AI state chip + actions (placement map §4):
- *   states  : AI Active · Human Active · Paused · Disabled
- *   actions : Pause AI · Resume AI · Take over · Return to AI · Disable/Enable
+ *   states  : AI Active · Human Active · Paused
+ *   actions : Pause AI · Resume AI · Take over · Return to AI
+ * No separate "disable" — pause/resume is the only agent-facing control
+ * (removed 2026-07). A paused conversation also auto-resumes on its own if
+ * the customer reopens it after a close (server-side, see
+ * conversation-state.ts `resumeOnReopen`) — this chip just reflects whatever
+ * the server reports.
  * Reflects the server state machine (correction #2). Persisted, so it survives
  * refresh; refetched on mount.
  */
 
-type State = "ai_active" | "human_active" | "ai_paused" | "disabled";
+type State = "ai_active" | "human_active" | "ai_paused";
 
 const META: Record<State, { label: string; className: string }> = {
   ai_active: { label: "AI Active", className: "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300" },
   human_active: { label: "Human Active", className: "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300" },
   ai_paused: { label: "AI Paused", className: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" },
-  disabled: { label: "AI Disabled", className: "bg-muted text-muted-foreground" },
 };
 
 const ACTIONS: Record<State, Array<[string, string]>> = {
-  ai_active: [["Pause AI", "pause"], ["Take over", "takeover"], ["Disable", "disable"]],
-  human_active: [["Return to AI", "resume"], ["Pause AI", "pause"], ["Disable", "disable"]],
-  ai_paused: [["Resume AI", "resume"], ["Disable", "disable"]],
-  disabled: [["Enable AI", "enable"]],
+  ai_active: [["Pause AI", "pause"], ["Take over", "takeover"]],
+  human_active: [["Return to AI", "resume"], ["Pause AI", "pause"]],
+  ai_paused: [["Resume AI", "resume"]],
 };
 
 export function AiStateControl({
@@ -92,7 +95,10 @@ export function AiStateControl({
     }
   }
 
-  if (!state) return null;
+  // A defensive fallback: the server can no longer produce anything outside
+  // `META`'s keys, but a not-yet-migrated legacy row (state="disabled") could
+  // theoretically still surface one during a rollout window — don't crash.
+  if (!state || !(state in META)) return null;
   const meta = META[state];
 
   return (

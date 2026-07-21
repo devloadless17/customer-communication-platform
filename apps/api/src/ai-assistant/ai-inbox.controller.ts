@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Res,
   UseGuards,
 } from "@nestjs/common";
@@ -15,17 +16,19 @@ import { ScopedByConversation } from "../auth/conversation-visibility.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
-import { zBody } from "../common/zod-validation.pipe";
+import { zBody, zQuery } from "../common/zod-validation.pipe";
 import { AiInboxService } from "./ai-inbox.service";
 import {
   CorrectTranscriptionSchema,
   PatchMemorySchema,
   StateActionSchema,
   SuggestionDecisionSchema,
+  SummaryRangeQuerySchema,
   type CorrectTranscriptionInput,
   type PatchMemoryInput,
   type StateActionInput,
   type SuggestionDecisionInput,
+  type SummaryRangeQuery,
 } from "./ai-inbox.schemas";
 
 /**
@@ -46,6 +49,19 @@ export class AiInboxController {
   @Get("conversations/:id/overview")
   async overview(@CurrentSession() session: ApiSession, @Param("id") id: string) {
     return this.svc.overview(session.teamId, id);
+  }
+
+  /** On-demand summary for an agent-picked `from`/`to` date range. */
+  // Conversation-scoped: this returns a summary of the thread's contents, so
+  // it needs the same visibility boundary as the thread itself.
+  @ScopedByConversation("id")
+  @Get("conversations/:id/summary")
+  async rangeSummary(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Query(zQuery(SummaryRangeQuerySchema)) query: SummaryRangeQuery,
+  ) {
+    return this.svc.rangeSummary(session.teamId, id, new Date(query.from), new Date(query.to));
   }
 
   @ScopedByConversation("id")

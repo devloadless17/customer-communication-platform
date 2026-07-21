@@ -9,12 +9,12 @@ import { sendTextInternal, SendTextValidationError } from "@/lib/messaging/send-
 import {
   pauseByAgent,
   resumeByAgent,
-  setDisabled,
   takeOverByAgent,
 } from "@/lib/ai/conversation-state";
 import { getInboundText, loadReplyContext } from "@/lib/ai/reply-context";
 import { generateReply } from "@/lib/ai/reply-service";
 import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
+import { summarizeRange } from "@/lib/ai/summary-job";
 import { persistSuggestion } from "@/lib/ai/suggestion-store";
 import {
   renderDraftAudio,
@@ -95,6 +95,13 @@ export class AiInboxService {
     };
   }
 
+  /** On-demand summary for an agent-selected date range — see summary-job.ts. */
+  async rangeSummary(teamId: string, conversationId: string, from: Date, to: Date) {
+    await this.assertConversation(teamId, conversationId);
+    const summary = await summarizeRange(teamId, conversationId, from, to);
+    return { summary };
+  }
+
   async setState(
     teamId: string,
     conversationId: string,
@@ -110,10 +117,6 @@ export class AiInboxService {
         return resumeByAgent(teamId, conversationId);
       case "takeover":
         return takeOverByAgent(teamId, conversationId, userId);
-      case "disable":
-        return setDisabled(teamId, conversationId, true);
-      case "enable":
-        return setDisabled(teamId, conversationId, false);
       default:
         throw new BadRequestException({ error: "invalid_action" });
     }

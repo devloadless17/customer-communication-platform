@@ -61,6 +61,16 @@ const TAG_KINDS = new Set(["interest", "recurring_need", "preference"]);
 
 export function AiConversationPanel({ conversationId }: { conversationId: string }) {
   const [data, setData] = useState<Overview | null>(null);
+  // Date-range summary: separate, on-demand, spans the WHOLE conversation —
+  // not part of /overview. `from`/`to` are the (initially empty)
+  // <input type="date"> values; `range` is the last FETCHED result, kept
+  // distinct from the inputs so editing the dates doesn't blank out the
+  // previous result until the agent explicitly re-fetches.
+  const [rangeFrom, setRangeFrom] = useState("");
+  const [rangeTo, setRangeTo] = useState("");
+  const [rangeLoading, setRangeLoading] = useState(false);
+  const [rangeError, setRangeError] = useState<string | null>(null);
+  const [range, setRange] = useState<SessionSummary | null | undefined>(undefined); // undefined = never fetched
 
   const load = useCallback(async () => {
     const res = await apiFetch(`/api/ai-assistant/conversations/${conversationId}/overview`);
@@ -98,6 +108,48 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
     .filter((m) => TAG_KINDS.has(m.kind) && m.status === "confirmed")
     .slice(0, 6);
   const summary = data?.summary ?? null;
+
+  async function fetchRangeSummary() {
+    if (!rangeFrom || !rangeTo) return;
+    setRangeLoading(true);
+    setRangeError(null);
+    try {
+      // <input type="date"> gives a bare "YYYY-MM-DD"; widen to a full-day
+      // window in the agent's local time so "to" includes that whole day.
+      const from = new Date(`${rangeFrom}T00:00:00`).toISOString();
+      const to = new Date(`${rangeTo}T23:59:59.999`).toISOString();
+      const qs = new URLSearchParams({ from, to }).toString();
+      const res = await apiFetch(`/api/ai-assistant/conversations/${conversationId}/summary?${qs}`);
+      if (!res.ok) {
+        setRangeError("Couldn't load a summary for that range.");
+        return;
+      }
+      const json = (await res.json()) as { summary: Partial<SessionSummary> | null };
+      setRange(
+        json.summary
+          ? {
+              customerGoal: json.summary.customerGoal ?? null,
+              importantContext: json.summary.importantContext ?? null,
+              questions: json.summary.questions ?? [],
+              answers: json.summary.answers ?? [],
+              commitments: json.summary.commitments ?? [],
+              openQuestions: json.summary.openQuestions ?? [],
+              requiredFollowUp: json.summary.requiredFollowUp ?? null,
+              sentiment: json.summary.sentiment ?? null,
+              language: json.summary.language ?? null,
+              tone: json.summary.tone ?? null,
+              latestStatus: json.summary.latestStatus ?? null,
+              overallBrief: json.summary.overallBrief ?? null,
+              updatedAt: "",
+            }
+          : null,
+      );
+    } catch {
+      setRangeError("Couldn't reach the summary service.");
+    } finally {
+      setRangeLoading(false);
+    }
+  }
 
   async function confirm(id: string) {
     await apiFetch(`/api/ai-assistant/memory/${id}`, {
@@ -203,6 +255,60 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
             </div>
           </div>
         )}
+      </Section>
+
+      <Section title="Summary for a date range">
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <input
+              type="date"
+              value={rangeFrom}
+              onChange={(e) => setRangeFrom(e.target.value)}
+              className="rounded border border-border bg-background px-1.5 py-1 text-xs"
+              aria-label="From date"
+            />
+            <span className="text-xs text-muted-foreground">to</span>
+            <input
+              type="date"
+              value={rangeTo}
+              onChange={(e) => setRangeTo(e.target.value)}
+              className="rounded border border-border bg-background px-1.5 py-1 text-xs"
+              aria-label="To date"
+            />
+            <button
+              onClick={() => void fetchRangeSummary()}
+              disabled={!rangeFrom || !rangeTo || rangeLoading}
+              className="rounded bg-primary px-2 py-1 text-xs font-medium text-primary-foreground disabled:opacity-50"
+            >
+              {rangeLoading ? "Loading…" : "View summary"}
+            </button>
+          </div>
+          {rangeError && <p className="text-xs text-destructive">{rangeError}</p>}
+          {range === null && !rangeError && (
+            <p className="text-xs text-muted-foreground">No messages in that range.</p>
+          )}
+          {range && (
+            <div className="space-y-2 text-sm">
+              {range.overallBrief && (
+                <p className="rounded-md bg-muted/50 px-2 py-1.5 text-xs">
+                  <span className="font-medium text-muted-foreground">Overall: </span>
+                  <span className="text-foreground">{range.overallBrief}</span>
+                </p>
+              )}
+              <SummaryLine label="Goal" value={range.customerGoal} />
+              <SummaryLine label="Context" value={range.importantContext} />
+              <SummaryList label="Open questions" items={range.openQuestions} />
+              <SummaryList label="Company commitments" items={range.commitments} />
+              <SummaryLine label="Required follow-up" value={range.requiredFollowUp} />
+              <SummaryLine label="Latest status" value={range.latestStatus} />
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                {range.sentiment && <span>Sentiment: {range.sentiment}</span>}
+                {range.language && <span>Language: {range.language}</span>}
+                {range.tone && <span>Tone: {range.tone}</span>}
+              </div>
+            </div>
+          )}
+        </div>
       </Section>
     </>
   );

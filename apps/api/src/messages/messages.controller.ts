@@ -33,6 +33,7 @@ import { zBody } from "../common/zod-validation.pipe";
 import { MessagesService } from "./messages.service";
 import {
   ForwardMessagesSchema,
+  RefineSchema,
   SendContactsSchema,
   SendInteractiveSchema,
   SendLocationSchema,
@@ -43,6 +44,7 @@ import {
   SendTextSchema,
   TranslateSchema,
   type ForwardMessagesInput,
+  type RefineInput,
   type SendContactsInput,
   type SendInteractiveInput,
   type SendLocationInput,
@@ -111,6 +113,20 @@ export class MessagesController {
     @Body(zBody(TranslateSchema)) body: TranslateInput,
   ) {
     return this.messages.translate(body);
+  }
+
+  /**
+   * AI-refine composer text (Formalise / Friendly / Shorten / Fix grammar —
+   * Gmail-"Polish"-style). Session-authed only; stateless draft transform,
+   * same shape as `translate` above. Shares the controller's rate-limit
+   * bucket — fine, it's only hit on an explicit menu pick.
+   */
+  @Post("refine")
+  async refine(
+    @CurrentSession() _session: ApiSession,
+    @Body(zBody(RefineSchema)) body: RefineInput,
+  ) {
+    return this.messages.refine(body);
   }
 
   /**
