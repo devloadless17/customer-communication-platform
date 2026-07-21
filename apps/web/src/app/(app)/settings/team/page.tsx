@@ -68,6 +68,7 @@ export default async function TeamSettingsPage() {
     <TeamSettings
       currentUserId={user.id}
       currentUserRole={user.role}
+      teamId={user.teamId}
       teamName={team.name}
       users={users}
       pendingInvites={pendingInvites}

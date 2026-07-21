@@ -54,6 +54,15 @@ const RegisterSchema = z.object({
 });
 type RegisterInput = z.infer<typeof RegisterSchema>;
 
+/** Seeded into every new org — kept in lockstep with the backfill in
+ *  prisma/migrations/20260722140000_seed_default_message_flags. */
+const DEFAULT_MESSAGE_FLAGS = [
+  { name: "Complaint", color: "rose", description: "The customer is unhappy — needs a follow-up." },
+  { name: "Refund request", color: "amber", description: "The customer asked for money back." },
+  { name: "Follow up", color: "sky", description: "Come back to this one later." },
+  { name: "Urgent", color: "orange", description: "Needs attention before anything else in the queue." },
+] as const;
+
 @Controller("api/register")
 export class RegisterController {
   constructor(private readonly db: DbService) {}
@@ -89,6 +98,21 @@ export class RegisterController {
         // it. The web action redirects the new admin to /pending afterward.
         const team = await tx.team.create({
           data: { name: body.orgName, status: "pending" },
+        });
+        // Starter message-flag definitions. The flags feature is invisible
+        // until a definition exists (the message "…" menu hides "Flag as" on an
+        // empty catalog), so a brand-new org would otherwise never discover it.
+        // Existing orgs were seeded the same set by
+        // 20260722140000_seed_default_message_flags. Admins can rename,
+        // recolour or delete any of them in Settings.
+        await tx.messageFlagDefinition.createMany({
+          data: DEFAULT_MESSAGE_FLAGS.map((f, i) => ({
+            teamId: team.id,
+            name: f.name,
+            color: f.color,
+            description: f.description,
+            sortOrder: i,
+          })),
         });
         const user = await tx.user.create({
           data: {

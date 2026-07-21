@@ -164,6 +164,14 @@ export async function applyAvailability(
     // exactly as availability behaved before working hours existed.
     overrideUntil = overrideExpiryFor(schedule, nowMs);
   } else if (intent.kind === "followSchedule") {
+    // Handing control back RELEASES the manual pick, not just its expiry.
+    // Dropping only the expiry isn't enough: the resolver deliberately treats a
+    // manual `offline` as a sticky privacy choice the schedule may never
+    // revoke, so "Follow schedule" would be a silent no-op for exactly the
+    // member most likely to need it — and there'd be no way back onto the
+    // schedule short of picking some other status first.
+    manualStatus = "available";
+    manualMessage = null;
     overrideUntil = null;
     setByUserId = null;
   } else if (intent.kind === "rescheduled" && overrideUntil !== null) {

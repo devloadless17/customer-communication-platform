@@ -1738,8 +1738,6 @@ function MessageThreadImpl({
         contactAvatarUrl={contact.avatarUrl ?? null}
         phone={contact.phoneNumber}
         status={conversation.status}
-        aiEnabled={conversation.aiEnabled ?? true}
-        aiAutopilotEnabled={aiAutopilotEnabled}
         assignedUserId={assignedUser?.id ?? null}
         assignedUserName={assignedUser?.name ?? null}
         assignedUserAvatarUrl={assignedUser?.avatarUrl ?? null}

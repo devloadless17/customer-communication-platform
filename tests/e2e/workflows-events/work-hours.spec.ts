@@ -257,6 +257,40 @@ test.describe("resolveEffectiveAvailability", () => {
   });
 });
 
+test.describe("appear-offline is sticky", () => {
+  test("the schedule never revokes a manual `offline` at shift start", () => {
+    // "Appear offline" is a PRIVACY choice, not an absence note. Reclaiming it
+    // at 09:00 would put the user back in the visible-online set, back in the
+    // widget's "an agent is here" dot, and back in the assignment tiers without
+    // them ever touching the picker. busy/away are different — those describe a
+    // temporary state and the schedule may legitimately clear them.
+    const onShift = at(2026, 7, 22, 10);
+    expect(isWithinWorkHours(nineToFive, onShift)).toBe(true);
+    const r = resolveEffectiveAvailability({
+      manualStatus: "offline",
+      manualMessage: null,
+      manualSource: "manual",
+      overrideUntil: null,
+      schedule: nineToFive,
+      nowMs: onShift,
+    });
+    expect(r.status).toBe("offline");
+  });
+
+  test("busy IS reclaimed at shift start (the contrast that makes the rule a rule)", () => {
+    const r = resolveEffectiveAvailability({
+      manualStatus: "busy",
+      manualMessage: "in a meeting",
+      manualSource: "manual",
+      overrideUntil: null,
+      schedule: nineToFive,
+      nowMs: at(2026, 7, 22, 10),
+    });
+    expect(r.status).toBe("available");
+    expect(r.source).toBe("schedule");
+  });
+});
+
 test.describe("overrideExpiryFor", () => {
   test("a mid-shift pick expires at shift END — the forgot-to-flip fix", () => {
     const expiry = overrideExpiryFor(nineToFive, at(2026, 7, 22, 14));

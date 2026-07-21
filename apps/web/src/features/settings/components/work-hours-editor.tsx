@@ -107,7 +107,7 @@ export function WorkHoursEditor({
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-3">
-        <label className="flex min-w-56 flex-1 flex-col gap-1.5">
+        <label className="flex min-w-56 max-w-xs flex-1 flex-col gap-1.5">
           <span className="text-xs font-medium text-muted-foreground">Timezone</span>
           <Select
             value={value.timezone}
@@ -130,23 +130,38 @@ export function WorkHoursEditor({
             ))}
           </Select>
         </label>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={disabled || !value.weekly.mon?.length}
-          onClick={copyToWeekdays}
-        >
-          Copy Monday to Tue–Fri
-        </Button>
       </div>
 
-      <div className="divide-y divide-border/60 rounded-lg border border-border/60">
+      <div className="overflow-hidden rounded-lg border border-border/60">
+        {/* Grid header — the copy action belongs WITH the grid it rewrites, not
+            beside the timezone picker where it read as a timezone action. */}
+        <div className="flex items-center justify-between gap-3 border-b border-border/60 bg-muted/30 px-3 py-2">
+          <span className="text-2xs font-medium uppercase tracking-wider text-muted-foreground">
+            Weekly schedule
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 text-2xs"
+            disabled={disabled || !value.weekly.mon?.length}
+            onClick={copyToWeekdays}
+          >
+            Copy Monday to Tue–Fri
+          </Button>
+        </div>
+        <div className="divide-y divide-border/60">
         {DAY_KEYS.map((day) => {
           const windows = value.weekly[day] ?? [];
           const open = windows.length > 0;
           return (
-            <div key={day} className="flex flex-wrap items-center gap-3 px-3 py-2.5">
+            <div
+              key={day}
+              // Fixed min-height: an "on" row (inputs) and an "off" row (text)
+              // used to differ by ~14px, so the day column visibly jittered
+              // down the week. One height keeps the rhythm even.
+              className="flex min-h-12 flex-wrap items-center gap-3 px-3 py-2"
+            >
               <div className="flex w-40 shrink-0 items-center gap-2.5">
                 <Switch
                   checked={open}
@@ -229,11 +244,16 @@ export function WorkHoursEditor({
                   )}
                 </div>
               ) : (
-                <span className="text-xs text-muted-foreground">Day off</span>
+                // Same column as the time inputs above, so the eye tracks one
+                // vertical line down the week instead of two.
+                <span className="flex flex-1 items-center text-xs text-muted-foreground">
+                  Day off
+                </span>
               )}
             </div>
           );
         })}
+        </div>
       </div>
 
       {empty ? (
@@ -245,10 +265,12 @@ export function WorkHoursEditor({
           No working days set — this schedule is inactive and availability stays manual.
         </p>
       ) : (
+        // Only the non-obvious rule. The "members show as away outside these
+        // hours and are skipped by round-robin" half used to be repeated here
+        // word-for-word from the card header two inches above it.
         <p className="text-xs text-muted-foreground">
-          Outside these hours members show as away automatically and are skipped by
-          round-robin assignment. An end time before the start time (22:00–06:00)
-          runs overnight.
+          An end time earlier than the start time runs overnight — 22:00–06:00 is
+          a night shift ending the next morning.
         </p>
       )}
     </div>

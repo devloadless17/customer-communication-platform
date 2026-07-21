@@ -27,7 +27,6 @@ function callChannelName(channel: Channel | undefined): string {
 
 import { AssignmentDropdown } from "./assignment-dropdown";
 import { ConversationMenu } from "./conversation-menu";
-import { AiToggle } from "./ai-toggle";
 import { StatusDropdown } from "./status-dropdown";
 
 /**
@@ -128,8 +127,6 @@ function ThreadHeaderImpl({
   contactAvatarUrl,
   phone,
   status,
-  aiEnabled,
-  aiAutopilotEnabled,
   assignedUserId,
   assignedUserName,
   assignedUserAvatarUrl,
@@ -162,9 +159,7 @@ function ThreadHeaderImpl({
   phone: string | null;
   status: ConversationStatus;
   /** AI Autopilot state for the header toggle (per-conversation). */
-  aiEnabled: boolean;
   /** Team-level opt-in — when false the AI toggle is hidden entirely. */
-  aiAutopilotEnabled: boolean;
   assignedUserId: string | null;
   assignedUserName: string | null;
   assignedUserAvatarUrl?: string | null;
@@ -324,15 +319,14 @@ function ThreadHeaderImpl({
           currentUserName={currentUserName}
           onAlert={onAlert}
         />
-        {aiAutopilotEnabled && (
-          <AiToggle
-            teamId={teamId}
-            conversationId={conversationId}
-            aiEnabled={aiEnabled}
-            currentUserName={currentUserName}
-            onAlert={onAlert}
-          />
-        )}
+        {/* The legacy AI Autopilot per-conversation toggle used to render here.
+            Removed with the autopilot itself: the built-in assistant is the AI
+            now, and its pause / resume / take-over control is `AiStateControl`
+            above. Leaving both shipped two AI switches side by side that meant
+            different things — and once the autopilot settings page was gone,
+            a team that had it enabled could no longer turn this one off. The
+            `Conversation.aiEnabled` column and the /v1 endpoint stay for any
+            org still driving an external flow through the API. */}
         {canDeleteConversations && (
           <ConversationMenu
             conversationId={conversationId}

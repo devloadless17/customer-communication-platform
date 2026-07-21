@@ -42,6 +42,8 @@ import {
   AVAILABILITY_DOT_CLASSES,
   AVAILABILITY_LABELS,
 } from "@ccp/shared/presence";
+import { PresenceDot } from "@/components/presence-dot";
+import { usePresence } from "@/hooks/use-presence";
 import type { Role, UserAvailabilityStatus } from "@ccp/shared/types";
 import {
   asWorkHours,
@@ -107,6 +109,7 @@ interface InviteResult {
 export function TeamSettings({
   currentUserId,
   currentUserRole,
+  teamId,
   teamName,
   users,
   pendingInvites,
@@ -115,6 +118,8 @@ export function TeamSettings({
 }: {
   currentUserId: string;
   currentUserRole: Role;
+  /** Needed for the live presence subscription behind the member status dots. */
+  teamId: string;
   teamName: string;
   users: TeamUserRow[];
   /** Empty for non-admins (they can't see this panel). */
@@ -141,6 +146,12 @@ export function TeamSettings({
   // + danger-zone copy stay in sync with what this tab just dispatched OR
   // with another admin's rename on a different tab/device.
   const liveTeamName = useLiveTeamName(teamName);
+  // Live presence + availability, the SAME source the inbox sidebar and the
+  // assignment dropdown read. Without it this page painted the STORED status
+  // with no presence check, so a teammate who wasn't connected at all still
+  // showed a green "Available" here while the sidebar correctly showed them
+  // grey — the two surfaces disagreed about the same person.
+  const { onlineUserIds, availabilityByUserId } = usePresence(teamId, currentUserId);
   const { confirm, confirmDialog } = useConfirm();
 
   const refresh = softRefresh;
@@ -399,6 +410,9 @@ export function TeamSettings({
               user={u}
               isSelf={u.id === currentUserId}
               actorRole={currentUserRole}
+              online={onlineUserIds.has(u.id)}
+              liveAvailability={availabilityByUserId[u.id]?.status}
+              liveNote={availabilityByUserId[u.id]?.message ?? undefined}
               canManageAvailability={canManageOthersAvailability}
               onAvailabilityChanged={refresh}
               onAvailabilityError={setError}
@@ -488,6 +502,9 @@ function UserRow({
   user,
   isSelf,
   actorRole,
+  online,
+  liveAvailability,
+  liveNote,
   canManageAvailability,
   onAvailabilityChanged,
   onAvailabilityError,
@@ -499,6 +516,11 @@ function UserRow({
   user: TeamUserRow;
   isSelf: boolean;
   actorRole: Role;
+  /** Has a live socket. Offline wins over any availability — see PresenceDot. */
+  online: boolean;
+  /** Live status/note from the socket; falls back to the SSR snapshot. */
+  liveAvailability?: UserAvailabilityStatus;
+  liveNote?: string;
   canManageAvailability: boolean;
   onAvailabilityChanged: () => void;
   onAvailabilityError: (message: string | null) => void;
@@ -508,6 +530,11 @@ function UserRow({
   onResetPassword: () => void;
 }) {
   const editable = canManageUsers(actorRole) && canModifyUser(actorRole, user.role);
+  // Live socket value wins; the SSR snapshot is the fallback for the first
+  // paint (and for a member the sparse presence map omits, i.e. the default
+  // "available, no note").
+  const status: UserAvailabilityStatus = liveAvailability ?? user.availabilityStatus;
+  const note = liveNote ?? user.availabilityMessage ?? "";
   const options = useMemo(() => {
     const set = new Set<Role>(assignableRoles(actorRole));
     set.add(user.role);
@@ -551,17 +578,15 @@ function UserRow({
                 ·
               </span>
               <span className="flex shrink-0 items-center gap-1.5">
-                <span
-                  aria-hidden
-                  className={cn(
-                    "size-2 shrink-0 rounded-full",
-                    AVAILABILITY_DOT_CLASSES[user.availabilityStatus],
-                  )}
-                />
+                {/* The shared dot, so this page can't drift from the sidebar /
+                    assignment dropdown: a teammate with no live socket reads as
+                    Offline regardless of the status stored on their row. */}
+                <PresenceDot online={online} availability={status} className="size-2" />
                 <span className="truncate">
-                  {user.availabilityMessage ||
-                    AVAILABILITY_LABELS[user.availabilityStatus]}
-                  {user.availabilitySource === "admin" && " · set by an admin"}
+                  {online
+                    ? note || AVAILABILITY_LABELS[status]
+                    : AVAILABILITY_LABELS.offline}
+                  {online && user.availabilitySource === "admin" && " · set by an admin"}
                 </span>
               </span>
             </>

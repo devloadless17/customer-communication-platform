@@ -571,6 +571,46 @@ test.describe("Settings → Team UI", () => {
     expect(row.availabilitySource).toBe("manual");
   });
 
+  test("a teammate with NO live socket reads as Offline, not their stored status", async ({
+    page,
+    request,
+  }) => {
+    // The bug this guards, seen in prod: the members list painted the STORED
+    // availability with no presence check, so someone who wasn't connected at
+    // all still showed a green "Available" here while the inbox sidebar
+    // correctly showed them grey. Two surfaces, same person, opposite answers.
+    guard(page);
+    await setTeamWorkHours(request, null);
+    const ghost = await db().user.create({
+      data: {
+        teamId: adminTeamId,
+        name: `Ghost ${Date.now()}`,
+        email: `wh-ghost-${Date.now()}@loadless.test`,
+        role: "agent",
+        availabilityStatus: "available",
+        availabilityManualStatus: "available",
+      },
+      select: { id: true, name: true },
+    });
+    try {
+      await request.patch("/api/users/me/availability", { data: { status: "available" } });
+      await page.goto("/settings/team");
+      await hideDevChrome(page);
+
+      const ghostRow = page.locator("li").filter({ hasText: ghost.name });
+      await expect(ghostRow).toBeVisible();
+      // Never connected -> Offline, regardless of the row's stored status.
+      await expect(ghostRow.getByTitle("Offline")).toBeVisible();
+      await expect(ghostRow.getByTitle("Available")).toHaveCount(0);
+
+      // ...while OUR row (this browser holds a live socket) reads Available.
+      const mine = page.locator("li").filter({ hasText: APP_ADMIN_EMAIL });
+      await expect(mine.getByTitle("Available")).toBeVisible();
+    } finally {
+      await db().user.delete({ where: { id: ghost.id } }).catch(() => undefined);
+    }
+  });
+
   test("the account-menu picker shows schedule context and can follow the schedule", async ({
     page,
     request,
