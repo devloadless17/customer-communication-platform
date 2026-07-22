@@ -39,6 +39,13 @@ export interface ReplyPayload {
   hallucinationRisk: number;
   /** The specific unverified claim(s), or empty string when risk is low/zero. */
   hallucinationNotes: string;
+  /**
+   * Model self-reported confidence 0..1 that the CUSTOMER's latest message
+   * (not the reply) is a complaint — dissatisfaction, a problem report, or a
+   * grievance about the product/service/order. 0 for an ordinary question,
+   * greeting, or request. Drives the auto-raised "Complaint" message flag.
+   */
+  complaintConfidence: number;
 }
 
 // OpenAI strict structured outputs: every property listed in `required`,
@@ -59,6 +66,7 @@ export const REPLY_SCHEMA: Record<string, unknown> = {
     "escalationReason",
     "hallucinationRisk",
     "hallucinationNotes",
+    "complaintConfidence",
   ],
   properties: {
     replyText: { type: "string", description: "The reply to send to the customer." },
@@ -101,6 +109,11 @@ export const REPLY_SCHEMA: Record<string, unknown> = {
       type: "string",
       description:
         "The specific claim(s) in replyText that aren't grounded in the provided company info/knowledge, or an empty string when hallucinationRisk is 0.",
+    },
+    complaintConfidence: {
+      type: "number",
+      description:
+        "Confidence between 0 and 1 that the CUSTOMER's latest message is a complaint (unhappy about the product/service/order, reporting a problem). 0 for a normal question, greeting, or neutral request.",
     },
   },
 };

@@ -6,8 +6,7 @@ import { assignByPolicy } from "@/lib/assignment/apply";
 import { loadAssignmentSettings } from "@/lib/assignment/resolve";
 import { legacyAutopilotOwnsTeam } from "@/lib/ai/automation-claim";
 import { getState } from "@/lib/ai/conversation-state";
-import { aiGloballyEnabled } from "@/lib/ai/models";
-import { openaiConfigured } from "@/lib/ai/openai-client";
+import { aiTextEngineConfigured } from "@/lib/ai/models";
 import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
@@ -152,7 +151,7 @@ export class AutoAssignSubscriber implements OnModuleInit, OnModuleDestroy {
     // team, and answers the conversation itself — so it counts as "AI handling"
     // even though none of the native gates below would fire.
     if (await legacyAutopilotOwnsTeam(teamId)) return true;
-    if (!aiGloballyEnabled() || !openaiConfigured()) return false;
+    if (!aiTextEngineConfigured()) return false;
     const config = await loadAiConfig(teamId);
     if (!configEnabled(config)) return false;
     const state = await getState(conversationId);

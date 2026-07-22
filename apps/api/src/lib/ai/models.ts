@@ -75,3 +75,17 @@ export function replyTextProvider(): "anthropic" | "openai" {
 export function anthropicReplyModel(): string {
   return process.env.AI_ANTHROPIC_MODEL_REPLY || "claude-opus-4-8";
 }
+
+/**
+ * Is there ANY engine available to generate reply text? `reply-service`
+ * happily runs on Anthropic alone (falling back to OpenAI only on a live
+ * Anthropic error) — so a deployment with only ANTHROPIC_API_KEY set is a
+ * fully valid configuration. Gating the reply pipeline on `openaiConfigured()`
+ * (OpenAI-only) would silently kill every reply on exactly that deployment.
+ * Use this for "can the assistant reply at all"; keep using
+ * `openaiConfigured()` / `azureTtsConfigured()` for paths that are genuinely
+ * OpenAI/Azure-only (STT transcription, TTS voice synthesis).
+ */
+export function aiTextEngineConfigured(): boolean {
+  return aiGloballyEnabled() && (!!openaiApiKey() || !!anthropicApiKey());
+}
