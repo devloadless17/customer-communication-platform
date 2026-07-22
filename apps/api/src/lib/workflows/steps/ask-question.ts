@@ -411,7 +411,7 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
         const contactId = c?.id;
         if (contactId) {
           const trimmed = valueToSave.slice(0, 2048);
-          await saveAnswerToField(ctx.teamId, contactId, config.saveTo.key, trimmed);
+          await saveAnswerToField(ctx.workspaceId, contactId, config.saveTo.key, trimmed);
         }
       }
       return {
@@ -456,7 +456,7 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
     const { contact, extras } = await buildTokenContext(
       envelope,
       ctx,
-      ctx.teamId,
+      ctx.workspaceId,
       c.id,
     );
     const body = resolveFieldTokens(config.question, contact, extras);
@@ -465,13 +465,13 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
       // Per-conversation send ceiling — same loop backstop as send_message.
       // A rate-limited question routes to the timeout edge (below) so the
       // author's fallback branch still runs instead of stalling the run.
-      consumeConversationSendBudget(ctx.teamId, conversationId);
+      consumeConversationSendBudget(ctx.workspaceId, conversationId);
       if (config.answerKind === "buttons" || config.answerKind === "list") {
         // Interactive — buttons (1-3) or list (1-10). The contact's tap
         // round-trips as `interactiveReply.id` which the runner exposes
         // via `ctx.pendingAnswer.optionId` on resume.
         await sendInteractiveInternal({
-          teamId: ctx.teamId,
+          workspaceId: ctx.workspaceId,
           conversationId,
           bodyText: body,
           kind: config.answerKind,
@@ -482,7 +482,7 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
         });
       } else {
         await sendTextInternal({
-          teamId: ctx.teamId,
+          workspaceId: ctx.workspaceId,
           conversationId,
           body,
           sentVia: `workflow/${ctx.workflowId}`,
@@ -559,13 +559,13 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
  * exactly like update-field.ts.
  */
 async function saveAnswerToField(
-  teamId: string,
+  workspaceId: string,
   contactId: string,
   key: string,
   value: string,
 ): Promise<void> {
   const contact = await db.contact.findFirst({
-    where: { id: contactId, teamId },
+    where: { id: contactId, workspaceId },
     include: { tags: { select: { id: true } } },
   });
   if (!contact) return;
@@ -578,7 +578,7 @@ async function saveAnswerToField(
   let updated;
   try {
     updated = await db.contact.update({
-      where: { id: contactId, teamId, version: contact.version },
+      where: { id: contactId, workspaceId, version: contact.version },
       data: {
         customFields: nextFields as Prisma.InputJsonValue,
         version: { increment: 1 },
@@ -601,7 +601,7 @@ async function saveAnswerToField(
 
   await publish({
     type: "contact.updated",
-    teamId,
+    workspaceId,
     contact: payload,
     previousStageId: updated.stageId, // stage didn't change here
     fieldChanges: [{ key, previous: previousValue, next: value }],

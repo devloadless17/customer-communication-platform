@@ -27,7 +27,7 @@ import { EPHEMERAL_CONTACT_CHANNELS } from "@ccp/shared/providers/capabilities";
  *
  * NEVER name/fuzzy matching (the top source of wrong-person data leaks). Any
  * softer link is a manual, reversible merge (see the merge/split API). Tenant-
- * scoped: identity never crosses `teamId`. If nothing matches, the contact is a
+ * scoped: identity never crosses `workspaceId`. If nothing matches, the contact is a
  * distinct person and gets a fresh Customer.
  *
  * Runs in exactly one place conceptually — this service — called from the
@@ -67,7 +67,7 @@ interface ResolveOpts {
  * id and discard a person-level rename — so that decision needs this signal.
  */
 export async function findExistingCustomerIdByStrongKey(
-  teamId: string,
+  workspaceId: string,
   contact: ResolveContactInput,
   client: IdentityClient = db,
   { trustEmailAsStrongKey = false }: ResolveOpts = {},
@@ -95,7 +95,7 @@ export async function findExistingCustomerIdByStrongKey(
   // requires verifying the number/address first (SMS/email code) — see §6.
   const match = await client.contact.findFirst({
     where: {
-      teamId,
+      workspaceId,
       ...(contact.id ? { id: { not: contact.id } } : {}),
       customerId: { not: null },
       deletedAt: null,
@@ -109,17 +109,17 @@ export async function findExistingCustomerIdByStrongKey(
 }
 
 export async function resolveCustomerId(
-  teamId: string,
+  workspaceId: string,
   contact: ResolveContactInput,
   client: IdentityClient = db,
   opts: ResolveOpts = {},
 ): Promise<string> {
-  const existing = await findExistingCustomerIdByStrongKey(teamId, contact, client, opts);
+  const existing = await findExistingCustomerIdByStrongKey(workspaceId, contact, client, opts);
   if (existing) return existing;
 
   // Distinct person → fresh Customer, seeded with the contact's display name.
   const customer = await client.customer.create({
-    data: { teamId, name: contact.name },
+    data: { workspaceId, name: contact.name },
     select: { id: true },
   });
   return customer.id;

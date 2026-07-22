@@ -68,7 +68,7 @@ export function isOptOutKeyword(body: string | null | undefined): boolean {
 }
 
 interface InboundContext {
-  teamId: string;
+  workspaceId: string;
   contactId: string;
   messageId: string;
   body: string | null;
@@ -87,7 +87,7 @@ interface InboundContext {
 export async function attributeInboundToBroadcast(ctx: InboundContext): Promise<void> {
   // Opt-out first — it must apply even when the contact was never in a campaign.
   if (isOptOutKeyword(ctx.body)) {
-    await applyOptOut(ctx.teamId, ctx.contactId, "stop_keyword", ctx.timestamp);
+    await applyOptOut(ctx.workspaceId, ctx.contactId, "stop_keyword", ctx.timestamp);
   }
 
   const recipientId = await resolveAttributedRecipient(ctx);
@@ -114,7 +114,7 @@ export async function attributeInboundToBroadcast(ctx: InboundContext): Promise<
   // reporting/assignment failure must never surface on the inbound path.
   if (credited.count > 0) {
     await applyCampaignAssigneeOnReply({
-      teamId: ctx.teamId,
+      workspaceId: ctx.workspaceId,
       contactId: ctx.contactId,
       recipientId,
     }).catch((err) => {
@@ -153,7 +153,7 @@ async function resolveAttributedRecipient(ctx: InboundContext): Promise<string |
     }
   }
 
-  // Note the absence of a teamId filter: BroadcastRecipient has no teamId of its
+  // Note the absence of a workspaceId filter: BroadcastRecipient has no workspaceId of its
   // own (it is scoped through Broadcast), and `contactId` here came from a row
   // this team's own ingest path just committed — so tenancy holds transitively,
   // the same way every other recipient query in the codebase works.
@@ -178,13 +178,13 @@ async function resolveAttributedRecipient(ctx: InboundContext): Promise<string |
  * report groups by.
  */
 export async function applyOptOut(
-  teamId: string,
+  workspaceId: string,
   contactId: string,
   source: "stop_keyword" | "meta_preferences" | "agent" | "api",
   at: Date,
 ): Promise<void> {
   await db.contact.updateMany({
-    where: { id: contactId, teamId, marketingOptOutAt: null },
+    where: { id: contactId, workspaceId, marketingOptOutAt: null },
     data: { marketingOptOutAt: at, marketingOptOutSource: source },
   });
 }
@@ -194,9 +194,9 @@ export async function applyOptOut(
  * (its `resume` value) — an inbound keyword can opt a customer OUT but must
  * never opt them back IN, because consent has to be affirmative.
  */
-export async function clearOptOut(teamId: string, contactId: string): Promise<void> {
+export async function clearOptOut(workspaceId: string, contactId: string): Promise<void> {
   await db.contact.updateMany({
-    where: { id: contactId, teamId },
+    where: { id: contactId, workspaceId },
     data: { marketingOptOutAt: null, marketingOptOutSource: null },
   });
 }

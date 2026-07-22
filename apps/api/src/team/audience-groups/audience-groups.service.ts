@@ -20,30 +20,30 @@ export class AudienceGroupsService {
     private readonly bus: EventBus,
   ) {}
 
-  list(teamId: string) {
-    return listAudienceGroups(teamId);
+  list(workspaceId: string) {
+    return listAudienceGroups(workspaceId);
   }
 
-  async get(teamId: string, id: string) {
-    const group = await getAudienceGroup(teamId, id);
+  async get(workspaceId: string, id: string) {
+    const group = await getAudienceGroup(workspaceId, id);
     if (!group) throw new NotFoundException({ error: "not found" });
     return group;
   }
 
-  async create(teamId: string, userId: string, input: CreateAudienceGroupInput) {
+  async create(workspaceId: string, userId: string, input: CreateAudienceGroupInput) {
     const description = input.description?.length ? input.description : null;
 
     // Cross-team id stuffing defense: filter to ids that actually belong
     // to this team. Foreign ids get silently dropped.
     const [validTagIds, validContactIds] = await Promise.all([
-      this.ownedTagIds(teamId, input.tagIds),
-      this.ownedContactIds(teamId, input.contactIds),
+      this.ownedTagIds(workspaceId, input.tagIds),
+      this.ownedContactIds(workspaceId, input.contactIds),
     ]);
 
     try {
       const created = await this.db.audienceGroup.create({
         data: {
-          teamId,
+          workspaceId,
           createdById: userId,
           name: input.name,
           description,
@@ -52,10 +52,10 @@ export class AudienceGroupsService {
         },
         select: { id: true },
       });
-      const dto = await getAudienceGroup(teamId, created.id);
+      const dto = await getAudienceGroup(workspaceId, created.id);
       await this.bus.publish({
         type: "team.catalog_changed",
-        teamId,
+        workspaceId,
         scope: "audience-groups",
       });
       return dto;
@@ -65,8 +65,8 @@ export class AudienceGroupsService {
     }
   }
 
-  async update(teamId: string, id: string, input: UpdateAudienceGroupInput) {
-    const existing = await this.db.audienceGroup.findFirst({ where: { id, teamId } });
+  async update(workspaceId: string, id: string, input: UpdateAudienceGroupInput) {
+    const existing = await this.db.audienceGroup.findFirst({ where: { id, workspaceId } });
     if (!existing) throw new NotFoundException({ error: "not found" });
 
     // Build the update payload incrementally so unset fields stay untouched.
@@ -81,20 +81,20 @@ export class AudienceGroupsService {
     if (input.name !== undefined) data.name = input.name;
     if (input.description !== undefined) data.description = input.description;
     if (input.tagIds !== undefined) {
-      const owned = await this.ownedTagIds(teamId, input.tagIds);
+      const owned = await this.ownedTagIds(workspaceId, input.tagIds);
       data.tags = { set: owned.map((tid) => ({ id: tid })) };
     }
     if (input.contactIds !== undefined) {
-      const owned = await this.ownedContactIds(teamId, input.contactIds);
+      const owned = await this.ownedContactIds(workspaceId, input.contactIds);
       data.contacts = { set: owned.map((cid) => ({ id: cid })) };
     }
 
     try {
       await this.db.audienceGroup.update({ where: { id }, data });
-      const updated = await getAudienceGroup(teamId, id);
+      const updated = await getAudienceGroup(workspaceId, id);
       await this.bus.publish({
         type: "team.catalog_changed",
-        teamId,
+        workspaceId,
         scope: "audience-groups",
       });
       return updated;
@@ -104,34 +104,34 @@ export class AudienceGroupsService {
     }
   }
 
-  async remove(teamId: string, id: string): Promise<void> {
-    const existing = await this.db.audienceGroup.findFirst({ where: { id, teamId } });
+  async remove(workspaceId: string, id: string): Promise<void> {
+    const existing = await this.db.audienceGroup.findFirst({ where: { id, workspaceId } });
     if (!existing) throw new NotFoundException({ error: "not found" });
     // Broadcasts that referenced this group keep their `audienceGroupName`
     // snapshot for the audit trail — only the join row goes.
     await this.db.audienceGroup.delete({ where: { id } });
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "audience-groups",
     });
   }
 
-  private async ownedTagIds(teamId: string, ids: string[]): Promise<string[]> {
+  private async ownedTagIds(workspaceId: string, ids: string[]): Promise<string[]> {
     if (ids.length === 0) return [];
     const rows = await this.db.tag.findMany({
-      where: { teamId, id: { in: ids } },
+      where: { workspaceId, id: { in: ids } },
       select: { id: true },
     });
     return rows.map((r) => r.id);
   }
 
-  private async ownedContactIds(teamId: string, ids: string[]): Promise<string[]> {
+  private async ownedContactIds(workspaceId: string, ids: string[]): Promise<string[]> {
     if (ids.length === 0) return [];
     const rows = await this.db.contact.findMany({
       // deletedAt: null — don't connect a soft-deleted contact to a group (it
       // would render as a phantom chip the member count excludes).
-      where: { teamId, deletedAt: null, id: { in: ids } },
+      where: { workspaceId, deletedAt: null, id: { in: ids } },
       select: { id: true },
     });
     return rows.map((r) => r.id);

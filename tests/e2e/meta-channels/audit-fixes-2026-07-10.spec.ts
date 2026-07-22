@@ -37,7 +37,7 @@ const uniq = () => Math.random().toString(36).slice(2, 10);
 
 function msgByExternalId(channel: "whatsapp" | "messenger" | "instagram", externalId: string) {
   return db().message.findUnique({
-    where: { teamId_channel_externalId: { teamId: META_TEST_TEAM_ID, channel, externalId } },
+    where: { workspaceId_channel_externalId: { workspaceId: META_TEST_TEAM_ID, channel, externalId } },
   });
 }
 
@@ -207,7 +207,7 @@ test("multi-attachment Messenger message keeps ALL media, not just the first", a
   );
   const rows = await db().message.count({
     where: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       channel: "messenger",
       externalId: { in: [mid, `${mid}:att:1`, `${mid}:att:2`] },
     },
@@ -297,7 +297,7 @@ test("WhatsApp BSUID cold→warm resolves to ONE contact, not a split identity",
   expect(cold.status).toBe(200);
 
   const afterCold = await db().contact.findMany({
-    where: { teamId: META_TEST_TEAM_ID, bsuid },
+    where: { workspaceId: META_TEST_TEAM_ID, bsuid },
   });
   expect(afterCold).toHaveLength(1);
   // A BSUID must never be digit-stripped into a phone number.
@@ -325,24 +325,24 @@ test("WhatsApp BSUID cold→warm resolves to ONE contact, not a split identity",
   // BSUID-keyed row was never found and a SECOND contact + conversation were
   // created, permanently orphaning the first thread.
   const byBsuid = await db().contact.findMany({
-    where: { teamId: META_TEST_TEAM_ID, bsuid },
+    where: { workspaceId: META_TEST_TEAM_ID, bsuid },
   });
   expect(byBsuid).toHaveLength(1);
   expect(byBsuid[0]!.phoneNumber).toBe(phone);
 
   const byPhone = await db().contact.findMany({
-    where: { teamId: META_TEST_TEAM_ID, phoneNumber: phone },
+    where: { workspaceId: META_TEST_TEAM_ID, phoneNumber: phone },
   });
   expect(byPhone).toHaveLength(1);
   expect(byPhone[0]!.id).toBe(afterCold[0]!.id);
 
   // Both messages land on the ONE conversation that contact owns.
   const convs = await db().conversation.findMany({
-    where: { teamId: META_TEST_TEAM_ID, contactId: afterCold[0]!.id },
+    where: { workspaceId: META_TEST_TEAM_ID, contactId: afterCold[0]!.id },
   });
   expect(convs).toHaveLength(1);
   const msgs = await db().message.findMany({
-    where: { teamId: META_TEST_TEAM_ID, conversationId: convs[0]!.id },
+    where: { workspaceId: META_TEST_TEAM_ID, conversationId: convs[0]!.id },
   });
   expect(msgs.map((m) => m.body).sort()).toEqual(["first contact", "second contact"]);
 });

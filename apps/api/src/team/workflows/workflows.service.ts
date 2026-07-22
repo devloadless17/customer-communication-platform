@@ -64,9 +64,9 @@ export class WorkflowsService {
    * derived from the start node so admins skimming a long list can see
    * what each workflow does without opening it.
    */
-  async list(teamId: string) {
+  async list(workspaceId: string) {
     const rows = await this.db.workflow.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: { createdAt: "desc" },
       select: {
         id: true,
@@ -111,7 +111,7 @@ export class WorkflowsService {
    * Create always uses SAVE-tier validation. Admins publish via /publish
    * once the canvas is complete; new workflows always land as drafts.
    */
-  async create(teamId: string, raw: unknown) {
+  async create(workspaceId: string, raw: unknown) {
     const body = (raw ?? {}) as WorkflowBody;
     const parsed = parseWorkflowBody(body);
     if (parsed.errors.length > 0) {
@@ -125,7 +125,7 @@ export class WorkflowsService {
     try {
       const created = await this.db.workflow.create({
         data: {
-          teamId,
+          workspaceId,
           name: parsed.name,
           published: false,
           trigger: parsed.trigger,
@@ -135,7 +135,7 @@ export class WorkflowsService {
           graph: encryptGraphStepSecrets(parsed.graph),
         },
       });
-      await this.publishCatalogChange(teamId);
+      await this.publishCatalogChange(workspaceId);
       // `warnings` carries non-blocking mid-build incompleteness (unwired
       // Branch / ask_question outputs) so the canvas can surface them without
       // having blocked the save.
@@ -146,9 +146,9 @@ export class WorkflowsService {
     }
   }
 
-  async get(teamId: string, id: string) {
+  async get(workspaceId: string, id: string) {
     const row = await this.db.workflow.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
     });
     if (!row) throw new NotFoundException({ error: "not found" });
     return this.toDto(row);
@@ -163,9 +163,9 @@ export class WorkflowsService {
    * tokens) on every save, so we restore them from the matching old
    * node id when the incoming payload omits them.
    */
-  async update(teamId: string, id: string, raw: unknown) {
+  async update(workspaceId: string, id: string, raw: unknown) {
     const existing = await this.db.workflow.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
     });
     if (!existing) throw new NotFoundException({ error: "not found" });
 
@@ -254,7 +254,7 @@ export class WorkflowsService {
           graph: encryptGraphStepSecrets(parsed.graph),
         },
       });
-      await this.publishCatalogChange(teamId);
+      await this.publishCatalogChange(workspaceId);
       // See create() — non-blocking mid-build incompleteness for the canvas.
       return { ...this.toDto(updated), warnings: parsed.warnings };
     } catch (err) {
@@ -263,15 +263,15 @@ export class WorkflowsService {
     }
   }
 
-  async remove(teamId: string, id: string): Promise<void> {
+  async remove(workspaceId: string, id: string): Promise<void> {
     const existing = await this.db.workflow.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true },
     });
     if (!existing) throw new NotFoundException({ error: "not found" });
 
     await this.db.workflow.delete({ where: { id } });
-    await this.publishCatalogChange(teamId);
+    await this.publishCatalogChange(workspaceId);
   }
 
   /**
@@ -281,12 +281,12 @@ export class WorkflowsService {
    * validates (a published workflow can always be pulled offline).
    */
   async publish(
-    teamId: string,
+    workspaceId: string,
     id: string,
     publishFlag: boolean,
   ): Promise<{ published: boolean }> {
     const existing = await this.db.workflow.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
     });
     if (!existing) throw new NotFoundException({ error: "not found" });
 
@@ -318,7 +318,7 @@ export class WorkflowsService {
       // the broken step). Catching it at publish time keeps the dispatcher
       // from ever picking up a workflow that's structurally broken.
       const refErrors = await this.validateGraphReferences(
-        teamId,
+        workspaceId,
         existing.id,
         existing.graph as unknown,
       );
@@ -334,7 +334,7 @@ export class WorkflowsService {
       where: { id },
       data: { published: publishFlag },
     });
-    await this.publishCatalogChange(teamId);
+    await this.publishCatalogChange(workspaceId);
     return { published: publishFlag };
   }
 
@@ -349,7 +349,7 @@ export class WorkflowsService {
    * here — that lives in the runtime depth guard).
    */
   private async validateGraphReferences(
-    teamId: string,
+    workspaceId: string,
     selfWorkflowId: string,
     rawGraph: unknown,
   ): Promise<string[]> {
@@ -405,37 +405,37 @@ export class WorkflowsService {
       await Promise.all([
         tagIds.size > 0
           ? this.db.tag.findMany({
-              where: { id: { in: [...tagIds] }, teamId },
+              where: { id: { in: [...tagIds] }, workspaceId },
               select: { id: true },
             })
           : Promise.resolve([] as { id: string }[]),
         fieldKeys.size > 0
           ? this.db.contactFieldDefinition.findMany({
-              where: { key: { in: [...fieldKeys] }, teamId },
+              where: { key: { in: [...fieldKeys] }, workspaceId },
               select: { key: true },
             })
           : Promise.resolve([] as { key: string }[]),
         stageIds.size > 0
           ? this.db.contactStage.findMany({
-              where: { id: { in: [...stageIds] }, teamId },
+              where: { id: { in: [...stageIds] }, workspaceId },
               select: { id: true },
             })
           : Promise.resolve([] as { id: string }[]),
         userIds.size > 0
           ? this.db.user.findMany({
-              where: { id: { in: [...userIds] }, teamId, deactivatedAt: null },
+              where: { id: { in: [...userIds] }, workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
               select: { id: true },
             })
           : Promise.resolve([] as { id: string }[]),
         templateIds.size > 0
           ? this.db.messageTemplate.findMany({
-              where: { id: { in: [...templateIds] }, teamId },
+              where: { id: { in: [...templateIds] }, workspaceId },
               select: { id: true },
             })
           : Promise.resolve([] as { id: string }[]),
         workflowIds.size > 0
           ? this.db.workflow.findMany({
-              where: { id: { in: [...workflowIds] }, teamId },
+              where: { id: { in: [...workflowIds] }, workspaceId },
               select: { id: true },
             })
           : Promise.resolve([] as { id: string }[]),
@@ -481,13 +481,13 @@ export class WorkflowsService {
    * its natural trigger.
    */
   async manualTrigger(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     id: string,
     input: ManualTriggerInput,
   ): Promise<{ runId: string }> {
     const wf = await this.db.workflow.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true, trigger: true, published: true },
     });
     if (!wf) throw new NotFoundException({ error: "workflow not found" });
@@ -508,7 +508,7 @@ export class WorkflowsService {
       // (never null) for this entry shape. The null branch only exists
       // for the trigger_workflow step chain path.
       const runId = await dispatchManualTrigger({
-        teamId,
+        workspaceId,
         workflowId: id,
         contactId: input.contactId,
         conversationId: input.conversationId ?? null,
@@ -539,12 +539,12 @@ export class WorkflowsService {
    * from the canvas.
    */
   async test(
-    teamId: string,
+    workspaceId: string,
     id: string,
     input: TestWorkflowInput,
   ): Promise<{ runId: string; jobId: string | null }> {
     const wf = await this.db.workflow.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true, graph: true, trigger: true },
     });
     if (!wf) throw new NotFoundException({ error: "not found" });
@@ -556,12 +556,12 @@ export class WorkflowsService {
     if (contactId) {
       const [contact, conversation] = await Promise.all([
         this.db.contact.findFirst({
-          where: { id: contactId, teamId },
+          where: { id: contactId, workspaceId },
           include: { tags: { select: { id: true } } },
         }),
         conversationId
           ? this.db.conversation.findFirst({
-              where: { id: conversationId, teamId },
+              where: { id: conversationId, workspaceId },
             })
           : Promise.resolve(null),
       ]);
@@ -619,7 +619,7 @@ export class WorkflowsService {
     const run = await this.db.workflowRun.create({
       data: {
         workflowId: wf.id,
-        teamId,
+        workspaceId,
         trigger: wf.trigger,
         contactId,
         conversationId,
@@ -666,7 +666,7 @@ export class WorkflowsService {
       select: {
         id: true,
         graph: true,
-        teamId: true,
+        workspaceId: true,
         trigger: true,
         published: true,
         triggerConfig: true,
@@ -802,7 +802,7 @@ export class WorkflowsService {
         await this.db.workflowRun.create({
           data: {
             workflowId: wf.id,
-            teamId: wf.teamId,
+            workspaceId: wf.workspaceId,
             trigger: "incoming_webhook",
             contactId: null,
             conversationId: null,
@@ -898,7 +898,7 @@ export class WorkflowsService {
       run = await this.db.workflowRun.create({
         data: {
           workflowId: wf.id,
-          teamId: wf.teamId,
+          workspaceId: wf.workspaceId,
           trigger: "incoming_webhook",
           contactId: null,
           conversationId: null,
@@ -943,9 +943,9 @@ export class WorkflowsService {
   // Runs
   // -------------------------------------------------------------------------
 
-  async listRuns(teamId: string, id: string, query?: ListWorkflowRunsQuery) {
+  async listRuns(workspaceId: string, id: string, query?: ListWorkflowRunsQuery) {
     const wf = await this.db.workflow.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true },
     });
     if (!wf) throw new NotFoundException({ error: "not found" });
@@ -1002,9 +1002,9 @@ export class WorkflowsService {
     };
   }
 
-  async getRun(teamId: string, id: string, runId: string) {
+  async getRun(workspaceId: string, id: string, runId: string) {
     const run = await this.db.workflowRun.findFirst({
-      where: { id: runId, workflowId: id, teamId },
+      where: { id: runId, workflowId: id, workspaceId },
     });
     if (!run) throw new NotFoundException({ error: "not found" });
 
@@ -1069,10 +1069,10 @@ export class WorkflowsService {
     }
   }
 
-  private publishCatalogChange(teamId: string): Promise<void> {
+  private publishCatalogChange(workspaceId: string): Promise<void> {
     return this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "workflows",
     });
   }

@@ -3,12 +3,26 @@
  *
  * These mirror the Prisma schema we'll generate in Week 1, so swapping fake
  * data for real DB rows later is mostly a sed job. Multi-tenancy is baked in
- * (every row has teamId) even though MVP runs single-tenant.
+ * (every row has workspaceId) even though MVP runs single-tenant.
  *
  * IDs are strings to match Prisma's cuid() defaults.
  */
 
 import type { MessageFlag } from "./message-flags/types";
+
+export type {
+  Ticket,
+  TicketCounts,
+  TicketEvent,
+  TicketEventKind,
+  TicketFieldDefinition,
+  TicketPriority,
+  TicketSlaPolicy,
+  TicketSlaState,
+  TicketSource,
+  TicketStatus,
+  TicketTag,
+} from "./tickets/types";
 import type { AvailabilitySource, WorkHours, WorkHoursMode } from "./work-hours";
 
 export type {
@@ -18,12 +32,20 @@ export type {
   MessageFlagStatus,
 } from "./message-flags/types";
 
-export type Role = "superAdmin" | "admin" | "manager" | "agent";
+// Per-WORKSPACE role, carried on WorkspaceMember and resolved onto the session
+// as the EFFECTIVE role in the active workspace. `superAdmin` is deliberately
+// NOT here — it is platform-level, orthogonal to any workspace, and lives on
+// `User.isSuperAdmin` / `session.isSuperAdmin`. Mirrors the Prisma `Role` enum.
+export type Role = "admin" | "manager" | "agent";
+// Org-directory role: billing, the user directory, and workspace creation. An
+// `owner`/`admin` here is implicitly `admin` in every workspace of the org.
+// Mirrors the Prisma `OrgRole` enum.
+export type OrgRole = "owner" | "admin" | "member";
 export type Plan = "free" | "starter" | "advanced" | "enterprise";
 // Org-approval lifecycle. `pending` = created, awaiting super-admin approval
 // (no app access); `active` = approved; `suspended` = access revoked by a
-// super-admin. Mirrors the Prisma `TeamStatus` enum.
-export type TeamStatus = "pending" | "active" | "suspended";
+// super-admin. Mirrors the Prisma `OrgStatus` enum.
+export type OrgStatus = "pending" | "active" | "suspended";
 export type ConversationStatus = "open" | "pending" | "closed";
 export type MessageDirection = "in" | "out";
 export type MessageStatus = "sent" | "delivered" | "read" | "failed";
@@ -88,8 +110,17 @@ export type UserAvailabilityStatus = "available" | "busy" | "away" | "offline";
 
 export interface User {
   id: string;
-  teamId: string;
+  /** The workspace this DTO was resolved IN — `role` below is scoped to it. */
+  workspaceId: string;
+  /** EFFECTIVE role in `workspaceId` (from WorkspaceMember). */
   role: Role;
+  /**
+   * Platform-level operator flag (replaces the removed `Role.superAdmin`).
+   * Kept separate from `role` because it is orthogonal to any workspace: it is
+   * what routes to /platform and what protects an operator from being edited
+   * by an ordinary workspace admin.
+   */
+  isSuperAdmin?: boolean;
   name: string;
   email: string;
   avatarUrl?: string;
@@ -154,7 +185,7 @@ export interface SocialProfile {
 
 export interface Contact {
   id: string;
-  teamId: string;
+  workspaceId: string;
   /**
    * WhatsApp/SMS contacts carry a phone number; Instagram/Telegram contacts
    * don't (their identity lives in `identityChannel` + `externalContactId`).
@@ -165,7 +196,7 @@ export interface Contact {
    * Multi-channel identity. Set together with `externalContactId` when the
    * contact's natural id isn't a phone number — Instagram scoped-user-id,
    * Telegram chat-id, etc. WhatsApp contacts leave both null and use
-   * phoneNumber. The DB enforces `(teamId, identityChannel, externalContactId)`
+   * phoneNumber. The DB enforces `(workspaceId, identityChannel, externalContactId)`
    * uniqueness so a contact can be deduped on either key.
    */
   identityChannel?: Channel | null;
@@ -251,7 +282,7 @@ export interface Contact {
  */
 export interface ContactFieldDefinition {
   id: string;
-  teamId: string;
+  workspaceId: string;
   key: string;
   label: string;
   order: number;
@@ -293,7 +324,7 @@ export interface ContactPanelBuiltins {
  */
 export interface ContactStage {
   id: string;
-  teamId: string;
+  workspaceId: string;
   name: string;
   color: TagColor;
   position: number;
@@ -331,7 +362,7 @@ export const TAG_COLORS: TagColor[] = [
 
 export interface Tag {
   id: string;
-  teamId: string;
+  workspaceId: string;
   name: string;
   color: TagColor;
   /**
@@ -393,6 +424,13 @@ export interface TemplateDto {
    * haven't had bindings configured yet.
    */
   variableBindings: unknown;
+  /**
+   * Meta's `parameter_format`: `"positional"` (`{{1}}`) or `"named"`
+   * (`{{order_id}}`). Carried to the client so the broadcast composer renders
+   * ONE input per real placeholder — a named template asked for `{{1}}`-style
+   * values would collect the wrong number of them and fail every recipient.
+   */
+  parameterFormat: "positional" | "named";
   syncedAt: string;
 }
 
@@ -532,7 +570,7 @@ export interface MessageAttribution {
 
 export interface Message {
   id: string;
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   /** Provider-assigned id; UNIQUE across messages for dedupe. */
   externalId: string;
@@ -739,7 +777,15 @@ export type ConversationEventKind =
   | "flag_added"
   | "flag_reopened"
   | "flag_resolved"
-  | "flag_removed";
+  | "flag_removed"
+  // Ticket boundaries, rendered as inline pills so an agent reading the thread
+  // sees where one piece of work ended and the next began. `after` carries
+  // { ticketId, number, subject, status } — snapshotted at write time. The FULL
+  // ticket history lives on TicketEvent; only these four cross over.
+  | "ticket_opened"
+  | "ticket_solved"
+  | "ticket_reopened"
+  | "ticket_closed";
 
 /**
  * Who triggered the change.
@@ -819,7 +865,7 @@ export interface ConversationActivityEvent {
 
 export interface Conversation {
   id: string;
-  teamId: string;
+  workspaceId: string;
   contactId: string;
   assignedUserId: string | null;
   status: ConversationStatus;

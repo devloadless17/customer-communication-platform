@@ -404,17 +404,17 @@ export class OutboxDrainerService
    * The bus's `publish()` would write ANOTHER outbox row + dispatch — we
    * don't want that. Use the lower-level dispatch hook instead.
    *
-   * `teamId` is restored from the COLUMN, not the payload — `publishInTx`
+   * `workspaceId` is restored from the COLUMN, not the payload — `publishInTx`
    * destructures it out before storing (see outbox.ts:49), so it would be
    * undefined on the reconstructed event otherwise. The realtime fanout
-   * rules read `e.teamId` to pick the team room, so a missing teamId
+   * rules read `e.workspaceId` to pick the team room, so a missing workspaceId
    * silently routes every inbound socket emit to `team:undefined` and
    * the user has to refresh to see new conversations.
    */
   private async dispatch(
     row: {
       id: string;
-      teamId: string;
+      workspaceId: string;
       type: string;
       payload: unknown;
       attempts: number;
@@ -425,7 +425,7 @@ export class OutboxDrainerService
   ): Promise<void> {
     const event = {
       type: row.type as DomainEventType,
-      teamId: row.teamId,
+      workspaceId: row.workspaceId,
       ...(row.payload as Record<string, unknown>),
     } as DomainEvent;
 

@@ -13,7 +13,7 @@ import { test, expect } from "@playwright/test";
 import { generateApiKey } from "../../../apps/api/src/auth/api-key";
 import { db, superadminTeam, wipeTestData } from "../_helpers/db";
 
-let teamId: string;
+let workspaceId: string;
 let apiToken: string;
 let contactId: string;
 
@@ -39,12 +39,12 @@ async function patchFields(
 test.beforeAll(async () => {
   await wipeTestData();
   const su = await superadminTeam();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
 
   const key = generateApiKey();
-  await db().teamApiKey.create({
+  await db().workspaceApiKey.create({
     data: {
-      teamId,
+      workspaceId,
       name: "E2E /v1 customfields-cap key",
       tokenHash: key.tokenHash,
       tokenPrefix: key.tokenPrefix,
@@ -56,7 +56,7 @@ test.beforeAll(async () => {
 
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       phoneNumber: "+15553334444",
       identityChannel: "whatsapp",
       name: "CF Cap Test",
@@ -118,7 +118,7 @@ test.describe("PATCH /v1/contacts/:id customFields total cap", () => {
     for (let i = 0; i < 110; i++) big[`big_${i}`] = "v";
     const over = await db().contact.create({
       data: {
-        teamId,
+        workspaceId,
         phoneNumber: "+15556667777",
         identityChannel: "whatsapp",
         name: "Over Cap",

@@ -29,7 +29,7 @@ import {
   probeStuckBroadcasts,
   STUCK_BROADCAST_PROBE_MIN,
 } from "../../../apps/api/src/health/stuck-broadcasts";
-import { db } from "../_helpers/db";
+import { createTestWorkspace, db } from "../_helpers/db";
 
 test.describe.configure({ mode: "serial" });
 
@@ -56,7 +56,7 @@ function healthyExcept(stuckBroadcasts: {
 async function seedPaused(pausedMinAgo: number, pausedReason: string | null): Promise<void> {
   await db().broadcast.create({
     data: {
-      teamId: TEAM_ID,
+      workspaceId: TEAM_ID,
       name: `stuck-${Math.random().toString(36).slice(2)}`,
       channel: "whatsapp",
       status: "paused",
@@ -69,18 +69,18 @@ async function seedPaused(pausedMinAgo: number, pausedReason: string | null): Pr
 }
 
 async function clear(): Promise<void> {
-  await db().broadcast.deleteMany({ where: { teamId: TEAM_ID } });
+  await db().broadcast.deleteMany({ where: { workspaceId: TEAM_ID } });
 }
 
 test.beforeAll(async () => {
-  await db().team.create({
-    data: { id: TEAM_ID, name: "E2E Stuck Alerting Team", status: "active" },
-  });
+  await createTestWorkspace({ id: TEAM_ID, name: "E2E Stuck Alerting Team", status: "active" });
 });
 
 test.afterAll(async () => {
   await clear();
-  await db().team.delete({ where: { id: TEAM_ID } });
+  // Delete the ORG — it cascades to the workspace. Deleting only the workspace
+  // leaves an orphan Organization behind on every run.
+  await db().organization.deleteMany({ where: { workspaces: { some: { id: TEAM_ID } } } });
 });
 
 test("a freshly paused broadcast does NOT alert (auto-recovery gets first crack)", async () => {
@@ -150,7 +150,7 @@ test("a RUNNING or COMPLETED broadcast never alerts, however old", async () => {
   for (const status of ["running", "completed", "queued"] as const) {
     await db().broadcast.create({
       data: {
-        teamId: TEAM_ID,
+        workspaceId: TEAM_ID,
         name: `notpaused-${status}`,
         channel: "whatsapp",
         status,

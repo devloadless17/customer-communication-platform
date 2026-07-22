@@ -3,14 +3,14 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import type { ContactStage, TagColor } from "@ccp/shared/types";
 
-export async function listContactStages(teamId: string): Promise<ContactStage[]> {
+export async function listContactStages(workspaceId: string): Promise<ContactStage[]> {
   const rows = await db.contactStage.findMany({
-    where: { teamId },
+    where: { workspaceId },
     orderBy: [{ position: "asc" }, { createdAt: "asc" }],
   });
   return rows.map((r) => ({
     id: r.id,
-    teamId: r.teamId,
+    workspaceId: r.workspaceId,
     name: r.name,
     color: r.color as TagColor,
     position: r.position,
@@ -31,7 +31,7 @@ export async function listContactStages(teamId: string): Promise<ContactStage[]>
  * zero stages. Better to lazily create than to scatter `db.contactStage`
  * writes through every team-creation site.
  *
- * Cached by teamId for 5 minutes — this is called on every inbound message
+ * Cached by workspaceId for 5 minutes — this is called on every inbound message
  * ingest, which previously bought a ~2-5ms findFirst per event. The default
  * stage id changes ~never (only when an admin promotes a different stage),
  * so a 5-min TTL trades a tiny invalidation lag for amortized zero-cost
@@ -41,20 +41,20 @@ export async function listContactStages(teamId: string): Promise<ContactStage[]>
 const DEFAULT_STAGE_TTL_MS = 5 * 60 * 1000;
 const defaultStageCache = new Map<string, { id: string; exp: number }>();
 
-export function invalidateDefaultStageCache(teamId: string): void {
-  defaultStageCache.delete(teamId);
+export function invalidateDefaultStageCache(workspaceId: string): void {
+  defaultStageCache.delete(workspaceId);
 }
 
-export async function ensureDefaultStage(teamId: string): Promise<string> {
-  const cached = defaultStageCache.get(teamId);
+export async function ensureDefaultStage(workspaceId: string): Promise<string> {
+  const cached = defaultStageCache.get(workspaceId);
   if (cached && cached.exp > Date.now()) return cached.id;
 
   const existingDefault = await db.contactStage.findFirst({
-    where: { teamId, isDefault: true },
+    where: { workspaceId, isDefault: true },
     select: { id: true },
   });
   if (existingDefault) {
-    defaultStageCache.set(teamId, {
+    defaultStageCache.set(workspaceId, {
       id: existingDefault.id,
       exp: Date.now() + DEFAULT_STAGE_TTL_MS,
     });
@@ -68,13 +68,13 @@ export async function ensureDefaultStage(teamId: string): Promise<string> {
   try {
     resolvedId = await db.$transaction(async (tx) => {
       const reread = await tx.contactStage.findFirst({
-        where: { teamId, isDefault: true },
+        where: { workspaceId, isDefault: true },
         select: { id: true },
       });
       if (reread) return reread.id;
 
       const anyStage = await tx.contactStage.findFirst({
-        where: { teamId },
+        where: { workspaceId },
         orderBy: [{ position: "asc" }, { createdAt: "asc" }],
         select: { id: true },
       });
@@ -88,7 +88,7 @@ export async function ensureDefaultStage(teamId: string): Promise<string> {
 
       const created = await tx.contactStage.create({
         data: {
-          teamId,
+          workspaceId,
           name: "Stage 1",
           color: "slate",
           position: 0,
@@ -107,7 +107,7 @@ export async function ensureDefaultStage(teamId: string): Promise<string> {
     // default instead of 500-ing the ingest/create path that called us.
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       const winner = await db.contactStage.findFirst({
-        where: { teamId, isDefault: true },
+        where: { workspaceId, isDefault: true },
         select: { id: true },
       });
       if (!winner) throw err; // no default despite P2002 — unexpected, surface it
@@ -116,7 +116,7 @@ export async function ensureDefaultStage(teamId: string): Promise<string> {
       throw err;
     }
   }
-  defaultStageCache.set(teamId, {
+  defaultStageCache.set(workspaceId, {
     id: resolvedId,
     exp: Date.now() + DEFAULT_STAGE_TTL_MS,
   });

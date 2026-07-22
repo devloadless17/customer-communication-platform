@@ -18,7 +18,7 @@ export class PresenceService {
     // Expose the live online set to framework-agnostic lib code (the
     // round-robin picker) so it can prefer truly-connected agents — not just
     // whoever's flagged "available" in the DB. See presence-bridge.ts.
-    setOnlinePresenceResolver((teamId) => new Set(this.snapshot(teamId)));
+    setOnlinePresenceResolver((workspaceId) => new Set(this.snapshot(workspaceId)));
   }
 
   // Per-conversation viewer set: conversationId → userId → socketIds.
@@ -36,33 +36,33 @@ export class PresenceService {
    * broadcast when the same user is just opening another tab — without this
    * gate, every reconnect / additional tab fans out N team-wide emits.
    */
-  add(teamId: string, userId: string, socketId: string): boolean {
-    const team = this.byTeam.get(teamId) ?? new Map<string, Set<string>>();
+  add(workspaceId: string, userId: string, socketId: string): boolean {
+    const team = this.byTeam.get(workspaceId) ?? new Map<string, Set<string>>();
     const sockets = team.get(userId) ?? new Set<string>();
     const wasEmpty = sockets.size === 0;
     sockets.add(socketId);
     team.set(userId, sockets);
-    this.byTeam.set(teamId, team);
+    this.byTeam.set(workspaceId, team);
     return wasEmpty;
   }
 
   /** Returns true iff this removal took the user offline (last socket closed). */
-  remove(teamId: string, userId: string, socketId: string): boolean {
-    const team = this.byTeam.get(teamId);
+  remove(workspaceId: string, userId: string, socketId: string): boolean {
+    const team = this.byTeam.get(workspaceId);
     if (!team) return false;
     const sockets = team.get(userId);
     if (!sockets) return false;
     sockets.delete(socketId);
     if (sockets.size === 0) {
       team.delete(userId);
-      if (team.size === 0) this.byTeam.delete(teamId);
+      if (team.size === 0) this.byTeam.delete(workspaceId);
       return true;
     }
     return false;
   }
 
-  snapshot(teamId: string): string[] {
-    const team = this.byTeam.get(teamId);
+  snapshot(workspaceId: string): string[] {
+    const team = this.byTeam.get(workspaceId);
     return team ? [...team.keys()] : [];
   }
 

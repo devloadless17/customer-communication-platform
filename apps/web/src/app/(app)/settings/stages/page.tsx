@@ -15,12 +15,12 @@ export const dynamic = "force-dynamic";
  * catalog for everyone — agents need it to switch a contact's stage). The
  * MANAGEMENT page is admin/manager-only because it adds/removes/renames
  * the catalog itself; agents seeing it without permission would just be
- * confused. Redirect to /settings/account when gated.
+ * confused. Redirect to /account when gated.
  */
 export default async function StagesSettingsPage() {
   const { permissions } = await getSession();
   if (!permissions["stages:manage"]) {
-    redirect("/settings/account");
+    redirect("/account");
   }
 
   const [stages, counts] = await Promise.all([

@@ -34,11 +34,11 @@ export interface PendingAnswer {
 
 /**
  * Context handed to every step handler at run time. The envelope already
- * carries teamId / contact / conversation; this is the slim extras a
+ * carries workspaceId / contact / conversation; this is the slim extras a
  * handler couldn't infer.
  */
 export interface StepRunContext {
-  teamId: string;
+  workspaceId: string;
   workflowId: string;
   runId: string;
   trigger: WorkflowTriggerEvent;

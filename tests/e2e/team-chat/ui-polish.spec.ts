@@ -12,38 +12,30 @@
  * removes both afterwards.
  */
 import { test, expect, type Page } from "@playwright/test";
-import { db, appAdmin } from "../_helpers/db";
+import { createTestUser, db, appAdmin } from "../_helpers/db";
 
 test.describe.configure({ mode: "serial" });
 
 const PREFIX = "e2e_tcpolish_";
 const CHAN_PREFIX = "e2e-tcpolish-";
-let teamId: string;
+let workspaceId: string;
 let adminUserId: string;
 let peerUserId: string;
 
 test.beforeAll(async () => {
   const admin = await appAdmin();
-  teamId = admin.teamId;
+  workspaceId = admin.workspaceId;
   adminUserId = admin.userId;
-  const peer = await db().user.create({
-    data: {
-      teamId,
-      email: `${PREFIX}peer@example.test`,
-      name: `${PREFIX}Peer Person`,
-      role: "agent",
-    },
-    select: { id: true },
-  });
+  const peer = await createTestUser({ workspaceId: workspaceId, role: "agent", email: `${PREFIX}peer@example.test`, name: `${PREFIX}Peer Person` });
   peerUserId = peer.id;
 });
 
 test.afterAll(async () => {
-  await db().teamChannel.deleteMany({ where: { teamId, kind: "dm" } });
+  await db().teamChannel.deleteMany({ where: { workspaceId, kind: "dm" } });
   await db().teamChannel.deleteMany({
-    where: { teamId, name: { startsWith: CHAN_PREFIX } },
+    where: { workspaceId, name: { startsWith: CHAN_PREFIX } },
   });
-  await db().user.deleteMany({ where: { teamId, email: { startsWith: PREFIX } } });
+  await db().user.deleteMany({ where: { workspaceMemberships: { some: { workspaceId } }, email: { startsWith: PREFIX } } });
 });
 
 /** Open /team and wait for the feed (not networkidle — the socket never idles). */

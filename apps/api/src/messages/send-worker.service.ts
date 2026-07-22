@@ -37,7 +37,7 @@ import {
  *
  * Same shape as the workflow worker: claim a slot synchronously, and if the team
  * is at cap `moveToDelayed` the job so the global slot is released immediately
- * instead of being parked. Cheaper than the workflow version, because `teamId`
+ * instead of being parked. Cheaper than the workflow version, because `workspaceId`
  * is already on the job payload — no DB read to decide admission.
  */
 function sendPerTeamConcurrency(): number {
@@ -47,18 +47,18 @@ function sendPerTeamConcurrency(): number {
 
 const sendTeamSlots = new Map<string, { active: number }>();
 
-function tryAcquireSendSlot(teamId: string): boolean {
+function tryAcquireSendSlot(workspaceId: string): boolean {
   const cap = sendPerTeamConcurrency();
-  let entry = sendTeamSlots.get(teamId);
+  let entry = sendTeamSlots.get(workspaceId);
   if (!entry) {
     entry = { active: 0 };
-    sendTeamSlots.set(teamId, entry);
+    sendTeamSlots.set(workspaceId, entry);
   }
   if (entry.active >= cap) return false;
   entry.active += 1;
   // The team just made progress → clear its defer-generation so a later
   // saturated burst starts escalating from the floor again.
-  sendTeamDeferGen.delete(teamId);
+  sendTeamDeferGen.delete(workspaceId);
   return true;
 }
 
@@ -75,19 +75,19 @@ function tryAcquireSendSlot(teamId: string): boolean {
  */
 const sendTeamDeferGen = new Map<string, number>();
 
-function nextSendDeferGen(teamId: string): number {
-  const n = (sendTeamDeferGen.get(teamId) ?? 0) + 1;
-  sendTeamDeferGen.set(teamId, n);
+function nextSendDeferGen(workspaceId: string): number {
+  const n = (sendTeamDeferGen.get(workspaceId) ?? 0) + 1;
+  sendTeamDeferGen.set(workspaceId, n);
   return n;
 }
 
-function releaseSendSlot(teamId: string): void {
-  const entry = sendTeamSlots.get(teamId);
+function releaseSendSlot(workspaceId: string): void {
+  const entry = sendTeamSlots.get(workspaceId);
   if (!entry) return;
   entry.active = Math.max(0, entry.active - 1);
   // Drop the entry once idle so the Map stays bounded by ACTIVE teams, not by
   // every team that has ever sent.
-  if (entry.active === 0) sendTeamSlots.delete(teamId);
+  if (entry.active === 0) sendTeamSlots.delete(workspaceId);
 }
 
 /**
@@ -181,19 +181,19 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
         // global slot straight back rather than holding it. `moveToDelayed` +
         // DelayedError is BullMQ's non-blocking defer — the job returns to the
         // queue and another tenant's send runs now.
-        const teamId = job.data.teamId;
-        if (!tryAcquireSendSlot(teamId)) {
+        const workspaceId = job.data.workspaceId;
+        if (!tryAcquireSendSlot(workspaceId)) {
           // Backoff keyed on the team's defer-generation, not job.attemptsMade
           // (which stays 0 across defers because moveToDelayed skips the attempt
           // counter) — so a saturated team's backlog actually escalates toward
           // the 4s cap instead of re-polling every ~250ms forever.
-          await job.moveToDelayed(Date.now() + deferDelayMs(nextSendDeferGen(teamId)), token);
+          await job.moveToDelayed(Date.now() + deferDelayMs(nextSendDeferGen(workspaceId)), token);
           throw new DelayedError();
         }
         try {
           return await this.handle(job.data, job.id);
         } finally {
-          releaseSendSlot(teamId);
+          releaseSendSlot(workspaceId);
         }
       },
       {
@@ -277,7 +277,7 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
       const { reason, detail } = categorizeSendError(err);
       void publish({
         type: "message.send_failed",
-        teamId: job.data.teamId,
+        workspaceId: job.data.workspaceId,
         conversationId: job.data.conversationId,
         senderUserId: job.data.userId,
         ...(job.data.clientTempId ? { clientTempId: job.data.clientTempId } : {}),
@@ -291,7 +291,7 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
       // Drop the cached HTTP-POST success so a same-clientTempId Retry within
       // the idempotency window re-enqueues instead of short-circuiting.
       invalidateSendIdempotency({
-        teamId: job.data.teamId,
+        workspaceId: job.data.workspaceId,
         userId: job.data.userId,
         conversationId: job.data.conversationId,
         clientTempId: job.data.clientTempId,
@@ -355,7 +355,7 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
       await this.messages.executeTextSendJob(data, jobId);
       // Send worked → the token is healthy; self-heal a stale reconnect flag
       // (no-op query when it isn't set). Covers every channel, incl. WhatsApp.
-      void clearChannelNeedsReconnect(data.teamId, data.channel ?? "whatsapp");
+      void clearChannelNeedsReconnect(data.workspaceId, data.channel ?? "whatsapp");
     } catch (err) {
       const { reason, detail, recoverable } = categorizeSendError(err);
 
@@ -364,14 +364,14 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
         // surfaces a "reconnect" banner. Meta's best practice: notify admins to
         // re-issue the token rather than silently retrying a dead credential.
         if (reason === "auth_expired") {
-          void flagChannelNeedsReconnect(data.teamId, data.channel ?? "whatsapp");
+          void flagChannelNeedsReconnect(data.workspaceId, data.channel ?? "whatsapp");
         }
         // Permanent failure — no retry is coming, so publish the actionable
         // "Failed · Retry" bubble now and stop. (worker.on("failed") skips
         // republishing for UnrecoverableError, so there's no duplicate frame.)
         await publish({
           type: "message.send_failed",
-          teamId: data.teamId,
+          workspaceId: data.workspaceId,
           conversationId: data.conversationId,
           senderUserId: data.userId,
           ...(data.clientTempId ? { clientTempId: data.clientTempId } : {}),
@@ -385,7 +385,7 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
         // Drop the cached HTTP-POST success so a same-clientTempId Retry within
         // the idempotency window re-enqueues instead of short-circuiting.
         invalidateSendIdempotency({
-          teamId: data.teamId,
+          workspaceId: data.workspaceId,
           userId: data.userId,
           conversationId: data.conversationId,
           clientTempId: data.clientTempId,

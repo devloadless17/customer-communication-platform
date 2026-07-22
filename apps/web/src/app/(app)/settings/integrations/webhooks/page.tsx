@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
 export default async function WebhooksPage() {
   const { user } = await getSession();
   if (!canManageUsers(user.role)) {
-    redirect("/settings/account");
+    redirect("/account");
   }
 
   const webhooks = await listOutboundWebhooks();

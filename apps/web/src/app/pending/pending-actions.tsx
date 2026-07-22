@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
  *
  *  - Auto-refresh: re-runs the page's server component every 25s. The moment a
  *    superAdmin flips the org to `active`, that re-render reads the fresh
- *    `teamStatus` and server-redirects to /settings/whatsapp — no manual reload.
+ *    `orgStatus` and server-redirects to /settings/whatsapp — no manual reload.
  *  - "Check now": same refresh on demand (with a brief spinner) so an impatient
  *    operator isn't stuck waiting for the tick.
  *  - "Sign out": plain navigation to /logout (a route handler that CAN clear

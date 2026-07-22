@@ -74,9 +74,9 @@ export class AiAssistantService {
   constructor(private readonly db: DbService) {}
 
   /** Read the team's config, or synthesized defaults when nothing is saved yet. */
-  async getConfig(teamId: string) {
-    const row = await this.db.aiAssistantConfig.findUnique({ where: { teamId } });
-    return row ?? { ...DEFAULT_AI_CONFIG, teamId };
+  async getConfig(workspaceId: string) {
+    const row = await this.db.aiAssistantConfig.findUnique({ where: { workspaceId } });
+    return row ?? { ...DEFAULT_AI_CONFIG, workspaceId };
   }
 
   /**
@@ -85,7 +85,7 @@ export class AiAssistantService {
    * — a mismatch means a concurrent save clobbered ours. Every successful save
    * bumps `configVersion` (stamped onto every AiAssistantInteraction for audit).
    */
-  async updateConfig(teamId: string, canManage: boolean, input: UpdateAiConfigInput) {
+  async updateConfig(workspaceId: string, canManage: boolean, input: UpdateAiConfigInput) {
     if (!canManage) {
       throw new ForbiddenException({ error: "forbidden" });
     }
@@ -96,7 +96,7 @@ export class AiAssistantService {
     const data = rest as Record<string, unknown>;
 
     const existing = await this.db.aiAssistantConfig.findUnique({
-      where: { teamId },
+      where: { workspaceId },
       select: { configVersion: true },
     });
 
@@ -111,24 +111,24 @@ export class AiAssistantService {
         });
       }
       return this.db.aiAssistantConfig.update({
-        where: { teamId },
+        where: { workspaceId },
         data: { ...data, configVersion: existing.configVersion + 1 },
       });
     }
 
     try {
       return await this.db.aiAssistantConfig.create({
-        data: { teamId, ...data, configVersion: 1 },
+        data: { workspaceId, ...data, configVersion: 1 },
       });
     } catch (err) {
-      // Lost a create race (unique teamId) — fall through to an update.
+      // Lost a create race (unique workspaceId) — fall through to an update.
       if ((err as { code?: string })?.code === "P2002") {
         const cur = await this.db.aiAssistantConfig.findUnique({
-          where: { teamId },
+          where: { workspaceId },
           select: { configVersion: true },
         });
         return this.db.aiAssistantConfig.update({
-          where: { teamId },
+          where: { workspaceId },
           data: { ...data, configVersion: (cur?.configVersion ?? 0) + 1 },
         });
       }

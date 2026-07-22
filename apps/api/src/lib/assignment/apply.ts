@@ -86,7 +86,7 @@ export type AssignByPolicyOutcome =
  */
 export async function buildAssignmentContext(
   db: Db,
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   source: AssignmentSource,
   extra?: Partial<AssignmentContext>,
@@ -95,7 +95,7 @@ export async function buildAssignmentContext(
   assignedUserId: string | null;
 } | null> {
   const conv = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
+    where: { id: conversationId, workspaceId },
     select: {
       assignedUserId: true,
       channel: true,
@@ -127,7 +127,7 @@ export async function buildAssignmentContext(
 export async function assignByPolicy(args: {
   db: Db;
   publish: Publish;
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   source: AssignmentSource;
   /** Extra rule-matching context the caller has cheaply (message text, etc). */
@@ -147,7 +147,7 @@ export async function assignByPolicy(args: {
   const {
     db,
     publish,
-    teamId,
+    workspaceId,
     conversationId,
     source,
     context,
@@ -159,7 +159,7 @@ export async function assignByPolicy(args: {
     silent = false,
   } = args;
 
-  const built = await buildAssignmentContext(db, teamId, conversationId, source, context);
+  const built = await buildAssignmentContext(db, workspaceId, conversationId, source, context);
   if (!built) {
     return { applied: false, userId: null, decision: null, skipped: "not_found" };
   }
@@ -173,14 +173,14 @@ export async function assignByPolicy(args: {
   // escalating later, which would otherwise re-route the thread generically.
   // Only consulted on those paths — every other caller skips the query.
   if (source === "ai_handoff" || source === "inbound" || source === "reopen") {
-    const drawn = await pendingCampaignAssignee({ teamId, conversationId }).catch(
+    const drawn = await pendingCampaignAssignee({ workspaceId, conversationId }).catch(
       () => null,
     );
     if (drawn) {
       const result = await assignConversation({
         db,
         publish,
-        teamId,
+        workspaceId,
         conversationId,
         targetUserId: drawn,
         changedByUserId,
@@ -215,7 +215,7 @@ export async function assignByPolicy(args: {
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const decision = await resolveAssignee({
       db,
-      teamId,
+      workspaceId,
       ctx: { ...built.ctx, excludeUserIds: excluded },
       policyId,
       conversationId,
@@ -228,7 +228,7 @@ export async function assignByPolicy(args: {
     const result = await assignConversation({
       db,
       publish,
-      teamId,
+      workspaceId,
       conversationId,
       targetUserId: decision.userId,
       changedByUserId,
@@ -258,7 +258,7 @@ export async function assignByPolicy(args: {
         // Someone else mutated the conversation mid-flight. If a human claimed
         // it, we're done — automation never overrides that.
         const now = await db.conversation.findFirst({
-          where: { id: conversationId, teamId },
+          where: { id: conversationId, workspaceId },
           select: { assignedUserId: true },
         });
         if (!now) {

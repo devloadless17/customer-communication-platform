@@ -40,8 +40,8 @@ export class MessageFlagsCatalogService {
   ) {}
 
   /** The picker's list — live definitions only. */
-  async list(teamId: string): Promise<MessageFlagDefinition[]> {
-    return listFlagDefinitions(this.db, teamId);
+  async list(workspaceId: string): Promise<MessageFlagDefinition[]> {
+    return listFlagDefinitions(this.db, workspaceId);
   }
 
   /**
@@ -53,9 +53,9 @@ export class MessageFlagsCatalogService {
    * aggregates in ONE query — not a per-definition loop (that would be an N+1
    * over the catalog).
    */
-  async listWithUsage(teamId: string): Promise<MessageFlagDefinitionWithUsage[]> {
+  async listWithUsage(workspaceId: string): Promise<MessageFlagDefinitionWithUsage[]> {
     const rows = await this.db.messageFlagDefinition.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
       select: {
         ...MESSAGE_FLAG_DEFINITION_SELECT,
@@ -64,7 +64,7 @@ export class MessageFlagsCatalogService {
     });
     const openCounts = await this.db.messageFlag.groupBy({
       by: ["definitionId"],
-      where: { teamId, status: "open" },
+      where: { workspaceId, status: "open" },
       _count: { _all: true },
     });
     const openById = new Map(openCounts.map((g) => [g.definitionId, g._count._all]));
@@ -77,13 +77,13 @@ export class MessageFlagsCatalogService {
   }
 
   async create(
-    teamId: string,
+    workspaceId: string,
     input: CreateFlagDefinitionInput,
   ): Promise<MessageFlagDefinition> {
     try {
       const created = await this.db.messageFlagDefinition.create({
         data: {
-          teamId,
+          workspaceId,
           name: input.name,
           color: normalizeColor(input.color),
           description: input.description ?? null,
@@ -91,7 +91,7 @@ export class MessageFlagsCatalogService {
         },
         select: MESSAGE_FLAG_DEFINITION_SELECT,
       });
-      await this.publishCatalogChanged(teamId);
+      await this.publishCatalogChanged(workspaceId);
       return mapFlagDefinition(created);
     } catch (err) {
       throwIfUniqueViolation(err, `A message flag named "${input.name}" already exists.`);
@@ -100,19 +100,19 @@ export class MessageFlagsCatalogService {
   }
 
   async update(
-    teamId: string,
+    workspaceId: string,
     id: string,
     input: UpdateFlagDefinitionInput,
   ): Promise<MessageFlagDefinition> {
     const existing = await this.db.messageFlagDefinition.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true },
     });
     if (!existing) throw new NotFoundException({ error: "message_flag_definition_not_found" });
 
     try {
       const updated = await this.db.messageFlagDefinition.update({
-        where: { id, teamId },
+        where: { id, workspaceId },
         data: {
           ...input,
           // Normalize on UPDATE too, not just create. The internal schema
@@ -125,7 +125,7 @@ export class MessageFlagsCatalogService {
         },
         select: MESSAGE_FLAG_DEFINITION_SELECT,
       });
-      await this.publishCatalogChanged(teamId);
+      await this.publishCatalogChanged(workspaceId);
       return mapFlagDefinition(updated);
     } catch (err) {
       throwIfUniqueViolation(err, "A message flag with that name already exists.");
@@ -133,9 +133,9 @@ export class MessageFlagsCatalogService {
     }
   }
 
-  async remove(teamId: string, id: string): Promise<void> {
+  async remove(workspaceId: string, id: string): Promise<void> {
     const existing = await this.db.messageFlagDefinition.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true, _count: { select: { flags: true } } },
     });
     if (!existing) throw new NotFoundException({ error: "message_flag_definition_not_found" });
@@ -151,11 +151,11 @@ export class MessageFlagsCatalogService {
     }
 
     await this.db.messageFlagDefinition.delete({ where: { id } });
-    await this.publishCatalogChanged(teamId);
+    await this.publishCatalogChanged(workspaceId);
   }
 
-  private async publishCatalogChanged(teamId: string): Promise<void> {
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "message-flags" });
+  private async publishCatalogChanged(workspaceId: string): Promise<void> {
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "message-flags" });
   }
 }
 

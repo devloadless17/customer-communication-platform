@@ -17,6 +17,7 @@ import {
 } from "@/lib/messages/idempotent-create";
 import { ingestCallEvent } from "@/lib/providers/ingest-call";
 import { resumeOnReopen } from "@/lib/ai/conversation-state";
+import { routeMessageToTicket } from "@/lib/tickets/mutations";
 import { applyContactShareFromReply } from "@/lib/identity/contact-share";
 import {
   applyOptOut,
@@ -78,15 +79,22 @@ import { isPhoneChannel, isSocialContactPlaceholder } from "@ccp/shared/provider
  *
  * One entry point per route. Routes never touch the DB or Socket.io directly.
  *
- * `teamId` is resolved by the caller (the per-team webhook URL contains it,
- * so the route trusts it). Status updates ignore teamId — they look up the
+ * `workspaceId` is resolved by the caller (the per-team webhook URL contains it,
+ * so the route trusts it). Status updates ignore workspaceId — they look up the
  * existing message row by externalId, which already carries its own team.
  */
 
 export async function ingestEvents(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   events: NormalizedEvent[],
+  /**
+   * The ChannelConnection that RECEIVED this batch. Stamped onto the
+   * conversation so replies go back out the same account — re-stamped on every
+   * inbound, because a customer who messages a different number of yours has
+   * moved the live thread (and its 24h window) to THAT account.
+   */
+  channelConnectionId?: string | null,
 ): Promise<void> {
   if (events.length === 0) return;
 
@@ -136,44 +144,44 @@ export async function ingestEvents(
   const runOne = async (evt: NormalizedEvent): Promise<void> => {
     try {
       if (evt.kind === "message") {
-        await ingestInboundMessage(teamId, channel, evt);
+        await ingestInboundMessage(workspaceId, channel, evt, channelConnectionId);
       } else if (evt.kind === "echo") {
         // WhatsApp Coexistence: a message the owner sent from the phone app.
-        await ingestOutboundEcho(teamId, channel, evt);
+        await ingestOutboundEcho(workspaceId, channel, evt);
       } else if (evt.kind === "contact_sync") {
         // WhatsApp Coexistence: the owner's phone address book changed.
-        await ingestContactSync(teamId, channel, evt);
+        await ingestContactSync(workspaceId, channel, evt);
       } else if (evt.kind === "reaction") {
-        await ingestReaction(teamId, channel, evt);
+        await ingestReaction(workspaceId, channel, evt);
       } else if (evt.kind === "message_correction") {
-        await ingestMessageCorrection(teamId, channel, evt);
+        await ingestMessageCorrection(workspaceId, channel, evt);
       } else if (evt.kind === "message_feedback") {
-        await ingestMessageFeedback(teamId, channel, evt);
+        await ingestMessageFeedback(workspaceId, channel, evt);
       } else if (evt.kind === "read_watermark") {
-        await ingestReadWatermark(teamId, channel, evt);
+        await ingestReadWatermark(workspaceId, channel, evt);
       } else if (evt.kind === "delivered_watermark") {
-        await ingestDeliveredWatermark(teamId, channel, evt);
+        await ingestDeliveredWatermark(workspaceId, channel, evt);
       } else if (evt.kind === "contact_number_change") {
-        await ingestContactNumberChange(teamId, channel, evt);
+        await ingestContactNumberChange(workspaceId, channel, evt);
       } else if (evt.kind === "template_status") {
-        await ingestTemplateStatusUpdate(teamId, evt);
+        await ingestTemplateStatusUpdate(workspaceId, evt);
       } else if (evt.kind === "marketing_preference") {
         // Marketing opt-out / resume from Meta. Resolve the contact by phone
         // within this team, then set or clear consent.
         const contact = await db.contact.findFirst({
-          where: { teamId, phoneNumber: { contains: evt.contactPhone }, deletedAt: null },
+          where: { workspaceId, phoneNumber: { contains: evt.contactPhone }, deletedAt: null },
           select: { id: true },
         });
         if (contact) {
           if (evt.optedOut) {
-            await applyOptOut(teamId, contact.id, "meta_preferences", evt.timestamp);
+            await applyOptOut(workspaceId, contact.id, "meta_preferences", evt.timestamp);
           } else {
-            await clearOptOut(teamId, contact.id);
+            await clearOptOut(workspaceId, contact.id);
           }
         }
       } else if (evt.kind === "channel_health") {
         // WhatsApp number messaging-limit tier / quality / throughput changed.
-        await persistWhatsappHealth(teamId, {
+        await persistWhatsappHealth(workspaceId, {
           ...(evt.messagingTier !== undefined ? { messagingTier: evt.messagingTier } : {}),
           ...(evt.qualityRating !== undefined ? { qualityRating: evt.qualityRating } : {}),
           ...(evt.callingRestrictedUntil !== undefined
@@ -206,19 +214,19 @@ export async function ingestEvents(
             JSON.stringify({
               event: "ingest.call_skipped_killswitch",
               severity: "warn",
-              teamId,
+              workspaceId,
               channel,
             }),
           );
         } else {
-          await ingestCallEvent(teamId, channel, evt);
+          await ingestCallEvent(workspaceId, channel, evt);
         }
       } else {
-        await ingestStatusUpdate(teamId, channel, evt);
+        await ingestStatusUpdate(workspaceId, channel, evt);
       }
     } catch (err) {
         // Structured log — fields chosen so a flood of identical errors is
-        // greppable as a single event in ops (key = teamId+kind+code).
+        // greppable as a single event in ops (key = workspaceId+kind+code).
         // Stack included so a real bug isn't hidden, but never the raw
         // body / phone number (those live in `rawPayload` on the message
         // row for forensic queries that go through DB, not log search).
@@ -228,7 +236,7 @@ export async function ingestEvents(
           JSON.stringify({
             event: "ingest.event_failed",
             severity: "error",
-            teamId,
+            workspaceId,
             channel,
             kind: evt.kind,
             externalId,
@@ -239,7 +247,7 @@ export async function ingestEvents(
         // Transient infra faults (pool timeout, deadlock, DB unreachable)
         // must NOT be swallowed: re-throw so `ingestEvents` rejects, the
         // webhook controller returns 503, and Meta RE-DELIVERS the batch.
-        // Every event is deduped on (teamId, channel, externalId) so re-
+        // Every event is deduped on (workspaceId, channel, externalId) so re-
         // ingest is safe. The old code swallowed these and returned 200 —
         // Meta then never retried and the inbound customer message was lost
         // forever (Meta has no history sync). A retry can re-fire a sibling's
@@ -312,7 +320,7 @@ export function isTransientDbError(err: unknown): boolean {
  *
  * Matches on SQLSTATE where the driver provides one, and on message shape for
  * the pool/socket errors that carry no code. Erring toward "transient" is the
- * safe direction here: a redelivery is deduped by (teamId, channel, externalId),
+ * safe direction here: a redelivery is deduped by (workspaceId, channel, externalId),
  * whereas a wrong "permanent" verdict loses a customer's message for good.
  */
 export function isDriverTransientError(err: unknown): boolean {
@@ -374,14 +382,14 @@ export function isDriverTransientError(err: unknown): boolean {
  * fanout (a 👍 isn't a business event).
  */
 async function ingestReaction(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   evt: NormalizedReaction,
 ): Promise<void> {
   const target = await db.message.findUnique({
     where: {
-      teamId_channel_externalId: {
-        teamId,
+      workspaceId_channel_externalId: {
+        workspaceId,
         channel,
         externalId: evt.targetExternalId,
       },
@@ -437,7 +445,7 @@ async function ingestReaction(
 
   await publish({
     type: "message.reaction_changed",
-    teamId,
+    workspaceId,
     conversationId: target.conversationId,
     messageId: target.id,
     actor: "customer",
@@ -447,7 +455,7 @@ async function ingestReaction(
 
 /**
  * Apply a customer message unsend/edit (WhatsApp revoke·edit, Messenger/
- * Instagram unsend). Finds the target Message by (teamId, channel,
+ * Instagram unsend). Finds the target Message by (workspaceId, channel,
  * targetExternalId) and either tombstones it (`deletedAt`, body PRESERVED for
  * the record) or updates its body (`editedAt` + new body), then fans out
  * `message.updated` so viewers patch the bubble. Idempotent: a re-delivered
@@ -456,13 +464,13 @@ async function ingestReaction(
  * message isn't a business event).
  */
 async function ingestMessageCorrection(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   evt: NormalizedMessageCorrection,
 ): Promise<void> {
   const target = await db.message.findUnique({
     where: {
-      teamId_channel_externalId: { teamId, channel, externalId: evt.targetExternalId },
+      workspaceId_channel_externalId: { workspaceId, channel, externalId: evt.targetExternalId },
     },
     select: { id: true, conversationId: true, body: true, deletedAt: true, direction: true },
   });
@@ -486,10 +494,10 @@ async function ingestMessageCorrection(
     // If this was the thread's newest message, the inbox-list preview now shows
     // deleted text — repoint it (DB) and carry the new preview on the event so
     // fanout pushes a live `conversation:preview` frame to the list.
-    const listUpdate = await refreshPreviewSafely(teamId, target.conversationId, target.id);
+    const listUpdate = await refreshPreviewSafely(workspaceId, target.conversationId, target.id);
     await publish({
       type: "message.updated",
-      teamId,
+      workspaceId,
       conversationId: target.conversationId,
       messageId: target.id,
       deletedAt: now.toISOString(),
@@ -514,10 +522,10 @@ async function ingestMessageCorrection(
   });
   // Keep the inbox-list preview in sync if this was the newest message, and
   // carry it on the event so fanout pushes a live `conversation:preview` frame.
-  const listUpdate = await refreshPreviewSafely(teamId, target.conversationId, target.id);
+  const listUpdate = await refreshPreviewSafely(workspaceId, target.conversationId, target.id);
   await publish({
     type: "message.updated",
-    teamId,
+    workspaceId,
     conversationId: target.conversationId,
     messageId: target.id,
     deletedAt: null,
@@ -538,13 +546,13 @@ async function ingestMessageCorrection(
  * reactions) — no workflow / outbound-webhook fanout.
  */
 async function ingestMessageFeedback(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   evt: NormalizedMessageFeedback,
 ): Promise<void> {
   const target = await db.message.findUnique({
     where: {
-      teamId_channel_externalId: { teamId, channel, externalId: evt.targetExternalId },
+      workspaceId_channel_externalId: { workspaceId, channel, externalId: evt.targetExternalId },
     },
     select: { id: true, conversationId: true, feedback: true, direction: true },
   });
@@ -557,7 +565,7 @@ async function ingestMessageFeedback(
   });
   await publish({
     type: "message.updated",
-    teamId,
+    workspaceId,
     conversationId: target.conversationId,
     messageId: target.id,
     deletedAt: null,
@@ -577,15 +585,15 @@ async function ingestMessageFeedback(
  * frame is lost for good. Degrade to "no live preview frame" instead.
  */
 async function refreshPreviewSafely(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   correctedMessageId: string,
 ): Promise<{ preview: string; at: string } | null> {
   try {
-    return await refreshPreviewIfNewestCorrected(teamId, conversationId, correctedMessageId);
+    return await refreshPreviewIfNewestCorrected(workspaceId, conversationId, correctedMessageId);
   } catch (err) {
     console.error(
-      `[ingest] list-preview refresh failed for team=${teamId} conversation=${conversationId}:`,
+      `[ingest] list-preview refresh failed for team=${workspaceId} conversation=${conversationId}:`,
       err,
     );
     return null;
@@ -601,12 +609,12 @@ async function refreshPreviewSafely(
  * when the corrected message wasn't the newest (list needs no update).
  */
 async function refreshPreviewIfNewestCorrected(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   correctedMessageId: string,
 ): Promise<{ preview: string; at: string } | null> {
   const newest = await db.message.findFirst({
-    where: { teamId, conversationId },
+    where: { workspaceId, conversationId },
     orderBy: [{ timestamp: "desc" }, { id: "desc" }],
     select: { id: true, body: true, deletedAt: true, mediaKind: true, timestamp: true },
   });
@@ -618,7 +626,7 @@ async function refreshPreviewIfNewestCorrected(
         mediaPreview((newest.mediaKind as MediaKind | null) ?? undefined)
       ).slice(0, 200);
   await db.conversation.updateMany({
-    where: { id: conversationId, teamId },
+    where: { id: conversationId, workspaceId },
     data: { lastMessagePreview: preview },
   });
   return { preview, at: newest.timestamp.toISOString() };
@@ -632,19 +640,19 @@ async function refreshPreviewIfNewestCorrected(
  * exactly as WhatsApp's per-message read path does.
  */
 async function ingestReadWatermark(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   evt: NormalizedReadWatermark,
 ): Promise<void> {
   const extId = evt.externalContactId;
   if (!extId) return;
   const contact = await db.contact.findFirst({
-    where: { teamId, identityChannel: channel, externalContactId: extId, deletedAt: null },
+    where: { workspaceId, identityChannel: channel, externalContactId: extId, deletedAt: null },
     select: { id: true },
   });
   if (!contact) return;
   const conversation = await db.conversation.findFirst({
-    where: { teamId, contactId: contact.id },
+    where: { workspaceId, contactId: contact.id },
     select: { id: true },
   });
   if (!conversation) return;
@@ -659,7 +667,7 @@ async function ingestReadWatermark(
   // predicate matches nothing the second time.
   const msgs = await db.message.findMany({
     where: {
-      teamId,
+      workspaceId,
       conversationId: conversation.id,
       direction: "out",
       timestamp: { lte: evt.watermark },
@@ -681,7 +689,7 @@ async function ingestReadWatermark(
   for (const m of msgs) {
     await publish({
       type: "message.status_changed",
-      teamId,
+      workspaceId,
       channel,
       conversationId: conversation.id,
       contactId: contact.id,
@@ -702,25 +710,25 @@ async function ingestReadWatermark(
  * omitted, so this catches deliveries the old per-mid path dropped.
  */
 async function ingestDeliveredWatermark(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   evt: NormalizedDeliveredWatermark,
 ): Promise<void> {
   const extId = evt.externalContactId;
   if (!extId) return;
   const contact = await db.contact.findFirst({
-    where: { teamId, identityChannel: channel, externalContactId: extId, deletedAt: null },
+    where: { workspaceId, identityChannel: channel, externalContactId: extId, deletedAt: null },
     select: { id: true },
   });
   if (!contact) return;
   const conversation = await db.conversation.findFirst({
-    where: { teamId, contactId: contact.id },
+    where: { workspaceId, contactId: contact.id },
     select: { id: true },
   });
   if (!conversation) return;
   const msgs = await db.message.findMany({
     where: {
-      teamId,
+      workspaceId,
       conversationId: conversation.id,
       direction: "out",
       timestamp: { lte: evt.watermark },
@@ -740,7 +748,7 @@ async function ingestDeliveredWatermark(
   for (const m of msgs) {
     await publish({
       type: "message.status_changed",
-      teamId,
+      workspaceId,
       channel,
       conversationId: conversation.id,
       contactId: contact.id,
@@ -752,25 +760,25 @@ async function ingestDeliveredWatermark(
 }
 
 async function ingestStatusUpdate(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   evt: NormalizedStatusUpdate,
 ): Promise<void> {
-  // (teamId, channel, externalId) is the compound unique key post the
-  // multi-channel refactor. teamId + channel come from the webhook route
+  // (workspaceId, channel, externalId) is the compound unique key post the
+  // multi-channel refactor. workspaceId + channel come from the webhook route
   // (the URL is per-team and the route is per-channel); the wire payload
   // carries only the externalId.
   const existing = await db.message.findUnique({
     where: {
-      teamId_channel_externalId: {
-        teamId,
+      workspaceId_channel_externalId: {
+        workspaceId,
         channel,
         externalId: evt.externalId,
       },
     },
     select: {
       id: true,
-      teamId: true,
+      workspaceId: true,
       conversationId: true,
       status: true,
       direction: true,
@@ -790,7 +798,7 @@ async function ingestStatusUpdate(
   // it drains the parked status and applies it. After TTL we drop — at that
   // point either the create failed permanently or Meta's clock is way off.
   if (!existing) {
-    await parkUnknownWamidStatus(teamId, channel, evt.externalId, {
+    await parkUnknownWamidStatus(workspaceId, channel, evt.externalId, {
       status: evt.status,
       errorCode: evt.errorCode,
       errorTitle: evt.errorTitle,
@@ -882,7 +890,7 @@ async function ingestStatusUpdate(
 
   await publish({
     type: "message.status_changed",
-    teamId: existing.teamId,
+    workspaceId: existing.workspaceId,
     channel,
     conversationId: existing.conversationId,
     contactId: existing.conversation.contactId,
@@ -922,7 +930,7 @@ async function ingestStatusUpdate(
  * so we let the catalog sync own row creation and only flip status here.
  */
 async function ingestTemplateStatusUpdate(
-  teamId: string,
+  workspaceId: string,
   evt: NormalizedTemplateStatusUpdate,
 ): Promise<void> {
   // A status update sets `status`; a category update sets `category`; both flip
@@ -934,7 +942,7 @@ async function ingestTemplateStatusUpdate(
 
   // Prefer matching on Meta's template id (externalId); fall back to the
   // natural (name, language) key. Build the narrowest WHERE we can.
-  const where: Prisma.MessageTemplateWhereInput = { teamId };
+  const where: Prisma.MessageTemplateWhereInput = { workspaceId };
   if (evt.externalId) {
     where.externalId = evt.externalId;
   } else if (evt.name) {
@@ -955,14 +963,14 @@ async function ingestTemplateStatusUpdate(
   // the same catalog-changed event syncTemplates publishes.
   await publish({
     type: "team.catalog_changed",
-    teamId,
+    workspaceId,
     scope: "whatsapp-templates",
   });
 }
 
 /**
  * Park-and-replay table for status updates that arrived before the message
- * row was committed. Keyed by `(teamId|channel|externalId)` and stored in
+ * row was committed. Keyed by `(workspaceId|channel|externalId)` and stored in
  * Redis with a 15-minute TTL so:
  *   - state survives process restart (deploys + crashes)
  *   - two api processes can park on A and drain on B without losing replay
@@ -978,11 +986,11 @@ async function ingestTemplateStatusUpdate(
 const UNKNOWN_WAMID_TTL_MS = 15 * 60_000;
 
 function parkKey(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   externalId: string,
 ): string {
-  return `ccp:parked-status:${teamId}|${channel}|${externalId}`;
+  return `ccp:parked-status:${workspaceId}|${channel}|${externalId}`;
 }
 
 /**
@@ -1019,12 +1027,12 @@ function parseParkedStatus(raw: string): ParkedStatus {
 }
 
 async function parkUnknownWamidStatus(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   externalId: string,
   parked: ParkedStatus,
 ): Promise<void> {
-  const key = parkKey(teamId, channel, externalId);
+  const key = parkKey(workspaceId, channel, externalId);
   const redis = getRedisConnection();
   const { status } = parked;
   try {
@@ -1049,7 +1057,7 @@ async function parkUnknownWamidStatus(
     // `failed` exactly once — without this the message stays 'sent' forever.
     // Re-read the row; if it now exists, drain immediately through the shared
     // CAS path (GETDEL makes the double-drain-with-create-path safe).
-    await drainParkIfRowCommitted(teamId, channel, externalId);
+    await drainParkIfRowCommitted(workspaceId, channel, externalId);
   } catch (err) {
     // Redis hiccup must not abort the webhook 200. Losing one parked status
     // is recoverable — Meta typically resends the next-rank event soon after.
@@ -1068,13 +1076,13 @@ async function parkUnknownWamidStatus(
  * this safe against a concurrent create-path drain (only one wins the key).
  */
 async function drainParkIfRowCommitted(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   externalId: string,
 ): Promise<void> {
   const row = await db.message.findUnique({
     where: {
-      teamId_channel_externalId: { teamId, channel, externalId },
+      workspaceId_channel_externalId: { workspaceId, channel, externalId },
     },
     select: {
       id: true,
@@ -1084,7 +1092,7 @@ async function drainParkIfRowCommitted(
   });
   if (!row) return;
   await drainParkedStatus(
-    teamId,
+    workspaceId,
     channel,
     externalId,
     row.id,
@@ -1101,14 +1109,14 @@ async function drainParkIfRowCommitted(
  * apply the same parked status.
  */
 export async function drainParkedStatus(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   externalId: string,
   messageId: string,
   conversationId: string,
   contactId: string,
 ): Promise<void> {
-  const key = parkKey(teamId, channel, externalId);
+  const key = parkKey(workspaceId, channel, externalId);
   const redis = getRedisConnection();
   let parked: ParkedStatus | null = null;
   try {
@@ -1186,7 +1194,7 @@ export async function drainParkedStatus(
 
   await publish({
     type: "message.status_changed",
-    teamId,
+    workspaceId,
     channel,
     conversationId,
     contactId,
@@ -1376,17 +1384,19 @@ async function applyBroadcastDeliveryStatus(
 }
 
 async function ingestInboundMessage(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   evt: NormalizedInboundMessage,
+  /** The account that received this message (see ingestEvents). */
+  channelConnectionId?: string | null,
 ): Promise<void> {
   // Rule #3 dedupe gate. Cheap pre-check; the compound unique
-  // (teamId, channel, externalId) is the actual race guard via the P2002
+  // (workspaceId, channel, externalId) is the actual race guard via the P2002
   // catch below.
   const existing = await db.message.findUnique({
     where: {
-      teamId_channel_externalId: {
-        teamId,
+      workspaceId_channel_externalId: {
+        workspaceId,
         channel,
         externalId: evt.externalId,
       },
@@ -1402,7 +1412,7 @@ async function ingestInboundMessage(
   let replySnapshot: ReplySnapshot | null = null;
   if (evt.replyToExternalId) {
     replySnapshot = await loadReplySnapshotByExternalId(evt.replyToExternalId, {
-      teamId,
+      workspaceId,
       channel,
     });
   }
@@ -1420,7 +1430,7 @@ async function ingestInboundMessage(
   // lookup. We pass it as the `create` stageId so brand-new contacts land
   // in the team's default; existing rows pass through `update` (empty) and
   // keep whatever stage they're already in.
-  const defaultStageId = await ensureDefaultStage(teamId);
+  const defaultStageId = await ensureDefaultStage(workspaceId);
 
   // Contact + conversation resolution must be transactional. Without a tx,
   // two simultaneous first-time inbounds from the same brand-new phone both
@@ -1457,7 +1467,7 @@ async function ingestInboundMessage(
       // Channel-aware contact identity (multi-channel / F4). Phone channels
       // (WhatsApp) resolve by `phoneNumber`; non-phone channels (Messenger,
       // Instagram, …) resolve by the compound unique
-      // `(teamId, identityChannel, externalContactId)`, where the id is the
+      // `(workspaceId, identityChannel, externalContactId)`, where the id is the
       // provider's opaque per-account id (PSID / IGSID) — NEVER a phone. This
       // keeps a Messenger contact that happens to share digits with a WhatsApp
       // number from resolving to the wrong row.
@@ -1508,26 +1518,26 @@ async function ingestInboundMessage(
           // Scope by identityChannel like the bsuid/externalContactId lookups
           // below: contact-share can stamp this same phone onto a
           // messenger/instagram contact (the partial unique on
-          // (teamId, phoneNumber) fires ONLY for identityChannel='whatsapp', so
+          // (workspaceId, phoneNumber) fires ONLY for identityChannel='whatsapp', so
           // a social row holding the shared phone is allowed). Without the
           // channel scope this phone-channel inbound could resolve to that
           // social contact and fold a WhatsApp thread onto a messenger
           // conversation. Cross-channel personhood lives on Customer, never by
           // folding contacts.
           existingContact = await tx.contact.findFirst({
-            where: { teamId, identityChannel: channel, phoneNumber: evt.contactPhone },
+            where: { workspaceId, identityChannel: channel, phoneNumber: evt.contactPhone },
             select: contactIdentitySelect,
           });
         }
         if (!existingContact && evt.bsuid) {
           existingContact = await tx.contact.findFirst({
-            where: { teamId, identityChannel: channel, bsuid: evt.bsuid },
+            where: { workspaceId, identityChannel: channel, bsuid: evt.bsuid },
             select: contactIdentitySelect,
           });
         }
       } else {
         existingContact = await tx.contact.findFirst({
-          where: { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
+          where: { workspaceId, identityChannel: channel, externalContactId: evt.externalContactId },
           select: contactIdentitySelect,
         });
       }
@@ -1590,7 +1600,7 @@ async function ingestInboundMessage(
         // Adopt-only + reap-empty, exactly like applyContactShareFromReply.
         if (identityBackfill.phoneNumber) {
           const adoptedCustomerId = await findExistingCustomerIdByStrongKey(
-            teamId,
+            workspaceId,
             { id: contact.id, name: contact.name, phoneNumber: identityBackfill.phoneNumber, email: null },
             tx,
           );
@@ -1606,7 +1616,7 @@ async function ingestInboundMessage(
             // still owns other channel contacts) intact.
             if (priorCustomerId) {
               await tx.customer.deleteMany({
-                where: { id: priorCustomerId, teamId, contacts: { none: {} } },
+                where: { id: priorCustomerId, workspaceId, contacts: { none: {} } },
               });
             }
           }
@@ -1614,7 +1624,7 @@ async function ingestInboundMessage(
       } else {
         contact = await tx.contact.create({
           data: {
-            teamId,
+            workspaceId,
             // Explicit channel stamp — every new contact carries its channel.
             identityChannel: channel,
             // Exactly one identity is set, keyed on the channel kind: phone
@@ -1646,7 +1656,7 @@ async function ingestInboundMessage(
             // Customer rolls back with the contact if the create aborts. The
             // drift sweeper stays the backstop for keys that appear later.
             customerId: await resolveCustomerId(
-              teamId,
+              workspaceId,
               {
                 phoneNumber: isPhone ? evt.contactPhone ?? null : null,
                 email: null,
@@ -1669,7 +1679,7 @@ async function ingestInboundMessage(
       // Only when a contact has literally never had a conversation do we
       // create one.
       const existingConvo = await tx.conversation.findFirst({
-        where: { teamId, contactId: contact.id },
+        where: { workspaceId, contactId: contact.id },
         orderBy: { lastMessageAt: "desc" },
       });
       const isNewConversation = !existingConvo;
@@ -1686,8 +1696,10 @@ async function ingestInboundMessage(
       if (!conversation) {
         conversation = await tx.conversation.create({
           data: {
-            teamId,
+            workspaceId,
             contactId: contact.id,
+            // Bind the new thread to the account that received it.
+            ...(channelConnectionId ? { channelConnectionId } : {}),
             // The thread's channel is the channel whose webhook created it.
             channel,
             // New chats land in `pending` so they sit in the triage column
@@ -1697,10 +1709,23 @@ async function ingestInboundMessage(
             lastMessagePreview: "",
           },
         });
-      } else if (conversation.status === "closed") {
-        // Returning customer replying to a closed thread → mark for reopen in
-        // tx2 (do NOT mutate here).
-        needsReopen = true;
+      } else {
+        // RE-STAMP the account on an existing thread when the customer messaged
+        // a DIFFERENT one of our accounts. The live thread — and the 24h window
+        // that governs free-form replies — now belongs to that account, so a
+        // reply must go out from it. Deliberately unlike webchat's sticky
+        // `webchatWidgetId`. Guarded so the common case writes nothing.
+        if (channelConnectionId && conversation.channelConnectionId !== channelConnectionId) {
+          conversation = await tx.conversation.update({
+            where: { id: conversation.id },
+            data: { channelConnectionId },
+          });
+        }
+        if (conversation.status === "closed") {
+          // Returning customer replying to a closed thread → mark for reopen in
+          // tx2 (do NOT mutate here).
+          needsReopen = true;
+        }
       }
       return { contact, conversation, isNewContact, wasRevived, isNewConversation, needsReopen };
     },
@@ -1731,7 +1756,7 @@ async function ingestInboundMessage(
     const txResult = await db.$transaction(async (tx) => {
       const created = await tx.message.create({
         data: {
-          teamId,
+          workspaceId,
           conversationId: conversation.id,
           externalId: evt.externalId,
           senderUserId: null,
@@ -1805,6 +1830,32 @@ async function ingestInboundMessage(
         // Closed threads already have the assignee cleared (see the close path),
         // so null is the correct post-reopen value.
         conversation = { ...conversation, status: "pending", assignedUserId: null };
+      }
+
+      // Attach the message to a ticket — the unit of WORK this thread is doing
+      // right now. Inside THIS transaction on purpose: a message that exists
+      // with no ticket (or a ticket auto-opened for a message that rolled back)
+      // is exactly the inconsistency the explicit `Message.ticketId` column
+      // exists to rule out. Runs AFTER the reopen flip so a returning customer
+      // routes against the post-reopen thread state.
+      //
+      // NOT wrapped in a try/catch, deliberately. A caught error here would be
+      // false safety: a failed statement has already poisoned the surrounding
+      // Postgres transaction, so every write after the catch fails anyway.
+      // Routing only throws on infrastructure failure (it returns null, never
+      // throws, for every logical miss — unknown conversation, auto-open off),
+      // and in that case the message write is failing too. Letting it roll back
+      // means Meta redelivers and we ingest cleanly on the retry.
+      const routed = await routeMessageToTicket(tx, {
+        workspaceId,
+        conversationId: conversation.id,
+        direction: "in",
+      });
+      if (routed.ticketId) {
+        await tx.message.update({
+          where: { id: created.id },
+          data: { ticketId: routed.ticketId },
+        });
       }
 
       // Run the two denorm updates SEQUENTIALLY, not via Promise.all. Prisma
@@ -1881,7 +1932,7 @@ async function ingestInboundMessage(
       // dispatch atomically with the entity write.
       const messagePayload = buildMessageDomain({
         createdId: created.id,
-        teamId,
+        workspaceId,
         channel,
         conversation,
         evt,
@@ -1987,7 +2038,7 @@ async function ingestInboundMessage(
         );
         await publishInTx(tx, {
           type: "conversation.status_changed",
-          teamId,
+          workspaceId,
           conversationId: conversation.id,
           previousStatus: "closed",
           newStatus: "pending",
@@ -2005,7 +2056,7 @@ async function ingestInboundMessage(
 
       await publishInTx(tx, {
         type: "message.received",
-        teamId,
+        workspaceId,
         conversationId: conversation.id,
         message: messagePayload,
         contact: contactSnapshot,
@@ -2031,7 +2082,7 @@ async function ingestInboundMessage(
       // happens AFTER the tx commits (below) so the worker doesn't pick
       // up the run before the message row is visible.
       const resumeRunIds = await findAndConsumeAwaitingReplies(tx, {
-        teamId,
+        workspaceId,
         contactId: contact.id,
         answer: {
           body: evt.body,
@@ -2066,7 +2117,7 @@ async function ingestInboundMessage(
     // leaves the conversation paused until an agent notices, not catastrophic.
     if (txResult?.reopened) {
       try {
-        await resumeOnReopen(teamId, txResult.conversationId);
+        await resumeOnReopen(workspaceId, txResult.conversationId);
       } catch (err) {
         console.error("[ingest][ai_resume_on_reopen]", { conversationId: txResult.conversationId, err });
       }
@@ -2093,7 +2144,7 @@ async function ingestInboundMessage(
     if (evt.interactiveReply && txResult) {
       try {
         await applyContactShareFromReply(
-          teamId,
+          workspaceId,
           channel,
           txResult.conversationId,
           txResult.contactId,
@@ -2111,7 +2162,7 @@ async function ingestInboundMessage(
     if (txResult) {
       try {
         await attributeInboundToBroadcast({
-          teamId,
+          workspaceId,
           contactId: txResult.contactId,
           messageId: txResult.messageId,
           body: evt.body ?? null,
@@ -2160,14 +2211,14 @@ async function ingestInboundMessage(
     try {
       await publish({
         type: "contact.created",
-        teamId,
+        workspaceId,
         contact: toContactWire(contact),
         source: "inbound",
         createdByUserId: null,
       });
     } catch (err) {
       console.error(
-        `[ingest] publish(contact.created) failed for team=${teamId} contact=${contact.id}:`,
+        `[ingest] publish(contact.created) failed for team=${workspaceId} contact=${contact.id}:`,
         err instanceof Error ? err.message : err,
       );
       // The customer-visible message arrival already happened (outbox row
@@ -2227,7 +2278,7 @@ function buildEchoMediaBlock(
  *     agent send would).
  */
 async function ingestOutboundEcho(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   evt: NormalizedOutboundEcho,
 ): Promise<void> {
@@ -2236,13 +2287,13 @@ async function ingestOutboundEcho(
   // own-send case before we touch the contact/conversation resolution.
   const existing = await db.message.findUnique({
     where: {
-      teamId_channel_externalId: { teamId, channel, externalId: evt.externalId },
+      workspaceId_channel_externalId: { workspaceId, channel, externalId: evt.externalId },
     },
     select: { id: true },
   });
   if (existing) return;
 
-  const defaultStageId = await ensureDefaultStage(teamId);
+  const defaultStageId = await ensureDefaultStage(workspaceId);
   // Channel-agnostic identity: WhatsApp Coexistence echoes carry `contactPhone`,
   // social native-inbox echoes carry `externalContactId` (customer PSID/IGSID).
   const isPhone = isPhoneChannel(channel);
@@ -2259,15 +2310,15 @@ async function ingestOutboundEcho(
       const found = await tx.contact.findFirst({
         // Scope by identityChannel exactly like the inbound / call / history
         // paths (see the comment at the inbound lookup ~1490): the partial
-        // unique on (teamId, phoneNumber) fires ONLY for identityChannel=
+        // unique on (workspaceId, phoneNumber) fires ONLY for identityChannel=
         // 'whatsapp', so contact-share (or a widget pre-chat) can stamp this
         // same phone onto a messenger/instagram/webchatwidget contact. Without
         // the channel scope this coexistence echo could resolve to that social/
         // widget contact and fold a WhatsApp echo thread onto the wrong
         // channel's conversation.
         where: isPhone
-          ? { teamId, identityChannel: channel, phoneNumber: evt.contactPhone }
-          : { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
+          ? { workspaceId, identityChannel: channel, phoneNumber: evt.contactPhone }
+          : { workspaceId, identityChannel: channel, externalContactId: evt.externalContactId },
         include: { tags: { select: { id: true } } },
       });
       const isNewContact = !found;
@@ -2284,7 +2335,7 @@ async function ingestOutboundEcho(
       } else if (!found) {
         contact = await tx.contact.create({
           data: {
-            teamId,
+            workspaceId,
             identityChannel: channel,
             phoneNumber: isPhone ? evt.contactPhone : null,
             externalContactId: isPhone ? null : evt.externalContactId,
@@ -2300,7 +2351,7 @@ async function ingestOutboundEcho(
             // be the FIRST time we see a contact (owner messaged them natively
             // before they replied). Runs in `tx` so it rolls back atomically.
             customerId: await resolveCustomerId(
-              teamId,
+              workspaceId,
               {
                 phoneNumber: isPhone ? evt.contactPhone ?? null : null,
                 email: null,
@@ -2317,7 +2368,7 @@ async function ingestOutboundEcho(
       // closed one — there's fresh activity); create it only when the owner
       // started a brand-new chat from the phone.
       const existingConvo = await tx.conversation.findFirst({
-        where: { teamId, contactId: contact!.id },
+        where: { workspaceId, contactId: contact!.id },
         orderBy: { lastMessageAt: "desc" },
       });
       const isNewConversation = !existingConvo;
@@ -2328,7 +2379,7 @@ async function ingestOutboundEcho(
       if (!conversation) {
         conversation = await tx.conversation.create({
           data: {
-            teamId,
+            workspaceId,
             contactId: contact!.id,
             channel,
             // A phone-initiated thread lands in triage like any other new
@@ -2363,7 +2414,7 @@ async function ingestOutboundEcho(
   );
 
   const { message: created, created: isFreshRow } = await createOutboundMessageIdempotentDetailed({
-    teamId,
+    workspaceId,
     conversationId: conversation.id,
     externalId: evt.externalId,
     senderUserId: null,
@@ -2407,7 +2458,7 @@ async function ingestOutboundEcho(
   const mediaBlock = buildEchoMediaBlock(created.id, evt.media, evt.body);
   const message: Message = {
     id: created.id,
-    teamId,
+    workspaceId,
     conversationId: conversation.id,
     externalId: evt.externalId,
     senderUserId: null,
@@ -2453,7 +2504,7 @@ async function ingestOutboundEcho(
     preview,
     event: {
       type: "message.sent",
-      teamId,
+      workspaceId,
       conversationId: conversation.id,
       contactId: contact.id,
       message,
@@ -2484,7 +2535,7 @@ async function ingestOutboundEcho(
     );
     await publish({
       type: "conversation.status_changed",
-      teamId,
+      workspaceId,
       conversationId: conversation.id,
       previousStatus: "closed",
       newStatus: "pending",
@@ -2501,13 +2552,13 @@ async function ingestOutboundEcho(
   // next inbound. NO Meta read receipt (the phone already sent it).
   try {
     const cleared = await db.conversation.updateMany({
-      where: { id: conversation.id, teamId, unreadCount: { gt: 0 } },
+      where: { id: conversation.id, workspaceId, unreadCount: { gt: 0 } },
       data: { unreadCount: 0 },
     });
     if (cleared.count > 0) {
       await publish({
         type: "conversation.read",
-        teamId,
+        workspaceId,
         conversationId: conversation.id,
         readByUserId: COEXISTENCE_ECHO_READER,
       });
@@ -2525,14 +2576,14 @@ async function ingestOutboundEcho(
     try {
       await publish({
         type: "contact.created",
-        teamId,
+        workspaceId,
         contact: toContactWire(contact),
         source: "inbound",
         createdByUserId: null,
       });
     } catch (err) {
       console.error(
-        `[ingest] publish(contact.created) failed for echo team=${teamId} contact=${contact.id}:`,
+        `[ingest] publish(contact.created) failed for echo team=${workspaceId} contact=${contact.id}:`,
         err instanceof Error ? err.message : err,
       );
     }
@@ -2552,14 +2603,14 @@ async function ingestOutboundEcho(
  *     an inbox contact with real conversation history).
  */
 async function ingestContactSync(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   evt: NormalizedContactSync,
 ): Promise<void> {
   if (evt.action === "remove" || !evt.fullName) return;
 
   const contact = await db.contact.findFirst({
-    where: { teamId, phoneNumber: evt.phone, identityChannel: channel },
+    where: { workspaceId, phoneNumber: evt.phone, identityChannel: channel },
     include: { tags: { select: { id: true } } },
   });
   if (!contact) return;
@@ -2580,7 +2631,7 @@ async function ingestContactSync(
   try {
     await publish({
       type: "contact.updated",
-      teamId,
+      workspaceId,
       contact: toContactWire(updated),
       previousStageId: updated.stageId,
       fieldChanges: [],
@@ -2593,7 +2644,7 @@ async function ingestContactSync(
     });
   } catch (err) {
     console.error(
-      `[ingest] publish(contact.updated) failed for state_sync team=${teamId} contact=${contact.id}:`,
+      `[ingest] publish(contact.updated) failed for state_sync team=${workspaceId} contact=${contact.id}:`,
       err instanceof Error ? err.message : err,
     );
   }
@@ -2607,17 +2658,17 @@ async function ingestContactSync(
  * key. Best-effort — a system webhook must never throw into the ingest pipeline.
  */
 async function ingestContactNumberChange(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   evt: NormalizedContactNumberChange,
 ): Promise<void> {
   const oldContact = await db.contact.findFirst({
-    where: { teamId, identityChannel: channel, phoneNumber: evt.oldPhone, deletedAt: null },
+    where: { workspaceId, identityChannel: channel, phoneNumber: evt.oldPhone, deletedAt: null },
     select: { id: true },
   });
   if (!oldContact) return;
   const existingNew = await db.contact.findFirst({
-    where: { teamId, identityChannel: channel, phoneNumber: evt.newPhone, deletedAt: null },
+    where: { workspaceId, identityChannel: channel, phoneNumber: evt.newPhone, deletedAt: null },
     select: { id: true },
   });
   if (existingNew) {
@@ -2625,7 +2676,7 @@ async function ingestContactNumberChange(
       JSON.stringify({
         event: "whatsapp.number_change_conflict",
         severity: "warning",
-        teamId,
+        workspaceId,
         oldContactId: oldContact.id,
         newContactId: existingNew.id,
         note: "a contact already exists under the new number — left for a manual merge",
@@ -2641,7 +2692,7 @@ async function ingestContactNumberChange(
     })
     .catch((err) => {
       console.error(
-        `[ingest] number-change update failed team=${teamId} contact=${oldContact.id}:`,
+        `[ingest] number-change update failed team=${workspaceId} contact=${oldContact.id}:`,
         err instanceof Error ? err.message : err,
       );
       return null;
@@ -2650,7 +2701,7 @@ async function ingestContactNumberChange(
   try {
     await publish({
       type: "contact.updated",
-      teamId,
+      workspaceId,
       contact: toContactWire(updated),
       previousStageId: updated.stageId,
       fieldChanges: [],
@@ -2661,7 +2712,7 @@ async function ingestContactNumberChange(
     });
   } catch (err) {
     console.error(
-      `[ingest] publish(contact.updated) failed for number_change team=${teamId} contact=${oldContact.id}:`,
+      `[ingest] publish(contact.updated) failed for number_change team=${workspaceId} contact=${oldContact.id}:`,
       err instanceof Error ? err.message : err,
     );
   }
@@ -2680,7 +2731,7 @@ async function ingestContactNumberChange(
  * the name from the webhook) or providers without `fetchContactProfile`.
  */
 export async function enrichSocialContactNames(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   externalContactIds: string[],
   opts?: { forceAvatar?: boolean },
@@ -2700,7 +2751,7 @@ export async function enrichSocialContactNames(
 
   let config;
   try {
-    config = await binding.getSendConfig(teamId);
+    config = await binding.getSendConfig(workspaceId);
   } catch {
     return; // not connected / creds missing — skip, keep the id fallback
   }
@@ -2708,7 +2759,7 @@ export async function enrichSocialContactNames(
   await runWithConcurrency(unique, 4, async (extId) => {
     try {
       const contact = await db.contact.findFirst({
-        where: { teamId, identityChannel: channel, externalContactId: extId },
+        where: { workspaceId, identityChannel: channel, externalContactId: extId },
         include: { tags: { select: { id: true } } },
       });
       if (!contact) return;
@@ -2815,7 +2866,7 @@ export async function enrichSocialContactNames(
       });
       await publish({
         type: "contact.updated",
-        teamId,
+        workspaceId,
         contact: toContactWire(updated),
         previousStageId: updated.stageId,
         fieldChanges: [],
@@ -2825,7 +2876,7 @@ export async function enrichSocialContactNames(
       });
     } catch (err) {
       console.error(
-        `[ingest] social name enrichment failed team=${teamId} channel=${channel} id=${extId}:`,
+        `[ingest] social name enrichment failed team=${workspaceId} channel=${channel} id=${extId}:`,
         err instanceof Error ? err.message : err,
       );
     }
@@ -2858,37 +2909,37 @@ export interface HistoricalMessageInput {
 }
 
 export async function ingestHistoricalMessage(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   msg: HistoricalMessageInput,
 ): Promise<void> {
   const existing = await db.message.findUnique({
     where: {
-      teamId_channel_externalId: { teamId, channel, externalId: msg.externalId },
+      workspaceId_channel_externalId: { workspaceId, channel, externalId: msg.externalId },
     },
     select: { id: true },
   });
   if (existing) return;
 
-  const defaultStageId = await ensureDefaultStage(teamId);
+  const defaultStageId = await ensureDefaultStage(workspaceId);
   const { firstName, lastName } = splitContactName(msg.contactPhone);
 
   const conversation = await runWithSerializableRetry(async (tx) => {
     // Channel-scoped like the live message/call ingest sites: contact-share can
-    // stamp this phone onto a messenger/instagram contact (the (teamId,
+    // stamp this phone onto a messenger/instagram contact (the (workspaceId,
     // phoneNumber) partial unique is whatsapp-only), so an unscoped lookup would
     // fold this WhatsApp coexistence-history backfill onto a social contact.
     // channel is always 'whatsapp' here; cross-channel identity is a Customer
     // concern, never a fold.
     const found = await tx.contact.findFirst({
-      where: { teamId, identityChannel: channel, phoneNumber: msg.contactPhone },
+      where: { workspaceId, identityChannel: channel, phoneNumber: msg.contactPhone },
       select: { id: true },
     });
     let contactId = found?.id;
     if (!contactId) {
       const createdContact = await tx.contact.create({
         data: {
-          teamId,
+          workspaceId,
           identityChannel: channel,
           phoneNumber: msg.contactPhone,
           name: msg.contactPhone,
@@ -2914,14 +2965,14 @@ export async function ingestHistoricalMessage(
     }
 
     const existingConvo = await tx.conversation.findFirst({
-      where: { teamId, contactId },
+      where: { workspaceId, contactId },
       orderBy: { lastMessageAt: "desc" },
     });
     if (existingConvo) return existingConvo;
     // Backfilled-only threads land closed — archived context, not triage.
     return tx.conversation.create({
       data: {
-        teamId,
+        workspaceId,
         contactId,
         channel,
         status: "closed",
@@ -2932,7 +2983,7 @@ export async function ingestHistoricalMessage(
   });
 
   await createOutboundMessageIdempotent({
-    teamId,
+    workspaceId,
     conversationId: conversation.id,
     externalId: msg.externalId,
     senderUserId: null,
@@ -2976,17 +3027,17 @@ export async function ingestHistoricalMessage(
  */
 function buildMessageDomain(args: {
   createdId: string;
-  teamId: string;
+  workspaceId: string;
   channel: Channel;
   conversation: { id: string };
   evt: NormalizedInboundMessage;
   replySnapshot: ReplySnapshot | null;
   mediaPending: boolean;
 }): Message {
-  const { createdId, teamId, channel, conversation, evt, replySnapshot, mediaPending } = args;
+  const { createdId, workspaceId, channel, conversation, evt, replySnapshot, mediaPending } = args;
   return {
     id: createdId,
-    teamId,
+    workspaceId,
     conversationId: conversation.id,
     externalId: evt.externalId,
     senderUserId: null,
@@ -3264,7 +3315,7 @@ async function loadRecentForWorkflow(
 
 function toDomainConversation(c: {
   id: string;
-  teamId: string;
+  workspaceId: string;
   contactId: string;
   assignedUserId: string | null;
   status: string;
@@ -3279,7 +3330,7 @@ function toDomainConversation(c: {
 }): Conversation {
   return {
     id: c.id,
-    teamId: c.teamId,
+    workspaceId: c.workspaceId,
     contactId: c.contactId,
     assignedUserId: c.assignedUserId,
     status: c.status as ConversationStatus,
@@ -3327,15 +3378,15 @@ export function wamidMessageKey(externalId: string): string | null {
 
 export async function loadReplySnapshotByExternalId(
   externalId: string,
-  scope: { teamId: string; channel: Channel },
+  scope: { workspaceId: string; channel: Channel },
 ): Promise<ReplySnapshot | null> {
-  // Post the (teamId, channel, externalId) compound unique migration,
+  // Post the (workspaceId, channel, externalId) compound unique migration,
   // externalId alone isn't unique; pass the scope explicitly so cross-team
   // / cross-channel replies can't accidentally resolve to a different row.
   const row = await db.message.findUnique({
     where: {
-      teamId_channel_externalId: {
-        teamId: scope.teamId,
+      workspaceId_channel_externalId: {
+        workspaceId: scope.workspaceId,
         channel: scope.channel,
         externalId,
       },
@@ -3352,7 +3403,7 @@ export async function loadReplySnapshotByExternalId(
   const key = wamidMessageKey(externalId);
   if (!key) return null;
   const candidates = await db.message.findMany({
-    where: { teamId: scope.teamId, channel: scope.channel },
+    where: { workspaceId: scope.workspaceId, channel: scope.channel },
     orderBy: { createdAt: "desc" },
     take: 300,
     select: { ...REPLY_TO_INCLUDE.select, externalId: true },
@@ -3364,11 +3415,11 @@ export async function loadReplySnapshotByExternalId(
 }
 
 export async function loadReplySnapshotById(
-  teamId: string,
+  workspaceId: string,
   id: string,
 ): Promise<ReplySnapshot | null> {
   const row = await db.message.findFirst({
-    where: { id, teamId },
+    where: { id, workspaceId },
     select: REPLY_TO_INCLUDE.select,
   });
   return mapReplySnapshot(row);
@@ -3379,7 +3430,7 @@ export async function loadReplySnapshotById(
  * `40001` (serialization failure) OR `23505` (unique violation). Two
  * concurrent webhook handlers ingesting the first inbound from the same
  * brand-new phone can race the findFirst→create on both `Contact` (partial
- * unique on phone) and `Conversation` (full unique on (teamId, contactId)).
+ * unique on phone) and `Conversation` (full unique on (workspaceId, contactId)).
  * Serializable + a retry is the cleanest fix. In practice Postgres usually
  * fires P2034 first via predicate locking, but the unique-index backstop
  * can race ahead — we retry both signals so the loser's tx restarts cleanly

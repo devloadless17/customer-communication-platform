@@ -1606,7 +1606,7 @@ function BulkTagMenu({
             <TagChip
               tag={{
                 id: "preview",
-                teamId: "preview",
+                workspaceId: "preview",
                 name: query.trim() || "new tag",
                 color: newColor,
               }}

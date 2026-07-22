@@ -3,7 +3,7 @@
  *
  * Before this session, every team member could read any channel they were
  * not invited to: per-channel REST routes only gated on `(channelId,
- * teamId)`, and fanout went to `emitToTeam` with client-side filtering.
+ * workspaceId)`, and fanout went to `emitToTeam` with client-side filtering.
  * Workspace-wide search also bypassed membership.
  *
  * These specs verify the gate from BOTH directions:
@@ -30,7 +30,7 @@
 import { test, expect } from "@playwright/test";
 import { db, appAdmin, wipeTestData } from "../_helpers/db";
 
-let teamId: string;
+let workspaceId: string;
 let userId: string;
 let privateChannelId: string;
 let publicMessageId: string;
@@ -41,24 +41,24 @@ test.beforeAll(async () => {
   // Browsing/request identity is the e2e app-admin — channel-search membership
   // is evaluated for THIS viewer, so "viewer is a member" must add this user.
   const su = await appAdmin();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
   userId = su.userId;
 
   // The default channel — auto-created at team setup, auto-membership
   // for every team user. Reuse the existing row instead of creating one.
   const def = await db().teamChannel.findFirstOrThrow({
-    where: { teamId, isDefault: true },
+    where: { workspaceId, isDefault: true },
     select: { id: true },
   });
   defaultChannelId = def.id;
 
   // Wipe any leftover non-default channels from prior runs (wipeTestData
   // doesn't touch team_chat tables since they don't carry message-state
-  // that other suites care about). The schema has a `(teamId, name)`
+  // that other suites care about). The schema has a `(workspaceId, name)`
   // unique on TeamChannel, so a leftover `private-leadership` would
   // P2002 on create below.
   await db().teamChannel.deleteMany({
-    where: { teamId, isDefault: false },
+    where: { workspaceId, isDefault: false },
   });
 
   // A non-default channel. Create the row directly (Prisma bypasses the
@@ -67,7 +67,7 @@ test.beforeAll(async () => {
   // "non-member" for this channel's protection.
   const priv = await db().teamChannel.create({
     data: {
-      teamId,
+      workspaceId,
       name: "private-leadership",
       isDefault: false,
       createdById: userId,
@@ -82,7 +82,7 @@ test.beforeAll(async () => {
   const msg = await db().teamChannelMessage.create({
     data: {
       channelId: privateChannelId,
-      teamId,
+      workspaceId,
       authorUserId: userId,
       body: "Q3 salary planning numbers attached",
     },
@@ -96,7 +96,7 @@ test.afterAll(async () => {
   // Clean up the non-default channel this suite created — wipeTestData
   // doesn't touch team_chat tables.
   await db().teamChannel.deleteMany({
-    where: { teamId, isDefault: false },
+    where: { workspaceId, isDefault: false },
   });
   await db().$disconnect();
 });

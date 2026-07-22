@@ -6,6 +6,16 @@ export const CreateInviteSchema = z.object({
   email: z.string().trim().toLowerCase().email(),
   /** Optional — falls back to "agent" if missing OR not assignable by caller. */
   role: z.string().optional(),
+  /**
+   * Which workspace to invite INTO. Defaults to the caller's active one, which
+   * is what the in-workspace "Team members" page wants.
+   *
+   * Organization settings passes it explicitly so an org admin can staff a
+   * workspace they are not currently looking at. It is validated against the
+   * caller's own organization server-side — a workspace id from another org
+   * must never be addressable.
+   */
+  workspaceId: z.string().min(1).optional(),
 });
 export type CreateInviteInput = z.infer<typeof CreateInviteSchema>;
 

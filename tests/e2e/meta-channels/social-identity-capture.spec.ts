@@ -98,7 +98,7 @@ test("WhatsApp contacts[].user_id + username land on the contact as bsuid/userna
   expect(res.status).toBe(200);
 
   const contact = await db().contact.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: "whatsapp", phoneNumber: phone },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "whatsapp", phoneNumber: phone },
     select: { bsuid: true, username: true, phoneNumber: true, name: true },
   });
   expect(contact?.phoneNumber).toBe(phone);
@@ -122,7 +122,7 @@ test("a phone-less WhatsApp webhook resolves by BSUID and never fabricates a pho
   expect(res.status).toBe(200);
 
   const byBsuid = await db().contact.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: "whatsapp", bsuid },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "whatsapp", bsuid },
     select: { phoneNumber: true, bsuid: true },
   });
   expect(byBsuid).not.toBeNull();
@@ -130,7 +130,7 @@ test("a phone-less WhatsApp webhook resolves by BSUID and never fabricates a pho
 
   // The mangled-digits contact must not exist.
   const fabricated = await db().contact.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, phoneNumber: "946402411360999" },
+    where: { workspaceId: META_TEST_TEAM_ID, phoneNumber: "946402411360999" },
     select: { id: true },
   });
   expect(fabricated).toBeNull();
@@ -172,7 +172,7 @@ async function seedOffer(
 ) {
   await db().message.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       conversationId,
       externalId,
       channel: "messenger",
@@ -192,7 +192,7 @@ async function socialConversationFor(senderId: string): Promise<string> {
     socialQuickReply({ senderId, mid: `mid.seed.${senderId}`, payload: "hello" }),
   );
   const contact = await db().contact.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: senderId },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: senderId },
     select: { conversations: { select: { id: true }, take: 1 } },
   });
   const conversationId = contact?.conversations[0]?.id;
@@ -208,12 +208,12 @@ test("a tapped user_email chip writes Contact.email and merges into the matching
   // A WhatsApp contact for the SAME person already carries this email, under its
   // own Customer. The share should fuse them.
   const waCustomer = await db().customer.create({
-    data: { teamId: META_TEST_TEAM_ID, name: "Shared Person" },
+    data: { workspaceId: META_TEST_TEAM_ID, name: "Shared Person" },
     select: { id: true },
   });
   await db().contact.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       identityChannel: "whatsapp",
       phoneNumber: "15551239777",
       email,
@@ -235,7 +235,7 @@ test("a tapped user_email chip writes Contact.email and merges into the matching
   expect(res.status).toBe(200);
 
   const social = await db().contact.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: senderId },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: senderId },
     select: { email: true, customerId: true },
   });
   expect(social?.email).toBe(email);
@@ -266,7 +266,7 @@ test("a reply matching an authored option id is never mistaken for a shared emai
   expect(res.status).toBe(200);
 
   const social = await db().contact.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: senderId },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: senderId },
     select: { email: true },
   });
   expect(social?.email).toBeNull();
@@ -290,7 +290,7 @@ test("a quick-reply with no preceding chip offer never writes an identity key", 
   expect(res.status).toBe(200);
 
   const social = await db().contact.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: senderId },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: senderId },
     select: { email: true },
   });
   expect(social?.email).toBeNull();
@@ -313,7 +313,7 @@ test("an email tap is ignored when only the phone chip was offered", async () =>
   expect(res.status).toBe(200);
 
   const social = await db().contact.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: senderId },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: senderId },
     select: { email: true, phoneNumber: true },
   });
   expect(social?.email).toBeNull();

@@ -53,7 +53,7 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
   const worker = new Worker<HistoryJobData>(
     COEXISTENCE_HISTORY_QUEUE_NAME,
     async (job: Job<HistoryJobData>) => {
-      const { teamId, payload } = job.data;
+      const { workspaceId, payload } = job.data;
       let events: NormalizedEvent[];
       try {
         events = getMetaProvider().parseWebhook(payload);
@@ -61,7 +61,7 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
         // A malformed chunk is permanent poison — log + swallow so BullMQ
         // doesn't retry-storm it. (Throwing would burn all 5 attempts.)
         console.error(
-          `[coexistence-history] parse failed for team=${teamId}; dropping chunk:`,
+          `[coexistence-history] parse failed for team=${workspaceId}; dropping chunk:`,
           err instanceof Error ? err.message : err,
         );
         return;
@@ -73,7 +73,7 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
         // Coexistence history is WhatsApp-only, so contactPhone is always set;
         // the guard just satisfies the now-optional identity type.
         if (evt.kind === "message" && evt.contactPhone) {
-          await ingestHistoricalMessage(teamId, "whatsapp", {
+          await ingestHistoricalMessage(workspaceId, "whatsapp", {
             externalId: evt.externalId,
             contactPhone: evt.contactPhone,
             body: evt.body,
@@ -87,7 +87,7 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
           // Coexistence echoes always carry a phone (WhatsApp); the field is now
           // optional on the shared type (social echoes use externalContactId).
           if (!evt.contactPhone) continue;
-          await ingestHistoricalMessage(teamId, "whatsapp", {
+          await ingestHistoricalMessage(workspaceId, "whatsapp", {
             externalId: evt.externalId,
             contactPhone: evt.contactPhone,
             body: evt.body,
@@ -102,7 +102,7 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
       console.log(
         JSON.stringify({
           event: "coexistence.history_chunk_ingested",
-          teamId,
+          workspaceId,
           landed,
         }),
       );

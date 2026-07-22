@@ -33,7 +33,7 @@ export function signWebhookBody(secret: string, body: string, timestamp = Math.f
  * Generate a fresh shared secret for a new webhook. 32 bytes is the
  * upper bound HMAC-SHA256 benefits from; more buys no real security.
  *
- * Prefix matches our `TeamApiKey` convention (`ccp_`) so partner code can
+ * Prefix matches our `WorkspaceApiKey` convention (`ccp_`) so partner code can
  * pattern-match: if it starts with `ccp_whsec_`, it's a webhook secret.
  */
 export function generateWebhookSecret(): string {

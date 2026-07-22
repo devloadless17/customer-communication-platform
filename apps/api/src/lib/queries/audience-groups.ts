@@ -31,9 +31,9 @@ function audienceChannelFilter(channel?: Channel) {
 // can name it without reaching across the package boundary.
 export type { AudienceGroupDto };
 
-export async function listAudienceGroups(teamId: string): Promise<AudienceGroupDto[]> {
+export async function listAudienceGroups(workspaceId: string): Promise<AudienceGroupDto[]> {
   const rows = await db.audienceGroup.findMany({
-    where: { teamId },
+    where: { workspaceId },
     orderBy: { createdAt: "desc" },
     include: {
       createdBy: { select: { name: true } },
@@ -69,7 +69,7 @@ export async function listAudienceGroups(teamId: string): Promise<AudienceGroupD
   // The union is the same one `countAudienceContacts` expresses for a single
   // group — manual members ∪ tag carriers, deduped, soft-deleted excluded —
   // just evaluated for every group at once so it stays one round trip. Both
-  // arms are teamId-scoped independently: membership rows are not
+  // arms are workspaceId-scoped independently: membership rows are not
   // tenant-tagged themselves, so the Contact join is what enforces isolation.
   // `manualCount` rides along in the same pass so it stays soft-delete aware —
   // a Prisma `_count` can't carry the `deletedAt IS NULL` filter, and an
@@ -94,7 +94,7 @@ export async function listAudienceGroups(teamId: string): Promise<AudienceGroupD
   // `COUNT(c.id)` (not `COUNT(*)`) is load-bearing: it skips the NULLs left by
   // members the Contact join rejected — soft-deleted, or belonging to another
   // team. That join IS the tenant-isolation check, since membership rows carry
-  // no teamId of their own.
+  // no workspaceId of their own.
   const counts = await db.$queryRaw<
     Array<{ groupId: string; count: bigint; manualCount: bigint }>
   >`
@@ -118,14 +118,14 @@ export async function listAudienceGroups(teamId: string): Promise<AudienceGroupD
     ) mem ON TRUE
     LEFT JOIN "Contact" c
       ON c.id = mem.contact_id
-     AND c."teamId" = g."teamId"
+     AND c."workspaceId" = g."workspaceId"
      AND c."deletedAt" IS NULL
      -- Scope to BROADCASTABLE channels, matching countAudienceContacts'
      -- no-channel default, so list / detail / composer all report the same
      -- number — an unscoped count folds in webchatwidget visitors the runner
      -- drops, inflating memberCount above actual reach.
      AND c."identityChannel" = ANY(${BROADCASTABLE_LIST}::"Channel"[])
-    WHERE g."teamId" = ${teamId}
+    WHERE g."workspaceId" = ${workspaceId}
     GROUP BY g.id
   `;
   const countByGroup = new Map(
@@ -134,7 +134,7 @@ export async function listAudienceGroups(teamId: string): Promise<AudienceGroupD
 
   return rows.map((g) => ({
     id: g.id,
-    teamId: g.teamId,
+    workspaceId: g.workspaceId,
     name: g.name,
     description: g.description,
     tagIds: g.tags.map((t) => t.id),
@@ -149,11 +149,11 @@ export async function listAudienceGroups(teamId: string): Promise<AudienceGroupD
 }
 
 export async function getAudienceGroup(
-  teamId: string,
+  workspaceId: string,
   id: string,
 ): Promise<AudienceGroupDto | null> {
   const g = await db.audienceGroup.findFirst({
-    where: { id, teamId },
+    where: { id, workspaceId },
     include: {
       createdBy: { select: { name: true } },
       tags: { select: { id: true } },
@@ -165,13 +165,13 @@ export async function getAudienceGroup(
     },
   });
   if (!g) return null;
-  const memberCount = await resolveAudienceGroupMemberCount(teamId, {
+  const memberCount = await resolveAudienceGroupMemberCount(workspaceId, {
     tagIds: g.tags.map((t) => t.id),
     manualContactIds: g.contacts.map((c) => c.id),
   });
   return {
     id: g.id,
-    teamId: g.teamId,
+    workspaceId: g.workspaceId,
     name: g.name,
     description: g.description,
     tagIds: g.tags.map((t) => t.id),
@@ -192,7 +192,7 @@ export async function getAudienceGroup(
  * UNION of manual + tag-matched, deduped server-side.
  */
 export async function resolveAudienceGroupMembers(
-  teamId: string,
+  workspaceId: string,
   {
     tagIds,
     manualContactIds,
@@ -204,14 +204,14 @@ export async function resolveAudienceGroupMembers(
   const where: Prisma.ContactWhereInput =
     tagIds.length > 0
       ? {
-          teamId,
+          workspaceId,
           deletedAt: null,
           OR: [
             { id: { in: manualContactIds } },
             { tags: { some: { id: { in: tagIds } } } },
           ],
         }
-      : { teamId, deletedAt: null, id: { in: manualContactIds } };
+      : { workspaceId, deletedAt: null, id: { in: manualContactIds } };
 
   // `limit` is a MEMORY guard, not the policy. A tag matching the whole contact
   // book resolves the entire set into the caller's heap before anything checks
@@ -228,10 +228,10 @@ export async function resolveAudienceGroupMembers(
 }
 
 async function resolveAudienceGroupMemberCount(
-  teamId: string,
+  workspaceId: string,
   args: { tagIds: string[]; manualContactIds: string[] },
 ): Promise<number> {
-  return countAudienceContacts(teamId, {
+  return countAudienceContacts(workspaceId, {
     tagIds: args.tagIds,
     contactIds: args.manualContactIds,
   });
@@ -245,7 +245,7 @@ async function resolveAudienceGroupMemberCount(
  * every contact, which falls apart past a few thousand).
  */
 export async function countAudienceContacts(
-  teamId: string,
+  workspaceId: string,
   {
     tagIds = [],
     contactIds = [],
@@ -263,7 +263,7 @@ export async function countAudienceContacts(
   // ignored. Kept separate from the empty-selection case below, which returns 0
   // on purpose so an unconfigured custom audience never fans out to everyone.
   if (all) {
-    return db.contact.count({ where: { teamId, deletedAt: null, ...channelFilter } });
+    return db.contact.count({ where: { workspaceId, deletedAt: null, ...channelFilter } });
   }
   const tags = tagIds.filter((s) => s.length > 0);
   const ids = contactIds.filter((s) => s.length > 0);
@@ -271,14 +271,14 @@ export async function countAudienceContacts(
   const where: Prisma.ContactWhereInput =
     tags.length > 0 && ids.length > 0
       ? {
-          teamId,
+          workspaceId,
           deletedAt: null,
           ...channelFilter,
           OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }],
         }
       : tags.length > 0
-        ? { teamId, deletedAt: null, ...channelFilter, tags: { some: { id: { in: tags } } } }
-        : { teamId, deletedAt: null, ...channelFilter, id: { in: ids } };
+        ? { workspaceId, deletedAt: null, ...channelFilter, tags: { some: { id: { in: tags } } } }
+        : { workspaceId, deletedAt: null, ...channelFilter, id: { in: ids } };
   return db.contact.count({ where });
 }
 
@@ -289,7 +289,7 @@ export async function countAudienceContacts(
  * without shipping the whole contact list.
  */
 export async function previewAudienceContacts(
-  teamId: string,
+  workspaceId: string,
   { tagIds = [], contactIds = [] }: { tagIds?: string[]; contactIds?: string[] },
   sampleLimit = 200,
   // Scoped exactly like `countAudienceContacts` — the preview answers "who am I
@@ -313,14 +313,14 @@ export async function previewAudienceContacts(
   const where: Prisma.ContactWhereInput =
     tags.length > 0 && ids.length > 0
       ? {
-          teamId,
+          workspaceId,
           deletedAt: null,
           ...channelFilter,
           OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }],
         }
       : tags.length > 0
-        ? { teamId, deletedAt: null, ...channelFilter, tags: { some: { id: { in: tags } } } }
-        : { teamId, deletedAt: null, ...channelFilter, id: { in: ids } };
+        ? { workspaceId, deletedAt: null, ...channelFilter, tags: { some: { id: { in: tags } } } }
+        : { workspaceId, deletedAt: null, ...channelFilter, id: { in: ids } };
   const [total, sample] = await Promise.all([
     db.contact.count({ where }),
     db.contact.findMany({
@@ -343,7 +343,7 @@ export async function previewAudienceContacts(
       phoneNumber: c.phoneNumber,
       tags: c.tags.map((t) => ({
         id: t.id,
-        teamId: t.teamId,
+        workspaceId: t.workspaceId,
         name: t.name,
         color: t.color as TagColor,
       })),

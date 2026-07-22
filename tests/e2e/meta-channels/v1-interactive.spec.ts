@@ -38,7 +38,7 @@ const uniq = () => Math.random().toString(36).slice(2, 10);
 
 test("Messenger interactive send with consent chips posts quick replies to Meta", async () => {
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "messenger",
     externalContactId: `psid_int_${uniq()}`,
     name: "Interactive Customer",
@@ -76,7 +76,7 @@ test("Messenger interactive send with consent chips posts quick replies to Meta"
 
 test("Instagram list options reach Meta as quick replies", async () => {
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "instagram",
     externalContactId: `igsid_int_${uniq()}`,
     name: "IG Interactive",
@@ -103,7 +103,7 @@ test("Instagram list options reach Meta as quick replies", async () => {
 
 test("WhatsApp refuses consent chips instead of silently dropping them", async () => {
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "whatsapp",
     phoneNumber: `9613${Math.floor(1000000 + Math.random() * 8999999)}`,
     name: "WA Interactive",
@@ -129,7 +129,7 @@ test("WhatsApp refuses consent chips instead of silently dropping them", async (
 
 test("a repeated Idempotency-Key replays without a second Meta post", async () => {
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "messenger",
     externalContactId: `psid_idem_${uniq()}`,
     name: "Idem Customer",
@@ -155,7 +155,7 @@ test("a repeated Idempotency-Key replays without a second Meta post", async () =
 
 test("duplicate option titles are rejected before Meta is called", async () => {
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "messenger",
     externalContactId: `psid_dup_${uniq()}`,
     name: "Dup Titles",
@@ -205,7 +205,7 @@ test("duplicate option titles are rejected before Meta is called", async () => {
  */
 test("an ambiguous Meta 5xx RETAINS the idempotency claim — a same-key retry is refused, not re-sent", async () => {
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "messenger",
     externalContactId: `psid_amb_${uniq()}`,
     name: "Ambiguous Send",
@@ -240,7 +240,7 @@ test("an ambiguous Meta 5xx RETAINS the idempotency claim — a same-key retry i
 
 test("a provable non-send (Meta 4xx) RELEASES the claim so a corrected retry can proceed", async () => {
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "messenger",
     externalContactId: `psid_4xx_${uniq()}`,
     name: "Rejected Send",

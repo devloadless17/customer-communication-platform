@@ -76,7 +76,7 @@ export type { ListContactsOpts };
  * user is looking at either way.
  */
 export function buildContactFilterWhere(
-  teamId: string,
+  workspaceId: string,
   opts: ListContactsOpts = {},
 ): Prisma.Sql {
   const search = opts.search?.trim() ?? "";
@@ -88,7 +88,7 @@ export function buildContactFilterWhere(
   const tagIds = (opts.tagIds ?? []).filter((t) => t.length > 0);
 
   return Prisma.sql`
-    c."teamId" = ${teamId}
+    c."workspaceId" = ${workspaceId}
     AND c."deletedAt" IS NULL
     ${
       channel && isEphemeralChannel(channel)
@@ -152,11 +152,11 @@ export function buildContactFilterWhere(
  * reject). One flat query, no LATERAL join (the sort key isn't needed here).
  */
 export async function resolveContactIdsByFilter(
-  teamId: string,
+  workspaceId: string,
   opts: ListContactsOpts,
   cap: number,
 ): Promise<{ ids: string[]; capped: boolean }> {
-  const where = buildContactFilterWhere(teamId, opts);
+  const where = buildContactFilterWhere(workspaceId, opts);
   const rows = await db.$queryRaw<Array<{ id: string }>>`
     SELECT c.id
     FROM "Contact" c
@@ -182,7 +182,7 @@ export async function resolveContactIdsByFilter(
  * folding. We cast to text and use ILIKE so partial matches work.
  */
 export async function listContacts(
-  teamId: string,
+  workspaceId: string,
   opts: ListContactsOpts = {},
 ): Promise<CursorPage<ContactListItem>> {
   const take = clampTake(opts.take, CONTACTS_PAGE);
@@ -205,12 +205,12 @@ export async function listContacts(
   // KNOWN INDEX-MISS (acceptable at pilot scale). No JSONB GIN serves substring
   // (jsonb_path_ops only serves @>/@?/@@ containment, which is why the old
   // Contact_customFields_gin_idx was dropped as dead write overhead, migration
-  // 20260611130200). It seq-scans, but ONLY over this team's LIVE rows (teamId
+  // 20260611130200). It seq-scans, but ONLY over this team's LIVE rows (workspaceId
   // + deletedAt IS NULL narrow first via Contact_teamId_active_idx), so it's
   // bounded by one tenant's contact count. Dropping the arm would lose "find a
   // contact by any custom-field value" from quick-search. TRIGGER to revisit: a
   // team crosses ~50k contacts AND EXPLAIN shows this as the hot cost.
-  const filterWhere = buildContactFilterWhere(teamId, opts);
+  const filterWhere = buildContactFilterWhere(workspaceId, opts);
 
   // Tag filter is now pushed down as `EXISTS (... _ContactToTag ...)` in
   // the raw query below. The previous approach pre-resolved every matching
@@ -229,7 +229,7 @@ export async function listContacts(
   const rows = await db.$queryRaw<
     Array<{
       id: string;
-      teamId: string;
+      workspaceId: string;
       phoneNumber: string | null;
       identityChannel: "whatsapp" | null;
       externalContactId: string | null;
@@ -248,7 +248,7 @@ export async function listContacts(
   >`
     SELECT
       c.id,
-      c."teamId",
+      c."workspaceId",
       c."phoneNumber",
       c."identityChannel",
       c."externalContactId",
@@ -267,12 +267,12 @@ export async function listContacts(
     LEFT JOIN LATERAL (
       SELECT id, "lastMessageAt"
       FROM "Conversation" co
-      -- Match on (teamId, contactId) so the LEFT JOIN LATERAL seeks the
+      -- Match on (workspaceId, contactId) so the LEFT JOIN LATERAL seeks the
       -- Conversation_teamId_contactId_key unique index. Filtering on
       -- contactId alone could not use it (contactId is not the leading column),
       -- degrading to a scan per contact row on the list. Contacts are
-      -- team-siloed, so co.teamId always equals c.teamId.
-      WHERE co."teamId" = c."teamId"
+      -- team-siloed, so co.workspaceId always equals c.workspaceId.
+      WHERE co."workspaceId" = c."workspaceId"
         AND co."contactId" = c.id
         AND co.status <> 'closed'
       ORDER BY co."lastMessageAt" DESC, co.id DESC
@@ -300,13 +300,13 @@ export async function listContacts(
     -- the LEFT JOIN LATERAL, so NO index can serve this ORDER BY — and the
     -- keyset cursor predicate above references the same expression. So EVERY
     -- page (incl. scroll pages 2,3,…) re-runs the lateral probe (one
-    -- Conversation_teamId_contactId_key seek per contact passing teamId +
+    -- Conversation_teamId_contactId_key seek per contact passing workspaceId +
     -- deletedAt IS NULL), materializes N sort keys, top-N sorts, then LIMIT.
     -- Bounded by one tenant's live-contact count — single-digit ms at a few
     -- thousand. WHEN it trips (50k contacts AND EXPLAIN shows this hot):
     -- denormalize the sort key onto Contact (e.g. lastActivityAt, bumped by the
     -- same ingest/send paths that maintain lastInboundAt + the conversation
-    -- summary), add @@index([teamId, lastActivityAt DESC, id DESC]), and key
+    -- summary), add @@index([workspaceId, lastActivityAt DESC, id DESC]), and key
     -- BOTH this ORDER BY and the cursor off that column — turning every page
     -- into a pure keyset index walk.
     ORDER BY COALESCE(conv."lastMessageAt", c."createdAt") DESC, c.id DESC
@@ -352,7 +352,7 @@ export async function listContacts(
   if (sliced.length > 0) {
     const ids = sliced.map((r) => r.id);
     const links = await db.contact.findMany({
-      where: { teamId, id: { in: ids } },
+      where: { workspaceId, id: { in: ids } },
       select: { id: true, tags: { select: { id: true } } },
     });
     for (const c of links) {
@@ -363,7 +363,7 @@ export async function listContacts(
   const items: ContactListItem[] = sliced.map((r) => ({
     contact: {
       id: r.id,
-      teamId: r.teamId,
+      workspaceId: r.workspaceId,
       phoneNumber: r.phoneNumber,
       identityChannel: r.identityChannel,
       externalContactId: r.externalContactId,
@@ -407,7 +407,7 @@ export async function listContacts(
  * discarded OFFSET rows grow.
  *
  * It is NOT as bad as the shape suggests. `Conversation` carries
- * `@@unique([teamId, contactId])`, so the LEFT JOIN LATERAL resolves to ONE
+ * `@@unique([workspaceId, contactId])`, so the LEFT JOIN LATERAL resolves to ONE
  * unique-index lookup per contact rather than a scan. At 200k contacts that
  * is 200k index probes plus a sort — real, but a filtered directory page the
  * user explicitly opened, not a hot path.
@@ -422,13 +422,13 @@ export async function listContacts(
  * flat list (keyset, indexed) is the fast path and is the default.
  */
 export async function listPeople(
-  teamId: string,
+  workspaceId: string,
   opts: ListContactsOpts = {},
 ): Promise<CursorPage<ContactListItem>> {
   const take = clampTake(opts.take, CONTACTS_PAGE);
   const page = opts.page != null && opts.page >= 1 ? opts.page : 1;
   const offset = (page - 1) * take;
-  const filterWhere = buildContactFilterWhere(teamId, { ...opts, channel: undefined });
+  const filterWhere = buildContactFilterWhere(workspaceId, { ...opts, channel: undefined });
 
   // DISTINCT ON must lead ORDER BY with the person key, so pick the
   // representative contact per person in the inner query, then order the OUTER
@@ -436,7 +436,7 @@ export async function listPeople(
   const rows = await db.$queryRaw<
     Array<{
       id: string;
-      teamId: string;
+      workspaceId: string;
       phoneNumber: string | null;
       identityChannel: Channel;
       externalContactId: string | null;
@@ -457,7 +457,7 @@ export async function listPeople(
     SELECT sub.* FROM (
       SELECT DISTINCT ON (COALESCE(c."customerId", c.id))
         c.id,
-        c."teamId",
+        c."workspaceId",
         c."phoneNumber",
         c."identityChannel",
         c."externalContactId",
@@ -477,7 +477,7 @@ export async function listPeople(
       LEFT JOIN LATERAL (
         SELECT id, "lastMessageAt"
         FROM "Conversation" co
-        WHERE co."teamId" = c."teamId"
+        WHERE co."workspaceId" = c."workspaceId"
           AND co."contactId" = c.id
           AND co.status <> 'closed'
         ORDER BY co."lastMessageAt" DESC, co.id DESC
@@ -507,7 +507,7 @@ export async function listPeople(
   ];
   // Dedup each person's sibling contacts down to the distinct channels they span
   // (the list row only needs the channel set, not the per-channel conversation).
-  const siblingsByCustomer = await siblingChannelsByCustomer(teamId, customerIds);
+  const siblingsByCustomer = await siblingChannelsByCustomer(workspaceId, customerIds);
   const channelsByCustomer = new Map<string, Channel[]>();
   for (const [customerId, siblings] of siblingsByCustomer) {
     const channels: Channel[] = [];
@@ -521,7 +521,7 @@ export async function listPeople(
   if (rows.length > 0) {
     const ids = rows.map((r) => r.id);
     const links = await db.contact.findMany({
-      where: { teamId, id: { in: ids } },
+      where: { workspaceId, id: { in: ids } },
       select: { id: true, tags: { select: { id: true } } },
     });
     for (const c of links) {
@@ -532,7 +532,7 @@ export async function listPeople(
   const items: ContactListItem[] = rows.map((r) => ({
     contact: {
       id: r.id,
-      teamId: r.teamId,
+      workspaceId: r.workspaceId,
       phoneNumber: r.phoneNumber,
       identityChannel: r.identityChannel,
       externalContactId: r.externalContactId,
@@ -562,15 +562,15 @@ export async function listPeople(
  * can iterate without re-sorting.
  */
 export async function listContactFieldDefinitions(
-  teamId: string,
+  workspaceId: string,
 ): Promise<ContactFieldDefinition[]> {
   const rows = await db.contactFieldDefinition.findMany({
-    where: { teamId },
+    where: { workspaceId },
     orderBy: [{ order: "asc" }, { createdAt: "asc" }],
   });
   return rows.map((r) => ({
     id: r.id,
-    teamId: r.teamId,
+    workspaceId: r.workspaceId,
     key: r.key,
     label: r.label,
     order: r.order,
@@ -579,8 +579,8 @@ export async function listContactFieldDefinitions(
 }
 
 /** Total number of (non-deleted) contacts in a team. */
-export async function countContacts(teamId: string): Promise<number> {
-  return db.contact.count({ where: { teamId, deletedAt: null } });
+export async function countContacts(workspaceId: string): Promise<number> {
+  return db.contact.count({ where: { workspaceId, deletedAt: null } });
 }
 
 /**
@@ -589,7 +589,7 @@ export async function countContacts(teamId: string): Promise<number> {
  * Returns only the fields a chip needs — never the full Contact row.
  */
 export async function lookupContacts(
-  teamId: string,
+  workspaceId: string,
   ids: string[],
 ): Promise<Array<{ id: string; name: string; phoneNumber: string | null }>> {
   const clean = Array.from(
@@ -600,7 +600,7 @@ export async function lookupContacts(
     // deletedAt:null so a tombstoned contact can't flash back into picker chips
     // / the contacts:bulk_updated refetch — matches every other read surface
     // (countContacts, list, remove, update, bulk, setTags all filter it).
-    where: { teamId, deletedAt: null, id: { in: clean } },
+    where: { workspaceId, deletedAt: null, id: { in: clean } },
     select: { id: true, name: true, phoneNumber: true },
   });
 }

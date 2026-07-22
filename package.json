@@ -18,6 +18,7 @@
     "api:dev": "pnpm --filter @ccp/api dev",
     "api:start": "pnpm --filter @ccp/api start",
     "api:typecheck": "pnpm --filter @ccp/api typecheck",
+    "check:prisma-fields": "node scripts/check-prisma-fields.mjs",
     "db:migrate": "prisma migrate dev",
     "db:reset": "prisma migrate reset",
     "db:seed": "prisma db seed",

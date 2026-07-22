@@ -80,20 +80,20 @@ function phaseToStatus(phase: NormalizedCallEvent["phase"]): CallStatus | null {
 }
 
 export async function ingestCallEvent(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   evt: NormalizedCallEvent,
 ): Promise<void> {
   // Permission events take a side-path: they mutate Contact, not Call.
   if (evt.phase === "permission_granted" || evt.phase === "permission_revoked") {
-    await handlePermissionEvent(teamId, channel, evt);
+    await handlePermissionEvent(workspaceId, channel, evt);
     return;
   }
 
   // Channel-aware caller identity — mirrors the message-ingest resolution
   // (providers/ingest.ts): phone channels (WhatsApp) resolve/create by
   // `phoneNumber`; external-id channels (Messenger PSID / Instagram IGSID) by
-  // the compound `(teamId, identityChannel, externalContactId)`. Exactly one
+  // the compound `(workspaceId, identityChannel, externalContactId)`. Exactly one
   // identity is set on the event, so a PSID is never digit-stripped into a
   // phone nor collides with a WhatsApp contact sharing the same digits.
   // On phone channels the caller may be identified by a BSUID instead of a
@@ -116,7 +116,7 @@ export async function ingestCallEvent(
     // at-least-once; a duplicate terminate for a purged row is a safe no-op).
     const existingCall = await db.call.findUnique({
       where: {
-        teamId_channel_externalCallId: { teamId, channel, externalCallId: evt.externalCallId },
+        workspaceId_channel_externalCallId: { workspaceId, channel, externalCallId: evt.externalCallId },
       },
       select: { conversation: { include: { contact: true } } },
     });
@@ -129,7 +129,7 @@ export async function ingestCallEvent(
     // Serializable-with-retry pattern as message ingest so two concurrent
     // first-time call webhooks for the same brand-new caller can't race-
     // create duplicate rows.
-    const defaultStageId = await ensureDefaultStage(teamId);
+    const defaultStageId = await ensureDefaultStage(workspaceId);
     const resolved = await runWithSerializableRetry(async (tx) => {
       // Try BOTH phone and BSUID (phone first — it's the canonical key), so a
       // caller first seen cold as a BSUID and later warm as a phone resolves to
@@ -150,24 +150,24 @@ export async function ingestCallEvent(
       if (isPhone) {
         if (evt.contactPhone) {
           // Channel-scoped like message ingest: contact-share can stamp this
-          // phone onto a social contact (the (teamId, phoneNumber) partial
+          // phone onto a social contact (the (workspaceId, phoneNumber) partial
           // unique is whatsapp-only), so an unscoped lookup could attach an
           // inbound WhatsApp call to a messenger/instagram contact sharing the
           // number. Cross-channel identity is a Customer concern, not a fold.
           existingContact = await tx.contact.findFirst({
-            where: { teamId, identityChannel: channel, phoneNumber: evt.contactPhone },
+            where: { workspaceId, identityChannel: channel, phoneNumber: evt.contactPhone },
             select: contactIdentitySelect,
           });
         }
         if (!existingContact && evt.bsuid) {
           existingContact = await tx.contact.findFirst({
-            where: { teamId, identityChannel: channel, bsuid: evt.bsuid },
+            where: { workspaceId, identityChannel: channel, bsuid: evt.bsuid },
             select: contactIdentitySelect,
           });
         }
       } else {
         existingContact = await tx.contact.findFirst({
-          where: { teamId, identityChannel: channel, externalContactId: evt.externalContactId },
+          where: { workspaceId, identityChannel: channel, externalContactId: evt.externalContactId },
           select: contactIdentitySelect,
         });
       }
@@ -200,7 +200,7 @@ export async function ingestCallEvent(
       } else {
         contact = await tx.contact.create({
           data: {
-            teamId,
+            workspaceId,
             identityChannel: channel,
             phoneNumber: isPhone ? evt.contactPhone ?? null : null,
             externalContactId: isPhone ? null : evt.externalContactId,
@@ -219,7 +219,7 @@ export async function ingestCallEvent(
             // "customer"` broadcast until the drift sweeper happened to catch it.
             // Inside `tx` so the Customer rolls back with the contact.
             customerId: await resolveCustomerId(
-              teamId,
+              workspaceId,
               {
                 phoneNumber: isPhone ? evt.contactPhone ?? null : null,
                 email: null,
@@ -234,7 +234,7 @@ export async function ingestCallEvent(
       // One conversation per contact, forever. Closed → pending reopen on
       // an inbound call mirrors the message-ingest reopen.
       const existingConvo = await tx.conversation.findFirst({
-        where: { teamId, contactId: contact.id },
+        where: { workspaceId, contactId: contact.id },
         orderBy: { lastMessageAt: "desc" },
       });
       let conversation = existingConvo;
@@ -252,7 +252,7 @@ export async function ingestCallEvent(
       if (!conversation) {
         conversation = await tx.conversation.create({
           data: {
-            teamId,
+            workspaceId,
             contactId: contact.id,
             channel,
             status: "pending",
@@ -287,14 +287,14 @@ export async function ingestCallEvent(
       try {
         await publish({
           type: "contact.created",
-          teamId,
+          workspaceId,
           contact: toContactWire(resolved.contact),
           source: "inbound",
           createdByUserId: null,
         });
       } catch (err) {
         console.error(
-          `[ingest-call] publish(contact.created) failed for team=${teamId} contact=${resolved.contact.id}:`,
+          `[ingest-call] publish(contact.created) failed for team=${workspaceId} contact=${resolved.contact.id}:`,
           err,
         );
       }
@@ -311,8 +311,8 @@ export async function ingestCallEvent(
     await db.$transaction(async (tx) => {
       const existing = await tx.call.findUnique({
         where: {
-          teamId_channel_externalCallId: {
-            teamId,
+          workspaceId_channel_externalCallId: {
+            workspaceId,
             channel,
             externalCallId: evt.externalCallId,
           },
@@ -436,7 +436,7 @@ export async function ingestCallEvent(
           //      the Calls page (row=completed) and the thread timeline.
           await publishInTx(tx, {
             type: "call.ended",
-            teamId,
+            workspaceId,
             conversationId: conversation.id,
             callId: corrected.id,
             direction: existing.direction,
@@ -492,7 +492,7 @@ export async function ingestCallEvent(
           evt.direction === "in" ? CallDirection.in : CallDirection.out;
         callRow = await tx.call.create({
           data: {
-            teamId,
+            workspaceId,
             conversationId: conversation.id,
             externalCallId: evt.externalCallId,
             channel,
@@ -540,7 +540,7 @@ export async function ingestCallEvent(
           );
           await publishInTx(tx, {
             type: "conversation.status_changed",
-            teamId,
+            workspaceId,
             conversationId: conversation.id,
             previousStatus: "closed",
             newStatus: "pending",
@@ -572,7 +572,7 @@ export async function ingestCallEvent(
       if (isFirstInsert && evt.direction === "in") {
         await publishInTx(tx, {
           type: "call.incoming",
-          teamId,
+          workspaceId,
           conversationId: conversation.id,
           callId: callRow.id,
           externalCallId: evt.externalCallId,
@@ -584,7 +584,7 @@ export async function ingestCallEvent(
       if (isFirstInsert && evt.direction === "out") {
         await publishInTx(tx, {
           type: "call.ringing_out",
-          teamId,
+          workspaceId,
           conversationId: conversation.id,
           callId: callRow.id,
           externalCallId: evt.externalCallId,
@@ -612,7 +612,7 @@ export async function ingestCallEvent(
       ) {
         await publishInTx(tx, {
           type: "call.answered_by_agent",
-          teamId,
+          workspaceId,
           conversationId: conversation.id,
           callId: callRow.id,
           answeredByUserId: existing.initiatedByUserId ?? "",
@@ -647,7 +647,7 @@ export async function ingestCallEvent(
         if (effectiveStatus === CallStatus.completed) {
           await publishInTx(tx, {
             type: "call.ended",
-            teamId,
+            workspaceId,
             conversationId: conversation.id,
             callId: callRow.id,
             direction: rowDirection,
@@ -668,7 +668,7 @@ export async function ingestCallEvent(
         } else if (effectiveStatus === CallStatus.missed) {
           await publishInTx(tx, {
             type: "call.missed",
-            teamId,
+            workspaceId,
             conversationId: conversation.id,
             callId: callRow.id,
             ringingAt: evt.timestamp.toISOString(),
@@ -685,7 +685,7 @@ export async function ingestCallEvent(
         } else if (effectiveStatus === CallStatus.rejected) {
           await publishInTx(tx, {
             type: "call.rejected",
-            teamId,
+            workspaceId,
             conversationId: conversation.id,
             callId: callRow.id,
             rejectedByUserId: null,
@@ -694,7 +694,7 @@ export async function ingestCallEvent(
         } else if (effectiveStatus === CallStatus.failed) {
           await publishInTx(tx, {
             type: "call.failed",
-            teamId,
+            workspaceId,
             conversationId: conversation.id,
             callId: callRow.id,
             reason: "provider_error",
@@ -729,7 +729,7 @@ export async function ingestCallEvent(
       if (evt.sdp && !alreadyTerminal) {
         await publishInTx(tx, {
           type: "call.sdp_offer",
-          teamId,
+          workspaceId,
           conversationId: conversation.id,
           callId: callRow.id,
           // The shared event type narrows `sdp.type` to "offer"; carry
@@ -757,7 +757,7 @@ export async function ingestCallEvent(
  * to re-enable); granted clears it AND resets the unanswered counter.
  */
 async function handlePermissionEvent(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   evt: NormalizedCallEvent,
 ): Promise<void> {
@@ -773,13 +773,13 @@ async function handlePermissionEvent(
   // a permission grant from a cold (BSUID-only) caller silently lands nowhere.
   const identityWhere = isPhone
     ? {
-        teamId,
+        workspaceId,
         OR: [
           ...(evt.contactPhone ? [{ identityChannel: channel, phoneNumber: evt.contactPhone }] : []),
           ...(evt.bsuid ? [{ identityChannel: channel, bsuid: evt.bsuid }] : []),
         ],
       }
-    : { teamId, identityChannel: channel, externalContactId: evt.externalContactId };
+    : { workspaceId, identityChannel: channel, externalContactId: evt.externalContactId };
   const contact = await db.contact.findFirst({
     where: identityWhere,
     select: { id: true },
@@ -816,7 +816,7 @@ async function handlePermissionEvent(
         new Date(grantedAt.getTime() + 7 * 24 * 60 * 60 * 1000);
     const pending = await db.callPermissionRequest.findFirst({
       where: {
-        teamId,
+        workspaceId,
         contactId: contact.id,
         ...(evt.permissionRequestExternalId
           ? { externalRequestId: evt.permissionRequestExternalId }
@@ -851,7 +851,7 @@ async function handlePermissionEvent(
       // true no-op. A permanent grant is always live.
       const existingGrant = await db.callPermissionRequest.findFirst({
         where: {
-          teamId,
+          workspaceId,
           contactId: contact.id,
           status: CallPermissionStatus.granted,
           OR: [{ isPermanent: true }, { expiresAt: { gt: grantedAt } }],
@@ -861,7 +861,7 @@ async function handlePermissionEvent(
       if (!existingGrant) {
         await db.callPermissionRequest.create({
           data: {
-            teamId,
+            workspaceId,
             contactId: contact.id,
             status: CallPermissionStatus.granted,
             grantedAt,
@@ -934,7 +934,7 @@ async function handlePermissionEvent(
     // whatever is outstanding.
     await db.callPermissionRequest.updateMany({
       where: {
-        teamId,
+        workspaceId,
         contactId: contact.id,
         ...(evt.permissionRequestExternalId
           ? { externalRequestId: evt.permissionRequestExternalId }

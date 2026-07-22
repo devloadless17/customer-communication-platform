@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
-import { Check, Flag, Loader2, MessageSquare, RotateCcw, X } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Check, Flag, Loader2, MessageSquare, RotateCcw, Search, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/layouts/page-header";
@@ -40,9 +40,22 @@ export function FlagsQueueClient({
   definitions: MessageFlagDefinition[];
 }) {
   const router = useRouter();
-  const [tab, setTab] = useState<StatusTab>("open");
-  const [definitionId, setDefinitionId] = useState<string | null>(null);
-  const [mineOnly, setMineOnly] = useState(false);
+  const params = useSearchParams();
+  // View state lives in the URL and is owned by the sidebar — linkable, and
+  // one source of truth instead of a chip row that could disagree with it.
+  const tab: StatusTab = params.get("status") === "resolved" ? "resolved" : "open";
+  const definitionId = params.get("definitionId");
+  const mineOnly = params.get("assignee") === "me";
+  // Search stays LOCAL: pushing a history entry per keystroke would make the
+  // back button useless.
+  const [search, setSearch] = useState("");
+  // Debounced mirror of `search`. The query key (and therefore the fetch) is
+  // built from THIS, so typing doesn't fire a request per keystroke.
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => clearTimeout(t);
+  }, [search]);
   const [items, setItems] = useState<MessageFlagQueueItem[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [counts, setCounts] = useState<MessageFlagCounts | null>(null);
@@ -62,8 +75,9 @@ export function FlagsQueueClient({
     else p.set("status", "resolved,dismissed");
     if (definitionId) p.set("definitionId", definitionId);
     if (mineOnly) p.set("assignedTo", "me");
+    if (debouncedSearch) p.set("q", debouncedSearch);
     return p;
-  }, [tab, definitionId, mineOnly]);
+  }, [tab, definitionId, mineOnly, debouncedSearch]);
 
   const load = useCallback(
     async (cursor?: string) => {
@@ -190,38 +204,16 @@ export function FlagsQueueClient({
               : "Messages your team marked for follow-up"
           }
         />
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <TabButton active={tab === "open"} onClick={() => setTab("open")}>
-            Open
-            {totalOpen > 0 && <Pill>{totalOpen}</Pill>}
-          </TabButton>
-          <TabButton active={tab === "resolved"} onClick={() => setTab("resolved")}>
-            Handled
-          </TabButton>
-          <span className="mx-1 h-5 w-px bg-border" />
-          <TabButton active={mineOnly} onClick={() => setMineOnly((m) => !m)}>
-            Assigned to me
-            {counts?.mineOpen ? <Pill>{counts.mineOpen}</Pill> : null}
-          </TabButton>
-          <span className="mx-1 h-5 w-px bg-border" />
-          <TabButton active={definitionId === null} onClick={() => setDefinitionId(null)}>
-            All flags
-          </TabButton>
-          {definitions.map((d) => (
-            <TabButton
-              key={d.id}
-              active={definitionId === d.id}
-              onClick={() => setDefinitionId(d.id)}
-            >
-              <span
-                className={cn("size-2 rounded-full", tagColorClasses(d.color).solid)}
-              />
-              {d.name}
-              {counts?.openByDefinition[d.id] ? (
-                <Pill>{counts.openByDefinition[d.id]}</Pill>
-              ) : null}
-            </TabButton>
-          ))}
+        <div className="relative mt-4">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search the message, the contact, or a flag note…"
+            aria-label="Search flagged messages"
+            className="h-9 w-full rounded-md border border-border bg-background pl-8 pr-3 text-sm outline-hidden placeholder:text-muted-foreground focus:border-primary/50"
+          />
         </div>
       </div>
 
@@ -234,7 +226,7 @@ export function FlagsQueueClient({
           <EmptyState
             tab={tab}
             hasDefinitions={definitions.length > 0}
-            filtered={definitionId !== null || mineOnly}
+            filtered={definitionId !== null || mineOnly || debouncedSearch !== ""}
           />
         ) : (
           <ul className="divide-y">
@@ -379,40 +371,6 @@ function QueueRow({
         )}
       </div>
     </li>
-  );
-}
-
-function TabButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors",
-        active
-          ? "border-primary/40 bg-primary/10 text-foreground"
-          : "border-border text-muted-foreground hover:bg-muted",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Pill({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="rounded-full bg-foreground/10 px-1.5 text-[10px] leading-4">
-      {children}
-    </span>
   );
 }
 

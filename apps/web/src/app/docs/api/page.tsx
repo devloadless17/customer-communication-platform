@@ -30,8 +30,11 @@ const SCOPES: ReadonlyArray<{ scope: string; grants: string }> = [
   { scope: "write:messages", grants: "send text / media / template" },
   { scope: "write:notes", grants: "add internal notes" },
   { scope: "read:flags", grants: "read message triage flags + the flag queue" },
+  { scope: "read:tickets", grants: "read tickets, SLA policies + ticket fields" },
+  { scope: "write:tickets", grants: "open / assign / solve tickets · edit SLA + fields" },
   { scope: "write:flags", grants: "raise / resolve / dismiss / remove message flags" },
   { scope: "read:catalog", grants: "read tags · fields · stages · channels · users" },
+  { scope: "read:channels", grants: "read the accounts connected under each channel" },
   { scope: "write:catalog", grants: "create / edit tags + custom fields" },
   { scope: "read:broadcasts", grants: "read broadcast campaigns + delivery reports" },
   { scope: "read:calls", grants: "read call history + calling-permission state" },
@@ -390,7 +393,20 @@ export default function ApiDocsPage() {
           <code>POST /contacts/:id/stage</code> (above).
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/channels">
-          Read-only channel list (today: a single WhatsApp row per team).
+          Read-only list of the channels this workspace has connected.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/channels/:channel/accounts">
+          The accounts under one channel — <code>whatsapp</code>,{" "}
+          <code>messenger</code> or <code>instagram</code>. A channel can hold more
+          than one account (two numbers, two Pages). Each row carries the
+          provider&apos;s own <code>externalAccountId</code> (phone-number id / Page
+          id / IG id) so you can correlate a webhook you receive from Meta directly
+          with the account it belongs to, plus <code>label</code>,{" "}
+          <code>isDefault</code> (used only when a send doesn&apos;t name an
+          account — replies always go out the account the customer messaged) and{" "}
+          <code>needsReconnect</code>. Scope <code>read:channels</code>. Read-only:
+          connecting or disconnecting an account moves real credentials and changes
+          which number a customer hears from, so it stays an in-app admin action.
         </Endpoint>
       </Section>
 
@@ -509,7 +525,9 @@ export default function ApiDocsPage() {
       <Section title="Conversations">
         <Endpoint method="GET" path="/api/external/v1/conversations">
           Paginated. <code>?status=</code>, <code>?phone=</code>,{" "}
-          <code>?cursor=</code>.
+          <code>?viewId=</code> (a saved inbox view — see below),{" "}
+          <code>?cursor=</code>. A view&apos;s criteria are <strong>ANDed</strong> with
+          the other filters, not substituted for them.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/conversations/:id">
           Fetch one + its contact.
@@ -548,6 +566,72 @@ export default function ApiDocsPage() {
           to a human — every later <code>message.received</code> webhook then
           carries <code>ai_enabled: false</code> so your automation can skip it.
         </Endpoint>
+      </Section>
+
+      <Section title="Saved inbox views">
+        <p className="text-sm text-muted-foreground">
+          A <strong>view</strong> is a named, reusable filter over the
+          conversation list — &ldquo;Support · unassigned · WhatsApp&rdquo;.
+          These are the same views your team sees in the inbox rail, backed by
+          the same service, so a view can never select different conversations
+          through the API than it shows in the product. Read needs{" "}
+          <code>read:catalog</code>, writes need <code>write:catalog</code>.
+        </p>
+        <p className="text-sm text-muted-foreground">
+          Two consequences of an API key not being a person:{" "}
+          <strong>only shared views</strong> are visible or creatable (a
+          personal view belongs to one teammate; an explicit{" "}
+          <code>&quot;personal&quot;</code> returns{" "}
+          <code>inbox_view_requires_user</code>), and a view whose assignee is{" "}
+          <code>{`{ kind: "me" }`}</code> <strong>matches nothing</strong> here
+          rather than silently widening to everyone.
+        </p>
+        <Endpoint method="GET" path="/api/external/v1/inbox-views">
+          Every shared view in the workspace, in rail order.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/inbox-views/:id">
+          One view. 404 for another workspace&apos;s id, so it can&apos;t be
+          used to probe for existence.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/inbox-views"
+          body={{
+            name: "Unassigned WhatsApp",
+            icon: "flame",
+            color: "rose",
+            filters: {
+              statuses: ["open"],
+              assignee: { kind: "unassigned" },
+              channels: ["whatsapp"],
+            },
+          }}
+        >
+          Every <code>filters</code> field is optional and <strong>ANDed</strong>;
+          an omitted field means &ldquo;no opinion&rdquo;, so <code>{`{}`}</code>{" "}
+          is the widest possible view. Fields:{" "}
+          <code>statuses</code>, <code>assignee</code> (
+          <code>{`{ kind: "anyone" | "me" | "unassigned" }`}</code> or{" "}
+          <code>{`{ kind: "users", userIds: [...] }`}</code>),{" "}
+          <code>channels</code>, <code>stageIds</code>, <code>tagIds</code> +{" "}
+          <code>tagMatch</code> (<code>&quot;any&quot;</code> default or{" "}
+          <code>&quot;all&quot;</code>), <code>hasOpenFlags</code>,{" "}
+          <code>unreadOnly</code>.
+        </Endpoint>
+        <Endpoint method="PATCH" path="/api/external/v1/inbox-views/:id" body={{ name: "Renamed" }}>
+          Any subset of the create fields.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/inbox-views/:id">
+          Removes the saved filter. Conversations are untouched.
+        </Endpoint>
+        <p className="text-sm text-muted-foreground">
+          A view referencing a tag, stage or teammate that has since been
+          deleted is <strong>widened</strong>, not emptied: the dead ids are
+          dropped at read time. Deleting one tag of five must not silently blank
+          a view. Errors: <code>inbox_view_not_found</code> (404),{" "}
+          <code>inbox_view_name_taken</code> (400),{" "}
+          <code>inbox_view_limit_reached</code> (400, 30 per scope).
+        </p>
       </Section>
 
       <Section title="Assignment routing">
@@ -739,6 +823,104 @@ export default function ApiDocsPage() {
           (symmetric with the create above, so a CRM mirror can complete a
           create→delete round-trip). Idempotent — a repeated delete returns{" "}
           <code>404 note_not_found</code>.
+        </Endpoint>
+      </Section>
+
+      <Section title="Tickets (the unit of work)">
+        <p className="mb-4 text-sm text-muted-foreground">
+          A <strong>conversation</strong> is the long-lived thread with one contact — it
+          never fragments. A <strong>ticket</strong> is one piece of <em>work</em> on that
+          thread, and there are many over time: the refund raised in March and the
+          delivery question in June are two tickets on one unbroken thread, each with its
+          own assignee, priority, SLA clock and outcome. Every message carries the ticket
+          it belongs to.
+          <br />
+          <br />
+          Lifecycle: <code>new</code> → <code>open</code> → <code>pending</code> /{" "}
+          <code>on_hold</code> → <code>solved</code> → <code>closed</code>. Tickets open
+          by themselves — an inbound on a thread with no active ticket opens one, and a
+          follow-up inside the reopen window (default 72h) comes back to the solved one
+          instead of starting a third. <strong>Broadcasts never open tickets</strong>; a
+          customer who replies to one does.
+          <br />
+          <br />
+          Subscribe to the <code>ticket.changed</code> webhook to be told the instant work
+          is opened, reassigned, solved, or breaches its SLA, then use these endpoints to
+          work the backlog from your own system.
+        </p>
+        <Endpoint method="GET" path="/api/external/v1/tickets">
+          The board, newest-first, keyset-paginated. Query: <code>status</code>,{" "}
+          <code>priority</code>, <code>tagIds</code> (comma lists),{" "}
+          <code>assignee</code> (a user id, <code>me</code>, or <code>none</code> for
+          unassigned), <code>contactId</code>, <code>conversationId</code>,{" "}
+          <code>channel</code>, <code>breached=true</code>,{" "}
+          <code>cursorCreatedAt</code> + <code>cursorId</code>, <code>limit</code> (max
+          50). An unknown enum value is a <code>400</code> that names it — a filter is
+          never silently ignored. Scope <code>read:tickets</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/tickets/counts">
+          Header badges: <code>totalActive</code>, <code>mineActive</code>,{" "}
+          <code>breached</code>, <code>byStatus</code>. <code>mineActive</code> is always
+          0 for an API key (a key has no agent identity). Scope{" "}
+          <code>read:tickets</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/tickets/:id">
+          One ticket plus its full <code>events</code> timeline. Scope{" "}
+          <code>read:tickets</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/tickets"
+          body={{
+            conversationId: "cnv_9",
+            subject: "Also: wrong invoice",
+            priority: "high",
+          }}
+        >
+          Open a ticket manually — a second issue raised in the same breath, or work
+          created from your own system. Also accepts <code>assignedUserId</code>,{" "}
+          <code>tagIds</code>, <code>customFields</code>. With an assignee it starts{" "}
+          <code>open</code>; without one it starts <code>new</code>, which is what makes
+          an untriaged backlog reportable. Scope <code>write:tickets</code>.
+        </Endpoint>
+        <Endpoint
+          method="PATCH"
+          path="/api/external/v1/tickets/:id"
+          body={{ expectedVersion: 3, status: "solved", resolutionCode: "refunded" }}
+        >
+          Status, priority, assignee, subject, tags, custom fields, resolution. Send{" "}
+          <code>expectedVersion</code> from your last read and a write built on a stale
+          view returns <code>409 version_conflict</code> instead of overwriting someone
+          else&apos;s change; omit it and the write always applies (right for automation,
+          which has no stale view to protect). Moving to <code>on_hold</code> pauses the
+          SLA clock — leaving it pushes both deadlines out by exactly the parked time
+          rather than restarting the commitment. Scope <code>write:tickets</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/tickets-settings">
+          <code>ticketAutoOpen</code>, <code>ticketReopenWindowHours</code>,{" "}
+          <code>ticketCloseConversationOnLastSolved</code>. <code>PATCH</code> the same
+          path to change them (<code>write:tickets</code>). Scope{" "}
+          <code>read:tickets</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/ticket-sla"
+          body={{ priority: "urgent", firstResponseMins: 15, resolutionMins: 60 }}
+        >
+          One commitment per priority; upserts on <code>priority</code>.{" "}
+          <code>null</code> minutes means <strong>no commitment on that leg</strong> — not
+          zero, so nothing is due and nothing breaches. Due dates are computed when a
+          ticket is created and then stored, so editing a policy never retroactively
+          breaches open work. <code>GET</code> the same path to read them. Scope{" "}
+          <code>write:tickets</code> / <code>read:tickets</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/ticket-fields">
+          Custom fields on a ticket. <code>POST</code> to create,{" "}
+          <code>PATCH</code>/<code>DELETE /ticket-fields/:id</code> to edit or remove. The{" "}
+          <code>key</code> is derived from the label once and is immutable — stored values
+          are keyed by it. Deleting a definition leaves its values in place (history on
+          closed work); they just stop rendering. Scope <code>read:tickets</code> /{" "}
+          <code>write:tickets</code>.
         </Endpoint>
       </Section>
 

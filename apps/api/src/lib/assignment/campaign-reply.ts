@@ -24,31 +24,31 @@ import { assignConversation } from "@/lib/conversations/mutations";
  * the attribution window). This function never re-derives that.
  */
 export async function applyCampaignAssigneeOnReply(args: {
-  teamId: string;
+  workspaceId: string;
   contactId: string;
   /** The BroadcastRecipient the reply was just credited to. */
   recipientId: string;
 }): Promise<void> {
-  const { teamId, contactId, recipientId } = args;
+  const { workspaceId, contactId, recipientId } = args;
 
   const recipient = await db.broadcastRecipient.findUnique({
     where: { id: recipientId },
     select: {
       assignedUserId: true,
       broadcast: {
-        select: { teamId: true, assignmentTrigger: true, assignmentOverwrite: true },
+        select: { workspaceId: true, assignmentTrigger: true, assignmentOverwrite: true },
       },
     },
   });
   if (!recipient?.assignedUserId) return;
-  // BroadcastRecipient has no teamId of its own (it's scoped through Broadcast),
+  // BroadcastRecipient has no workspaceId of its own (it's scoped through Broadcast),
   // so assert tenancy explicitly rather than relying on the caller.
-  if (recipient.broadcast.teamId !== teamId) return;
+  if (recipient.broadcast.workspaceId !== workspaceId) return;
   // "on_send" campaigns already assigned in the runner.
   if (recipient.broadcast.assignmentTrigger !== "on_reply") return;
 
   const conversation = await db.conversation.findFirst({
-    where: { teamId, contactId },
+    where: { workspaceId, contactId },
     select: { id: true, assignedUserId: true },
   });
   if (!conversation) return;
@@ -63,7 +63,7 @@ export async function applyCampaignAssigneeOnReply(args: {
   await assignConversation({
     db,
     publish,
-    teamId,
+    workspaceId,
     conversationId: conversation.id,
     targetUserId: recipient.assignedUserId,
     changedByUserId: null,
@@ -97,11 +97,11 @@ export async function applyCampaignAssigneeOnReply(args: {
  * everything else, which is the overwhelming majority of calls.
  */
 export async function pendingCampaignAssignee(args: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
 }): Promise<string | null> {
   const conv = await db.conversation.findFirst({
-    where: { id: args.conversationId, teamId: args.teamId },
+    where: { id: args.conversationId, workspaceId: args.workspaceId },
     select: { contactId: true },
   });
   if (!conv) return null;
@@ -120,11 +120,11 @@ export async function pendingCampaignAssignee(args: {
     orderBy: { sentAt: "desc" },
     select: {
       assignedUserId: true,
-      broadcast: { select: { teamId: true, assignmentTrigger: true } },
+      broadcast: { select: { workspaceId: true, assignmentTrigger: true } },
     },
   });
   if (!recipient) return null;
-  if (recipient.broadcast.teamId !== args.teamId) return null;
+  if (recipient.broadcast.workspaceId !== args.workspaceId) return null;
   if (recipient.broadcast.assignmentTrigger !== "on_reply") return null;
   return recipient.assignedUserId;
 }

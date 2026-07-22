@@ -223,7 +223,7 @@ export function isEphemeralChannel(channel: Channel): boolean {
 /**
  * How a channel identifies a contact. `phone` channels resolve/create contacts
  * by `Contact.phoneNumber`; `external` channels use the opaque provider id
- * (`Contact.externalContactId`) via the `(teamId, identityChannel,
+ * (`Contact.externalContactId`) via the `(workspaceId, identityChannel,
  * externalContactId)` compound unique. This is the discriminator the ingest
  * pipeline branches on (the documented multi-channel / F4 seam).
  */
@@ -239,7 +239,7 @@ export const CHANNEL_IDENTITY_KIND: Record<Channel, ChannelIdentityKind> = {
   email: "external",
   sms: "phone",
   // Website widget: an opaque per-browser visitor id, keyed via
-  // (teamId, identityChannel, externalContactId) like the social channels.
+  // (workspaceId, identityChannel, externalContactId) like the social channels.
   webchatwidget: "external",
 };
 

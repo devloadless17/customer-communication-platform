@@ -33,9 +33,9 @@ export class ApiKeysService {
     private readonly bus: EventBus,
   ) {}
 
-  async list(teamId: string): Promise<ApiKeyListDto[]> {
-    const keys = await this.db.teamApiKey.findMany({
-      where: { teamId },
+  async list(workspaceId: string): Promise<ApiKeyListDto[]> {
+    const keys = await this.db.workspaceApiKey.findMany({
+      where: { workspaceId },
       orderBy: { createdAt: "desc" },
       select: {
         id: true,
@@ -59,7 +59,7 @@ export class ApiKeysService {
   }
 
   async create(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: CreateApiKeyInput,
   ): Promise<ApiKeyCreateDto> {
@@ -69,9 +69,9 @@ export class ApiKeysService {
     // to callers. The settings UI WILL ship a picker as part of this batch;
     // once it does, this branch primarily covers admin scripts.
     const scopes = input.scopes && input.scopes.length > 0 ? input.scopes : ["*"];
-    const row = await this.db.teamApiKey.create({
+    const row = await this.db.workspaceApiKey.create({
       data: {
-        teamId,
+        workspaceId,
         name: input.name,
         tokenHash: generated.tokenHash,
         tokenPrefix: generated.tokenPrefix,
@@ -80,7 +80,7 @@ export class ApiKeysService {
       },
       select: { id: true, name: true, tokenPrefix: true, createdAt: true, scopes: true },
     });
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "api-keys" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "api-keys" });
     return {
       id: row.id,
       name: row.name,
@@ -98,18 +98,18 @@ export class ApiKeysService {
    * look identical to a key that never existed. Once revoked, the bearer
    * guard rejects further requests.
    */
-  async revoke(teamId: string, id: string): Promise<void> {
-    const key = await this.db.teamApiKey.findFirst({
-      where: { id, teamId },
+  async revoke(workspaceId: string, id: string): Promise<void> {
+    const key = await this.db.workspaceApiKey.findFirst({
+      where: { id, workspaceId },
       select: { id: true, revokedAt: true },
     });
     if (!key) throw new NotFoundException({ error: "key not found" });
     if (key.revokedAt) return; // Idempotent — revoking twice is fine.
-    await this.db.teamApiKey.update({
+    await this.db.workspaceApiKey.update({
       where: { id },
       data: { revokedAt: new Date() },
     });
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "api-keys" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "api-keys" });
   }
 
   /**
@@ -122,26 +122,26 @@ export class ApiKeysService {
    * uses name as the "already connected" signal).
    */
   async rotate(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     id: string,
   ): Promise<ApiKeyCreateDto> {
-    const existing = await this.db.teamApiKey.findFirst({
-      where: { id, teamId },
+    const existing = await this.db.workspaceApiKey.findFirst({
+      where: { id, workspaceId },
       select: { id: true, name: true, scopes: true, revokedAt: true },
     });
     if (!existing) throw new NotFoundException({ error: "key not found" });
     const generated = generateApiKey();
     const created = await this.db.$transaction(async (tx) => {
       if (!existing.revokedAt) {
-        await tx.teamApiKey.update({
+        await tx.workspaceApiKey.update({
           where: { id: existing.id },
           data: { revokedAt: new Date() },
         });
       }
-      return tx.teamApiKey.create({
+      return tx.workspaceApiKey.create({
         data: {
-          teamId,
+          workspaceId,
           name: existing.name,
           tokenHash: generated.tokenHash,
           tokenPrefix: generated.tokenPrefix,
@@ -151,7 +151,7 @@ export class ApiKeysService {
         select: { id: true, name: true, tokenPrefix: true, createdAt: true, scopes: true },
       });
     });
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "api-keys" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "api-keys" });
     return {
       id: created.id,
       name: created.name,

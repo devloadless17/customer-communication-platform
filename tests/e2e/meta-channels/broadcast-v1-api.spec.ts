@@ -20,7 +20,7 @@ test.beforeAll(async () => {
   ({ apiToken } = await seedMetaTestTeam());
   const b = await db().broadcast.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       status: "completed",
       kind: "template",
       targetMode: "contact",
@@ -46,7 +46,7 @@ test.beforeAll(async () => {
   for (const st of states) {
     const c = await db().contact.create({
       data: {
-        teamId: META_TEST_TEAM_ID,
+        workspaceId: META_TEST_TEAM_ID,
         name: `${PREFIX}${i}`,
         phoneNumber: `1555${String(Date.now()).slice(-6)}${i++}`,
         identityChannel: "whatsapp",
@@ -78,7 +78,7 @@ test.afterAll(async () => {
     await db().broadcast.deleteMany({ where: { id: { in: ids } } });
   }
   await db().contact.deleteMany({
-    where: { teamId: META_TEST_TEAM_ID, name: { startsWith: PREFIX } },
+    where: { workspaceId: META_TEST_TEAM_ID, name: { startsWith: PREFIX } },
   });
 });
 

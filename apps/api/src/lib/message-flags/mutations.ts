@@ -63,7 +63,7 @@ interface EventGates {
 }
 
 export interface RaiseFlagArgs extends EventGates {
-  teamId: string;
+  workspaceId: string;
   messageId: string;
   definitionId: string;
   actor: FlagActor;
@@ -83,13 +83,13 @@ export interface RaiseFlagArgs extends EventGates {
  */
 export async function raiseFlag(db: Db, args: RaiseFlagArgs): Promise<FlagMutationOutcome> {
   const message = await db.message.findFirst({
-    where: { id: args.messageId, teamId: args.teamId },
+    where: { id: args.messageId, workspaceId: args.workspaceId },
     select: { id: true, conversationId: true },
   });
   if (!message) return { ok: false, reason: "message_not_found" };
 
   const definition = await db.messageFlagDefinition.findFirst({
-    where: { id: args.definitionId, teamId: args.teamId },
+    where: { id: args.definitionId, workspaceId: args.workspaceId },
     select: { id: true, archived: true },
   });
   if (!definition) return { ok: false, reason: "definition_not_found" };
@@ -97,7 +97,7 @@ export async function raiseFlag(db: Db, args: RaiseFlagArgs): Promise<FlagMutati
   // accept new ones — otherwise "retired" wouldn't mean anything.
   if (definition.archived) return { ok: false, reason: "definition_archived" };
 
-  if (args.assignedToId && !(await assertTeamMember(db, args.teamId, args.assignedToId))) {
+  if (args.assignedToId && !(await assertTeamMember(db, args.workspaceId, args.assignedToId))) {
     return { ok: false, reason: "assignee_not_found" };
   }
 
@@ -136,7 +136,7 @@ async function raiseFlagOnce(
     if (!existing) {
       const created = await tx.messageFlag.create({
         data: {
-          teamId: args.teamId,
+          workspaceId: args.workspaceId,
           messageId: args.messageId,
           conversationId,
           definitionId: args.definitionId,
@@ -216,7 +216,7 @@ async function raiseFlagOnce(
 }
 
 export interface UpdateFlagArgs extends EventGates {
-  teamId: string;
+  workspaceId: string;
   flagId: string;
   actor: FlagActor;
   /** Omitted = leave the lifecycle alone (this is an assignee/note-only edit). */
@@ -239,12 +239,12 @@ export interface UpdateFlagArgs extends EventGates {
  */
 export async function updateFlag(db: Db, args: UpdateFlagArgs): Promise<FlagMutationOutcome> {
   const existing = await db.messageFlag.findFirst({
-    where: { id: args.flagId, teamId: args.teamId },
+    where: { id: args.flagId, workspaceId: args.workspaceId },
     select: { id: true, status: true, conversationId: true },
   });
   if (!existing) return { ok: false, reason: "flag_not_found" };
 
-  if (args.assignedToId && !(await assertTeamMember(db, args.teamId, args.assignedToId))) {
+  if (args.assignedToId && !(await assertTeamMember(db, args.workspaceId, args.assignedToId))) {
     return { ok: false, reason: "assignee_not_found" };
   }
 
@@ -346,7 +346,7 @@ export async function updateFlag(db: Db, args: UpdateFlagArgs): Promise<FlagMuta
 }
 
 export interface RemoveFlagArgs extends EventGates {
-  teamId: string;
+  workspaceId: string;
   flagId: string;
   actor: FlagActor;
 }
@@ -361,7 +361,7 @@ export interface RemoveFlagArgs extends EventGates {
  */
 export async function removeFlag(db: Db, args: RemoveFlagArgs): Promise<FlagMutationOutcome> {
   const existing = await db.messageFlag.findFirst({
-    where: { id: args.flagId, teamId: args.teamId },
+    where: { id: args.flagId, workspaceId: args.workspaceId },
     select: { id: true, status: true, conversationId: true },
   });
   if (!existing) return { ok: false, reason: "flag_not_found" };
@@ -456,7 +456,7 @@ async function bumpOpenFlagCount(
 async function publishFlagEvent(
   tx: TxClient,
   params: {
-    args: EventGates & { teamId: string; actor: FlagActor };
+    args: EventGates & { workspaceId: string; actor: FlagActor };
     flag: MessageFlag;
     openFlagCount: number;
     action: "added" | "updated" | "reopened" | "resolved" | "removed";
@@ -466,7 +466,7 @@ async function publishFlagEvent(
   const { args, flag, openFlagCount, action, conversationId } = params;
   await publishInTx(tx, {
     type: "message.flag_changed",
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     conversationId,
     messageId: flag.messageId,
     action,
@@ -483,9 +483,9 @@ async function publishFlagEvent(
 
 /** An assignee must be a live member of THIS team — otherwise a crafted id
  *  could hand a complaint to someone in another tenant. */
-async function assertTeamMember(db: Db, teamId: string, userId: string): Promise<boolean> {
+async function assertTeamMember(db: Db, workspaceId: string, userId: string): Promise<boolean> {
   const user = await db.user.findFirst({
-    where: { id: userId, teamId, deactivatedAt: null },
+    where: { id: userId, workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
     select: { id: true },
   });
   return Boolean(user);

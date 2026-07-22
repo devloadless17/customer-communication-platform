@@ -133,6 +133,12 @@ export interface ListFlagsFilter {
   /** Agent conversation-visibility boundary (lib/conversations/visibility.ts).
    *  `{}` for unrestricted viewers. */
   visibility?: { assignedUserId?: string };
+  /**
+   * Free-text narrowing across the three things an agent actually remembers
+   * about a flagged item: what the customer said, who said it, and the note
+   * whoever flagged it left behind.
+   */
+  search?: string;
 }
 
 /**
@@ -146,14 +152,14 @@ export interface ListFlagsFilter {
  */
 export async function listFlags(
   db: Db,
-  teamId: string,
+  workspaceId: string,
   filter: ListFlagsFilter = {},
 ): Promise<{ items: MessageFlagQueueItem[]; nextCursor: string | null }> {
   const take = Math.min(Math.max(filter.take ?? FLAG_QUEUE_PAGE, 1), FLAG_QUEUE_PAGE);
   const statuses = filter.statuses?.length ? filter.statuses : (["open"] as const);
 
   const where: Prisma.MessageFlagWhereInput = {
-    teamId,
+    workspaceId,
     // Visibility boundary: the queue selects message body, media caption and
     // the contact's name + phone, so an unscoped read here would hand a
     // restricted agent excerpts of every conversation in the org.
@@ -168,7 +174,15 @@ export async function listFlags(
       : filter.assignedToId
         ? { assignedToId: filter.assignedToId }
         : {}),
-    ...keysetWhere(filter.cursor),
+    // Search and the keyset cursor BOTH express themselves as an `OR`, so
+    // spreading them as siblings makes the second silently overwrite the first
+    // — the search would quietly stop applying from page 2 onward. Composing
+    // them in an AND array keeps both live. (Same trap that has bitten the
+    // conversation-visibility boundary before: restrictions go in AND, never a
+    // sibling spread.)
+    AND: [searchWhere(filter.search), keysetWhere(filter.cursor)].filter(
+      (clause) => Object.keys(clause).length > 0,
+    ),
   };
 
   const rows = await db.messageFlag.findMany({
@@ -221,7 +235,7 @@ export async function listFlags(
  */
 export async function flagCounts(
   db: Db,
-  teamId: string,
+  workspaceId: string,
   userId: string,
   visibility?: { assignedUserId?: string },
 ): Promise<MessageFlagCounts> {
@@ -233,11 +247,11 @@ export async function flagCounts(
   const [byDefinition, mineOpen] = await Promise.all([
     db.messageFlag.groupBy({
       by: ["definitionId"],
-      where: { teamId, status: "open", ...scope },
+      where: { workspaceId, status: "open", ...scope },
       _count: { _all: true },
     }),
     db.messageFlag.count({
-      where: { teamId, status: "open", assignedToId: userId, ...scope },
+      where: { workspaceId, status: "open", assignedToId: userId, ...scope },
     }),
   ]);
 
@@ -255,11 +269,11 @@ export async function flagCounts(
  *  picker must never offer a retired definition. */
 export async function listFlagDefinitions(
   db: Db,
-  teamId: string,
+  workspaceId: string,
   opts: { includeArchived?: boolean } = {},
 ): Promise<MessageFlagDefinition[]> {
   const rows = await db.messageFlagDefinition.findMany({
-    where: { teamId, ...(opts.includeArchived ? {} : { archived: false }) },
+    where: { workspaceId, ...(opts.includeArchived ? {} : { archived: false }) },
     orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
     select: MESSAGE_FLAG_DEFINITION_SELECT,
   });
@@ -279,6 +293,31 @@ function encodeCursor(createdAt: Date, id: string): string {
   return `${createdAt.getTime()}_${id}`;
 }
 
+/**
+ * Free-text narrowing: the flagged message's body or media caption, the
+ * contact's name or phone, or the note left when flagging.
+ *
+ * Case-insensitive `contains`, deliberately NOT a trgm index target. The scan
+ * is already narrowed to one workspace's flags — a set measured in hundreds,
+ * not the millions of rows that made the Message/InternalNote body searches
+ * need a GIN. Adding an index here would be write amplification for a query
+ * that never gets hot. Revisit if a workspace ever carries 100k+ flags.
+ */
+function searchWhere(search: string | undefined): Prisma.MessageFlagWhereInput {
+  const q = search?.trim();
+  if (!q) return {};
+  return {
+    OR: [
+      { note: { contains: q, mode: "insensitive" } },
+      { resolutionNote: { contains: q, mode: "insensitive" } },
+      { message: { body: { contains: q, mode: "insensitive" } } },
+      { message: { mediaCaption: { contains: q, mode: "insensitive" } } },
+      { conversation: { contact: { name: { contains: q, mode: "insensitive" } } } },
+      { conversation: { contact: { phoneNumber: { contains: q } } } },
+    ],
+  };
+}
+
 function keysetWhere(cursor: string | null | undefined): Prisma.MessageFlagWhereInput {
   if (!cursor) return {};
   const sep = cursor.lastIndexOf("_");
@@ -294,7 +333,7 @@ function keysetWhere(cursor: string | null | undefined): Prisma.MessageFlagWhere
   // Strictly-after in DESC order = strictly-before in time, with `id` breaking
   // same-millisecond ties. Written as an OR rather than a tuple comparison
   // because Prisma has no row-value syntax; the planner still uses the
-  // (teamId, status, createdAt DESC, id DESC) index for both branches.
+  // (workspaceId, status, createdAt DESC, id DESC) index for both branches.
   return {
     OR: [{ createdAt: { lt: createdAt } }, { createdAt, id: { lt: id } }],
   };

@@ -20,7 +20,7 @@ import {
  *   GET /api/inbox/search?scope=messages&q=… → GlobalMessageSearchPage
  *   GET /api/inbox/search?scope=notes&q=…    → NoteSearchPage
  *
- * All three are team-scoped (session.teamId), read-only, and ungated beyond
+ * All three are team-scoped (session.workspaceId), read-only, and ungated beyond
  * SessionGuard — same access level as the conversation list itself (any
  * member can search the inbox they can already see). Empty/blank `q`
  * short-circuits to an empty page so the client can fire on every keystroke
@@ -46,7 +46,7 @@ export class InboxSearchController {
     const opts = { query: q, take: query.take, cursor: query.cursor };
     switch (query.scope) {
       case "contacts":
-        return this.conversations.globalSearchContacts(session.teamId, opts, session);
+        return this.conversations.globalSearchContacts(session.workspaceId, opts, session);
       case "messages":
         // minor#14: the heavy scopes are team-wide trigram/ILIKE scans over the
         // Message table — a 1-char query matches half the team and seq-scans.
@@ -54,10 +54,10 @@ export class InboxSearchController {
         // mounts at length>=2); enforce the same floor server-side so a direct
         // API call (or a future client) can't trigger the scan on 1-char input.
         if (q.length < 2) return { items: [], nextCursor: null };
-        return this.conversations.globalSearchMessages(session.teamId, opts, session);
+        return this.conversations.globalSearchMessages(session.workspaceId, opts, session);
       case "notes":
         if (q.length < 2) return { items: [], nextCursor: null };
-        return this.conversations.globalSearchNotes(session.teamId, opts, session);
+        return this.conversations.globalSearchNotes(session.workspaceId, opts, session);
     }
   }
 }

@@ -93,9 +93,9 @@ const cacheGeneration = new Map<string, number>();
 
 /** Call after ANY write to policies / rules / settings so the next resolution
  *  sees it immediately instead of up to TTL later. */
-export function invalidateAssignmentCache(teamId: string): void {
-  configCache.delete(teamId);
-  cacheGeneration.set(teamId, (cacheGeneration.get(teamId) ?? 0) + 1);
+export function invalidateAssignmentCache(workspaceId: string): void {
+  configCache.delete(workspaceId);
+  cacheGeneration.set(workspaceId, (cacheGeneration.get(workspaceId) ?? 0) + 1);
 }
 
 export interface AssignmentSettingsShape {
@@ -123,20 +123,20 @@ export const DEFAULT_ASSIGNMENT_SETTINGS: AssignmentSettingsShape = {
   aiHandoffPolicyId: null,
 };
 
-async function loadConfig(db: Db, teamId: string): Promise<CachedConfig> {
-  const cached = configCache.get(teamId);
+async function loadConfig(db: Db, workspaceId: string): Promise<CachedConfig> {
+  const cached = configCache.get(workspaceId);
   if (cached && cached.expiresAt > Date.now()) return cached;
 
   // Snapshot BEFORE the reads — see `cacheGeneration`.
-  const generation = cacheGeneration.get(teamId) ?? 0;
+  const generation = cacheGeneration.get(workspaceId) ?? 0;
 
   const [policies, rules, settings] = await Promise.all([
     db.assignmentPolicy.findMany({
-      where: { teamId, archivedAt: null },
+      where: { workspaceId, archivedAt: null },
       orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
     }),
     db.assignmentRule.findMany({
-      where: { teamId, enabled: true },
+      where: { workspaceId, enabled: true },
       orderBy: [{ position: "asc" }, { id: "asc" }],
       select: {
         id: true,
@@ -147,7 +147,7 @@ async function loadConfig(db: Db, teamId: string): Promise<CachedConfig> {
         conditions: true,
       },
     }),
-    db.assignmentSettings.findUnique({ where: { teamId } }),
+    db.assignmentSettings.findUnique({ where: { workspaceId } }),
   ]);
 
   const entry: CachedConfig = {
@@ -170,17 +170,17 @@ async function loadConfig(db: Db, teamId: string): Promise<CachedConfig> {
   // Only publish if nothing invalidated while we were reading. Otherwise return
   // the rows to THIS caller (a consistent read as of when it started) without
   // caching them for anyone else.
-  if ((cacheGeneration.get(teamId) ?? 0) === generation) {
-    configCache.set(teamId, entry);
+  if ((cacheGeneration.get(workspaceId) ?? 0) === generation) {
+    configCache.set(workspaceId, entry);
   }
   return entry;
 }
 
 export async function loadAssignmentSettings(
   db: Db,
-  teamId: string,
+  workspaceId: string,
 ): Promise<AssignmentSettingsShape> {
-  return (await loadConfig(db, teamId)).settings;
+  return (await loadConfig(db, workspaceId)).settings;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,21 +189,21 @@ export async function loadAssignmentSettings(
 
 const RESERVATION_TTL_MS = 10_000;
 
-/** teamId → userId → expiry timestamps (one entry per in-flight pick). */
+/** workspaceId → userId → expiry timestamps (one entry per in-flight pick). */
 const reservations = new Map<string, Map<string, number[]>>();
 
-function reserve(teamId: string, userId: string): void {
-  const byUser = reservations.get(teamId) ?? new Map<string, number[]>();
+function reserve(workspaceId: string, userId: string): void {
+  const byUser = reservations.get(workspaceId) ?? new Map<string, number[]>();
   const list = byUser.get(userId) ?? [];
   list.push(Date.now() + RESERVATION_TTL_MS);
   byUser.set(userId, list);
-  reservations.set(teamId, byUser);
+  reservations.set(workspaceId, byUser);
 }
 
 /** Live reservation counts, pruning expired entries as it goes. */
-function reservedCounts(teamId: string): Map<string, number> {
+function reservedCounts(workspaceId: string): Map<string, number> {
   const out = new Map<string, number>();
-  const byUser = reservations.get(teamId);
+  const byUser = reservations.get(workspaceId);
   if (!byUser) return out;
   const now = Date.now();
   for (const [userId, list] of byUser) {
@@ -214,7 +214,7 @@ function reservedCounts(teamId: string): Map<string, number> {
       out.set(userId, live.length);
     }
   }
-  if (byUser.size === 0) reservations.delete(teamId);
+  if (byUser.size === 0) reservations.delete(workspaceId);
   return out;
 }
 
@@ -263,12 +263,12 @@ function toSelectable(policy: AssignmentPolicy): SelectablePolicy {
  */
 async function previousAgentFor(
   db: Db,
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   windowDays: number,
 ): Promise<string | null> {
   const conv = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
+    where: { id: conversationId, workspaceId },
     select: {
       lastAssignedUserId: true,
       lastAssignedAt: true,
@@ -289,7 +289,7 @@ async function previousAgentFor(
   if (!customerId) return null;
   const sibling = await db.conversation.findFirst({
     where: {
-      teamId,
+      workspaceId,
       id: { not: conversationId },
       lastAssignedUserId: { not: null },
       lastAssignedAt: { gte: cutoff },
@@ -319,11 +319,11 @@ async function previousAgentFor(
  * cursor write for it, which costs nothing (with no persisted cursor the
  * rotation just restarts, and least-busy doesn't depend on it).
  */
-function implicitDefaultPolicy(teamId: string): AssignmentPolicy {
+function implicitDefaultPolicy(workspaceId: string): AssignmentPolicy {
   const now = new Date(0);
   return {
     id: "",
-    teamId,
+    workspaceId,
     name: "Default",
     description: null,
     isDefault: true,
@@ -355,7 +355,7 @@ function implicitDefaultPolicy(teamId: string): AssignmentPolicy {
  */
 export async function resolvePolicyFor(
   db: Db,
-  teamId: string,
+  workspaceId: string,
   ctx: AssignmentContext,
   requestedPolicyId?: string | null,
 ): Promise<{
@@ -363,9 +363,9 @@ export async function resolvePolicyFor(
   ruleId: string | null;
   ruleName: string | null;
 }> {
-  const { policies, rules } = await loadConfig(db, teamId);
+  const { policies, rules } = await loadConfig(db, workspaceId);
   if (policies.length === 0) {
-    return { policy: implicitDefaultPolicy(teamId), ruleId: null, ruleName: null };
+    return { policy: implicitDefaultPolicy(workspaceId), ruleId: null, ruleName: null };
   }
 
   if (requestedPolicyId) {
@@ -395,13 +395,17 @@ export async function resolvePolicyFor(
  */
 async function loadMembers(
   db: Db,
-  teamId: string,
+  workspaceId: string,
   policyId: string,
 ): Promise<SelectableMember[]> {
   const [users, overrides, grouped] = await Promise.all([
     db.user.findMany({
-      where: { teamId, deactivatedAt: null },
-      select: { id: true, role: true, availabilityStatus: true },
+      where: { workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
+      select: {
+        id: true,
+        availabilityStatus: true,
+        workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 },
+      },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     }),
     db.assignmentPolicyMember.findMany({
@@ -410,7 +414,7 @@ async function loadMembers(
     }),
     db.conversation.groupBy({
       by: ["assignedUserId"],
-      where: { teamId, assignedUserId: { not: null }, status: { not: "closed" } },
+      where: { workspaceId, assignedUserId: { not: null }, status: { not: "closed" } },
       _count: { _all: true },
     }),
   ]);
@@ -419,14 +423,14 @@ async function loadMembers(
   for (const g of grouped) {
     if (g.assignedUserId) openCounts.set(g.assignedUserId, g._count._all);
   }
-  const reserved = reservedCounts(teamId);
+  const reserved = reservedCounts(workspaceId);
   const overrideByUser = new Map(overrides.map((o) => [o.userId, o]));
 
   return users.map((u) => {
     const o = overrideByUser.get(u.id);
     return {
       id: u.id,
-      role: u.role,
+      role: u.workspaceMemberships[0]?.role ?? "agent",
       availabilityStatus: u.availabilityStatus,
       openCount: (openCounts.get(u.id) ?? 0) + (reserved.get(u.id) ?? 0),
       hasOverride: o != null,
@@ -449,7 +453,7 @@ async function loadMembers(
  */
 export async function resolveAssignee(args: {
   db: Db;
-  teamId: string;
+  workspaceId: string;
   ctx: AssignmentContext;
   policyId?: string | null;
   /** The thread being routed. Enables continuity (`preferPreviousAgent`);
@@ -458,9 +462,9 @@ export async function resolveAssignee(args: {
   /** Default true. False = dry run (settings preview) — no cursor/counter write. */
   commit?: boolean;
 }): Promise<AssignmentDecision> {
-  const { db, teamId, ctx, policyId, conversationId, commit = true } = args;
+  const { db, workspaceId, ctx, policyId, conversationId, commit = true } = args;
 
-  const { policy, ruleId, ruleName } = await resolvePolicyFor(db, teamId, ctx, policyId);
+  const { policy, ruleId, ruleName } = await resolvePolicyFor(db, workspaceId, ctx, policyId);
   if (!policy) {
     return {
       userId: null,
@@ -472,20 +476,20 @@ export async function resolveAssignee(args: {
     };
   }
 
-  const members = await loadMembers(db, teamId, policy.id);
+  const members = await loadMembers(db, workspaceId, policy.id);
 
   // Continuity lookup only when the policy asks for it and the caller told us
   // which conversation we're routing — the settings preview has no thread, so
   // it simply previews the strategy without a relationship bias.
   const previousUserId =
     policy.preferPreviousAgent && conversationId
-      ? await previousAgentFor(db, teamId, conversationId, policy.previousAgentWindowDays)
+      ? await previousAgentFor(db, workspaceId, conversationId, policy.previousAgentWindowDays)
       : null;
 
   const result = selectAssignee({
     policy: toSelectable(policy),
     members,
-    onlineUserIds: getOnlineUserIds(teamId),
+    onlineUserIds: getOnlineUserIds(workspaceId),
     excludeUserIds: ctx.excludeUserIds,
     previousUserId,
   });
@@ -500,7 +504,7 @@ export async function resolveAssignee(args: {
   };
 
   if (commit && result.userId) {
-    reserve(teamId, result.userId);
+    reserve(workspaceId, result.userId);
     await commitPick(db, policy, result.userId).catch(() => {
       // Bookkeeping only — the assignment itself is already decided.
     });
@@ -533,7 +537,7 @@ async function commitPick(
   await db.assignmentPolicyMember.upsert({
     where: { policyId_userId: { policyId: policy.id, userId } },
     create: {
-      teamId: policy.teamId,
+      workspaceId: policy.workspaceId,
       policyId: policy.id,
       userId,
       served: 1,

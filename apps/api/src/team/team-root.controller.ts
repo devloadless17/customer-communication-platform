@@ -63,8 +63,8 @@ export class TeamRootController {
 
   @Get()
   async get(@CurrentSession() session: ApiSession) {
-    const team = await this.db.team.findUnique({
-      where: { id: session.teamId },
+    const team = await this.db.workspace.findUnique({
+      where: { id: session.workspaceId },
       select: {
         id: true,
         name: true,
@@ -84,7 +84,7 @@ export class TeamRootController {
     // business-initiated calling isn't offered can't call anyone, while an
     // eligible one can call customers anywhere. Sent once here rather than
     // derived per contact in the UI, because it is not a per-contact fact.
-    const businessCountry = await getBusinessNumberCountry(session.teamId);
+    const businessCountry = await getBusinessNumberCountry(session.workspaceId);
     return {
       team: {
         ...team,
@@ -103,8 +103,8 @@ export class TeamRootController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(SetAiAutopilotSchema)) body: SetAiAutopilotInput,
   ) {
-    await this.db.team.update({
-      where: { id: session.teamId },
+    await this.db.workspace.update({
+      where: { id: session.workspaceId },
       data: { aiAutopilotEnabled: body.aiAutopilotEnabled },
     });
     return { ok: true, aiAutopilotEnabled: body.aiAutopilotEnabled };
@@ -119,7 +119,7 @@ export class TeamRootController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(SetAiSettingsSchema)) body: SetAiSettingsInput,
   ) {
-    const team = await this.teamRoot.updateAiSettings(session.teamId, body);
+    const team = await this.teamRoot.updateAiSettings(session.workspaceId, body);
     return { ok: true, team };
   }
 
@@ -137,18 +137,18 @@ export class TeamRootController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(SetTeamWorkHoursSchema)) body: SetTeamWorkHoursInput,
   ) {
-    await this.db.team.update({
-      where: { id: session.teamId },
+    await this.db.workspace.update({
+      where: { id: session.workspaceId },
       data: { workHours: body.workHours ?? Prisma.DbNull },
     });
-    await this.users.resyncAvailability(session.teamId);
+    await this.users.resyncAvailability(session.workspaceId);
     return { ok: true, workHours: body.workHours };
   }
 
   @Get("work-hours")
   async getWorkHours(@CurrentSession() session: ApiSession) {
-    const team = await this.db.team.findUnique({
-      where: { id: session.teamId },
+    const team = await this.db.workspace.findUnique({
+      where: { id: session.workspaceId },
       select: { workHours: true },
     });
     return { workHours: team?.workHours ?? null };
@@ -160,14 +160,14 @@ export class TeamRootController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(RenameTeamSchema)) body: RenameTeamInput,
   ) {
-    const { name } = await this.teamRoot.rename(session.teamId, body.name, session.userId);
-    return { team: { id: session.teamId, name } };
+    const { name } = await this.teamRoot.rename(session.workspaceId, body.name, session.userId);
+    return { team: { id: session.workspaceId, name } };
   }
 
   @RequireRole("admin")
   @Delete()
   async remove(@CurrentSession() session: ApiSession) {
-    await this.teamRoot.destroy(session.teamId, "api/team");
+    await this.teamRoot.destroy(session.workspaceId, "api/team");
     return { ok: true };
   }
 }

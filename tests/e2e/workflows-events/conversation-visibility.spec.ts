@@ -24,7 +24,7 @@ import {
 
 const viewer = (over: Partial<ConversationViewer> = {}): ConversationViewer => ({
   userId: "u_agent",
-  teamId: "t1",
+  workspaceId: "t1",
   role: "agent",
   agentConversationVisibility: "assigned",
   ...over,
@@ -42,7 +42,7 @@ test.describe("who is restricted", () => {
   });
 
   test("admin, manager and superAdmin are NEVER restricted", () => {
-    for (const role of ["admin", "manager", "superAdmin"] as const) {
+    for (const role of ["admin", "manager"] as const) {
       expect(isRestrictedViewer(viewer({ role }))).toBe(false);
     }
   });

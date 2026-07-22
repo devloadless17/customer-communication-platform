@@ -13,8 +13,12 @@ import { PolicyCard } from "./policy-card";
 import { RulesPanel } from "./rules-panel";
 import type { AssignmentOverview } from "./types";
 
+// "Teams" is the user-facing name for what the schema calls an
+// AssignmentPolicy: a named group of members with a strategy, weights and
+// capacity. It IS the routable team — inventing a second entity beside it
+// would give one concept two homes that could disagree about who is on it.
 const TABS = [
-  { key: "policies", label: "Policies" },
+  { key: "policies", label: "Teams" },
   { key: "rules", label: "Routing rules" },
   { key: "automation", label: "When it runs" },
 ] as const;
@@ -97,8 +101,8 @@ export function AssignmentSettings() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Assignment"
-        description="Decide who takes each conversation — and when that happens automatically."
+        title="Teams & routing"
+        description="Group people into teams, decide who takes each conversation, and when that happens automatically."
         action={
           tab === "policies" ? (
             <Button size="sm" onClick={() => void createPolicy()} disabled={creating}>
@@ -107,7 +111,7 @@ export function AssignmentSettings() {
               ) : (
                 <Plus className="size-4" />
               )}
-              New policy
+              New team
             </Button>
           ) : undefined
         }

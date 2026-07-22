@@ -24,7 +24,7 @@ export class MessengerController {
 
   @Get()
   async get(@CurrentSession() session: ApiSession) {
-    const config = await this.messenger.getConfig(session.teamId);
+    const config = await this.messenger.getConfig(session.workspaceId);
     return { config };
   }
 
@@ -33,13 +33,13 @@ export class MessengerController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(UpdateMessengerConfigSchema)) body: UpdateMessengerConfigInput,
   ) {
-    const out = await this.messenger.updateConfig(session.teamId, body);
+    const out = await this.messenger.updateConfig(session.workspaceId, body);
     return { ok: true, ...out };
   }
 
   @Delete()
   async disconnect(@CurrentSession() session: ApiSession) {
-    await this.messenger.disconnect(session.teamId);
+    await this.messenger.disconnect(session.workspaceId);
     return { ok: true };
   }
 }

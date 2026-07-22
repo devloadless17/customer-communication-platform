@@ -19,6 +19,8 @@ import type {
   Message,
   MessageFlag,
   MessageStatus,
+  Ticket,
+  TicketStatus,
   User,
   UserAvailabilityStatus,
 } from "../types";
@@ -38,7 +40,7 @@ export interface ServerToClientEvents {
    * row in without a refetch.
    */
   "message:new": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     message: Message;
     preview: string;
@@ -60,7 +62,7 @@ export interface ServerToClientEvents {
 
   /** A message's delivery status changed (sent → delivered → read, or failed). */
   "message:status": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     messageId: string;
     status: MessageStatus;
@@ -85,7 +87,7 @@ export interface ServerToClientEvents {
    * null when the reaction was removed.
    */
   "message:reaction": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     messageId: string;
     actor: "customer" | "agent";
@@ -107,7 +109,7 @@ export interface ServerToClientEvents {
    * their own message) that the team frame costs nothing.
    */
   "message:updated": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     messageId: string;
     deletedAt: string | null;
@@ -133,12 +135,47 @@ export interface ServerToClientEvents {
    * count — the list badge reads it directly instead of recomputing.
    */
   "message:flag": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     messageId: string;
     action: "added" | "updated" | "reopened" | "resolved" | "removed";
     flag: MessageFlag;
     openFlagCount: number;
+  }) => void;
+
+  /**
+   * A ticket was created or changed.
+   *
+   * WORKSPACE-room scoped, unlike `message:flag`. The ticket board is a
+   * workspace-wide view of work across every conversation — an agent watching
+   * the board has not joined `conv:<id>` for any of the threads on it, so a
+   * conversation-room frame would leave every card stale until a refetch. The
+   * frames are rare (ticket writes are agent- or lifecycle-driven, never
+   * per-message), so the team-room cost is the right trade — same call as
+   * `message:updated`.
+   *
+   * `ticket` is the state AFTER the change. `openTicketCount` is the parent
+   * conversation's post-change count, so the inbox row badge updates from the
+   * same frame without recomputing.
+   */
+  "ticket:changed": (payload: {
+    workspaceId: string;
+    ticketId: string;
+    conversationId: string;
+    action:
+      | "created"
+      | "assigned"
+      | "status_changed"
+      | "priority_changed"
+      | "reopened"
+      | "solved"
+      | "closed"
+      | "sla_breached"
+      | "updated";
+    ticket: Ticket;
+    previousStatus: TicketStatus | null;
+    breachedLeg?: "first_response" | "resolution";
+    openTicketCount: number;
   }) => void;
 
   /**
@@ -152,7 +189,7 @@ export interface ServerToClientEvents {
    * forwarded only for the list's recency guard.
    */
   "conversation:preview": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     preview: string;
     lastMessageAt: string | null;
@@ -166,7 +203,7 @@ export interface ServerToClientEvents {
    * socket-fanout subscribes to the underlying domain event.
    */
   "message:failed": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     clientTempId?: string;
     reason: string;
@@ -182,7 +219,7 @@ export interface ServerToClientEvents {
    *     the placeholder and renders as a text-only bubble (caption preserved).
    */
   "message:media:ready": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     messageId: string;
     media?: MediaAttachment;
@@ -190,14 +227,14 @@ export interface ServerToClientEvents {
 
   /** A teammate added an internal note. */
   "note:new": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     note: InternalNote;
   }) => void;
 
   /** A teammate deleted an internal note — splice it out of the thread. */
   "note:deleted": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     noteId: string;
     /** Client-only flag on the deleter's optimistic dispatch: removes the card
@@ -209,7 +246,7 @@ export interface ServerToClientEvents {
 
   /** Assignment was changed (or cleared). */
   "conversation:assigned": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     assignedUser: User | null;
     /**
@@ -228,7 +265,7 @@ export interface ServerToClientEvents {
 
   /** Conversation status changed (open / pending / closed). */
   "conversation:status": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     status: ConversationStatus;
     /** See `conversation:assigned.optimistic`. */
@@ -237,7 +274,7 @@ export interface ServerToClientEvents {
 
   /** AI Autopilot enabled/disabled for a conversation. */
   "conversation:ai": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     aiEnabled: boolean;
     /** See `conversation:assigned.optimistic`. */
@@ -247,26 +284,26 @@ export interface ServerToClientEvents {
   // --- Native AI Assistant (panel/suggestion-level; consumed by the inbox AI
   // surfaces via direct socket.on, not thread-reducers). ---
   "ai:suggestion": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     suggestionId: string | null;
     state: string;
   }) => void;
-  "ai:summary": (payload: { teamId: string; conversationId: string }) => void;
+  "ai:summary": (payload: { workspaceId: string; conversationId: string }) => void;
   "ai:memory": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     customerId: string;
   }) => void;
-  "ai:state": (payload: { teamId: string; conversationId: string; state: string }) => void;
+  "ai:state": (payload: { workspaceId: string; conversationId: string; state: string }) => void;
   "ai:transcription": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     messageId: string;
     status: string;
   }) => void;
   "ai:flag": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     messageId: string;
     risk: number;
@@ -278,7 +315,7 @@ export interface ServerToClientEvents {
    * of its list; an open detail view should bounce back to /inbox.
    */
   "conversation:deleted": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
   }) => void;
 
@@ -289,7 +326,7 @@ export interface ServerToClientEvents {
    * contacts page itself.
    */
   "contact:deleted": (payload: {
-    teamId: string;
+    workspaceId: string;
     contactId: string;
   }) => void;
 
@@ -313,7 +350,7 @@ export interface ServerToClientEvents {
    * every emit.
    */
   "contact:updated": (payload: {
-    teamId: string;
+    workspaceId: string;
     contact: Contact;
     /**
      * Set ONLY by client-side optimistic dispatches (dispatchLocalSocketEvent),
@@ -338,7 +375,7 @@ export interface ServerToClientEvents {
    * event only fires when the server batched the mutation.
    */
   "contacts:bulk_updated": (payload: {
-    teamId: string;
+    workspaceId: string;
     contactIds: string[];
     changeKind: "tags" | "stage" | "fields" | "mixed";
   }) => void;
@@ -350,7 +387,7 @@ export interface ServerToClientEvents {
    * progress bar and auto-start the download without polling.
    */
   "contacts:transfer_progress": (payload: {
-    teamId: string;
+    workspaceId: string;
     job: {
       id: string;
       kind: "import" | "export";
@@ -377,7 +414,7 @@ export interface ServerToClientEvents {
    * per-agent unread as deferred, so this is shared across the team.
    */
   "conversation:read": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     readByUserId: string;
   }) => void;
@@ -403,7 +440,7 @@ export interface ServerToClientEvents {
    * rollback dispatch can target the exact stub to remove on a failed PATCH.
    */
   "conversation:activity": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     /** The synthetic event to append. `null` together with `removeId` = remove. */
     event: ConversationActivityEvent | null;
@@ -417,7 +454,7 @@ export interface ServerToClientEvents {
    * subscribe so it doesn't have to wait for the next change to populate.
    */
   "presence:update": (payload: {
-    teamId: string;
+    workspaceId: string;
     onlineUserIds: string[];
   }) => void;
 
@@ -440,7 +477,7 @@ export interface ServerToClientEvents {
    * "unchanged" — clients merge by user id, replacing the prior entry.
    */
   "user:availability:updated": (payload: {
-    teamId: string;
+    workspaceId: string;
     userId: string;
     status: UserAvailabilityStatus;
     message?: string | null;
@@ -469,7 +506,7 @@ export interface ServerToClientEvents {
    * re-applied incrementally.
    */
   "user:availability:snapshot": (payload: {
-    teamId: string;
+    workspaceId: string;
     byUserId: Record<string, {
       status: UserAvailabilityStatus;
       message?: string | null;
@@ -545,7 +582,7 @@ export interface ServerToClientEvents {
    * (polling is still in place as a fallback for clients off the socket).
    */
   "broadcast:status": (payload: {
-    teamId: string;
+    workspaceId: string;
     broadcastId: string;
     // `scheduled` is emitted only by the create path so other tabs can
     // pick up newly-created delayed broadcasts live. See
@@ -567,7 +604,7 @@ export interface ServerToClientEvents {
    * so the detail page can advance the progress bar in real time.
    */
   "broadcast:progress": (payload: {
-    teamId: string;
+    workspaceId: string;
     broadcastId: string;
     sentCount: number;
     failedCount: number;
@@ -593,7 +630,7 @@ export interface ServerToClientEvents {
    *     that consumes that catalog).
    */
   "team:catalog:changed": (payload: {
-    teamId: string;
+    workspaceId: string;
     scope:
       | "stages"
       | "tags"
@@ -644,7 +681,7 @@ export interface ServerToClientEvents {
    * members of that team see it.
    */
   "team:renamed": (payload: {
-    teamId: string;
+    workspaceId: string;
     name: string;
     renamedByUserId: string;
   }) => void;
@@ -656,7 +693,7 @@ export interface ServerToClientEvents {
    * know the integration just went silent.
    */
   "webhook:subscription_disabled": (payload: {
-    teamId: string;
+    workspaceId: string;
     webhookId: string;
     reason: string;
   }) => void;
@@ -667,12 +704,12 @@ export interface ServerToClientEvents {
    * webhook is unhealthy" badge so the operator doesn't need to refresh.
    */
   "webhook:subscription_recovered": (payload: {
-    teamId: string;
+    workspaceId: string;
     webhookId: string;
   }) => void;
 
   // -------------------------------------------------------------------------
-  // Team chat (internal channels). All payloads carry `teamId` so the team
+  // Team chat (internal channels). All payloads carry `workspaceId` so the team
   // room's clients can ignore events from other tenants in the rare case
   // they ever cross a room (e.g. multi-team accounts in the future).
   // -------------------------------------------------------------------------
@@ -689,7 +726,7 @@ export interface ServerToClientEvents {
    * same pattern as `message:new` for customer threads.
    */
   "team:channel:message": (payload: {
-    teamId: string;
+    workspaceId: string;
     channelId: string;
     message: TeamChannelMessageDto;
     /** Truncated body / media hint for the channel-list preview. Null for replies. */
@@ -718,7 +755,7 @@ export interface ServerToClientEvents {
    * channel-room frame (when the channel is active) or the next list refetch.
    */
   "team:channel:activity": (payload: {
-    teamId: string;
+    workspaceId: string;
     channelId: string;
     authorUserId: string | null;
     mentionedUserIds: string[];
@@ -732,7 +769,7 @@ export interface ServerToClientEvents {
    *  Also fired (with a possibly-null `lastReplyAt`) on reply DELETE so the
    *  parent's "X replies" pill keeps the count + timestamp in sync. */
   "team:channel:thread:reply": (payload: {
-    teamId: string;
+    workspaceId: string;
     channelId: string;
     rootMessageId: string;
     replyCount: number;
@@ -744,7 +781,7 @@ export interface ServerToClientEvents {
    * label source. Body is the post-edit content; old body isn't carried.
    */
   "team:channel:message:edited": (payload: {
-    teamId: string;
+    workspaceId: string;
     channelId: string;
     messageId: string;
     body: string;
@@ -753,7 +790,7 @@ export interface ServerToClientEvents {
 
   /** A message was hard-deleted. Splice from the feed and any open thread. */
   "team:channel:message:deleted": (payload: {
-    teamId: string;
+    workspaceId: string;
     channelId: string;
     messageId: string;
     /** Set when the deleted message was a reply — so the thread panel can
@@ -769,7 +806,7 @@ export interface ServerToClientEvents {
    * reaction was removed.
    */
   "team:channel:reaction:changed": (payload: {
-    teamId: string;
+    workspaceId: string;
     channelId: string;
     messageId: string;
     emoji: string;
@@ -797,7 +834,7 @@ export interface ServerToClientEvents {
    * Fields are null on unpin.
    */
   "team:channel:pin:changed": (payload: {
-    teamId: string;
+    workspaceId: string;
     channelId: string;
     messageId: string;
     pinned: boolean;
@@ -813,7 +850,7 @@ export interface ServerToClientEvents {
    * can reconcile against any in-flight `team:channel:message` events.
    */
   "team:channel:read": (payload: {
-    teamId: string;
+    workspaceId: string;
     channelId: string;
     readByUserId: string;
     lastReadAt: string;
@@ -838,7 +875,7 @@ export interface ServerToClientEvents {
    * event per user. `changedById` is the actor who triggered the change.
    */
   "team:channel:members:changed": (payload: {
-    teamId: string;
+    workspaceId: string;
     channelId: string;
     action: "added" | "removed";
     userIds: string[];
@@ -854,7 +891,7 @@ export interface ServerToClientEvents {
    * Undefined fields = no change. `avatarUrl: null` = explicitly cleared.
    */
   "user:profile:updated": (payload: {
-    teamId: string;
+    workspaceId: string;
     userId: string;
     name?: string;
     avatarUrl?: string | null;
@@ -879,7 +916,7 @@ export interface ServerToClientEvents {
    * people in the DM, who already know who they are.
    */
   "team:dm:created": (payload: {
-    teamId: string;
+    workspaceId: string;
     channelId: string;
     /** Who opened it — lets the starter's own tab skip the toast/ding. */
     createdByUserId: string;
@@ -904,7 +941,7 @@ export interface ServerToClientEvents {
 
   /** Inbound call ringing. Team room — any agent might pick up. */
   "call:incoming": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     callId: string;
     externalCallId: string;
@@ -922,7 +959,7 @@ export interface ServerToClientEvents {
    *  Calls badge (which counts ringing rows) must see the outbound ring phase
    *  for non-viewers too. See fanout-rules.ts `call.ringing_out`. */
   "call:ringing": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     callId: string;
     initiatedByUserId: string;
@@ -935,7 +972,7 @@ export interface ServerToClientEvents {
 
   /** First agent's CAS succeeded. Team room — dismisses every OTHER toast. */
   "call:answered": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     callId: string;
     answeredByUserId: string;
@@ -945,7 +982,7 @@ export interface ServerToClientEvents {
   /** Call ended (terminal). Same shape used for missed/rejected/failed —
    *  Call.status differentiates them on the row when the bubble renders. */
   "call:ended": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     callId: string;
     durationSeconds: number | null;
@@ -959,7 +996,7 @@ export interface ServerToClientEvents {
    *  (customer's answer to our offer → browser calls setRemoteDescription
    *  to complete handshake). Branches on payload.sdp.type. */
   "call:sdp_offer": (payload: {
-    teamId: string;
+    workspaceId: string;
     conversationId: string;
     callId: string;
     sdp: { type: "offer" | "answer"; sdp: string };
@@ -990,7 +1027,7 @@ export interface TeamChannelMediaDto {
 export interface TeamChannelMessageDto {
   id: string;
   channelId: string;
-  teamId: string;
+  workspaceId: string;
   /** Null when author was removed. UI renders "Removed user." */
   authorUserId: string | null;
   authorName: string | null;
@@ -1062,7 +1099,7 @@ export type InterServerEvents = Record<string, never>;
 
 export interface SocketData {
   // Set during the handshake auth middleware, non-null afterwards.
-  teamId?: string;
+  workspaceId?: string;
   userId?: string;
   role?: import("../types").Role;
   /** `Team.agentConversationVisibility` — decides whether this socket joins the

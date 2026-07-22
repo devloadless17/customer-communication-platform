@@ -91,7 +91,7 @@ export class ContactsService {
    * Next.js route exactly: search, fieldKey+fieldValue, source, tagIds,
    * window, stageId, cursor. Empty / unknown values are dropped silently.
    */
-  list(teamId: string, query: ListContactsQueryInput) {
+  list(workspaceId: string, query: ListContactsQueryInput) {
     const tagIds = query.tagIds
       ? query.tagIds.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
       : undefined;
@@ -113,7 +113,7 @@ export class ContactsService {
     };
     // "Group by person" rolls the list up to one row per unified Customer;
     // otherwise the default per-channel-contact list.
-    return query.groupByPerson ? listPeople(teamId, opts) : listContacts(teamId, opts);
+    return query.groupByPerson ? listPeople(workspaceId, opts) : listContacts(workspaceId, opts);
   }
 
   /**
@@ -126,7 +126,7 @@ export class ContactsService {
    * paths fire the same event from their own create sites.)
    */
   async create(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: CreateContactInput,
   ): Promise<Contact> {
@@ -157,13 +157,13 @@ export class ContactsService {
 
     // Every contact lands in the team's default stage on create — lazy-init
     // covers older teams + admins who deleted the seeded default.
-    const stageId = await ensureDefaultStage(teamId);
+    const stageId = await ensureDefaultStage(workspaceId);
 
     let created;
     try {
       created = await this.db.contact.create({
         data: {
-          teamId,
+          workspaceId,
           // Manual contact-create from the UI is WhatsApp-only today (it
           // takes a phone number). Stamp the channel explicitly so the row
           // is self-describing; future channels would get their own create
@@ -194,7 +194,7 @@ export class ContactsService {
         // A soft-deleted contact still holds this phone's unique slot. Re-adding
         // the number should revive that tombstoned row (and its preserved
         // conversation) rather than 409 on a contact the agent can't even see.
-        const revived = await this.reviveSoftDeletedByPhone(teamId, userId, phone, {
+        const revived = await this.reviveSoftDeletedByPhone(workspaceId, userId, phone, {
           name,
           firstName: trimmedFirst,
           lastName: trimmedLast,
@@ -217,7 +217,7 @@ export class ContactsService {
 
     await this.bus.publish({
       type: "contact.created",
-      teamId,
+      workspaceId,
       contact,
       source: "manual",
       createdByUserId: userId,
@@ -237,7 +237,7 @@ export class ContactsService {
    * is the manual-create mirror of the ingest upsert's `deletedAt: null` revive.
    */
   private async reviveSoftDeletedByPhone(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     phone: string,
     data: {
@@ -254,7 +254,7 @@ export class ContactsService {
   ): Promise<Contact | null> {
     const existing = await this.db.contact.findFirst({
       // whatsapp-scoped: the phone unique slot being revived is WhatsApp-only.
-      where: { teamId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: { not: null } },
+      where: { workspaceId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: { not: null } },
       select: { id: true },
     });
     if (!existing) return null;
@@ -296,7 +296,7 @@ export class ContactsService {
     if (revived.count > 0) {
       await this.bus.publish({
         type: "contact.created",
-        teamId,
+        workspaceId,
         contact,
         source: "manual",
         createdByUserId: userId,
@@ -317,7 +317,7 @@ export class ContactsService {
    * be specific (CLAUDE.md memory: contact phone is immutable).
    */
   async update(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     contactId: string,
     input: UpdateContactInput,
@@ -338,7 +338,7 @@ export class ContactsService {
     try {
       result = await this.db.$transaction(async (tx) => {
         const existing = await tx.contact.findFirst({
-          where: { id: contactId, teamId, deletedAt: null },
+          where: { id: contactId, workspaceId, deletedAt: null },
           include: { tags: { select: { id: true } } },
         });
         if (!existing) return null;
@@ -351,7 +351,7 @@ export class ContactsService {
         // zod schema.
         if (typeof stageId === "string") {
           const ok = await tx.contactStage.findFirst({
-            where: { id: stageId, teamId },
+            where: { id: stageId, workspaceId },
             select: { id: true },
           });
           if (!ok) {
@@ -382,7 +382,7 @@ export class ContactsService {
         // Without this, two PATCHes editing different fields would race
         // read-modify-write and silently lose one set of changes.
         const updated = await tx.contact.update({
-          where: { id: contactId, teamId, version: existing.version },
+          where: { id: contactId, workspaceId, version: existing.version },
           data: {
             ...(name !== undefined ? { name } : derivedName !== undefined ? { name: derivedName } : {}),
             ...(firstName !== undefined ? { firstName } : {}),
@@ -443,7 +443,7 @@ export class ContactsService {
     // socket fanout, audit, web cache revalidate).
     await this.bus.publish({
       type: "contact.updated",
-      teamId,
+      workspaceId,
       contact,
       previousStageId: existing.stageId,
       fieldChanges,
@@ -456,7 +456,7 @@ export class ContactsService {
     if (existing.stageId !== updated.stageId) {
       await this.bus.publish({
         type: "contact.lifecycle_changed",
-        teamId,
+        workspaceId,
         contactId: updated.id,
         before: { stageId: existing.stageId },
         after: { stageId: updated.stageId },
@@ -473,29 +473,29 @@ export class ContactsService {
    * blob unlinking is best-effort AFTER the DB commit — a stuck blob is
    * preferable to a half-committed delete.
    */
-  async remove(teamId: string, userId: string, contactId: string): Promise<void> {
+  async remove(workspaceId: string, userId: string, contactId: string): Promise<void> {
     // Soft-delete: tombstone the contact but PRESERVE its conversations,
     // messages, and media — removing a contact must NOT delete its chat. The
     // contact just leaves the directory; its thread stays in the inbox, and a
     // returning contact is re-activated by the ingest upsert.
     const contact = await this.db.contact.findFirst({
-      where: { id: contactId, teamId, deletedAt: null },
+      where: { id: contactId, workspaceId, deletedAt: null },
       select: { id: true },
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });
 
-    // updateMany on (id, teamId) — the findFirst above already proves
+    // updateMany on (id, workspaceId) — the findFirst above already proves
     // ownership, but keeping the tenant scope on the mutation itself means a
     // future refactor that drops the gate isn't one line from a cross-tenant
     // write (mirrors conversations.service.remove's defense-in-depth).
     await this.db.contact.updateMany({
-      where: { id: contactId, teamId },
+      where: { id: contactId, workspaceId },
       data: { deletedAt: new Date() },
     });
 
     await this.bus.publish({
       type: "contact.deleted",
-      teamId,
+      workspaceId,
       contactId,
       // Conversations are preserved on soft-delete — none to splice from lists.
       conversationIds: [],
@@ -520,7 +520,7 @@ export class ContactsService {
    *   { ok, count, action, capped }    — filter-mode tag op that hit the cap
    */
   async bulk(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: BulkContactsInput,
   ): Promise<{
@@ -544,7 +544,7 @@ export class ContactsService {
     let capped = false;
     if (input.action !== "delete" && input.mode === "filter") {
       const resolved = await resolveContactIdsByFilter(
-        teamId,
+        workspaceId,
         this.filterToListOpts(input.filter),
         MAX_FILTER_MATCH,
       );
@@ -552,7 +552,7 @@ export class ContactsService {
       capped = resolved.capped;
     } else {
       const ownContacts = await this.db.contact.findMany({
-        where: { teamId, id: { in: input.contactIds }, deletedAt: null },
+        where: { workspaceId, id: { in: input.contactIds }, deletedAt: null },
         select: { id: true },
       });
       ownedIds = ownContacts.map((c) => c.id);
@@ -567,7 +567,7 @@ export class ContactsService {
       // Soft-delete: tombstone the contacts but PRESERVE conversations +
       // messages + media — a contact delete must not take its chat with it.
       await this.db.contact.updateMany({
-        where: { teamId, id: { in: ownedIds }, deletedAt: null },
+        where: { workspaceId, id: { in: ownedIds }, deletedAt: null },
         data: { deletedAt: new Date() },
       });
 
@@ -579,7 +579,7 @@ export class ContactsService {
       await runWithConcurrency(ownedIds, 16, async (id) => {
         await this.bus.publish({
           type: "contact.deleted",
-          teamId,
+          workspaceId,
           contactId: id,
           // Conversations preserved on soft-delete — none to splice.
           conversationIds: [],
@@ -592,14 +592,14 @@ export class ContactsService {
 
     // ---- tag-add / tag-remove ----------------------------------------------
     const { action, tagId } = input;
-    const tag = await this.db.tag.findFirst({ where: { id: tagId, teamId } });
+    const tag = await this.db.tag.findFirst({ where: { id: tagId, workspaceId } });
     if (!tag) throw new NotFoundException({ error: "tag not found" });
 
     // Pre-snapshot so the per-contact tagChanges payload reflects the actual
     // membership delta, not the requested intent (a tag-add of a tag the
     // contact already had → no diff → no workflow trigger).
     const beforeRows = await this.db.contact.findMany({
-      where: { teamId, id: { in: ownedIds } },
+      where: { workspaceId, id: { in: ownedIds } },
       select: { id: true, tags: { select: { id: true } } },
     });
     const hadTag = new Map(
@@ -615,7 +615,7 @@ export class ContactsService {
       await this.db.$executeRaw`
         INSERT INTO "_ContactToTag" ("A", "B")
         SELECT id, ${tagId} FROM "Contact"
-        WHERE id = ANY(${ownedIds}::text[]) AND "teamId" = ${teamId}
+        WHERE id = ANY(${ownedIds}::text[]) AND "workspaceId" = ${workspaceId}
         ON CONFLICT DO NOTHING
       `;
     } else {
@@ -632,7 +632,7 @@ export class ContactsService {
     await this.db.$executeRaw`
       UPDATE "Contact"
       SET version = version + 1
-      WHERE id = ANY(${ownedIds}::text[]) AND "teamId" = ${teamId}
+      WHERE id = ANY(${ownedIds}::text[]) AND "workspaceId" = ${workspaceId}
     `;
 
     // Reload ALL ownedIds (not just succeeded) — emitting the current truth
@@ -653,7 +653,7 @@ export class ContactsService {
     for (let i = 0; i < ownedIds.length; i += RELOAD_CHUNK) {
       const chunkIds = ownedIds.slice(i, i + RELOAD_CHUNK);
       const updated = await this.db.contact.findMany({
-        where: { teamId, id: { in: chunkIds } },
+        where: { workspaceId, id: { in: chunkIds } },
         include: { tags: { select: { id: true } } },
       });
       // Per-contact events for workflow + audit subscribers (granular
@@ -678,7 +678,7 @@ export class ContactsService {
 
           await this.bus.publish({
             type: "contact.updated",
-            teamId,
+            workspaceId,
             contact: payload,
             previousStageId: c.stageId,
             fieldChanges: [],
@@ -692,7 +692,7 @@ export class ContactsService {
           if (actuallyChanged) {
             await this.bus.publish({
               type: "contact.tag_changed",
-              teamId,
+              workspaceId,
               contactId: c.id,
               before: {
                 tagIds:
@@ -713,7 +713,7 @@ export class ContactsService {
     // a 500-contact bulk-tag drops from ~12,500 socket frames to 25.
     await this.bus.publish({
       type: "contact.bulk_updated",
-      teamId,
+      workspaceId,
       contactIds: ownedIds,
       changeKind: "tags",
       changedByUserId: userId,
@@ -763,26 +763,26 @@ export class ContactsService {
    * dedicated count keeps "all" semantics from leaking into the audience
    * union logic.
    */
-  async countAll(teamId: string): Promise<number> {
+  async countAll(workspaceId: string): Promise<number> {
     // Directory-scoped, matching the list: this feeds the broadcast wizard's
     // "All contacts" card, and anonymous widget visitors are neither listed nor
     // broadcastable — counting them would promise an audience we can't reach.
     return this.db.contact.count({
-      where: { teamId, deletedAt: null, ...directoryContactWhere },
+      where: { workspaceId, deletedAt: null, ...directoryContactWhere },
     });
   }
 
   /** Lightweight id→display lookup for picker chips. Cross-team ids dropped. */
-  lookup(teamId: string, ids: string[]) {
-    return lookupContacts(teamId, ids);
+  lookup(workspaceId: string, ids: string[]) {
+    return lookupContacts(workspaceId, ids);
   }
 
   /** True when the contact exists in this team AND carries a captured
    *  (same-origin) avatar. Gates the avatar serve route so one team can't
    *  stream another team's contact avatar object. */
-  async hasCapturedAvatar(teamId: string, contactId: string): Promise<boolean> {
+  async hasCapturedAvatar(workspaceId: string, contactId: string): Promise<boolean> {
     const row = await this.db.contact.findFirst({
-      where: { teamId, id: contactId },
+      where: { workspaceId, id: contactId },
       select: { avatarUrl: true },
     });
     return Boolean(row?.avatarUrl && row.avatarUrl.startsWith("/api/contacts/"));
@@ -797,9 +797,9 @@ export class ContactsService {
    * truth; it publishes `contact.updated`, so the panel updates live too.
    * No-op (returns the current contact) for phone channels / non-social.
    */
-  async syncSocialProfile(teamId: string, contactId: string): Promise<Contact> {
+  async syncSocialProfile(workspaceId: string, contactId: string): Promise<Contact> {
     const contact = await this.db.contact.findFirst({
-      where: { teamId, id: contactId, deletedAt: null },
+      where: { workspaceId, id: contactId, deletedAt: null },
       include: { tags: { select: { id: true } } },
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });
@@ -810,7 +810,7 @@ export class ContactsService {
       contact.externalContactId
     ) {
       await enrichSocialContactNames(
-        teamId,
+        workspaceId,
         contact.identityChannel,
         [contact.externalContactId],
         { forceAvatar: true },
@@ -819,7 +819,7 @@ export class ContactsService {
 
     // Re-read so the response reflects whatever enrichment just persisted.
     const fresh = await this.db.contact.findFirst({
-      where: { teamId, id: contactId },
+      where: { workspaceId, id: contactId },
       include: { tags: { select: { id: true } } },
     });
     const row = fresh ?? contact;
@@ -828,18 +828,18 @@ export class ContactsService {
 
   /** Live recipient count for an audience selection, optionally scoped to the
    *  broadcast's target channel so the composer count matches what gets sent. */
-  countAudience(teamId: string, input: AudienceCountInput): Promise<number> {
+  countAudience(workspaceId: string, input: AudienceCountInput): Promise<number> {
     return countAudienceContacts(
-      teamId,
+      workspaceId,
       { tagIds: input.tagIds, contactIds: input.contactIds, all: input.all },
       input.channel,
     );
   }
 
   /** First N matches for an audience selection (for the preview list). */
-  previewAudience(teamId: string, input: AudiencePreviewInput) {
+  previewAudience(workspaceId: string, input: AudiencePreviewInput) {
     const { limit, channel, ...audience } = input;
-    return previewAudienceContacts(teamId, audience, limit, channel);
+    return previewAudienceContacts(workspaceId, audience, limit, channel);
   }
 
   /**
@@ -849,13 +849,13 @@ export class ContactsService {
    * `contact_tag_updated` trigger per added/removed id.
    */
   async setTags(
-    teamId: string,
+    workspaceId: string,
     actorUserId: string,
     contactId: string,
     input: SetContactTagsInput,
   ): Promise<{ tagIds: string[] }> {
     const contact = await this.db.contact.findFirst({
-      where: { id: contactId, teamId, deletedAt: null },
+      where: { id: contactId, workspaceId, deletedAt: null },
       include: { tags: { select: { id: true } } },
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });
@@ -866,7 +866,7 @@ export class ContactsService {
         ? []
         : (
             await this.db.tag.findMany({
-              where: { teamId, id: { in: input.tagIds } },
+              where: { workspaceId, id: { in: input.tagIds } },
               select: { id: true },
             })
           ).map((t) => t.id);
@@ -879,7 +879,7 @@ export class ContactsService {
     let updated;
     try {
       updated = await this.db.contact.update({
-        where: { id: contactId, teamId, version: contact.version },
+        where: { id: contactId, workspaceId, version: contact.version },
         data: {
           tags: { set: validIds.map((tagId) => ({ id: tagId })) },
           version: { increment: 1 },
@@ -899,7 +899,7 @@ export class ContactsService {
 
     await this.bus.publish({
       type: "contact.updated",
-      teamId,
+      workspaceId,
       contact: payload,
       previousStageId: contact.stageId,
       fieldChanges: [],
@@ -911,7 +911,7 @@ export class ContactsService {
     if (added.length > 0 || removed.length > 0) {
       await this.bus.publish({
         type: "contact.tag_changed",
-        teamId,
+        workspaceId,
         contactId: updated.id,
         before: { tagIds: [...previousIds] },
         after: { tagIds: validIds },

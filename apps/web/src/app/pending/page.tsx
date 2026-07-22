@@ -20,19 +20,24 @@ export const dynamic = "force-dynamic";
  * client island also polls so approval lets the user in without a manual reload.
  */
 export default async function PendingPage() {
-  const { user, teamId, teamStatus } = await getSession();
+  const { user, workspaceId, orgStatus } = await getSession();
 
   // superAdmins never sit here — they manage from the platform shell.
-  if (user.role === "superAdmin") redirect("/platform");
+  if (user.isSuperAdmin) redirect("/platform");
   // Approved already (e.g. approved between page loads) → into the app.
-  if (teamStatus === "active") redirect("/settings/whatsapp");
+  if (orgStatus === "active") redirect("/settings/whatsapp");
 
-  const team = await db.team.findUnique({
-    where: { id: teamId },
-    select: { name: true, statusReason: true },
+  // `statusReason` lives on the ORGANIZATION now — the approval gate is
+  // org-level, not workspace-level. Selecting it off Workspace compiled fine
+  // (Prisma select keys aren't typechecked) and only blew up here at render,
+  // which is the first page a brand-new signup lands on.
+  const team = await db.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { name: true, organization: { select: { statusReason: true } } },
   });
+  const statusReason = team?.organization?.statusReason ?? null;
 
-  const suspended = teamStatus === "suspended";
+  const suspended = orgStatus === "suspended";
 
   return (
     <main className="flex min-h-svh items-center justify-center bg-background px-4 py-10 text-foreground">
@@ -81,10 +86,10 @@ export default async function PendingPage() {
             </p>
           </div>
 
-          {team?.statusReason ? (
+          {statusReason ? (
             <div className="w-full rounded-lg border border-border bg-muted/40 px-3 py-2 text-left text-[13px] text-muted-foreground">
               <span className="font-medium text-foreground">Note from the team:</span>{" "}
-              {team.statusReason}
+              {statusReason}
             </div>
           ) : null}
 

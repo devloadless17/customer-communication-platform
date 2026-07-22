@@ -166,7 +166,7 @@ function ChannelMessageImpl({
       : [...priorUserIds, currentUser.id];
     const emit = (userIds: string[]) =>
       dispatchLocalSocketEvent("team:channel:reaction:changed", {
-        teamId: currentUser.teamId,
+        workspaceId: currentUser.workspaceId,
         channelId,
         messageId: message.id,
         emoji,
@@ -220,7 +220,7 @@ function ChannelMessageImpl({
     // Optimistic: flip the pin badge instantly + fan the same frame the
     // server will emit so other surfaces (pinned-list etc.) update too.
     dispatchLocalSocketEvent("team:channel:pin:changed", {
-      teamId: currentUser.teamId,
+      workspaceId: currentUser.workspaceId,
       channelId,
       messageId: message.id,
       pinned: nextPinned,
@@ -228,7 +228,7 @@ function ChannelMessageImpl({
     });
     const rollback = () => {
       dispatchLocalSocketEvent("team:channel:pin:changed", {
-        teamId: currentUser.teamId,
+        workspaceId: currentUser.workspaceId,
         channelId,
         messageId: message.id,
         pinned: message.pinned,
@@ -260,7 +260,7 @@ function ChannelMessageImpl({
     // server rejects, we softly bounce by surfacing the toast; the next
     // refresh / reconnect will bring the row back.
     dispatchLocalSocketEvent("team:channel:message:deleted", {
-      teamId: currentUser.teamId,
+      workspaceId: currentUser.workspaceId,
       channelId,
       messageId: message.id,
       threadRootId: isThreadReply ? message.threadRootId ?? null : null,
@@ -290,7 +290,7 @@ function ChannelMessageImpl({
     // Optimistic: update body + show (edited) label instantly. The real
     // socket frame arriving moments later carries the canonical editedAt.
     dispatchLocalSocketEvent("team:channel:message:edited", {
-      teamId: currentUser.teamId,
+      workspaceId: currentUser.workspaceId,
       channelId,
       messageId: message.id,
       body: next,
@@ -309,7 +309,7 @@ function ChannelMessageImpl({
       else {
         // Roll back to the pre-edit body.
         dispatchLocalSocketEvent("team:channel:message:edited", {
-          teamId: currentUser.teamId,
+          workspaceId: currentUser.workspaceId,
           channelId,
           messageId: message.id,
           body: message.body,

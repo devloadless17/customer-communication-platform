@@ -3,18 +3,17 @@
 import { usePathname } from "next/navigation";
 import {
   BarChart3,
-  Bell,
   Bot,
   Flag,
   Layers,
   ListChecks,
+  Ticket as TicketIcon,
   Share2,
   MessagesSquare,
   Plug,
   ShieldCheck,
   Sparkles,
   Tag as TagIcon,
-  UserCircle2,
   Users,
 } from "lucide-react";
 
@@ -56,32 +55,16 @@ export function SettingsSubSidebar({
 
   return (
     // Groups mirror the single /settings landing exactly: My account / Team &
-    // roles / Channels & integrations / Conversation config. Each label matches
-    // the destination page's own h1 so "open Stages" resolves unambiguously.
-    <SubSidebar title="Settings">
-      <SubSidebarSection label="My account">
-        <SubSidebarItem
-          href="/settings/account"
-          label="Account"
-          leading={<UserCircle2 className="size-4" />}
-          // /settings/workspace is the legacy account landing (now redirects
-          // to /settings) — keep it lit so the redirect hop still highlights.
-          active={isActive("/settings/account") || isActive("/settings/workspace")}
-        />
-        {/* Notification sounds — personal + per-device, so NO capability gate
-            (everyone manages their own). */}
-        <SubSidebarItem
-          href="/settings/notifications"
-          label="Notifications"
-          leading={<Bell className="size-4" />}
-          active={isActive("/settings/notifications")}
-        />
-      </SubSidebarSection>
-
-      <SubSidebarSection label="Team & roles">
+    // Groups mirror the tenancy model: everything here configures THIS
+    // workspace. Personal settings moved to /account and company-level settings
+    // to /organization, so this sidebar no longer mixes three different scopes
+    // under one heading. Each label matches its page's own h1 so "open Stages"
+    // resolves unambiguously.
+    <SubSidebar title="Workspace settings">
+      <SubSidebarSection label="People & teams">
         <SubSidebarItem
           href="/settings/team"
-          label="Team members"
+          label="Members"
           leading={<Users className="size-4" />}
           active={isActive("/settings/team")}
         />
@@ -96,7 +79,7 @@ export function SettingsSubSidebar({
         {isAdmin && (
           <SubSidebarItem
             href="/settings/assignment"
-            label="Assignment"
+            label="Teams & routing"
             leading={<Share2 className="size-4" />}
             active={isActive("/settings/assignment")}
           />
@@ -104,7 +87,7 @@ export function SettingsSubSidebar({
         {permissions["teamActivity:view"] && (
           <SubSidebarItem
             href="/settings/activity"
-            label="Team activity"
+            label="Activity"
             leading={<BarChart3 className="size-4" />}
             active={isActive("/settings/activity")}
           />
@@ -112,7 +95,7 @@ export function SettingsSubSidebar({
       </SubSidebarSection>
 
       {isAdmin && (
-        <SubSidebarSection label="Channels & integrations">
+        <SubSidebarSection label="Channels & apps">
           <SubSidebarItem
             href="/settings/channels"
             label="Channels"
@@ -135,7 +118,7 @@ export function SettingsSubSidebar({
         </SubSidebarSection>
       )}
 
-      <SubSidebarSection label="Conversation config">
+      <SubSidebarSection label="Inbox">
         {canAiAssistant && (
           <SubSidebarItem
             href="/settings/ai-assistant"
@@ -185,6 +168,23 @@ export function SettingsSubSidebar({
           />
         )}
       </SubSidebarSection>
+
+      {/* Tickets are their own domain, not "conversation config": a ticket is
+          the unit of WORK on a conversation, with its own lifecycle, SLA and
+          board. Burying its settings under Inbox implied it was a per-message
+          setting like tags. Admin-gated on the ROLE — every /api/team/tickets
+          route is @RequireRole("admin"), so a capability gate would send a
+          manager to the error boundary. */}
+      {isAdmin && (
+        <SubSidebarSection label="Tickets">
+          <SubSidebarItem
+            href="/settings/tickets"
+            label="Ticket settings"
+            leading={<TicketIcon className="size-4" />}
+            active={isActive("/settings/tickets")}
+          />
+        </SubSidebarSection>
+      )}
     </SubSidebar>
   );
 }

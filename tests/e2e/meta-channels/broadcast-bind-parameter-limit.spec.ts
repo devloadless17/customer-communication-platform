@@ -32,7 +32,7 @@
 
 import { test, expect } from "@playwright/test";
 
-import { db } from "../_helpers/db";
+import { createTestWorkspace, db } from "../_helpers/db";
 
 test.describe.configure({ mode: "serial" });
 
@@ -55,12 +55,10 @@ let realIds: string[] = [];
 
 test.beforeAll(async () => {
   test.setTimeout(120_000);
-  await db().team.create({
-    data: { id: TEAM_ID, name: "E2E Bind-Limit Team", status: "active" },
-  });
+  await createTestWorkspace({ id: TEAM_ID, name: "E2E Bind-Limit Team", status: "active" });
   await db().contact.createMany({
     data: Array.from({ length: REAL }, (_, i) => ({
-      teamId: TEAM_ID,
+      workspaceId: TEAM_ID,
       name: `contact-${i}`,
       // Digits-only, matching how ingest stores numbers.
       phoneNumber: `19995${String(i).padStart(6, "0")}`,
@@ -69,7 +67,7 @@ test.beforeAll(async () => {
     })),
   });
   realIds = (
-    await db().contact.findMany({ where: { teamId: TEAM_ID }, select: { id: true } })
+    await db().contact.findMany({ where: { workspaceId: TEAM_ID }, select: { id: true } })
   ).map((c) => c.id);
   expect(realIds.length).toBe(REAL);
 
@@ -93,15 +91,17 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   test.setTimeout(60_000);
-  await db().contact.deleteMany({ where: { teamId: TEAM_ID } });
-  await db().team.delete({ where: { id: TEAM_ID } });
+  await db().contact.deleteMany({ where: { workspaceId: TEAM_ID } });
+  // Delete the ORG — it cascades to the workspace. Deleting only the workspace
+  // leaves an orphan Organization behind on every run.
+  await db().organization.deleteMany({ where: { workspaces: { some: { id: TEAM_ID } } } });
 });
 
 test("a 70k-id `in` filter succeeds and merges results across every batch", async () => {
   test.setTimeout(60_000);
   // Exactly the shape broadcast create() uses for its identity-channel filter.
   const rows = await db().contact.findMany({
-    where: { teamId: TEAM_ID, id: { in: idList }, deletedAt: null },
+    where: { workspaceId: TEAM_ID, id: { in: idList }, deletedAt: null },
     select: { id: true },
   });
   // Every real id, from all three batches — not merely "it didn't throw".
@@ -115,7 +115,7 @@ test("a 70k-id `in` still applies its OTHER predicates correctly across batches"
   // the first batch. Every seeded contact is whatsapp, so a messenger-scoped
   // filter over the same list must return exactly zero.
   const wrongChannel = await db().contact.findMany({
-    where: { teamId: TEAM_ID, id: { in: idList }, identityChannel: "messenger", deletedAt: null },
+    where: { workspaceId: TEAM_ID, id: { in: idList }, identityChannel: "messenger", deletedAt: null },
     select: { id: true },
   });
   expect(wrongChannel.length).toBe(0);
@@ -127,7 +127,7 @@ test("updateMany over a 70k-id `in` affects every matching row (the retryFailed 
   // to only one batch, a large retry would silently re-queue part of the
   // audience and report success.
   const updated = await db().contact.updateMany({
-    where: { teamId: TEAM_ID, id: { in: idList } },
+    where: { workspaceId: TEAM_ID, id: { in: idList } },
     data: { source: "manual" },
   });
   expect(updated.count).toBe(REAL);
@@ -138,7 +138,7 @@ test("the opt-out lookup is bounded and audience-size independent", async () => 
   // "who on this team opted out" and intersects in memory — one small indexed
   // query whose cost does not grow with the audience.
   const optedOut = await db().contact.findMany({
-    where: { teamId: TEAM_ID, marketingOptOutAt: { not: null } },
+    where: { workspaceId: TEAM_ID, marketingOptOutAt: { not: null } },
     select: { id: true },
   });
   expect(Array.isArray(optedOut)).toBe(true);

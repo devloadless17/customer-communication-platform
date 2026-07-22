@@ -159,7 +159,7 @@ export type CreateContactInput = z.infer<typeof CreateContactSchema>;
 // this AND on the service-layer destructure (contacts.service.ts) to filter to
 // a known field allowlist before any Prisma `data:` spread. Don't use
 // `.passthrough()` here — it would let a future `data: input` call smuggle
-// arbitrary columns (`teamId`, FK fields) into the update.
+// arbitrary columns (`workspaceId`, FK fields) into the update.
 // ---------------------------------------------------------------------------
 export const UpdateContactSchema = z.object({
     name: z.string().trim().min(1).max(MAX_TEXT).optional(),

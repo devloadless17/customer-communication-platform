@@ -41,7 +41,7 @@ async function main() {
   // Safety gate: if a team exists that isn't the pilot, bail. Idempotent +
   // visible: the message tells the operator exactly what to do (run the seed
   // against the pilot's DB only).
-  const otherTeam = await db.team.findFirst({
+  const otherTeam = await db.workspace.findFirst({
     where: { id: { not: PILOT_TEAM_ID } },
     select: { id: true, name: true },
   });
@@ -59,27 +59,42 @@ async function main() {
   // the org-approval gate. superAdmins bypass the gate anyway (it's role-keyed),
   // but keeping the row `active` avoids a confusing "pending" badge on the
   // operator's own org in the platform list.
-  const team = await db.team.upsert({
-    where: { id: PILOT_TEAM_ID },
-    create: { id: PILOT_TEAM_ID, name: "Loadless", status: "active" },
+  // The approval gate lives on the ORGANIZATION now, so `status: active` is set
+  // there; the workspace is just the operator's anchor data scope.
+  const org = await db.organization.upsert({
+    where: { id: `${PILOT_TEAM_ID}_org` },
+    create: { id: `${PILOT_TEAM_ID}_org`, name: "Loadless", status: "active" },
     update: { status: "active" },
+  });
+  const team = await db.workspace.upsert({
+    where: { id: PILOT_TEAM_ID },
+    create: { id: PILOT_TEAM_ID, name: "Loadless", organizationId: org.id },
+    update: { name: "Loadless" },
   });
 
   const passwordHash = await bcrypt.hash(password, 10);
 
+  // superAdmin is the platform FLAG now, not a role. The operator also owns
+  // their anchor org and is admin of its workspace.
   const user = await db.user.upsert({
     where: { email: email },
     create: {
-      teamId: team.id,
-      role: "superAdmin",
+      organizationId: org.id,
+      orgRole: "owner",
+      isSuperAdmin: true,
       name: NAME,
       email,
     },
     update: {
-      role: "superAdmin",
+      isSuperAdmin: true,
       name: NAME,
       deactivatedAt: null,
     },
+  });
+  await db.workspaceMember.upsert({
+    where: { userId_workspaceId: { userId: user.id, workspaceId: team.id } },
+    create: { userId: user.id, workspaceId: team.id, role: "admin" },
+    update: { role: "admin" },
   });
 
   // Better Auth verifies credentials against Account.password (providerId
@@ -101,8 +116,8 @@ async function main() {
   // team setup, and /team redirects to it on first login; without this row
   // the team-chat surface lands on the "No channels yet" dead-end.
   const channel = await db.teamChannel.upsert({
-    where: { teamId_name: { teamId: team.id, name: "general" } },
-    create: { teamId: team.id, name: "general", isDefault: true, createdById: user.id },
+    where: { workspaceId_name: { workspaceId: team.id, name: "general" } },
+    create: { workspaceId: team.id, name: "general", isDefault: true, createdById: user.id },
     update: {},
   });
 
@@ -129,9 +144,9 @@ async function main() {
   ];
   for (const s of stages) {
     await db.contactStage.upsert({
-      where: { teamId_name: { teamId: team.id, name: s.name } },
+      where: { workspaceId_name: { workspaceId: team.id, name: s.name } },
       create: {
-        teamId: team.id,
+        workspaceId: team.id,
         name: s.name,
         color: s.color,
         position: s.position,

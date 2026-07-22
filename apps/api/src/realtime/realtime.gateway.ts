@@ -27,7 +27,7 @@ import {
 } from "@/lib/conversations/visibility";
 import { PresenceService } from "./presence.service";
 import { RealtimeEmitter, type TypedIO } from "./emitter.service";
-import { channelRoom, conversationRoom, teamRoom, userRoom } from "./rooms";
+import { channelRoom, conversationRoom, workspaceRoom, userRoom } from "./rooms";
 import { SocketAuthService } from "./socket-auth.service";
 import { TypingService } from "./typing.service";
 
@@ -164,13 +164,13 @@ export class RealtimeGateway
   // up". WebchatwidgetGateway binds a relay that pushes availability to that team's
   // visitor sockets; we call it whenever a team's presence flips (broadcastPresence),
   // so the dot updates live as agents come and go.
-  private widgetAvailabilityRelay: ((teamId: string, online: boolean) => void) | null = null;
-  bindWidgetAvailabilityRelay(fn: (teamId: string, online: boolean) => void): void {
+  private widgetAvailabilityRelay: ((workspaceId: string, online: boolean) => void) | null = null;
+  bindWidgetAvailabilityRelay(fn: (workspaceId: string, online: boolean) => void): void {
     this.widgetAvailabilityRelay = fn;
   }
-  private async relayWidgetAvailability(teamId: string): Promise<void> {
+  private async relayWidgetAvailability(workspaceId: string): Promise<void> {
     if (!this.widgetAvailabilityRelay) return;
-    this.widgetAvailabilityRelay(teamId, await this.teamHasAvailableAgent(teamId));
+    this.widgetAvailabilityRelay(workspaceId, await this.teamHasAvailableAgent(workspaceId));
   }
 
   /**
@@ -187,11 +187,11 @@ export class RealtimeGateway
    * Over-showing the dot for one tick beats going dark on transient Postgres
    * flapping — the visitor can still send, they just might wait.
    */
-  async teamHasAvailableAgent(teamId: string): Promise<boolean> {
-    const connected = getOnlineUserIds(teamId);
+  async teamHasAvailableAgent(workspaceId: string): Promise<boolean> {
+    const connected = getOnlineUserIds(workspaceId);
     if (!connected || connected.size === 0) return false;
     try {
-      const rows = await this.teamAvailability(teamId);
+      const rows = await this.teamAvailability(workspaceId);
       const available = new Set(
         rows
           .filter((r) => (r.availabilityStatus ?? "available") === "available")
@@ -224,25 +224,25 @@ export class RealtimeGateway
     // the exact moment the cached availability rows went stale. Busting the
     // cache here means the TTL never delays a real status change — it only
     // ever collapses reads that nothing invalidated (the reconnect storm).
-    this.emitter.bindPresenceSnapshotter((teamId) => {
-      this.invalidateTeamAvailability(teamId);
+    this.emitter.bindPresenceSnapshotter((workspaceId) => {
+      this.invalidateTeamAvailability(workspaceId);
       // An availability change can flip the widget's "an agent is available"
       // dot too — a lone agent going busy/away, or the working-hours sweeper
       // closing the shift, means nobody is there to answer a visitor. Before
       // this, the relay only fired on socket connect/disconnect, so the dot
       // stayed green after the last agent marked themselves away (or went off
       // shift) until someone happened to open or close a tab.
-      void this.relayWidgetAvailability(teamId);
-      return this.buildVisibleOnlineSnapshot(teamId);
+      void this.relayWidgetAvailability(workspaceId);
+      return this.buildVisibleOnlineSnapshot(workspaceId);
     });
     // Same indirection for the per-conversation viewer pill — the
     // `user.availability_changed` fanout re-emits `conversation:viewers`
     // for every room the user is in so a status flip drops/restores them
     // from teammates' "also viewing" pills in the same frame as the badge.
     this.emitter.bindConversationViewersSnapshotter(async (conversationId) => {
-      const teamId = await this.teamIdForConversation(conversationId);
-      if (teamId === null) return [];
-      return this.buildVisibleViewers(conversationId, teamId);
+      const workspaceId = await this.teamIdForConversation(conversationId);
+      if (workspaceId === null) return [];
+      return this.buildVisibleViewers(conversationId, workspaceId);
     });
     this.emitter.bindConversationsViewedByUser((userId) =>
       this.presence.conversationsViewedBy(userId),
@@ -250,9 +250,9 @@ export class RealtimeGateway
     // RT-1: resolve a channel's activity-badge audience. Default channel →
     // whole team; membership-gated channel → just its members (their user
     // rooms), so a private channel's activity never reaches non-members.
-    this.emitter.bindChannelActivityResolver(async (channelId, teamId) => {
+    this.emitter.bindChannelActivityResolver(async (channelId, workspaceId) => {
       const channel = await this.db.teamChannel.findFirst({
-        where: { id: channelId, teamId },
+        where: { id: channelId, workspaceId },
         select: { isDefault: true, members: { select: { userId: true } } },
       });
       if (!channel) return { isDefault: false, memberUserIds: [] };
@@ -268,9 +268,9 @@ export class RealtimeGateway
     // emitter caches them, so an opted-in team pays a lookup per conversation
     // per 30s — not per frame.
     this.emitter.bindVisibilityResolvers(
-      async (teamId) => {
-        const team = await this.db.team.findUnique({
-          where: { id: teamId },
+      async (workspaceId) => {
+        const team = await this.db.workspace.findUnique({
+          where: { id: workspaceId },
           select: { agentConversationVisibility: true },
         });
         return team?.agentConversationVisibility === "assigned";
@@ -294,8 +294,8 @@ export class RealtimeGateway
     // When an admin flips the org's agent-visibility setting, bust the
     // emitter's per-team scope cache so fanout switches audience on the next
     // frame instead of up to a TTL later.
-    registerVisibilityInvalidator((teamId) => {
-      this.emitter.invalidateTeamScope(teamId);
+    registerVisibilityInvalidator((workspaceId) => {
+      this.emitter.invalidateTeamScope(workspaceId);
     });
 
     // realtime-added-1: start the outbound write-buffer reaper. Disconnects a
@@ -391,7 +391,7 @@ export class RealtimeGateway
       const result = await this.auth.authenticate(socket);
       if (result.kind === "ok") {
         socket.data.userId = result.identity.userId;
-        socket.data.teamId = result.identity.teamId;
+        socket.data.workspaceId = result.identity.workspaceId;
         socket.data.role = result.identity.role;
         // Decides team-firehose room membership on connect (see
         // handleConnection). Stashed here so a recovered reconnect that skips
@@ -420,15 +420,15 @@ export class RealtimeGateway
     // recovered reconnect that skipped middleware AND lost socket.data) we
     // can't trust the connection — drop it.
     const userId = client.data.userId as string | undefined;
-    const teamId = client.data.teamId as string | undefined;
+    const workspaceId = client.data.workspaceId as string | undefined;
     const role = client.data.role as Role | undefined;
-    if (!userId || !teamId || !role) {
+    if (!userId || !workspaceId || !role) {
       client.disconnect(true);
       return;
     }
     const agentConversationVisibility =
       (client.data.agentConversationVisibility as string | undefined) ?? "team";
-    const identity = { userId, teamId, role, agentConversationVisibility };
+    const identity = { userId, workspaceId, role, agentConversationVisibility };
 
     // Identity already stashed on socket.data by the auth middleware in
     // afterInit. Initialize the per-socket Sets that @SubscribeMessage
@@ -505,12 +505,12 @@ export class RealtimeGateway
     // conversation-scoped rule co-targets.
     const restrictedViewer = isRestrictedViewer({
       userId: identity.userId,
-      teamId: identity.teamId,
+      workspaceId: identity.workspaceId,
       role: identity.role,
       agentConversationVisibility: identity.agentConversationVisibility,
     });
     if (!restrictedViewer) {
-      client.join(teamRoom(identity.teamId));
+      client.join(workspaceRoom(identity.workspaceId));
     }
     // Per-user room (RT-1) — lets the server target this user across all their
     // tabs for membership-scoped fanout (private-channel activity badges)
@@ -524,21 +524,21 @@ export class RealtimeGateway
     // do — a backgrounded tab just keeps receiving). Detached: a slow DB read
     // must not hold up the connect path.
     if (client.recovered) {
-      void this.pruneRecoveredChannelRooms(client, identity.teamId, identity.userId).catch(
+      void this.pruneRecoveredChannelRooms(client, identity.workspaceId, identity.userId).catch(
         (err) =>
           this.logger.error(`pruneRecoveredChannelRooms failed: ${err}`),
       );
     }
 
     const cameOnline = this.presence.add(
-      identity.teamId,
+      identity.workspaceId,
       identity.userId,
       client.id,
     );
     // Stamp the transition synchronously (before the async snapshot build) so
     // ordering is preserved against a racing disconnect — see `presenceSeq`.
     const presenceSeq = cameOnline
-      ? this.nextPresenceSeq(identity.teamId)
+      ? this.nextPresenceSeq(identity.workspaceId)
       : null;
     // Visibly-online snapshot — connected users intersected with "not marked
     // offline" so an agent who picked "Appear offline" doesn't show up on
@@ -546,11 +546,11 @@ export class RealtimeGateway
     // DB read happens at most once per connect (rare); after that the gateway
     // handles user.availability_changed via the fanout's emitPresenceSnapshot
     // path, not on every emit.
-    const onlineUserIds = await this.buildVisibleOnlineSnapshot(identity.teamId);
+    const onlineUserIds = await this.buildVisibleOnlineSnapshot(identity.workspaceId);
     // Snapshot to THIS socket immediately so the user's own dot lights up
     // without waiting for the next presence change.
     client.emit("presence:update", {
-      teamId: identity.teamId,
+      workspaceId: identity.workspaceId,
       onlineUserIds,
     });
     // Seed availability for every teammate in one frame so the freshly-loaded
@@ -558,7 +558,7 @@ export class RealtimeGateway
     // status. Reuses the same DB read that built the presence snapshot
     // shape-wise — kept as separate frames so consumers can subscribe to
     // either independently (presence and availability are orthogonal).
-    void this.emitAvailabilitySnapshot(identity.teamId, client).catch((err) =>
+    void this.emitAvailabilitySnapshot(identity.workspaceId, client).catch((err) =>
       this.logger.error(`emitAvailabilitySnapshot (connect) failed: ${err}`),
     );
     // Broadcast a fresh snapshot to the rest of the team ONLY when this
@@ -566,7 +566,7 @@ export class RealtimeGateway
     // every additional tab / Caddy bounce reconnect spammed a team-wide
     // emit even though the onlineUserIds list didn't change.
     if (presenceSeq !== null) {
-      this.broadcastPresence(identity.teamId, presenceSeq, onlineUserIds);
+      this.broadcastPresence(identity.workspaceId, presenceSeq, onlineUserIds);
     }
   }
 
@@ -580,7 +580,7 @@ export class RealtimeGateway
    */
   private async pruneRecoveredChannelRooms(
     client: Socket,
-    teamId: string,
+    workspaceId: string,
     userId: string,
   ): Promise<void> {
     const channelIds: string[] = [];
@@ -591,7 +591,7 @@ export class RealtimeGateway
 
     const [channels, memberships] = await Promise.all([
       this.db.teamChannel.findMany({
-        where: { id: { in: channelIds }, teamId },
+        where: { id: { in: channelIds }, workspaceId },
         select: { id: true, isDefault: true },
       }),
       this.db.teamChannelMember.findMany({
@@ -673,12 +673,12 @@ export class RealtimeGateway
    * failure — every caller already has its own fail-soft fallback and they
    * differ, so this must not pick one for them.
    */
-  private async teamAvailability(teamId: string): Promise<TeamAvailabilityRow[]> {
-    const hit = this.availabilityCache.get(teamId);
+  private async teamAvailability(workspaceId: string): Promise<TeamAvailabilityRow[]> {
+    const hit = this.availabilityCache.get(workspaceId);
     if (hit && Date.now() - hit.at < RealtimeGateway.AVAILABILITY_TTL_MS) {
       return hit.rows;
     }
-    const inFlight = this.availabilityInFlight.get(teamId);
+    const inFlight = this.availabilityInFlight.get(workspaceId);
     if (inFlight) return inFlight;
 
     // One entry per team, so this is tiny at pilot scale — but sweep expired
@@ -693,7 +693,11 @@ export class RealtimeGateway
 
     const p = this.db.user
       .findMany({
-        where: { teamId, deactivatedAt: null },
+        // Membership is `WorkspaceMember` since the tenancy restructure —
+        // `User.workspaceId` no longer exists. Filtering on it threw a
+        // PrismaClientValidationError on EVERY socket connect, so no teammate
+        // ever received the availability seed frame.
+        where: { workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
         select: {
           id: true,
           availabilityStatus: true,
@@ -703,13 +707,13 @@ export class RealtimeGateway
         },
       })
       .then((rows) => {
-        this.availabilityCache.set(teamId, { at: Date.now(), rows });
+        this.availabilityCache.set(workspaceId, { at: Date.now(), rows });
         return rows;
       })
       .finally(() => {
-        this.availabilityInFlight.delete(teamId);
+        this.availabilityInFlight.delete(workspaceId);
       });
-    this.availabilityInFlight.set(teamId, p);
+    this.availabilityInFlight.set(workspaceId, p);
     return p;
   }
 
@@ -718,8 +722,8 @@ export class RealtimeGateway
    * status actually changes, so the TTL only ever delays a read that nothing
    * invalidated — a flip is reflected immediately, not up to 3s later.
    */
-  invalidateTeamAvailability(teamId: string): void {
-    this.availabilityCache.delete(teamId);
+  invalidateTeamAvailability(workspaceId: string): void {
+    this.availabilityCache.delete(workspaceId);
     // Drop the IN-FLIGHT promise too, not just the cached value. A query
     // already running was issued BEFORE the status write committed, so
     // handing it to the next caller serves pre-change data — and its `.then`
@@ -733,7 +737,7 @@ export class RealtimeGateway
     // since buildVisibleViewers reads the same cache — until the next
     // transition. The doc above promises a status flip is never delayed by the
     // TTL; this is what makes that true.
-    this.availabilityInFlight.delete(teamId);
+    this.availabilityInFlight.delete(workspaceId);
   }
 
   /**
@@ -745,9 +749,9 @@ export class RealtimeGateway
    * be called at the same tick as the presence add/remove so it captures true
    * temporal order before any async snapshot build).
    */
-  private nextPresenceSeq(teamId: string): number {
-    const next = (this.presenceSeq.get(teamId) ?? 0) + 1;
-    this.presenceSeq.set(teamId, next);
+  private nextPresenceSeq(workspaceId: string): number {
+    const next = (this.presenceSeq.get(workspaceId) ?? 0) + 1;
+    this.presenceSeq.set(workspaceId, next);
     return next;
   }
 
@@ -757,22 +761,22 @@ export class RealtimeGateway
    * resolving out of order (see `presenceSeq` above).
    */
   private broadcastPresence(
-    teamId: string,
+    workspaceId: string,
     seq: number,
     onlineUserIds: string[],
   ): void {
-    if (seq < (this.presenceEmittedSeq.get(teamId) ?? 0)) return;
-    this.presenceEmittedSeq.set(teamId, seq);
-    this.server.to(teamRoom(teamId)).emit("presence:update", {
-      teamId,
+    if (seq < (this.presenceEmittedSeq.get(workspaceId) ?? 0)) return;
+    this.presenceEmittedSeq.set(workspaceId, seq);
+    this.server.to(workspaceRoom(workspaceId)).emit("presence:update", {
+      workspaceId,
       onlineUserIds,
     });
     // Keep the widget's "an agent is available" dot in step with real presence.
-    void this.relayWidgetAvailability(teamId);
+    void this.relayWidgetAvailability(workspaceId);
   }
 
-  private async buildVisibleOnlineSnapshot(teamId: string): Promise<string[]> {
-    const connected = this.presence.snapshot(teamId);
+  private async buildVisibleOnlineSnapshot(workspaceId: string): Promise<string[]> {
+    const connected = this.presence.snapshot(workspaceId);
     if (connected.length === 0) return [];
     try {
       // Intersect the LIVE presence set against cached availability, rather
@@ -781,7 +785,7 @@ export class RealtimeGateway
       // cached "who is marked offline" is exactly as fresh as it needs to be.
       // A user absent from the rows (deactivated) is not in `offline`, so they
       // stay in the list — identical to the previous per-connected-id query.
-      const rows = await this.teamAvailability(teamId);
+      const rows = await this.teamAvailability(workspaceId);
       const offline = new Set(
         rows.filter((r) => r.availabilityStatus === "offline").map((r) => r.id),
       );
@@ -811,12 +815,12 @@ export class RealtimeGateway
    */
   private async buildVisibleViewers(
     conversationId: string,
-    teamId: string,
+    workspaceId: string,
   ): Promise<string[]> {
     const viewers = this.presence.snapshotViewers(conversationId);
     if (viewers.length === 0) return [];
     try {
-      const rows = await this.teamAvailability(teamId);
+      const rows = await this.teamAvailability(workspaceId);
       const available = new Set(
         rows
           .filter((r) => (r.availabilityStatus ?? "available") === "available")
@@ -830,7 +834,7 @@ export class RealtimeGateway
   }
 
   /**
-   * Resolve the teamId for a conversation room. Used by the viewers
+   * Resolve the workspaceId for a conversation room. Used by the viewers
    * snapshotter so the cross-event re-emit (on availability flip) can
    * filter by the right team. Cheap indexed read; called rarely.
    */
@@ -840,9 +844,9 @@ export class RealtimeGateway
     try {
       const row = await this.db.conversation.findUnique({
         where: { id: conversationId },
-        select: { teamId: true },
+        select: { workspaceId: true },
       });
-      return row?.teamId ?? null;
+      return row?.workspaceId ?? null;
     } catch (err) {
       this.logger.error(`teamIdForConversation lookup failed: ${err}`);
       return null;
@@ -856,12 +860,12 @@ export class RealtimeGateway
    * connect later). Tightly bounded query (one team only).
    */
   private async emitAvailabilitySnapshot(
-    teamId: string,
+    workspaceId: string,
     client: Socket,
   ): Promise<void> {
     let rows: TeamAvailabilityRow[];
     try {
-      rows = await this.teamAvailability(teamId);
+      rows = await this.teamAvailability(workspaceId);
     } catch (err) {
       // Fail-soft like the presence snapshot: a transient Postgres flap on
       // connect must not leak an unhandled rejection (this is invoked via
@@ -902,13 +906,13 @@ export class RealtimeGateway
           : {}),
       };
     }
-    client.emit("user:availability:snapshot", { teamId, byUserId });
+    client.emit("user:availability:snapshot", { workspaceId, byUserId });
   }
 
   handleDisconnect(client: Socket): void {
-    const teamId = client.data.teamId as string | undefined;
+    const workspaceId = client.data.workspaceId as string | undefined;
     const userId = client.data.userId as string | undefined;
-    if (!teamId || !userId) return;
+    if (!workspaceId || !userId) return;
 
     // Drop typing flags FIRST — these are per-conversation and need their
     // own emit even if presence didn't tick.
@@ -970,7 +974,7 @@ export class RealtimeGateway
           client.id,
         );
         if (userLeft) {
-          void this.buildVisibleViewers(conversationId, teamId).then(
+          void this.buildVisibleViewers(conversationId, workspaceId).then(
             (viewerUserIds) => {
               this.server
                 .to(conversationRoom(conversationId))
@@ -985,17 +989,17 @@ export class RealtimeGateway
       viewing.clear();
     }
 
-    const wentOffline = this.presence.remove(teamId, userId, client.id);
+    const wentOffline = this.presence.remove(workspaceId, userId, client.id);
     if (wentOffline) {
       // Stamp the transition synchronously so a racing connect can't overtake
       // this went-offline frame with a stale user-online one (see presenceSeq).
-      const seq = this.nextPresenceSeq(teamId);
+      const seq = this.nextPresenceSeq(workspaceId);
       // Async fire-and-forget — the DB read inside the snapshot helper isn't
       // worth blocking teardown on. A late frame on disconnect lands at most
       // a handful of ms behind, which is invisible to the team.
-      void this.buildVisibleOnlineSnapshot(teamId)
+      void this.buildVisibleOnlineSnapshot(workspaceId)
         .then((onlineUserIds) => {
-          this.broadcastPresence(teamId, seq, onlineUserIds);
+          this.broadcastPresence(workspaceId, seq, onlineUserIds);
         })
         .catch((err) =>
           // The helper itself is now fail-soft (falls back to the raw connected
@@ -1016,20 +1020,20 @@ export class RealtimeGateway
   // refreshes state without a page reload.
   @SubscribeMessage("presence:request")
   async onPresenceRequest(@ConnectedSocket() client: Socket): Promise<void> {
-    const teamId = client.data.teamId as string | undefined;
-    if (!teamId) return;
+    const workspaceId = client.data.workspaceId as string | undefined;
+    if (!workspaceId) return;
     // Two DB reads per call (online snapshot + availability). Cheap, but
     // unbounded from a misbehaving client without a budget. Dedicated tiny
     // bucket (4/30s) — kept separate from the typing budget so a fast
     // typist burning typing tokens doesn't starve a legitimate reseed
     // (which is fired at most a few times per session).
     if (!checkPresenceRequestBudget(client)) return;
-    const onlineUserIds = await this.buildVisibleOnlineSnapshot(teamId);
-    client.emit("presence:update", { teamId, onlineUserIds });
+    const onlineUserIds = await this.buildVisibleOnlineSnapshot(workspaceId);
+    client.emit("presence:update", { workspaceId, onlineUserIds });
     // Also reseed the availability snapshot — the hook re-fires presence:
     // request on every `connect`, and a reconnect after a long offline can
     // have missed availability changes that a delta can't carry.
-    await this.emitAvailabilitySnapshot(teamId, client);
+    await this.emitAvailabilitySnapshot(workspaceId, client);
   }
 
   // ---- conversation rooms -------------------------------------------------
@@ -1039,9 +1043,9 @@ export class RealtimeGateway
     @MessageBody() body: { conversationId: string },
   ): Promise<void> {
     if (!isValidBody(body, "conversationId")) return;
-    const teamId = client.data.teamId as string | undefined;
+    const workspaceId = client.data.workspaceId as string | undefined;
     const userId = client.data.userId as string | undefined;
-    if (!teamId || !userId) return;
+    if (!workspaceId || !userId) return;
     const room = conversationRoom(body.conversationId);
 
     // Idempotency split: re-subscribe of an already-joined room (the common
@@ -1073,10 +1077,10 @@ export class RealtimeGateway
         const owns = await this.db.conversation.findFirst({
           where: {
             id: body.conversationId,
-            teamId,
+            workspaceId,
             ...visibilityWhere({
               userId: client.data.userId as string,
-              teamId,
+              workspaceId,
               role: client.data.role as Role,
               agentConversationVisibility: client.data
                 .agentConversationVisibility as string | undefined,
@@ -1127,7 +1131,7 @@ export class RealtimeGateway
     // on every (re-)subscribe so a long reconnect catches a fresh snapshot.
     const visibleViewers = await this.buildVisibleViewers(
       body.conversationId,
-      teamId,
+      workspaceId,
     );
     client.emit("conversation:viewers", {
       conversationId: body.conversationId,
@@ -1174,9 +1178,9 @@ export class RealtimeGateway
         client.id,
       );
       if (userLeft) {
-        const teamId = client.data.teamId as string | undefined;
-        if (!teamId) return;
-        void this.buildVisibleViewers(body.conversationId, teamId).then(
+        const workspaceId = client.data.workspaceId as string | undefined;
+        if (!workspaceId) return;
+        void this.buildVisibleViewers(body.conversationId, workspaceId).then(
           (viewerUserIds) => {
             this.server
               .to(conversationRoom(body.conversationId))
@@ -1248,9 +1252,9 @@ export class RealtimeGateway
     @MessageBody() body: { channelId: string },
   ): Promise<void> {
     if (!isValidBody(body, "channelId")) return;
-    const teamId = client.data.teamId as string | undefined;
+    const workspaceId = client.data.workspaceId as string | undefined;
     const userId = client.data.userId as string | undefined;
-    if (!teamId || !userId) return;
+    if (!workspaceId || !userId) return;
     const room = channelRoom(body.channelId);
 
     // Mirror the subscribe:conversation idempotency split: a re-subscribe
@@ -1286,7 +1290,7 @@ export class RealtimeGateway
       // row. Silently no-op on failure (don't teach a non-member that the
       // channel exists).
       const channel = await this.db.teamChannel.findFirst({
-        where: { id: body.channelId, teamId },
+        where: { id: body.channelId, workspaceId },
         select: { id: true, isDefault: true },
       });
       let allowed = channel !== null;
@@ -1417,12 +1421,12 @@ export class RealtimeGateway
     if (!isValidBody(body, "channelId") || !isValidBody(body, "threadRootId")) return;
     if (!checkTypingBudget(client)) return;
     const userId = client.data.userId as string | undefined;
-    const teamId = client.data.teamId as string | undefined;
+    const workspaceId = client.data.workspaceId as string | undefined;
     const typingInThread = client.data.typingInThread as Set<string> | undefined;
     const validatedThreads = client.data.validatedThreads as
       | Set<string>
       | undefined;
-    if (!userId || !teamId || !typingInThread || !validatedThreads) return;
+    if (!userId || !workspaceId || !typingInThread || !validatedThreads) return;
     if (!client.rooms.has(channelRoom(body.channelId))) return;
     const composite = `${body.channelId}::${body.threadRootId}`;
     // First registration of this composite → verify the thread root belongs
@@ -1433,7 +1437,7 @@ export class RealtimeGateway
       if (!checkSubscribeBudget(client, "typing:thread:start")) return;
       try {
         const root = await this.db.teamChannelMessage.findFirst({
-          where: { id: body.threadRootId, channelId: body.channelId, teamId },
+          where: { id: body.threadRootId, channelId: body.channelId, workspaceId },
           select: { id: true },
         });
         if (!root) return; // silently drop — don't leak that the thread exists

@@ -140,6 +140,10 @@ export const STEP_OPTIONS: Array<{
   { value: "set_status", label: "Set Status", description: "open / pending / closed.", group: "convo" },
   { value: "open_conversation", label: "Open Conversation", description: "Shortcut for Set Status → open.", group: "convo" },
   { value: "close_conversation", label: "Close Conversation", description: "Shortcut for Set Status → closed, with category + summary.", group: "convo" },
+  { value: "create_ticket", label: "Open a Ticket", description: "Open a work item on this conversation.", group: "convo" },
+  { value: "set_ticket_status", label: "Set Ticket Status", description: "Move the conversation's active ticket.", group: "convo" },
+  { value: "set_ticket_priority", label: "Set Ticket Priority", description: "Escalate or de-escalate the active ticket.", group: "convo" },
+  { value: "assign_ticket", label: "Assign Ticket", description: "Give the active ticket an owner.", group: "convo" },
   { value: "add_tag", label: "Add Tag", description: "Apply a tag to the contact.", group: "contact" },
   { value: "remove_tag", label: "Remove Tag", description: "Remove a tag from the contact.", group: "contact" },
   { value: "update_field", label: "Update Contact Field", description: "Set a custom field value.", group: "contact" },
@@ -196,6 +200,12 @@ export const CONTACT_ACTING_STEPS: ReadonlySet<StepType> = new Set([
   "update_field",
   "update_lifecycle",
   "ask_question",
+  // Every ticket step resolves the conversation from the envelope — a
+  // contact-less trigger has none, so they'd no-op silently without this badge.
+  "create_ticket",
+  "set_ticket_status",
+  "set_ticket_priority",
+  "assign_ticket",
 ]);
 
 /** Author-facing reason shown when a contact-acting step is offered on a
@@ -239,6 +249,17 @@ export function emptyConfigFor(type: StepType): Record<string, unknown> {
       return { url: "" };
     case "trigger_workflow":
       return { workflowId: "" };
+    case "create_ticket":
+      // `onlyIfNoActiveTicket` defaults ON server-side; mirrored here so the
+      // editor shows the real default rather than an empty checkbox that then
+      // behaves as if it were ticked.
+      return { subject: "", priority: "normal", onlyIfNoActiveTicket: true };
+    case "set_ticket_status":
+      return { status: "solved" };
+    case "set_ticket_priority":
+      return { priority: "high" };
+    case "assign_ticket":
+      return { mode: "unassign" };
   }
 }
 

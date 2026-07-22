@@ -2,10 +2,11 @@ import { Injectable, Logger } from "@nestjs/common";
 import type { Socket } from "socket.io";
 
 import { auth } from "@/auth/better-auth";
-import type { Role, TeamStatus } from "@ccp/shared/types";
+import type { Role, OrgStatus } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
 import {
+  readActiveWorkspaceCookie,
   sessionCacheGet,
   sessionCacheGetByCookie,
   sessionCacheSet,
@@ -14,7 +15,7 @@ import {
 
 export interface SocketIdentity {
   userId: string;
-  teamId: string;
+  workspaceId: string;
   role: Role;
   /** `Team.agentConversationVisibility` — decides whether this socket may join
    *  the team firehose room. See RealtimeGateway.handleConnection. */
@@ -67,13 +68,13 @@ export class SocketAuthService {
     const cachedFromCookie = sessionCacheGetByCookie(cookieHeader);
     if (cachedFromCookie) {
       // I-10: re-check the org-approval gate on the fast path too. The cached
-      // entry carries teamStatus (refreshed at least every 15s), so a
+      // entry carries orgStatus (refreshed at least every 15s), so a
       // suspended/pending org's reconnect is cut over here instead of slipping
       // through because the cookie cache was warm — matching the slow path below
-      // and the HTTP SessionGuard, which re-checks teamStatus on every request.
+      // and the HTTP SessionGuard, which re-checks orgStatus on every request.
       if (
-        cachedFromCookie.role !== "superAdmin" &&
-        cachedFromCookie.teamStatus !== "active"
+        !cachedFromCookie.isSuperAdmin &&
+        cachedFromCookie.orgStatus !== "active"
       ) {
         return { kind: "unauthenticated" };
       }
@@ -81,7 +82,7 @@ export class SocketAuthService {
         kind: "ok",
         identity: {
           userId: cachedFromCookie.userId,
-          teamId: cachedFromCookie.teamId,
+          workspaceId: cachedFromCookie.workspaceId,
           role: cachedFromCookie.role,
           agentConversationVisibility: cachedFromCookie.agentConversationVisibility,
         },
@@ -101,11 +102,15 @@ export class SocketAuthService {
       return { kind: "unavailable" };
     }
 
+    // Only identity comes off the Better Auth payload. Tenant scope is NOT read
+    // from it any more: `workspaceId`/`role` used to ride along as Better Auth
+    // `additionalFields` mirroring the old User columns, but the active
+    // workspace is now a per-request resolution over WorkspaceMember (below),
+    // and the role is per-workspace. Trusting the token's copy would also pin a
+    // socket to a stale workspace after a switch.
     const userId = session?.user?.id;
     const sessionId = session?.session?.id;
-    const teamId = (session?.user as { teamId?: string } | undefined)?.teamId;
-    const role = (session?.user as { role?: Role } | undefined)?.role;
-    if (!userId || !sessionId || !teamId || !role) {
+    if (!userId || !sessionId) {
       return { kind: "unauthenticated" };
     }
 
@@ -118,7 +123,7 @@ export class SocketAuthService {
     if (cached) {
       // I-10: same org-approval re-check on this fast path (see the cookie-cache
       // branch above) so a warm per-userId cache can't bypass the gate.
-      if (cached.role !== "superAdmin" && cached.teamStatus !== "active") {
+      if (!cached.isSuperAdmin && cached.orgStatus !== "active") {
         return { kind: "unauthenticated" };
       }
       sessionCacheSetByCookie(cookieHeader, userId, sessionId);
@@ -126,7 +131,7 @@ export class SocketAuthService {
         kind: "ok",
         identity: {
           userId,
-          teamId: cached.teamId,
+          workspaceId: cached.workspaceId,
           role: cached.role,
           agentConversationVisibility: cached.agentConversationVisibility,
         },
@@ -139,17 +144,29 @@ export class SocketAuthService {
         where: { id: userId },
         select: {
           id: true,
-          teamId: true,
-          role: true,
+          organizationId: true,
+          orgRole: true,
+          isSuperAdmin: true,
           name: true,
           email: true,
           avatarUrl: true,
           deactivatedAt: true,
-          team: {
+          organization: { select: { status: true } },
+          // Mirrors resolveSession: the socket's active workspace is resolved
+          // from the SAME membership set, so an agent's socket can never join a
+          // workspace room their HTTP session wouldn't grant.
+          workspaceMemberships: {
+            orderBy: { createdAt: "asc" },
             select: {
-              rolePermissions: true,
-              status: true,
-              agentConversationVisibility: true,
+              role: true,
+              workspace: {
+                select: {
+                  id: true,
+                  name: true,
+                  rolePermissions: true,
+                  agentConversationVisibility: true,
+                },
+              },
             },
           },
         },
@@ -167,31 +184,59 @@ export class SocketAuthService {
     // RSC layer has already bounced the tab to /pending. Checked in the slow
     // path only, same as the deactivation check above — a fast-path cache hit
     // means the user passed this check within the 15s window. superAdmins exempt.
-    const teamStatus = (dbUser.team?.status ?? "active") as TeamStatus;
-    if (dbUser.role !== "superAdmin" && teamStatus !== "active") {
+    const orgStatus = (dbUser.organization?.status ?? "active") as OrgStatus;
+    if (!dbUser.isSuperAdmin && orgStatus !== "active") {
       return { kind: "unauthenticated" };
     }
+
+    // Same resolution order as resolveSession: membership-validated cookie →
+    // first membership. The cookie can only SELECT among workspaces this user
+    // belongs to, so a forged value cannot join another tenant's room.
+    const memberships = dbUser.workspaceMemberships;
+    const isOrgAdmin = dbUser.orgRole === "owner" || dbUser.orgRole === "admin";
+    const cookieCandidate = readActiveWorkspaceCookie(cookieHeader);
+    const activeWorkspaceId =
+      cookieCandidate &&
+      (memberships.some((m) => m.workspace.id === cookieCandidate) ||
+        isOrgAdmin ||
+        dbUser.isSuperAdmin)
+        ? cookieCandidate
+        : (memberships[0]?.workspace.id ?? null);
+    if (!activeWorkspaceId) return { kind: "unauthenticated" };
+
+    const active = memberships.find((m) => m.workspace.id === activeWorkspaceId);
+    const effectiveRole: Role =
+      dbUser.isSuperAdmin || isOrgAdmin ? "admin" : ((active?.role ?? "agent") as Role);
+    const visibility = active?.workspace.agentConversationVisibility ?? "team";
+
     sessionCacheSet(userId, {
       sessionId,
       userId: dbUser.id,
-      teamId: dbUser.teamId,
-      role: dbUser.role as Role,
+      organizationId: dbUser.organizationId,
+      orgRole: dbUser.orgRole,
+      isSuperAdmin: dbUser.isSuperAdmin,
+      workspaceId: activeWorkspaceId,
+      role: effectiveRole,
+      workspaceMemberships: memberships.map((m) => ({
+        workspaceId: m.workspace.id,
+        name: m.workspace.name,
+        role: m.role as Role,
+      })),
       name: dbUser.name,
       email: dbUser.email,
-      agentConversationVisibility: dbUser.team?.agentConversationVisibility ?? "team",
+      agentConversationVisibility: visibility,
       avatarUrl: dbUser.avatarUrl ?? null,
-      teamStatus,
-      rolePermissions: dbUser.team?.rolePermissions ?? {},
+      orgStatus,
+      rolePermissions: active?.workspace.rolePermissions ?? {},
     });
     sessionCacheSetByCookie(cookieHeader, dbUser.id, sessionId);
     return {
       kind: "ok",
       identity: {
         userId,
-        teamId: dbUser.teamId,
-        role: dbUser.role as Role,
-        agentConversationVisibility:
-          dbUser.team?.agentConversationVisibility ?? "team",
+        workspaceId: activeWorkspaceId,
+        role: effectiveRole,
+        agentConversationVisibility: visibility,
       },
     };
   }

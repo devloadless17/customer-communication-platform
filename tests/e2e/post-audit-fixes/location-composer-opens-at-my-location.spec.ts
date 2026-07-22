@@ -23,14 +23,14 @@ const PREFIX = "e2e_loccomposer_";
 // Somewhere unmistakably distant from the old hardcoded default (25, 45).
 const GEO = { latitude: 48.858370, longitude: 2.294481 }; // Eiffel Tower
 
-let teamId: string;
+let workspaceId: string;
 let contactId: string;
 
 test.beforeAll(async () => {
-  teamId = (await appAdmin()).teamId;
+  workspaceId = (await appAdmin()).workspaceId;
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       identityChannel: "whatsapp",
       phoneNumber: `9998${Date.now().toString().slice(-8)}`,
       name: `${PREFIX}Contact`,
@@ -44,7 +44,7 @@ test.beforeAll(async () => {
   contactId = contact.id;
   const convo = await db().conversation.create({
     data: {
-      teamId,
+      workspaceId,
       contactId,
       channel: "whatsapp",
       status: "open",
@@ -55,7 +55,7 @@ test.beforeAll(async () => {
   });
   await db().message.create({
     data: {
-      teamId,
+      workspaceId,
       conversationId: convo.id,
       channel: "whatsapp",
       direction: "in",
@@ -67,9 +67,9 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  await db().message.deleteMany({ where: { teamId, conversation: { contactId } } });
-  await db().conversation.deleteMany({ where: { teamId, contactId } });
-  await db().contact.deleteMany({ where: { teamId, id: contactId } });
+  await db().message.deleteMany({ where: { workspaceId, conversation: { contactId } } });
+  await db().conversation.deleteMany({ where: { workspaceId, contactId } });
+  await db().contact.deleteMany({ where: { workspaceId, id: contactId } });
 });
 
 /** Open the seeded thread and click the location button. */

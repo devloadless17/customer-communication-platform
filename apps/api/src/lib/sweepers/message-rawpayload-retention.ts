@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * rawPayload bloat control (DB-1). Every inbound Message stores the VERBATIM
@@ -51,6 +51,12 @@ async function runTick(label: string): Promise<void> {
   try {
     await withSweeperMutex("message-rawpayload-retention", () => sweepOnce(days));
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopMessageRawPayloadRetentionSweeper();
+      return;
+    }
     console.error(`[sweeper.message-rawpayload] ${label} failed`, err);
   } finally {
     inFlight = false;

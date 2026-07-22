@@ -154,7 +154,7 @@ export class CallsService {
     sdpOffer: string,
   ): Promise<InitiateCallSuccess | InitiateCallFailure> {
     const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId: session.teamId },
+      where: { id: conversationId, workspaceId: session.workspaceId },
       select: {
         id: true,
         channel: true,
@@ -221,7 +221,7 @@ export class CallsService {
     // a PSID carries no country, and Messenger's per-Page feature status is its
     // own region gate.) Defense-in-depth; the UI already hides the button.
     if (!isUnified) {
-      const businessCountry = await getBusinessNumberCountry(session.teamId);
+      const businessCountry = await getBusinessNumberCountry(session.workspaceId);
       if (!isBicAllowedForBusinessNumber(businessCountry)) {
         return { ok: false, reason: "bic_blocked_region" };
       }
@@ -231,8 +231,8 @@ export class CallsService {
     // low pickup rate). Every attempt would fail anyway; refusing here gives the
     // agent the real reason and the date it lifts instead of a generic
     // rejection, and avoids adding failed attempts to the record that caused it.
-    const restriction = await this.db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId: session.teamId, channel: channelForCall } },
+    const restriction = await this.db.channelConnection.findFirst({
+      where: { workspaceId: session.workspaceId, channel: channelForCall, isDefault: true },
       select: { callingRestrictedUntil: true },
     });
     if (
@@ -257,7 +257,7 @@ export class CallsService {
       process.env.CALLS_SKIP_PREFLIGHT === "1";
     if (skipPreflight) {
       this.logger.warn(
-        `CALLS_SKIP_PREFLIGHT active — bypassing permission/quota for team=${session.teamId} contact=${contact.id}`,
+        `CALLS_SKIP_PREFLIGHT active — bypassing permission/quota for team=${session.workspaceId} contact=${contact.id}`,
       );
     }
 
@@ -277,10 +277,10 @@ export class CallsService {
     // Everything past here needs provider credentials.
     let sendConfig: unknown;
     try {
-      sendConfig = await binding.getSendConfig(session.teamId);
+      sendConfig = await binding.getSendConfig(session.workspaceId);
     } catch (err) {
       this.logger.warn(
-        `getSendConfig failed for team=${session.teamId}: ${
+        `getSendConfig failed for team=${session.workspaceId}: ${
           err instanceof Error ? err.message : err
         }`,
       );
@@ -298,7 +298,7 @@ export class CallsService {
             await binding.provider.requestCallPermission?.(to, sendConfig);
           } catch (err) {
             this.logger.warn(
-              `messenger call-permission request failed for team=${session.teamId} contact=${contact.id}: ${
+              `messenger call-permission request failed for team=${session.workspaceId} contact=${contact.id}: ${
                 err instanceof Error ? err.message : err
               }`,
             );
@@ -333,7 +333,7 @@ export class CallsService {
           // call anyway would burn quota and hit an opaque rejection. Refuse
           // with the reason the agent can act on.
           this.logger.warn(
-            `getCallPermission failed for team=${session.teamId} contact=${contact.id}: ${
+            `getCallPermission failed for team=${session.workspaceId} contact=${contact.id}: ${
               err instanceof Error ? err.message : err
             }`,
           );
@@ -342,14 +342,14 @@ export class CallsService {
 
         // Mirror the provider's answer locally so the contact panel and the
         // next pre-flight agree with it without another round-trip.
-        await this.syncPermissionCache(session.teamId, contact.id, permission);
+        await this.syncPermissionCache(session.workspaceId, contact.id, permission);
 
         if (!permission.hasPermission) {
           // No permission at all. Ask for it, then tell the agent to wait —
           // sending the request is the useful action here, not an error.
           if (permission.canRequestPermission) {
             const requested = await this.tryRequestPermission(
-              session.teamId,
+              session.workspaceId,
               contact.id,
               conversation.channel,
               { to, recipient },
@@ -405,7 +405,7 @@ export class CallsService {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(
-        `placeCall failed for team=${session.teamId} contact=${contact.id}: ${message}`,
+        `placeCall failed for team=${session.workspaceId} contact=${contact.id}: ${message}`,
       );
       // Map the provider's own error code where it says something actionable,
       // so the agent sees "they haven't allowed calls" instead of a generic
@@ -413,7 +413,7 @@ export class CallsService {
       // clear it so the next click re-reads rather than trusting a dead row.
       const normalized = normalizeMetaSendError(err);
       if (normalized?.code === "call_permission_required") {
-        await this.invalidatePermissionCache(session.teamId, contact.id);
+        await this.invalidatePermissionCache(session.workspaceId, contact.id);
         return { ok: false, reason: "permission_required" };
       }
       // Differentiate config errors from provider-side rejections so the UI
@@ -432,7 +432,7 @@ export class CallsService {
       created = await this.db.$transaction(async (tx) => {
         return tx.call.create({
           data: {
-            teamId: session.teamId,
+            workspaceId: session.workspaceId,
             conversationId,
             externalCallId: placed.externalCallId,
             channel: conversation.channel,
@@ -461,8 +461,8 @@ export class CallsService {
       ) {
         const existing = await this.db.call.findUnique({
           where: {
-            teamId_channel_externalCallId: {
-              teamId: session.teamId,
+            workspaceId_channel_externalCallId: {
+              workspaceId: session.workspaceId,
               channel: conversation.channel,
               externalCallId: placed.externalCallId,
             },
@@ -495,12 +495,12 @@ export class CallsService {
         // this method's no-throw contract). ingest still records whatever
         // terminal webhook Meta sends, for forensics.
         this.logger.error(
-          `Call row insert failed after placeCall succeeded for team=${session.teamId} contact=${contact.id} externalCallId=${placed.externalCallId}: ${
+          `Call row insert failed after placeCall succeeded for team=${session.workspaceId} contact=${contact.id} externalCallId=${placed.externalCallId}: ${
             err instanceof Error ? err.message : err
           } — terminating the orphaned Meta call`,
         );
         try {
-          const cfg = await binding.getSendConfig(session.teamId);
+          const cfg = await binding.getSendConfig(session.workspaceId);
           await providerEndCall(binding.provider, channelForCall, cfg, {
             externalCallId: placed.externalCallId,
           });
@@ -523,7 +523,7 @@ export class CallsService {
     if (createdHere) {
       await this.bus.publish({
         type: "call.ringing_out",
-        teamId: session.teamId,
+        workspaceId: session.workspaceId,
         conversationId,
         callId: created.id,
         externalCallId: created.externalCallId,
@@ -559,7 +559,7 @@ export class CallsService {
         error: "provider does not support getPhoneNumberSettings",
       });
     }
-    const config = await binding.getSendConfig(session.teamId);
+    const config = await binding.getSendConfig(session.workspaceId);
     try {
       return await fn(config);
     } catch (err) {
@@ -597,12 +597,12 @@ export class CallsService {
         error: "provider does not support enableCalling",
       });
     }
-    const config = await binding.getSendConfig(session.teamId);
+    const config = await binding.getSendConfig(session.workspaceId);
     try {
       return await fn(config);
     } catch (err) {
       this.logger.warn(
-        `enableCalling failed for team=${session.teamId}: ${
+        `enableCalling failed for team=${session.workspaceId}: ${
           err instanceof Error ? err.message : err
         }`,
       );
@@ -636,7 +636,7 @@ export class CallsService {
         detail: `${channel} has no configurable calling settings.`,
       });
     }
-    const config = await binding.getSendConfig(session.teamId);
+    const config = await binding.getSendConfig(session.workspaceId);
     try {
       return await fn(config);
     } catch (err) {
@@ -668,12 +668,12 @@ export class CallsService {
         detail: `${channel} has no configurable calling settings.`,
       });
     }
-    const config = await binding.getSendConfig(session.teamId);
+    const config = await binding.getSendConfig(session.workspaceId);
     try {
       return await fn(settings, config);
     } catch (err) {
       this.logger.warn(
-        `updateCallSettings failed for team=${session.teamId}: ${
+        `updateCallSettings failed for team=${session.workspaceId}: ${
           err instanceof Error ? err.message : err
         }`,
       );
@@ -705,7 +705,7 @@ export class CallsService {
 
     // Business-initiated calling isn't offered in every market, and eligibility
     // follows OUR number's country. A team here can still RECEIVE calls.
-    const businessCountry = await getBusinessNumberCountry(session.teamId);
+    const businessCountry = await getBusinessNumberCountry(session.workspaceId);
     const regionOk = isBicAllowedForBusinessNumber(businessCountry);
     checks.push({
       key: "region",
@@ -719,17 +719,17 @@ export class CallsService {
     // Meta requires a 2,000-recipient daily messaging limit before calling can
     // be enabled. We already track the tier from the broadcast work, so this
     // costs no extra call.
-    const connection = await this.db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId: session.teamId, channel } },
+    const connection = await this.db.channelConnection.findFirst({
+      where: { workspaceId: session.workspaceId, channel, isDefault: true },
       select: {
-        messagingDailyCap: true,
-        messagingTier: true,
+        // Messaging limit is portfolio-scoped (Meta, 2025-10-07).
+        portfolio: { select: { messagingDailyCap: true, messagingTier: true } },
         callingRestrictedUntil: true,
         callingRestrictionReason: true,
         callingQualityWarning: true,
       },
     });
-    const cap = connection?.messagingDailyCap ?? null;
+    const cap = connection?.portfolio?.messagingDailyCap ?? null;
     // Unknown tier is reported as met rather than failed: we'd rather not block
     // a working setup on a stat we haven't synced yet, and the provider
     // enforces it regardless.
@@ -740,7 +740,7 @@ export class CallsService {
       label: "Messaging limit of 2,000+ unique recipients",
       detail: tierOk
         ? null
-        : `Your number is on ${connection?.messagingTier ?? "a lower tier"}. Calling requires a 2,000/day messaging limit — this rises automatically as your quality and volume grow.`,
+        : `Your number is on ${connection?.portfolio?.messagingTier ?? "a lower tier"}. Calling requires a 2,000/day messaging limit — this rises automatically as your quality and volume grow.`,
     });
 
     // The provider's own view: is calling on, and is anything restricted?
@@ -822,7 +822,7 @@ export class CallsService {
     conversationId: string,
   ): Promise<{ permissionRequestId: string; expiresAt: string }> {
     const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId: session.teamId },
+      where: { id: conversationId, workspaceId: session.workspaceId },
       select: {
         channel: true,
         contact: { select: { id: true, phoneNumber: true, bsuid: true } },
@@ -841,13 +841,13 @@ export class CallsService {
     };
 
     const binding = getProviderBinding(conversation.channel);
-    const config = await binding.getSendConfig(session.teamId);
+    const config = await binding.getSendConfig(session.workspaceId);
 
     // Already permitted? Hand back the live grant rather than asking again.
     const readPermission = binding.provider.getCallPermission;
     if (readPermission) {
       const permission = await readPermission(identity, config);
-      await this.syncPermissionCache(session.teamId, contact.id, permission);
+      await this.syncPermissionCache(session.workspaceId, contact.id, permission);
       if (permission.hasPermission) {
         return {
           permissionRequestId: "",
@@ -872,7 +872,7 @@ export class CallsService {
     );
     await this.db.callPermissionRequest.create({
       data: {
-        teamId: session.teamId,
+        workspaceId: session.workspaceId,
         contactId: contact.id,
         externalRequestId: out.permissionRequestId,
         expiresAt: out.expiresAt,
@@ -895,11 +895,11 @@ export class CallsService {
    * returned rather than re-asking a customer who already said yes.
    */
   async requestPermissionForTeam(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
   ): Promise<{ permissionRequestId: string; expiresAt: string }> {
     const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
+      where: { id: conversationId, workspaceId },
       select: {
         channel: true,
         contact: { select: { id: true, phoneNumber: true, bsuid: true } },
@@ -918,11 +918,11 @@ export class CallsService {
     };
 
     const binding = getProviderBinding(conversation.channel);
-    const config = await binding.getSendConfig(teamId);
+    const config = await binding.getSendConfig(workspaceId);
     const readPermission = binding.provider.getCallPermission;
     if (readPermission) {
       const permission = await readPermission(identity, config);
-      await this.syncPermissionCache(teamId, contact.id, permission);
+      await this.syncPermissionCache(workspaceId, contact.id, permission);
       if (permission.hasPermission) {
         return {
           permissionRequestId: "",
@@ -945,7 +945,7 @@ export class CallsService {
     );
     await this.db.callPermissionRequest.create({
       data: {
-        teamId,
+        workspaceId,
         contactId: contact.id,
         externalRequestId: out.permissionRequestId,
         expiresAt: out.expiresAt,
@@ -966,7 +966,7 @@ export class CallsService {
    * permission as a side effect once they use it.
    */
   async sendCallButtonForTeam(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     input: {
       bodyText: string;
@@ -976,7 +976,7 @@ export class CallsService {
     },
   ): Promise<{ externalId: string }> {
     const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
+      where: { id: conversationId, workspaceId },
       select: {
         channel: true,
         contact: { select: { phoneNumber: true } },
@@ -998,7 +998,7 @@ export class CallsService {
       "sendInteractive",
       conversation.channel,
     );
-    const config = await binding.getSendConfig(teamId);
+    const config = await binding.getSendConfig(workspaceId);
     const out = await sendInteractive(
       {
         to: conversation.contact.phoneNumber,
@@ -1023,7 +1023,7 @@ export class CallsService {
    * caller can distinguish "we asked them" from "we couldn't".
    */
   private async tryRequestPermission(
-    teamId: string,
+    workspaceId: string,
     contactId: string,
     channel: Channel,
     identity: { to?: string; recipient?: string },
@@ -1032,7 +1032,7 @@ export class CallsService {
       const binding = getProviderBinding(channel);
       const sendPerm = binding.provider.sendCallPermissionRequest;
       if (!sendPerm) return false;
-      const config = await binding.getSendConfig(teamId);
+      const config = await binding.getSendConfig(workspaceId);
       const out = await sendPerm(
         {
           ...(identity.to ? { to: identity.to } : {}),
@@ -1043,7 +1043,7 @@ export class CallsService {
       );
       await this.db.callPermissionRequest.create({
         data: {
-          teamId,
+          workspaceId,
           contactId,
           externalRequestId: out.permissionRequestId,
           expiresAt: out.expiresAt,
@@ -1053,7 +1053,7 @@ export class CallsService {
       return true;
     } catch (err) {
       this.logger.warn(
-        `sendCallPermissionRequest failed for team=${teamId} contact=${contactId}: ${
+        `sendCallPermissionRequest failed for team=${workspaceId} contact=${contactId}: ${
           err instanceof Error ? err.message : err
         }`,
       );
@@ -1072,7 +1072,7 @@ export class CallsService {
    * fail the call that triggered it.
    */
   private async syncPermissionCache(
-    teamId: string,
+    workspaceId: string,
     contactId: string,
     permission: CallPermissionState,
   ): Promise<void> {
@@ -1080,12 +1080,12 @@ export class CallsService {
       if (permission.hasPermission) {
         // Clear any stale revocation and refresh/insert the cached grant.
         await this.db.contact.updateMany({
-          where: { id: contactId, teamId },
+          where: { id: contactId, workspaceId },
           data: { callPermissionRevokedUntil: null },
         });
         const live = await this.db.callPermissionRequest.findFirst({
           where: {
-            teamId,
+            workspaceId,
             contactId,
             status: CallPermissionStatus.granted,
           },
@@ -1107,7 +1107,7 @@ export class CallsService {
           });
         } else {
           await this.db.callPermissionRequest.create({
-            data: { teamId, contactId, grantedAt: new Date(), ...data },
+            data: { workspaceId, contactId, grantedAt: new Date(), ...data },
           });
         }
       } else {
@@ -1115,7 +1115,7 @@ export class CallsService {
         // panel stops claiming the customer allowed calls.
         await this.db.callPermissionRequest.updateMany({
           where: {
-            teamId,
+            workspaceId,
             contactId,
             status: CallPermissionStatus.granted,
           },
@@ -1124,7 +1124,7 @@ export class CallsService {
       }
     } catch (err) {
       this.logger.warn(
-        `permission cache sync failed for team=${teamId} contact=${contactId}: ${
+        `permission cache sync failed for team=${workspaceId} contact=${contactId}: ${
           err instanceof Error ? err.message : err
         }`,
       );
@@ -1133,12 +1133,12 @@ export class CallsService {
 
   /** Drop a cached grant the provider has just contradicted. Best-effort. */
   private async invalidatePermissionCache(
-    teamId: string,
+    workspaceId: string,
     contactId: string,
   ): Promise<void> {
     await this.db.callPermissionRequest
       .updateMany({
-        where: { teamId, contactId, status: CallPermissionStatus.granted },
+        where: { workspaceId, contactId, status: CallPermissionStatus.granted },
         data: { status: CallPermissionStatus.denied },
       })
       .catch(() => {
@@ -1172,10 +1172,10 @@ export class CallsService {
     sdpRenegotiation?: string;
   }> {
     const call = await this.db.call.findFirst({
-      where: { id: callId, teamId: session.teamId },
+      where: { id: callId, workspaceId: session.workspaceId },
       select: {
         id: true,
-        teamId: true,
+        workspaceId: true,
         conversationId: true,
         externalCallId: true,
         channel: true,
@@ -1226,7 +1226,7 @@ export class CallsService {
     // Roll back to `failed` (terminal) so the agent gets a clear UI state
     // and the row reflects the truth.
     const binding = getProviderBinding(call.channel);
-    const config = await binding.getSendConfig(session.teamId);
+    const config = await binding.getSendConfig(session.workspaceId);
     // WhatsApp: pre_accept only, carrying the browser's SDP ANSWER — the real
     // accept follows from completeAccept once media is up. Messenger: a single
     // accept carrying the browser's SDP OFFER, returning the answer (+
@@ -1274,7 +1274,7 @@ export class CallsService {
         });
         await this.bus.publish({
           type: "call.failed",
-          teamId: session.teamId,
+          workspaceId: session.workspaceId,
           conversationId: call.conversationId,
           callId: call.id,
           reason: "provider_error",
@@ -1292,7 +1292,7 @@ export class CallsService {
 
     await this.bus.publish({
       type: "call.answered_by_agent",
-      teamId: session.teamId,
+      workspaceId: session.workspaceId,
       conversationId: call.conversationId,
       callId: call.id,
       answeredByUserId: session.userId,
@@ -1330,7 +1330,7 @@ export class CallsService {
       throw new ForbiddenException({ error: "forbidden" });
     }
     const call = await this.db.call.findFirst({
-      where: { id: callId, teamId: session.teamId },
+      where: { id: callId, workspaceId: session.workspaceId },
       select: {
         id: true,
         externalCallId: true,
@@ -1349,7 +1349,7 @@ export class CallsService {
     if (call.status !== CallStatus.in_progress) return { ok: true };
 
     const binding = getProviderBinding(call.channel);
-    const config = await binding.getSendConfig(session.teamId);
+    const config = await binding.getSendConfig(session.workspaceId);
     try {
       await providerCompleteAccept(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
@@ -1371,7 +1371,7 @@ export class CallsService {
    * send a post-pickup `media_update` webhook carrying a new SDP OFFER; the
    * agent's browser answers it and POSTs that answer here, and we forward it via
    * the unified `media_update` action. Only meaningful on a LIVE call the team
-   * owns, so it's teamId-scoped and gated on `in_progress`.
+   * owns, so it's workspaceId-scoped and gated on `in_progress`.
    *
    * Capability-gated the same way `endCall` is. This comment used to claim
    * parity with endCall while asserting "no extra capability" — but endCall
@@ -1380,7 +1380,7 @@ export class CallsService {
    * team, INCLUDING a role scoped entirely out of calling, relay
    * attacker-supplied SDP into a teammate's live call: call ids travel in
    * `call:*` socket frames and `GET /api/calls`, so they are easy to obtain.
-   * Tenant isolation was never at risk (teamId is scoped); intra-tenant
+   * Tenant isolation was never at risk (workspaceId is scoped); intra-tenant
    * authorization was.
    *
    * Returns any SDP the provider hands back for the browser to apply. WhatsApp
@@ -1401,7 +1401,7 @@ export class CallsService {
     }
 
     const call = await this.db.call.findFirst({
-      where: { id: callId, teamId: session.teamId },
+      where: { id: callId, workspaceId: session.workspaceId },
       select: {
         id: true,
         externalCallId: true,
@@ -1414,7 +1414,7 @@ export class CallsService {
       throw new BadRequestException({ error: "call_not_in_progress" });
     }
     const binding = getProviderBinding(call.channel);
-    const config = await binding.getSendConfig(session.teamId);
+    const config = await binding.getSendConfig(session.workspaceId);
     let result: { sdpAnswer?: string; sdpRenegotiation?: string };
     try {
       result = await providerMediaUpdate(binding.provider, call.channel, config, {
@@ -1450,7 +1450,7 @@ export class CallsService {
     reason?: "busy" | "declined",
   ): Promise<{ ok: true }> {
     const call = await this.db.call.findFirst({
-      where: { id: callId, teamId: session.teamId },
+      where: { id: callId, workspaceId: session.workspaceId },
       select: {
         id: true,
         conversationId: true,
@@ -1481,7 +1481,7 @@ export class CallsService {
     }
 
     const binding = getProviderBinding(call.channel);
-    const config = await binding.getSendConfig(session.teamId);
+    const config = await binding.getSendConfig(session.workspaceId);
     try {
       await providerRejectCall(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
@@ -1498,7 +1498,7 @@ export class CallsService {
 
     await this.bus.publish({
       type: "call.rejected",
-      teamId: session.teamId,
+      workspaceId: session.workspaceId,
       conversationId: call.conversationId,
       callId: call.id,
       rejectedByUserId: session.userId,
@@ -1551,7 +1551,7 @@ export class CallsService {
     }
 
     const call = await this.db.call.findFirst({
-      where: { id: callId, teamId: session.teamId },
+      where: { id: callId, workspaceId: session.workspaceId },
       select: {
         id: true,
         conversationId: true,
@@ -1627,7 +1627,7 @@ export class CallsService {
       // (webhook/race — idempotent OK below) or answeredAt flipped under us.
       // Re-read to distinguish; on a still-non-terminal row, reclassify + retry.
       const reread = await this.db.call.findFirst({
-        where: { id: callId, teamId: session.teamId },
+        where: { id: callId, workspaceId: session.workspaceId },
         select: { status: true, answeredAt: true },
       });
       if (
@@ -1649,7 +1649,7 @@ export class CallsService {
     }
 
     const binding = getProviderBinding(call.channel);
-    const config = await binding.getSendConfig(session.teamId);
+    const config = await binding.getSendConfig(session.workspaceId);
     try {
       await providerEndCall(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
@@ -1670,7 +1670,7 @@ export class CallsService {
     if (wasConnected) {
       await this.bus.publish({
         type: "call.ended",
-        teamId: session.teamId,
+        workspaceId: session.workspaceId,
         conversationId: call.conversationId,
         callId: call.id,
         direction: call.direction === CallDirection.in ? "in" : "out",
@@ -1681,7 +1681,7 @@ export class CallsService {
     } else {
       await this.bus.publish({
         type: "call.missed",
-        teamId: session.teamId,
+        workspaceId: session.workspaceId,
         conversationId: call.conversationId,
         callId: call.id,
         ringingAt: call.ringingAt.toISOString(),
@@ -1738,7 +1738,7 @@ export class CallsService {
       // a thread they can't open (404, same as missing).
       where: {
         id: conversationId,
-        teamId: session.teamId,
+        workspaceId: session.workspaceId,
         ...visibilityWhere(session),
       },
       select: { id: true },
@@ -1763,12 +1763,12 @@ export class CallsService {
           ],
         }
       : undefined;
-    // teamId is explicit (not just the conversationId FK) to match every other
+    // workspaceId is explicit (not just the conversationId FK) to match every other
     // call query in this service and keep the tenant scope visible at the row
     // level, not implied by the prior conversation lookup.
     const baseWhere: Prisma.CallWhereInput = {
       conversationId,
-      teamId: session.teamId,
+      workspaceId: session.workspaceId,
     };
     const rows = await this.db.call.findMany({
       where: cursorWhere ? { AND: [baseWhere, cursorWhere] } : baseWhere,
@@ -1834,7 +1834,7 @@ export class CallsService {
     // in the org, so it carries the same PII weight as the conversation list
     // and gets the same boundary.
     const baseWhere: Prisma.CallWhereInput = {
-      teamId: session.teamId,
+      workspaceId: session.workspaceId,
       ...conversationRelationWhere(session),
     };
 
@@ -1933,7 +1933,7 @@ export class CallsService {
     }
     const count = await this.db.call.count({
       where: {
-        teamId: session.teamId,
+        workspaceId: session.workspaceId,
         status: { in: [CallStatus.ringing, CallStatus.in_progress] },
       },
     });

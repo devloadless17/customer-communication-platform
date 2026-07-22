@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Reconciler for the `Conversation` analytics MESSAGE COUNTERS
@@ -24,7 +24,7 @@ import { withSweeperMutex } from "@/lib/sweepers/_mutex";
  * (deferred) workflow-analytics payload. If/when analytics become a
  * user-visible dashboard, revisit with a proper derivation, not a guess.
  *
- * Mirrors `contact-last-inbound-drift.ts`: a per-team loop of teamId-scoped
+ * Mirrors `contact-last-inbound-drift.ts`: a per-team loop of workspaceId-scoped
  * set-based UPDATEs, 24h, NO clever self-disabling (that variant's disable-state
  * was in-memory only and reset every restart — more debug cost than the scan
  * ever saved).
@@ -46,6 +46,12 @@ async function runTick(label: string): Promise<void> {
     // pool-pressuring sweepers (contact-drift, retention scans).
     await withSweeperMutex("conversation-analytics-drift", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopConversationAnalyticsDriftSweeper();
+      return;
+    }
     console.error(`[sweeper.analytics-drift] ${label} failed`, err);
   } finally {
     inFlight = false;
@@ -82,7 +88,7 @@ async function sweepOnce(): Promise<void> {
   // ENTIRE Message table's per-conversation direction counts — at scale (many
   // teams × millions of messages) that's a long-running, high-lock, whole-table
   // scan in one transaction. Scoping each statement to a single team (via the
-  // indexed Message.teamId / Conversation.teamId) bounds the footprint and lets
+  // indexed Message.workspaceId / Conversation.workspaceId) bounds the footprint and lets
   // unrelated tenants' writes proceed between iterations.
   //
   // Per team: join Conversation against per-conversation direction counts from
@@ -90,9 +96,9 @@ async function sweepOnce(): Promise<void> {
   // to 0 so a conversation with zero messages of a direction reconciles to 0
   // rather than being skipped. IS DISTINCT FROM is moot here (both sides are
   // non-null ints) but the COALESCE makes the "no rows" case explicit.
-  const teams = await db.team.findMany({ select: { id: true } });
+  const teams = await db.workspace.findMany({ select: { id: true } });
   let totalDrifted = 0;
-  for (const { id: teamId } of teams) {
+  for (const { id: workspaceId } of teams) {
     // Per-team isolation: a lock-wait / deadlock on one tenant's hot Message
     // table must not throw out of the whole sweep and skip every later-ordered
     // team — with a 24h cadence the next retry is a full day away.
@@ -135,13 +141,13 @@ async function sweepOnce(): Promise<void> {
                   AND (m."rawPayload"->>'sentVia') IS DISTINCT FROM 'broadcast'
               ) AS out_count
             FROM "Message" m
-            WHERE m."teamId" = ${teamId}
+            WHERE m."workspaceId" = ${workspaceId}
             GROUP BY m."conversationId"
           ) cnt ON cnt.conversation_id = c2.id
-          WHERE c2."teamId" = ${teamId}
+          WHERE c2."workspaceId" = ${workspaceId}
         ) sub
         WHERE conv.id = sub.conversation_id
-          AND conv."teamId" = ${teamId}
+          AND conv."workspaceId" = ${workspaceId}
           AND (
             conv."incomingMessagesCount" <> sub.in_count
             OR conv."outgoingMessagesCount" <> sub.out_count
@@ -150,7 +156,7 @@ async function sweepOnce(): Promise<void> {
       totalDrifted += Number(drifted);
     } catch (err) {
       console.warn(
-        `[sweeper.analytics-drift] reconcile failed for team=${teamId}; continuing`,
+        `[sweeper.analytics-drift] reconcile failed for team=${workspaceId}; continuing`,
         err instanceof Error ? err.message : err,
       );
     }

@@ -54,12 +54,12 @@ export class WhatsappTemplatesController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    return this.whatsapp.listTemplates(session.teamId);
+    return this.whatsapp.listTemplates(session.workspaceId);
   }
 
   @Post()
   async sync(@CurrentSession() session: ApiSession) {
-    return this.whatsapp.syncTemplates(session.teamId);
+    return this.whatsapp.syncTemplates(session.workspaceId);
   }
 
   /**
@@ -74,7 +74,7 @@ export class WhatsappTemplatesController {
     @CurrentSession() session: ApiSession,
     @Body() body: unknown,
   ) {
-    const out = await this.whatsapp.createTemplate(session.teamId, body);
+    const out = await this.whatsapp.createTemplate(session.workspaceId, body);
     return { ok: true, ...out };
   }
 
@@ -112,7 +112,7 @@ export class WhatsappTemplatesController {
     try {
       const buffer = await readFile(file.path);
       const fileWithBuffer = { ...file, buffer } as Express.Multer.File;
-      const out = await this.whatsapp.uploadHeaderMedia(session.teamId, fileWithBuffer);
+      const out = await this.whatsapp.uploadHeaderMedia(session.workspaceId, fileWithBuffer);
       return { ok: true, ...out };
     } finally {
       await unlink(file.path).catch(() => undefined);
@@ -125,7 +125,7 @@ export class WhatsappTemplatesController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.whatsapp.deleteTemplate(session.teamId, id);
+    await this.whatsapp.deleteTemplate(session.workspaceId, id);
     return { ok: true };
   }
 
@@ -136,7 +136,7 @@ export class WhatsappTemplatesController {
     @Param("id") id: string,
     @Body(zBody(UpdateTemplateBindingsSchema)) body: UpdateTemplateBindingsInput,
   ) {
-    await this.whatsapp.updateTemplateBindings(session.teamId, id, body);
+    await this.whatsapp.updateTemplateBindings(session.workspaceId, id, body);
     return { ok: true };
   }
 }

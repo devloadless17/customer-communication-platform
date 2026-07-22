@@ -77,23 +77,23 @@ async function seedOutbound(o: {
   // cascade) first so a re-run — or an isolated run that left residue — never
   // collides on the unique (team, channel, externalContactId).
   const existing = await db().contact.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: o.channel, externalContactId: o.externalContactId },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: o.channel, externalContactId: o.externalContactId },
     select: { id: true },
   });
   if (existing) {
-    await db().message.deleteMany({ where: { teamId: META_TEST_TEAM_ID, conversation: { contactId: existing.id } } });
-    await db().conversation.deleteMany({ where: { teamId: META_TEST_TEAM_ID, contactId: existing.id } });
+    await db().message.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID, conversation: { contactId: existing.id } } });
+    await db().conversation.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID, contactId: existing.id } });
     await db().contact.delete({ where: { id: existing.id } });
   }
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: o.channel,
     externalContactId: o.externalContactId,
     name: "Reaction Tester",
   });
   await db().message.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       conversationId,
       channel: o.channel,
       externalId: o.mid,
@@ -106,7 +106,7 @@ async function seedOutbound(o: {
 function reactionOf(channel: "messenger" | "instagram", mid: string) {
   return db()
     .message.findUnique({
-      where: { teamId_channel_externalId: { teamId: META_TEST_TEAM_ID, channel, externalId: mid } },
+      where: { workspaceId_channel_externalId: { workspaceId: META_TEST_TEAM_ID, channel, externalId: mid } },
       select: { reaction: true },
     })
     .then((m) => m?.reaction ?? null);

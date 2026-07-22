@@ -82,7 +82,7 @@ function releaseSharedConnectListener(): void {
  * reconnect so a long offline doesn't leave stale dots.
  */
 export function usePresence(
-  teamId: string,
+  workspaceId: string,
   _userId: string,
 ): {
   onlineUserIds: Set<string>;
@@ -97,7 +97,7 @@ export function usePresence(
     const socket = getClientSocket();
 
     const onUpdate: Parameters<typeof socket.on<"presence:update">>[1] = (payload) => {
-      if (payload.teamId !== teamId) return;
+      if (payload.workspaceId !== workspaceId) return;
       // Diff before reallocating — a team-wide presence:update fires
       // whenever ANY teammate connects, disconnects, or toggles availability.
       // On a busy team (20+ agents) this can be many events per minute, each
@@ -119,7 +119,7 @@ export function usePresence(
     const onAvailabilitySnapshot: Parameters<
       typeof socket.on<"user:availability:snapshot">
     >[1] = (payload) => {
-      if (payload.teamId !== teamId) return;
+      if (payload.workspaceId !== workspaceId) return;
       // Replace wholesale — the snapshot is the authoritative full picture.
       // Diff first so a snapshot identical to current state (common on
       // reconnect) doesn't trigger a wide re-render.
@@ -143,7 +143,7 @@ export function usePresence(
     const onAvailabilityUpdate: Parameters<
       typeof socket.on<"user:availability:updated">
     >[1] = (payload) => {
-      if (payload.teamId !== teamId) return;
+      if (payload.workspaceId !== workspaceId) return;
       setAvailabilityByUserId((prev) => {
         const existing = prev[payload.userId];
         // Wire contract: `message === undefined` means UNCHANGED — preserve the
@@ -199,7 +199,7 @@ export function usePresence(
       socket.off("user:availability:updated", onAvailabilityUpdate);
       releaseSharedConnectListener();
     };
-  }, [teamId]);
+  }, [workspaceId]);
 
   return { onlineUserIds, availabilityByUserId };
 }

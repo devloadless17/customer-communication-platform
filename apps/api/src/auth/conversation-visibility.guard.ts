@@ -89,7 +89,7 @@ export class ConversationVisibilityGuard implements CanActivate {
     const row = await this.db.conversation.findFirst({
       where: {
         id: conversationId,
-        teamId: session.teamId,
+        workspaceId: session.workspaceId,
         assignedUserId: session.userId,
       },
       select: { id: true },

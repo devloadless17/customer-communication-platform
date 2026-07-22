@@ -3,6 +3,7 @@ import "server-only";
 import { cache } from "react";
 
 import type { WorkflowTriggerEvent } from "@prisma/client";
+import type { InboxView } from "@ccp/shared/inbox-views/types";
 
 import { api } from "../api-client";
 import type {
@@ -11,6 +12,7 @@ import type {
   PlatformAnalytics,
   SuperAdminTeamDetail,
   SuperAdminTeamRow,
+  SuperAdminOrgRow,
   WhatsappConfigView,
 } from "@ccp/shared/dtos";
 import type {
@@ -36,6 +38,12 @@ import type {
   User,
 } from "@ccp/shared/types";
 import type { MessageFlagDefinitionWithUsage } from "@ccp/shared/message-flags/types";
+import type {
+  Ticket as TicketView,
+  TicketEvent as TicketEventView,
+  TicketFieldDefinition,
+  TicketSlaPolicy,
+} from "@ccp/shared/tickets/types";
 
 /**
  * Inline DTOs that the API ships but apps/api defines locally in its
@@ -157,11 +165,17 @@ export async function listAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> 
   return teams;
 }
 
+/** Organisations with their workspaces nested — what the platform list shows. */
+export async function listAllOrgsForSuperAdmin(): Promise<SuperAdminOrgRow[]> {
+  const { orgs } = await api<{ orgs: SuperAdminOrgRow[] }>("/api/admin/teams");
+  return orgs;
+}
+
 export async function getTeamDetailForSuperAdmin(
-  teamId: string,
+  workspaceId: string,
 ): Promise<SuperAdminTeamDetail | null> {
   try {
-    return await api<SuperAdminTeamDetail>(`/api/admin/teams/${teamId}`);
+    return await api<SuperAdminTeamDetail>(`/api/admin/teams/${workspaceId}`);
   } catch (err) {
     if (isApiNotFound(err)) return null;
     throw err;
@@ -182,6 +196,66 @@ export async function getPlatformAnalytics(): Promise<PlatformAnalytics> {
 // full 60s window even after their own edits. Strip the cache so every RSC
 // render hits NestJS fresh. Cost: ~5-15ms per call docker-network. Acceptable
 // at pilot scale. Re-introduce a working cache layer once we trust the bust.
+/** Org, its workspaces (with counts) and its members — Organization settings. */
+export async function getOrganizationOverview(): Promise<OrganizationOverview> {
+  return api<OrganizationOverview>("/api/workspaces/organization");
+}
+
+export interface OrganizationOverview {
+  id: string;
+  name: string;
+  plan: string;
+  status: string;
+  workspaces: Array<{
+    id: string;
+    name: string;
+    memberCount: number;
+    conversationCount: number;
+    channelAccountCount: number;
+    /** Whether the viewer can open this one. */
+    joined: boolean;
+    createdAt: string;
+  }>;
+  members: Array<{
+    id: string;
+    name: string;
+    email: string;
+    avatarUrl: string | null;
+    orgRole: string;
+    isActive: boolean;
+    memberships: Array<{ workspaceId: string; role: string }>;
+  }>;
+  /** Mirrors the server's `orgRole` gate, so the UI never offers a refused button. */
+  canManage: boolean;
+}
+
+/** One ticket plus its timeline. Throws (→ notFound) when it isn't ours. */
+export async function getTicket(
+  id: string,
+): Promise<{ ticket: TicketView; events: TicketEventView[] }> {
+  return api<{ ticket: TicketView; events: TicketEventView[] }>(`/api/tickets/${id}`);
+}
+
+/** Ticketing configuration for the settings page, in one round-trip. */
+export async function getTicketSettings(): Promise<{
+  settings: TicketSettingsView;
+  policies: TicketSlaPolicy[];
+  fields: TicketFieldDefinition[];
+}> {
+  const [settings, sla, fieldsRes] = await Promise.all([
+    api<TicketSettingsView>("/api/team/tickets/settings"),
+    api<{ policies: TicketSlaPolicy[] }>("/api/team/tickets/sla"),
+    api<{ fields: TicketFieldDefinition[] }>("/api/team/tickets/fields"),
+  ]);
+  return { settings, policies: sla.policies, fields: fieldsRes.fields };
+}
+
+export interface TicketSettingsView {
+  ticketAutoOpen: boolean;
+  ticketReopenWindowHours: number;
+  ticketCloseConversationOnLastSolved: boolean;
+}
+
 export async function listTags(): Promise<Tag[]> {
   const { tags } = await api<{ tags: Tag[] }>("/api/team/tags");
   return tags;
@@ -239,6 +313,18 @@ export async function listSnippets(): Promise<SnippetDto[]> {
 export const listContactStages = cache(async (): Promise<ContactStage[]> => {
   const { stages } = await api<{ stages: ContactStage[] }>("/api/team/stages");
   return stages;
+});
+
+/**
+ * Saved inbox views visible to the signed-in agent (shared + their own).
+ *
+ * `cache`d for the same reason as the stage catalog: the inbox LAYOUT renders
+ * the views rail while the PAGE seeds the list's view lookup, and both would
+ * otherwise pay the round-trip on every navigation.
+ */
+export const listInboxViews = cache(async (): Promise<InboxView[]> => {
+  const { views } = await api<{ views: InboxView[] }>("/api/inbox-views");
+  return views;
 });
 
 export async function getStageContactCounts(): Promise<{
@@ -456,6 +542,29 @@ export async function listChannelPins(channelId: string): Promise<ChannelPinDto[
 export async function getTeamWhatsappConfig(): Promise<WhatsappConfigView> {
   const { config } = await api<{ config: WhatsappConfigView }>("/api/team/whatsapp");
   return config;
+}
+
+/** One connected account on a channel — a workspace may have several. */
+export interface ChannelAccountView {
+  id: string;
+  channel: string;
+  externalAccountId: string;
+  label: string | null;
+  isDefault: boolean;
+  isActive: boolean;
+  needsReconnect: boolean;
+  displayPhoneNumber: string | null;
+  wabaId: string | null;
+  createdAt: string;
+}
+
+export async function listChannelAccounts(
+  channel: "whatsapp" | "messenger" | "instagram",
+): Promise<ChannelAccountView[]> {
+  const { accounts } = await api<{ accounts: ChannelAccountView[] }>(
+    `/api/team/channels/${channel}/accounts`,
+  );
+  return accounts;
 }
 
 /** Server→browser view for the Messenger connect form (mirrors the API shape). */

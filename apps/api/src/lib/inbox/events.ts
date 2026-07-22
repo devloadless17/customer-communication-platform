@@ -5,7 +5,7 @@ import { db } from "@/lib/db";
 /**
  * Conversation audit timeline writer.
  *
- *   recordConversationEvent({ conversationId, teamId, userId, kind, before?, after? })
+ *   recordConversationEvent({ conversationId, workspaceId, userId, kind, before?, after? })
  *
  * Writes the ConversationEvent row. Best-effort: a DB failure here logs and
  * continues — the original state mutation (assign / status / tag) has
@@ -18,7 +18,7 @@ import { db } from "@/lib/db";
 
 interface RecordArgs {
   conversationId: string;
-  teamId: string;
+  workspaceId: string;
   userId: string | null;
   /** Set on external /v1 mutations so the audit row attributes the change
    *  to the API key instead of leaving userId null + opaque. */
@@ -47,7 +47,7 @@ export async function recordConversationEvent(args: RecordArgs): Promise<void> {
     await db.conversationEvent.create({
       data: {
         conversationId: args.conversationId,
-        teamId: args.teamId,
+        workspaceId: args.workspaceId,
         userId: args.userId,
         apiKeyId: args.apiKeyId ?? null,
         workflowId: args.workflowId ?? null,

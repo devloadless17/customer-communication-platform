@@ -37,7 +37,7 @@ import { SendTextValidationError } from "./send-text-internal";
  */
 
 export interface SendInteractiveInternalArgs {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   bodyText: string;
   kind: "buttons" | "list";
@@ -77,10 +77,12 @@ export async function sendInteractiveInternal(
   }
 
   const conversation = await db.conversation.findFirst({
-    where: { id: args.conversationId, teamId: args.teamId },
+    where: { id: args.conversationId, workspaceId: args.workspaceId },
     select: {
       id: true,
       contactId: true,
+      // The account this thread belongs to — sends must go out from it.
+      channelConnectionId: true,
       // Channel is conversation-owned — bind + stamp from here, not the contact.
       channel: true,
       lastMessageAt: true,
@@ -143,7 +145,7 @@ export async function sendInteractiveInternal(
 
   let sendConfig;
   try {
-    sendConfig = await binding.getSendConfig(args.teamId);
+    sendConfig = await binding.getSendConfig(args.workspaceId, conversation.channelConnectionId);
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) {
       throw new SendTextValidationError(
@@ -222,7 +224,7 @@ export async function sendInteractiveInternal(
   };
 
   const created = await createOutboundMessageIdempotent({
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     conversationId: args.conversationId,
     externalId: send.externalId,
     senderUserId: args.senderUserId ?? null,
@@ -246,7 +248,7 @@ export async function sendInteractiveInternal(
   const senderUserId = args.senderUserId ?? null;
   const message: Message = {
     id: created.id,
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     conversationId: args.conversationId,
     externalId: send.externalId,
     senderUserId,
@@ -265,7 +267,7 @@ export async function sendInteractiveInternal(
     preview: previewBody,
     event: {
       type: "message.sent",
-      teamId: args.teamId,
+      workspaceId: args.workspaceId,
       conversationId: args.conversationId,
       contactId: conversation.contactId,
       message,

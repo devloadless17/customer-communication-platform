@@ -29,13 +29,13 @@ import { readError } from "./utils";
  * (applyConversationAi reducer), so the auto-pause flips it without a refresh.
  */
 export function AiToggle({
-  teamId,
+  workspaceId,
   conversationId,
   aiEnabled,
   currentUserName,
   onAlert,
 }: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   aiEnabled: boolean;
   /** Actor name for the optimistic activity pill. */
@@ -49,18 +49,18 @@ export function AiToggle({
     const next = !aiEnabled;
     setPending(true);
     const activity = buildOptimisticAiChange({
-      teamId,
+      workspaceId,
       conversationId,
       actorName: currentUserName,
       aiEnabled: next,
     });
     dispatchLocalSocketEvents([
-      ["conversation:ai", { teamId, conversationId, aiEnabled: next, optimistic: true }],
+      ["conversation:ai", { workspaceId, conversationId, aiEnabled: next, optimistic: true }],
       activity.frame,
     ]);
     const rollback = () => {
-      dispatchLocalSocketEvent("conversation:ai", { teamId, conversationId, aiEnabled });
-      rollbackOptimisticActivity(teamId, conversationId, activity.id);
+      dispatchLocalSocketEvent("conversation:ai", { workspaceId, conversationId, aiEnabled });
+      rollbackOptimisticActivity(workspaceId, conversationId, activity.id);
     };
     try {
       const res = await apiFetch(`/api/conversations/${conversationId}/ai`, {

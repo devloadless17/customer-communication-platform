@@ -123,7 +123,7 @@ export function TeamChatWorkspace({
     };
 
     const onPin = (payload: {
-      teamId: string;
+      workspaceId: string;
       channelId: string;
       messageId: string;
       pinned: boolean;
@@ -492,7 +492,7 @@ export function TeamChatWorkspace({
         />
         {showMembers && (
           <ChannelMembersDialog
-            teamId={currentUser.teamId}
+            workspaceId={currentUser.workspaceId}
             channel={initialChannel}
             currentUser={{ id: currentUser.id }}
             currentRole={currentUser.role}

@@ -39,20 +39,20 @@ let broadcastId: string;
 
 test.beforeAll(async () => {
   // Seed ONLY if the fixture isn't already there. `seedMetaTestTeam()` deletes
-  // every TeamApiKey for the test team and mints a fresh one, so calling it
+  // every WorkspaceApiKey for the test team and mints a fresh one, so calling it
   // invalidates the token any previously-run spec is still holding — and the
   // api caches key lookups, which makes the resulting 401 timing-dependent and
   // land on a different spec each run. This spec authenticates with HMAC-signed
   // webhooks and Prisma, never an API key, so it has no reason to rotate them.
-  const connected = await db().channelConnection.findUnique({
-    where: { teamId_channel: { teamId: META_TEST_TEAM_ID, channel: "whatsapp" } },
+  const connected = await db().channelConnection.findFirst({
+    where: { workspaceId: META_TEST_TEAM_ID, channel: "whatsapp", isDefault: true },
     select: { id: true },
   });
   if (!connected) await seedMetaTestTeam();
 
   const b = await db().broadcast.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       status: "completed",
       kind: "template",
       targetMode: "contact",
@@ -79,7 +79,7 @@ test.afterAll(async () => {
     await db().broadcast.deleteMany({ where: { id: { in: ids } } });
   }
   await db().contact.deleteMany({
-    where: { teamId: META_TEST_TEAM_ID, name: { startsWith: PREFIX } },
+    where: { workspaceId: META_TEST_TEAM_ID, name: { startsWith: PREFIX } },
   });
 });
 
@@ -92,7 +92,7 @@ async function seedSentRecipient(tag: string) {
   const wamid = `wamid.${PREFIX}${tag}.${Date.now()}`;
   const contact = await db().contact.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       name: `${PREFIX}${tag}`,
       phoneNumber: `+1555${Math.floor(1000000 + Math.random() * 8999999)}`,
       identityChannel: "whatsapp",
@@ -102,7 +102,7 @@ async function seedSentRecipient(tag: string) {
   });
   const conversation = await db().conversation.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       contactId: contact.id,
       channel: "whatsapp",
       status: "pending",
@@ -112,7 +112,7 @@ async function seedSentRecipient(tag: string) {
   });
   await db().message.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       conversationId: conversation.id,
       externalId: wamid,
       body: "campaign",

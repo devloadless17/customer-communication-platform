@@ -91,7 +91,7 @@ export const branchStepHandler: StepHandler<BranchStepConfig> = {
       const { contact } = await buildTokenContext(
         envelope,
         ctx,
-        ctx.teamId,
+        ctx.workspaceId,
         triggerContactId,
       );
       matched = await evaluateBranchPreset(config.preset, envelope, contact);

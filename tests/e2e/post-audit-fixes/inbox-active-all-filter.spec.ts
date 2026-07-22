@@ -17,7 +17,7 @@
 import { test, expect } from "@playwright/test";
 import { db, superadminTeam, wipeTestData } from "../_helpers/db";
 
-let teamId: string;
+let workspaceId: string;
 let openId: string;
 let pendingId: string;
 let closedId: string;
@@ -25,7 +25,7 @@ let closedId: string;
 test.beforeAll(async () => {
   await wipeTestData();
   const su = await superadminTeam();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
 
   // Three contacts (uniqueness is per-team on phoneNumber for WhatsApp) +
   // one conversation each, in three distinct statuses. Spaced lastMessageAt
@@ -38,7 +38,7 @@ test.beforeAll(async () => {
   ) => {
     const contact = await db().contact.create({
       data: {
-        teamId,
+        workspaceId,
         phoneNumber: phone,
         identityChannel: "whatsapp",
         name: `Filter test ${status}`,
@@ -47,7 +47,7 @@ test.beforeAll(async () => {
     });
     const conv = await db().conversation.create({
       data: {
-        teamId,
+        workspaceId,
         contactId: contact.id,
         channel: "whatsapp",
         status,

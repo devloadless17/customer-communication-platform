@@ -64,12 +64,12 @@ async function fireScheduled(broadcastId: string): Promise<void> {
   // Surface the scheduled → queued flip so any open detail page updates live.
   const row = await db.broadcast.findUnique({
     where: { id: broadcastId },
-    select: { teamId: true },
+    select: { workspaceId: true },
   });
   if (row) {
     await publish({
       type: "broadcast.status_changed",
-      teamId: row.teamId,
+      workspaceId: row.workspaceId,
       broadcastId,
       status: "queued",
     });

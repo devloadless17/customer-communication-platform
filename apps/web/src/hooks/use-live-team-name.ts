@@ -11,7 +11,7 @@ import { getClientSocket } from "@/lib/socket-client";
  * different admin/tab renaming via the team-room fanout). One subscription
  * per consumer; cleanup on unmount.
  *
- * No filter on `payload.teamId` — a socket session is single-team; the
+ * No filter on `payload.workspaceId` — a socket session is single-team; the
  * server only routes frames for the team it belongs to.
  */
 export function useLiveTeamName(initial: string): string {

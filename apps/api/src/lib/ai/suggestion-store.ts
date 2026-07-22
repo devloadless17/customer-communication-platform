@@ -14,7 +14,7 @@ import type { ReplyPayload } from "./reply-schema";
 const SUGGESTION_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface PersistSuggestionArgs {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   inboundMessageId: string;
   payload: ReplyPayload;
@@ -24,15 +24,15 @@ export interface PersistSuggestionArgs {
 }
 
 export async function persistSuggestion(args: PersistSuggestionArgs) {
-  const { teamId, conversationId, inboundMessageId } = args;
+  const { workspaceId, conversationId, inboundMessageId } = args;
   const expiresAt = new Date(Date.now() + SUGGESTION_TTL_MS);
 
   const created = await db.$transaction(async (tx) => {
     const current = await tx.aiReplySuggestion.findFirst({
-      where: { teamId, inboundMessageId, state: "pending" },
+      where: { workspaceId, inboundMessageId, state: "pending" },
     });
     const agg = await tx.aiReplySuggestion.aggregate({
-      where: { teamId, inboundMessageId },
+      where: { workspaceId, inboundMessageId },
       _max: { attempt: true },
     });
     if (current) {
@@ -45,7 +45,7 @@ export async function persistSuggestion(args: PersistSuggestionArgs) {
     const attempt = (agg._max.attempt ?? 0) + 1;
     return tx.aiReplySuggestion.create({
       data: {
-        teamId,
+        workspaceId,
         conversationId,
         inboundMessageId,
         text: args.payload.replyText,
@@ -63,7 +63,7 @@ export async function persistSuggestion(args: PersistSuggestionArgs) {
 
   void publish({
     type: "ai.suggestion_changed",
-    teamId,
+    workspaceId,
     conversationId,
     suggestionId: created.id,
     state: "pending",
@@ -72,9 +72,9 @@ export async function persistSuggestion(args: PersistSuggestionArgs) {
   return created;
 }
 
-export async function getPendingSuggestion(teamId: string, conversationId: string) {
+export async function getPendingSuggestion(workspaceId: string, conversationId: string) {
   return db.aiReplySuggestion.findFirst({
-    where: { teamId, conversationId, state: "pending" },
+    where: { workspaceId, conversationId, state: "pending" },
     orderBy: { createdAt: "desc" },
   });
 }

@@ -34,7 +34,7 @@ const API_BASE = process.env.E2E_API_BASE ?? "http://localhost:4000";
  */
 
 const PHONE = "+33611119001";
-let teamId: string;
+let workspaceId: string;
 let userId: string;
 let conversationId: string;
 // The connection's stored phone-number id. The webhook controller matches
@@ -127,7 +127,7 @@ async function stubWebRtc(page: Page): Promise<void> {
 async function seedRingingOutboundCall(externalCallId: string) {
   return db().call.create({
     data: {
-      teamId,
+      workspaceId,
       conversationId,
       externalCallId,
       channel: "whatsapp",
@@ -144,12 +144,12 @@ async function seedRingingOutboundCall(externalCallId: string) {
 test.beforeAll(async () => {
   await wipeTestData();
   const su = await appAdmin();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
   userId = su.userId;
 
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       phoneNumber: PHONE,
       identityChannel: "whatsapp",
       name: "Call Panel E2E",
@@ -162,7 +162,7 @@ test.beforeAll(async () => {
   });
   const conv = await db().conversation.create({
     data: {
-      teamId,
+      workspaceId,
       contactId: contact.id,
       channel: "whatsapp",
       status: "open",
@@ -176,10 +176,18 @@ test.beforeAll(async () => {
   // A WhatsApp connection has to exist for the webhook to resolve this team,
   // and its phoneNumberId has to match what the payload carries.
   await db().channelConnection.upsert({
-    where: { teamId_channel: { teamId, channel: "whatsapp" } },
+    where: {
+      workspaceId_channel_externalAccountId: {
+        workspaceId,
+        channel: "whatsapp",
+        externalAccountId: phoneNumberId,
+      },
+    },
     create: {
-      teamId,
+      workspaceId,
       channel: "whatsapp",
+      externalAccountId: phoneNumberId,
+      isDefault: true,
       config: {
         phoneNumberId,
         displayPhoneNumber: "+33600000000",
@@ -273,7 +281,7 @@ test("the panel leaves 'Calling…' and starts the timer when the customer picks
       ],
   });
   // HMAC over the RAW bytes we send, same as Meta.
-  const res = await fetch(`${API_BASE}/webhooks/meta/${teamId}`, {
+  const res = await fetch(`${API_BASE}/webhooks/meta/${workspaceId}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -296,7 +304,7 @@ test("a reload during a live call releases the customer instead of stranding the
   const externalCallId = `wacid.reload.${Date.now()}`;
   const call = await db().call.create({
     data: {
-      teamId,
+      workspaceId,
       conversationId,
       externalCallId,
       channel: "whatsapp",

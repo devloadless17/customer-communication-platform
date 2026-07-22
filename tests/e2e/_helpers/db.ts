@@ -39,19 +39,25 @@ export function db(): PrismaClient {
  * The single superadmin row created by `prisma/seeds/seed-superadmin.ts`.
  * Resolved once at suite start so we don't keep pinging the user table.
  */
-export async function superadminTeam(): Promise<{ teamId: string; userId: string }> {
+export async function superadminTeam(): Promise<{ workspaceId: string; userId: string }> {
   const user = await db().user.findFirst({
-    where: { role: "superAdmin" },
-    select: { id: true, teamId: true },
+    where: { isSuperAdmin: true },
+    select: {
+      id: true,
+      // Users are org-scoped; their workspace comes from the membership.
+      workspaceMemberships: { select: { workspaceId: true }, orderBy: { createdAt: "asc" }, take: 1 },
+    },
   });
   if (!user) {
     throw new Error("no superAdmin row — run pnpm db:seed:superadmin first");
   }
-  return { teamId: user.teamId, userId: user.id };
+  const wsId = user.workspaceMemberships[0]?.workspaceId;
+  if (!wsId) throw new Error("seeded user has no workspace membership");
+  return { workspaceId: wsId, userId: user.id };
 }
 
 // Regular-admin test user. Lives in the SAME team as the superadmin (the
-// seeded, active Loadless team) so fixtures keyed by `superadminTeam().teamId`
+// seeded, active Loadless team) so fixtures keyed by `superadminTeam().workspaceId`
 // are visible to it. Exists because the superAdmin can no longer browse the
 // customer app — they're redirected to the platform shell (org-approval gate,
 // 2026-06-10). Customer-app specs drive the app as THIS admin; the superadmin
@@ -65,17 +71,27 @@ export const APP_ADMIN_PASSWORD = "loadless";
  * Returns the creds the auth setup logs in with.
  */
 export async function ensureAppAdmin(): Promise<{
-  teamId: string;
+  workspaceId: string;
   userId: string;
   email: string;
   password: string;
 }> {
-  const { teamId } = await superadminTeam();
+  const { workspaceId } = await superadminTeam();
+  // Users belong to the ORG; "admin" is a per-workspace grant on WorkspaceMember.
+  const ws = await db().workspace.findUniqueOrThrow({
+    where: { id: workspaceId },
+    select: { organizationId: true },
+  });
   const passwordHash = await bcrypt.hash(APP_ADMIN_PASSWORD, 10);
   const user = await db().user.upsert({
     where: { email: APP_ADMIN_EMAIL },
-    create: { teamId, role: "admin", name: "E2E Admin", email: APP_ADMIN_EMAIL },
-    update: { teamId, role: "admin", deactivatedAt: null },
+    create: { organizationId: ws.organizationId, name: "E2E Admin", email: APP_ADMIN_EMAIL },
+    update: { organizationId: ws.organizationId, deactivatedAt: null },
+  });
+  await db().workspaceMember.upsert({
+    where: { userId_workspaceId: { userId: user.id, workspaceId } },
+    create: { userId: user.id, workspaceId, role: "admin" },
+    update: { role: "admin" },
   });
   await db().account.upsert({
     where: {
@@ -92,7 +108,7 @@ export async function ensureAppAdmin(): Promise<{
   // Default-channel membership so /team doesn't dead-end on the "no channels"
   // path (mirrors registration + the superadmin seed).
   const channel = await db().teamChannel.findFirst({
-    where: { teamId, isDefault: true },
+    where: { workspaceId, isDefault: true },
     select: { id: true },
   });
   if (channel) {
@@ -102,7 +118,7 @@ export async function ensureAppAdmin(): Promise<{
       update: {},
     });
   }
-  return { teamId, userId: user.id, email: APP_ADMIN_EMAIL, password: APP_ADMIN_PASSWORD };
+  return { workspaceId, userId: user.id, email: APP_ADMIN_EMAIL, password: APP_ADMIN_PASSWORD };
 }
 
 /**
@@ -112,10 +128,14 @@ export async function ensureAppAdmin(): Promise<{
  * assignee): the request context authenticates as this admin, so the actor id
  * is this user's, not the super-admin's. The team is the same either way.
  */
-export async function appAdmin(): Promise<{ teamId: string; userId: string }> {
+export async function appAdmin(): Promise<{ workspaceId: string; userId: string }> {
   const user = await db().user.findFirst({
     where: { email: APP_ADMIN_EMAIL },
-    select: { id: true, teamId: true },
+    select: {
+      id: true,
+      // Users are org-scoped; their workspace comes from the membership.
+      workspaceMemberships: { select: { workspaceId: true }, orderBy: { createdAt: "asc" }, take: 1 },
+    },
   });
   if (!user) {
     throw new Error(
@@ -123,7 +143,9 @@ export async function appAdmin(): Promise<{ teamId: string; userId: string }> {
         "(it calls ensureAppAdmin()).",
     );
   }
-  return { teamId: user.teamId, userId: user.id };
+  const wsId = user.workspaceMemberships[0]?.workspaceId;
+  if (!wsId) throw new Error("seeded user has no workspace membership");
+  return { workspaceId: wsId, userId: user.id };
 }
 
 /**
@@ -150,7 +172,7 @@ export async function wipeTestData(): Promise<void> {
     d.message.deleteMany({}),
     d.conversation.deleteMany({}),
     d.contact.deleteMany({}),
-    d.teamApiKey.deleteMany({}),
+    d.workspaceApiKey.deleteMany({}),
   ]);
 }
 
@@ -178,4 +200,64 @@ export async function pollUntil<T>(
       options.label ? ` waiting for ${options.label}` : ""
     } (last=${JSON.stringify(last)})`,
   );
+}
+
+/**
+ * Create a test Workspace together with its owning Organization.
+ *
+ * Post-restructure a Workspace can't stand alone: the approval `status` (and
+ * plan / seat cap) live on the Organization, and every spec that used to do
+ * `workspace.create({ data: { name, status } })` needs both rows. Defaults to
+ * an `active` org so specs aren't bounced by the org-approval gate.
+ */
+export async function createTestWorkspace(opts: {
+  id?: string;
+  name: string;
+  status?: "pending" | "active" | "suspended";
+}): Promise<{ organizationId: string; workspaceId: string }> {
+  const org = await db().organization.create({
+    data: { name: `${opts.name} Org`, status: opts.status ?? "active" },
+  });
+  const ws = await db().workspace.create({
+    data: { ...(opts.id ? { id: opts.id } : {}), name: opts.name, organizationId: org.id },
+  });
+  return { organizationId: org.id, workspaceId: ws.id };
+}
+
+/**
+ * Create a user in the same Organization as `workspaceId` and grant them
+ * `role` in that workspace. Replaces the old
+ * `user.create({ data: { workspaceId, role } })` shape.
+ */
+export async function createTestUser(opts: {
+  workspaceId: string;
+  name: string;
+  email: string;
+  role?: "admin" | "manager" | "agent";
+  // Availability columns some specs seed directly on the user row.
+  availabilityStatus?: string;
+  availabilityManualStatus?: string;
+  availabilityMessage?: string;
+}): Promise<{ id: string; name: string }> {
+  const ws = await db().workspace.findUniqueOrThrow({
+    where: { id: opts.workspaceId },
+    select: { organizationId: true },
+  });
+  const user = await db().user.create({
+    data: {
+      organizationId: ws.organizationId,
+      name: opts.name,
+      email: opts.email,
+      ...(opts.availabilityStatus ? { availabilityStatus: opts.availabilityStatus } : {}),
+      ...(opts.availabilityManualStatus
+        ? { availabilityManualStatus: opts.availabilityManualStatus }
+        : {}),
+      ...(opts.availabilityMessage ? { availabilityMessage: opts.availabilityMessage } : {}),
+    },
+    select: { id: true, name: true },
+  });
+  await db().workspaceMember.create({
+    data: { userId: user.id, workspaceId: opts.workspaceId, role: opts.role ?? "agent" },
+  });
+  return user;
 }

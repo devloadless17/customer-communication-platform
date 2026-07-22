@@ -96,7 +96,7 @@ export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
       const outcome = await assignByPolicy({
         db,
         publish,
-        teamId: ctx.teamId,
+        workspaceId: ctx.workspaceId,
         conversationId,
         source: "workflow",
         policyId: config.mode === "policy" ? config.policyId : null,
@@ -143,7 +143,7 @@ export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
     const result = await assignConversation({
       db,
       publish,
-      teamId: ctx.teamId,
+      workspaceId: ctx.workspaceId,
       conversationId,
       targetUserId,
       changedByUserId: null,

@@ -27,7 +27,7 @@ export type IdempotencyClaim<T> =
 
 /**
  * Stripe-style CLAIM-then-execute idempotency on the
- * `(teamId, apiKeyId, key)` unique index of `ApiIdempotencyKey`.
+ * `(workspaceId, apiKeyId, key)` unique index of `ApiIdempotencyKey`.
  *
  * Originally lived (private) inside `ExternalV1MessagingService` for the text +
  * template send paths. Extracted here so the NON-send /v1 mutations (assign,
@@ -37,15 +37,15 @@ export type IdempotencyClaim<T> =
  * no longer re-fires the mutation + its workflow/webhook reactions.
  *
  * Usage (mirrors the send paths):
- *   const claim = await idem.claim<Result>(teamId, apiKeyId, key,
+ *   const claim = await idem.claim<Result>(workspaceId, apiKeyId, key,
  *     idem.fingerprint("assign", { conversationId, ...input }));
  *   if (claim.kind === "replay") return claim.result;
  *   try {
  *     const result = await doTheWork();
- *     await idem.complete(teamId, apiKeyId, key, result);
+ *     await idem.complete(workspaceId, apiKeyId, key, result);
  *     return result;
  *   } catch (err) {
- *     await idem.release(teamId, apiKeyId, key);
+ *     await idem.release(workspaceId, apiKeyId, key);
  *     throw err;
  *   }
  *
@@ -86,7 +86,7 @@ export class ApiIdempotencyService {
    * payload (Stripe-style).
    */
   async claim<T>(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     key: string,
     requestHash: string,
@@ -113,7 +113,7 @@ export class ApiIdempotencyService {
     const claimPending = () =>
       this.db.apiIdempotencyKey.create({
         data: {
-          teamId,
+          workspaceId,
           apiKeyId,
           key,
           requestHash,
@@ -141,7 +141,7 @@ export class ApiIdempotencyService {
       }
       // Another request already claimed this key. Read its state.
       const cached = await this.db.apiIdempotencyKey.findUnique({
-        where: { teamId_apiKeyId_key: { teamId, apiKeyId, key } },
+        where: { workspaceId_apiKeyId_key: { workspaceId, apiKeyId, key } },
         select: {
           responseBody: true,
           responseStatus: true,
@@ -191,7 +191,7 @@ export class ApiIdempotencyService {
         }
         // Non-irreversible mutation — safe to clear + re-run.
         await this.db.apiIdempotencyKey.deleteMany({
-          where: { teamId, apiKeyId, key },
+          where: { workspaceId, apiKeyId, key },
         });
         throw new ConflictException({
           error: "idempotency_in_progress",
@@ -229,7 +229,7 @@ export class ApiIdempotencyService {
       // rows (the winner already pushed expiresAt into the future).
       const now = Date.now();
       const reclaimed = await this.db.apiIdempotencyKey.updateMany({
-        where: { teamId, apiKeyId, key, expiresAt: { lt: new Date(now) } },
+        where: { workspaceId, apiKeyId, key, expiresAt: { lt: new Date(now) } },
         data: {
           requestHash,
           responseBody: (ambiguityProtected
@@ -259,14 +259,14 @@ export class ApiIdempotencyService {
 
   /** Flip a claimed pending row to the completed response (24h TTL). */
   async complete<T>(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     key: string,
     result: T,
   ): Promise<void> {
     try {
       await this.db.apiIdempotencyKey.update({
-        where: { teamId_apiKeyId_key: { teamId, apiKeyId, key } },
+        where: { workspaceId_apiKeyId_key: { workspaceId, apiKeyId, key } },
         data: {
           responseBody: result as unknown as Prisma.InputJsonValue,
           responseStatus: 200,
@@ -283,10 +283,10 @@ export class ApiIdempotencyService {
   }
 
   /** Release a claimed pending row on failure so a retry can re-claim fresh. */
-  async release(teamId: string, apiKeyId: string, key: string): Promise<void> {
+  async release(workspaceId: string, apiKeyId: string, key: string): Promise<void> {
     await this.db.apiIdempotencyKey
       .deleteMany({
-        where: { teamId, apiKeyId, key, responseStatus: IDEMPOTENCY_PENDING_STATUS },
+        where: { workspaceId, apiKeyId, key, responseStatus: IDEMPOTENCY_PENDING_STATUS },
       })
       .catch(() => {
         /* best-effort */

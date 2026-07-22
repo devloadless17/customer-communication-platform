@@ -18,7 +18,7 @@ import { renderTts } from "./voice";
  */
 
 export interface DeliverArgs {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   inboundMessageId: string;
   payload: ReplyPayload;
@@ -50,11 +50,11 @@ function channelPlan(
   }
 }
 
-export function draftAudioKey(teamId: string, inboundMessageId: string): string {
-  return `ai-voice-draft/${teamId}/${inboundMessageId}.mp3`;
+export function draftAudioKey(workspaceId: string, inboundMessageId: string): string {
+  return `ai-voice-draft/${workspaceId}/${inboundMessageId}.mp3`;
 }
-function replyAudioKey(teamId: string, inboundMessageId: string): string {
-  return `ai-voice/${teamId}/${inboundMessageId}.mp3`;
+function replyAudioKey(workspaceId: string, inboundMessageId: string): string {
+  return `ai-voice/${workspaceId}/${inboundMessageId}.mp3`;
 }
 
 /**
@@ -74,7 +74,7 @@ function voiceInstructions(
 }
 
 export async function deliverReply(args: DeliverArgs): Promise<DeliverResult> {
-  const { teamId, conversationId, inboundMessageId, payload, config } = args;
+  const { workspaceId, conversationId, inboundMessageId, payload, config } = args;
   const plan = channelPlan(config.replyChannelMode, args.inboundWasVoice);
   const result: DeliverResult = { usedVoice: false, voiceFellBackToText: false };
 
@@ -87,13 +87,13 @@ export async function deliverReply(args: DeliverArgs): Promise<DeliverResult> {
         instructions: voiceInstructions(config),
       });
       const sent = await sendMediaInternal({
-        teamId,
+        workspaceId,
         conversationId,
         bytes: rendered.bytes,
         mimeType: rendered.contentType,
         filename: "voice.mp3",
         voice: true,
-        blobKey: replyAudioKey(teamId, inboundMessageId),
+        blobKey: replyAudioKey(workspaceId, inboundMessageId),
         sentVia: "ai-assistant/voice",
       });
       result.voiceMessageId = sent.messageId;
@@ -108,7 +108,7 @@ export async function deliverReply(args: DeliverArgs): Promise<DeliverResult> {
   // Send text when the mode wants it, on voice fallback, or if nothing else went.
   if (plan.text || (!result.usedVoice && !plan.voice)) {
     const sent = await sendTextInternal({
-      teamId,
+      workspaceId,
       conversationId,
       body: payload.replyText,
       sentVia: "ai-assistant/reply",
@@ -125,7 +125,7 @@ export async function deliverReply(args: DeliverArgs): Promise<DeliverResult> {
  * so a Regenerate overwrites the preview.
  */
 export async function renderDraftAudio(
-  teamId: string,
+  workspaceId: string,
   inboundMessageId: string,
   payload: ReplyPayload,
   config: AiConfigRow,
@@ -137,7 +137,7 @@ export async function renderDraftAudio(
       speed: config.voiceSpeed,
       instructions: voiceInstructions(config),
     });
-    const key = draftAudioKey(teamId, inboundMessageId);
+    const key = draftAudioKey(workspaceId, inboundMessageId);
     await blobStorage.putObject({ key, bytes: rendered.bytes, contentType: rendered.contentType });
     return key;
   } catch {
@@ -160,7 +160,7 @@ export function wantsVoiceDraft(
  * send on any TTS/media failure.
  */
 export async function sendSuggestionAsVoice(args: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   inboundMessageId: string;
   text: string;
@@ -186,19 +186,19 @@ export async function sendSuggestionAsVoice(args: {
       contentType = r.contentType;
     }
     const sent = await sendMediaInternal({
-      teamId: args.teamId,
+      workspaceId: args.workspaceId,
       conversationId: args.conversationId,
       bytes,
       mimeType: contentType,
       filename: "voice.mp3",
       voice: true,
-      blobKey: replyAudioKey(args.teamId, args.inboundMessageId),
+      blobKey: replyAudioKey(args.workspaceId, args.inboundMessageId),
       sentVia: "ai-assistant/voice",
     });
     return { messageId: sent.messageId, usedVoice: true };
   } catch {
     const sent = await sendTextInternal({
-      teamId: args.teamId,
+      workspaceId: args.workspaceId,
       conversationId: args.conversationId,
       body: args.text,
       sentVia: "ai-assistant/suggestion",

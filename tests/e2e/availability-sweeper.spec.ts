@@ -60,8 +60,8 @@ let adminUserId: string;
 let adminTeamId: string;
 
 test.beforeAll(async () => {
-  const { teamId, userId } = await appAdmin();
-  adminTeamId = teamId;
+  const { workspaceId, userId } = await appAdmin();
+  adminTeamId = workspaceId;
   adminUserId = userId;
   // Start from a known state. These specs assert a member is ON SHIFT before
   // watching the tick carry them off it, and a live override left behind by an
@@ -69,7 +69,7 @@ test.beforeAll(async () => {
   // outranks the schedule — which would make the precondition depend on file
   // ordering rather than on the behavior under test.
   await db().user.updateMany({
-    where: { teamId: adminTeamId },
+    where: { workspaceMemberships: { some: { workspaceId: adminTeamId } } },
     data: {
       availabilityStatus: "available",
       availabilityMessage: null,
@@ -85,9 +85,9 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  await db().team.update({ where: { id: adminTeamId }, data: { workHours: Prisma.DbNull } });
+  await db().workspace.update({ where: { id: adminTeamId }, data: { workHours: Prisma.DbNull } });
   await db().user.updateMany({
-    where: { teamId: adminTeamId },
+    where: { workspaceMemberships: { some: { workspaceId: adminTeamId } } },
     data: {
       availabilityStatus: "available",
       availabilityMessage: null,

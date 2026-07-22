@@ -30,7 +30,9 @@ import { resolveUserSchedule } from "./schedule";
 /** Exactly the columns this module reads. Use as a Prisma `select`. */
 export const AVAILABILITY_SELECT = {
   id: true,
-  teamId: true,
+  // NOTE: no `workspaceId` — users are org-scoped now. Callers already know the
+  // workspace they queried in; selecting it here would be an invalid column.
+
   availabilityStatus: true,
   availabilityMessage: true,
   availabilityManualStatus: true,
@@ -44,7 +46,6 @@ export const AVAILABILITY_SELECT = {
 
 export interface AvailabilityRow {
   id: string;
-  teamId: string;
   availabilityStatus: string | null;
   availabilityMessage: string | null;
   availabilityManualStatus: string | null;
@@ -98,6 +99,9 @@ export type AvailabilityIntent =
 export interface ApplyAvailabilityArgs {
   db: AvailabilityDb;
   user: AvailabilityRow;
+  // Passed explicitly: the User row is org-scoped and no longer carries a
+  // workspaceId, but the availability event is workspace-scoped.
+  workspaceId: string;
   /** The team's default schedule, already narrowed (see teamScheduleOf). */
   teamSchedule: WorkHours | null;
   intent: AvailabilityIntent;
@@ -135,7 +139,7 @@ export function computeEffective(
 export async function applyAvailability(
   args: ApplyAvailabilityArgs,
 ): Promise<ApplyAvailabilityResult> {
-  const { db, user, teamSchedule, intent, nowMs } = args;
+  const { db, user, workspaceId, teamSchedule, intent, nowMs } = args;
   const schedule = resolveUserSchedule(user, teamSchedule);
 
   // --- 1. Fold the intent into the manual pick -----------------------------
@@ -223,10 +227,9 @@ export async function applyAvailability(
   }
 
   await db.user.update({
-    // §18: teamId belongs in the WHERE of every query. Redundant today (the
-    // caller already read this user team-scoped), but the invariant exists so
-    // it survives the next refactor that changes how `user` gets here.
-    where: { id: user.id, teamId: user.teamId },
+    // §18: the tenant scope belongs in the WHERE of every query. Users are
+    // org-scoped now, so the workspace guard is a membership existence check.
+    where: { id: user.id },
     data: {
       availabilityStatus: effective.status,
       availabilityMessage: effective.message,
@@ -244,7 +247,7 @@ export async function applyAvailability(
 
   await publish({
     type: "user.availability_changed",
-    teamId: user.teamId,
+    workspaceId,
     userId: user.id,
     status: effective.status,
     message: effective.message,

@@ -39,10 +39,10 @@ const DEV_PASSWORD_HASH = bcrypt.hashSync(DEV_PASSWORD, 10);
 const TEAM = { id: "team_1", name: "Loadless Support" };
 
 const USERS = [
-  { id: "u_me",   role: "superAdmin", name: "Ali Al-Ahmad", email: "ali@loadless.ai" },
-  { id: "u_sara", role: "admin",      name: "Sara Khalil",  email: "sara@loadless.ai" },
-  { id: "u_omar", role: "manager",    name: "Omar Reyes",   email: "omar@loadless.ai" },
-  { id: "u_lina", role: "agent",      name: "Lina Becker",  email: "lina@loadless.ai" },
+  { id: "u_me",   role: "admin",  isSuperAdmin: true, name: "Ali Al-Ahmad", email: "ali@loadless.ai" },
+  { id: "u_sara", role: "admin",   isSuperAdmin: false, name: "Sara Khalil",  email: "sara@loadless.ai" },
+  { id: "u_omar", role: "manager", isSuperAdmin: false, name: "Omar Reyes",   email: "omar@loadless.ai" },
+  { id: "u_lina", role: "agent",   isSuperAdmin: false, name: "Lina Becker",  email: "lina@loadless.ai" },
 ] as const;
 
 const CONTACTS = [
@@ -176,9 +176,14 @@ const CONVERSATIONS: SeedConvo[] = [
 
 async function main() {
   console.log(`→ team ${TEAM.name}`);
-  await db.team.upsert({
+  const org = await db.organization.upsert({
+    where: { id: `${TEAM.id}_org` },
+    create: { id: `${TEAM.id}_org`, name: TEAM.name, status: "active" },
+    update: { status: "active" },
+  });
+  await db.workspace.upsert({
     where: { id: TEAM.id },
-    create: { id: TEAM.id, name: TEAM.name },
+    create: { id: TEAM.id, name: TEAM.name, organizationId: org.id },
     update: { name: TEAM.name },
   });
 
@@ -197,13 +202,21 @@ async function main() {
     const row = await db.user.upsert({
       where: { email: u.email },
       create: {
-        id: u.id, teamId: TEAM.id, role: u.role, name: u.name, email: u.email,
+        id: u.id, organizationId: org.id, name: u.name, email: u.email,
+        isSuperAdmin: u.isSuperAdmin ?? false,
       },
       update: {
-        teamId: TEAM.id, role: u.role, name: u.name, email: u.email,
+        organizationId: org.id, name: u.name, email: u.email,
+        isSuperAdmin: u.isSuperAdmin ?? false,
         // Re-enable any previously deactivated seeded user.
         deactivatedAt: null,
       },
+    });
+    // The seeded role is a per-workspace grant now.
+    await db.workspaceMember.upsert({
+      where: { userId_workspaceId: { userId: row.id, workspaceId: TEAM.id } },
+      create: { userId: row.id, workspaceId: TEAM.id, role: u.role },
+      update: { role: u.role },
     });
     userIdByKey[u.id] = row.id;
     // Better Auth verifies signin against Account.password (providerId
@@ -238,7 +251,7 @@ async function main() {
       where: { id: c.id },
       create: {
         id: c.id,
-        teamId: TEAM.id,
+        workspaceId: TEAM.id,
         identityChannel: "whatsapp",
         phoneNumber: c.phoneNumber,
         name: c.name,
@@ -254,7 +267,7 @@ async function main() {
     await db.conversation.upsert({
       where: { id: c.id },
       create: {
-        id: c.id, teamId: TEAM.id, contactId: c.contactId,
+        id: c.id, workspaceId: TEAM.id, contactId: c.contactId,
         assignedUserId: resolveUserId(c.assignedUserId), status: c.status,
         unreadCount: c.unreadCount, lastMessageAt: lastTs,
         lastMessagePreview: lastMsg.body.slice(0, 200),
@@ -270,14 +283,14 @@ async function main() {
       const externalId = `seed_${c.id}_${idx}`;
       await db.message.upsert({
         where: {
-          teamId_channel_externalId: {
-            teamId: TEAM.id,
+          workspaceId_channel_externalId: {
+            workspaceId: TEAM.id,
             channel: "whatsapp",
             externalId,
           },
         },
         create: {
-          teamId: TEAM.id, conversationId: c.id, externalId,
+          workspaceId: TEAM.id, conversationId: c.id, externalId,
           senderUserId: m.dir === "out" ? resolveUserId(m.senderUserId) : null,
           body: m.body, direction: m.dir, channel: "whatsapp",
           status: m.dir === "out" ? (m.status ?? "delivered") : "delivered",
@@ -297,7 +310,7 @@ async function main() {
       await db.internalNote.upsert({
         where: { id },
         create: {
-          id, teamId: TEAM.id, conversationId: c.id,
+          id, workspaceId: TEAM.id, conversationId: c.id,
           authorUserId: resolveUserId(n.authorUserId),
           body: n.body, timestamp: ago(n.minutesAgo),
         },

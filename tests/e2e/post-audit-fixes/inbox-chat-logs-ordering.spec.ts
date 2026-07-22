@@ -26,7 +26,7 @@ import { db, superadminTeam, wipeTestData } from "../_helpers/db";
 
 const PHONE = "+15557654321";
 
-let teamId: string;
+let workspaceId: string;
 let userId: string;
 let adminName: string;
 let conversationId: string;
@@ -165,7 +165,7 @@ async function injectInbound(body: string, atMs: number): Promise<string> {
   const ts = new Date(atMs);
   const msg = await db().message.create({
     data: {
-      teamId,
+      workspaceId,
       conversationId,
       externalId,
       direction: "in",
@@ -178,14 +178,14 @@ async function injectInbound(body: string, atMs: number): Promise<string> {
   });
   await db().outboundEvent.create({
     data: {
-      teamId,
+      workspaceId,
       type: "message.received",
       payload: {
-        teamId,
+        workspaceId,
         conversationId,
         message: {
           id: msg.id,
-          teamId,
+          workspaceId,
           conversationId,
           externalId,
           direction: "in",
@@ -236,7 +236,7 @@ async function injectInbound(body: string, atMs: number): Promise<string> {
 
 test.beforeAll(async () => {
   const su = await superadminTeam();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
   userId = su.userId;
   const u = await db().user.findUnique({
     where: { id: userId },
@@ -250,7 +250,7 @@ test.beforeAll(async () => {
   const now = Date.now();
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       phoneNumber: PHONE,
       identityChannel: "whatsapp",
       name: "Chat Smoke Contact",
@@ -262,7 +262,7 @@ test.beforeAll(async () => {
 
   const conv = await db().conversation.create({
     data: {
-      teamId,
+      workspaceId,
       contactId: contact.id,
       channel: "whatsapp",
       status: "open",
@@ -284,7 +284,7 @@ test.beforeAll(async () => {
     const m = seeded[i]!;
     await db().message.create({
       data: {
-        teamId,
+        workspaceId,
         conversationId,
         externalId: `seed-${now}-${i}`,
         direction: m.dir,

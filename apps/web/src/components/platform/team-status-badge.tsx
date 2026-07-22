@@ -1,14 +1,14 @@
 import { CheckCircle2, Clock, ShieldX } from "lucide-react";
 
 import { cn } from "@ccp/shared/utils";
-import type { TeamStatus } from "@ccp/shared/types";
+import type { OrgStatus } from "@ccp/shared/types";
 
 /**
  * Org-approval status pill, shared by the platform Organizations list + detail.
  * Presentational only (no hooks) so it renders as a server component.
  */
 const STYLES: Record<
-  TeamStatus,
+  OrgStatus,
   { label: string; className: string; Icon: typeof Clock }
 > = {
   pending: {
@@ -34,7 +34,7 @@ export function TeamStatusBadge({
   status,
   className,
 }: {
-  status: TeamStatus;
+  status: OrgStatus;
   className?: string;
 }) {
   const s = STYLES[status];

@@ -59,7 +59,7 @@ export async function registerAction(
   if (password !== confirmPassword) return fail("Passwords do not match.");
 
   try {
-    await api<{ ok: true; email: string; teamId: string }>("/api/register", {
+    await api<{ ok: true; email: string; workspaceId: string }>("/api/register", {
       method: "POST",
       body: { orgName, name, email, password },
       on401: "throw",

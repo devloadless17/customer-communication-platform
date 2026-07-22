@@ -37,14 +37,14 @@ import type { StateActionInput } from "./ai-inbox.schemas";
 /**
  * Agent-facing AI operations from the inbox (no aiAssistant:manage capability —
  * any team member operating a conversation can use these). Every method is
- * teamId-scoped.
+ * workspaceId-scoped.
  */
 @Injectable()
 export class AiInboxService {
   constructor(private readonly db: DbService) {}
 
   private async assertConversation(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     viewer?: ConversationViewer,
   ) {
@@ -53,7 +53,7 @@ export class AiInboxService {
       // for the thread, so it needs the same gate as the thread itself.
       where: {
         id: conversationId,
-        teamId,
+        workspaceId,
         ...(viewer ? visibilityWhere(viewer) : {}),
       },
       select: { id: true, contactId: true },
@@ -63,8 +63,8 @@ export class AiInboxService {
   }
 
   /** One call to hydrate the inbox AI surfaces for a conversation. */
-  async overview(teamId: string, conversationId: string, viewer?: ConversationViewer) {
-    const conv = await this.assertConversation(teamId, conversationId, viewer);
+  async overview(workspaceId: string, conversationId: string, viewer?: ConversationViewer) {
+    const conv = await this.assertConversation(workspaceId, conversationId, viewer);
     const contact = await this.db.contact.findUnique({
       where: { id: conv.contactId },
       select: { customerId: true },
@@ -72,22 +72,22 @@ export class AiInboxService {
     const [state, suggestion, summary, memory, hallucination] = await Promise.all([
       this.db.aiConversationState.findUnique({ where: { conversationId } }),
       this.db.aiReplySuggestion.findFirst({
-        where: { teamId, conversationId, state: "pending" },
+        where: { workspaceId, conversationId, state: "pending" },
         orderBy: { createdAt: "desc" },
       }),
       this.db.conversationSessionSummary.findFirst({
-        where: { teamId, conversationId },
+        where: { workspaceId, conversationId },
         orderBy: { sessionStartAt: "desc" },
       }),
       contact?.customerId
         ? this.db.aiCustomerMemory.findMany({
-            where: { teamId, customerId: contact.customerId, status: { in: ["confirmed", "candidate"] } },
+            where: { workspaceId, customerId: contact.customerId, status: { in: ["confirmed", "candidate"] } },
             // Most-recent first so the panel can show the freshest interests.
             orderBy: [{ status: "asc" }, { updatedAt: "desc" }],
             take: 50,
           })
         : Promise.resolve([]),
-      getConversationHallucinationSummary(teamId, conversationId),
+      getConversationHallucinationSummary(workspaceId, conversationId),
     ]);
     return {
       state: state?.state ?? "ai_active",
@@ -100,20 +100,20 @@ export class AiInboxService {
   }
 
   /** On-demand summary for an agent-selected date range — see summary-job.ts. */
-  async rangeSummary(teamId: string, conversationId: string, from: Date, to: Date) {
-    await this.assertConversation(teamId, conversationId);
-    const summary = await summarizeRange(teamId, conversationId, from, to);
+  async rangeSummary(workspaceId: string, conversationId: string, from: Date, to: Date) {
+    await this.assertConversation(workspaceId, conversationId);
+    const summary = await summarizeRange(workspaceId, conversationId, from, to);
     return { summary };
   }
 
   /** Single-message hallucination flag, for the thread bubble badge. */
-  async getMessageFlag(teamId: string, messageId: string, viewer?: ConversationViewer) {
+  async getMessageFlag(workspaceId: string, messageId: string, viewer?: ConversationViewer) {
     const row = await this.db.aiMessageMetadata.findFirst({
       // Visibility boundary: keyed by messageId, so it needs the RELATION form
       // — a restricted agent must not read the assistant's notes about a
       // message on a thread they can't open.
       where: {
-        teamId,
+        workspaceId,
         messageId,
         aiGenerated: true,
         ...(viewer
@@ -128,20 +128,20 @@ export class AiInboxService {
   }
 
   async setState(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     userId: string,
     action: StateActionInput["action"],
     viewer?: ConversationViewer,
   ) {
-    await this.assertConversation(teamId, conversationId, viewer);
+    await this.assertConversation(workspaceId, conversationId, viewer);
     switch (action) {
       case "pause":
-        return pauseByAgent(teamId, conversationId, userId);
+        return pauseByAgent(workspaceId, conversationId, userId);
       case "resume":
-        return resumeByAgent(teamId, conversationId);
+        return resumeByAgent(workspaceId, conversationId);
       case "takeover":
-        return takeOverByAgent(teamId, conversationId, userId);
+        return takeOverByAgent(workspaceId, conversationId, userId);
       default:
         throw new BadRequestException({ error: "invalid_action" });
     }
@@ -149,14 +149,14 @@ export class AiInboxService {
 
   /** Accept (optionally edited) or reject a persisted draft. */
   async decideSuggestion(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     id: string,
     action: "accept" | "reject",
     editedText?: string,
     sendAs: "text" | "voice" = "text",
   ) {
-    const s = await this.db.aiReplySuggestion.findFirst({ where: { id, teamId } });
+    const s = await this.db.aiReplySuggestion.findFirst({ where: { id, workspaceId } });
     if (!s) throw new NotFoundException({ error: "suggestion_not_found" });
     if (s.state !== "pending") {
       throw new ConflictException({ error: "suggestion_already_decided", state: s.state });
@@ -169,7 +169,7 @@ export class AiInboxService {
       });
       void publish({
         type: "ai.suggestion_changed",
-        teamId,
+        workspaceId,
         conversationId: s.conversationId,
         suggestionId: id,
         state: "rejected",
@@ -190,7 +190,7 @@ export class AiInboxService {
     // pre-claim acquisition; its internal raw throws stay keep-the-claim, which
     // is the safe side of the ambiguity — a raw throw there could be a Meta
     // network error that already billed, so we must not re-arm and double-send.)
-    const voiceConfig = sendAs === "voice" ? await loadAiConfig(teamId) : null;
+    const voiceConfig = sendAs === "voice" ? await loadAiConfig(workspaceId) : null;
 
     // CLAIM before sending, with a CAS on state=pending. This is the only
     // customer-visible send path that was read-then-act: two concurrent accepts
@@ -201,7 +201,7 @@ export class AiInboxService {
     // provably-pre-send validation error below, so a send that may have reached
     // Meta is never re-attempted.
     const claim = await this.db.aiReplySuggestion.updateMany({
-      where: { id, teamId, state: "pending" },
+      where: { id, workspaceId, state: "pending" },
       data: {
         state: targetState,
         editedText: edited || null,
@@ -211,7 +211,7 @@ export class AiInboxService {
     });
     if (claim.count === 0) {
       const cur = await this.db.aiReplySuggestion.findFirst({
-        where: { id, teamId },
+        where: { id, workspaceId },
         select: { state: true },
       });
       throw new ConflictException({
@@ -225,7 +225,7 @@ export class AiInboxService {
       if (sendAs === "voice") {
         const config = voiceConfig!;
         const out = await sendSuggestionAsVoice({
-          teamId,
+          workspaceId,
           conversationId: s.conversationId,
           inboundMessageId: s.inboundMessageId,
           text: body,
@@ -236,7 +236,7 @@ export class AiInboxService {
         messageId = out.messageId;
       } else {
         const result = await sendTextInternal({
-          teamId,
+          workspaceId,
           conversationId: s.conversationId,
           body,
           sentVia: "ai-assistant/suggestion",
@@ -264,7 +264,7 @@ export class AiInboxService {
       ]);
       if (err instanceof SendTextValidationError && preSendRevertCodes.has(err.code)) {
         await this.db.aiReplySuggestion.updateMany({
-          where: { id, teamId, state: targetState },
+          where: { id, workspaceId, state: targetState },
           data: { state: "pending", decidedByUserId: null, decidedAt: null, editedText: null },
         });
       }
@@ -272,15 +272,15 @@ export class AiInboxService {
     }
 
     await this.db.aiMessageMetadata
-      .create({ data: { teamId, messageId, aiGenerated: true } })
+      .create({ data: { workspaceId, messageId, aiGenerated: true } })
       .catch(() => {});
 
     const accepted = await this.db.aiReplySuggestion.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
     });
     void publish({
       type: "ai.suggestion_changed",
-      teamId,
+      workspaceId,
       conversationId: s.conversationId,
       suggestionId: id,
       state: edited ? "edited" : "accepted",
@@ -294,17 +294,17 @@ export class AiInboxService {
    * deterministic `attempt` number and keeps the prior draft as history. Never
    * auto-sends — the new draft is `pending` and still requires an explicit send.
    */
-  async regenerateSuggestion(teamId: string, _userId: string, suggestionId: string) {
-    const s = await this.db.aiReplySuggestion.findFirst({ where: { id: suggestionId, teamId } });
+  async regenerateSuggestion(workspaceId: string, _userId: string, suggestionId: string) {
+    const s = await this.db.aiReplySuggestion.findFirst({ where: { id: suggestionId, workspaceId } });
     if (!s) throw new NotFoundException({ error: "suggestion_not_found" });
 
-    const config = await loadAiConfig(teamId);
+    const config = await loadAiConfig(workspaceId);
     if (!configEnabled(config)) throw new BadRequestException({ error: "ai_disabled" });
 
     const inbound = await getInboundText(s.inboundMessageId);
     if (!inbound || !inbound.text) throw new BadRequestException({ error: "no_inbound_text" });
 
-    const { memory, recentMessages } = await loadReplyContext(teamId, s.conversationId);
+    const { memory, recentMessages } = await loadReplyContext(workspaceId, s.conversationId);
     const generated = await generateReply({
       config,
       latestText: inbound.text,
@@ -314,11 +314,11 @@ export class AiInboxService {
     });
 
     const audioR2Key = wantsVoiceDraft(config.replyChannelMode, inbound.isVoice)
-      ? await renderDraftAudio(teamId, s.inboundMessageId, generated.payload, config)
+      ? await renderDraftAudio(workspaceId, s.inboundMessageId, generated.payload, config)
       : null;
 
     const suggestion = await persistSuggestion({
-      teamId,
+      workspaceId,
       conversationId: s.conversationId,
       inboundMessageId: s.inboundMessageId,
       payload: generated.payload,
@@ -329,7 +329,7 @@ export class AiInboxService {
 
     await this.db.aiAssistantInteraction.create({
       data: {
-        teamId,
+        workspaceId,
         conversationId: s.conversationId,
         inboundMessageId: s.inboundMessageId,
         configVersion: config.configVersion,
@@ -346,25 +346,25 @@ export class AiInboxService {
     return suggestion;
   }
 
-  async listMemory(teamId: string, customerId: string) {
+  async listMemory(workspaceId: string, customerId: string) {
     const customer = await this.db.customer.findFirst({
-      where: { id: customerId, teamId },
+      where: { id: customerId, workspaceId },
       select: { id: true },
     });
     if (!customer) throw new NotFoundException({ error: "customer_not_found" });
     return this.db.aiCustomerMemory.findMany({
-      where: { teamId, customerId },
+      where: { workspaceId, customerId },
       orderBy: [{ status: "asc" }, { confidence: "desc" }],
     });
   }
 
   async patchMemory(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     id: string,
     patch: { status?: "confirmed" | "rejected" | "candidate"; value?: string },
   ) {
-    const row = await this.db.aiCustomerMemory.findFirst({ where: { id, teamId } });
+    const row = await this.db.aiCustomerMemory.findFirst({ where: { id, workspaceId } });
     if (!row) throw new NotFoundException({ error: "memory_not_found" });
     return this.db.aiCustomerMemory.update({
       where: { id },
@@ -377,28 +377,28 @@ export class AiInboxService {
     });
   }
 
-  async deleteMemory(teamId: string, id: string) {
-    const row = await this.db.aiCustomerMemory.findFirst({ where: { id, teamId } });
+  async deleteMemory(workspaceId: string, id: string) {
+    const row = await this.db.aiCustomerMemory.findFirst({ where: { id, workspaceId } });
     if (!row) throw new NotFoundException({ error: "memory_not_found" });
     await this.db.aiCustomerMemory.delete({ where: { id } });
     return { ok: true };
   }
 
-  async getTranscription(teamId: string, messageId: string, viewer?: ConversationViewer) {
+  async getTranscription(workspaceId: string, messageId: string, viewer?: ConversationViewer) {
     return this.db.aiMessageTranscription.findFirst({
-      where: { messageId, teamId, ...(viewer ? conversationRelationWhere(viewer) : {}) },
+      where: { messageId, workspaceId, ...(viewer ? conversationRelationWhere(viewer) : {}) },
     });
   }
 
   async correctTranscription(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     messageId: string,
     correctedText: string,
     viewer?: ConversationViewer,
   ) {
     const row = await this.db.aiMessageTranscription.findFirst({
-      where: { messageId, teamId, ...(viewer ? conversationRelationWhere(viewer) : {}) },
+      where: { messageId, workspaceId, ...(viewer ? conversationRelationWhere(viewer) : {}) },
     });
     if (!row) throw new NotFoundException({ error: "transcription_not_found" });
     return this.db.aiMessageTranscription.update({
@@ -407,10 +407,10 @@ export class AiInboxService {
     });
   }
 
-  /** Stream a draft suggestion's pre-rendered voice preview (teamId-scoped). */
-  async getSuggestionAudio(teamId: string, id: string) {
+  /** Stream a draft suggestion's pre-rendered voice preview (workspaceId-scoped). */
+  async getSuggestionAudio(workspaceId: string, id: string) {
     const s = await this.db.aiReplySuggestion.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { audioR2Key: true },
     });
     if (!s?.audioR2Key) return null;

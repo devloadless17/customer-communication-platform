@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Periodic sweep for the `ApiIdempotencyKey` table.
@@ -40,6 +40,12 @@ async function runTick(label: string): Promise<void> {
     // Mutex serializes the batched DELETE against other heavy sweepers.
     await withSweeperMutex("api-idempotency", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopApiIdempotencyCleanupSweeper();
+      return;
+    }
     console.error(`[sweeper.api-idempotency] ${label} failed`, err);
   } finally {
     inFlight = false;

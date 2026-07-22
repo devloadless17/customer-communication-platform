@@ -357,7 +357,7 @@ export class MessagesService {
    * points do. Fire-and-forget with a self-contained try/catch: a mark-read
    * failure must never fail or delay the actual send.
    */
-  private markReadOnAgentSend(teamId: string, userId: string, conversationId: string): void {
+  private markReadOnAgentSend(workspaceId: string, userId: string, conversationId: string): void {
     void (async () => {
       try {
         // Single conditional updateMany — the WHERE predicate IS the gate.
@@ -367,13 +367,13 @@ export class MessagesService {
         // matched → skip the publish. Was 2 round-trips (findFirst then
         // CAS); the CAS itself can also serve as the read.
         const result = await this.db.conversation.updateMany({
-          where: { id: conversationId, teamId, unreadCount: { gt: 0 } },
+          where: { id: conversationId, workspaceId, unreadCount: { gt: 0 } },
           data: { unreadCount: 0 },
         });
         if (result.count > 0) {
           await this.bus.publish({
             type: "conversation.read",
-            teamId,
+            workspaceId,
             conversationId,
             readByUserId: userId,
           });
@@ -419,7 +419,7 @@ export class MessagesService {
    * (re)open a thread (no human is replying). Fire-and-forget with a
    * self-contained try/catch — a failure here must never fail the send.
    */
-  private autoAssignOnAgentSend(teamId: string, userId: string, conversationId: string): void {
+  private autoAssignOnAgentSend(workspaceId: string, userId: string, conversationId: string): void {
     void (async () => {
       try {
         // Read the whole row (not a narrow `select`) so we can build a
@@ -427,10 +427,10 @@ export class MessagesService {
         // a second round-trip. The conversation snapshot ships on the event
         // payload and feeds workflow-dispatch in lieu of a fresh DB read.
         const convo = await this.db.conversation.findFirst({
-          where: { id: conversationId, teamId },
+          where: { id: conversationId, workspaceId },
           include: {
             contact: { include: { tags: { select: { id: true } } } },
-            team: { select: { aiAutopilotEnabled: true } },
+            workspace: { select: { aiAutopilotEnabled: true } },
           },
         });
         if (!convo) return;
@@ -466,11 +466,11 @@ export class MessagesService {
         // or the send. Resume is explicit (inbox toggle) or on close. Gated on
         // the TEAM opt-in (orgs without AI never get pause events / pills) AND
         // the current value (skip the redundant re-read in the common case).
-        if (convo.team.aiAutopilotEnabled && convo.aiEnabled) {
+        if (convo.workspace.aiAutopilotEnabled && convo.aiEnabled) {
           void setConversationAiEnabled({
             db: this.db,
             publish: (e) => this.bus.publish(e),
-            teamId,
+            workspaceId,
             conversationId,
             aiEnabled: false,
             changedByUserId: userId,
@@ -486,7 +486,7 @@ export class MessagesService {
         // wait briefly for this send's outbound row to land, then base the pills
         // on it. Falls back to the prediction if the send never commits.
         const committedMsgTs = await this.waitForOutboundAfter(
-          teamId,
+          workspaceId,
           conversationId,
           lastBeforeSend,
         );
@@ -510,7 +510,7 @@ export class MessagesService {
             const result = await tx.conversation.updateMany({
               where: {
                 id: conversationId,
-                teamId,
+                workspaceId,
                 assignedUserId: currentAssignee, // pin current owner
                 status: previousStatus,
               },
@@ -523,7 +523,7 @@ export class MessagesService {
             );
             await publishInTx(tx, {
               type: "conversation.status_changed",
-              teamId,
+              workspaceId,
               conversationId,
               previousStatus,
               newStatus: "open",
@@ -547,22 +547,21 @@ export class MessagesService {
         // Resolve the assignee snapshot BEFORE opening the tx — it's a
         // pure read against the same DB and keeps the tx body short.
         const assignee = await this.db.user.findFirst({
-          where: { id: userId, teamId },
+          where: { id: userId, workspaceMemberships: { some: { workspaceId } } },
           select: {
             id: true,
-            teamId: true,
-            role: true,
             name: true,
             email: true,
             avatarUrl: true,
             deactivatedAt: true,
+            workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 },
           },
         });
         const assignedUser: User | null = assignee
           ? {
               id: assignee.id,
-              teamId: assignee.teamId,
-              role: assignee.role,
+              workspaceId,
+              role: assignee.workspaceMemberships[0]?.role ?? "agent",
               name: assignee.name,
               email: assignee.email,
               avatarUrl: assignee.avatarUrl ?? undefined,
@@ -572,13 +571,19 @@ export class MessagesService {
 
         await this.db.$transaction(async (tx) => {
           const result = await tx.conversation.updateMany({
-            where: { id: conversationId, teamId, assignedUserId: null, status: previousStatus },
+            where: { id: conversationId, workspaceId, assignedUserId: null, status: previousStatus },
             // `lastAssignedUserId` mirrors the shared assignConversation
             // mutation: an agent claiming a thread by replying is exactly the
             // relationship continuity routing should remember later.
             data: {
               assignedUserId: userId,
+              // Both halves together — same reasoning as assignConversation:
+              // `previousAgentFor` gates continuity on `lastAssignedAt`, so
+              // writing the id without the timestamp leaves the pointer
+              // half-set and continuity silently off until analytics catches
+              // up. The snapshot below already assumes `lastAssignedAt = now`.
               lastAssignedUserId: userId,
+              lastAssignedAt: new Date(),
               ...(statusChanged ? { status: nextStatus } : {}),
             },
           });
@@ -601,7 +606,7 @@ export class MessagesService {
           );
           await publishInTx(tx, {
             type: "conversation.assigned",
-            teamId,
+            workspaceId,
             conversationId,
             assignedUser,
             previousAssignedUserId: null,
@@ -619,7 +624,7 @@ export class MessagesService {
             );
             await publishInTx(tx, {
               type: "conversation.status_changed",
-              teamId,
+              workspaceId,
               conversationId,
               previousStatus,
               newStatus: nextStatus,
@@ -661,7 +666,7 @@ export class MessagesService {
    * at-or-after this send's own message.
    */
   private async waitForOutboundAfter(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     afterMs: number,
   ): Promise<Date | null> {
@@ -669,7 +674,7 @@ export class MessagesService {
     for (let i = 0; i < 25; i++) {
       const m = await this.db.message.findFirst({
         where: {
-          teamId,
+          workspaceId,
           conversationId,
           direction: "out",
           timestamp: { gt: after },
@@ -706,24 +711,24 @@ export class MessagesService {
    * before the enqueue; BullMQ's jobId on clientTempId is a second layer.
    */
   async sendText(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: SendTextInput,
     isRetry = false,
   ): Promise<{ ok: true; clientTempId?: string }> {
     return runWithSendIdempotency(
       {
-        teamId,
+        workspaceId,
         userId,
         conversationId: input.conversationId,
         clientTempId: input.clientTempId,
       },
       async () => {
-        const pre = await this.preflightTextSend(teamId, input);
+        const pre = await this.preflightTextSend(workspaceId, input);
         try {
           await enqueueMessageSend({
             kind: "text",
-            teamId,
+            workspaceId,
             userId,
             conversationId: input.conversationId,
             channel: pre.channel,
@@ -758,8 +763,8 @@ export class MessagesService {
         // accepted, don't mark-read/assign a message that won't go out). Inside
         // the idempotency callback so a deduped double-click doesn't re-fire
         // them. Fire-and-forget (void); errors self-log.
-        this.markReadOnAgentSend(teamId, userId, input.conversationId);
-        this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
+        this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
+        this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
         return {
           ok: true as const,
           ...(input.clientTempId ? { clientTempId: input.clientTempId } : {}),
@@ -782,7 +787,7 @@ export class MessagesService {
    * first call, so steady-state cost is a Map lookup, not a query).
    */
   private async preflightTextSend(
-    teamId: string,
+    workspaceId: string,
     input: SendTextInput,
   ): Promise<{
     channel: Channel;
@@ -793,7 +798,7 @@ export class MessagesService {
     const { conversationId, replyToMessageId: replyToMessageIdRaw } = input;
     const [conversation, replyToRow] = await Promise.all([
       this.db.conversation.findFirst({
-        where: { id: conversationId, teamId },
+        where: { id: conversationId, workspaceId },
         select: {
           id: true,
           // Channel is conversation-owned — the preflight returns this provider
@@ -811,7 +816,7 @@ export class MessagesService {
       }),
       replyToMessageIdRaw
         ? this.db.message.findFirst({
-            where: { id: replyToMessageIdRaw, conversationId, teamId },
+            where: { id: replyToMessageIdRaw, conversationId, workspaceId },
             select: { id: true, externalId: true },
           })
         : Promise.resolve(null),
@@ -855,7 +860,7 @@ export class MessagesService {
     // anymore — we need the contact's channel first — but a cached config is
     // a Map read, so the serialization cost is sub-millisecond steady-state.)
     try {
-      await binding.getSendConfig(teamId);
+      await binding.getSendConfig(workspaceId);
     } catch (err) {
       if (err instanceof ProviderNotConfiguredError) {
         // Channel-neutral key — this internal composer route (not /v1, whose
@@ -909,7 +914,7 @@ export class MessagesService {
     // 60/min/key. Throws ConversationSendRateLimitedError on hit; the
     // handler at the controller layer maps it to 429 + Retry-After.
     try {
-      consumeConversationSendBudget(teamId, conversationId);
+      consumeConversationSendBudget(workspaceId, conversationId);
     } catch (err) {
       if (err instanceof ConversationSendRateLimitedError) {
         throw new HttpException(
@@ -963,7 +968,7 @@ export class MessagesService {
     jobId?: string,
   ): Promise<void> {
     const {
-      teamId,
+      workspaceId,
       userId,
       conversationId,
       body,
@@ -984,7 +989,7 @@ export class MessagesService {
     // Pull lastMessageAt for the timestamp-monotonicity guard further down.
     const [exists, configOrErr] = await Promise.all([
       this.db.conversation.findFirst({
-        where: { id: conversationId, teamId },
+        where: { id: conversationId, workspaceId },
         select: {
           id: true,
           lastMessageAt: true,
@@ -993,7 +998,7 @@ export class MessagesService {
           contact: { select: { lastInboundAt: true } },
         },
       }),
-      binding.getSendConfig(teamId).catch((err: unknown) => {
+      binding.getSendConfig(workspaceId).catch((err: unknown) => {
         if (err instanceof ProviderNotConfiguredError) return err;
         throw err;
       }),
@@ -1011,7 +1016,7 @@ export class MessagesService {
     // payload for the quote pill; failure here degrades to a quoteless
     // bubble, never blocks the send.
     const replySnapshotPromise = replyToMessageId
-      ? loadReplySnapshotById(teamId, replyToMessageId)
+      ? loadReplySnapshotById(workspaceId, replyToMessageId)
       : Promise.resolve(null);
 
     // BEFORE-Meta-call idempotency: try to insert an OutboundSendAttempt
@@ -1027,7 +1032,7 @@ export class MessagesService {
     if (jobId) {
       try {
         await this.db.outboundSendAttempt.create({
-          data: { jobId, teamId, conversationId },
+          data: { jobId, workspaceId, conversationId },
         });
         attemptCreated = true;
       } catch (err) {
@@ -1047,7 +1052,7 @@ export class MessagesService {
             // dedups by externalId).
             let existing = await this.db.message.findFirst({
               where: {
-                teamId,
+                workspaceId,
                 channel,
                 externalId: prior.externalId,
               },
@@ -1058,7 +1063,7 @@ export class MessagesService {
               // Message insert. Meta ALREADY delivered this wamid, so we must
               // NOT re-call Meta — re-insert idempotently from the recorded
               // externalId instead. createOutboundMessageIdempotent dedups on
-              // (teamId, channel, externalId), so a concurrent recovery is
+              // (workspaceId, channel, externalId), so a concurrent recovery is
               // harmless. This closes the ghost+double-send window: pre
               // 2026-07-02 this fell through to `send_in_progress_or_lost`,
               // which surfaced as a Failed bubble and drove the agent to
@@ -1068,7 +1073,7 @@ export class MessagesService {
                   ? new Date(exists.lastMessageAt.getTime() + 1)
                   : receivedAt;
               existing = await createOutboundMessageIdempotent({
-                teamId,
+                workspaceId,
                 conversationId,
                 externalId: prior.externalId,
                 senderUserId: userId,
@@ -1087,7 +1092,7 @@ export class MessagesService {
               const replySnapshot = await replySnapshotPromise;
               const replayed: Message = {
                 id: existing.id,
-                teamId: existing.teamId,
+                workspaceId: existing.workspaceId,
                 conversationId: existing.conversationId,
                 externalId: existing.externalId ?? prior.externalId,
                 senderUserId: existing.senderUserId,
@@ -1117,7 +1122,7 @@ export class MessagesService {
               // showing the bubble.
               await publish({
                 type: "message.sent",
-                teamId,
+                workspaceId,
                 conversationId: existing.conversationId,
                 contactId: exists.contactId,
                 message: replayed,
@@ -1278,7 +1283,7 @@ export class MessagesService {
     // idempotently by branch (a).
     const [created, replySnapshot] = await Promise.all([
       createOutboundMessageIdempotent({
-        teamId,
+        workspaceId,
         conversationId,
         externalId: send.externalId,
         senderUserId: userId,
@@ -1296,7 +1301,7 @@ export class MessagesService {
     const preview = body.slice(0, 200);
     const message: Message = {
       id: created.id,
-      teamId,
+      workspaceId,
       conversationId,
       externalId: send.externalId,
       senderUserId: userId,
@@ -1322,7 +1327,7 @@ export class MessagesService {
         preview,
         event: {
           type: "message.sent",
-          teamId,
+          workspaceId,
           conversationId,
           contactId: exists.contactId,
           message,
@@ -1361,7 +1366,7 @@ export class MessagesService {
    * agent so they know NOT to retry (which would double-send).
    */
   async sendMedia(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     form: SendMediaFormInput,
     file: Express.Multer.File,
@@ -1373,38 +1378,38 @@ export class MessagesService {
   ): Promise<{ messageId: string | null; warning?: string }> {
     if (viewer && isRestrictedViewer(viewer)) {
       const visible = await this.db.conversation.findFirst({
-        where: { id: form.conversationId, teamId, assignedUserId: viewer.userId },
+        where: { id: form.conversationId, workspaceId, assignedUserId: viewer.userId },
         select: { id: true },
       });
       if (!visible) throw new NotFoundException({ error: "conversation not found" });
     }
     return runWithSendIdempotency(
       {
-        teamId,
+        workspaceId,
         userId,
         conversationId: form.conversationId,
         clientTempId: form.clientTempId,
       },
       async () => {
-        const result = await this.sendMediaInner(teamId, userId, form, file);
+        const result = await this.sendMediaInner(workspaceId, userId, form, file);
         // After validation+enqueue succeeded — mark-read + auto-assign only on
         // an accepted send, not on one the inner path rejected (window closed,
         // missing phone, etc.). See sendText for the full rationale.
-        this.markReadOnAgentSend(teamId, userId, form.conversationId);
-        this.autoAssignOnAgentSend(teamId, userId, form.conversationId);
+        this.markReadOnAgentSend(workspaceId, userId, form.conversationId);
+        this.autoAssignOnAgentSend(workspaceId, userId, form.conversationId);
         return result;
       },
     );
   }
 
   private async sendMediaInner(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     form: SendMediaFormInput,
     file: Express.Multer.File,
   ): Promise<{ messageId: string | null; warning?: string }> {
     try {
-      return await this.sendMediaWithTempFile(teamId, userId, form, file);
+      return await this.sendMediaWithTempFile(workspaceId, userId, form, file);
     } finally {
       // Disk-backed multer wrote the multipart payload to file.path. Whether
       // the send succeeded, threw mid-flight, or the agent disconnected,
@@ -1435,7 +1440,7 @@ export class MessagesService {
    */
   private async storeOutboundVideoPoster(
     messageId: string,
-    teamId: string,
+    workspaceId: string,
     bytes: Uint8Array,
     toPhone: string,
     toName: string | null,
@@ -1444,15 +1449,15 @@ export class MessagesService {
     try {
       const poster = await extractVideoPosterFrame(bytes);
       if (!poster || poster.length === 0) return;
-      const team = await this.db.team
-        .findUnique({ where: { id: teamId }, select: { name: true } })
+      const team = await this.db.workspace
+        .findUnique({ where: { id: workspaceId }, select: { name: true } })
         .catch(() => null);
       const thumb = await blobStorage.upload({
         bytes: poster,
         mimeType: "image/jpeg",
         kind: "image",
         context: {
-          teamId,
+          workspaceId,
           teamSlug: team?.name,
           direction: "out",
           contactPhone: toPhone,
@@ -1484,7 +1489,7 @@ export class MessagesService {
       await this.bus
         .publish({
           type: "message.media_ready",
-          teamId,
+          workspaceId,
           conversationId: updated.conversationId,
           messageId,
           media: {
@@ -1499,7 +1504,7 @@ export class MessagesService {
         .catch(() => {});
     } catch (err) {
       this.logger.warn(
-        `[${teamId}] outbound video poster generation failed for message ${messageId}: ${
+        `[${workspaceId}] outbound video poster generation failed for message ${messageId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -1507,7 +1512,7 @@ export class MessagesService {
   }
 
   private async sendMediaWithTempFile(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     form: SendMediaFormInput,
     file: Express.Multer.File,
@@ -1516,7 +1521,7 @@ export class MessagesService {
     const { conversationId, caption, clientTempId, replyToMessageId: replyToMessageIdRaw } = form;
 
     const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
+      where: { id: conversationId, workspaceId },
       select: {
         id: true,
         contactId: true,
@@ -1580,7 +1585,7 @@ export class MessagesService {
     // hot-potato loops at the thread level (30/min/thread) before the per-key
     // bucket bites.
     try {
-      consumeConversationSendBudget(teamId, conversationId);
+      consumeConversationSendBudget(workspaceId, conversationId);
     } catch (err) {
       if (err instanceof ConversationSendRateLimitedError) {
         throw new HttpException(
@@ -1599,7 +1604,7 @@ export class MessagesService {
     let replyToExternalId: string | undefined;
     if (replyToMessageIdRaw) {
       const replyToRow = await this.db.message.findFirst({
-        where: { id: replyToMessageIdRaw, conversationId, teamId },
+        where: { id: replyToMessageIdRaw, conversationId, workspaceId },
         select: { id: true, externalId: true },
       });
       if (replyToRow) {
@@ -1808,7 +1813,7 @@ export class MessagesService {
 
     let sendConfig;
     try {
-      sendConfig = await binding.getSendConfig(teamId);
+      sendConfig = await binding.getSendConfig(workspaceId);
     } catch (err) {
       throw new ConflictException({
         error: "WhatsApp is not connected for this team",
@@ -1829,8 +1834,8 @@ export class MessagesService {
     // functions of `bytes`. The team lookup that the blob context needs
     // also kicks off concurrently so it doesn't serialize the upload.
     const blobLabelId = clientTempId ?? randomUUID();
-    const teamRowPromise = this.db.team
-      .findUnique({ where: { id: teamId }, select: { name: true } })
+    const teamRowPromise = this.db.workspace
+      .findUnique({ where: { id: workspaceId }, select: { name: true } })
       .catch(() => null);
 
     const blobUploadPromise = (async () => {
@@ -1840,7 +1845,7 @@ export class MessagesService {
         mimeType,
         kind,
         context: {
-          teamId,
+          workspaceId,
           teamSlug: teamRow?.name,
           direction: "out",
           contactPhone: toPhone,
@@ -2009,7 +2014,7 @@ export class MessagesService {
         : receivedAt;
 
     const created = await createOutboundMessageIdempotent({
-      teamId,
+      workspaceId,
       conversationId,
       externalId: send.externalId,
       senderUserId: userId,
@@ -2071,7 +2076,7 @@ export class MessagesService {
     if (kind === "video" && saved) {
       void this.storeOutboundVideoPoster(
         createdId,
-        teamId,
+        workspaceId,
         bytes,
         toPhone,
         toName,
@@ -2098,12 +2103,12 @@ export class MessagesService {
       : undefined;
 
     const replySnapshot = replyToMessageId
-      ? await loadReplySnapshotById(teamId, replyToMessageId).catch(() => null)
+      ? await loadReplySnapshotById(workspaceId, replyToMessageId).catch(() => null)
       : null;
 
     const message: Message = {
       id: createdId,
-      teamId,
+      workspaceId,
       conversationId,
       externalId: send.externalId,
       senderUserId: userId,
@@ -2135,7 +2140,7 @@ export class MessagesService {
         preview: previewBody,
         event: {
           type: "message.sent",
-          teamId,
+          workspaceId,
           conversationId,
           contactId: conversation.contactId,
           message,
@@ -2196,23 +2201,23 @@ export class MessagesService {
    * re-hitting Meta.
    */
   async forward(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: ForwardMessagesInput,
   ): Promise<{ results: ForwardResult[] }> {
     return runWithSendIdempotency(
       {
-        teamId,
+        workspaceId,
         userId,
         conversationId: "forward",
         clientTempId: input.clientTempId,
       },
-      () => this.forwardImpl(teamId, userId, input),
+      () => this.forwardImpl(workspaceId, userId, input),
     );
   }
 
   private async forwardImpl(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: ForwardMessagesInput,
   ): Promise<{ results: ForwardResult[] }> {
@@ -2226,7 +2231,7 @@ export class MessagesService {
     // pulling the full Meta webhook payload (5-20 KB each) for N×M forward
     // wastes a lot of wire bytes.
     const sourceRows = await this.db.message.findMany({
-      where: { id: { in: messageIds }, teamId, status: { not: "failed" } },
+      where: { id: { in: messageIds }, workspaceId, status: { not: "failed" } },
       orderBy: { timestamp: "asc" },
       omit: { rawPayload: true },
     });
@@ -2242,7 +2247,7 @@ export class MessagesService {
     // failure in the results, consistent with the existing per-contact
     // "no phone number" failure path.)
     const contacts = await this.db.contact.findMany({
-      where: { id: { in: contactIds }, teamId, deletedAt: null },
+      where: { id: { in: contactIds }, workspaceId, deletedAt: null },
       include: { tags: { select: { id: true } } },
     });
     if (contacts.length === 0) {
@@ -2287,8 +2292,8 @@ export class MessagesService {
       return promise;
     };
 
-    const teamRow = await this.db.team.findUnique({
-      where: { id: teamId },
+    const teamRow = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { name: true },
     });
 
@@ -2315,7 +2320,7 @@ export class MessagesService {
       const binding = getProviderBinding(channel.channel);
       let sendConfig;
       try {
-        sendConfig = await binding.getSendConfig(teamId);
+        sendConfig = await binding.getSendConfig(workspaceId);
       } catch (err) {
         return {
           contactId: contact.id,
@@ -2344,7 +2349,7 @@ export class MessagesService {
       // One-contact-one-conversation invariant. Closed → pending (same
       // semantics as webhook ingest + broadcast runner reopen-on-send).
       const existing = await this.db.conversation.findFirst({
-        where: { teamId, contactId: contact.id },
+        where: { workspaceId, contactId: contact.id },
         orderBy: { lastMessageAt: "desc" },
       });
       let conversation;
@@ -2352,7 +2357,7 @@ export class MessagesService {
         try {
           conversation = await this.db.conversation.create({
             data: {
-              teamId,
+              workspaceId,
               contactId: contact.id,
               // Thread channel = the channel resolved for this send.
               channel: channel.channel,
@@ -2362,10 +2367,10 @@ export class MessagesService {
           });
         } catch (err) {
           // Lost the race for this contact's single conversation (unique
-          // [teamId, contactId]) to a concurrent inbound — reuse the winner.
+          // [workspaceId, contactId]) to a concurrent inbound — reuse the winner.
           if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
             conversation = await this.db.conversation.findFirstOrThrow({
-              where: { teamId, contactId: contact.id },
+              where: { workspaceId, contactId: contact.id },
               orderBy: { lastMessageAt: "desc" },
             });
           } else throw err;
@@ -2389,7 +2394,7 @@ export class MessagesService {
         );
         await this.bus.publish({
           type: "conversation.status_changed",
-          teamId,
+          workspaceId,
           conversationId: conversation.id,
           previousStatus: "closed",
           newStatus: "pending",
@@ -2415,7 +2420,7 @@ export class MessagesService {
       ): Promise<void> => {
         let newConversation: ConversationWithRefs | undefined;
         if (conversationIsNew && !emittedForConversation) {
-          const refs = await getConversationWithRefs(teamId, conversation.id, {
+          const refs = await getConversationWithRefs(workspaceId, conversation.id, {
             messageLimit: 1,
           });
           if (refs) newConversation = refs.data;
@@ -2427,7 +2432,7 @@ export class MessagesService {
           preview,
           event: {
             type: "message.sent",
-            teamId,
+            workspaceId,
             conversationId: conversation.id,
             contactId: contact.id,
             message,
@@ -2516,7 +2521,7 @@ export class MessagesService {
                   mimeType: sendMime,
                   kind: mb.kind,
                   context: {
-                    teamId,
+                    workspaceId,
                     teamSlug: teamRow?.name,
                     direction: "out",
                     contactPhone,
@@ -2581,7 +2586,7 @@ export class MessagesService {
                 : send.timestamp;
 
             const created = await createOutboundMessageIdempotent({
-              teamId,
+              workspaceId,
               conversationId: conversation.id,
               externalId: send.externalId,
               senderUserId: userId,
@@ -2646,7 +2651,7 @@ export class MessagesService {
               : undefined;
             const message: Message = {
               id: created.id,
-              teamId,
+              workspaceId,
               conversationId: conversation.id,
               externalId: send.externalId,
               senderUserId: userId,
@@ -2683,7 +2688,7 @@ export class MessagesService {
                 ? new Date(conversation.lastMessageAt.getTime() + 1)
                 : send.timestamp;
             const created = await createOutboundMessageIdempotent({
-              teamId,
+              workspaceId,
               conversationId: conversation.id,
               externalId: send.externalId,
               senderUserId: userId,
@@ -2712,7 +2717,7 @@ export class MessagesService {
             const preview = body.slice(0, 200);
             const message: Message = {
               id: created.id,
-              teamId,
+              workspaceId,
               conversationId: conversation.id,
               externalId: send.externalId,
               senderUserId: userId,
@@ -2807,7 +2812,7 @@ export class MessagesService {
    * `variables.headerMedia.link` on the template send.
    */
   async uploadTemplateHeaderMedia(
-    teamId: string,
+    workspaceId: string,
     file: Express.Multer.File,
   ): Promise<{ link: string; kind: "image" | "video" | "document"; filename?: string }> {
     // Normalize the mime the same way sendMedia does (strip codec params,
@@ -2844,7 +2849,7 @@ export class MessagesService {
       mimeType,
       kind,
       context: {
-        teamId,
+        workspaceId,
         direction: "out",
         externalId: `tpl-hdr-${randomUUID()}`,
         originalFilename: file.originalname,
@@ -2863,13 +2868,13 @@ export class MessagesService {
    * the workflow path produce identical message rows.
    */
   async sendTemplate(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: SendTemplateInput,
   ): Promise<{ messageId: string }> {
     return runWithSendIdempotency(
       {
-        teamId,
+        workspaceId,
         userId,
         conversationId: input.conversationId,
         clientTempId: input.clientTempId,
@@ -2881,7 +2886,7 @@ export class MessagesService {
         // (same clientTempId) double-charged the budget before the cache
         // short-circuited the actual send.
         try {
-          consumeConversationSendBudget(teamId, input.conversationId);
+          consumeConversationSendBudget(workspaceId, input.conversationId);
         } catch (err) {
           if (err instanceof ConversationSendRateLimitedError) {
             throw new HttpException(
@@ -2895,23 +2900,23 @@ export class MessagesService {
           }
           throw err;
         }
-        const result = await this.sendTemplateInner(teamId, userId, input);
+        const result = await this.sendTemplateInner(workspaceId, userId, input);
         // Engagement side effects only after the send is accepted (see sendText).
-        this.markReadOnAgentSend(teamId, userId, input.conversationId);
-        this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
+        this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
+        this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
         return result;
       },
     );
   }
 
   private async sendTemplateInner(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: SendTemplateInput,
   ): Promise<{ messageId: string }> {
     try {
       const result = await sendTemplateInternal({
-        teamId,
+        workspaceId,
         conversationId: input.conversationId,
         templateId: input.templateId,
         variables: input.variables,
@@ -2956,7 +2961,7 @@ export class MessagesService {
    * the outbound bubble.
    */
   async sendInteractive(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: import("./messages.schemas").SendInteractiveInput,
   ): Promise<{ messageId: string }> {
@@ -2966,30 +2971,30 @@ export class MessagesService {
     // message to Meta. No-ops when clientTempId is absent.
     return runWithSendIdempotency(
       {
-        teamId,
+        workspaceId,
         userId,
         conversationId: input.conversationId,
         clientTempId: input.clientTempId,
       },
       async () => {
-        const result = await this.sendInteractiveInner(teamId, userId, input);
+        const result = await this.sendInteractiveInner(workspaceId, userId, input);
         // Mark-read + auto-assign only after the inner path accepted the send
         // (see sendText) — a rejected interactive send must not claim/reopen.
-        this.markReadOnAgentSend(teamId, userId, input.conversationId);
-        this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
+        this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
+        this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
         return result;
       },
     );
   }
 
   private async sendInteractiveInner(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: import("./messages.schemas").SendInteractiveInput,
   ): Promise<{ messageId: string }> {
     // Per-thread send ceiling, same as sendText/sendMedia/sendTemplate.
     try {
-      consumeConversationSendBudget(teamId, input.conversationId);
+      consumeConversationSendBudget(workspaceId, input.conversationId);
     } catch (err) {
       if (err instanceof ConversationSendRateLimitedError) {
         throw new HttpException(
@@ -3005,7 +3010,7 @@ export class MessagesService {
     }
     try {
       const result = await sendInteractiveInternal({
-        teamId,
+        workspaceId,
         conversationId: input.conversationId,
         bodyText: input.body,
         kind: input.kind,
@@ -3055,7 +3060,7 @@ export class MessagesService {
   /** Outbound location share — persists as a `structured` location that renders
    *  the same map-pin card an inbound location does. */
   async sendLocation(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: import("./messages.schemas").SendLocationInput,
   ): Promise<{ messageId: string }> {
@@ -3064,11 +3069,11 @@ export class MessagesService {
     // first result instead of sending a SECOND map pin to the customer. No-ops
     // when clientTempId is absent.
     return runWithSendIdempotency(
-      { teamId, userId, conversationId: input.conversationId, clientTempId: input.clientTempId },
+      { workspaceId, userId, conversationId: input.conversationId, clientTempId: input.clientTempId },
       async () => {
         try {
           const r = await sendStructuredInternal({
-            teamId,
+            workspaceId,
             conversationId: input.conversationId,
             kind: "location",
             latitude: input.latitude,
@@ -3078,8 +3083,8 @@ export class MessagesService {
             senderUserId: userId,
             sentVia: "api/messages/location",
           });
-          this.markReadOnAgentSend(teamId, userId, input.conversationId);
-          this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
+          this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
+          this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
           return { messageId: r.messageId };
         } catch (err) {
           this.throwStructuredSendError(err, "location");
@@ -3090,24 +3095,24 @@ export class MessagesService {
 
   /** Outbound contact share — persists as a `structured` contacts card. */
   async sendContacts(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: import("./messages.schemas").SendContactsInput,
   ): Promise<{ messageId: string }> {
     return runWithSendIdempotency(
-      { teamId, userId, conversationId: input.conversationId, clientTempId: input.clientTempId },
+      { workspaceId, userId, conversationId: input.conversationId, clientTempId: input.clientTempId },
       async () => {
         try {
           const r = await sendStructuredInternal({
-            teamId,
+            workspaceId,
             conversationId: input.conversationId,
             kind: "contacts",
             contacts: input.contacts,
             senderUserId: userId,
             sentVia: "api/messages/contact",
           });
-          this.markReadOnAgentSend(teamId, userId, input.conversationId);
-          this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
+          this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
+          this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
           return { messageId: r.messageId };
         } catch (err) {
           this.throwStructuredSendError(err, "contact");
@@ -3119,13 +3124,13 @@ export class MessagesService {
   /** Outbound emoji reaction to a customer message — mutates the target's
    *  reaction (no new row) and fans out via message.reaction_changed. */
   async reactToMessage(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: import("./messages.schemas").SendReactionInput,
   ): Promise<{ ok: true }> {
     try {
       await sendReactionInternal({
-        teamId,
+        workspaceId,
         conversationId: input.conversationId,
         messageId: input.messageId,
         emoji: input.emoji,
@@ -3146,9 +3151,9 @@ export class MessagesService {
    * the customer's behalf) — it just clears our stored `reaction` and fans out
    * `message.reaction_changed` (customer side) so every agent sees it cleared.
    */
-  async dismissReaction(teamId: string, messageId: string): Promise<{ ok: true }> {
+  async dismissReaction(workspaceId: string, messageId: string): Promise<{ ok: true }> {
     const target = await this.db.message.findFirst({
-      where: { id: messageId, teamId },
+      where: { id: messageId, workspaceId },
       select: { id: true, conversationId: true, reaction: true },
     });
     if (!target) {
@@ -3158,7 +3163,7 @@ export class MessagesService {
     await this.db.message.update({ where: { id: target.id }, data: { reaction: null } });
     await publish({
       type: "message.reaction_changed",
-      teamId,
+      workspaceId,
       conversationId: target.conversationId,
       messageId: target.id,
       actor: "customer",

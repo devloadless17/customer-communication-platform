@@ -9,7 +9,7 @@ import { Prisma } from "@prisma/client";
 
 import { generateInviteToken, hashInviteToken, inviteExpiry } from "@/auth/invite-token";
 import { hashPassword } from "@/auth/password";
-import { assignableRoles } from "@ccp/shared/auth/permissions";
+import { assignableRoles, type UserActor } from "@ccp/shared/auth/permissions";
 import { validatePasswordStructure } from "@ccp/shared/auth/password-policy";
 import type { Role } from "@ccp/shared/types";
 
@@ -40,10 +40,36 @@ export class InvitesService {
   ) {}
 
   /** List PENDING (un-accepted, un-expired) invites for the team. */
-  async list(teamId: string): Promise<InviteListDto[]> {
+  /**
+   * Which workspace an invite is being written into.
+   *
+   * Defaults to the caller's active workspace. A caller may name a DIFFERENT
+   * one only when it belongs to their own organization — otherwise a crafted id
+   * would let an admin of org A mint a working invite into org B.
+   *
+   * Note there is no extra role gate here: the controller is already
+   * `@RequireRole("admin")`, and an org owner/admin resolves to `admin` in
+   * every workspace of their org, so anyone who reaches this method is entitled
+   * to staff any workspace it can return.
+   */
+  async resolveTargetWorkspace(
+    session: { workspaceId: string; organizationId: string },
+    requested: string | undefined,
+  ): Promise<string> {
+    if (!requested || requested === session.workspaceId) return session.workspaceId;
+    const inOrg = await this.db.workspace.count({
+      where: { id: requested, organizationId: session.organizationId },
+    });
+    // 404, not 403 — a 403 would confirm the workspace exists to someone
+    // outside the org that owns it.
+    if (!inOrg) throw new NotFoundException({ error: "workspace_not_found" });
+    return requested;
+  }
+
+  async list(workspaceId: string): Promise<InviteListDto[]> {
     const rows = await this.db.invite.findMany({
       where: {
-        teamId,
+        workspaceId,
         acceptedAt: null,
         expiresAt: { gt: new Date() },
       },
@@ -68,13 +94,13 @@ export class InvitesService {
   }
 
   async create(
-    teamId: string,
-    inviterRole: Role,
+    workspaceId: string,
+    inviter: UserActor,
     inviterUserId: string,
     originUrl: string,
     input: CreateInviteInput,
   ): Promise<InviteCreateDto> {
-    const allowed = assignableRoles(inviterRole);
+    const allowed = assignableRoles(inviter);
     const requestedRole =
       input.role && (allowed as string[]).includes(input.role)
         ? (input.role as Role)
@@ -97,7 +123,7 @@ export class InvitesService {
     // without a cron.
     await this.db.invite.deleteMany({
       where: {
-        teamId,
+        workspaceId,
         acceptedAt: null,
         OR: [{ email: input.email }, { expiresAt: { lt: new Date() } }],
       },
@@ -110,25 +136,34 @@ export class InvitesService {
     // re-invite to the same email (whose prior pending row was just deleted)
     // doesn't double-count its own slot. Active members only — deactivated
     // accounts don't hold a seat.
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
-      select: { maxMembers: true },
+    // The seat cap is PER-WORKSPACE. After the workspaces restructure a member
+    // belongs to a workspace (a WorkspaceMember row), not to the organisation
+    // as a whole — the same person can hold seats in two workspaces and that is
+    // the intended model. The organisation instead caps how many WORKSPACES it
+    // may create (`Organization.maxWorkspaces`), which is what bounds the total.
+    const workspace = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { organizationId: true, maxMembers: true },
     });
     const [activeMembers, pendingInvites] = await Promise.all([
-      // superAdmins are platform operators, not org seats — never counted. In
-      // production a customer org has none; this only matters where tooling
-      // co-locates an operator into a team.
-      this.db.user.count({
-        where: { teamId, deactivatedAt: null, role: { not: "superAdmin" } },
+      // superAdmins are platform operators, not seats — never counted. In
+      // production a customer workspace has none; this only matters where
+      // tooling co-locates an operator into one.
+      this.db.workspaceMember.count({
+        where: {
+          workspaceId,
+          user: { deactivatedAt: null, isSuperAdmin: false },
+        },
       }),
       this.db.invite.count({
-        where: { teamId, acceptedAt: null, expiresAt: { gt: new Date() } },
+        where: { workspaceId, acceptedAt: null, expiresAt: { gt: new Date() } },
       }),
     ]);
-    if (team && activeMembers + pendingInvites >= team.maxMembers) {
+    const maxMembers = workspace?.maxMembers;
+    if (maxMembers !== undefined && activeMembers + pendingInvites >= maxMembers) {
       throw new ConflictException({
         error: "member_limit_reached",
-        detail: `This organization is at its member limit (${team.maxMembers} member${team.maxMembers === 1 ? "" : "s"}). Ask your platform administrator to raise the limit before inviting more.`,
+        detail: `This workspace is at its member limit (${maxMembers} member${maxMembers === 1 ? "" : "s"}). Ask your platform administrator to raise the limit before inviting more.`,
       });
     }
 
@@ -136,7 +171,7 @@ export class InvitesService {
     const tokenHash = hashInviteToken(token);
     const invite = await this.db.invite.create({
       data: {
-        teamId,
+        workspaceId,
         email: input.email,
         role,
         tokenHash,
@@ -152,7 +187,7 @@ export class InvitesService {
     const origin = process.env.BETTER_AUTH_URL || originUrl;
     const url = `${origin.replace(/\/$/, "")}/invite/${token}`;
 
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "invites" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "invites" });
 
     return { id: invite.id, expiresAt: invite.expiresAt.toISOString(), url };
   }
@@ -160,15 +195,15 @@ export class InvitesService {
   /**
    * Revoke a PENDING invite by hard-deleting the row. Already-accepted
    * invites are historical audit rows; admins remove the resulting User
-   * via /api/users/[id] instead. Scope by teamId so a foreign id can never
+   * via /api/users/[id] instead. Scope by workspaceId so a foreign id can never
    * match and an already-accepted invite is treated as "not found".
    */
-  async revoke(teamId: string, id: string): Promise<void> {
+  async revoke(workspaceId: string, id: string): Promise<void> {
     const result = await this.db.invite.deleteMany({
-      where: { id, teamId, acceptedAt: null },
+      where: { id, workspaceId, acceptedAt: null },
     });
     if (result.count === 0) throw new NotFoundException({ error: "invite not found" });
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "invites" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "invites" });
   }
 
   /**
@@ -189,7 +224,7 @@ export class InvitesService {
         role: true,
         acceptedAt: true,
         expiresAt: true,
-        team: { select: { name: true } },
+        workspace: { select: { name: true } },
       },
     });
     if (!invite) return { status: "invalid", invite: null };
@@ -199,7 +234,7 @@ export class InvitesService {
         invite: {
           email: invite.email,
           role: invite.role as Role,
-          teamName: invite.team?.name ?? "your team",
+          teamName: invite.workspace?.name ?? "your team",
         },
       };
     }
@@ -209,7 +244,7 @@ export class InvitesService {
         invite: {
           email: invite.email,
           role: invite.role as Role,
-          teamName: invite.team?.name ?? "your team",
+          teamName: invite.workspace?.name ?? "your team",
         },
       };
     }
@@ -218,7 +253,7 @@ export class InvitesService {
       invite: {
         email: invite.email,
         role: invite.role as Role,
-        teamName: invite.team?.name ?? "your team",
+        teamName: invite.workspace?.name ?? "your team",
       },
     };
   }
@@ -226,7 +261,7 @@ export class InvitesService {
   /**
    * Accept an invite: validate the token + password, create the User +
    * Better-Auth `Account` row + stamp `acceptedAt` in one transaction,
-   * publish catalog events. Returns the email + teamId so the (web-side)
+   * publish catalog events. Returns the email + workspaceId so the (web-side)
    * caller can complete sign-in via Better Auth and set the cookie.
    *
    * Why this lives in NestJS (not the original Next.js server action):
@@ -239,7 +274,7 @@ export class InvitesService {
    */
   async accept(
     input: AcceptInviteInput,
-  ): Promise<{ email: string; teamId: string }> {
+  ): Promise<{ email: string; workspaceId: string }> {
     // Server-side password policy: the web action runs validatePasswordStructure
     // in @ccp/shared, but a direct POST to /api/invites/accept bypasses the form.
     // Without this gate any string ≥ 6 chars would be accepted, even though
@@ -252,7 +287,7 @@ export class InvitesService {
     const tokenHash = hashInviteToken(input.token);
     const passwordHash = await hashPassword(input.password);
 
-    let result: { email: string; teamId: string };
+    let result: { email: string; workspaceId: string };
     try {
       result = await this.db.$transaction(async (tx) => {
         const invite = await tx.invite.findUnique({ where: { tokenHash } });
@@ -283,30 +318,52 @@ export class InvitesService {
         // can't both read "1 of 2" and both insert → 3. The lock serializes
         // them; the second waits, re-reads the now-current count, and is
         // rejected. Active members only — deactivated accounts free their seat.
-        const lockedTeam = await tx.$queryRaw<{ maxMembers: number }[]>`
-          SELECT "maxMembers" FROM "Team" WHERE id = ${invite.teamId} FOR UPDATE
+        // The seat cap is PER-WORKSPACE, so the row we lock is the WORKSPACE.
+        // `FOR UPDATE` is load-bearing, not decorative: two people accepting
+        // the last seat at the same instant would both read count < max and
+        // both insert, putting the workspace one over its cap permanently.
+        // Serialising on the workspace row makes the loser re-read after the
+        // winner commits and correctly see the workspace full.
+        const lockedWs = await tx.$queryRaw<
+          { maxMembers: number; organizationId: string }[]
+        >`
+          SELECT "maxMembers", "organizationId" FROM "Workspace"
+          WHERE id = ${invite.workspaceId} FOR UPDATE
         `;
-        const maxMembers = lockedTeam[0]?.maxMembers ?? 2;
-        const memberCount = await tx.user.count({
+        const maxMembers = lockedWs[0]?.maxMembers ?? 2;
+        // Same locked row supplies the org the new user belongs to — no second
+        // lookup, and it cannot disagree with what we just locked.
+        const organizationId = lockedWs[0]?.organizationId;
+        if (!organizationId) {
+          throw new InviteAcceptError("invalid", "This invite is no longer valid.");
+        }
+        const memberCount = await tx.workspaceMember.count({
           where: {
-            teamId: invite.teamId,
-            deactivatedAt: null,
-            role: { not: "superAdmin" },
+            workspaceId: invite.workspaceId,
+            user: { deactivatedAt: null, isSuperAdmin: false },
           },
         });
         if (memberCount >= maxMembers) {
           throw new InviteAcceptError(
             "team_full",
-            `This organization has reached its member limit (${maxMembers} member${maxMembers === 1 ? "" : "s"}). Ask the organization's admin to request a higher limit.`,
+            `This workspace has reached its member limit (${maxMembers} member${maxMembers === 1 ? "" : "s"}). Ask the organization's admin to request a higher limit.`,
           );
         }
 
+        // The user belongs to the ORG; the invited ROLE is a per-workspace
+        // grant, so it lands on a WorkspaceMember row rather than the user.
         const user = await tx.user.create({
           data: {
-            teamId: invite.teamId,
-            role: invite.role,
+            organizationId,
             name: input.name,
             email: invite.email,
+          },
+        });
+        await tx.workspaceMember.create({
+          data: {
+            userId: user.id,
+            workspaceId: invite.workspaceId,
+            role: invite.role,
           },
         });
         // Better Auth verifies credentials against the `Account` row, not
@@ -330,7 +387,7 @@ export class InvitesService {
         // members dialog (apps/web/src/features/team-chat/channel-members-*)
         // is where the admin adds them to specialized rooms.
         const defaultChannel = await tx.teamChannel.findFirst({
-          where: { teamId: invite.teamId, isDefault: true },
+          where: { workspaceId: invite.workspaceId, isDefault: true },
           select: { id: true },
         });
         if (defaultChannel) {
@@ -343,7 +400,7 @@ export class InvitesService {
           });
         }
 
-        return { email: invite.email, teamId: invite.teamId };
+        return { email: invite.email, workspaceId: invite.workspaceId };
       });
     } catch (err) {
       if (err instanceof InviteAcceptError) {
@@ -363,12 +420,12 @@ export class InvitesService {
     // as the pre-NestJS server action.
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId: result.teamId,
+      workspaceId: result.workspaceId,
       scope: "invites",
     });
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId: result.teamId,
+      workspaceId: result.workspaceId,
       scope: "members",
     });
 

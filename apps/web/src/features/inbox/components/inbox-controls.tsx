@@ -25,6 +25,10 @@ export type PresetFilterId =
 export type Filter =
   | { kind: "preset"; id: PresetFilterId }
   | { kind: "stage"; stageId: string }
+  // A saved inbox view. Only the id travels — the server owns the filter
+  // document, so the client can never widen a view beyond what was saved, and
+  // a personal view can't be read by passing someone else's id.
+  | { kind: "view"; viewId: string }
   // The "Calls" view — a team-wide call-history list rendered inside the inbox
   // content area (not a separate route), so it behaves like the other filters.
   | { kind: "calls" };

@@ -52,7 +52,7 @@ export const addCommentStepHandler: StepHandler<AddCommentStepConfig> = {
     const conversationId = conv.id;
 
     const conversation = await db.conversation.findFirst({
-      where: { id: conversationId, teamId: ctx.teamId },
+      where: { id: conversationId, workspaceId: ctx.workspaceId },
       select: { id: true },
     });
     if (!conversation) return advanceWithError(404, "conversation not found");
@@ -62,14 +62,14 @@ export const addCommentStepHandler: StepHandler<AddCommentStepConfig> = {
     const { contact, extras } = await buildTokenContext(
       envelope,
       ctx,
-      ctx.teamId,
+      ctx.workspaceId,
       envelopeContact(envelope)?.id,
     );
     const body = resolveFieldTokens(config.body, contact, extras);
 
     const note = await db.internalNote.create({
       data: {
-        teamId: ctx.teamId,
+        workspaceId: ctx.workspaceId,
         conversationId,
         authorUserId: null,
         body,
@@ -86,7 +86,7 @@ export const addCommentStepHandler: StepHandler<AddCommentStepConfig> = {
     // which event types do/don't need silent).
     await publish({
       type: "note.created",
-      teamId: ctx.teamId,
+      workspaceId: ctx.workspaceId,
       conversationId,
       note: {
         id: note.id,

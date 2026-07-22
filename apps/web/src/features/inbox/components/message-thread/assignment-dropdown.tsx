@@ -32,7 +32,7 @@ import type { ConversationStatus, User } from "@ccp/shared/types";
 import { readError } from "./utils";
 
 export function AssignmentDropdown({
-  teamId,
+  workspaceId,
   conversationId,
   currentId,
   currentName,
@@ -45,7 +45,7 @@ export function AssignmentDropdown({
   canAssignOthers,
   currentUserId,
 }: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   currentId: string | null;
   currentName: string | null;
@@ -74,7 +74,7 @@ export function AssignmentDropdown({
   // small "Away/Busy/Offline" cue. The hook is cheap (shared socket + one
   // listener per signal); subscribing it directly here avoids threading
   // availabilityByUserId through ThreadHeader → MessageThread for one menu.
-  const { onlineUserIds, availabilityByUserId } = usePresence(teamId, "");
+  const { onlineUserIds, availabilityByUserId } = usePresence(workspaceId, "");
 
   const assign = async (assignedUserId: string | null) => {
     if (pending) return;
@@ -105,7 +105,7 @@ export function AssignmentDropdown({
     // the inbox-list resync + counts refetch during the in-flight PATCH;
     // the authoritative server frame (optimistic absent) drives convergence.
     const assignActivity = buildOptimisticAssignment({
-      teamId,
+      workspaceId,
       conversationId,
       actorName: currentUserName,
       assignedToName: nextUser?.name ?? null,
@@ -115,13 +115,13 @@ export function AssignmentDropdown({
     const frames: Parameters<typeof dispatchLocalSocketEvents>[0] = [
       [
         "conversation:assigned",
-        { teamId, conversationId, assignedUser: nextUser, optimistic: true },
+        { workspaceId, conversationId, assignedUser: nextUser, optimistic: true },
       ],
       assignActivity.frame,
     ];
     if (statusWillChange) {
       const statusActivity = buildOptimisticStatusChange({
-        teamId,
+        workspaceId,
         conversationId,
         actorName: currentUserName,
         status: nextStatus,
@@ -129,15 +129,15 @@ export function AssignmentDropdown({
       statusActivityId = statusActivity.id;
       frames.push([
         "conversation:status",
-        { teamId, conversationId, status: nextStatus, optimistic: true },
+        { workspaceId, conversationId, status: nextStatus, optimistic: true },
       ]);
       frames.push(statusActivity.frame);
     }
     dispatchLocalSocketEvents(frames);
     const rollbackActivity = () => {
-      rollbackOptimisticActivity(teamId, conversationId, assignActivityId);
+      rollbackOptimisticActivity(workspaceId, conversationId, assignActivityId);
       if (statusActivityId) {
-        rollbackOptimisticActivity(teamId, conversationId, statusActivityId);
+        rollbackOptimisticActivity(workspaceId, conversationId, statusActivityId);
       }
     };
     try {
@@ -149,13 +149,13 @@ export function AssignmentDropdown({
       if (!res.ok) {
         // Roll back BOTH frames so the chip + pill reflect truth.
         dispatchLocalSocketEvent("conversation:assigned", {
-          teamId,
+          workspaceId,
           conversationId,
           assignedUser: prevUser,
         });
         if (statusWillChange) {
           dispatchLocalSocketEvent("conversation:status", {
-            teamId,
+            workspaceId,
             conversationId,
             status: currentStatus,
           });
@@ -165,13 +165,13 @@ export function AssignmentDropdown({
       }
     } catch (err) {
       dispatchLocalSocketEvent("conversation:assigned", {
-        teamId,
+        workspaceId,
         conversationId,
         assignedUser: prevUser,
       });
       if (statusWillChange) {
         dispatchLocalSocketEvent("conversation:status", {
-          teamId,
+          workspaceId,
           conversationId,
           status: currentStatus,
         });

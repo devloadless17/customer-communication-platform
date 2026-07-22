@@ -78,7 +78,7 @@ export async function materializeBroadcast(broadcastId: string): Promise<void> {
     where: { id: broadcastId },
     select: {
       id: true,
-      teamId: true,
+      workspaceId: true,
       status: true,
       scheduledAt: true,
       materializeRecipients: true,
@@ -112,7 +112,7 @@ export async function materializeBroadcast(broadcastId: string): Promise<void> {
   // `assignedUserId`, which is what keeps the plan stable across attempts.
   const plan = await buildBroadcastAssignmentPlan({
     db,
-    teamId: row.teamId,
+    workspaceId: row.workspaceId,
     total: staged.length,
     config: {
       mode: row.assignmentMode,
@@ -134,11 +134,11 @@ export async function materializeBroadcast(broadcastId: string): Promise<void> {
     // (create() guards empty audiences, so a true 0 here is a data fault).
     const existing = await db.broadcastRecipient.count({ where: { broadcastId } });
     if (existing > 0) {
-      await finalizeMaterialized(broadcastId, row.teamId, existing, row.scheduledAt);
+      await finalizeMaterialized(broadcastId, row.workspaceId, existing, row.scheduledAt);
     } else {
       await failMaterialize(
         broadcastId,
-        row.teamId,
+        row.workspaceId,
         "No recipients to materialize (staging was empty).",
       );
     }
@@ -185,7 +185,7 @@ export async function materializeBroadcast(broadcastId: string): Promise<void> {
   // from an imperfectly-deduped audience). Corrects the provisional totalCount
   // create() stamped from the staged length.
   const inserted = await db.broadcastRecipient.count({ where: { broadcastId } });
-  await finalizeMaterialized(broadcastId, row.teamId, inserted, row.scheduledAt);
+  await finalizeMaterialized(broadcastId, row.workspaceId, inserted, row.scheduledAt);
 }
 
 /**
@@ -203,7 +203,7 @@ export async function materializeBroadcast(broadcastId: string): Promise<void> {
  */
 async function finalizeMaterialized(
   broadcastId: string,
-  teamId: string,
+  workspaceId: string,
   totalCount: number,
   scheduledAt: Date | null,
 ): Promise<void> {
@@ -249,7 +249,7 @@ async function finalizeMaterialized(
   }
   await publish({
     type: "broadcast.status_changed",
-    teamId,
+    workspaceId,
     broadcastId,
     status: nextStatus,
   });
@@ -285,7 +285,7 @@ async function reconcileCanceledMaterialize(broadcastId: string): Promise<void> 
  *  inserted rows). Mirrors the runner's fail() shape. */
 async function failMaterialize(
   broadcastId: string,
-  teamId: string,
+  workspaceId: string,
   message: string,
 ): Promise<void> {
   const failed = await db.broadcast.updateMany({
@@ -300,7 +300,7 @@ async function failMaterialize(
   if (failed.count === 0) return;
   await publish({
     type: "broadcast.status_changed",
-    teamId,
+    workspaceId,
     broadcastId,
     status: "failed",
     error: message,

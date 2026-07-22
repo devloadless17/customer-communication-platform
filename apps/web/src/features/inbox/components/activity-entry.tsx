@@ -1,6 +1,7 @@
 "use client";
 
 import { memo } from "react";
+import Link from "next/link";
 import {
   ArrowRightLeft,
   Bot,
@@ -9,6 +10,7 @@ import {
   FlagOff,
   RefreshCw,
   Tag,
+  Ticket as TicketIcon,
   Trash2,
   UserPlus,
   UserMinus,
@@ -226,6 +228,47 @@ function describe(e: ConversationActivityEvent): {
         icon: RefreshCw,
         text: <>Visitor started a new conversation</>,
       };
+    // Ticket boundaries. Only four of the ticket lifecycle's transitions cross
+    // over into the THREAD timeline — the ones that change what the
+    // conversation means from here on. The full history lives on the ticket
+    // itself; putting it all here would drown the thread.
+    //
+    // The number and subject are snapshotted on the audit row at write time
+    // (same rule as tag_added), so the pill keeps reading correctly after a
+    // rename — and the link stays valid because the id is snapshotted too.
+    case "ticket_opened":
+    case "ticket_reopened":
+    case "ticket_solved":
+    case "ticket_closed": {
+      const number = e.after?.number;
+      const subject = (e.after?.subject as string | null | undefined) ?? null;
+      const id = (e.after?.ticketId as string | null | undefined) ?? null;
+      const verb =
+        e.kind === "ticket_opened"
+          ? "opened"
+          : e.kind === "ticket_reopened"
+            ? "reopened"
+            : e.kind === "ticket_solved"
+              ? "solved"
+              : "closed";
+      const label = typeof number === "number" ? `#${number}` : "a ticket";
+      return {
+        icon: TicketIcon,
+        text: (
+          <>
+            {who} {verb}{" "}
+            {id ? (
+              <Link href={`/tickets/${id}`} className="font-medium hover:underline">
+                {label}
+              </Link>
+            ) : (
+              <b>{label}</b>
+            )}
+            {subject ? <> — {subject}</> : null}
+          </>
+        ),
+      };
+    }
     default:
       return null;
   }

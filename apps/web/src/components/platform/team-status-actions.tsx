@@ -6,7 +6,7 @@ import { CheckCircle2, Loader2, RotateCcw, ShieldX } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/api/client-fetch";
-import type { TeamStatus } from "@ccp/shared/types";
+import type { OrgStatus } from "@ccp/shared/types";
 
 /**
  * Shared mutation hook for the org-approval controls. PATCHes the status, then
@@ -14,7 +14,7 @@ import type { TeamStatus } from "@ccp/shared/types";
  * change. The server also busts the target org's session cache, so the change
  * takes effect for that org on its next request — not after the 15s TTL.
  */
-function useSetTeamStatus(teamId: string) {
+function useSetTeamStatus(workspaceId: string) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -27,7 +27,7 @@ function useSetTeamStatus(teamId: string) {
     setError(null);
     startTransition(async () => {
       try {
-        const res = await apiFetch(`/api/admin/teams/${teamId}/status`, {
+        const res = await apiFetch(`/api/admin/teams/${workspaceId}/status`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(reason ? { status, reason } : { status }),
@@ -54,8 +54,8 @@ function useSetTeamStatus(teamId: string) {
  * One-click "Approve" for a pending org. Used inline in the Organizations list
  * (the approval queue) so the common action doesn't need a detail-page trip.
  */
-export function QuickApproveButton({ teamId }: { teamId: string }) {
-  const { setStatus, pending, error } = useSetTeamStatus(teamId);
+export function QuickApproveButton({ workspaceId }: { workspaceId: string }) {
+  const { setStatus, pending, error } = useSetTeamStatus(workspaceId);
   return (
     <div className="flex flex-col items-end gap-1">
       <Button size="sm" disabled={pending} onClick={() => setStatus("active")}>
@@ -78,15 +78,15 @@ export function QuickApproveButton({ teamId }: { teamId: string }) {
  * org — that's managed from Settings, mirroring the delete button's guard.
  */
 export function TeamStatusControls({
-  teamId,
+  workspaceId,
   status,
   isOwnTeam,
 }: {
-  teamId: string;
-  status: TeamStatus;
+  workspaceId: string;
+  status: OrgStatus;
   isOwnTeam: boolean;
 }) {
-  const { setStatus, pending, error } = useSetTeamStatus(teamId);
+  const { setStatus, pending, error } = useSetTeamStatus(workspaceId);
   const [suspendOpen, setSuspendOpen] = useState(false);
   const [reason, setReason] = useState("");
 

@@ -79,7 +79,7 @@ export class UsersController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    const users = await this.users.list(session.teamId);
+    const users = await this.users.list(session.workspaceId);
     return { users };
   }
 
@@ -97,7 +97,7 @@ export class UsersController {
     @Query(zQuery(StatsQuerySchema)) query: StatsQuery,
   ) {
     const stats = await this.users.getMemberStats(
-      session.teamId,
+      session.workspaceId,
       periodSince(query.period),
     );
     return { stats, period: query.period };
@@ -111,7 +111,7 @@ export class UsersController {
   @RequireCapability("teamActivity:view")
   @Get("active-assignments")
   async activeAssignments(@CurrentSession() session: ApiSession) {
-    const counts = await this.users.getActiveAssignments(session.teamId);
+    const counts = await this.users.getActiveAssignments(session.workspaceId);
     return { counts };
   }
 
@@ -129,7 +129,7 @@ export class UsersController {
     @Param("userId") userId: string,
     @Res() res: Response,
   ): Promise<void> {
-    const hasAvatar = await this.users.hasAvatar(session.teamId, userId);
+    const hasAvatar = await this.users.hasAvatar(session.workspaceId, userId);
     if (!hasAvatar) throw new NotFoundException({ error: "not_found" });
     await streamBlob(res, avatarObjectKey(userId), undefined);
   }
@@ -143,7 +143,7 @@ export class UsersController {
     @Body(zBody(UpdateMyProfileSchema)) body: UpdateMyProfileInput,
   ) {
     const user = await this.users.updateMyProfile(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       body,
     );
@@ -165,7 +165,7 @@ export class UsersController {
     @Body(zBody(UpdateMyAvailabilitySchema)) body: UpdateMyAvailabilityInput,
   ) {
     const user = await this.users.updateMyAvailability(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       body,
     );
@@ -197,7 +197,7 @@ export class UsersController {
     if (!file) throw new BadRequestException({ error: "file required" });
     try {
       const bytes = await readFile(file.path);
-      const out = await this.users.uploadMyAvatar(session.teamId, session.userId, {
+      const out = await this.users.uploadMyAvatar(session.workspaceId, session.userId, {
         bytes: new Uint8Array(bytes),
         mimeType: file.mimetype || "application/octet-stream",
         originalFilename: file.originalname ?? null,
@@ -226,9 +226,9 @@ export class UsersController {
     @Body(zBody(SetUserAvailabilitySchema)) body: SetUserAvailabilityInput,
   ) {
     const user = await this.users.setUserAvailability(
-      session.teamId,
+      session.workspaceId,
       session.userId,
-      session.role,
+      { role: session.role, isSuperAdmin: session.isSuperAdmin },
       id,
       body,
     );
@@ -246,7 +246,7 @@ export class UsersController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    return this.users.getUserWorkHours(session.teamId, id);
+    return this.users.getUserWorkHours(session.workspaceId, id);
   }
 
   /**
@@ -262,8 +262,8 @@ export class UsersController {
     @Body(zBody(SetUserWorkHoursSchema)) body: SetUserWorkHoursInput,
   ) {
     const user = await this.users.setUserWorkHours(
-      session.teamId,
-      session.role,
+      session.workspaceId,
+      { role: session.role, isSuperAdmin: session.isSuperAdmin },
       id,
       body,
     );
@@ -278,8 +278,8 @@ export class UsersController {
     @Body(zBody(UpdateUserSchema)) body: UpdateUserInput,
   ) {
     const user = await this.users.update(
-      session.teamId,
-      session.role,
+      session.workspaceId,
+      { role: session.role, isSuperAdmin: session.isSuperAdmin },
       session.userId,
       id,
       body,
@@ -312,8 +312,8 @@ export class UsersController {
       });
     }
     await this.users.resetPassword(
-      session.teamId,
-      session.role,
+      session.workspaceId,
+      { role: session.role, isSuperAdmin: session.isSuperAdmin },
       id,
       body.newPassword,
     );
@@ -326,7 +326,7 @@ export class UsersController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.users.remove(session.teamId, session.role, session.userId, id);
+    await this.users.remove(session.workspaceId, { role: session.role, isSuperAdmin: session.isSuperAdmin }, session.userId, id);
     return { ok: true };
   }
 }

@@ -19,7 +19,7 @@ import { db, appAdmin } from "../_helpers/db";
 test.describe.configure({ mode: "serial" });
 
 const PREFIX = "e2e_report_";
-let teamId: string;
+let workspaceId: string;
 let broadcastId: string;
 
 // A deliberately lopsided campaign: a big undelivered bucket (so the
@@ -33,10 +33,10 @@ const PLAN = [
 ] as const;
 
 test.beforeAll(async () => {
-  teamId = (await appAdmin()).teamId;
+  workspaceId = (await appAdmin()).workspaceId;
   const b = await db().broadcast.create({
     data: {
-      teamId,
+      workspaceId,
       status: "completed",
       kind: "template",
       targetMode: "contact",
@@ -60,7 +60,7 @@ test.beforeAll(async () => {
     for (let k = 0; k < group.n; k++) {
       const contact = await db().contact.create({
         data: {
-          teamId,
+          workspaceId,
           name: `${PREFIX}${group.state}_${k}`,
           phoneNumber: `+1555${String(7000000 + i++).slice(0, 7)}`,
           identityChannel: "whatsapp",
@@ -98,7 +98,7 @@ test.afterAll(async () => {
     await db().broadcastRecipient.deleteMany({ where: { broadcastId: { in: ids } } });
     await db().broadcast.deleteMany({ where: { id: { in: ids } } });
   }
-  await db().contact.deleteMany({ where: { teamId, name: { startsWith: PREFIX } } });
+  await db().contact.deleteMany({ where: { workspaceId, name: { startsWith: PREFIX } } });
   await db().$disconnect();
 });
 

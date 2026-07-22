@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Nightly cleanup for `OutboundWebhookDelivery` rows.
@@ -45,6 +45,12 @@ async function runTick(label: string): Promise<void> {
     // can't pile pool pressure on top of the other heavy sweepers.
     await withSweeperMutex("outbound-webhook-delivery-cleanup", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopOutboundWebhookDeliveryCleanup();
+      return;
+    }
     console.error(`[sweeper.webhook-delivery-cleanup] ${label} failed`, err);
   } finally {
     inFlight = false;

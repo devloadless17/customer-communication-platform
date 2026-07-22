@@ -9,6 +9,7 @@ import {
   workflowConversationSnapshotAfterStatusChange,
 } from "@/lib/workflows/events";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
+import { fillActiveTicketAssignee } from "@/lib/tickets/mutations";
 
 /**
  * Single source of truth for the two conversation mutations whose business
@@ -64,20 +65,24 @@ function isP2025(err: unknown): boolean {
   );
 }
 
-function toWireUser(u: {
-  id: string;
-  teamId: string;
-  role: User["role"];
-  name: string;
-  email: string;
-  avatarUrl: string | null;
-  deactivatedAt: Date | null;
-} | null): User | null {
+function toWireUser(
+  u: {
+    id: string;
+    name: string;
+    email: string;
+    avatarUrl: string | null;
+    deactivatedAt: Date | null;
+    // Role is per-workspace now, so it arrives as a filtered membership row
+    // rather than a column on the user.
+    workspaceMemberships: { role: User["role"] }[];
+  } | null,
+  workspaceId: string,
+): User | null {
   return u
     ? {
         id: u.id,
-        teamId: u.teamId,
-        role: u.role,
+        workspaceId,
+        role: u.workspaceMemberships[0]?.role ?? "agent",
         name: u.name,
         email: u.email,
         avatarUrl: u.avatarUrl ?? undefined,
@@ -109,7 +114,7 @@ function toWireUser(u: {
 export async function assignConversation(args: {
   db: Db;
   publish: Publish;
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   targetUserId: string | null;
   /** Real user id for UI/API actions; `null` for system/workflow actions. */
@@ -134,7 +139,7 @@ export async function assignConversation(args: {
 > {
   const {
     db,
-    teamId,
+    workspaceId,
     conversationId,
     targetUserId,
     changedByUserId,
@@ -144,7 +149,7 @@ export async function assignConversation(args: {
   } = args;
 
   const conversation = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
+    where: { id: conversationId, workspaceId },
     select: {
       id: true,
       assignedUserId: true,
@@ -161,7 +166,7 @@ export async function assignConversation(args: {
     // Reject deactivated assignees — a soft-deleted agent shouldn't be
     // assigned new work even if their User row still exists for history.
     const member = await db.user.findFirst({
-      where: { id: targetUserId, teamId, deactivatedAt: null },
+      where: { id: targetUserId, workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
       select: { id: true },
     });
     if (!member) return { ok: false, reason: "invalid_user" };
@@ -204,7 +209,7 @@ export async function assignConversation(args: {
         // by someone else surfaces as a conflict instead of a silent clobber.
         where: {
           id: conversationId,
-          teamId,
+          workspaceId,
           assignedUserId: previousAssignedUserId,
           status: previousStatus,
         },
@@ -216,9 +221,28 @@ export async function assignConversation(args: {
         data: {
           assignedUserId: targetUserId,
           ...(statusChanged ? { status: nextStatus } : {}),
-          ...(targetUserId !== null ? { lastAssignedUserId: targetUserId } : {}),
+          // BOTH halves of the continuity pointer are written HERE, in the same
+          // transaction. `lastAssignedAt` is also maintained by the analytics
+          // subscriber, but continuity must not depend on that: `previousAgentFor`
+          // gates on `lastAssignedAt >= cutoff`, so a null timestamp silently
+          // disables "send the returning customer back to the agent who knows
+          // them" — no error, no log, the feature just quietly stops. Leaving the
+          // id and the timestamp to two different subsystems means one future
+          // change to analytics (e.g. gating it on `silent`, which the workflow
+          // and webhook subscribers already do) would kill continuity for every
+          // AUTOMATED assignment while manual ones kept working. Writing both
+          // together makes the pair atomic and the dependency impossible.
+          ...(targetUserId !== null
+            ? { lastAssignedUserId: targetUserId, lastAssignedAt: new Date() }
+            : {}),
         },
-        include: { assignedUser: true },
+        include: {
+          assignedUser: {
+            include: {
+              workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 },
+            },
+          },
+        },
       });
 
       if (assigneeChanged) {
@@ -232,9 +256,9 @@ export async function assignConversation(args: {
         );
         await publishInTx(tx, {
           type: "conversation.assigned",
-          teamId,
+          workspaceId,
           conversationId,
-          assignedUser: toWireUser(row.assignedUser),
+          assignedUser: toWireUser(row.assignedUser, workspaceId),
           previousAssignedUserId,
           newAssignedUserId: targetUserId,
           changedByUserId,
@@ -259,7 +283,7 @@ export async function assignConversation(args: {
         );
         await publishInTx(tx, {
           type: "conversation.status_changed",
-          teamId,
+          workspaceId,
           conversationId,
           previousStatus,
           newStatus: nextStatus,
@@ -280,7 +304,28 @@ export async function assignConversation(args: {
   }
   kickOutbox();
 
-  const assignedUser = toWireUser(updated.assignedUser);
+  // Give the thread's live work an owner too, when it has none.
+  //
+  // FILL-EMPTY-ONLY, never a reassignment: a ticket can legitimately belong to
+  // someone other than whoever owns the thread (an escalation handed to a
+  // specialist), and silently dragging it along with the conversation would
+  // take work away from the person doing it — the §18 rule that automated
+  // assignment never overrides a human, applied to the ticket.
+  //
+  // Deliberately AFTER the transaction, not inside it: `updateTicket` opens its
+  // own transaction, and the assignment must not fail because ticketing did.
+  // A few ms of eventual consistency costs nothing here (the conversation is
+  // the source of truth for assignment), and the worst case is a ticket that
+  // stays unassigned — visible and fixable, never corrupt.
+  if (targetUserId !== null) {
+    await fillActiveTicketAssignee(workspaceId, conversationId, targetUserId).catch(
+      (err: unknown) => {
+        console.warn("[assign] ticket assignee follow-through failed", conversationId, err);
+      },
+    );
+  }
+
+  const assignedUser = toWireUser(updated.assignedUser, workspaceId);
 
   return {
     ok: true,
@@ -318,7 +363,7 @@ export async function assignConversation(args: {
 export async function setConversationStatus(args: {
   db: Db;
   publish: Publish;
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   status: ConversationStatus;
   changedByUserId: string | null;
@@ -339,7 +384,7 @@ export async function setConversationStatus(args: {
 > {
   const {
     db,
-    teamId,
+    workspaceId,
     conversationId,
     status,
     changedByUserId,
@@ -351,7 +396,7 @@ export async function setConversationStatus(args: {
   } = args;
 
   const conversation = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
+    where: { id: conversationId, workspaceId },
     include: { contact: { include: { tags: { select: { id: true } } } } },
   });
   if (!conversation) return { ok: false, reason: "not_found" };
@@ -402,7 +447,7 @@ export async function setConversationStatus(args: {
     // after commit dispatches the outbox rows in ~1ms.
     await db.$transaction(async (tx) => {
       await tx.conversation.update({
-        where: { id: conversationId, teamId, status: previousStatus },
+        where: { id: conversationId, workspaceId, status: previousStatus },
         data: updateData,
       });
 
@@ -423,7 +468,7 @@ export async function setConversationStatus(args: {
 
         await publishInTx(tx, {
           type: "conversation.status_changed",
-          teamId,
+          workspaceId,
           conversationId,
           previousStatus,
           newStatus: status,
@@ -453,7 +498,7 @@ export async function setConversationStatus(args: {
         );
         await publishInTx(tx, {
           type: "conversation.assigned",
-          teamId,
+          workspaceId,
           conversationId,
           assignedUser: null,
           previousAssignedUserId,
@@ -473,7 +518,7 @@ export async function setConversationStatus(args: {
         // in sync.
         await publishInTx(tx, {
           type: "conversation.ai_changed",
-          teamId,
+          workspaceId,
           conversationId,
           previousAiEnabled: false,
           newAiEnabled: true,
@@ -513,7 +558,7 @@ export async function setConversationStatus(args: {
 export async function setConversationAiEnabled(args: {
   db: Db;
   publish: Publish;
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   aiEnabled: boolean;
   changedByUserId: string | null;
@@ -531,7 +576,7 @@ export async function setConversationAiEnabled(args: {
 > {
   const {
     db,
-    teamId,
+    workspaceId,
     conversationId,
     aiEnabled,
     changedByUserId,
@@ -542,7 +587,7 @@ export async function setConversationAiEnabled(args: {
   } = args;
 
   const conversation = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
+    where: { id: conversationId, workspaceId },
     include: { contact: { include: { tags: { select: { id: true } } } } },
   });
   if (!conversation) return { ok: false, reason: "not_found" };
@@ -559,12 +604,12 @@ export async function setConversationAiEnabled(args: {
     // frame + audit row + outbound webhook. kickOutbox() dispatches in ~1ms.
     await db.$transaction(async (tx) => {
       await tx.conversation.update({
-        where: { id: conversationId, teamId, aiEnabled: previousAiEnabled },
+        where: { id: conversationId, workspaceId, aiEnabled: previousAiEnabled },
         data: { aiEnabled },
       });
       await publishInTx(tx, {
         type: "conversation.ai_changed",
-        teamId,
+        workspaceId,
         conversationId,
         previousAiEnabled,
         newAiEnabled: aiEnabled,
@@ -584,3 +629,5 @@ export async function setConversationAiEnabled(args: {
 
   return { ok: true, changed: true, previousAiEnabled };
 }
+
+

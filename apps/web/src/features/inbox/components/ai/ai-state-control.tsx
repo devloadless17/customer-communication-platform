@@ -63,7 +63,7 @@ export function AiStateControl({
   // Realtime: reflect state changes made elsewhere (ai.state_changed).
   useEffect(() => {
     const socket = getClientSocket();
-    const onState = (p: { teamId: string; conversationId: string; state: string }) => {
+    const onState = (p: { workspaceId: string; conversationId: string; state: string }) => {
       if (p.conversationId === conversationId) setState(p.state as State);
     };
     socket.on("ai:state", onState);

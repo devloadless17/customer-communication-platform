@@ -78,6 +78,18 @@ export class TtlCache<V> {
     this.map.delete(key);
   }
 
+  /**
+   * Drop every entry whose key starts with `prefix`.
+   *
+   * Credentials are cached per ACCOUNT now (`<workspaceId>::<accountId>`), so
+   * "bust this workspace" is no longer a single-key delete — a workspace with
+   * three WhatsApp numbers has three entries, and leaving two behind would keep
+   * serving stale tokens after a credential save.
+   */
+  deletePrefix(prefix: string): void {
+    for (const k of this.map.keys()) if (k.startsWith(prefix)) this.map.delete(k);
+  }
+
   sweepExpired(): void {
     const now = Date.now();
     for (const [k, v] of this.map) if (v.exp <= now) this.map.delete(k);

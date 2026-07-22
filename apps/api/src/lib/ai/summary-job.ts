@@ -70,7 +70,7 @@ const SUMMARY_SCHEMA: Record<string, unknown> = {
 export async function runSessionSummary(conversationId: string): Promise<void> {
   const conv = await db.conversation.findUnique({
     where: { id: conversationId },
-    select: { teamId: true, status: true },
+    select: { workspaceId: true, status: true },
   });
   if (!conv) return;
   const messages = await loadRecentMessages(conversationId, 80);
@@ -165,7 +165,7 @@ export async function runSessionSummary(conversationId: string): Promise<void> {
   } else {
     await db.conversationSessionSummary.create({
       data: {
-        teamId: conv.teamId,
+        workspaceId: conv.workspaceId,
         conversationId,
         sessionStartAt: scoped[0]!.timestamp ?? now,
         summaryVersion: 1,
@@ -174,7 +174,7 @@ export async function runSessionSummary(conversationId: string): Promise<void> {
     });
   }
 
-  void publish({ type: "ai.summary_changed", teamId: conv.teamId, conversationId }).catch(() => {});
+  void publish({ type: "ai.summary_changed", workspaceId: conv.workspaceId, conversationId }).catch(() => {});
 }
 
 // Messages beyond this in a selected range are dropped from the transcript
@@ -190,13 +190,13 @@ const MAX_RANGE_MESSAGES = 400;
  * there are no messages in range or the model call fails.
  */
 export async function summarizeRange(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   from: Date,
   to: Date,
 ): Promise<SummaryPayload | null> {
   const messages = await db.message.findMany({
-    where: { teamId, conversationId, timestamp: { gte: from, lte: to } },
+    where: { workspaceId, conversationId, timestamp: { gte: from, lte: to } },
     orderBy: { timestamp: "asc" },
     take: MAX_RANGE_MESSAGES,
     select: { id: true, direction: true, body: true },

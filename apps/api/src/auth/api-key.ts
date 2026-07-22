@@ -4,7 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
  * Team API key helpers.
  *
  * Tokens look like `ccp_<32 hex chars>`. We store SHA-256(token) in
- * TeamApiKey.tokenHash and the first 8 chars of the token in tokenPrefix.
+ * WorkspaceApiKey.tokenHash and the first 8 chars of the token in tokenPrefix.
  * The plaintext is shown ONCE at creation; lost keys are rotated, not
  * recovered.
  *

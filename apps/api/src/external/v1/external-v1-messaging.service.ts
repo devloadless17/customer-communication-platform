@@ -122,30 +122,30 @@ export class ExternalV1MessagingService {
   // (sendMessage / sendTopLevelMessage below) unchanged.
 
   private claimIdempotency<T>(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     key: string,
     requestHash: string,
     opts?: { refuseStaleOnAmbiguity?: boolean },
   ): Promise<{ kind: "claimed" } | { kind: "replay"; result: T }> {
-    return this.idem.claim<T>(teamId, apiKeyId, key, requestHash, opts);
+    return this.idem.claim<T>(workspaceId, apiKeyId, key, requestHash, opts);
   }
 
   private completeIdempotency<T>(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     key: string,
     result: T,
   ): Promise<void> {
-    return this.idem.complete<T>(teamId, apiKeyId, key, result);
+    return this.idem.complete<T>(workspaceId, apiKeyId, key, result);
   }
 
   private releaseIdempotency(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     key: string,
   ): Promise<void> {
-    return this.idem.release(teamId, apiKeyId, key);
+    return this.idem.release(workspaceId, apiKeyId, key);
   }
 
   // ===========================================================================
@@ -153,9 +153,18 @@ export class ExternalV1MessagingService {
   // ===========================================================================
 
   async listConversations(
-    teamId: string,
+    workspaceId: string,
     q: ListConversationsQueryInput,
     includeContactPii = true,
+    /**
+     * Predicates from a saved view, already resolved by the controller (which
+     * owns the membership check + dangling-id cleanup).
+     *
+     * ANDed, never spread. The view can set `status` and so can `q`; merging by
+     * spread would let one silently delete the other, and the caller would get
+     * a page that quietly ignores half the filter they asked for.
+     */
+    viewClauses: Prisma.ConversationWhereInput[] = [],
   ) {
     // API-1: keyset cursor over the COMPOSITE (lastMessageAt, id) sort, not a
     // bare `cursor:{id}, skip:1`. `lastMessageAt` is mutable (every inbound /
@@ -168,7 +177,7 @@ export class ExternalV1MessagingService {
     const phone = q.phone ? normalizePhoneE164(q.phone) ?? q.phone : null;
     const rows = await this.db.conversation.findMany({
       where: {
-        teamId,
+        workspaceId,
         ...(q.status ? { status: q.status } : {}),
         ...(phone ? { contact: { phoneNumber: phone } } : {}),
         ...(cursor
@@ -179,6 +188,7 @@ export class ExternalV1MessagingService {
               ],
             }
           : {}),
+        ...(viewClauses.length ? { AND: viewClauses } : {}),
       },
       include: EXTERNAL_CONVERSATION_INCLUDE,
       orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
@@ -200,9 +210,9 @@ export class ExternalV1MessagingService {
     return { items, nextCursor };
   }
 
-  async getConversation(teamId: string, id: string, includeContactPii = true) {
+  async getConversation(workspaceId: string, id: string, includeContactPii = true) {
     const row = await this.db.conversation.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       include: EXTERNAL_CONVERSATION_INCLUDE,
     });
     if (!row) throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
@@ -217,7 +227,7 @@ export class ExternalV1MessagingService {
   }
 
   async assign(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalAssignInput,
@@ -230,7 +240,7 @@ export class ExternalV1MessagingService {
     // { ok: true } with zero side effects.
     if (idempotencyKey) {
       const claim = await this.idem.claim<{ ok: true }>(
-        teamId,
+        workspaceId,
         apiKeyId,
         idempotencyKey,
         this.idem.fingerprint("assign", {
@@ -243,19 +253,19 @@ export class ExternalV1MessagingService {
       if (claim.kind === "replay") return claim.result;
     }
     try {
-      const result = await this.assignInternal(teamId, apiKeyId, conversationId, input);
+      const result = await this.assignInternal(workspaceId, apiKeyId, conversationId, input);
       if (idempotencyKey) {
-        await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
+        await this.idem.complete(workspaceId, apiKeyId, idempotencyKey, result);
       }
       return result;
     } catch (err) {
-      if (idempotencyKey) await this.idem.release(teamId, apiKeyId, idempotencyKey);
+      if (idempotencyKey) await this.idem.release(workspaceId, apiKeyId, idempotencyKey);
       throw err;
     }
   }
 
   private async assignInternal(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalAssignInput,
@@ -269,7 +279,7 @@ export class ExternalV1MessagingService {
       const outcome = await assignByPolicy({
         db: this.db,
         publish: (e) => this.bus.publish(e),
-        teamId,
+        workspaceId,
         conversationId,
         source: "api",
         policyId: input.policyId ?? null,
@@ -304,7 +314,7 @@ export class ExternalV1MessagingService {
     const result = await assignConversation({
       db: this.db,
       publish: (e) => this.bus.publish(e),
-      teamId,
+      workspaceId,
       conversationId,
       targetUserId: input.assignedUserId ?? null,
       changedByUserId: null,
@@ -327,7 +337,7 @@ export class ExternalV1MessagingService {
   }
 
   async setStatus(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalStatusInput,
@@ -337,7 +347,7 @@ export class ExternalV1MessagingService {
     // conversation.status_changed (+ the unassign-on-close cascade).
     if (idempotencyKey) {
       const claim = await this.idem.claim<{ ok: true }>(
-        teamId,
+        workspaceId,
         apiKeyId,
         idempotencyKey,
         this.idem.fingerprint("set_status", { conversationId, status: input.status }),
@@ -345,13 +355,13 @@ export class ExternalV1MessagingService {
       if (claim.kind === "replay") return claim.result;
     }
     try {
-      const result = await this.setStatusInternal(teamId, apiKeyId, conversationId, input);
+      const result = await this.setStatusInternal(workspaceId, apiKeyId, conversationId, input);
       if (idempotencyKey) {
-        await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
+        await this.idem.complete(workspaceId, apiKeyId, idempotencyKey, result);
       }
       return result;
     } catch (err) {
-      if (idempotencyKey) await this.idem.release(teamId, apiKeyId, idempotencyKey);
+      if (idempotencyKey) await this.idem.release(workspaceId, apiKeyId, idempotencyKey);
       throw err;
     }
   }
@@ -366,7 +376,7 @@ export class ExternalV1MessagingService {
    * thread" and never errors the partner.
    */
   private async reopenIfStillClosed(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
   ): Promise<void> {
@@ -376,11 +386,11 @@ export class ExternalV1MessagingService {
     // successful, billed send into a failure response. Swallow everything.
     try {
       const current = await this.db.conversation.findFirst({
-        where: { id: conversationId, teamId },
+        where: { id: conversationId, workspaceId },
         select: { status: true },
       });
       if (current?.status !== "closed") return;
-      await this.setStatus(teamId, apiKeyId, conversationId, { status: "pending" });
+      await this.setStatus(workspaceId, apiKeyId, conversationId, { status: "pending" });
     } catch (err) {
       this.logger.warn(
         `reopen after top-level send failed for conversation ${conversationId}: ${
@@ -391,7 +401,7 @@ export class ExternalV1MessagingService {
   }
 
   private async setStatusInternal(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalStatusInput,
@@ -399,12 +409,12 @@ export class ExternalV1MessagingService {
     // Shared business rule (CAS, unassign-on-close, event publishing) lives in
     // lib/conversations/mutations.ts so a /v1 close matches the inbox UI + the
     // workflow close step exactly. (Also tightens the update with a status CAS
-    // + teamId guard the old hand-rolled version lacked.) `changedByApiKeyId`
+    // + workspaceId guard the old hand-rolled version lacked.) `changedByApiKeyId`
     // threads partner attribution; `silent` skips workflow re-trigger + echo.
     const result = await setConversationStatus({
       db: this.db,
       publish: (e) => this.bus.publish(e),
-      teamId,
+      workspaceId,
       conversationId,
       status: input.status,
       changedByUserId: null,
@@ -424,7 +434,7 @@ export class ExternalV1MessagingService {
   }
 
   async setAiEnabled(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalSetAiInput,
@@ -433,7 +443,7 @@ export class ExternalV1MessagingService {
     // Idempotency — see setStatus(). A retry must not re-publish ai_changed.
     if (idempotencyKey) {
       const claim = await this.idem.claim<{ ok: true }>(
-        teamId,
+        workspaceId,
         apiKeyId,
         idempotencyKey,
         this.idem.fingerprint("set_ai", { conversationId, aiEnabled: input.aiEnabled }),
@@ -441,19 +451,19 @@ export class ExternalV1MessagingService {
       if (claim.kind === "replay") return claim.result;
     }
     try {
-      const result = await this.setAiEnabledInternal(teamId, apiKeyId, conversationId, input);
+      const result = await this.setAiEnabledInternal(workspaceId, apiKeyId, conversationId, input);
       if (idempotencyKey) {
-        await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
+        await this.idem.complete(workspaceId, apiKeyId, idempotencyKey, result);
       }
       return result;
     } catch (err) {
-      if (idempotencyKey) await this.idem.release(teamId, apiKeyId, idempotencyKey);
+      if (idempotencyKey) await this.idem.release(workspaceId, apiKeyId, idempotencyKey);
       throw err;
     }
   }
 
   private async setAiEnabledInternal(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalSetAiInput,
@@ -464,7 +474,7 @@ export class ExternalV1MessagingService {
     const result = await setConversationAiEnabled({
       db: this.db,
       publish: (e) => this.bus.publish(e),
-      teamId,
+      workspaceId,
       conversationId,
       aiEnabled: input.aiEnabled,
       changedByUserId: null,
@@ -496,7 +506,7 @@ export class ExternalV1MessagingService {
       await runHandoffPolicy({
         db: this.db,
         publish: (e) => this.bus.publish(e),
-        teamId,
+        workspaceId,
         conversationId,
         changedByApiKeyId: apiKeyId,
         onError: (m) => this.logger.warn(m),
@@ -516,7 +526,7 @@ export class ExternalV1MessagingService {
   // ===========================================================================
 
   async listMessages(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     q: ListMessagesQueryInput,
     includeContactPii = true,
@@ -526,7 +536,7 @@ export class ExternalV1MessagingService {
     // who the thread is with (contact + assignee embedded) without a separate
     // GET /v1/conversations/:id.
     const conv = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
+      where: { id: conversationId, workspaceId },
       include: EXTERNAL_CONVERSATION_INCLUDE,
     });
     if (!conv) throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
@@ -535,7 +545,7 @@ export class ExternalV1MessagingService {
       where: { conversationId },
       // Select EXACTLY the columns toExternalMessage reads — not `omit:
       // rawPayload`, which still ships ~15 unused columns (reply FKs, error
-      // strings, teamId, audit timestamps) per row on this partner-pollable
+      // strings, workspaceId, audit timestamps) per row on this partner-pollable
       // export endpoint. The compiler enforces this set stays in sync with the
       // mapper: drop a field the mapper reads and `toExternalMessage(row)`
       // below fails to typecheck.
@@ -577,9 +587,9 @@ export class ExternalV1MessagingService {
     };
   }
 
-  async findMessage(teamId: string, id: string, includeContactPii = true) {
+  async findMessage(workspaceId: string, id: string, includeContactPii = true) {
     const row = await this.db.message.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       omit: { rawPayload: true },
       // Embed the parent conversation (which itself embeds contact + assignee)
       // so a single message fetch carries who it's with — no follow-up call.
@@ -596,7 +606,7 @@ export class ExternalV1MessagingService {
   }
 
   async sendMessage(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalSendMessageInput,
@@ -657,7 +667,7 @@ export class ExternalV1MessagingService {
     // NOT auto-cleared into a re-send (OUTBOUND-1).
     {
       const claim = await this.claimIdempotency<{ message: ExternalMessage }>(
-        teamId,
+        workspaceId,
         apiKeyId,
         idempotencyKey,
         requestFingerprint("send_message", {
@@ -672,7 +682,7 @@ export class ExternalV1MessagingService {
     }
 
     const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
+      where: { id: conversationId, workspaceId },
       select: {
         id: true,
         contactId: true,
@@ -695,7 +705,7 @@ export class ExternalV1MessagingService {
       // Provably-not-sent validation failure — release the claim so it doesn't
       // strand a pending row (which, with refuseStaleOnAmbiguity, would wrongly
       // block a corrected retry after TTL) — API-2.
-      if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+      if (idempotencyKey) await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
       throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
     }
 
@@ -708,7 +718,7 @@ export class ExternalV1MessagingService {
     // so a legitimate later send can reuse the key. Returns 200 {skipped} so
     // n8n treats it as a clean no-op, not a retryable error.
     if (input.onlyIfAiEnabled && conversation.aiEnabled === false) {
-      if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+      if (idempotencyKey) await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
       return { message: null, skipped: "ai_disabled" as const };
     }
 
@@ -717,7 +727,7 @@ export class ExternalV1MessagingService {
       channel = resolveContactChannel(conversation.contact);
     } catch (err) {
       if (err instanceof NoChannelDestinationError) {
-        if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+        if (idempotencyKey) await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
         throw new BadRequestException({
           error: "contact_has_no_phone",
           detail: "This contact has no reachable address.",
@@ -733,7 +743,7 @@ export class ExternalV1MessagingService {
     // over-limit reject.
     const tooLong = checkTextCap(input.body, binding.provider.capabilities, provider);
     if (tooLong) {
-      if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+      if (idempotencyKey) await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
       throw new UnprocessableEntityException({
         error: "message_too_long",
         detail: tooLong.detail,
@@ -748,7 +758,7 @@ export class ExternalV1MessagingService {
     if (windowMs !== null) {
       const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);
       if (win.state === "closed" || win.state === "never") {
-        if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+        if (idempotencyKey) await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
         throw new UnprocessableEntityException({
           error: "outside_24h_window",
           detail:
@@ -770,14 +780,14 @@ export class ExternalV1MessagingService {
     let replyToExternalId: string | undefined;
     if (input.replyToMessageId) {
       const replyRow = await this.db.message.findFirst({
-        where: { id: input.replyToMessageId, conversationId, teamId },
+        where: { id: input.replyToMessageId, conversationId, workspaceId },
         select: { id: true, externalId: true },
       });
       if (!replyRow) {
         // Previously silently dropped — partner thought their reply was
         // quoted but the message went out as a top-level send. Surface
         // the failure so they can see the bad id in their automation logs.
-        if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+        if (idempotencyKey) await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
         throw new BadRequestException({
           error: "reply_target_not_found",
           detail:
@@ -801,13 +811,13 @@ export class ExternalV1MessagingService {
     // throws here, the calling partner can release + retry after the
     // Retry-After window expires.
     try {
-      consumeConversationSendBudget(teamId, conversationId);
+      consumeConversationSendBudget(workspaceId, conversationId);
     } catch (err) {
       if (err instanceof ConversationSendRateLimitedError) {
         // Release the idempotency claim so the partner's retry after
         // Retry-After expires can re-claim a fresh slot.
         if (idempotencyKey) {
-          await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+          await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
         }
         throw new HttpException(
           {
@@ -823,7 +833,7 @@ export class ExternalV1MessagingService {
 
     let send;
     try {
-      const config = await binding.getSendConfig(teamId);
+      const config = await binding.getSendConfig(workspaceId);
       send = await binding.provider.sendText(
         {
           to: channel.to,
@@ -846,7 +856,7 @@ export class ExternalV1MessagingService {
         err instanceof ProviderNotConfiguredError ||
         (normalized != null && normalized.httpStatus < 500);
       if (idempotencyKey && provablyNotSent) {
-        await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+        await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
       }
       if (err instanceof ProviderNotConfiguredError) {
         throw new ConflictException({
@@ -874,7 +884,7 @@ export class ExternalV1MessagingService {
     }
 
     const created = await createOutboundMessageIdempotent({
-      teamId,
+      workspaceId,
       conversationId,
       externalId: send.externalId,
       senderUserId: null,
@@ -890,7 +900,7 @@ export class ExternalV1MessagingService {
     const preview = input.body.slice(0, 200);
     const message: Message = {
       id: created.id,
-      teamId,
+      workspaceId,
       conversationId,
       externalId: send.externalId,
       senderUserId: null,
@@ -914,7 +924,7 @@ export class ExternalV1MessagingService {
       preview,
       event: {
         type: "message.sent",
-        teamId,
+        workspaceId,
         conversationId,
         contactId: conversation.contactId,
         message,
@@ -936,7 +946,7 @@ export class ExternalV1MessagingService {
     // claim path immediately see the completed row instead of racing the
     // partner into a duplicate send.
     if (idempotencyKey) {
-      await this.completeIdempotency(teamId, apiKeyId, idempotencyKey, result);
+      await this.completeIdempotency(workspaceId, apiKeyId, idempotencyKey, result);
     }
 
     // Deferred reopen — the send landed (fresh, past the replay short-circuit),
@@ -949,7 +959,7 @@ export class ExternalV1MessagingService {
       // `conversation` was snapshotted (line 642) before the Meta send, so
       // reopenIfStillClosed re-reads fresh to avoid downgrading a thread an
       // agent reopened (closed->open) mid-send.
-      await this.reopenIfStillClosed(teamId, apiKeyId, conversationId);
+      await this.reopenIfStillClosed(workspaceId, apiKeyId, conversationId);
     }
 
     return result;
@@ -965,11 +975,11 @@ export class ExternalV1MessagingService {
    * message yet). Caller decides whether to 404 or auto-create.
    */
   private async resolveContactConversation(
-    teamId: string,
+    workspaceId: string,
     contactId: string,
   ): Promise<{ id: string } | null> {
     const conversation = await this.db.conversation.findFirst({
-      where: { teamId, contactId },
+      where: { workspaceId, contactId },
       orderBy: { lastMessageAt: "desc" },
       select: { id: true },
     });
@@ -978,14 +988,14 @@ export class ExternalV1MessagingService {
 
   /** Resolve `contact: { id } | { phone }` to a contactId. Throws 404 on miss. */
   private async resolveContactIdentifier(
-    teamId: string,
+    workspaceId: string,
     contact: { id: string } | { phone: string },
   ): Promise<string> {
     if ("id" in contact) {
       // deletedAt:null — a tombstoned contact 404s on GET/PATCH; it must also be
       // unreachable on the highest-side-effect route (a billed WhatsApp send).
       const row = await this.db.contact.findFirst({
-        where: { id: contact.id, teamId, deletedAt: null },
+        where: { id: contact.id, workspaceId, deletedAt: null },
         select: { id: true },
       });
       if (!row) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
@@ -1000,12 +1010,12 @@ export class ExternalV1MessagingService {
     }
     const row = await this.db.contact.findFirst({
       // Scope to the phone-owning channel (whatsapp). The partial unique on
-      // (teamId, phoneNumber) fires only for identityChannel='whatsapp', so the
+      // (workspaceId, phoneNumber) fires only for identityChannel='whatsapp', so the
       // same phone can also sit on a social/widget contact via contact-share or
       // widget pre-chat. Without this scope a billed partner send could resolve
       // to that social/widget row instead of the WhatsApp contact. Mirrors
       // ingest.ts's channel-scoped phone lookup.
-      where: { teamId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: null },
+      where: { workspaceId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: null },
       select: { id: true },
     });
     if (!row) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
@@ -1013,7 +1023,7 @@ export class ExternalV1MessagingService {
   }
 
   async assignByContact(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     contactId: string,
     input: ExternalContactAssignInput,
@@ -1022,11 +1032,11 @@ export class ExternalV1MessagingService {
     const contactRow = await this.db.contact.findFirst({
       // deletedAt:null — consistent with getContact + resolveContactIdentifier;
       // a tombstoned contact must not be mutable through the by-contact routes.
-      where: { id: contactId, teamId, deletedAt: null },
+      where: { id: contactId, workspaceId, deletedAt: null },
       select: { id: true },
     });
     if (!contactRow) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
-    const conv = await this.resolveContactConversation(teamId, contactId);
+    const conv = await this.resolveContactConversation(workspaceId, contactId);
     if (!conv) {
       throw new NotFoundException({
         error: "no_conversation_for_contact",
@@ -1035,7 +1045,7 @@ export class ExternalV1MessagingService {
     }
     // Idempotency is enforced inside assign() on the resolved conversation id.
     await this.assign(
-      teamId,
+      workspaceId,
       apiKeyId,
       conv.id,
       // Pass the whole body through so the contact-keyed route supports every
@@ -1048,7 +1058,7 @@ export class ExternalV1MessagingService {
   }
 
   async setStatusByContact(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     contactId: string,
     input: ExternalContactStatusInput,
@@ -1056,11 +1066,11 @@ export class ExternalV1MessagingService {
   ) {
     const contactRow = await this.db.contact.findFirst({
       // deletedAt:null — see assignByContact; tombstoned contacts stay 404 here.
-      where: { id: contactId, teamId, deletedAt: null },
+      where: { id: contactId, workspaceId, deletedAt: null },
       select: { id: true },
     });
     if (!contactRow) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
-    const conv = await this.resolveContactConversation(teamId, contactId);
+    const conv = await this.resolveContactConversation(workspaceId, contactId);
     if (!conv) {
       throw new NotFoundException({
         error: "no_conversation_for_contact",
@@ -1069,7 +1079,7 @@ export class ExternalV1MessagingService {
     }
     // Idempotency is enforced inside setStatus() on the resolved conversation id.
     await this.setStatus(
-      teamId,
+      workspaceId,
       apiKeyId,
       conv.id,
       { status: input.status, silent: input.silent },
@@ -1083,7 +1093,7 @@ export class ExternalV1MessagingService {
   // ===========================================================================
 
   async sendTopLevelMessage(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     input: ExternalTopLevelSendMessageInput,
     idempotencyKey?: string,
@@ -1122,14 +1132,14 @@ export class ExternalV1MessagingService {
       });
     }
 
-    const contactId = await this.resolveContactIdentifier(teamId, input.contact);
+    const contactId = await this.resolveContactIdentifier(workspaceId, input.contact);
 
     // Find an active (non-closed) conversation or create one. Mirrors the
     // inbound-ingest "one-contact-one-conversation" invariant — if the most
     // recent conversation is closed, we reopen it via the existing
     // conversation-status path so the audit trail captures the reopen.
     let conv = await this.db.conversation.findFirst({
-      where: { teamId, contactId },
+      where: { workspaceId, contactId },
       orderBy: { lastMessageAt: "desc" },
       select: { id: true, status: true },
     });
@@ -1162,7 +1172,7 @@ export class ExternalV1MessagingService {
       try {
         conv = await this.db.conversation.create({
           data: {
-            teamId,
+            workspaceId,
             contactId,
             channel,
             status: "pending",
@@ -1173,11 +1183,11 @@ export class ExternalV1MessagingService {
         });
       } catch (err) {
         // Lost the race for this contact's single conversation (unique
-        // [teamId, contactId]) to a concurrent inbound/forward — reuse the
+        // [workspaceId, contactId]) to a concurrent inbound/forward — reuse the
         // winner's row (it was just created `pending`, so no reopen needed).
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
           conv = await this.db.conversation.findFirstOrThrow({
-            where: { teamId, contactId },
+            where: { workspaceId, contactId },
             orderBy: { lastMessageAt: "desc" },
             select: { id: true, status: true },
           });
@@ -1191,7 +1201,7 @@ export class ExternalV1MessagingService {
     // whole point (cold outbound + re-engagement).
     if (input.template) {
       const template = await this.db.messageTemplate.findFirst({
-        where: { teamId, name: input.template.name, language: input.template.language },
+        where: { workspaceId, name: input.template.name, language: input.template.language },
         select: { id: true },
       });
       if (!template) {
@@ -1213,7 +1223,7 @@ export class ExternalV1MessagingService {
           message: ExternalMessage;
           clientTempId: string | null;
         }>(
-          teamId,
+          workspaceId,
           apiKeyId,
           idempotencyKey,
           requestFingerprint("send_template", {
@@ -1232,11 +1242,11 @@ export class ExternalV1MessagingService {
       // most expensive to leave uncapped. Claimed idempotency above is released
       // on rate-limit so a retry after Retry-After can re-claim fresh.
       try {
-        consumeConversationSendBudget(teamId, conv.id);
+        consumeConversationSendBudget(workspaceId, conv.id);
       } catch (err) {
         if (err instanceof ConversationSendRateLimitedError) {
           if (idempotencyKey) {
-            await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+            await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
           }
           throw new HttpException(
             {
@@ -1253,7 +1263,7 @@ export class ExternalV1MessagingService {
       let out: { ok: true; message: ExternalMessage; clientTempId: string | null };
       try {
         const result = await sendTemplateInternal({
-          teamId,
+          workspaceId,
           conversationId: conv.id,
           templateId: template.id,
           variables: input.template.variables,
@@ -1293,7 +1303,7 @@ export class ExternalV1MessagingService {
             });
           }
           if (idempotencyKey) {
-            await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+            await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
           }
           throw new BadRequestException({
             error: err.code,
@@ -1306,7 +1316,7 @@ export class ExternalV1MessagingService {
           // 5xx may have landed AFTER Meta accepted — treat as ambiguous + keep
           // the claim so a retry can't double-send (OUTBOUND-1).
           if (idempotencyKey && normalized.httpStatus < 500) {
-            await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+            await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
           }
           throw new UnprocessableEntityException({
             error: normalized.code,
@@ -1321,7 +1331,7 @@ export class ExternalV1MessagingService {
         throw err;
       }
       if (idempotencyKey) {
-        await this.completeIdempotency(teamId, apiKeyId, idempotencyKey, out);
+        await this.completeIdempotency(workspaceId, apiKeyId, idempotencyKey, out);
       }
       // Deferred reopen — only now that a fresh template send has landed (past
       // the replay short-circuit + successful send). Best-effort: the billed
@@ -1330,7 +1340,7 @@ export class ExternalV1MessagingService {
         // `wasClosed` was snapshotted (line 1081) before the idempotency claim +
         // the entire sendTemplateInternal Meta round-trip, so reopenIfStillClosed
         // re-reads fresh to avoid downgrading a thread an agent reopened mid-send.
-        await this.reopenIfStillClosed(teamId, apiKeyId, conv.id);
+        await this.reopenIfStillClosed(workspaceId, apiKeyId, conv.id);
       }
       return out;
     }
@@ -1341,7 +1351,7 @@ export class ExternalV1MessagingService {
     }
 
     const result = await this.sendMessage(
-      teamId,
+      workspaceId,
       apiKeyId,
       conv.id,
       {
@@ -1368,7 +1378,7 @@ export class ExternalV1MessagingService {
   // ===========================================================================
 
   async createNote(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalNoteInput,
@@ -1403,7 +1413,7 @@ export class ExternalV1MessagingService {
           timestamp: string;
         };
       }>(
-        teamId,
+        workspaceId,
         apiKeyId,
         idempotencyKey,
         this.idem.fingerprint("create_note", {
@@ -1415,24 +1425,24 @@ export class ExternalV1MessagingService {
       if (claim.kind === "replay") return claim.result;
     }
     try {
-      const result = await this.createNoteInternal(teamId, conversationId, input);
+      const result = await this.createNoteInternal(workspaceId, conversationId, input);
       if (idempotencyKey) {
-        await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
+        await this.idem.complete(workspaceId, apiKeyId, idempotencyKey, result);
       }
       return result;
     } catch (err) {
-      if (idempotencyKey) await this.idem.release(teamId, apiKeyId, idempotencyKey);
+      if (idempotencyKey) await this.idem.release(workspaceId, apiKeyId, idempotencyKey);
       throw err;
     }
   }
 
   private async createNoteInternal(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     input: ExternalNoteInput,
   ) {
     const conv = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
+      where: { id: conversationId, workspaceId },
       select: { id: true },
     });
     if (!conv) throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
@@ -1447,7 +1457,7 @@ export class ExternalV1MessagingService {
       });
     }
     const u = await this.db.user.findFirst({
-      where: { id: input.authorUserId, teamId },
+      where: { id: input.authorUserId, workspaceMemberships: { some: { workspaceId } } },
       select: { id: true },
     });
     if (!u) {
@@ -1465,7 +1475,7 @@ export class ExternalV1MessagingService {
     // at-least-once. kickOutbox() drains it in ~1ms so the note still appears live.
     const note = await this.db.$transaction(async (tx) => {
       const row = await tx.internalNote.create({
-        data: { teamId, conversationId, authorUserId, body: input.body },
+        data: { workspaceId, conversationId, authorUserId, body: input.body },
       });
       const notePayload = {
         id: row.id,
@@ -1476,7 +1486,7 @@ export class ExternalV1MessagingService {
       };
       await publishInTx(tx, {
         type: "note.created",
-        teamId,
+        workspaceId,
         conversationId,
         note: notePayload,
         // Honor `silent: true` so a partner whose `note.created` webhook
@@ -1498,11 +1508,11 @@ export class ExternalV1MessagingService {
    * the UI. Publishes the SAME `note.deleted` event the UI path does, so an
    * API-driven CRM mirror can complete a create→delete round-trip. Naturally
    * idempotent — a repeated delete 404s, so no Idempotency-Key is required.
-   * Team scope goes through the parent conversation (InternalNote has no teamId).
+   * Team scope goes through the parent conversation (InternalNote has no workspaceId).
    */
-  async deleteNote(teamId: string, conversationId: string, noteId: string) {
+  async deleteNote(workspaceId: string, conversationId: string, noteId: string) {
     const note = await this.db.internalNote.findFirst({
-      where: { id: noteId, conversationId, conversation: { teamId } },
+      where: { id: noteId, conversationId, conversation: { workspaceId } },
       select: { id: true, conversationId: true },
     });
     if (!note) throw new NotFoundException({ error: "note_not_found", detail: "note not found" });
@@ -1514,7 +1524,7 @@ export class ExternalV1MessagingService {
       await tx.internalNote.delete({ where: { id: note.id } });
       await publishInTx(tx, {
         type: "note.deleted",
-        teamId,
+        workspaceId,
         conversationId: note.conversationId,
         noteId: note.id,
         // API-driven deletion has no human actor — the API key is the actor.
@@ -1542,7 +1552,7 @@ export class ExternalV1MessagingService {
    * send: a mandatory `Idempotency-Key` claim and API-key attribution.
    */
   async sendInteractive(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalSendInteractiveInput,
@@ -1557,7 +1567,7 @@ export class ExternalV1MessagingService {
         messageId: string;
         externalId: string;
       }>(
-        teamId,
+        workspaceId,
         apiKeyId,
         idempotencyKey,
         requestFingerprint("send_interactive", { conversationId, ...input }),
@@ -1572,11 +1582,11 @@ export class ExternalV1MessagingService {
     // Claimed idempotency above is released on rate-limit so a retry after
     // Retry-After can re-claim fresh.
     try {
-      consumeConversationSendBudget(teamId, conversationId);
+      consumeConversationSendBudget(workspaceId, conversationId);
     } catch (err) {
       if (err instanceof ConversationSendRateLimitedError) {
         if (idempotencyKey) {
-          await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+          await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
         }
         throw new HttpException(
           {
@@ -1592,7 +1602,7 @@ export class ExternalV1MessagingService {
 
     try {
       const result = await sendInteractiveInternal({
-        teamId,
+        workspaceId,
         conversationId,
         bodyText: input.body,
         kind: input.kind,
@@ -1614,12 +1624,12 @@ export class ExternalV1MessagingService {
       // reopen before completing would let a transient DB error in the reopen
       // read fall into the catch below and return a false 502 with the claim
       // stuck pending (success unrecoverable, retries double-bill).
-      await this.completeIdempotency(teamId, apiKeyId, idempotencyKey, payload);
+      await this.completeIdempotency(workspaceId, apiKeyId, idempotencyKey, payload);
       // A closed thread that receives an interactive send should reopen to
       // pending, like the /v1 text send (reopenIfClosed) and the composer's
       // interactive path (autoAssignOnAgentSend). Best-effort AND past the
       // completed claim, so a reopen hiccup can neither re-send nor strand it.
-      await this.reopenIfStillClosed(teamId, apiKeyId, conversationId);
+      await this.reopenIfStillClosed(workspaceId, apiKeyId, conversationId);
       return payload;
     } catch (err) {
       // OUTBOUND-1: release the claim ONLY when the send PROVABLY never reached
@@ -1646,7 +1656,7 @@ export class ExternalV1MessagingService {
           err instanceof ProviderNotConfiguredError ||
           (normalized != null && normalized.httpStatus < 500));
       if (provablyNotSent) {
-        await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+        await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
       }
 
       if (sentThenLostConversation) {

@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { blobStorage } from "@/lib/blob-storage";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Reclaim orphan blobs at the provider (Cloudflare R2).
@@ -63,9 +63,9 @@ const MAX_PAGES_PER_TICK = 4;
 // `ai-knowledge/` and `ai-voice-draft/` are here for the SAME reason and were
 // missing, which made this sweeper permanently DESTROY customer data rather
 // than merely leak storage:
-//   - `ai-knowledge/{teamId}/{uuid}` (team/ai-assistant/ai-knowledge.service.ts)
+//   - `ai-knowledge/{workspaceId}/{uuid}` (team/ai-assistant/ai-knowledge.service.ts)
 //     is referenced ONLY by `AiContextDocument.r2Key`.
-//   - `ai-voice-draft/{teamId}/{messageId}.mp3` (lib/ai/voice-delivery.ts) is
+//   - `ai-voice-draft/{workspaceId}/{messageId}.mp3` (lib/ai/voice-delivery.ts) is
 //     referenced ONLY by the AI suggestion's `audioR2Key`.
 // `listKeys` walks the WHOLE bucket with no prefix filter, and the cross-check
 // below queries only Message.mediaKey / Message.mediaThumbnailKey /
@@ -139,6 +139,12 @@ async function runTick(label: string): Promise<void> {
     // heavy sweepers. Health log warns if last completion >8d.
     await withSweeperMutex("blob-orphan", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopBlobOrphanSweeper();
+      return;
+    }
     console.error(`[sweeper.blob-orphan] ${label} failed`, err);
   } finally {
     inFlight = false;

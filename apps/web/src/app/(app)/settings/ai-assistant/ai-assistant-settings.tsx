@@ -134,7 +134,7 @@ export function AiAssistantSettings({
   async function save() {
     setSaving(true);
     try {
-      const { id: _id, configVersion: _cv, createdAt: _c, updatedAt: _u, teamId: _t, ...editable } =
+      const { id: _id, configVersion: _cv, createdAt: _c, updatedAt: _u, workspaceId: _t, ...editable } =
         form as Record<string, unknown>;
       const res = await apiFetch("/api/team/ai-assistant", {
         method: "PUT",

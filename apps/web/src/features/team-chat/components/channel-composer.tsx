@@ -106,7 +106,7 @@ export function ChannelComposer({
   //
   // Per (team, channel, thread) so the main composer and each thread panel
   // keep independent buffers.
-  const draftKey = `team-chat:${currentUser.teamId}:draft:${channelId}${
+  const draftKey = `team-chat:${currentUser.workspaceId}:draft:${channelId}${
     threadRootId ? `:t:${threadRootId}` : ""
   }`;
 
@@ -345,7 +345,7 @@ export function ChannelComposer({
     const optimistic: TeamChannelMessageDto = {
       id: clientTempId,
       channelId,
-      teamId: currentUser.teamId,
+      workspaceId: currentUser.workspaceId,
       authorUserId: currentUser.id,
       authorName: currentUser.name,
       authorAvatarUrl: currentUser.avatarUrl ?? null,
@@ -407,7 +407,7 @@ export function ChannelComposer({
     const optimistic: TeamChannelMessageDto & { hasOptimisticMedia: true } = {
       id: clientTempId,
       channelId,
-      teamId: currentUser.teamId,
+      workspaceId: currentUser.workspaceId,
       authorUserId: currentUser.id,
       authorName: currentUser.name,
       authorAvatarUrl: currentUser.avatarUrl ?? null,

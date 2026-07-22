@@ -10,7 +10,7 @@ import type { User } from "@ccp/shared/types";
 export function unknownAuthor(id: string | null): User {
   return {
     id: id ?? "removed",
-    teamId: "",
+    workspaceId: "",
     role: "agent",
     name: id ? "Unknown" : "Removed user",
     email: "",

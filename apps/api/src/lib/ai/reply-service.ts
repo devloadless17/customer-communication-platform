@@ -45,7 +45,7 @@ export interface GeneratedReply {
 
 export async function generateReply(input: GenerateReplyInput): Promise<GeneratedReply> {
   const now = input.now ?? new Date();
-  const chunks = await retrieveContextChunks(input.config.teamId, input.latestText, 6);
+  const chunks = await retrieveContextChunks(input.config.workspaceId, input.latestText, 6);
 
   const system = buildSystemPrompt(input.config);
   const user = buildUserPrompt({

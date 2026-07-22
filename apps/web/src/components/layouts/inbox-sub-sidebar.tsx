@@ -22,13 +22,14 @@ import {
   AVAILABILITY_DOT_CLASSES,
   AVAILABILITY_LABELS,
 } from "@ccp/shared/presence";
-import type { ContactStage, ConversationWithRefs, User } from "@ccp/shared/types";
+import type { ContactStage, ConversationWithRefs, Tag, User } from "@ccp/shared/types";
 import type {
   Filter,
   PresetFilterId,
 } from "@/features/inbox/components/inbox-controls";
 import { useConversationCounts } from "@/features/inbox/hooks/use-conversation-counts";
 import { useLiveCalls } from "@/features/calls/hooks/use-live-calls";
+import { InboxViewsSection } from "@/features/inbox/components/views/inbox-views-section";
 
 import { SubSidebar, SubSidebarSection } from "./sub-sidebar";
 
@@ -62,15 +63,19 @@ export function InboxSubSidebar({
   currentUser,
   conversations,
   stages,
+  tags,
   teammates,
   onlineUserIds,
   availabilityByUserId,
   filter,
   onFilterChange,
+  canManageSharedViews,
 }: {
   currentUser: User;
   conversations: ConversationWithRefs[];
   stages: ContactStage[];
+  /** Tag catalog, for the saved-view builder's tag filter. */
+  tags: Tag[];
   /** Active teammates rendered under the Stages section with a presence dot. */
   teammates?: User[];
   /** When provided, teammate avatars get a green/grey dot. */
@@ -82,6 +87,8 @@ export function InboxSubSidebar({
   >;
   filter: Filter;
   onFilterChange: (f: Filter) => void;
+  /** Whether this agent may create/edit SHARED views. */
+  canManageSharedViews: boolean;
 }) {
   const [stagesOpen, setStagesOpen] = useState(filter.kind === "stage");
   const [teammatesOpen, setTeammatesOpen] = useState(true);
@@ -293,6 +300,17 @@ export function InboxSubSidebar({
           )}
         </button>
       </SubSidebarSection>
+
+      {/* Saved views sit between the built-in filters and stages: same kind of
+          thing as a filter, and more day-to-day than a lifecycle stage. */}
+      <InboxViewsSection
+        filter={filter}
+        onFilterChange={onFilterChange}
+        canShare={canManageSharedViews}
+        stages={stages}
+        tags={tags}
+        teammates={teammates ?? []}
+      />
 
       <div className="mt-3">
         <button

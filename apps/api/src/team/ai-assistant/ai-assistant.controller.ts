@@ -88,7 +88,7 @@ export class AiAssistantController {
   @Get()
   async getConfig(@CurrentSession() session: ApiSession) {
     this.assertManage(session);
-    const config = await this.config.getConfig(session.teamId);
+    const config = await this.config.getConfig(session.workspaceId);
     return { config };
   }
 
@@ -98,7 +98,7 @@ export class AiAssistantController {
     @Body(zBody(UpdateAiConfigSchema)) body: UpdateAiConfigInput,
   ) {
     this.assertManage(session);
-    const config = await this.config.updateConfig(session.teamId, true, body);
+    const config = await this.config.updateConfig(session.workspaceId, true, body);
     return { config };
   }
 
@@ -137,7 +137,7 @@ export class AiAssistantController {
   @Get("documents")
   async listDocuments(@CurrentSession() session: ApiSession) {
     this.assertManage(session);
-    const documents = await this.knowledge.list(session.teamId);
+    const documents = await this.knowledge.list(session.workspaceId);
     return { documents };
   }
 
@@ -161,7 +161,7 @@ export class AiAssistantController {
     if (!file) throw new BadRequestException({ error: "file required" });
     try {
       const bytes = await readFile(file.path);
-      const document = await this.knowledge.upload(session.teamId, {
+      const document = await this.knowledge.upload(session.workspaceId, {
         bytes: new Uint8Array(bytes),
         mimeType: file.mimetype,
         filename: file.originalname ?? "document",
@@ -178,7 +178,7 @@ export class AiAssistantController {
     @Param("id") id: string,
   ) {
     this.assertManage(session);
-    return this.knowledge.reprocess(session.teamId, id);
+    return this.knowledge.reprocess(session.workspaceId, id);
   }
 
   @Patch("documents/:id")
@@ -188,7 +188,7 @@ export class AiAssistantController {
     @Body(zBody(PatchDocumentSchema)) body: PatchDocumentInput,
   ) {
     this.assertManage(session);
-    const document = await this.knowledge.setEnabled(session.teamId, id, body.enabled);
+    const document = await this.knowledge.setEnabled(session.workspaceId, id, body.enabled);
     return { document };
   }
 
@@ -198,6 +198,6 @@ export class AiAssistantController {
     @Param("id") id: string,
   ) {
     this.assertManage(session);
-    return this.knowledge.remove(session.teamId, id);
+    return this.knowledge.remove(session.workspaceId, id);
   }
 }

@@ -1,7 +1,7 @@
 /**
  * Capability catalog for external API keys.
  *
- * Keys are stored in the DB on `TeamApiKey.scopes` as a `string[]`. An empty
+ * Keys are stored in the DB on `WorkspaceApiKey.scopes` as a `string[]`. An empty
  * array means "no access" (deny by default — a freshly created key with no
  * boxes ticked can't do anything). The literal `"*"` is a single-element
  * wildcard that grants every scope; existing rows from before this feature
@@ -54,6 +54,15 @@ export const API_KEY_SCOPES = [
   "read:flags",
   "write:flags",
 
+  // Tickets — the unit of WORK on a conversation. Their own scope for the same
+  // reason flags have one: a helpdesk or BI system that should read and resolve
+  // work items must not thereby gain the ability to send billed messages. The
+  // ticket CONFIGURATION (SLA promises, custom fields, auto-open behaviour)
+  // sits behind `write:tickets` rather than `write:catalog`, because editing an
+  // SLA changes what every future ticket in the workspace promises.
+  "read:tickets",
+  "write:tickets",
+
   // Catalogs — tags / stages / contact fields / templates / snippets etc.
   // Most partners only need read here; the bulk of mutations come through
   // the contacts/messages/conversations surfaces above.
@@ -84,6 +93,13 @@ export const API_KEY_SCOPES = [
   // Deliberately NOT "create/delete users": inviting and removing members is
   // an auth-boundary action with its own email flow and seat-cap enforcement.
   "write:users",
+
+  // Connected channel accounts — which WhatsApp numbers / Pages / IG handles a
+  // workspace has, which is the default, and their health. Read-only on
+  // purpose: adding or disconnecting an account moves real credentials and
+  // silently changes which number a customer hears from, so it stays a
+  // deliberate action in Settings rather than something an integration can do.
+  "read:channels",
 ] as const;
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];

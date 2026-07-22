@@ -378,7 +378,7 @@ export const r2Provider: BlobStorageProvider = {
  * so a re-upload of the same logical object overwrites in place — free
  * idempotency, no orphan on retry (replaces the old customId/409 recovery).
  *
- * Shape: `media/{teamId}/{yyyy}/{mm}/{externalShort}-{kind}.{ext}`
+ * Shape: `media/{workspaceId}/{yyyy}/{mm}/{externalShort}-{kind}.{ext}`
  * The `media/` prefix + per-team segment give multi-tenant isolation and let
  * the orphan sweeper tell media apart from `avatars/` by prefix.
  */
@@ -387,7 +387,7 @@ function buildKey(input: UploadInput): string {
   const now = new Date();
   const yyyy = String(now.getUTCFullYear());
   const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
-  const team = sanitizeSeg(context.teamId);
+  const team = sanitizeSeg(context.workspaceId);
   const externalShort = sanitizeSeg(context.externalId).slice(-48) || "x";
   const ext = sanitizeExt(documentExtension(input) ?? extFromMime(input.mimeType));
   return `media/${team}/${yyyy}/${mm}/${externalShort}-${input.kind}.${ext}`;
@@ -400,7 +400,7 @@ function buildKey(input: UploadInput): string {
 function buildReadableName(input: UploadInput): string {
   const { context, mimeType } = input;
   const date = new Date().toISOString().slice(0, 10);
-  const team = slug(context.teamSlug ?? context.teamId, 16);
+  const team = slug(context.teamSlug ?? context.workspaceId, 16);
   const phone = context.contactPhone ?? "unknown";
   const contact = slug(context.contactName ?? "anon", 20);
   const convo = (context.conversationId ?? "noconvo").slice(-8);

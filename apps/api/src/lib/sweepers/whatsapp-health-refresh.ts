@@ -71,7 +71,7 @@ async function sweepOnce(): Promise<void> {
     },
     // Oldest (and never-fetched) first so no connection is starved.
     orderBy: { messagingHealthUpdatedAt: { sort: "asc", nulls: "first" } },
-    select: { teamId: true },
+    select: { workspaceId: true },
     take: MAX_PER_TICK,
   });
   if (stale.length === 0) return;
@@ -82,12 +82,12 @@ async function sweepOnce(): Promise<void> {
   const worker = async (): Promise<void> => {
     while (cursor < stale.length) {
       const idx = cursor++;
-      const teamId = stale[idx]!.teamId;
+      const workspaceId = stale[idx]!.workspaceId;
       try {
-        await fetchWhatsappHealthFromGraph(teamId);
+        await fetchWhatsappHealthFromGraph(workspaceId);
       } catch (err) {
         console.warn(
-          `[whatsapp-health-refresh-sweeper] fetch failed for team=${teamId}:`,
+          `[whatsapp-health-refresh-sweeper] fetch failed for team=${workspaceId}:`,
           err instanceof Error ? err.message : err,
         );
       }

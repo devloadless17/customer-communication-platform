@@ -61,19 +61,19 @@ export interface ExportResult {
  * within one page rather than after the whole file.
  */
 export async function runContactExport(opts: {
-  teamId: string;
+  workspaceId: string;
   jobId: string;
   format: TransferFormat;
   scope: ExportScope;
   onProgress?: ExportProgress;
   isCanceled?: () => Promise<boolean>;
 }): Promise<ExportResult> {
-  const { teamId, jobId, format, scope } = opts;
+  const { workspaceId, jobId, format, scope } = opts;
 
-  const { columns, fieldDefs, oneOffKeys } = await resolveExportColumns(teamId);
+  const { columns, fieldDefs, oneOffKeys } = await resolveExportColumns(workspaceId);
 
   const stageRows = await db.contactStage.findMany({
-    where: { teamId },
+    where: { workspaceId },
     select: { id: true, name: true },
   });
   const stageNameById = new Map(stageRows.map((s) => [s.id, s.name]));
@@ -87,9 +87,9 @@ export async function runContactExport(opts: {
   try {
     await sink.writeHeader(columns);
 
-    const total = await countScope(teamId, scope);
+    const total = await countScope(workspaceId, scope);
 
-    for await (const page of iterateContacts(teamId, scope)) {
+    for await (const page of iterateContacts(workspaceId, scope)) {
       if (opts.isCanceled && (await opts.isCanceled())) {
         throw new ExportCanceled();
       }
@@ -145,7 +145,7 @@ export async function runContactExport(opts: {
 
     await sink.finish();
 
-    const key = `contact-exports/${teamId}/${jobId}.${format}`;
+    const key = `contact-exports/${workspaceId}/${jobId}.${format}`;
     const { sizeBytes } = await blobStorage.putObjectFromFile({
       key,
       // Streamed from disk by the storage layer, not read into a Buffer here.
@@ -192,9 +192,9 @@ type ExportContact = {
  * to the export itself (one indexed count), and a progress bar that can't reach
  * 100% is worse than none.
  */
-async function countScope(teamId: string, scope: ExportScope): Promise<number | null> {
+async function countScope(workspaceId: string, scope: ExportScope): Promise<number | null> {
   if (scope.ids) return scope.ids.length;
-  const where = buildContactFilterWhere(teamId, scope.filters ?? {});
+  const where = buildContactFilterWhere(workspaceId, scope.filters ?? {});
   const rows = await db.$queryRaw<Array<{ count: bigint }>>`
     SELECT COUNT(*)::bigint AS count FROM "Contact" c WHERE ${where}
   `;
@@ -206,7 +206,7 @@ async function countScope(teamId: string, scope: ExportScope): Promise<number | 
  * Yield pages of contacts for the scope.
  *
  * Ids come from the shared filter SQL, keyset-paginated on `(createdAt, id)` —
- * served by the existing `@@index([teamId, createdAt desc, id desc])`, which
+ * served by the existing `@@index([workspaceId, createdAt desc, id desc])`, which
  * Postgres scans backwards for our ascending order. Hydration is a separate
  * Prisma query so we get typed rows + the tag join without hand-writing it.
  *
@@ -214,21 +214,21 @@ async function countScope(teamId: string, scope: ExportScope): Promise<number | 
  * make Postgres walk and discard 100,000 rows.
  */
 async function* iterateContacts(
-  teamId: string,
+  workspaceId: string,
   scope: ExportScope,
 ): AsyncGenerator<ExportContact[]> {
   if (scope.ids) {
-    // Explicit selection: chunk the id list. Still scoped by teamId — an id
+    // Explicit selection: chunk the id list. Still scoped by workspaceId — an id
     // list arrives from the client and must never be trusted as tenant-safe.
     for (let i = 0; i < scope.ids.length; i += PAGE) {
       const chunk = scope.ids.slice(i, i + PAGE);
-      const rows = await hydrate(teamId, chunk);
+      const rows = await hydrate(workspaceId, chunk);
       if (rows.length > 0) yield rows;
     }
     return;
   }
 
-  const where = buildContactFilterWhere(teamId, scope.filters ?? {});
+  const where = buildContactFilterWhere(workspaceId, scope.filters ?? {});
   let cursor: { createdAt: Date; id: string } | null = null;
 
   for (;;) {
@@ -246,7 +246,7 @@ async function* iterateContacts(
     if (idRows.length === 0) return;
 
     const rows = await hydrate(
-      teamId,
+      workspaceId,
       idRows.map((r) => r.id),
     );
     if (rows.length > 0) yield rows;
@@ -257,12 +257,12 @@ async function* iterateContacts(
   }
 }
 
-async function hydrate(teamId: string, ids: string[]): Promise<ExportContact[]> {
+async function hydrate(workspaceId: string, ids: string[]): Promise<ExportContact[]> {
   if (ids.length === 0) return [];
   const rows = await db.contact.findMany({
-    // teamId in the where even though the ids came from a team-scoped query —
+    // workspaceId in the where even though the ids came from a team-scoped query —
     // tenant isolation is manual here and defense in depth is free.
-    where: { teamId, id: { in: ids }, deletedAt: null },
+    where: { workspaceId, id: { in: ids }, deletedAt: null },
     select: {
       id: true,
       phoneNumber: true,

@@ -31,9 +31,9 @@ test.beforeAll(async () => {
   await wipeTestData();
   const su = await superadminTeam();
   const key = generateApiKey();
-  await db().teamApiKey.create({
+  await db().workspaceApiKey.create({
     data: {
-      teamId: su.teamId,
+      workspaceId: su.workspaceId,
       name: "E2E /v1 phone-norm key",
       tokenHash: key.tokenHash,
       tokenPrefix: key.tokenPrefix,

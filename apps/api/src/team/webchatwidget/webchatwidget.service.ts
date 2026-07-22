@@ -89,19 +89,19 @@ export class WebchatwidgetAdminService {
     private readonly bus: EventBus,
   ) {}
 
-  async list(teamId: string): Promise<WidgetView[]> {
+  async list(workspaceId: string): Promise<WidgetView[]> {
     const rows = await this.db.webchatWidget.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: { createdAt: "asc" },
       include: { _count: { select: { conversations: true } } },
     });
     return rows.map((r) => this.toView(r, r._count.conversations));
   }
 
-  async create(teamId: string, input: CreateWidgetInput): Promise<WidgetView> {
+  async create(workspaceId: string, input: CreateWidgetInput): Promise<WidgetView> {
     const widget = await this.db.webchatWidget.create({
       data: {
-        teamId,
+        workspaceId,
         name: input.name,
         publicKey: mintPublicKey(),
         allowedOrigins: input.allowedOrigins,
@@ -109,14 +109,14 @@ export class WebchatwidgetAdminService {
         isActive: true,
       },
     });
-    invalidateWebchatwidgetTeam(teamId);
-    await this.announce(teamId);
+    invalidateWebchatwidgetTeam(workspaceId);
+    await this.announce(workspaceId);
     return this.toView(widget, 0);
   }
 
-  async update(teamId: string, id: string, input: UpdateWidgetInput): Promise<WidgetView> {
+  async update(workspaceId: string, id: string, input: UpdateWidgetInput): Promise<WidgetView> {
     const existing = await this.db.webchatWidget.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       include: { _count: { select: { conversations: true } } },
     });
     if (!existing) throw new NotFoundException({ error: "widget_not_found" });
@@ -133,23 +133,23 @@ export class WebchatwidgetAdminService {
     });
     // Both caches key on stale state: the team's connected flag and the by-key
     // resolved config the visitor gateway reads.
-    invalidateWebchatwidgetTeam(teamId);
+    invalidateWebchatwidgetTeam(workspaceId);
     invalidateWebchatwidgetKey(existing.publicKey);
-    await this.announce(teamId);
+    await this.announce(workspaceId);
     return this.toView(updated, existing._count.conversations);
   }
 
-  async remove(teamId: string, id: string): Promise<void> {
+  async remove(workspaceId: string, id: string): Promise<void> {
     const existing = await this.db.webchatWidget.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { publicKey: true },
     });
     if (!existing) throw new NotFoundException({ error: "widget_not_found" });
     // Conversations SetNull their webchatWidgetId (history is preserved).
     await this.db.webchatWidget.delete({ where: { id } });
-    invalidateWebchatwidgetTeam(teamId);
+    invalidateWebchatwidgetTeam(workspaceId);
     invalidateWebchatwidgetKey(existing.publicKey);
-    await this.announce(teamId);
+    await this.announce(workspaceId);
   }
 
   private toView(
@@ -181,7 +181,7 @@ export class WebchatwidgetAdminService {
   }
 
   /** Bust the channels catalog so Settings reflects connect/disconnect. */
-  private async announce(teamId: string): Promise<void> {
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "channels" });
+  private async announce(workspaceId: string): Promise<void> {
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "channels" });
   }
 }

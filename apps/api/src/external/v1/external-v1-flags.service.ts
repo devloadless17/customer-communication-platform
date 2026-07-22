@@ -49,8 +49,8 @@ export class ExternalV1FlagsService {
     private readonly catalog: MessageFlagsCatalogService,
   ) {}
 
-  async listDefinitions(teamId: string) {
-    const definitions = await listFlagDefinitions(this.db, teamId, {
+  async listDefinitions(workspaceId: string) {
+    const definitions = await listFlagDefinitions(this.db, workspaceId, {
       includeArchived: true,
     });
     return { definitions };
@@ -62,48 +62,49 @@ export class ExternalV1FlagsService {
    * and the `team.catalog_changed` fanout are identical on both surfaces —
    * parity by construction rather than by a second implementation.
    */
-  async createDefinition(teamId: string, body: ExternalCreateFlagDefinitionInput) {
-    const definition = await this.catalog.create(teamId, body);
+  async createDefinition(workspaceId: string, body: ExternalCreateFlagDefinitionInput) {
+    const definition = await this.catalog.create(workspaceId, body);
     return { definition };
   }
 
   async updateDefinition(
-    teamId: string,
+    workspaceId: string,
     id: string,
     body: ExternalUpdateFlagDefinitionInput,
   ) {
-    const definition = await this.catalog.update(teamId, id, body);
+    const definition = await this.catalog.update(workspaceId, id, body);
     return { definition };
   }
 
-  async deleteDefinition(teamId: string, id: string) {
-    await this.catalog.remove(teamId, id);
+  async deleteDefinition(workspaceId: string, id: string) {
+    await this.catalog.remove(workspaceId, id);
     return { ok: true };
   }
 
   async list(
-    teamId: string,
+    workspaceId: string,
     query: ExternalListFlagsQueryInput,
   ): Promise<{ items: MessageFlagQueueItem[]; nextCursor: string | null }> {
-    return listFlags(this.db, teamId, {
+    return listFlags(this.db, workspaceId, {
       ...(query.status?.length ? { statuses: query.status as MessageFlagStatus[] } : {}),
       ...(query.definitionId?.length ? { definitionIds: query.definitionId } : {}),
       ...(query.assignedTo ? { assignedToId: query.assignedTo } : {}),
       ...(query.conversationId ? { conversationId: query.conversationId } : {}),
       ...(query.cursor ? { cursor: query.cursor } : {}),
       ...(query.take ? { take: query.take } : {}),
+      ...(query.q ? { search: query.q } : {}),
     });
   }
 
   /** Team-wide open counts. `mineOpen` is meaningless for a key (no user), so
    *  it is reported against no assignee and callers should ignore it. */
-  async counts(teamId: string) {
-    const counts = await flagCounts(this.db, teamId, "");
+  async counts(workspaceId: string) {
+    const counts = await flagCounts(this.db, workspaceId, "");
     return { counts };
   }
 
   async raise(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     messageId: string,
     body: ExternalRaiseFlagInput,
@@ -112,10 +113,10 @@ export class ExternalV1FlagsService {
     // configured by a human who knows "Complaint", not a cuid. Resolved here
     // (not in the domain layer) because it's an ergonomics concern of this
     // surface, not a rule of the feature.
-    const definitionId = await this.resolveDefinitionId(teamId, body);
+    const definitionId = await this.resolveDefinitionId(workspaceId, body);
     return this.unwrap(
       await raiseFlag(this.db, {
-        teamId,
+        workspaceId,
         messageId,
         definitionId,
         actor: { apiKeyId },
@@ -127,14 +128,14 @@ export class ExternalV1FlagsService {
   }
 
   async update(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     flagId: string,
     body: ExternalUpdateFlagInput,
   ): Promise<{ flag: MessageFlag; openFlagCount: number }> {
     return this.unwrap(
       await updateFlag(this.db, {
-        teamId,
+        workspaceId,
         flagId,
         actor: { apiKeyId },
         ...(body.status !== undefined ? { status: body.status as MessageFlagStatus } : {}),
@@ -148,22 +149,22 @@ export class ExternalV1FlagsService {
   }
 
   async remove(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     flagId: string,
   ): Promise<{ flag: MessageFlag; openFlagCount: number }> {
     return this.unwrap(
-      await removeFlag(this.db, { teamId, flagId, actor: { apiKeyId } }),
+      await removeFlag(this.db, { workspaceId, flagId, actor: { apiKeyId } }),
     );
   }
 
   private async resolveDefinitionId(
-    teamId: string,
+    workspaceId: string,
     body: ExternalRaiseFlagInput,
   ): Promise<string> {
     if (body.definitionId) return body.definitionId;
     const byName = await this.db.messageFlagDefinition.findFirst({
-      where: { teamId, name: body.definitionName!, archived: false },
+      where: { workspaceId, name: body.definitionName!, archived: false },
       select: { id: true },
     });
     if (!byName) {

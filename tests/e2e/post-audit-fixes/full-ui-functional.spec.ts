@@ -80,15 +80,15 @@ test.afterAll(async () => {
 });
 
 async function cleanup() {
-  const { teamId } = await appAdmin();
-  await db().tag.deleteMany({ where: { teamId, name: { startsWith: RUN } } });
-  await db().contactStage.deleteMany({ where: { teamId, name: { startsWith: RUN } } });
-  await db().contactFieldDefinition.deleteMany({ where: { teamId, label: { startsWith: RUN } } });
-  await db().snippet.deleteMany({ where: { teamId, name: { startsWith: RUN } } });
-  await db().teamApiKey.deleteMany({ where: { teamId, name: { startsWith: RUN } } });
-  await db().outboundWebhook.deleteMany({ where: { teamId, name: { startsWith: RUN } } });
+  const { workspaceId } = await appAdmin();
+  await db().tag.deleteMany({ where: { workspaceId, name: { startsWith: RUN } } });
+  await db().contactStage.deleteMany({ where: { workspaceId, name: { startsWith: RUN } } });
+  await db().contactFieldDefinition.deleteMany({ where: { workspaceId, label: { startsWith: RUN } } });
+  await db().snippet.deleteMany({ where: { workspaceId, name: { startsWith: RUN } } });
+  await db().workspaceApiKey.deleteMany({ where: { workspaceId, name: { startsWith: RUN } } });
+  await db().outboundWebhook.deleteMany({ where: { workspaceId, name: { startsWith: RUN } } });
   await db().teamChannelMessage.deleteMany({ where: { body: { contains: RUN } } });
-  await db().contact.deleteMany({ where: { teamId, phoneNumber: { contains: PHONE_DIGITS } } });
+  await db().contact.deleteMany({ where: { workspaceId, phoneNumber: { contains: PHONE_DIGITS } } });
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -273,12 +273,12 @@ test("settings/integrations: mint an org API key then revoke it", async ({ page 
   await expect(page.getByText(/only time it.ll be shown/i)).toBeVisible();
   const row = page.locator("li").filter({ hasText: name });
   await expect(row).toBeVisible();
-  expect(await db().teamApiKey.count({ where: { name, revokedAt: null } })).toBe(1);
+  expect(await db().workspaceApiKey.count({ where: { name, revokedAt: null } })).toBe(1);
 
   await row.getByRole("button", { name: "Revoke" }).click();
   await confirmButton(page, "Revoke key").click();
   await expect(row).toHaveCount(0);
-  expect(await db().teamApiKey.count({ where: { name, revokedAt: null } })).toBe(0);
+  expect(await db().workspaceApiKey.count({ where: { name, revokedAt: null } })).toBe(0);
   expect(errs, "api key errors").toEqual([]);
 });
 

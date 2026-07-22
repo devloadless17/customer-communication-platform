@@ -35,7 +35,7 @@ import type { Role } from "@ccp/shared/types";
 /** The viewer, as carried on `ApiSession`. */
 export interface ConversationViewer {
   userId: string;
-  teamId: string;
+  workspaceId: string;
   role: Role;
   /** `Team.agentConversationVisibility`. */
   agentConversationVisibility?: string | null;
@@ -103,7 +103,7 @@ export async function assertCanViewConversation(
   const row = await db.conversation.findFirst({
     where: {
       id: conversationId,
-      teamId: viewer.teamId,
+      workspaceId: viewer.workspaceId,
       assignedUserId: viewer.userId,
     },
     select: { id: true },
@@ -114,7 +114,7 @@ export async function assertCanViewConversation(
 /**
  * Cache key suffix for anything memoized per team that is now ALSO per viewer.
  *
- * The conversation-counts memo is keyed by teamId; without this a restricted
+ * The conversation-counts memo is keyed by workspaceId; without this a restricted
  * agent would read another agent's cached totals — a leak that no `where`
  * clause could catch because the query never runs. Unrestricted viewers share
  * one key, so the cache stays as effective as it was.
@@ -131,7 +131,7 @@ export function visibilityScopeKey(viewer: ConversationViewer): string {
  * boot rather than imported so this file stays free of NestJS and Prisma —
  * the same seam `presence-bridge.ts` uses for the online-user resolver.
  */
-type VisibilityInvalidator = (teamId: string) => void;
+type VisibilityInvalidator = (workspaceId: string) => void;
 
 const invalidators: VisibilityInvalidator[] = [];
 
@@ -139,10 +139,10 @@ export function registerVisibilityInvalidator(fn: VisibilityInvalidator): void {
   invalidators.push(fn);
 }
 
-export function invalidateTeamVisibilityCaches(teamId: string): void {
+export function invalidateTeamVisibilityCaches(workspaceId: string): void {
   for (const fn of invalidators) {
     try {
-      fn(teamId);
+      fn(workspaceId);
     } catch {
       // Best-effort: a failed cache bust degrades to "the change lands within
       // the TTL", never to a broken save.

@@ -4,7 +4,7 @@ import { invalidateSessionCache } from "@/auth/session.guard";
 import { db } from "@/lib/db";
 import { AVAILABILITY_SELECT, applyAvailability } from "@/lib/availability/apply";
 import { teamScheduleOf } from "@/lib/availability/schedule";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Working-hours boundary tick — the thing that makes availability self-correct.
@@ -43,6 +43,12 @@ async function runTick(label: string): Promise<void> {
   try {
     await withSweeperMutex("work-hours", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopWorkHoursSweeper();
+      return;
+    }
     console.error(`[sweeper.work-hours] ${label} failed`, err);
   } finally {
     inFlight = false;
@@ -77,11 +83,20 @@ async function sweepOnce(): Promise<void> {
   // Only teams that could possibly have a schedule in force: one on the team
   // itself, or at least one member with their own. Teams with neither are the
   // common case pre-adoption and are skipped entirely.
-  const teams = await db.team.findMany({
+  const teams = await db.workspace.findMany({
     where: {
       OR: [
         { workHours: { not: Prisma.DbNull } },
-        { users: { some: { workHoursMode: "custom", workHours: { not: Prisma.DbNull } } } },
+        // Membership is `WorkspaceMember` since the tenancy restructure —
+        // `Workspace.users` no longer exists, and filtering on it threw on
+        // EVERY tick, so no scheduled availability transition ever fired.
+        {
+          members: {
+            some: {
+              user: { workHoursMode: "custom", workHours: { not: Prisma.DbNull } },
+            },
+          },
+        },
       ],
     },
     select: { id: true, workHours: true },
@@ -96,13 +111,14 @@ async function sweepOnce(): Promise<void> {
     try {
       const teamSchedule = teamScheduleOf(team);
       const members = await db.user.findMany({
-        where: { teamId: team.id, deactivatedAt: null },
+        where: { workspaceMemberships: { some: { workspaceId: team.id } }, deactivatedAt: null },
         select: AVAILABILITY_SELECT,
       });
       for (const member of members) {
         const result = await applyAvailability({
           db,
           user: member,
+          workspaceId: team.id,
           teamSchedule,
           intent: { kind: "sync" },
           nowMs,

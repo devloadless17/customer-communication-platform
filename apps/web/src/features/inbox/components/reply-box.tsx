@@ -306,8 +306,8 @@ function ReplyBoxImpl({
   // note into the WhatsApp reply field where one Enter would send it to the
   // customer (irreversible Meta send). `switchMode` handles the handoff.
   const draftKeyFor = useCallback(
-    (m: Mode) => `inbox:${currentUser.teamId}:draft:${m}:${conversationId}`,
-    [currentUser.teamId, conversationId],
+    (m: Mode) => `inbox:${currentUser.workspaceId}:draft:${m}:${conversationId}`,
+    [currentUser.workspaceId, conversationId],
   );
   // Initial value MUST match SSR (always ""), otherwise the submit button's
   // `disabled` attribute hydrates mismatched when a draft exists. Mount mode
@@ -1058,7 +1058,7 @@ function ReplyBoxImpl({
         const blobUrl = URL.createObjectURL(file);
         optimisticMessage = {
           id: clientTempId,
-          teamId: currentUser.teamId,
+          workspaceId: currentUser.workspaceId,
           conversationId,
           externalId: clientTempId,
           senderUserId: currentUser.id,
@@ -1098,7 +1098,7 @@ function ReplyBoxImpl({
       } else if (trimmed) {
         optimisticMessage = {
           id: clientTempId,
-          teamId: currentUser.teamId,
+          workspaceId: currentUser.workspaceId,
           conversationId,
           externalId: clientTempId,
           senderUserId: currentUser.id,
@@ -1165,7 +1165,7 @@ function ReplyBoxImpl({
         if (aiAutopilotEnabled && aiEnabled && !aiPauseEmittedRef.current) {
           aiPauseEmittedRef.current = true;
           const aiActivity = buildOptimisticAiChange({
-            teamId: currentUser.teamId,
+            workspaceId: currentUser.workspaceId,
             conversationId,
             actorName: currentUser.name,
             aiEnabled: false,
@@ -1175,7 +1175,7 @@ function ReplyBoxImpl({
           sendFrames.push(
             [
               "conversation:ai",
-              { teamId: currentUser.teamId, conversationId, aiEnabled: false, optimistic: true },
+              { workspaceId: currentUser.workspaceId, conversationId, aiEnabled: false, optimistic: true },
             ],
             aiActivity.frame,
           );
@@ -1187,7 +1187,7 @@ function ReplyBoxImpl({
         if (status != null && status !== "open" && !reopenEmittedRef.current) {
           reopenEmittedRef.current = true;
           const statusActivity = buildOptimisticStatusChange({
-            teamId: currentUser.teamId,
+            workspaceId: currentUser.workspaceId,
             conversationId,
             actorName: currentUser.name,
             status: "open",
@@ -1197,7 +1197,7 @@ function ReplyBoxImpl({
           sendFrames.push(
             [
               "conversation:status",
-              { teamId: currentUser.teamId, conversationId, status: "open", optimistic: true },
+              { workspaceId: currentUser.workspaceId, conversationId, status: "open", optimistic: true },
             ],
             statusActivity.frame,
           );
@@ -1206,7 +1206,7 @@ function ReplyBoxImpl({
         if (assignedUserId == null && !selfAssignEmittedRef.current) {
           selfAssignEmittedRef.current = true;
           const assignActivity = buildOptimisticAssignment({
-            teamId: currentUser.teamId,
+            workspaceId: currentUser.workspaceId,
             conversationId,
             actorName: currentUser.name,
             assignedToName: currentUser.name,
@@ -1216,7 +1216,7 @@ function ReplyBoxImpl({
           sendFrames.push(
             [
               "conversation:assigned",
-              { teamId: currentUser.teamId, conversationId, assignedUser: currentUser, optimistic: true },
+              { workspaceId: currentUser.workspaceId, conversationId, assignedUser: currentUser, optimistic: true },
             ],
             assignActivity.frame,
           );
@@ -1366,19 +1366,19 @@ function ReplyBoxImpl({
           // calls each wrap their own flushSync, which on a 3-pill rollback was
           // up to 6 back-to-back paints (a visible cascade). Mirrors the batched
           // SEND path.
-          const tid = currentUser.teamId;
+          const tid = currentUser.workspaceId;
           const rollbackFrames: Parameters<typeof dispatchLocalSocketEvents>[0] = [];
           if (aiPauseOptimisticId && aiEnabledLiveRef.current === false) {
             rollbackFrames.push(
-              ["conversation:ai", { teamId: tid, conversationId, aiEnabled: true }],
-              ["conversation:activity", { teamId: tid, conversationId, event: null, removeId: aiPauseOptimisticId }],
+              ["conversation:ai", { workspaceId: tid, conversationId, aiEnabled: true }],
+              ["conversation:activity", { workspaceId: tid, conversationId, event: null, removeId: aiPauseOptimisticId }],
             );
             aiPauseEmittedRef.current = false;
           }
           if (assignOptimisticId && assignedUserIdRef.current === currentUser.id) {
             rollbackFrames.push(
-              ["conversation:assigned", { teamId: tid, conversationId, assignedUser: null }],
-              ["conversation:activity", { teamId: tid, conversationId, event: null, removeId: assignOptimisticId }],
+              ["conversation:assigned", { workspaceId: tid, conversationId, assignedUser: null }],
+              ["conversation:activity", { workspaceId: tid, conversationId, event: null, removeId: assignOptimisticId }],
             );
             selfAssignEmittedRef.current = false;
           }
@@ -1386,8 +1386,8 @@ function ReplyBoxImpl({
           // only if the live status is still the "open" we optimistically set.
           if (statusOptimisticId && status != null && statusRef.current === "open") {
             rollbackFrames.push(
-              ["conversation:status", { teamId: tid, conversationId, status }],
-              ["conversation:activity", { teamId: tid, conversationId, event: null, removeId: statusOptimisticId }],
+              ["conversation:status", { workspaceId: tid, conversationId, status }],
+              ["conversation:activity", { workspaceId: tid, conversationId, event: null, removeId: statusOptimisticId }],
             );
             reopenEmittedRef.current = false;
           }

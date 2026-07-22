@@ -93,13 +93,13 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
   // (ai.summary_changed / ai.memory_changed / ai.message_flagged).
   useEffect(() => {
     const socket = getClientSocket();
-    const onSummary = (p: { teamId: string; conversationId: string }) => {
+    const onSummary = (p: { workspaceId: string; conversationId: string }) => {
       if (p.conversationId === conversationId) void load();
     };
-    const onMemory = (p: { teamId: string; conversationId: string; customerId: string }) => {
+    const onMemory = (p: { workspaceId: string; conversationId: string; customerId: string }) => {
       if (p.conversationId === conversationId) void load();
     };
-    const onFlag = (p: { teamId: string; conversationId: string }) => {
+    const onFlag = (p: { workspaceId: string; conversationId: string }) => {
       if (p.conversationId === conversationId) void load();
     };
     socket.on("ai:summary", onSummary);

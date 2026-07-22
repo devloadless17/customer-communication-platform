@@ -16,7 +16,7 @@ import type {
   MediaKind,
   MessageDirection,
   Role,
-  TeamStatus,
+  OrgStatus,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -25,7 +25,7 @@ import type {
 
 export interface AudienceGroupDto {
   id: string;
-  teamId: string;
+  workspaceId: string;
   name: string;
   description: string | null;
   tagIds: string[];
@@ -65,7 +65,9 @@ export interface SuperAdminTeamRow {
   createdAt: string;
   /** Org-approval lifecycle — drives the approve/suspend controls + the
    *  pending-review queue on the platform Organizations page. */
-  status: TeamStatus;
+  /** Parent organisation — the platform list groups workspaces under it. */
+  organizationId: string;
+  status: OrgStatus;
   /** Operator note attached on suspension (or rejection). Null while active. */
   statusReason: string | null;
   /** When the status was last changed by a super-admin. Null if never. */
@@ -74,11 +76,44 @@ export interface SuperAdminTeamRow {
   whatsappDisplayNumber: string | null;
   userCount: number;
   /** Hard cap on ACTIVE member accounts. Default 2; only a superAdmin raises it. */
+  /** Seat cap for THIS workspace (super-admin controlled, default 2). */
   maxMembers: number;
+  /** How many workspaces the owning ORGANISATION may create (default 2). */
+  maxWorkspaces: number;
+  /** How many it currently has — only populated on the detail view. */
+  workspaceCount?: number;
   contactCount: number;
   conversationCount: number;
   messageCount: number;
   broadcastCount: number;
+}
+
+/**
+ * One ORGANISATION on the platform, with the workspaces it owns.
+ *
+ * The platform list is org-first because that is what the platform actually
+ * administers: approval status, the workspace cap and the billing relationship
+ * all live on the organisation. It used to list WORKSPACES under an
+ * "Organizations" heading, which showed workspace ids and made a two-workspace
+ * customer look like two customers.
+ */
+export interface SuperAdminOrgRow {
+  id: string;
+  name: string;
+  createdAt: string;
+  status: OrgStatus;
+  statusReason: string | null;
+  statusUpdatedAt: string | null;
+  /** How many workspaces it may create (super-admin controlled, default 2). */
+  maxWorkspaces: number;
+  /** Distinct people across all its workspaces — a person in two workspaces
+   *  counts once, which is what "how big is this customer" means. */
+  memberCount: number;
+  /** Totals summed over its workspaces. */
+  contactCount: number;
+  conversationCount: number;
+  messageCount: number;
+  workspaces: SuperAdminTeamRow[];
 }
 
 export interface SuperAdminTeamDetail {
@@ -88,6 +123,8 @@ export interface SuperAdminTeamDetail {
     name: string;
     email: string;
     role: Role;
+    // Platform operator co-located into this org — excluded from seat counts.
+    isSuperAdmin: boolean;
     deactivatedAt: string | null;
     createdAt: string;
   }>;

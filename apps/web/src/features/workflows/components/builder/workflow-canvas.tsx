@@ -836,6 +836,14 @@ function describeNode(n: WorkflowNode): string | undefined {
       return typeof c.url === "string" ? `POST ${clip(c.url, 40)}` : undefined;
     case "trigger_workflow":
       return typeof c.workflowId === "string" ? `→ ${c.workflowId}` : undefined;
+    case "create_ticket":
+      return typeof c.subject === "string" && c.subject ? clip(c.subject) : "New ticket";
+    case "set_ticket_status":
+      return typeof c.status === "string" ? `→ ${c.status}` : undefined;
+    case "set_ticket_priority":
+      return typeof c.priority === "string" ? `→ ${c.priority}` : undefined;
+    case "assign_ticket":
+      return c.mode === "unassign" ? "Unassign" : "Assign ticket";
     default:
       return undefined;
   }

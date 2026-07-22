@@ -207,6 +207,35 @@ export const STEP_OUTPUT_SHAPES: Record<WorkflowStepType, FieldShape> = {
     kind: "object",
     fields: { status: leafString("open | pending | closed") },
   },
+  create_ticket: {
+    kind: "object",
+    fields: {
+      ticketId: leafString(),
+      number: leafString("The human-facing ticket number"),
+      skipped: leafString("Set when the thread already had live work"),
+    },
+  },
+  set_ticket_status: {
+    kind: "object",
+    fields: {
+      ticketId: leafString(),
+      status: leafString("new | open | pending | on_hold | solved | closed"),
+      action: leafString("The transition that happened"),
+      skipped: leafString("Set when the thread had no active ticket"),
+    },
+  },
+  set_ticket_priority: {
+    kind: "object",
+    fields: {
+      ticketId: leafString(),
+      priority: leafString("low | normal | high | urgent"),
+      skipped: leafString(),
+    },
+  },
+  assign_ticket: {
+    kind: "object",
+    fields: { ticketId: leafString(), skipped: leafString() },
+  },
   open_conversation: {
     kind: "object",
     fields: { conversationId: leafString() },

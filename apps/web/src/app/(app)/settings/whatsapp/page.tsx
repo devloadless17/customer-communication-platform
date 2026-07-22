@@ -1,7 +1,13 @@
 import { getSession } from "@/lib/auth/current-user";
-import { getTeamWhatsappConfig, listWhatsappTemplates } from "@/lib/api/queries";
+import {
+  getTeamWhatsappConfig,
+  listChannelAccounts,
+  listWhatsappTemplates,
+  type ChannelAccountView,
+} from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 
+import { ChannelAccountsPanel } from "@/features/channels/components/channel-accounts-panel";
 import { WhatsappSettings, type WhatsappCurrent } from "./whatsapp-settings";
 
 export const metadata = {
@@ -20,13 +26,20 @@ export default async function WhatsappSettingsPage() {
   // instead: the members-open templates endpoint exposes only the `connected`
   // flag (no secrets), which feeds the component's `!canManage` branch.
   let current: WhatsappCurrent;
+  // Connected accounts (admin-only endpoint). The panel renders itself away
+  // when there's one account, so a single-number workspace is unchanged.
+  let accounts: ChannelAccountView[] = [];
   if (canManage) {
     // Encrypted Meta credentials are decrypted server-side by GET /api/team/whatsapp.
     // The endpoint absorbs decrypt failures (rotated key, corrupt envelope) and
     // returns null + a `credentialsUndecryptable` boolean so this page can prompt
     // the admin to re-paste instead of crashing. Crypto keys no longer live in
     // the web container — that's the security win of Step 7b for this page.
-    const config = await getTeamWhatsappConfig();
+    const [config, accountRows] = await Promise.all([
+      getTeamWhatsappConfig(),
+      listChannelAccounts("whatsapp").catch(() => [] as ChannelAccountView[]),
+    ]);
+    accounts = accountRows;
     current = {
       connected: Boolean(config.phoneNumberId),
       phoneNumberId: config.phoneNumberId,
@@ -57,5 +70,10 @@ export default async function WhatsappSettingsPage() {
     };
   }
 
-  return <WhatsappSettings current={current} canManage={canManage} />;
+  return (
+    <>
+      <WhatsappSettings current={current} canManage={canManage} />
+      <ChannelAccountsPanel channel="whatsapp" accounts={accounts} channelLabel="WhatsApp" />
+    </>
+  );
 }

@@ -34,11 +34,11 @@ interface OfferedChips {
  * so an older offer can't be what the customer just tapped.
  */
 async function lastOfferedChips(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
 ): Promise<OfferedChips | null> {
   const last = await db.message.findFirst({
-    where: { teamId, conversationId, direction: "out" },
+    where: { workspaceId, conversationId, direction: "out" },
     orderBy: [{ timestamp: "desc" }, { id: "desc" }],
     select: { rawPayload: true },
   });
@@ -73,20 +73,20 @@ async function lastOfferedChips(
  * for the `customerId` half.
  */
 export async function applyContactShareFromReply(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   conversationId: string,
   contactId: string,
   reply: InteractiveReply,
 ): Promise<ContactShareField | null> {
-  const offered = await lastOfferedChips(teamId, conversationId);
+  const offered = await lastOfferedChips(workspaceId, conversationId);
   if (!offered) return null;
 
   const share = resolveContactShare(reply.id, offered.contactShare, offered.optionIds);
   if (!share) return null;
 
   const contact = await db.contact.findFirst({
-    where: { id: contactId, teamId, deletedAt: null },
+    where: { id: contactId, workspaceId, deletedAt: null },
     select: { id: true, name: true, phoneNumber: true, email: true, customerId: true },
   });
   if (!contact) return null;
@@ -101,7 +101,7 @@ export async function applyContactShareFromReply(
     return null;
   }
 
-  // NOTE on uniqueness: the partial unique on (teamId, phoneNumber) is scoped to
+  // NOTE on uniqueness: the partial unique on (workspaceId, phoneNumber) is scoped to
   // `identityChannel = 'whatsapp'`, so stamping a phone on a messenger/instagram
   // contact can't collide with the WhatsApp contact for the same person — which
   // is precisely the pair we want `resolveCustomerId` to fuse below.
@@ -123,7 +123,7 @@ export async function applyContactShareFromReply(
   // account, so it identifies them. An agent-typed or CSV-imported email carries
   // no such assertion and must never auto-merge two people.
   const adoptedCustomerId = await findExistingCustomerIdByStrongKey(
-    teamId,
+    workspaceId,
     {
       id: contact.id,
       name: contact.name,
@@ -142,7 +142,7 @@ export async function applyContactShareFromReply(
     // other channel contacts (a real merge target), in which case we leave it.
     if (contact.customerId) {
       await db.customer.deleteMany({
-        where: { id: contact.customerId, teamId, contacts: { none: {} } },
+        where: { id: contact.customerId, workspaceId, contacts: { none: {} } },
       });
     }
   }
@@ -164,7 +164,7 @@ export async function applyContactShareFromReply(
     if (fresh) {
       await publish({
         type: "contact.updated",
-        teamId,
+        workspaceId,
         contact: toContactWire(fresh),
         previousStageId: fresh.stageId,
         fieldChanges: [],
@@ -174,7 +174,7 @@ export async function applyContactShareFromReply(
     }
   } catch (err) {
     console.error(
-      `[contact-share] publish(contact.updated) failed for team=${teamId} contact=${contact.id}:`,
+      `[contact-share] publish(contact.updated) failed for team=${workspaceId} contact=${contact.id}:`,
       err,
     );
   }

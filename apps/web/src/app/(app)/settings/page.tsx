@@ -2,9 +2,10 @@ import Link from "next/link";
 import {
   ArrowRight,
   BarChart3,
-  Bell,
   Layers,
+  Building2,
   ListChecks,
+  Ticket as TicketIcon,
   MessagesSquare,
   Plug,
   ShieldCheck,
@@ -18,14 +19,21 @@ import {
 import { getSession } from "@/lib/auth/current-user";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 import { PageHeader } from "@/components/layouts/page-header";
-import { AppearanceMode } from "./account/appearance-mode";
+import { AppearanceMode } from "@/app/(app)/account/appearance-mode";
 
 export const metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";
 
 /**
- * Single settings landing — one page, four permission-gated groups:
- * My account / Team & roles / Channels & integrations / Conversation config.
+ * WORKSPACE settings landing — everything here configures the workspace you
+ * are currently in.
+ *
+ * Two sibling areas own the other scopes, linked at the top of this page:
+ *   /organization → the company: its workspaces and its people
+ *   /account      → you: profile, password, notifications
+ *
+ * That three-way split replaced a single page that mixed all three scopes under
+ * one heading, which made "settings" mean three different things at once.
  *
  * Replaces the old split between "/settings" (titled "Team settings" but
  * holding conversation config) and "/settings/workspace" (titled "Account
@@ -39,29 +47,34 @@ export default async function SettingsIndex() {
 
   const groups: Group[] = [
     {
-      label: "My account",
+      // The layer ABOVE workspaces. First, because it answers "where am I" —
+      // which workspace you are configuring only makes sense once you know the
+      // org holds several.
+      label: "Other settings areas",
       cards: [
         {
-          href: "/settings/account",
-          icon: UserCircle2,
-          title: "Account",
-          description: "Your name, email, and password.",
+          href: "/organization",
+          icon: Building2,
+          title: "Organization",
+          description:
+            "Your company: the workspaces it holds, and who can reach each one.",
         },
         {
-          href: "/settings/notifications",
-          icon: Bell,
-          title: "Notifications",
-          description: "New-message sounds — personal, per device.",
+          href: "/account",
+          icon: UserCircle2,
+          title: "Personal settings",
+          description:
+            "Your profile, password and notification sounds — they follow you across workspaces.",
         },
       ],
     },
     {
-      label: "Team & roles",
+      label: "People & teams",
       cards: [
         {
           href: "/settings/team",
           icon: Users,
-          title: "Team members",
+          title: "Members",
           description: isAdmin
             ? "Invite teammates, change roles, deactivate accounts."
             : "See who else is on this team.",
@@ -93,7 +106,7 @@ export default async function SettingsIndex() {
     ...(isAdmin
       ? [
           {
-            label: "Channels & integrations",
+            label: "Channels & apps",
             cards: [
               {
                 href: "/settings/channels",
@@ -114,7 +127,7 @@ export default async function SettingsIndex() {
         ]
       : []),
     {
-      label: "Conversation config",
+      label: "Inbox",
       cards: [
         ...(permissions["snippets:manage"]
           ? [
@@ -157,6 +170,20 @@ export default async function SettingsIndex() {
                 title: "Contact fields",
                 description:
                   "Custom fields shown on every contact (order ID, plan, company size…).",
+              } satisfies Card,
+            ]
+          : []),
+        // Admin-gated on the ROLE, not a capability: every route under
+        // /api/team/tickets is @RequireRole("admin"), so surfacing this card to
+        // anyone else would land them on the error boundary.
+        ...(isAdmin
+          ? [
+              {
+                href: "/settings/tickets",
+                icon: TicketIcon,
+                title: "Tickets",
+                description:
+                  "When work opens by itself, how long a solved ticket stays reopenable, and what each priority promises.",
               } satisfies Card,
             ]
           : []),

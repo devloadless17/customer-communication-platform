@@ -84,7 +84,7 @@ export interface InteractiveReply {
  *     Telegram chat id). NEVER digit-stripped — these are not phone numbers.
  *
  * Ingest resolves the Contact from whichever is present (phone → `phoneNumber`
- * lookup; externalContactId → the `(teamId, identityChannel, externalContactId)`
+ * lookup; externalContactId → the `(workspaceId, identityChannel, externalContactId)`
  * compound-unique lookup). See `apps/api/src/lib/providers/ingest.ts`.
  */
 export interface NormalizedContactIdentity {
@@ -208,7 +208,7 @@ export interface NormalizedDeliveredWatermark {
  * One step of a WhatsApp call's lifecycle as it arrives via webhook. The
  * Meta provider emits one of these per call webhook (incoming offer,
  * outbound answer, terminal status). Ingest dedupes by
- * (teamId, channel, externalCallId) the same way it does for messages,
+ * (workspaceId, channel, externalCallId) the same way it does for messages,
  * then maps `phase` to CallStatus.
  *
  * `phase` is intentionally finer-grained than CallStatus — `ringing_out`
@@ -990,7 +990,22 @@ export interface ProviderTemplate {
   status: TemplateStatus;
   bodyText: string;
   components: TemplateComponent[];
+  /**
+   * Whether the template's placeholders are `{{1}}` (positional) or
+   * `{{order_id}}` (named) — Meta's own `parameter_format`, not our inference.
+   *
+   * This is a WIRE-SHAPE decision, not cosmetics: a named template must send
+   * `{ parameter_name, text }` objects and a positional one must send bare
+   * `{ text }`. Guessing it from a regex over the body misreads a positional
+   * template that happens to contain `{{order_id}}` as literal text, and every
+   * recipient then fails with Meta error 132000.
+   */
+  parameterFormat: TemplateParameterFormat;
 }
+
+/** Mirrors Meta's `parameter_format`. Defaults to positional — the historical
+ *  shape every template synced before this field existed was authored under. */
+export type TemplateParameterFormat = "positional" | "named";
 
 /**
  * One parameter substitution for a template send. The provider builds the

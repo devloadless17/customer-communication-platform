@@ -119,19 +119,19 @@ async function timed<T>(label: string, fn: () => Promise<T>): Promise<T> {
 }
 
 async function main(): Promise<void> {
-  const team = await db.team.create({
+  const team = await db.workspace.create({
     data: { name: `transfer-load-${randomUUID().slice(0, 8)}` },
     select: { id: true },
   });
-  const teamId = team.id;
-  console.log(`team ${teamId} · ${ROWS.toLocaleString()} rows\n`);
+  const workspaceId = team.id;
+  console.log(`team ${workspaceId} · ${ROWS.toLocaleString()} rows\n`);
 
   try {
-    await seed(teamId, ROWS);
+    await seed(workspaceId, ROWS);
 
     const csv = await timed("export CSV", () =>
       runContactExport({
-        teamId,
+        workspaceId,
         jobId: `load-csv-${randomUUID().slice(0, 8)}`,
         format: "csv",
         scope: { filters: {} },
@@ -145,7 +145,7 @@ async function main(): Promise<void> {
 
     const xlsx = await timed("export XLSX", () =>
       runContactExport({
-        teamId,
+        workspaceId,
         jobId: `load-xlsx-${randomUUID().slice(0, 8)}`,
         format: "xlsx",
         scope: { filters: {} },
@@ -157,7 +157,7 @@ async function main(): Promise<void> {
     // 100k lookups + 100k skips — the cheapest realistic re-import.
     const skipRun = await timed("import CSV (create_only, all existing)", () =>
       runContactImport({
-        teamId,
+        workspaceId,
         userId: null,
         jobId: `load-imp-skip-${randomUUID().slice(0, 8)}`,
         format: "csv",
@@ -188,7 +188,7 @@ async function main(): Promise<void> {
     // The heaviest realistic path: 100k bulk UPDATEs.
     const upsertRun = await timed("import CSV (create_and_update, all updates)", () =>
       runContactImport({
-        teamId,
+        workspaceId,
         userId: null,
         jobId: `load-imp-upsert-${randomUUID().slice(0, 8)}`,
         format: "csv",
@@ -212,7 +212,7 @@ async function main(): Promise<void> {
 
     // Round-trip integrity at scale: the data must be intact, not just fast.
     const sample = await db.contact.findFirst({
-      where: { teamId, phoneNumber: "15550050000" },
+      where: { workspaceId, phoneNumber: "15550050000" },
       select: { name: true, email: true, customFields: true },
     });
     if (sample?.name !== "Contact 50000") {
@@ -225,7 +225,7 @@ async function main(): Promise<void> {
     await blobStorage.delete([csv.artifactKey, xlsx.artifactKey]).catch(() => {});
   } finally {
     // Contacts cascade with the team; 100k deletes in one statement is fine.
-    await db.team.delete({ where: { id: teamId } }).catch((e) => console.error("cleanup", e));
+    await db.workspace.delete({ where: { id: workspaceId } }).catch((e) => console.error("cleanup", e));
   }
 
   console.log(failures === 0 ? "\nPASS" : `\nFAIL (${failures})`);
@@ -240,14 +240,14 @@ async function main(): Promise<void> {
  * you nothing about the subsystem (which is exactly what a 5,000-row chunk
  * did here). 1,000 keeps the fixture well under the runners' own footprint.
  */
-async function seed(teamId: string, n: number): Promise<void> {
+async function seed(workspaceId: string, n: number): Promise<void> {
   const CHUNK = 1_000;
   const t0 = Date.now();
   for (let i = 0; i < n; i += CHUNK) {
     const rows = [];
     for (let j = i; j < Math.min(i + CHUNK, n); j++) {
       rows.push({
-        teamId,
+        workspaceId,
         identityChannel: "whatsapp" as const,
         // Deterministic, valid E.164-able US numbers.
         phoneNumber: `1555${String(j).padStart(7, "0")}`,

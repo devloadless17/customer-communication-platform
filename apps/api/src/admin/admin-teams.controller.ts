@@ -15,6 +15,7 @@ import { z } from "zod";
 import {
   getTeamDetailForSuperAdmin,
   invalidateSuperAdminAggregates,
+  listAllOrgsForSuperAdmin,
   listAllTeamsForSuperAdmin,
 } from "@/lib/queries";
 
@@ -39,13 +40,20 @@ const SetStatusSchema = z.object({
 });
 type SetStatusInput = z.infer<typeof SetStatusSchema>;
 
-// Per-org member cap. Min 1 (an org always has at least its owner); a generous
-// upper bound keeps a typo from creating a nonsensical value. Default is 2 on
-// the Team row — this only raises/lowers it.
+// Per-WORKSPACE seat cap. Min 1 (a workspace always has at least its founder);
+// a generous upper bound keeps a typo from creating a nonsensical value.
+// Default is 2 on the Workspace row — this only raises/lowers it.
 const SetMaxMembersSchema = z.object({
   maxMembers: z.number().int().min(1).max(1000),
 });
 type SetMaxMembersInput = z.infer<typeof SetMaxMembersSchema>;
+
+// Per-ORGANISATION workspace cap. Min 1 — an org with zero workspaces has
+// nowhere to work, and the signup flow provisions one immediately.
+const SetMaxWorkspacesSchema = z.object({
+  maxWorkspaces: z.number().int().min(1).max(100),
+});
+type SetMaxWorkspacesInput = z.infer<typeof SetMaxWorkspacesSchema>;
 
 /**
  * superAdmin cross-team admin surface.
@@ -68,15 +76,24 @@ export class AdminTeamsController {
     private readonly sessionInvalidator: SessionInvalidationService,
   ) {}
 
+  /**
+   * Platform roster, ORGANISATION-first with each org's workspaces nested.
+   *
+   * `teams` is still returned (flat workspace list) so nothing that consumed
+   * the old shape breaks; `orgs` is what the platform page renders.
+   */
   @Get()
   async list() {
-    const teams = await listAllTeamsForSuperAdmin();
-    return { teams };
+    const [teams, orgs] = await Promise.all([
+      listAllTeamsForSuperAdmin(),
+      listAllOrgsForSuperAdmin(),
+    ]);
+    return { teams, orgs };
   }
 
   @Get(":id")
-  async get(@Param("id") teamId: string) {
-    const detail = await getTeamDetailForSuperAdmin(teamId);
+  async get(@Param("id") workspaceId: string) {
+    const detail = await getTeamDetailForSuperAdmin(workspaceId);
     if (!detail) throw new NotFoundException({ error: "team not found" });
     return detail;
   }
@@ -84,25 +101,25 @@ export class AdminTeamsController {
   @Patch(":id/status")
   async setStatus(
     @CurrentSession() session: ApiSession,
-    @Param("id") teamId: string,
+    @Param("id") workspaceId: string,
     @Body(zBody(SetStatusSchema)) body: SetStatusInput,
   ) {
     // Never let an operator lock themselves out of their own org. (superAdmins
     // bypass the gate anyway, but a `suspended` self-status is still confusing
     // and pointless — refuse it like the self-delete guard does.)
-    if (teamId === session.teamId) {
+    if (workspaceId === session.workspaceId) {
       throw new BadRequestException({
         error: "cannot change your own organization's status",
       });
     }
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
-      select: { id: true },
+    const team = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { id: true, organizationId: true },
     });
     if (!team) throw new NotFoundException({ error: "team not found" });
 
-    await this.db.team.update({
-      where: { id: teamId },
+    await this.db.organization.update({
+      where: { id: team.organizationId },
       data: {
         status: body.status,
         // Reason is only meaningful while suspended; clear it on (re)activation.
@@ -115,7 +132,7 @@ export class AdminTeamsController {
     // Land the change immediately for every member of the target org (their
     // team, not the operator's, so the operator's own session is untouched).
     const members = await this.db.user.findMany({
-      where: { teamId },
+      where: { workspaceMemberships: { some: { workspaceId } } },
       select: { id: true },
     });
 
@@ -161,7 +178,7 @@ export class AdminTeamsController {
    */
   @Patch(":id/max-members")
   async setMaxMembers(
-    @Param("id") teamId: string,
+    @Param("id") workspaceId: string,
     @Body(zBody(SetMaxMembersSchema)) body: SetMaxMembersInput,
   ) {
     // No self-team guard here (unlike setStatus/remove): a member cap is NOT a
@@ -170,17 +187,56 @@ export class AdminTeamsController {
     // reversible by raising it again. Guarding it added zero safety and only
     // created a UI/server mismatch — the platform org-detail "Limit" control is
     // rendered for every org including the operator's own.
-    const updated = await this.db.team.updateMany({
-      where: { id: teamId },
+    // The seat cap is a WORKSPACE-level fact: a member holds a seat in a
+    // workspace, not in the organisation as a whole.
+    const updated = await this.db.workspace.updateMany({
+      where: { id: workspaceId },
       data: { maxMembers: body.maxMembers },
     });
     if (updated.count === 0) {
       throw new NotFoundException({ error: "team not found" });
     }
     const activeMembers = await this.db.user.count({
-      where: { teamId, deactivatedAt: null, role: { not: "superAdmin" } },
+      where: { workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null, isSuperAdmin: false },
     });
     return { ok: true, maxMembers: body.maxMembers, activeMembers };
+  }
+
+  /**
+   * Raise/lower how many WORKSPACES an organisation may create.
+   *
+   *   PATCH /api/admin/teams/:id/max-workspaces   { maxWorkspaces }
+   *
+   * Addressed by a workspace id like the sibling routes (the platform detail
+   * page is workspace-keyed), but writes the ORGANISATION that owns it.
+   *
+   * Deliberately NOT retroactive: setting a cap below the number of workspaces
+   * an org already has does not delete any. It only refuses the next `create`.
+   * Destroying a workspace full of conversations because someone typed a small
+   * number into an admin box would be indefensible.
+   */
+  @Patch(":id/max-workspaces")
+  async setMaxWorkspaces(
+    @Param("id") workspaceId: string,
+    @Body(zBody(SetMaxWorkspacesSchema)) body: SetMaxWorkspacesInput,
+  ) {
+    const updated = await this.db.organization.updateMany({
+      where: { workspaces: { some: { id: workspaceId } } },
+      data: { maxWorkspaces: body.maxWorkspaces },
+    });
+    if (updated.count === 0) {
+      throw new NotFoundException({ error: "team not found" });
+    }
+    const workspace = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { organizationId: true },
+    });
+    const workspaceCount = workspace
+      ? await this.db.workspace.count({
+          where: { organizationId: workspace.organizationId },
+        })
+      : 0;
+    return { ok: true, maxWorkspaces: body.maxWorkspaces, workspaceCount };
   }
 
   /**
@@ -189,13 +245,13 @@ export class AdminTeamsController {
    * scoped to the caller's own org). The superAdmin sets a new password and
    * hands it to the locked-out user out-of-band — same recovery story, just
    * reachable for any org the operator manages. The service scopes the lookup
-   * to `teamId`, so a userId from another org 404s rather than leaking.
+   * to `workspaceId`, so a userId from another org 404s rather than leaking.
    */
   @Post(":id/members/:userId/reset-password")
   @HttpCode(200)
   async resetMemberPassword(
     @CurrentSession() session: ApiSession,
-    @Param("id") teamId: string,
+    @Param("id") workspaceId: string,
     @Param("userId") userId: string,
     @Body(zBody(ResetUserPasswordSchema)) body: ResetUserPasswordInput,
   ) {
@@ -206,26 +262,26 @@ export class AdminTeamsController {
         error: "Use change password to update your own account",
       });
     }
-    await this.users.resetPassword(teamId, session.role, userId, body.newPassword);
+    await this.users.resetPassword(workspaceId, { role: session.role, isSuperAdmin: session.isSuperAdmin }, userId, body.newPassword);
     return { ok: true };
   }
 
   @Delete(":id")
   async remove(
     @CurrentSession() session: ApiSession,
-    @Param("id") teamId: string,
+    @Param("id") workspaceId: string,
   ) {
-    if (teamId === session.teamId) {
+    if (workspaceId === session.workspaceId) {
       throw new BadRequestException({
         error: "use /api/team to delete your own organization",
       });
     }
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
+    const team = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { id: true },
     });
     if (!team) throw new NotFoundException({ error: "team not found" });
-    await this.teamRoot.destroy(teamId, `api/admin/teams ${teamId}`);
+    await this.teamRoot.destroy(workspaceId, `api/admin/teams ${workspaceId}`);
     invalidateSuperAdminAggregates();
     return { ok: true };
   }

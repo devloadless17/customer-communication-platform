@@ -48,7 +48,8 @@ type SweeperName =
   | "webchat-visitor-retention"
   | "contact-transfer-artifacts"
   | "work-hours"
-  | "assignment-rebalance";
+  | "assignment-rebalance"
+  | "ticket-sla-breach";
 
 // Single in-process mutex; sweepers serialize through it. Boolean is enough
 // because Node's event loop is single-threaded — the only way two callers
@@ -74,6 +75,7 @@ const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
   "api-idempotency": 75 * 60 * 1000, // hourly
   "inbound-media": 5 * 60 * 1000, // 60s cadence
   "stale-calls": 5 * 60 * 1000, // 60s cadence
+  "ticket-sla-breach": 5 * 60 * 1000, // 60s cadence
   "conversation-analytics-drift": 25 * 60 * 60 * 1000, // 24h cadence
   "outbound-webhook-delivery-cleanup": 25 * 60 * 60 * 1000, // nightly cadence
   "message-rawpayload-retention": 25 * 60 * 60 * 1000, // 24h cadence (opt-in)
@@ -188,4 +190,25 @@ export function _resetSweeperMutex(): void {
   mutexHeld = false;
   lastCompletion.clear();
   firstAttempt.clear();
+}
+
+
+/**
+ * Is this the "pool already closed" error?
+ *
+ * Every sweeper is a `setInterval` that outlives the thing it queries. Two
+ * situations end the Prisma pool while a timer is still armed:
+ *
+ *   · dev hot-reload — the module is replaced, the new instance disconnects the
+ *     old pool, and the OLD interval keeps firing against it (`unref()` stops
+ *     the timer holding the process open, it does not stop the timer);
+ *   · graceful shutdown — Nest tears providers down and nothing guarantees the
+ *     sweepers stop before `PrismaService` disconnects.
+ *
+ * Neither is a fault worth a stack trace: the work is simply over. Sweepers use
+ * this to stop themselves instead of logging an alarming error on every tick.
+ */
+export function isPoolClosedError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("Cannot use a pool after calling end on the pool");
 }

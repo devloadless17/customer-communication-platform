@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import {
   ArrowRightLeft,
+  Ticket as TicketIcon,
   CircleSlash,
   Circle,
   Clock,
@@ -58,6 +59,10 @@ const ICONS: Partial<Record<StepType, React.ComponentType<{ className?: string }
   ask_question: HelpCircle,
   http_request: Globe,
   trigger_workflow: ArrowRightLeft,
+  create_ticket: TicketIcon,
+  set_ticket_status: TicketIcon,
+  set_ticket_priority: TicketIcon,
+  assign_ticket: TicketIcon,
 };
 
 export interface NodeData extends Record<string, unknown> {

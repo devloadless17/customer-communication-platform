@@ -25,7 +25,7 @@ export type { MessageSearchHit, MessageSearchPage };
  * can share the codec.
  */
 export async function searchConversationMessages(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   opts: { query: string; take?: number; cursor?: string | null },
 ): Promise<MessageSearchPage> {
@@ -39,7 +39,7 @@ export async function searchConversationMessages(
   // Scope check: prevent enumeration of another tenant's conversation
   // by id-guessing.
   const owns = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
+    where: { id: conversationId, workspaceId },
     select: { id: true },
   });
   if (!owns) return { items: [], nextCursor: null, totalMatched: 0 };
@@ -115,7 +115,7 @@ export async function searchConversationMessages(
  * clicked a search result — but capped by clampTake.
  */
 export async function loadMessageContextWindow(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   opts: { targetMessageId: string; before?: number; after?: number },
 ): Promise<{
@@ -129,7 +129,7 @@ export async function loadMessageContextWindow(
   const after = clampTake(opts.after, 25);
 
   const target = await db.message.findFirst({
-    where: { id: opts.targetMessageId, conversationId, teamId },
+    where: { id: opts.targetMessageId, conversationId, workspaceId },
     select: { id: true, timestamp: true },
   });
   if (!target) return null;

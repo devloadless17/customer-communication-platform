@@ -176,7 +176,7 @@ export function TagMultiPicker({
                 <TagChip
                   tag={{
                     id: "preview",
-                    teamId: "preview",
+                    workspaceId: "preview",
                     name: query.trim() || "new tag",
                     color: newColor,
                   }}

@@ -85,7 +85,7 @@ const MAX_TEXT = 500;
 
 /**
  * External API service. Routes are parallel to the internal ones but
- * scoped by `teamId` from the API key, and `changedByUserId / senderUserId`
+ * scoped by `workspaceId` from the API key, and `changedByUserId / senderUserId`
  * is always null (the API key is an org-level credential, not a person).
  *
  * Each operation publishes the SAME domain event the internal route does —
@@ -149,7 +149,7 @@ export class ExternalV1Service {
    * inline the same pattern in ExternalV1MessagingService.
    */
   private async withIdempotency<T>(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     idempotencyKey: string | undefined,
     route: string,
@@ -158,7 +158,7 @@ export class ExternalV1Service {
   ): Promise<T> {
     if (!idempotencyKey) return work();
     const claim = await this.idem.claim<T>(
-      teamId,
+      workspaceId,
       apiKeyId,
       idempotencyKey,
       this.idem.fingerprint(route, fingerprintPayload),
@@ -166,10 +166,10 @@ export class ExternalV1Service {
     if (claim.kind === "replay") return claim.result;
     try {
       const result = await work();
-      await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
+      await this.idem.complete(workspaceId, apiKeyId, idempotencyKey, result);
       return result;
     } catch (err) {
-      await this.idem.release(teamId, apiKeyId, idempotencyKey);
+      await this.idem.release(workspaceId, apiKeyId, idempotencyKey);
       throw err;
     }
   }
@@ -194,62 +194,63 @@ export class ExternalV1Service {
   // ===========================================================================
 
   listConversations(
-    teamId: string,
+    workspaceId: string,
     q: ListConversationsQueryInput,
     includeContactPii = true,
+    viewClauses: Prisma.ConversationWhereInput[] = [],
   ) {
-    return this.messaging.listConversations(teamId, q, includeContactPii);
+    return this.messaging.listConversations(workspaceId, q, includeContactPii, viewClauses);
   }
 
-  getConversation(teamId: string, id: string, includeContactPii = true) {
-    return this.messaging.getConversation(teamId, id, includeContactPii);
+  getConversation(workspaceId: string, id: string, includeContactPii = true) {
+    return this.messaging.getConversation(workspaceId, id, includeContactPii);
   }
 
   assign(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalAssignInput,
     idempotencyKey?: string,
   ) {
-    return this.messaging.assign(teamId, apiKeyId, conversationId, input, idempotencyKey);
+    return this.messaging.assign(workspaceId, apiKeyId, conversationId, input, idempotencyKey);
   }
 
   setStatus(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalStatusInput,
     idempotencyKey?: string,
   ) {
-    return this.messaging.setStatus(teamId, apiKeyId, conversationId, input, idempotencyKey);
+    return this.messaging.setStatus(workspaceId, apiKeyId, conversationId, input, idempotencyKey);
   }
 
   setAiEnabled(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalSetAiInput,
     idempotencyKey?: string,
   ) {
-    return this.messaging.setAiEnabled(teamId, apiKeyId, conversationId, input, idempotencyKey);
+    return this.messaging.setAiEnabled(workspaceId, apiKeyId, conversationId, input, idempotencyKey);
   }
 
   listMessages(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     q: ListMessagesQueryInput,
     includeContactPii = true,
   ) {
-    return this.messaging.listMessages(teamId, conversationId, q, includeContactPii);
+    return this.messaging.listMessages(workspaceId, conversationId, q, includeContactPii);
   }
 
-  findMessage(teamId: string, id: string, includeContactPii = true) {
-    return this.messaging.findMessage(teamId, id, includeContactPii);
+  findMessage(workspaceId: string, id: string, includeContactPii = true) {
+    return this.messaging.findMessage(workspaceId, id, includeContactPii);
   }
 
   sendMessage(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalSendMessageInput,
@@ -258,7 +259,7 @@ export class ExternalV1Service {
     reopenIfClosed?: boolean,
   ) {
     return this.messaging.sendMessage(
-      teamId,
+      workspaceId,
       apiKeyId,
       conversationId,
       input,
@@ -269,14 +270,14 @@ export class ExternalV1Service {
   }
 
   sendInteractive(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalSendInteractiveInput,
     idempotencyKey: string,
   ) {
     return this.messaging.sendInteractive(
-      teamId,
+      workspaceId,
       apiKeyId,
       conversationId,
       input,
@@ -285,37 +286,37 @@ export class ExternalV1Service {
   }
 
   assignByContact(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     contactId: string,
     input: ExternalContactAssignInput,
     idempotencyKey?: string,
   ) {
-    return this.messaging.assignByContact(teamId, apiKeyId, contactId, input, idempotencyKey);
+    return this.messaging.assignByContact(workspaceId, apiKeyId, contactId, input, idempotencyKey);
   }
 
   setStatusByContact(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     contactId: string,
     input: ExternalContactStatusInput,
     idempotencyKey?: string,
   ) {
-    return this.messaging.setStatusByContact(teamId, apiKeyId, contactId, input, idempotencyKey);
+    return this.messaging.setStatusByContact(workspaceId, apiKeyId, contactId, input, idempotencyKey);
   }
 
   sendTopLevelMessage(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     input: ExternalTopLevelSendMessageInput,
     idempotencyKey?: string,
     chainDepth?: number,
   ) {
-    return this.messaging.sendTopLevelMessage(teamId, apiKeyId, input, idempotencyKey, chainDepth);
+    return this.messaging.sendTopLevelMessage(workspaceId, apiKeyId, input, idempotencyKey, chainDepth);
   }
 
   createNote(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalNoteInput,
@@ -323,7 +324,7 @@ export class ExternalV1Service {
     chainDepth?: number,
   ) {
     return this.messaging.createNote(
-      teamId,
+      workspaceId,
       apiKeyId,
       conversationId,
       input,
@@ -332,8 +333,8 @@ export class ExternalV1Service {
     );
   }
 
-  deleteNote(teamId: string, conversationId: string, noteId: string) {
-    return this.messaging.deleteNote(teamId, conversationId, noteId);
+  deleteNote(workspaceId: string, conversationId: string, noteId: string) {
+    return this.messaging.deleteNote(workspaceId, conversationId, noteId);
   }
 
 
@@ -342,7 +343,7 @@ export class ExternalV1Service {
   // ===========================================================================
 
   /** Call history, newest first. Keyset cursor `<ringingAtMs>_<id>`. */
-  async listCalls(teamId: string, query: ExternalListCallsQueryInput) {
+  async listCalls(workspaceId: string, query: ExternalListCallsQueryInput) {
     const parsed = ((): { ringingAt: Date; id: string } | null => {
       if (!query.cursor) return null;
       const i = query.cursor.indexOf("_");
@@ -363,7 +364,7 @@ export class ExternalV1Service {
     }
 
     const where: Prisma.CallWhereInput = {
-      teamId,
+      workspaceId,
       ...(query.conversationId ? { conversationId: query.conversationId } : {}),
       ...(ringingAt.gte || ringingAt.lte ? { ringingAt } : {}),
       ...(parsed
@@ -426,9 +427,9 @@ export class ExternalV1Service {
    * from their business profile), so a local answer would tell an integration
    * "no permission" for someone perfectly callable.
    */
-  async getCallPermission(teamId: string, conversationId: string) {
+  async getCallPermission(workspaceId: string, conversationId: string) {
     const conv = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
+      where: { id: conversationId, workspaceId },
       select: {
         channel: true,
         contact: { select: { phoneNumber: true, bsuid: true } },
@@ -446,7 +447,7 @@ export class ExternalV1Service {
     if (!conv.contact?.phoneNumber && !conv.contact?.bsuid) {
       throw new BadRequestException({ error: "contact_has_no_callable_identity" });
     }
-    const config = await binding.getSendConfig(teamId);
+    const config = await binding.getSendConfig(workspaceId);
     const permission = await read(
       {
         ...(conv.contact.phoneNumber ? { to: conv.contact.phoneNumber } : {}),
@@ -467,20 +468,20 @@ export class ExternalV1Service {
 
   /** Ask the customer for permission to call them. Sends a billable message. */
   async requestCallPermission(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     idempotencyKey?: string,
   ) {
     return this.withIdempotency(
-      teamId,
+      workspaceId,
       apiKeyId,
       idempotencyKey,
       "POST /v1/conversations/:id/call-permission",
       { conversationId },
       async () => {
         const out = await this.calls.requestPermissionForTeam(
-          teamId,
+          workspaceId,
           conversationId,
         );
         return {
@@ -494,21 +495,21 @@ export class ExternalV1Service {
 
   /** Send a call button inviting the customer to call us. */
   async sendCallButton(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     conversationId: string,
     input: ExternalCallButtonInput,
     idempotencyKey?: string,
   ) {
     return this.withIdempotency(
-      teamId,
+      workspaceId,
       apiKeyId,
       idempotencyKey,
       "POST /v1/conversations/:id/call-button",
       { conversationId, ...input },
       async () => {
         const out = await this.calls.sendCallButtonForTeam(
-          teamId,
+          workspaceId,
           conversationId,
           input,
         );
@@ -521,13 +522,13 @@ export class ExternalV1Service {
   // CONTACTS — read
   // ===========================================================================
 
-  async getContact(teamId: string, id: string) {
+  async getContact(workspaceId: string, id: string) {
     const row = await this.db.contact.findFirst({
       // deletedAt:null — a tombstoned contact is gone from the directory; the
       // list path + every mutation already filter it out, so a direct GET must
       // 404 too (a partner holding a cached id would otherwise see it as live
       // here but get a 404 on the next PATCH — an inconsistent surface).
-      where: { id, teamId, deletedAt: null },
+      where: { id, workspaceId, deletedAt: null },
       include: EXTERNAL_CONTACT_INCLUDE,
     });
     if (!row) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
@@ -538,7 +539,7 @@ export class ExternalV1Service {
    * Find or list contacts. `phone` is the n8n "Find a Contact" path — exact
    * E.164 match, at most one row. Everything else is the paged list path.
    */
-  async listContacts(teamId: string, q: ListContactsQueryInput) {
+  async listContacts(workspaceId: string, q: ListContactsQueryInput) {
     // Natural-key short-circuits. Integrators usually know exactly one of
     // {phone, email, externalContactId} and want a single hydrated row back
     // without paging. Each branch returns at most one item and no cursor.
@@ -556,13 +557,13 @@ export class ExternalV1Service {
       const normalized = normalizePhoneE164(q.phone) ?? q.phone;
       const rows = await this.db.contact.findMany({
         // Phone is the WhatsApp identity (the partial unique on
-        // (teamId, phoneNumber) fires only for identityChannel='whatsapp'). The
+        // (workspaceId, phoneNumber) fires only for identityChannel='whatsapp'). The
         // same number can also sit on a social/widget contact via contact-share
         // or widget pre-chat; scope to whatsapp so a partner "who is +…?" lookup
         // is deterministic and returns the phone's canonical owner, not a row
         // that merely borrowed it. (Safe scalar AND — directoryContactWhere's OR
         // has no sibling OR here.)
-        where: { teamId, deletedAt: null, ...directoryContactWhere, identityChannel: "whatsapp", phoneNumber: normalized },
+        where: { workspaceId, deletedAt: null, ...directoryContactWhere, identityChannel: "whatsapp", phoneNumber: normalized },
         include: EXTERNAL_CONTACT_INCLUDE,
         take: 1,
       });
@@ -572,7 +573,7 @@ export class ExternalV1Service {
     if (q.email) {
       const rows = await this.db.contact.findMany({
         where: {
-          teamId,
+          workspaceId,
           deletedAt: null,
           ...directoryContactWhere,
           email: { equals: q.email.trim(), mode: "insensitive" },
@@ -585,7 +586,7 @@ export class ExternalV1Service {
     }
     if (q.externalContactId) {
       const rows = await this.db.contact.findMany({
-        where: { teamId, deletedAt: null, externalContactId: q.externalContactId },
+        where: { workspaceId, deletedAt: null, externalContactId: q.externalContactId },
         include: EXTERNAL_CONTACT_INCLUDE,
         take: 1,
       });
@@ -599,7 +600,7 @@ export class ExternalV1Service {
 
     const rows = await this.db.contact.findMany({
       where: {
-        teamId,
+        workspaceId,
         deletedAt: null,
         ...(q.stageId ? { stageId: q.stageId } : {}),
         ...(tagIds.length > 0 ? { tags: { some: { id: { in: tagIds } } } } : {}),
@@ -648,7 +649,7 @@ export class ExternalV1Service {
    * subscribers that haven't been migrated yet.
    */
   async createContact(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     input: ExternalCreateContactInput,
   ): Promise<ExternalContact> {
@@ -685,13 +686,13 @@ export class ExternalV1Service {
     let stageId: string | null;
     if (input.stageId) {
       const stage = await this.db.contactStage.findFirst({
-        where: { id: input.stageId, teamId },
+        where: { id: input.stageId, workspaceId },
         select: { id: true },
       });
       if (!stage) throw new BadRequestException({ error: "stage_not_found", detail: "stage not found" });
       stageId = stage.id;
     } else {
-      stageId = await ensureDefaultStage(teamId);
+      stageId = await ensureDefaultStage(workspaceId);
     }
 
     // Tag validation: only keep tag ids that exist on this team — defense
@@ -699,7 +700,7 @@ export class ExternalV1Service {
     let validTagIds: string[] = [];
     if (input.tagIds && input.tagIds.length > 0) {
       const tags = await this.db.tag.findMany({
-        where: { teamId, id: { in: input.tagIds } },
+        where: { workspaceId, id: { in: input.tagIds } },
         select: { id: true },
       });
       validTagIds = tags.map((t) => t.id);
@@ -709,7 +710,7 @@ export class ExternalV1Service {
     try {
       created = await this.db.contact.create({
         data: {
-          teamId,
+          workspaceId,
           // External /v1 contact create is WhatsApp-only (input requires
           // phone). Channel stamped explicitly — when a partner adds an IG
           // /v1 endpoint later, it'd stamp 'instagram' from its own path.
@@ -742,7 +743,7 @@ export class ExternalV1Service {
         // it (and its preserved conversation) instead of 409-ing on a row the
         // directory no longer shows — mirrors ContactsService.create.
         const revived = await this.reviveSoftDeletedByPhone(
-          teamId,
+          workspaceId,
           apiKeyId,
           phone,
           {
@@ -775,7 +776,7 @@ export class ExternalV1Service {
     // subscribers that still listen to the legacy kind="created" discriminator.
     await this.bus.publish({
       type: "contact.created",
-      teamId,
+      workspaceId,
       contact,
       source: "api",
       createdByUserId: null,
@@ -784,7 +785,7 @@ export class ExternalV1Service {
 
     await this.bus.publish({
       type: "contact.updated",
-      teamId,
+      workspaceId,
       contact,
       previousStageId: null,
       fieldChanges: Object.entries(customFields).map(([key, next]) => ({
@@ -817,7 +818,7 @@ export class ExternalV1Service {
    * preserved — mirror of ContactsService.reviveSoftDeletedByPhone.
    */
   private async reviveSoftDeletedByPhone(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     phone: string,
     data: {
@@ -835,7 +836,7 @@ export class ExternalV1Service {
   ): Promise<ExternalContact | null> {
     const existing = await this.db.contact.findFirst({
       // whatsapp-scoped: the phone unique slot this revives is WhatsApp-only.
-      where: { teamId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: { not: null } },
+      where: { workspaceId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: { not: null } },
       select: { id: true },
     });
     if (!existing) return null;
@@ -865,7 +866,7 @@ export class ExternalV1Service {
 
     await this.bus.publish({
       type: "contact.created",
-      teamId,
+      workspaceId,
       contact,
       source: "api",
       createdByUserId: null,
@@ -874,7 +875,7 @@ export class ExternalV1Service {
 
     await this.bus.publish({
       type: "contact.updated",
-      teamId,
+      workspaceId,
       contact,
       previousStageId: null,
       fieldChanges: Object.entries(contact.customFields).map(([key, next]) => ({
@@ -902,7 +903,7 @@ export class ExternalV1Service {
    * with `phoneNumber` ownProperty BEFORE this method is called).
    */
   async updateContact(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     contactId: string,
     input: ExternalUpdateContactInput,
@@ -914,7 +915,7 @@ export class ExternalV1Service {
     // docs/audit-guide.md.
     if (idempotencyKey) {
       const claim = await this.idem.claim<ExternalContact>(
-        teamId,
+        workspaceId,
         apiKeyId,
         idempotencyKey,
         this.idem.fingerprint("update_contact", { contactId, input }),
@@ -922,19 +923,19 @@ export class ExternalV1Service {
       if (claim.kind === "replay") return this.applyContactPii(claim.result, includeContactPii);
     }
     try {
-      const result = await this.updateContactInternal(teamId, apiKeyId, contactId, input);
+      const result = await this.updateContactInternal(workspaceId, apiKeyId, contactId, input);
       if (idempotencyKey) {
-        await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
+        await this.idem.complete(workspaceId, apiKeyId, idempotencyKey, result);
       }
       return this.applyContactPii(result, includeContactPii);
     } catch (err) {
-      if (idempotencyKey) await this.idem.release(teamId, apiKeyId, idempotencyKey);
+      if (idempotencyKey) await this.idem.release(workspaceId, apiKeyId, idempotencyKey);
       throw err;
     }
   }
 
   private async updateContactInternal(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     contactId: string,
     input: ExternalUpdateContactInput,
@@ -953,7 +954,7 @@ export class ExternalV1Service {
 
     if (typeof stageId === "string") {
       const ok = await this.db.contactStage.findFirst({
-        where: { id: stageId, teamId },
+        where: { id: stageId, workspaceId },
         select: { id: true },
       });
       if (!ok) throw new BadRequestException({ error: "stage_not_found", detail: "stage not found" });
@@ -966,7 +967,7 @@ export class ExternalV1Service {
           // deletedAt:null — a partner holding a tombstoned id (cached / from a
           // prior export) must not be able to edit a soft-deleted contact via
           // /v1. Mirrors the contacts.service M5 mutation guards.
-          where: { id: contactId, teamId, deletedAt: null },
+          where: { id: contactId, workspaceId, deletedAt: null },
           include: EXTERNAL_CONTACT_INCLUDE,
         });
         if (!existing) return null;
@@ -994,7 +995,7 @@ export class ExternalV1Service {
         // to bump, exactly one wins. The loser surfaces as 409 so the
         // partner integration can retry against the fresh server state.
         const updated = await tx.contact.update({
-          where: { id: contactId, teamId, version: existing.version },
+          where: { id: contactId, workspaceId, version: existing.version },
           data: {
             ...(name !== undefined ? { name } : derivedName !== undefined ? { name: derivedName } : {}),
             ...(firstName !== undefined ? { firstName } : {}),
@@ -1064,7 +1065,7 @@ export class ExternalV1Service {
     // Always publish `contact.updated` for the catch-all subscribers.
     await this.bus.publish({
       type: "contact.updated",
-      teamId,
+      workspaceId,
       contact,
       previousStageId: existing.stageId,
       fieldChanges,
@@ -1080,7 +1081,7 @@ export class ExternalV1Service {
     if (existing.stageId !== updated.stageId) {
       await this.bus.publish({
         type: "contact.lifecycle_changed",
-        teamId,
+        workspaceId,
         contactId: updated.id,
         before: { stageId: existing.stageId },
         after: { stageId: updated.stageId },
@@ -1103,25 +1104,25 @@ export class ExternalV1Service {
    * coverage — every /v1 mutation now honors the header.
    */
   async upsertContact(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     input: ExternalUpsertContactInput,
     idempotencyKey?: string,
     includeContactPii = true,
   ): Promise<{ contact: ExternalContact; created: boolean }> {
     const result = await this.withIdempotency(
-      teamId,
+      workspaceId,
       apiKeyId,
       idempotencyKey,
       "upsert_contact",
       { input },
-      () => this.upsertContactInternal(teamId, apiKeyId, input),
+      () => this.upsertContactInternal(workspaceId, apiKeyId, input),
     );
     return { contact: this.applyContactPii(result.contact, includeContactPii), created: result.created };
   }
 
   private async upsertContactInternal(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     input: ExternalUpsertContactInput,
   ): Promise<{ contact: ExternalContact; created: boolean }> {
@@ -1138,7 +1139,7 @@ export class ExternalV1Service {
       // 'whatsapp', so the whole /v1 phone-keyed contact CRUD surface is
       // WhatsApp-semantic. Without this a re-sync could patch/revive a
       // social/widget contact that merely borrowed the phone.
-      where: { teamId, phoneNumber: phone, identityChannel: "whatsapp" },
+      where: { workspaceId, phoneNumber: phone, identityChannel: "whatsapp" },
       select: { id: true, deletedAt: true },
     });
     // Not found OR soft-deleted → go through createContact. For a tombstoned
@@ -1148,7 +1149,7 @@ export class ExternalV1Service {
     let targetId = existing && !existing.deletedAt ? existing.id : null;
     if (!targetId) {
       try {
-        const contact = await this.createContact(teamId, apiKeyId, input);
+        const contact = await this.createContact(workspaceId, apiKeyId, input);
         return { contact, created: true };
       } catch (err) {
         // API-6: two concurrent FIRST-time upserts of the same phone — the
@@ -1158,7 +1159,7 @@ export class ExternalV1Service {
         // path instead of surfacing the 409 to the partner.
         if (err instanceof ConflictException) {
           const winner = await this.db.contact.findFirst({
-            where: { teamId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: null },
+            where: { workspaceId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: null },
             select: { id: true },
           });
           if (!winner) throw err;
@@ -1173,7 +1174,7 @@ export class ExternalV1Service {
     // Forward EVERY directory field the update path supports (firstName /
     // lastName / language / countryCode included — they were silently dropped
     // before, so a CRM re-sync never refreshed them after the first create).
-    const contact = await this.updateContactInternal(teamId, apiKeyId, targetId, {
+    const contact = await this.updateContactInternal(workspaceId, apiKeyId, targetId, {
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(input.firstName !== undefined ? { firstName: input.firstName } : {}),
       ...(input.lastName !== undefined ? { lastName: input.lastName } : {}),
@@ -1191,7 +1192,7 @@ export class ExternalV1Service {
     // not a full replace; use DELETE /contacts/:id/tags/:tagId to unassign.
     if (input.tagIds && input.tagIds.length > 0) {
       return {
-        contact: await this.addContactTagsInternal(teamId, apiKeyId, targetId, {
+        contact: await this.addContactTagsInternal(workspaceId, apiKeyId, targetId, {
           tagIds: input.tagIds,
         }),
         created: false,
@@ -1208,12 +1209,12 @@ export class ExternalV1Service {
    * ContactsService.remove. A hard GDPR purge is a separate, explicit path.
    */
   async deleteContact(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     contactId: string,
   ): Promise<void> {
     const contact = await this.db.contact.findFirst({
-      where: { id: contactId, teamId, deletedAt: null },
+      where: { id: contactId, workspaceId, deletedAt: null },
       select: { id: true },
     });
     if (!contact) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
@@ -1225,7 +1226,7 @@ export class ExternalV1Service {
 
     await this.bus.publish({
       type: "contact.deleted",
-      teamId,
+      workspaceId,
       contactId,
       // Conversations are preserved on soft-delete — none to splice from lists.
       conversationIds: [],
@@ -1243,10 +1244,10 @@ export class ExternalV1Service {
    * (siloed per channel by design) so this returns a single-element array.
    * Future multi-channel rollout extends the shape here, not at the call site.
    */
-  async getContactChannels(teamId: string, contactId: string) {
+  async getContactChannels(workspaceId: string, contactId: string) {
     const c = await this.db.contact.findFirst({
       // deletedAt:null — consistent with getContact + every list/mutation path.
-      where: { id: contactId, teamId, deletedAt: null },
+      where: { id: contactId, workspaceId, deletedAt: null },
       select: { id: true, phoneNumber: true, identityChannel: true, externalContactId: true },
     });
     if (!c) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
@@ -1274,7 +1275,7 @@ export class ExternalV1Service {
   // ===========================================================================
 
   async addContactTags(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     contactId: string,
     input: ExternalContactAddTagsInput,
@@ -1282,18 +1283,18 @@ export class ExternalV1Service {
     includeContactPii = true,
   ): Promise<ExternalContact> {
     const contact = await this.withIdempotency(
-      teamId,
+      workspaceId,
       apiKeyId,
       idempotencyKey,
       "add_contact_tags",
       { contactId, tagIds: input.tagIds },
-      () => this.addContactTagsInternal(teamId, apiKeyId, contactId, input),
+      () => this.addContactTagsInternal(workspaceId, apiKeyId, contactId, input),
     );
     return this.applyContactPii(contact, includeContactPii);
   }
 
   private async addContactTagsInternal(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     contactId: string,
     input: ExternalContactAddTagsInput,
@@ -1301,13 +1302,13 @@ export class ExternalV1Service {
     const contact = await this.db.contact.findFirst({
       // deletedAt:null — don't tag a tombstoned contact (would write join rows +
       // fan out workflow/webhook events for a contact hidden everywhere else).
-      where: { id: contactId, teamId, deletedAt: null },
+      where: { id: contactId, workspaceId, deletedAt: null },
       include: EXTERNAL_CONTACT_INCLUDE,
     });
     if (!contact) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
 
     const tags = await this.db.tag.findMany({
-      where: { teamId, id: { in: input.tagIds } },
+      where: { workspaceId, id: { in: input.tagIds } },
       select: { id: true },
     });
     const validIds = tags.map((t) => t.id);
@@ -1321,7 +1322,7 @@ export class ExternalV1Service {
     let updated;
     try {
       updated = await this.db.contact.update({
-        where: { id: contactId, teamId, version: contact.version },
+        where: { id: contactId, workspaceId, version: contact.version },
         data: {
           tags: { connect: newIds.map((id) => ({ id })) },
           version: { increment: 1 },
@@ -1340,7 +1341,7 @@ export class ExternalV1Service {
 
     const tagIds = updated.tags.map((t) => t.id);
     await this.publishContactTagChange(
-      teamId,
+      workspaceId,
       apiKeyId,
       updated,
       contact.stageId,
@@ -1358,7 +1359,7 @@ export class ExternalV1Service {
    * event carrying all `removed` ids.
    */
   async removeContactTags(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     contactId: string,
     tagIds: string[],
@@ -1367,18 +1368,18 @@ export class ExternalV1Service {
     includeContactPii = true,
   ): Promise<ExternalContact> {
     const contact = await this.withIdempotency(
-      teamId,
+      workspaceId,
       apiKeyId,
       idempotencyKey,
       "remove_contact_tags",
       { contactId, tagIds },
-      () => this.removeContactTagsInternal(teamId, apiKeyId, contactId, tagIds, silent),
+      () => this.removeContactTagsInternal(workspaceId, apiKeyId, contactId, tagIds, silent),
     );
     return this.applyContactPii(contact, includeContactPii);
   }
 
   private async removeContactTagsInternal(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     contactId: string,
     tagIds: string[],
@@ -1386,7 +1387,7 @@ export class ExternalV1Service {
   ): Promise<ExternalContact> {
     const contact = await this.db.contact.findFirst({
       // deletedAt:null — consistent with the other /v1 contact mutators.
-      where: { id: contactId, teamId, deletedAt: null },
+      where: { id: contactId, workspaceId, deletedAt: null },
       include: EXTERNAL_CONTACT_INCLUDE,
     });
     if (!contact) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
@@ -1400,7 +1401,7 @@ export class ExternalV1Service {
     let updated;
     try {
       updated = await this.db.contact.update({
-        where: { id: contactId, teamId, version: contact.version },
+        where: { id: contactId, workspaceId, version: contact.version },
         data: {
           tags: { disconnect: toRemove.map((id) => ({ id })) },
           version: { increment: 1 },
@@ -1418,7 +1419,7 @@ export class ExternalV1Service {
     }
     const newTagIds = updated.tags.map((t) => t.id);
     await this.publishContactTagChange(
-      teamId,
+      workspaceId,
       apiKeyId,
       updated,
       contact.stageId,
@@ -1430,7 +1431,7 @@ export class ExternalV1Service {
   }
 
   async removeContactTag(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     contactId: string,
     tagId: string,
@@ -1443,13 +1444,13 @@ export class ExternalV1Service {
     // DELETE /v1/contacts/:id/tags/:tagId always fanouts while the bulk
     // DELETE could be silenced). Collapsing closes the asymmetry.
     const contact = await this.withIdempotency(
-      teamId,
+      workspaceId,
       apiKeyId,
       idempotencyKey,
       "remove_contact_tag",
       { contactId, tagId },
       () =>
-        this.removeContactTagsInternal(teamId, apiKeyId, contactId, [tagId], false),
+        this.removeContactTagsInternal(workspaceId, apiKeyId, contactId, [tagId], false),
     );
     return this.applyContactPii(contact, includeContactPii);
   }
@@ -1461,7 +1462,7 @@ export class ExternalV1Service {
    * layer fans out a single frame regardless of how many contacts × tags.
    */
   async bulkContactTags(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     action: "tag-add" | "tag-remove",
     input: ExternalBulkTagInput,
@@ -1484,12 +1485,12 @@ export class ExternalV1Service {
       );
     }
     return this.withIdempotency(
-      teamId,
+      workspaceId,
       apiKeyId,
       idempotencyKey,
       action === "tag-add" ? "bulk_contact_tags_add" : "bulk_contact_tags_remove",
       { action, contactIds: input.contactIds, tagIds: input.tagIds },
-      () => this.bulkContactTagsInternal(teamId, apiKeyId, action, input),
+      () => this.bulkContactTagsInternal(workspaceId, apiKeyId, action, input),
     );
   }
 
@@ -1508,20 +1509,20 @@ export class ExternalV1Service {
    * agent's role may withhold `tags:manage`; a key has no role).
    */
   async startContactImport(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     input: ExternalStartImportInput,
     idempotencyKey?: string,
   ): Promise<{ jobId: string }> {
     return this.withIdempotency(
-      teamId,
+      workspaceId,
       apiKeyId,
       idempotencyKey,
       "start_contact_import",
       { uploadKey: input.uploadKey, mode: input.mode },
       () =>
         this.transfers.startImport({
-          teamId,
+          workspaceId,
           userId: null,
           uploadKey: input.uploadKey,
           filename: input.filename,
@@ -1538,7 +1539,7 @@ export class ExternalV1Service {
   }
 
   private async bulkContactTagsInternal(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     action: "tag-add" | "tag-remove",
     input: ExternalBulkTagInput,
@@ -1549,7 +1550,7 @@ export class ExternalV1Service {
       // contacts out of the join + the per-contact fanout (the DELETE join keys
       // off _ContactToTag.A only and can't reference Contact.deletedAt, so this
       // pre-filter is the gate). Mirrors the contacts.service bulk M5 guard.
-      where: { teamId, deletedAt: null, id: { in: input.contactIds } },
+      where: { workspaceId, deletedAt: null, id: { in: input.contactIds } },
       select: { id: true },
     });
     const ownedIds = ownContacts.map((c) => c.id);
@@ -1558,7 +1559,7 @@ export class ExternalV1Service {
     }
 
     const validTags = await this.db.tag.findMany({
-      where: { teamId, id: { in: input.tagIds } },
+      where: { workspaceId, id: { in: input.tagIds } },
       select: { id: true },
     });
     const validTagIds = validTags.map((t) => t.id);
@@ -1589,20 +1590,20 @@ export class ExternalV1Service {
         await this.db.$executeRaw`
           INSERT INTO "_ContactToTag" ("A", "B")
           SELECT id, ${tagId} FROM "Contact"
-          WHERE id = ANY(${ownedIds}::text[]) AND "teamId" = ${teamId}
+          WHERE id = ANY(${ownedIds}::text[]) AND "workspaceId" = ${workspaceId}
           ON CONFLICT DO NOTHING
         `;
       } else {
-        // SEC-4: in-SQL teamId backstop mirroring the tag-add path's
-        // `Contact.teamId = ${teamId}` guard. `ownedIds`/`validTagIds` are
+        // SEC-4: in-SQL workspaceId backstop mirroring the tag-add path's
+        // `Contact.workspaceId = ${workspaceId}` guard. `ownedIds`/`validTagIds` are
         // already team-pre-filtered, so this is defense-in-depth — but it means
         // the destructive DELETE can never touch a cross-team join row even if a
         // future caller forgets the pre-filter.
         await this.db.$executeRaw`
           DELETE FROM "_ContactToTag"
           WHERE "A" = ANY(${ownedIds}::text[]) AND "B" = ${tagId}
-            AND "A" IN (SELECT id FROM "Contact" WHERE "teamId" = ${teamId})
-            AND "B" IN (SELECT id FROM "Tag" WHERE "teamId" = ${teamId})
+            AND "A" IN (SELECT id FROM "Contact" WHERE "workspaceId" = ${workspaceId})
+            AND "B" IN (SELECT id FROM "Tag" WHERE "workspaceId" = ${workspaceId})
         `;
       }
     }
@@ -1613,7 +1614,7 @@ export class ExternalV1Service {
     await this.db.$executeRaw`
       UPDATE "Contact"
       SET version = version + 1
-      WHERE id = ANY(${ownedIds}::text[]) AND "teamId" = ${teamId}
+      WHERE id = ANY(${ownedIds}::text[]) AND "workspaceId" = ${workspaceId}
     `;
 
     // Per-contact `contact.updated` events for workflow + audit dispatch —
@@ -1623,7 +1624,7 @@ export class ExternalV1Service {
     // but the outbound-webhooks subscriber doesn't read that flag) so the
     // n8n "On Contact Tag updated" trigger fires per affected contact.
     const updated = await this.db.contact.findMany({
-      where: { teamId, id: { in: ownedIds } },
+      where: { workspaceId, id: { in: ownedIds } },
       include: EXTERNAL_CONTACT_INCLUDE,
     });
     // Bounded 16-lane fanout — see contacts.service.ts for rationale. An
@@ -1646,7 +1647,7 @@ export class ExternalV1Service {
 
       await this.bus.publish({
         type: "contact.updated",
-        teamId,
+        workspaceId,
         contact: payload,
         previousStageId: c.stageId,
         fieldChanges: [],
@@ -1664,7 +1665,7 @@ export class ExternalV1Service {
       if (changed) {
         await this.bus.publish({
           type: "contact.tag_changed",
-          teamId,
+          workspaceId,
           contactId: c.id,
           // `before` is reconstructed from the post-state ± this contact's real
           // delta: for the add path it's the current set minus what we added;
@@ -1687,7 +1688,7 @@ export class ExternalV1Service {
 
     await this.bus.publish({
       type: "contact.bulk_updated",
-      teamId,
+      workspaceId,
       contactIds: ownedIds,
       changeKind: "tags",
       changedByUserId: null,
@@ -1701,9 +1702,9 @@ export class ExternalV1Service {
   // CONTACT FIELDS catalog
   // ===========================================================================
 
-  async listContactFields(teamId: string) {
+  async listContactFields(workspaceId: string) {
     const rows = await this.db.contactFieldDefinition.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: [{ order: "asc" }, { createdAt: "asc" }],
     });
     return {
@@ -1715,17 +1716,17 @@ export class ExternalV1Service {
    * Find a custom field by id OR by key. respond.io's "Find a Custom Field"
    * node accepts either; we mirror that here.
    */
-  async findContactField(teamId: string, idOrKey: string) {
+  async findContactField(workspaceId: string, idOrKey: string) {
     const row = await this.db.contactFieldDefinition.findFirst({
-      where: { teamId, OR: [{ id: idOrKey }, { key: idOrKey }] },
+      where: { workspaceId, OR: [{ id: idOrKey }, { key: idOrKey }] },
     });
     if (!row) throw new NotFoundException({ error: "contact_field_not_found", detail: "contact field not found" });
     return { id: row.id, key: row.key, label: row.label, order: row.order };
   }
 
-  async createContactField(teamId: string, input: ExternalCreateContactFieldInput) {
+  async createContactField(workspaceId: string, input: ExternalCreateContactFieldInput) {
     const existing = await this.db.contactFieldDefinition.findMany({
-      where: { teamId },
+      where: { workspaceId },
       select: { key: true, order: true },
       orderBy: { order: "desc" },
     });
@@ -1755,11 +1756,11 @@ export class ExternalV1Service {
 
     try {
       const created = await this.db.contactFieldDefinition.create({
-        data: { teamId, key, label: input.label, order: nextOrder },
+        data: { workspaceId, key, label: input.label, order: nextOrder },
       });
       await this.bus.publish({
         type: "team.catalog_changed",
-        teamId,
+        workspaceId,
         scope: "contact-fields",
       });
       return { id: created.id, key: created.key, label: created.label, order: created.order };
@@ -1780,31 +1781,31 @@ export class ExternalV1Service {
   // TAGS catalog
   // ===========================================================================
 
-  async listTags(teamId: string): Promise<{ items: Tag[] }> {
+  async listTags(workspaceId: string): Promise<{ items: Tag[] }> {
     const rows = await this.db.tag.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: { name: "asc" },
     });
     return {
       items: rows.map((r) => ({
         id: r.id,
-        teamId: r.teamId,
+        workspaceId: r.workspaceId,
         name: r.name,
         color: normalizeColor(r.color),
       })),
     };
   }
 
-  async createTag(teamId: string, input: ExternalCreateTagInput): Promise<Tag> {
+  async createTag(workspaceId: string, input: ExternalCreateTagInput): Promise<Tag> {
     const color = normalizeColor(input.color);
     try {
       const created = await this.db.tag.create({
-        data: { teamId, name: input.name, color },
+        data: { workspaceId, name: input.name, color },
       });
-      await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "tags" });
+      await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "tags" });
       return {
         id: created.id,
-        teamId: created.teamId,
+        workspaceId: created.workspaceId,
         name: created.name,
         color: normalizeColor(created.color),
       };
@@ -1824,15 +1825,15 @@ export class ExternalV1Service {
     }
   }
 
-  async updateTag(teamId: string, id: string, input: ExternalUpdateTagInput): Promise<Tag> {
-    const existing = await this.db.tag.findFirst({ where: { id, teamId } });
+  async updateTag(workspaceId: string, id: string, input: ExternalUpdateTagInput): Promise<Tag> {
+    const existing = await this.db.tag.findFirst({ where: { id, workspaceId } });
     if (!existing) throw new NotFoundException({ error: "tag_not_found", detail: "tag not found" });
     try {
       const updated = await this.db.tag.update({ where: { id }, data: input });
-      await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "tags" });
+      await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "tags" });
       return {
         id: updated.id,
-        teamId: updated.teamId,
+        workspaceId: updated.workspaceId,
         name: updated.name,
         color: normalizeColor(updated.color),
       };
@@ -1849,26 +1850,26 @@ export class ExternalV1Service {
     }
   }
 
-  async deleteTag(teamId: string, id: string): Promise<void> {
-    const existing = await this.db.tag.findFirst({ where: { id, teamId } });
+  async deleteTag(workspaceId: string, id: string): Promise<void> {
+    const existing = await this.db.tag.findFirst({ where: { id, workspaceId } });
     if (!existing) throw new NotFoundException({ error: "tag_not_found", detail: "tag not found" });
     await this.db.tag.delete({ where: { id } });
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "tags" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "tags" });
   }
 
   // ===========================================================================
   // STAGES catalog (read-only via /v1)
   // ===========================================================================
 
-  async listStages(teamId: string): Promise<{ items: ContactStage[] }> {
+  async listStages(workspaceId: string): Promise<{ items: ContactStage[] }> {
     const rows = await this.db.contactStage.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: [{ position: "asc" }, { createdAt: "asc" }],
     });
     return {
       items: rows.map((r) => ({
         id: r.id,
-        teamId: r.teamId,
+        workspaceId: r.workspaceId,
         name: r.name,
         color: r.color as TagColor,
         position: r.position,
@@ -1881,10 +1882,11 @@ export class ExternalV1Service {
   // USERS
   // ===========================================================================
 
-  async listUsers(teamId: string): Promise<{ items: User[] }> {
+  async listUsers(workspaceId: string): Promise<{ items: User[] }> {
     const rows = await this.db.user.findMany({
-      where: { teamId },
+      where: { workspaceMemberships: { some: { workspaceId } } },
       orderBy: { name: "asc" },
+      include: { workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
     });
     return {
       items: await Promise.all(
@@ -1894,8 +1896,8 @@ export class ExternalV1Service {
           const avatarUrl = await toExternalAvatarUrl(u.id, !!u.avatarUrl);
           return {
             id: u.id,
-            teamId: u.teamId,
-            role: u.role,
+            workspaceId,
+            role: u.workspaceMemberships[0]?.role ?? "agent",
             name: u.name,
             email: u.email,
             ...(avatarUrl ? { avatarUrl } : {}),
@@ -1907,17 +1909,18 @@ export class ExternalV1Service {
     };
   }
 
-  async findUser(teamId: string, idOrEmail: string): Promise<{ user: User }> {
+  async findUser(workspaceId: string, idOrEmail: string): Promise<{ user: User }> {
     const row = await this.db.user.findFirst({
-      where: { teamId, OR: [{ id: idOrEmail }, { email: idOrEmail }] },
+      where: { workspaceMemberships: { some: { workspaceId } }, OR: [{ id: idOrEmail }, { email: idOrEmail }] },
+      include: { workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
     });
     if (!row) throw new NotFoundException({ error: "user_not_found", detail: "user not found" });
     const avatarUrl = await toExternalAvatarUrl(row.id, !!row.avatarUrl);
     return {
       user: {
         id: row.id,
-        teamId: row.teamId,
-        role: row.role,
+        workspaceId,
+        role: row.workspaceMemberships[0]?.role ?? "agent",
         name: row.name,
         email: row.email,
         ...(avatarUrl ? { avatarUrl } : {}),
@@ -1938,24 +1941,24 @@ export class ExternalV1Service {
    * role hierarchy to compare against); `write:users` is the gate.
    */
   async setUserAvailability(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: SetUserAvailabilityInput,
   ) {
     const user = await this.users.setUserAvailability(
-      teamId,
+      workspaceId,
       // No member identity behind an API key — null keeps the write attributed
       // as "admin" without falsely crediting it to the target themselves.
       null,
-      "superAdmin",
+      { role: "admin", isSuperAdmin: true },
       userId,
       input,
     );
     return { user };
   }
 
-  async setUserWorkHours(teamId: string, userId: string, input: SetUserWorkHoursInput) {
-    const user = await this.users.setUserWorkHours(teamId, "superAdmin", userId, input);
+  async setUserWorkHours(workspaceId: string, userId: string, input: SetUserWorkHoursInput) {
+    const user = await this.users.setUserWorkHours(workspaceId, { role: "admin", isSuperAdmin: true }, userId, input);
     return { user };
   }
 
@@ -1963,10 +1966,10 @@ export class ExternalV1Service {
   // CHANNELS — synthetic single-row response for parity
   // ===========================================================================
 
-  async listChannels(teamId: string) {
+  async listChannels(workspaceId: string) {
     // One active connection per provider today; lists all the team's channels.
     const conns = await this.db.channelConnection.findMany({
-      where: { teamId, isActive: true },
+      where: { workspaceId, isActive: true },
       select: { channel: true, config: true },
     });
     const items = conns
@@ -2012,7 +2015,7 @@ export class ExternalV1Service {
   // ===========================================================================
 
   private async publishContactTagChange(
-    teamId: string,
+    workspaceId: string,
     apiKeyId: string,
     updated: Prisma.ContactGetPayload<{ include: { tags: { select: { id: true } } } }>,
     previousStageId: string | null,
@@ -2026,7 +2029,7 @@ export class ExternalV1Service {
     // Existing catch-all for legacy subscribers.
     await this.bus.publish({
       type: "contact.updated",
-      teamId,
+      workspaceId,
       contact: payload,
       previousStageId,
       fieldChanges: [],
@@ -2042,7 +2045,7 @@ export class ExternalV1Service {
     if (tagChanges.added.length > 0 || tagChanges.removed.length > 0) {
       await this.bus.publish({
         type: "contact.tag_changed",
-        teamId,
+        workspaceId,
         contactId: updated.id,
         before: { tagIds: previousTagIds },
         after: { tagIds },
@@ -2058,10 +2061,10 @@ export class ExternalV1Service {
   // ── Broadcasts (read-only) ─────────────────────────────────────────────────
 
   /** Campaign list, newest first. `since` lets a client poll incrementally. */
-  async listBroadcasts(teamId: string, q: ListBroadcastsQueryInput) {
+  async listBroadcasts(workspaceId: string, q: ListBroadcastsQueryInput) {
     const rows = await this.db.broadcast.findMany({
       where: {
-        teamId,
+        workspaceId,
         ...(q.status ? { status: q.status } : {}),
         ...(q.since ? { createdAt: { gte: new Date(q.since) } } : {}),
       },
@@ -2077,29 +2080,29 @@ export class ExternalV1Service {
     };
   }
 
-  async getBroadcast(teamId: string, id: string) {
-    const row = await this.db.broadcast.findFirst({ where: { id, teamId } });
+  async getBroadcast(workspaceId: string, id: string) {
+    const row = await this.db.broadcast.findFirst({ where: { id, workspaceId } });
     if (!row) throw new NotFoundException({ error: "broadcast_not_found" });
     return broadcastToExternal(row);
   }
 
   /** The SAME report object the in-app UI renders — one computation, three
    *  consumers, so the API and the dashboard can never disagree on a number. */
-  async getBroadcastReport(teamId: string, id: string) {
-    const report = await getBroadcastReport(teamId, id);
+  async getBroadcastReport(workspaceId: string, id: string) {
+    const report = await getBroadcastReport(workspaceId, id);
     if (!report) throw new NotFoundException({ error: "broadcast_not_found" });
     return report;
   }
 
   async listBroadcastRecipients(
-    teamId: string,
+    workspaceId: string,
     id: string,
     q: ListBroadcastRecipientsQueryInput,
   ) {
-    // BroadcastRecipient carries no teamId of its own (it is scoped through the
+    // BroadcastRecipient carries no workspaceId of its own (it is scoped through the
     // parent), so ownership must be proven here before any recipient read.
     const owner = await this.db.broadcast.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true },
     });
     if (!owner) throw new NotFoundException({ error: "broadcast_not_found" });

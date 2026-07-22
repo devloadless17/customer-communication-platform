@@ -47,12 +47,12 @@ function track(page: Page): string[] {
 }
 
 const PHONE = "+15550777013";
-let teamId: string;
+let workspaceId: string;
 let contactId: string;
 let conversationId: string;
 
 test.beforeAll(async () => {
-  teamId = (await superadminTeam()).teamId;
+  workspaceId = (await superadminTeam()).workspaceId;
   const now = Date.now();
   // Idempotent: clear any leftover from a prior run of THIS spec (by its unique
   // phone) without touching anything else.
@@ -64,7 +64,7 @@ test.beforeAll(async () => {
 
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       phoneNumber: PHONE,
       identityChannel: "whatsapp",
       name: "UI Polish E2E",
@@ -75,7 +75,7 @@ test.beforeAll(async () => {
   contactId = contact.id;
   const conv = await db().conversation.create({
     data: {
-      teamId,
+      workspaceId,
       contactId: contact.id,
       channel: "whatsapp",
       status: "open",
@@ -86,7 +86,7 @@ test.beforeAll(async () => {
   conversationId = conv.id;
   await db().message.create({
     data: {
-      teamId,
+      workspaceId,
       conversationId,
       externalId: `ui-polish-${now}`,
       direction: "in",

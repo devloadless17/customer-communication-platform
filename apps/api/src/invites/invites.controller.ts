@@ -25,7 +25,7 @@ export class InvitesController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    const invites = await this.invites.list(session.teamId);
+    const invites = await this.invites.list(session.workspaceId);
     return { invites };
   }
 
@@ -36,9 +36,14 @@ export class InvitesController {
     @Body(zBody(CreateInviteSchema)) body: CreateInviteInput,
   ) {
     const originUrl = `${req.protocol}://${req.get("host") ?? "localhost"}`;
+    // Inviting into ANOTHER workspace of the same org is allowed (Organization
+    // settings does it); inviting into another ORG's workspace is not. The
+    // check is here rather than trusting the body because `workspaceId` is
+    // client input — the same rule as every other tenant-scoped id.
+    const targetWorkspaceId = await this.invites.resolveTargetWorkspace(session, body.workspaceId);
     const invite = await this.invites.create(
-      session.teamId,
-      session.role,
+      targetWorkspaceId,
+      { role: session.role, isSuperAdmin: session.isSuperAdmin },
       session.userId,
       originUrl,
       body,
@@ -51,7 +56,7 @@ export class InvitesController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.invites.revoke(session.teamId, id);
+    await this.invites.revoke(session.workspaceId, id);
     return { ok: true };
   }
 }

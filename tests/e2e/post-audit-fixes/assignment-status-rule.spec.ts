@@ -23,13 +23,13 @@
 import { test, expect } from "@playwright/test";
 import { db, superadminTeam, wipeTestData } from "../_helpers/db";
 
-let teamId: string;
+let workspaceId: string;
 let userId: string;
 
 test.beforeAll(async () => {
   await wipeTestData();
   const su = await superadminTeam();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
   userId = su.userId;
 });
 
@@ -46,7 +46,7 @@ async function makeConversation(
   convSeq += 1;
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       phoneNumber: `+1555444${String(1000 + convSeq).slice(-4)}`,
       identityChannel: "whatsapp",
       name: `Assign rule ${status} ${convSeq}`,
@@ -55,7 +55,7 @@ async function makeConversation(
   });
   const conv = await db().conversation.create({
     data: {
-      teamId,
+      workspaceId,
       contactId: contact.id,
       channel: "whatsapp",
       status,

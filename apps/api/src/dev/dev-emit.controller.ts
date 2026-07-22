@@ -30,7 +30,7 @@ import type {
  *   1) `NODE_ENV !== "production"` — refuses prod builds outright (the
  *      route 404s in prod).
  *   2) `ENABLE_DEV_TOOLS=1` — opt-in env flag; defaults off even in dev.
- *   3) SessionGuard + every lookup scoped to `teamId` — even with the
+ *   3) SessionGuard + every lookup scoped to `workspaceId` — even with the
  *      flag on, an unauthenticated caller can't touch anything, and a
  *      logged-in user can't reach into another team.
  *
@@ -116,19 +116,19 @@ export class DevEmitController {
     if (!devToolsEnabled()) {
       throw new NotFoundException({ error: "not_found" });
     }
-    const { teamId, userId } = session;
+    const { workspaceId, userId } = session;
 
     switch (body.kind) {
       case "fake-inbound-message":
-        return this.handleFakeInbound(body, teamId);
+        return this.handleFakeInbound(body, workspaceId);
       case "mark-last-read":
-        return this.handleMarkLastRead(body, teamId);
+        return this.handleMarkLastRead(body, workspaceId);
       case "add-fake-note":
-        return this.handleAddNote(body, teamId, userId);
+        return this.handleAddNote(body, workspaceId, userId);
       case "toggle-status":
-        return this.handleToggleStatus(body, teamId);
+        return this.handleToggleStatus(body, workspaceId);
       case "assign":
-        return this.handleAssign(body, teamId);
+        return this.handleAssign(body, workspaceId);
       default: {
         const _exhaustive: never = body;
         void _exhaustive;
@@ -139,17 +139,17 @@ export class DevEmitController {
 
   // -------------------------------------------------------------------------
 
-  private async loadOwnedConversation(conversationId: string, teamId: string) {
+  private async loadOwnedConversation(conversationId: string, workspaceId: string) {
     return this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
+      where: { id: conversationId, workspaceId },
     });
   }
 
   private async handleFakeInbound(
     { conversationId, body }: FakeInboundMessageBody,
-    teamId: string,
+    workspaceId: string,
   ) {
-    const convo = await this.loadOwnedConversation(conversationId, teamId);
+    const convo = await this.loadOwnedConversation(conversationId, workspaceId);
     if (!convo) throw new NotFoundException({ error: "conversation not found" });
 
     const externalId = `fake_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -157,7 +157,7 @@ export class DevEmitController {
 
     const created = await this.db.message.create({
       data: {
-        teamId,
+        workspaceId,
         conversationId,
         externalId,
         direction: "in",
@@ -182,7 +182,7 @@ export class DevEmitController {
 
     const message: Message = {
       id: created.id,
-      teamId: created.teamId,
+      workspaceId: created.workspaceId,
       conversationId: created.conversationId,
       externalId: created.externalId,
       senderUserId: null,
@@ -196,8 +196,8 @@ export class DevEmitController {
 
     // Single team-room emit. Subscribers in conversation rooms also see
     // it (same socket is in both rooms) and filter by conversationId.
-    this.emitter.emitToTeam(teamId, "message:new", {
-      teamId,
+    this.emitter.emitToTeam(workspaceId, "message:new", {
+      workspaceId,
       conversationId,
       message,
       preview: body,
@@ -210,13 +210,13 @@ export class DevEmitController {
 
   private async handleMarkLastRead(
     { conversationId }: MarkLastReadBody,
-    teamId: string,
+    workspaceId: string,
   ) {
-    const convo = await this.loadOwnedConversation(conversationId, teamId);
+    const convo = await this.loadOwnedConversation(conversationId, workspaceId);
     if (!convo) throw new NotFoundException({ error: "conversation not found" });
 
     const lastOutbound = await this.db.message.findFirst({
-      where: { conversationId, teamId, direction: "out" },
+      where: { conversationId, workspaceId, direction: "out" },
       orderBy: { timestamp: "desc" },
     });
     if (!lastOutbound) {
@@ -234,8 +234,8 @@ export class DevEmitController {
       data: { status: next },
     });
 
-    this.emitter.emitToTeam(teamId, "message:status", {
-      teamId,
+    this.emitter.emitToTeam(workspaceId, "message:status", {
+      workspaceId,
       conversationId,
       messageId: lastOutbound.id,
       status: next,
@@ -246,15 +246,15 @@ export class DevEmitController {
 
   private async handleAddNote(
     { conversationId, body }: AddNoteBody,
-    teamId: string,
+    workspaceId: string,
     userId: string,
   ) {
-    const convo = await this.loadOwnedConversation(conversationId, teamId);
+    const convo = await this.loadOwnedConversation(conversationId, workspaceId);
     if (!convo) throw new NotFoundException({ error: "conversation not found" });
 
     const created = await this.db.internalNote.create({
       // Always attribute to the calling user — the request body has no say.
-      data: { teamId, conversationId, authorUserId: userId, body },
+      data: { workspaceId, conversationId, authorUserId: userId, body },
     });
 
     const note: InternalNote = {
@@ -265,8 +265,8 @@ export class DevEmitController {
       timestamp: created.timestamp.toISOString(),
     };
 
-    this.emitter.emitToTeam(teamId, "note:new", {
-      teamId,
+    this.emitter.emitToTeam(workspaceId, "note:new", {
+      workspaceId,
       conversationId,
       note,
     });
@@ -276,9 +276,9 @@ export class DevEmitController {
 
   private async handleToggleStatus(
     { conversationId, status }: ToggleStatusBody,
-    teamId: string,
+    workspaceId: string,
   ) {
-    const convo = await this.loadOwnedConversation(conversationId, teamId);
+    const convo = await this.loadOwnedConversation(conversationId, workspaceId);
     if (!convo) throw new NotFoundException({ error: "conversation not found" });
 
     await this.db.conversation.update({
@@ -286,8 +286,8 @@ export class DevEmitController {
       data: { status },
     });
 
-    this.emitter.emitToTeam(teamId, "conversation:status", {
-      teamId,
+    this.emitter.emitToTeam(workspaceId, "conversation:status", {
+      workspaceId,
       conversationId,
       status,
     });
@@ -297,14 +297,14 @@ export class DevEmitController {
 
   private async handleAssign(
     { conversationId, assignedUserId }: AssignBody,
-    teamId: string,
+    workspaceId: string,
   ) {
-    const convo = await this.loadOwnedConversation(conversationId, teamId);
+    const convo = await this.loadOwnedConversation(conversationId, workspaceId);
     if (!convo) throw new NotFoundException({ error: "conversation not found" });
 
     if (assignedUserId) {
       const assignee = await this.db.user.findFirst({
-        where: { id: assignedUserId, teamId },
+        where: { id: assignedUserId, workspaceMemberships: { some: { workspaceId } } },
         select: { id: true },
       });
       if (!assignee) {
@@ -315,14 +315,14 @@ export class DevEmitController {
     const updated = await this.db.conversation.update({
       where: { id: conversationId },
       data: { assignedUserId },
-      include: { assignedUser: true },
+      include: { assignedUser: { include: { workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } } } },
     });
 
     const assignedUser: User | null = updated.assignedUser
       ? {
           id: updated.assignedUser.id,
-          teamId: updated.assignedUser.teamId,
-          role: updated.assignedUser.role,
+          workspaceId,
+          role: updated.assignedUser.workspaceMemberships[0]?.role ?? "agent",
           name: updated.assignedUser.name,
           email: updated.assignedUser.email,
           avatarUrl: updated.assignedUser.avatarUrl ?? undefined,
@@ -330,8 +330,8 @@ export class DevEmitController {
         }
       : null;
 
-    this.emitter.emitToTeam(teamId, "conversation:assigned", {
-      teamId,
+    this.emitter.emitToTeam(workspaceId, "conversation:assigned", {
+      workspaceId,
       conversationId,
       assignedUser,
     });

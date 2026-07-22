@@ -142,18 +142,18 @@ interface FunnelRow {
 }
 
 export async function getBroadcastReport(
-  teamId: string,
+  workspaceId: string,
   broadcastId: string,
 ): Promise<BroadcastReport | null> {
-  const cacheKey = `${teamId}:${broadcastId}`;
+  const cacheKey = `${workspaceId}:${broadcastId}`;
   const hit = reportCache.get(cacheKey);
   if (hit) return hit;
 
-  // teamId is enforced on the parent: BroadcastRecipient has no teamId of its
+  // workspaceId is enforced on the parent: BroadcastRecipient has no workspaceId of its
   // own (it is scoped through Broadcast), so every recipient query in this file
   // is only safe because this lookup proved ownership first.
   const broadcast = await db.broadcast.findFirst({
-    where: { id: broadcastId, teamId },
+    where: { id: broadcastId, workspaceId },
     select: {
       id: true,
       status: true,
@@ -192,7 +192,7 @@ export async function getBroadcastReport(
       orderBy: { _count: { errorCode: "desc" } },
       take: 12,
     }),
-    computeBenchmark(teamId, broadcastId),
+    computeBenchmark(workspaceId, broadcastId),
     // Billable conversations grouped by Meta's pricing category (marketing /
     // utility / authentication / service). Counts only — see the `cost` field's
     // note on why no currency amount is stored.
@@ -299,12 +299,12 @@ export async function getBroadcastReport(
  * produce noise the operator would (correctly) stop trusting.
  */
 async function computeBenchmark(
-  teamId: string,
+  workspaceId: string,
   excludeId: string,
 ): Promise<BroadcastReport["benchmark"]> {
   const priors = await db.broadcast.findMany({
     where: {
-      teamId,
+      workspaceId,
       id: { not: excludeId },
       status: { in: ["completed", "failed"] },
       totalCount: { gte: 100 },
@@ -404,8 +404,8 @@ export function deriveDiagnostics(
 }
 
 /** Drop a campaign's cached report — call after any write that changes it. */
-export function invalidateBroadcastReport(teamId: string, broadcastId: string): void {
-  reportCache.delete(`${teamId}:${broadcastId}`);
+export function invalidateBroadcastReport(workspaceId: string, broadcastId: string): void {
+  reportCache.delete(`${workspaceId}:${broadcastId}`);
 }
 
 /**

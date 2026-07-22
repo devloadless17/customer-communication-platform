@@ -35,9 +35,9 @@ export class TagsService {
    * how many contact rows would lose a label before they confirm a delete.
    * One aggregate query so 100 tags don't fan into 100 SELECTs.
    */
-  async usage(teamId: string): Promise<Record<string, number>> {
+  async usage(workspaceId: string): Promise<Record<string, number>> {
     const rows = await this.db.tag.findMany({
-      where: { teamId },
+      where: { workspaceId },
       select: { id: true, _count: { select: { contacts: true } } },
     });
     const usage: Record<string, number> = {};
@@ -45,30 +45,30 @@ export class TagsService {
     return usage;
   }
 
-  async list(teamId: string): Promise<Tag[]> {
+  async list(workspaceId: string): Promise<Tag[]> {
     const rows = await this.db.tag.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: { createdAt: "desc" },
     });
     return rows.map((r) => ({
       id: r.id,
-      teamId: r.teamId,
+      workspaceId: r.workspaceId,
       name: r.name,
       color: normalizeColor(r.color),
       createdAt: r.createdAt.toISOString(),
     }));
   }
 
-  async create(teamId: string, input: CreateTagInput): Promise<Tag> {
+  async create(workspaceId: string, input: CreateTagInput): Promise<Tag> {
     const color = normalizeColor(input.color);
     try {
       const created = await this.db.tag.create({
-        data: { teamId, name: input.name, color },
+        data: { workspaceId, name: input.name, color },
       });
-      await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "tags" });
+      await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "tags" });
       return {
         id: created.id,
-        teamId: created.teamId,
+        workspaceId: created.workspaceId,
         name: created.name,
         color: normalizeColor(created.color),
         createdAt: created.createdAt.toISOString(),
@@ -79,16 +79,16 @@ export class TagsService {
     }
   }
 
-  async update(teamId: string, id: string, input: UpdateTagInput): Promise<Tag> {
-    const existing = await this.db.tag.findFirst({ where: { id, teamId } });
+  async update(workspaceId: string, id: string, input: UpdateTagInput): Promise<Tag> {
+    const existing = await this.db.tag.findFirst({ where: { id, workspaceId } });
     if (!existing) throw new NotFoundException({ error: "tag not found" });
 
     try {
       const updated = await this.db.tag.update({ where: { id }, data: input });
-      await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "tags" });
+      await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "tags" });
       return {
         id: updated.id,
-        teamId: updated.teamId,
+        workspaceId: updated.workspaceId,
         name: updated.name,
         color: normalizeColor(updated.color),
         createdAt: updated.createdAt.toISOString(),
@@ -99,12 +99,12 @@ export class TagsService {
     }
   }
 
-  async remove(teamId: string, id: string): Promise<void> {
-    const existing = await this.db.tag.findFirst({ where: { id, teamId } });
+  async remove(workspaceId: string, id: string): Promise<void> {
+    const existing = await this.db.tag.findFirst({ where: { id, workspaceId } });
     if (!existing) throw new NotFoundException({ error: "tag not found" });
     // Implicit M2M join rows go with the delete — contacts simply lose this tag.
     await this.db.tag.delete({ where: { id } });
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "tags" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "tags" });
   }
 }
 

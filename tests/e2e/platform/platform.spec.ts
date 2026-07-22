@@ -36,11 +36,13 @@ test.describe("org-approval gate (register → approve → suspend)", () => {
   // One throwaway org per run; cleaned up at the end.
   const email = `e2e-gate-${Date.now()}@example.com`;
   const password = "Test1234!";
-  let teamId: string | null = null;
+  let organizationId: string | null = null;
+  let workspaceId: string | null = null;
 
   test.afterAll(async () => {
-    if (teamId) {
-      await db().team.delete({ where: { id: teamId } }).catch(() => undefined);
+    if (organizationId) {
+      // Deleting the ORG cascades to its workspace(s) AND its users.
+      await db().organization.delete({ where: { id: organizationId } }).catch(() => undefined);
     }
   });
 
@@ -71,12 +73,18 @@ test.describe("org-approval gate (register → approve → suspend)", () => {
     // Resolve the new org's id by its admin email (precise — not "newest pending").
     const created = await db().user.findFirst({
       where: { email },
-      select: { teamId: true },
+      select: { organizationId: true },
     });
-    expect(created?.teamId, "new org row exists").toBeTruthy();
-    teamId = created!.teamId;
+    expect(created?.organizationId, "new org row exists").toBeTruthy();
+    organizationId = created!.organizationId;
+    // The signup provisions exactly one starter workspace under the new org.
+    const ws = await db().workspace.findFirstOrThrow({
+      where: { organizationId: organizationId! },
+      select: { id: true },
+    });
+    workspaceId = ws.id;
     expect(
-      (await db().team.findUnique({ where: { id: teamId }, select: { status: true } }))?.status,
+      (await db().organization.findUnique({ where: { id: organizationId! }, select: { status: true } }))?.status,
     ).toBe("pending");
 
     // A pending org can't reach the customer app even with its session.
@@ -84,14 +92,14 @@ test.describe("org-approval gate (register → approve → suspend)", () => {
     await expect(orgPage).toHaveURL(/\/pending/);
 
     // ── 2. Super-admin APPROVES via the platform UI ──
-    await page.goto(`/platform/organizations/${teamId}`);
+    await page.goto(`/platform/organizations/${workspaceId}`);
     await page.getByRole("button", { name: /approve organization/i }).click();
     // Status flips to Active (the Approve button is replaced by Suspend).
     await expect(page.getByRole("button", { name: /suspend access/i })).toBeVisible({
       timeout: 15_000,
     });
     expect(
-      (await db().team.findUnique({ where: { id: teamId }, select: { status: true } }))?.status,
+      (await db().organization.findUnique({ where: { id: organizationId! }, select: { status: true } }))?.status,
     ).toBe("active");
 
     // ── 3. The org admin can now use the app (approve busts their session cache) ──
@@ -99,14 +107,14 @@ test.describe("org-approval gate (register → approve → suspend)", () => {
     await expect(orgPage).toHaveURL(/\/inbox/, { timeout: 15_000 });
 
     // ── 4. Super-admin SUSPENDS ──
-    await page.goto(`/platform/organizations/${teamId}`);
+    await page.goto(`/platform/organizations/${workspaceId}`);
     await page.getByRole("button", { name: /suspend access/i }).click();
     await page.getByRole("button", { name: /confirm suspend/i }).click();
     await expect(page.getByRole("button", { name: /reactivate/i })).toBeVisible({
       timeout: 15_000,
     });
     expect(
-      (await db().team.findUnique({ where: { id: teamId }, select: { status: true } }))?.status,
+      (await db().organization.findUnique({ where: { id: organizationId! }, select: { status: true } }))?.status,
     ).toBe("suspended");
 
     // ── 5. The org admin is locked out again ──

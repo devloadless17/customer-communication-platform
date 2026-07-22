@@ -7,7 +7,7 @@ import { getMetaConnection, resolveWebhookSecrets } from "@/lib/providers/meta-c
 /**
  * Per-team Facebook Messenger config. Same model as WhatsApp
  * (lib/providers/config.ts): credentials live on a `ChannelConnection` row
- * keyed by (teamId, "messenger") — `config` holds non-secret fields, `secrets`
+ * keyed by (workspaceId, "messenger") — `config` holds non-secret fields, `secrets`
  * holds envelope-encrypted ciphertext per field. Kept in its own file (light
  * duplication over premature abstraction) so the WhatsApp loader stays
  * untouched and each channel's config shape is explicit.
@@ -73,14 +73,25 @@ const sendCache = new TtlCache<CachedSend>();
 const webhookCache = new TtlCache<WebhookCipher | null>();
 
 /** Drop cached Messenger credentials for a team. Call after the settings save. */
-export function invalidateMessengerConfig(teamId: string): void {
-  sendCache.delete(teamId);
-  webhookCache.delete(teamId);
+function sendKey(workspaceId: string, accountId?: string | null): string {
+  return `${workspaceId}::${accountId ?? "default"}`;
 }
 
-async function loadSendCipher(teamId: string): Promise<CachedSend> {
-  const conn = await db.channelConnection.findUnique({
-    where: { teamId_channel: { teamId, channel: "messenger" } },
+export function invalidateMessengerConfig(workspaceId: string): void {
+  sendCache.deletePrefix(`${workspaceId}::`);
+  webhookCache.delete(workspaceId);
+}
+
+async function loadSendCipher(
+  workspaceId: string,
+  accountId?: string | null,
+): Promise<CachedSend> {
+  // SECURITY: workspaceId stays in the WHERE even with an explicit account, so a
+  // mis-stamped/foreign id can never load another tenant's credentials.
+  const conn = await db.channelConnection.findFirst({
+    where: accountId
+      ? { id: accountId, workspaceId, channel: "messenger" }
+      : { workspaceId, channel: "messenger", isDefault: true },
     select: { config: true, secrets: true, isActive: true },
   });
   if (!conn || !conn.isActive) return { kind: "err", missing: ["not-connected"] };
@@ -100,17 +111,17 @@ async function loadSendCipher(teamId: string): Promise<CachedSend> {
   };
 }
 
-function materialize(teamId: string, cipher: SendCipher): MessengerSendConfig {
+function materialize(workspaceId: string, cipher: SendCipher): MessengerSendConfig {
   let pageAccessToken: string;
   try {
     pageAccessToken = decryptSecret(cipher.pageAccessTokenCipher);
   } catch (err) {
     console.error(
-      `[messenger-config] failed to decrypt send secrets for team=${teamId}: ${
+      `[messenger-config] failed to decrypt send secrets for team=${workspaceId}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
-    throw new ProviderNotConfiguredError(teamId, ["pageAccessToken (decrypt failed)"], "messenger");
+    throw new ProviderNotConfiguredError(workspaceId, ["pageAccessToken (decrypt failed)"], "messenger");
   }
   // App secret for appsecret_proof — best-effort: a decrypt failure must NOT
   // break sending (the proof is additive), so fall back to no proof.
@@ -131,31 +142,35 @@ function materialize(teamId: string, cipher: SendCipher): MessengerSendConfig {
 }
 
 /** Send-side Messenger config. Throws ProviderNotConfigured when unconnected. */
-export async function getMessengerSendConfig(teamId: string): Promise<MessengerSendConfig> {
-  const hit = sendCache.get(teamId);
+export async function getMessengerSendConfig(
+  workspaceId: string,
+  accountId?: string | null,
+): Promise<MessengerSendConfig> {
+  const key = sendKey(workspaceId, accountId);
+  const hit = sendCache.get(key);
   if (hit) {
     if (hit.kind === "err") {
-      throw new ProviderNotConfiguredError(teamId, [...hit.missing], "messenger");
+      throw new ProviderNotConfiguredError(workspaceId, [...hit.missing], "messenger");
     }
-    return materialize(teamId, hit.cipher);
+    return materialize(workspaceId, hit.cipher);
   }
-  const entry = await loadSendCipher(teamId);
-  sendCache.set(teamId, entry);
-  if (entry.kind === "err") throw new ProviderNotConfiguredError(teamId, [...entry.missing], "messenger");
-  return materialize(teamId, entry.cipher);
+  const entry = await loadSendCipher(workspaceId, accountId);
+  sendCache.set(key, entry);
+  if (entry.kind === "err") throw new ProviderNotConfiguredError(workspaceId, [...entry.missing], "messenger");
+  return materialize(workspaceId, entry.cipher);
 }
 
 /** Webhook-side Messenger config (GET verify + POST HMAC). Null when unconfigured. */
 export async function getMessengerWebhookConfig(
-  teamId: string,
+  workspaceId: string,
 ): Promise<MessengerWebhookConfig | null> {
-  const hit = webhookCache.get(teamId);
+  const hit = webhookCache.get(workspaceId);
   let cipher: WebhookCipher | null;
   if (hit !== undefined) {
     cipher = hit;
   } else {
-    const conn = await db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId, channel: "messenger" } },
+    const conn = await db.channelConnection.findFirst({
+      where: { workspaceId, channel: "messenger", isDefault: true },
       select: { config: true, secrets: true, isActive: true },
     });
     const config = (conn?.config ?? {}) as MessengerChannelConfig;
@@ -168,14 +183,14 @@ export async function getMessengerWebhookConfig(
             pageId: config.pageId ?? null,
           }
         : null;
-    webhookCache.set(teamId, cipher);
+    webhookCache.set(workspaceId, cipher);
   }
   if (!cipher) return null;
   try {
     // Prefer the shared Meta App secret (single source — rotation there applies
     // to every channel at once); fall back to the per-channel cipher for legacy
     // / pre-Meta-App rows. See getMetaWebhookConfig for the rationale.
-    const meta = await getMetaConnection(teamId);
+    const meta = await getMetaConnection(workspaceId);
     return {
       ...resolveWebhookSecrets(meta?.appSecret, decryptSecret(cipher.appSecretCipher)),
       verifyToken: cipher.verifyToken,
@@ -183,7 +198,7 @@ export async function getMessengerWebhookConfig(
     };
   } catch (err) {
     console.error(
-      `[messenger-config] failed to decrypt webhook secrets for team=${teamId}: ${
+      `[messenger-config] failed to decrypt webhook secrets for team=${workspaceId}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );

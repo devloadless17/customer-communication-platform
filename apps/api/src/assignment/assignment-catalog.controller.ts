@@ -27,7 +27,7 @@ export class AssignmentCatalogController {
   @Get()
   async list(@CurrentSession() session: ApiSession) {
     const policies = await this.db.assignmentPolicy.findMany({
-      where: { teamId: session.teamId, archivedAt: null },
+      where: { workspaceId: session.workspaceId, archivedAt: null },
       select: { id: true, name: true, isDefault: true, strategy: true },
       orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
     });

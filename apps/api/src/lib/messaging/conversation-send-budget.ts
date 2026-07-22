@@ -63,9 +63,9 @@ export class ConversationSendRateLimitedError extends Error {
  * Meta accepts, you've already spent customer-facing reputation.
  */
 export function consumeConversationSendBudget(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
 ): void {
-  const result = bucket.consume(`${teamId}:${conversationId}`);
+  const result = bucket.consume(`${workspaceId}:${conversationId}`);
   if (!result.ok) throw new ConversationSendRateLimitedError(result.retryAfter);
 }

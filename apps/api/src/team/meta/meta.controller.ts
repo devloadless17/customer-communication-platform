@@ -25,7 +25,7 @@ export class MetaController {
 
   @Get()
   async get(@CurrentSession() session: ApiSession) {
-    const config = await this.meta.getConfig(session.teamId);
+    const config = await this.meta.getConfig(session.workspaceId);
     return { config };
   }
 
@@ -34,13 +34,13 @@ export class MetaController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(UpdateMetaConnectionSchema)) body: UpdateMetaConnectionInput,
   ) {
-    const out = await this.meta.updateConfig(session.teamId, body);
+    const out = await this.meta.updateConfig(session.workspaceId, body);
     return { ok: true, ...out };
   }
 
   @Delete()
   async disconnect(@CurrentSession() session: ApiSession) {
-    await this.meta.disconnect(session.teamId);
+    await this.meta.disconnect(session.workspaceId);
     return { ok: true };
   }
 }

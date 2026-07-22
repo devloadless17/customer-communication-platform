@@ -58,7 +58,7 @@ export class BroadcastsController {
     @Body(zBody(CreateBroadcastSchema)) body: CreateBroadcastInput,
   ) {
     const { broadcastId, totalCount, scheduled } = await this.broadcasts.create(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       body,
     );
@@ -74,7 +74,7 @@ export class BroadcastsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(PreviewMissingFieldsSchema)) body: PreviewMissingFieldsInput,
   ) {
-    return this.broadcasts.previewMissingFields(session.teamId, body);
+    return this.broadcasts.previewMissingFields(session.workspaceId, body);
   }
 
   // Secret-free WhatsApp messaging-limit snapshot for the composer's pre-send
@@ -84,7 +84,7 @@ export class BroadcastsController {
   // broadcast user can read it.
   @Get("messaging-health")
   async messagingHealth(@CurrentSession() session: ApiSession) {
-    return this.broadcasts.getMessagingHealth(session.teamId);
+    return this.broadcasts.getMessagingHealth(session.workspaceId);
   }
 
   @Get()
@@ -94,7 +94,7 @@ export class BroadcastsController {
   ) {
     // Service returns { broadcasts, nextCursor }. Spread so the existing client
     // reads `body.broadcasts` unchanged and a paging client can read nextCursor.
-    return this.broadcasts.list(session.teamId, query);
+    return this.broadcasts.list(session.workspaceId, query);
   }
 
   @Get(":id")
@@ -102,7 +102,7 @@ export class BroadcastsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    const broadcast = await this.broadcasts.get(session.teamId, id);
+    const broadcast = await this.broadcasts.get(session.workspaceId, id);
     return { broadcast };
   }
 
@@ -120,7 +120,7 @@ export class BroadcastsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    const report = await this.broadcasts.getReport(session.teamId, id);
+    const report = await this.broadcasts.getReport(session.workspaceId, id);
     return { report };
   }
 
@@ -137,7 +137,7 @@ export class BroadcastsController {
     @Param("id") id: string,
     @Query(zQuery(BroadcastRecipientsQuerySchema)) query: BroadcastRecipientsQuery,
   ) {
-    return this.broadcasts.listRecipients(session.teamId, id, {
+    return this.broadcasts.listRecipients(session.workspaceId, id, {
       cursor: query.cursor,
       status: query.status,
       take: query.take,
@@ -153,7 +153,7 @@ export class BroadcastsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    return this.broadcasts.listRecipientContactIds(session.teamId, id);
+    return this.broadcasts.listRecipientContactIds(session.workspaceId, id);
   }
 
   @Post(":id/cancel")
@@ -162,7 +162,7 @@ export class BroadcastsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.broadcasts.cancel(session.teamId, id);
+    await this.broadcasts.cancel(session.workspaceId, id);
     return { ok: true };
   }
 
@@ -178,7 +178,7 @@ export class BroadcastsController {
     @Param("id") id: string,
     @Body(zBody(RetryBroadcastSchema)) body: RetryBroadcastInput,
   ) {
-    const { requeued } = await this.broadcasts.retryFailed(session.teamId, id, {
+    const { requeued } = await this.broadcasts.retryFailed(session.workspaceId, id, {
       ...(body.errorCodes ? { errorCodes: body.errorCodes } : {}),
     });
     return { ok: true, requeued };
@@ -199,7 +199,7 @@ export class BroadcastsController {
     @Query(zQuery(BroadcastExportQuerySchema)) query: BroadcastExportQuery,
     @Res() res: Response,
   ): Promise<void> {
-    await this.broadcasts.exportRecipientsCsv(session.teamId, id, query, res);
+    await this.broadcasts.exportRecipientsCsv(session.workspaceId, id, query, res);
   }
 
   @Delete(":id")
@@ -208,7 +208,7 @@ export class BroadcastsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.broadcasts.remove(session.teamId, id);
+    await this.broadcasts.remove(session.workspaceId, id);
     return { ok: true };
   }
 }

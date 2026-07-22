@@ -106,25 +106,25 @@ const teamSlots = new Map<string, TeamSlotState>();
  * call `releaseTeamSlot` in a finally). Returns false if the team is at
  * cap — caller defers the job via `moveToDelayed` instead of parking.
  */
-function tryAcquireTeamSlot(teamId: string): boolean {
+function tryAcquireTeamSlot(workspaceId: string): boolean {
   const cap = perTeamConcurrency();
-  let entry = teamSlots.get(teamId);
+  let entry = teamSlots.get(workspaceId);
   if (!entry) {
     entry = { active: 0 };
-    teamSlots.set(teamId, entry);
+    teamSlots.set(workspaceId, entry);
   }
   if (entry.active >= cap) return false;
   entry.active += 1;
   return true;
 }
 
-function releaseTeamSlot(teamId: string): void {
-  const entry = teamSlots.get(teamId);
+function releaseTeamSlot(workspaceId: string): void {
+  const entry = teamSlots.get(workspaceId);
   if (!entry) return;
   entry.active = Math.max(0, entry.active - 1);
   // Drop the entry to keep the Map bounded once a team is fully idle.
   if (entry.active === 0) {
-    teamSlots.delete(teamId);
+    teamSlots.delete(workspaceId);
   }
 }
 
@@ -140,20 +140,20 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
   const worker = new Worker<WorkflowJobData>(
     WORKFLOW_QUEUE_NAME,
     async (job: Job<WorkflowJobData>, token?: string) => {
-      // Per-team concurrency gate. Look up teamId from the run row — the
+      // Per-team concurrency gate. Look up workspaceId from the run row — the
       // job payload only carries runId. This is a single indexed read; OK
-      // to do for every pickup since the alternative (teamId in the job
+      // to do for every pickup since the alternative (workspaceId in the job
       // payload) would mean schema churn across every enqueue site.
       const run = await db.workflowRun.findUnique({
         where: { id: job.data.runId },
-        select: { teamId: true, workflowId: true, contactId: true },
+        select: { workspaceId: true, workflowId: true, contactId: true },
       });
       if (!run) {
         // Run was deleted between enqueue and pickup. Skip silently —
         // matches what runWorkflow does for a missing row.
         return;
       }
-      if (!tryAcquireTeamSlot(run.teamId)) {
+      if (!tryAcquireTeamSlot(run.workspaceId)) {
         // Team at cap. Push this job back into the delayed queue and
         // release the BullMQ slot immediately — other teams' work can
         // use it. BullMQ's standard pattern: moveToDelayed + throw
@@ -200,7 +200,7 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
           );
         }
       } finally {
-        releaseTeamSlot(run.teamId);
+        releaseTeamSlot(run.workspaceId);
       }
     },
     {

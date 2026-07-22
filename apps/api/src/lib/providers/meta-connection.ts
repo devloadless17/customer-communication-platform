@@ -54,8 +54,8 @@ const sweeper = setInterval(() => {
 sweeper.unref?.();
 
 /** Drop the cached Meta connection for a team. Call after the settings save. */
-export function invalidateMetaConnection(teamId: string): void {
-  cache.delete(teamId);
+export function invalidateMetaConnection(workspaceId: string): void {
+  cache.delete(workspaceId);
 }
 
 function tryDecrypt(cipher: string | null): string | null {
@@ -72,15 +72,15 @@ function tryDecrypt(cipher: string | null): string | null {
  * exists; individual fields are `null` when not yet set. Never throws.
  */
 export async function getMetaConnection(
-  teamId: string,
+  workspaceId: string,
 ): Promise<MetaConnectionResolved | null> {
-  const hit = cache.get(teamId);
+  const hit = cache.get(workspaceId);
   let cipher: Cipher | null;
   if (hit && hit.exp > Date.now()) {
     cipher = hit.value;
   } else {
     const row = await db.metaConnection.findUnique({
-      where: { teamId },
+      where: { workspaceId },
       select: { config: true, secrets: true },
     });
     if (!row) {
@@ -100,7 +100,7 @@ export async function getMetaConnection(
       const oldest = cache.keys().next().value;
       if (oldest !== undefined) cache.delete(oldest);
     }
-    cache.set(teamId, { value: cipher, exp: Date.now() + TTL_MS });
+    cache.set(workspaceId, { value: cipher, exp: Date.now() + TTL_MS });
   }
   if (!cipher) return null;
   return {

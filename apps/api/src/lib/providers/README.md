@@ -14,7 +14,7 @@ drops in without touching ingest, send orchestration, or business logic.
 | `config.ts` | Per-team Meta credential loader (`getMetaSendConfig`) + cache. Each provider gets its OWN config module + cache (no shared key — so "same team, two channels" can't collide). |
 | `index.ts` | The **registry**: `ProviderBinding` (provider + its config loader, coupled), `getProviderBinding(name)`, `requireProviderMethod(...)`, and the Meta-only `getMetaProvider()`. |
 | `channel.ts` | `resolveContactChannel(contact)` → `{ provider, to }`. The ONE place "phone number == identity" lives. |
-| `ingest.ts` | Provider-agnostic inbound pipeline: `ingestEvents(teamId, provider, events)`. Dedup on `(teamId, provider, externalId)`. |
+| `ingest.ts` | Provider-agnostic inbound pipeline: `ingestEvents(workspaceId, provider, events)`. Dedup on `(workspaceId, provider, externalId)`. |
 
 ## Recipe — adding `telegram` (example)
 
@@ -27,7 +27,7 @@ drops in without touching ingest, send orchestration, or business logic.
    `parseWebhook`, and `sendText`. Implement the optional methods
    (`sendMedia`, `sendInteractive`, `sendTemplate`, `markIncomingRead`,
    `sendTypingIndicator`, `fetchMedia`) only for what the channel supports.
-3. **Config loader:** `telegram-config.ts` with `getTelegramSendConfig(teamId)`
+3. **Config loader:** `telegram-config.ts` with `getTelegramSendConfig(workspaceId)`
    reading per-team credentials (mirror `config.ts`'s ciphertext-cache pattern;
    keep your own cache — don't share Meta's).
 4. **Register the binding** in `index.ts`:
@@ -38,9 +38,9 @@ drops in without touching ingest, send orchestration, or business logic.
    };
    ```
 5. **Webhook controller:** add `webhooks/telegram/telegram.controller.ts` at
-   `/webhooks/telegram/:teamId` that verifies the channel's signature, calls
+   `/webhooks/telegram/:workspaceId` that verifies the channel's signature, calls
    `telegramProvider.parseWebhook(payload)`, and hands off to the SAME
-   `ingestEvents(teamId, "telegram", events)`. Nothing in ingest changes.
+   `ingestEvents(workspaceId, "telegram", events)`. Nothing in ingest changes.
 
 That's it. The send paths already select the provider from the contact's
 channel via `resolveContactChannel` + `getProviderBinding`, gate the free-form

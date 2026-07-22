@@ -199,7 +199,7 @@ export function ContactDetailDrawer({
     // `optimistic: true` skips inbox-list resync + counts refetch during the
     // in-flight PATCH — see status-dropdown.tsx for the rationale.
     dispatchLocalSocketEvent("contact:updated", {
-      teamId: contact.teamId,
+      workspaceId: contact.workspaceId,
       contact: optimistic,
       optimistic: true,
     });
@@ -212,7 +212,7 @@ export function ContactDetailDrawer({
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       setError(body.error ?? "Couldn't save");
       dispatchLocalSocketEvent("contact:updated", {
-        teamId: contact.teamId,
+        workspaceId: contact.workspaceId,
         contact,
       });
       return false;
@@ -225,7 +225,7 @@ export function ContactDetailDrawer({
     setTagIds(nextIds);
     setError(null);
     dispatchLocalSocketEvent("contact:updated", {
-      teamId: contact.teamId,
+      workspaceId: contact.workspaceId,
       contact: { ...contact, tagIds: nextIds, stageId, customFields },
       optimistic: true,
     });
@@ -238,7 +238,7 @@ export function ContactDetailDrawer({
       setTagIds(prev);
       setError("Couldn't save tags");
       dispatchLocalSocketEvent("contact:updated", {
-        teamId: contact.teamId,
+        workspaceId: contact.workspaceId,
         contact: { ...contact, tagIds: prev, stageId, customFields },
       });
     }

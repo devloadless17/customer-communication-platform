@@ -78,13 +78,13 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
     if (m.mediaPending) return; // wait for media_ready
     const text = (m.body ?? "").trim();
     if (!text) return; // voice notes have empty body → handled on media_ready
-    const config = await loadAiConfig(e.teamId);
+    const config = await loadAiConfig(e.workspaceId);
     if (!configEnabled(config)) return;
     // Per-widget switch: the website widget defaults to AI OFF (see
     // webchatwidgetAiAllowed). Only pay the lookup for a widget message.
     if (m.channel === "webchatwidget" && !(await webchatwidgetAiAllowed(e.conversationId))) return;
     await enqueueAiReply({
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       conversationId: e.conversationId,
       inboundMessageId: m.id,
       text,
@@ -100,11 +100,11 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
     // non-widget conversations, and gates widget ones on their per-widget switch.
     if (!(await webchatwidgetAiAllowed(e.conversationId))) return;
     if (kind === "audio") {
-      const transcript = await ensureTranscription(e.teamId, e.messageId);
+      const transcript = await ensureTranscription(e.workspaceId, e.messageId);
       if (transcript) {
-        const config = await loadAiConfig(e.teamId);
+        const config = await loadAiConfig(e.workspaceId);
         await enqueueAiReply({
-          teamId: e.teamId,
+          workspaceId: e.workspaceId,
           conversationId: e.conversationId,
           inboundMessageId: e.messageId,
           text: transcript,
@@ -116,9 +116,9 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
     }
     const caption = (e.media?.caption ?? "").trim();
     if (caption) {
-      const config = await loadAiConfig(e.teamId);
+      const config = await loadAiConfig(e.workspaceId);
       await enqueueAiReply({
-        teamId: e.teamId,
+        workspaceId: e.workspaceId,
         conversationId: e.conversationId,
         inboundMessageId: e.messageId,
         text: caption,
@@ -131,7 +131,7 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
   private async onSent(e: DomainEventOf<"message.sent">): Promise<void> {
     if (e.silent) return;
     if (!e.senderUserId) return; // system / automation / AI send → not a human takeover
-    await onHumanReply(e.teamId, e.conversationId, e.senderUserId);
+    await onHumanReply(e.workspaceId, e.conversationId, e.senderUserId);
   }
 
   /**
@@ -143,7 +143,7 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
   private async onStatusChanged(e: DomainEventOf<"conversation.status_changed">): Promise<void> {
     if (e.newStatus !== "closed") return;
     if (!aiGloballyEnabled() || !openaiConfigured()) return;
-    const config = await loadAiConfig(e.teamId);
+    const config = await loadAiConfig(e.workspaceId);
     if (!configEnabled(config)) return;
     await enqueueAiMemoryOnClose(e.conversationId);
   }

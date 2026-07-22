@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Retention sweeper for OutboundSendAttempt rows. The model is bookkeeping
@@ -40,6 +40,12 @@ async function runTick(label: string): Promise<void> {
     // Mutex serializes the indexed DELETE against other heavy sweepers.
     await withSweeperMutex("outbound-send-attempt-retention", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopOutboundSendAttemptRetentionSweeper();
+      return;
+    }
     console.error(`[sweeper.outbound-send-attempt] ${label} failed`, err);
   } finally {
     inFlight = false;

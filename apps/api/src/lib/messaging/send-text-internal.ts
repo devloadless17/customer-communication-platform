@@ -36,7 +36,7 @@ import {
  */
 
 export interface SendTextInternalArgs {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   body: string;
   /** Provenance label for raw_payload.sentVia. e.g. "workflow/<id>". */
@@ -90,10 +90,12 @@ export async function sendTextInternal(
   }
 
   const conversation = await db.conversation.findFirst({
-    where: { id: args.conversationId, teamId: args.teamId },
+    where: { id: args.conversationId, workspaceId: args.workspaceId },
     select: {
       id: true,
       contactId: true,
+      // The account this thread belongs to — sends must go out from it.
+      channelConnectionId: true,
       // Channel is conversation-owned — bind + stamp the send from here, not
       // from the contact (resolveContactChannel only supplies the destination).
       channel: true,
@@ -176,7 +178,7 @@ export async function sendTextInternal(
 
   let sendConfig;
   try {
-    sendConfig = await binding.getSendConfig(args.teamId);
+    sendConfig = await binding.getSendConfig(args.workspaceId, conversation.channelConnectionId);
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) {
       throw new SendTextValidationError(
@@ -213,7 +215,7 @@ export async function sendTextInternal(
       : receivedAt;
 
   const created = await createOutboundMessageIdempotent({
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     conversationId: args.conversationId,
     externalId: send.externalId,
     senderUserId: null,
@@ -228,7 +230,7 @@ export async function sendTextInternal(
   const previewBody = body.slice(0, 200);
   const message: Message = {
     id: created.id,
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     conversationId: args.conversationId,
     externalId: send.externalId,
     senderUserId: null,
@@ -248,7 +250,7 @@ export async function sendTextInternal(
     preview: previewBody,
     event: {
       type: "message.sent",
-      teamId: args.teamId,
+      workspaceId: args.workspaceId,
       conversationId: args.conversationId,
       contactId: conversation.contactId,
       message,

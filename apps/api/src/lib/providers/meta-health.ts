@@ -77,6 +77,8 @@ export interface WhatsappHealthSnapshot {
   qualityRating: string | null;
   throughputLevel: string | null;
   messagingHealthUpdatedAt: Date | null;
+  /** The portfolio the cap belongs to — the scope its 24h budget is shared over. */
+  portfolioId: string | null;
 }
 
 /** A partial update — a webhook carries only the field(s) that changed. */
@@ -172,7 +174,7 @@ export function normalizeThroughputLevel(raw: unknown): string | null {
  * Invalidates the provider-config cache so a fresh eligibility read reflects it.
  */
 export async function persistWhatsappHealth(
-  teamId: string,
+  workspaceId: string,
   update: WhatsappHealthUpdate,
 ): Promise<void> {
   const data: {
@@ -188,10 +190,11 @@ export async function persistWhatsappHealth(
   } = { messagingHealthUpdatedAt: new Date() };
 
   let touched = false;
+  // The messaging limit is PORTFOLIO-scoped; it is written separately below
+  // (a per-number write would let one portfolio's budget be recorded N times).
+  let portfolioTier: string | null | undefined;
   if (update.messagingTier !== undefined) {
-    const tier = update.messagingTier ? normalizeMessagingTier(update.messagingTier) : null;
-    data.messagingTier = tier;
-    data.messagingDailyCap = tierDailyCap(tier);
+    portfolioTier = update.messagingTier ? normalizeMessagingTier(update.messagingTier) : null;
     touched = true;
   }
   if (update.qualityRating !== undefined) {
@@ -222,14 +225,40 @@ export async function persistWhatsappHealth(
   }
   if (!touched) return;
 
+  if (portfolioTier !== undefined) {
+    const portfolioData = {
+      messagingTier: portfolioTier,
+      messagingDailyCap: tierDailyCap(portfolioTier),
+      messagingHealthUpdatedAt: new Date(),
+    };
+    const updated = await db.whatsappPortfolio.updateMany({
+      where: { connections: { some: { workspaceId, channel: "whatsapp" } } },
+      data: portfolioData,
+    });
+    // Self-healing: a workspace whose WhatsApp account predates the portfolio
+    // table (or was connected without one) has nothing to update, and silently
+    // dropping the tier here would leave the pre-send gate permanently ungated.
+    // Mint the portfolio and attach every WhatsApp account to it.
+    if (updated.count === 0) {
+      const created = await db.whatsappPortfolio.create({
+        data: { workspaceId, ...portfolioData },
+        select: { id: true },
+      });
+      await db.channelConnection.updateMany({
+        where: { workspaceId, channel: "whatsapp", portfolioId: null },
+        data: { portfolioId: created.id },
+      });
+    }
+  }
+
   const res = await db.channelConnection.updateMany({
-    where: { teamId, channel: "whatsapp" },
+    where: { workspaceId, channel: "whatsapp" },
     data,
   });
   if (res.count > 0) {
     // The eligibility read below goes through the provider-config cache path;
     // bust it so a just-changed tier is reflected immediately.
-    invalidateProviderConfig(teamId);
+    invalidateProviderConfig(workspaceId);
   }
 }
 
@@ -286,12 +315,15 @@ const BROADCAST_LOOKBACK_HOURS = 72;
  * business-initiated volume by orders of magnitude. Widening it to all template
  * sends needs a template marker on `Message`, which does not exist today.
  *
- * Two-step rather than one join so it rides existing indexes: `[teamId,
+ * Two-step rather than one join so it rides existing indexes: `[workspaceId,
  * createdAt desc]` on Broadcast, then the `broadcastId`-leading indexes on
  * BroadcastRecipient. Runs once per broadcast creation, not per message.
  */
-export async function countRecentUniqueRecipients(teamId: string): Promise<number> {
-  const ids = await recentUniqueRecipientIds(teamId);
+export async function countRecentUniqueRecipients(
+  workspaceId: string,
+  portfolioId?: string | null,
+): Promise<number> {
+  const ids = await recentUniqueRecipientIds(workspaceId, portfolioId);
   return ids.size;
 }
 
@@ -309,11 +341,32 @@ export async function countRecentUniqueRecipients(teamId: string): Promise<numbe
  * polling path, so a TIER_100K team would repeatedly pull ~100k objects into
  * heap on an 8GB box. groupBy aggregates server-side.
  */
-async function recentUniqueRecipientIds(teamId: string): Promise<Set<string>> {
+async function recentUniqueRecipientIds(
+  workspaceId: string,
+  /**
+   * The portfolio whose budget we're counting. Meta's 24h limit is shared by
+   * EVERY number in a portfolio, so the count spans all of its accounts — but it
+   * must NOT span a second portfolio in the same workspace, which has its own
+   * independent budget. Null = count the whole workspace (the pre-portfolio
+   * behaviour, and correct while a workspace has one portfolio).
+   */
+  portfolioId?: string | null,
+): Promise<Set<string>> {
   const now = Date.now();
   const recent = await db.broadcast.findMany({
     where: {
-      teamId,
+      workspaceId,
+      // Scope to the portfolio's accounts. A broadcast with no account stamped
+      // (pre-multi-account) is counted too: it went out the number that existed
+      // at the time, which is in this portfolio.
+      ...(portfolioId
+        ? {
+            OR: [
+              { channelConnection: { portfolioId } },
+              { channelConnectionId: null },
+            ],
+          }
+        : {}),
       // Contact-mode WhatsApp sends only. A `targetMode: "customer"` broadcast
       // stores `channel: "whatsapp"` as an inert default while routing each
       // recipient to their best channel, so counting those would charge
@@ -354,7 +407,7 @@ async function recentUniqueRecipientIds(teamId: string): Promise<Set<string>> {
  * composer preview endpoint.
  */
 export async function checkBroadcastEligibility(
-  teamId: string,
+  workspaceId: string,
   audienceSize: number,
   /**
    * The audience's contact ids. Optional, but pass them whenever you have them:
@@ -364,7 +417,7 @@ export async function checkBroadcastEligibility(
    */
   audienceContactIds?: readonly string[],
 ): Promise<BroadcastEligibility> {
-  const health = await getWhatsappHealth(teamId);
+  const health = await getWhatsappHealth(workspaceId);
   const base: BroadcastEligibility = {
     allowed: true,
     reason: null,
@@ -381,7 +434,7 @@ export async function checkBroadcastEligibility(
   if (cap === null) return base;
 
   // Only pay for the usage query when there IS a cap to compare it against.
-  const alreadyMessaged = await recentUniqueRecipientIds(teamId);
+  const alreadyMessaged = await recentUniqueRecipientIds(workspaceId, health?.portfolioId);
   const used = alreadyMessaged.size;
   const remaining = Math.max(0, cap - used);
 
@@ -456,25 +509,29 @@ export async function checkBroadcastEligibility(
 
 /** Read the current snapshot for the team's WhatsApp connection (null if none). */
 export async function getWhatsappHealth(
-  teamId: string,
+  workspaceId: string,
 ): Promise<WhatsappHealthSnapshot | null> {
-  const row = await db.channelConnection.findUnique({
-    where: { teamId_channel: { teamId, channel: "whatsapp" } },
+  const row = await db.channelConnection.findFirst({
+    where: { workspaceId, channel: "whatsapp", isDefault: true },
     select: {
-      messagingTier: true,
-      messagingDailyCap: true,
       qualityRating: true,
       throughputLevel: true,
       messagingHealthUpdatedAt: true,
+      portfolioId: true,
+      // The 24h messaging limit is PORTFOLIO-scoped since 2025-10-07 (shared by
+      // every number in the portfolio), so tier + cap come off the portfolio,
+      // not this number. Quality + throughput above stay per-number.
+      portfolio: { select: { messagingTier: true, messagingDailyCap: true } },
     },
   });
   if (!row) return null;
   return {
-    messagingTier: row.messagingTier,
-    messagingDailyCap: row.messagingDailyCap,
+    messagingTier: row.portfolio?.messagingTier ?? null,
+    messagingDailyCap: row.portfolio?.messagingDailyCap ?? null,
     qualityRating: row.qualityRating,
     throughputLevel: row.throughputLevel,
     messagingHealthUpdatedAt: row.messagingHealthUpdatedAt,
+    portfolioId: row.portfolioId,
   };
 }
 
@@ -485,10 +542,10 @@ export async function getWhatsappHealth(
  * Best-effort — throws are swallowed by callers; a not-configured team is a
  * silent no-op. Idempotent.
  */
-export async function fetchWhatsappHealthFromGraph(teamId: string): Promise<void> {
+export async function fetchWhatsappHealthFromGraph(workspaceId: string): Promise<void> {
   let config;
   try {
-    config = await getMetaSendConfig(teamId);
+    config = await getMetaSendConfig(workspaceId);
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) return; // not connected — nothing to poll
     throw err;
@@ -506,7 +563,7 @@ export async function fetchWhatsappHealthFromGraph(teamId: string): Promise<void
       ? (throughput as { level?: unknown }).level
       : undefined;
 
-  await persistWhatsappHealth(teamId, {
+  await persistWhatsappHealth(workspaceId, {
     messagingTier: (node.messaging_limit_tier as string | undefined) ?? null,
     qualityRating: (node.quality_rating as string | undefined) ?? null,
     throughputLevel: (throughputLevel as string | undefined) ?? null,

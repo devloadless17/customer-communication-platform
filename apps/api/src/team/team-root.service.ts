@@ -38,23 +38,23 @@ export class TeamRootService {
    * or a publish, so a "save" of unchanged text doesn't churn every open
    * sidebar). Throws NotFound if the team is gone (race with delete).
    */
-  async rename(teamId: string, name: string, actorUserId: string): Promise<{ name: string }> {
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
+  async rename(workspaceId: string, name: string, actorUserId: string): Promise<{ name: string }> {
+    const team = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { name: true },
     });
     if (!team) throw new NotFoundException({ error: "team not found" });
     if (team.name === name) return { name };
 
-    const updated = await this.db.team.update({
-      where: { id: teamId },
+    const updated = await this.db.workspace.update({
+      where: { id: workspaceId },
       data: { name },
       select: { name: true },
     });
 
     await this.bus.publish({
       type: "team.renamed",
-      teamId,
+      workspaceId,
       name: updated.name,
       renamedByUserId: actorUserId,
     });
@@ -70,7 +70,7 @@ export class TeamRootService {
    * other actions (it's just ignored unless the action is assign_fixed).
    */
   async updateAiSettings(
-    teamId: string,
+    workspaceId: string,
     input: {
       aiHandoffAction?: AiHandoffAction;
       aiHandoffAssigneeId?: string | null;
@@ -81,8 +81,8 @@ export class TeamRootService {
     aiHandoffAssigneeId: string | null;
     firstTouchGreeter: FirstTouchGreeter;
   }> {
-    const current = await this.db.team.findUnique({
-      where: { id: teamId },
+    const current = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { aiHandoffAction: true, aiHandoffAssigneeId: true },
     });
     if (!current) throw new NotFoundException({ error: "team not found" });
@@ -102,7 +102,7 @@ export class TeamRootService {
         });
       }
       const member = await this.db.user.findFirst({
-        where: { id: nextAssignee, teamId, deactivatedAt: null },
+        where: { id: nextAssignee, workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
         select: { id: true },
       });
       if (!member) {
@@ -113,7 +113,7 @@ export class TeamRootService {
       }
     }
 
-    const data: Prisma.TeamUpdateInput = {};
+    const data: Prisma.WorkspaceUpdateInput = {};
     if (input.aiHandoffAction !== undefined) data.aiHandoffAction = input.aiHandoffAction;
     if (input.aiHandoffAssigneeId !== undefined) {
       data.aiHandoffAssignee = input.aiHandoffAssigneeId
@@ -122,8 +122,8 @@ export class TeamRootService {
     }
     if (input.firstTouchGreeter !== undefined) data.firstTouchGreeter = input.firstTouchGreeter;
 
-    const updated = await this.db.team.update({
-      where: { id: teamId },
+    const updated = await this.db.workspace.update({
+      where: { id: workspaceId },
       data,
       select: {
         aiHandoffAction: true,
@@ -139,7 +139,7 @@ export class TeamRootService {
    * hard-delete doesn't run as one multi-million-row transaction. FK-safe in any
    * order (Message's only inbound FK is the self-referential replyTo SetNull).
    */
-  private async batchDeleteMessagesByTeam(teamId: string): Promise<void> {
+  private async batchDeleteMessagesByTeam(workspaceId: string): Promise<void> {
     const BATCH = 5_000;
     // Safety ceiling so a bug can't spin forever; 200k × 5k = 1B rows, far above
     // any real tenant — the `< BATCH` break is the normal exit.
@@ -148,7 +148,7 @@ export class TeamRootService {
       const deleted = await this.db.$executeRaw`
         DELETE FROM "Message"
         WHERE id IN (
-          SELECT id FROM "Message" WHERE "teamId" = ${teamId} LIMIT ${BATCH}
+          SELECT id FROM "Message" WHERE "workspaceId" = ${workspaceId} LIMIT ${BATCH}
         )
       `;
       if (Number(deleted) < BATCH) break;
@@ -164,7 +164,7 @@ export class TeamRootService {
    * is a heap spike on exactly the tenant where deletion matters most, and it
    * happens BEFORE anything is deleted, so the purge dies before it starts.
    */
-  private async collectMessageBlobKeys(teamId: string): Promise<string[]> {
+  private async collectMessageBlobKeys(workspaceId: string): Promise<string[]> {
     const keys: string[] = [];
     const PAGE = 1_000;
     let cursor: string | undefined;
@@ -175,7 +175,7 @@ export class TeamRootService {
         // purge doesn't leak posters (audit fix F1d). The blob-orphan sweeper
         // backstops anything missed, but immediate cleanup is cheaper.
         where: {
-          teamId,
+          workspaceId,
           OR: [{ mediaKey: { not: null } }, { mediaThumbnailKey: { not: null } }],
         },
         select: { id: true, mediaKey: true, mediaThumbnailKey: true },
@@ -195,13 +195,13 @@ export class TeamRootService {
   }
 
   /** Captured social-contact avatar keys, paged for the same reason. */
-  private async collectContactAvatarKeys(teamId: string): Promise<string[]> {
+  private async collectContactAvatarKeys(workspaceId: string): Promise<string[]> {
     const keys: string[] = [];
     const PAGE = 1_000;
     let cursor: string | undefined;
     for (;;) {
       const page = await this.db.contact.findMany({
-        where: { teamId, avatarUrl: { not: null } },
+        where: { workspaceId, avatarUrl: { not: null } },
         select: { id: true },
         orderBy: { id: "asc" },
         take: PAGE,
@@ -215,15 +215,15 @@ export class TeamRootService {
     return keys;
   }
 
-  async destroy(teamId: string, label: string): Promise<void> {
+  async destroy(workspaceId: string, label: string): Promise<void> {
     // Snapshot blob keys + member ids BEFORE the cascade nukes the rows.
     // Blob keys feed post-delete cleanup; member ids feed the explicit
     // socket kick (the cascade clears their Session rows but already-
     // connected sockets stay live until kicked).
     const [messageBlobKeys, contactAvatarKeys, teamMembers] = await Promise.all([
-      this.collectMessageBlobKeys(teamId),
-      this.collectContactAvatarKeys(teamId),
-      this.db.user.findMany({ where: { teamId }, select: { id: true, avatarUrl: true } }),
+      this.collectMessageBlobKeys(workspaceId),
+      this.collectContactAvatarKeys(workspaceId),
+      this.db.user.findMany({ where: { workspaceMemberships: { some: { workspaceId } } }, select: { id: true, avatarUrl: true } }),
     ]);
     const blobKeys = messageBlobKeys
       // Each member's avatar is an independent R2 blob under the `avatars/`
@@ -250,8 +250,8 @@ export class TeamRootService {
       // SetNull, no Restrict referrers), so batches can run in any order. The
       // final cascade then handles the now-small remainder + every other table +
       // FK integrity. (blobKeys were snapshotted above, before this drains them.)
-      await this.batchDeleteMessagesByTeam(teamId);
-      await this.db.team.delete({ where: { id: teamId } });
+      await this.batchDeleteMessagesByTeam(workspaceId);
+      await this.db.workspace.delete({ where: { id: workspaceId } });
     } catch (err) {
       this.logger.error(`[${label}] cascade delete failed`, err);
       throw new InternalServerErrorException({
@@ -260,7 +260,7 @@ export class TeamRootService {
       });
     }
 
-    invalidateProviderConfig(teamId);
+    invalidateProviderConfig(workspaceId);
 
     // Revoke each member through the unified path so the per-process
     // session cache is busted alongside the socket kick. The cascade

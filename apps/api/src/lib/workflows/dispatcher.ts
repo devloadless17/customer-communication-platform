@@ -11,7 +11,7 @@ import { enqueueWorkflowRun } from "@/lib/workflows/queue";
  * Public entry point. Call from any place in the app that produces a domain
  * event:
  *
- *   await dispatch(teamId, "message_received", { message, conversation, ... });
+ *   await dispatch(workspaceId, "message_received", { message, conversation, ... });
  *
  * Behavior per workflow on this team+trigger:
  *   1. Filter to published (live) workflows
@@ -38,7 +38,7 @@ import { enqueueWorkflowRun } from "@/lib/workflows/queue";
  * only; messages still ingest, replies still send.
  */
 export async function dispatch<E extends WorkflowTriggerEvent>(
-  teamId: string,
+  workspaceId: string,
   event: E,
   payload: PayloadFor<E>,
 ): Promise<void> {
@@ -49,13 +49,13 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
     // WORKFLOW_LOAD_WARN_THRESHOLD on a single dispatch so a noisy team
     // surfaces before it becomes a tail-latency problem. The fix when this
     // trips: push triggerConditions evaluation into the DB (Postgres JSON
-    // operators + an expression index on (teamId, trigger, published)), or
+    // operators + an expression index on (workspaceId, trigger, published)), or
     // shard the lookup by a coarse condition key. Both are bigger changes
     // than the current pre-MVP scale warrants.
     const workflows = await retry(
       () =>
         db.workflow.findMany({
-          where: { teamId, trigger: event, published: true },
+          where: { workspaceId, trigger: event, published: true },
           select: {
             id: true,
             graph: true,
@@ -64,7 +64,7 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
           },
         }),
       RULE_LOOKUP_RETRIES,
-      `[workflows] lookup team=${teamId} event=${event}`,
+      `[workflows] lookup team=${workspaceId} event=${event}`,
     );
     if (workflows.length === 0) return;
     if (workflows.length >= WORKFLOW_LOAD_WARN_THRESHOLD) {
@@ -73,7 +73,7 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
       // a sudden spike on a single team is the exact signal we want loud.
       console.warn(
         `[workflows] dispatch loaded ${workflows.length} workflows ` +
-          `(team=${teamId} event=${event}) — approaching the in-memory filter ` +
+          `(team=${workspaceId} event=${event}) — approaching the in-memory filter ` +
           `threshold; consider pushing triggerConditions into the DB.`,
       );
     }
@@ -94,11 +94,11 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
       if (oncePerContactIds.length > 0) {
         const already = await db.workflowContactState.findMany({
           where: {
-            // teamId is redundant with workflowId here (workflowId is a global
-            // cuid and oncePerContactIds came from a teamId-scoped lookup),
+            // workspaceId is redundant with workflowId here (workflowId is a global
+            // cuid and oncePerContactIds came from a workspaceId-scoped lookup),
             // but adding it makes the team boundary explicit at the query and
-            // means the row's @@index([teamId]) can serve this filter too.
-            teamId,
+            // means the row's @@index([workspaceId]) can serve this filter too.
+            workspaceId,
             workflowId: { in: oncePerContactIds },
             contactId,
           },
@@ -121,7 +121,7 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
       try {
         await createAndEnqueue({
           workflowId: w.id,
-          teamId,
+          workspaceId,
           trigger: event,
           contactId,
           conversationId,
@@ -131,14 +131,14 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
         });
       } catch (err) {
         console.error(
-          `[workflows] enqueue PERMANENTLY FAILED for workflow=${w.id} team=${teamId} event=${event} — run will NOT execute:`,
+          `[workflows] enqueue PERMANENTLY FAILED for workflow=${w.id} team=${workspaceId} event=${event} — run will NOT execute:`,
           err instanceof Error ? err.message : err,
         );
       }
     });
   } catch (err) {
     console.error(
-      `[workflows] dispatch failed for team=${teamId} event=${event}:`,
+      `[workflows] dispatch failed for team=${workspaceId} event=${event}:`,
       err instanceof Error ? err.message : err,
     );
   }
@@ -146,7 +146,7 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
 
 interface CreateAndEnqueueArgs {
   workflowId: string;
-  teamId: string;
+  workspaceId: string;
   trigger: WorkflowTriggerEvent;
   contactId: string | null;
   conversationId: string | null;
@@ -170,13 +170,13 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
           data: {
             workflowId: args.workflowId,
             contactId: args.contactId!,
-            teamId: args.teamId,
+            workspaceId: args.workspaceId,
           },
         });
         const run = await tx.workflowRun.create({
           data: {
             workflowId: args.workflowId,
-            teamId: args.teamId,
+            workspaceId: args.workspaceId,
             trigger: args.trigger,
             contactId: args.contactId,
             conversationId: args.conversationId,
@@ -201,7 +201,7 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
     const run = await db.workflowRun.create({
       data: {
         workflowId: args.workflowId,
-        teamId: args.teamId,
+        workspaceId: args.workspaceId,
         trigger: args.trigger,
         contactId: args.contactId,
         conversationId: args.conversationId,
@@ -220,7 +220,7 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
   await retry(
     () => enqueueWorkflowRun(runId!),
     ENQUEUE_RETRIES,
-    `[workflows] enqueue team=${args.teamId} workflow=${args.workflowId}`,
+    `[workflows] enqueue team=${args.workspaceId} workflow=${args.workflowId}`,
   );
 }
 
@@ -283,7 +283,7 @@ async function retry<T>(
  * Redis / Postgres).
  */
 export async function dispatchManualTrigger(args: {
-  teamId: string;
+  workspaceId: string;
   workflowId: string;
   contactId: string;
   conversationId: string | null;
@@ -312,7 +312,7 @@ export async function dispatchManualTrigger(args: {
   workflowDepth?: number;
 }): Promise<string | null> {
   const wf = await db.workflow.findFirst({
-    where: { id: args.workflowId, teamId: args.teamId },
+    where: { id: args.workflowId, workspaceId: args.workspaceId },
     select: {
       id: true,
       graph: true,
@@ -327,12 +327,12 @@ export async function dispatchManualTrigger(args: {
 
   const [contact, conversation] = await Promise.all([
     db.contact.findFirst({
-      where: { id: args.contactId, teamId: args.teamId },
+      where: { id: args.contactId, workspaceId: args.workspaceId },
       include: { tags: { select: { id: true } } },
     }),
     args.conversationId
       ? db.conversation.findFirst({
-          where: { id: args.conversationId, teamId: args.teamId },
+          where: { id: args.conversationId, workspaceId: args.workspaceId },
         })
       : Promise.resolve(null),
   ]);
@@ -415,13 +415,13 @@ export async function dispatchManualTrigger(args: {
           data: {
             workflowId: wf.id,
             contactId: args.contactId,
-            teamId: args.teamId,
+            workspaceId: args.workspaceId,
           },
         });
         const run = await tx.workflowRun.create({
           data: {
             workflowId: wf.id,
-            teamId: args.teamId,
+            workspaceId: args.workspaceId,
             trigger: "manual_trigger",
             contactId: args.contactId,
             conversationId: args.conversationId,
@@ -450,7 +450,7 @@ export async function dispatchManualTrigger(args: {
   const run = await db.workflowRun.create({
     data: {
       workflowId: wf.id,
-      teamId: args.teamId,
+      workspaceId: args.workspaceId,
       trigger: "manual_trigger",
       contactId: args.contactId,
       conversationId: args.conversationId,

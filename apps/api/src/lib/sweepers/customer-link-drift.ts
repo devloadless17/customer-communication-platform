@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { resolveCustomerId } from "@/lib/identity/identity-service";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Ensures every Contact rolls up to a Customer (unified identity, §6).
@@ -30,12 +30,12 @@ let inFlight = false;
 async function sweepOnce(): Promise<void> {
   const orphans = await db.contact.findMany({
     where: { customerId: null, deletedAt: null },
-    select: { id: true, teamId: true, phoneNumber: true, email: true, name: true },
+    select: { id: true, workspaceId: true, phoneNumber: true, email: true, name: true },
     take: BATCH,
   });
   for (const c of orphans) {
     try {
-      const customerId = await resolveCustomerId(c.teamId, c);
+      const customerId = await resolveCustomerId(c.workspaceId, c);
       // CAS: only link if still unlinked.
       const linked = await db.contact.updateMany({
         where: { id: c.id, customerId: null },
@@ -47,10 +47,16 @@ async function sweepOnce(): Promise<void> {
       // customer or an existing strong-key match (an in-use customer is skipped).
       if (linked.count === 0) {
         await db.customer.deleteMany({
-          where: { id: customerId, teamId: c.teamId, contacts: { none: {} } },
+          where: { id: customerId, workspaceId: c.workspaceId, contacts: { none: {} } },
         });
       }
     } catch (err) {
+      // Pool already ended (dev hot-reload / shutdown) — the work is
+      // over, so stop instead of logging a stack trace every tick.
+      if (isPoolClosedError(err)) {
+        stopCustomerLinkSweeper();
+        return;
+      }
       console.error(`[sweeper.customer-link] failed for contact ${c.id}`, err);
     }
   }

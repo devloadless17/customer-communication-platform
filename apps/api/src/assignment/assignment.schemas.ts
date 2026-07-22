@@ -41,7 +41,7 @@ const policyBody = {
   description: z.string().trim().max(500).nullable().optional(),
   strategy: AssignmentStrategySchema.optional(),
   eligibility: AssignmentEligibilitySchema.optional(),
-  eligibleRoles: z.array(z.enum(["superAdmin", "admin", "manager", "agent"])).max(4).optional(),
+  eligibleRoles: z.array(z.enum(["admin", "manager", "agent"])).max(3).optional(),
   includeAllMembers: z.boolean().optional(),
   defaultMaxOpen: z.number().int().min(0).max(L.maxOpenCap).nullable().optional(),
   overflow: AssignmentOverflowSchema.optional(),

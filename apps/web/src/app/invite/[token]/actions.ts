@@ -49,7 +49,7 @@ export async function acceptInviteAction(
 
   let signInEmail: string;
   try {
-    const out = await api<{ ok: true; email: string; teamId: string }>(
+    const out = await api<{ ok: true; email: string; workspaceId: string }>(
       "/api/invites/accept",
       { method: "POST", body: { token, name, password }, on401: "throw" },
     );

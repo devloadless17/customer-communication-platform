@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
+import { markFirstResponse, routeMessageToTicket } from "@/lib/tickets/mutations";
 import type { DomainEventOf } from "@ccp/shared/events/types";
 
 /**
@@ -55,6 +56,34 @@ export async function commitOutboundSend(args: {
         lastMessageDirection: "out",
       },
     });
+    // Attach the reply to the thread's active ticket and stop its
+    // first-response clock. Here rather than in each `send-*-internal.ts`
+    // because this is already THE single post-send commit — five copies of
+    // this would drift the same way the monotonicity check once did.
+    //
+    // `direction: "out"` means routing will never resurrect a solved ticket:
+    // an agent's follow-up on closed work is not new work. If there is no
+    // active ticket the reply simply carries none.
+    //
+    // BROADCASTS DO NOT REACH HERE, and that is load-bearing. The runner writes
+    // its rows through `createOutboundMessageIdempotent` alone, so a 1k-recipient
+    // campaign opens ZERO tickets — same reasoning as the §18 rule that keeps
+    // audit and workflows off `broadcast.*`. A customer who REPLIES to a
+    // campaign does open one, via ingest, which is exactly right: the reply is
+    // the work, the blast isn't.
+    const routed = await routeMessageToTicket(tx, {
+      workspaceId: args.event.workspaceId,
+      conversationId: args.conversationId,
+      direction: "out",
+    });
+    if (routed.ticketId) {
+      await tx.message.update({
+        where: { id: args.event.message.id },
+        data: { ticketId: routed.ticketId },
+      });
+      await markFirstResponse(tx, args.event.workspaceId, routed.ticketId, effectiveBump);
+    }
+
     await publishInTx(tx, {
       ...args.event,
       lastMessageAt: effectiveBump.toISOString(),

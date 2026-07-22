@@ -22,6 +22,10 @@ import {
   SetStatusEditor,
   TagEditor,
   TriggerWorkflowEditor,
+  CreateTicketEditor,
+  SetTicketStatusEditor,
+  SetTicketPriorityEditor,
+  AssignTicketEditor,
   UpdateFieldEditor,
   UpdateLifecycleEditor,
   WaitEditor,
@@ -234,5 +238,13 @@ function EditorForNode({
       return <HttpRequestEditor config={c} onChange={onChangeConfig} />;
     case "trigger_workflow":
       return <TriggerWorkflowEditor config={c} onChange={onChangeConfig} workflows={catalogs.workflows} />;
+    case "create_ticket":
+      return <CreateTicketEditor config={c} onChange={onChangeConfig} />;
+    case "set_ticket_status":
+      return <SetTicketStatusEditor config={c} onChange={onChangeConfig} />;
+    case "set_ticket_priority":
+      return <SetTicketPriorityEditor config={c} onChange={onChangeConfig} />;
+    case "assign_ticket":
+      return <AssignTicketEditor config={c} onChange={onChangeConfig} users={catalogs.users} />;
   }
 }

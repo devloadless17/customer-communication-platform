@@ -20,7 +20,7 @@ export class NotesService {
   constructor(private readonly db: DbService) {}
 
   async create(
-    teamId: string,
+    workspaceId: string,
     authorUserId: string,
     input: CreateNoteInput,
     viewer?: ConversationViewer,
@@ -30,7 +30,7 @@ export class NotesService {
       // thread they can't see (404, same as a missing conversation).
       where: {
         id: input.conversationId,
-        teamId,
+        workspaceId,
         ...(viewer ? visibilityWhere(viewer) : {}),
       },
       select: { id: true },
@@ -46,7 +46,7 @@ export class NotesService {
     const created = await this.db.$transaction(async (tx) => {
       const row = await tx.internalNote.create({
         data: {
-          teamId,
+          workspaceId,
           conversationId: input.conversationId,
           authorUserId,
           body: input.body,
@@ -61,7 +61,7 @@ export class NotesService {
       };
       await publishInTx(tx, {
         type: "note.created",
-        teamId,
+        workspaceId,
         conversationId: input.conversationId,
         note,
       });
@@ -73,19 +73,19 @@ export class NotesService {
   }
 
   async remove(
-    teamId: string,
+    workspaceId: string,
     requesterUserId: string,
     requesterRole: Role,
     id: string,
     viewer?: ConversationViewer,
   ): Promise<void> {
     // Team scope via the parent conversation — defends against id-stuffing
-    // across tenants without joining at the note level (which lacks teamId).
+    // across tenants without joining at the note level (which lacks workspaceId).
     const note = await this.db.internalNote.findFirst({
       where: {
         id,
         conversation: {
-          teamId,
+          workspaceId,
           ...(viewer ? visibilityWhere(viewer) : {}),
         },
       },
@@ -100,8 +100,7 @@ export class NotesService {
     const isAuthor = note.authorUserId === requesterUserId;
     const isPrivileged =
       requesterRole === "admin" ||
-      requesterRole === "manager" ||
-      requesterRole === "superAdmin";
+      requesterRole === "manager";
     if (!isAuthor && !isPrivileged) {
       throw new ForbiddenException({
         error: "note_delete_forbidden",
@@ -113,7 +112,7 @@ export class NotesService {
       await tx.internalNote.delete({ where: { id } });
       await publishInTx(tx, {
         type: "note.deleted",
-        teamId,
+        workspaceId,
         conversationId: note.conversationId,
         noteId: id,
         deletedByUserId: requesterUserId,

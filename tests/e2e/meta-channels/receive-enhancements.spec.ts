@@ -37,7 +37,7 @@ test.beforeAll(async () => {
 
 function msgByExternalId(channel: "whatsapp" | "messenger" | "instagram", externalId: string) {
   return db().message.findUnique({
-    where: { teamId_channel_externalId: { teamId: META_TEST_TEAM_ID, channel, externalId } },
+    where: { workspaceId_channel_externalId: { workspaceId: META_TEST_TEAM_ID, channel, externalId } },
     select: {
       id: true,
       direction: true,

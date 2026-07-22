@@ -9,9 +9,35 @@ import {
 import type { Request } from "express";
 
 import { auth } from "@/auth/better-auth";
-import type { Role, TeamStatus } from "@ccp/shared/types";
+import type { Role, OrgRole, OrgStatus } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
+
+/**
+ * Cookie carrying the CANDIDATE active workspace. Deliberately a cookie rather
+ * than a header or a path segment: RSC fetches and the Socket.io handshake both
+ * send cookies automatically, so one mechanism covers HTTP + realtime without a
+ * routing refactor.
+ *
+ * SECURITY: this is client input. It only ever SELECTS among workspaces the
+ * user provably belongs to (validated against WorkspaceMember in
+ * resolveSession) — it can never widen access. The durable, server-side truth
+ * is `Session.activeWorkspaceId`.
+ */
+export const ACTIVE_WORKSPACE_COOKIE = "ccp.ws";
+
+/** Pull the raw `ccp.ws` value out of a Cookie header, if present. */
+export function readActiveWorkspaceCookie(cookieHeader: string | undefined): string | null {
+  if (typeof cookieHeader !== "string" || cookieHeader.length === 0) return null;
+  for (const part of cookieHeader.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() !== ACTIVE_WORKSPACE_COOKIE) continue;
+    const value = decodeURIComponent(part.slice(eq + 1).trim());
+    return value.length > 0 ? value : null;
+  }
+  return null;
+}
 
 /**
  * Shape attached to req.session on success. Same fields the pre-migration
@@ -26,18 +52,39 @@ export interface ApiSession {
    *  while every other device is kicked. */
   sessionId: string;
   userId: string;
-  teamId: string;
+  /** Organization (tenant / billing root) this user belongs to. A user belongs
+   *  to exactly ONE org and joins many of its workspaces. */
+  organizationId: string;
+  /** Org-directory role — governs billing, the user directory, and workspace
+   *  creation. Distinct from `role`, which is per-workspace. */
+  orgRole: OrgRole;
+  /** Platform-level operator. Replaces the removed `Role.superAdmin`: bypasses
+   *  the org-approval gate and every per-workspace permission check. */
+  isSuperAdmin: boolean;
+  /** The ACTIVE workspace for this request — the data-isolation scope that
+   *  every `where: { workspaceId }` uses. Resolved server-side from the
+   *  membership-validated `ccp.ws` cookie / `Session.activeWorkspaceId`, NEVER
+   *  taken raw from client input. */
+  workspaceId: string;
+  /** EFFECTIVE role in the active workspace:
+   *    isSuperAdmin            → "admin" (and every gate short-circuits anyway)
+   *    orgRole owner|admin     → "admin" in every workspace of the org
+   *    otherwise               → the WorkspaceMember.role for this workspace
+   *  Computed once here so guards stay a pure field read. */
   role: Role;
+  /** Every workspace this user may switch to, for the switcher UI and to
+   *  validate a switch request without a second query. */
+  workspaceMemberships: { workspaceId: string; name: string; role: Role }[];
   name: string;
   email: string;
   /** Same row the guard already loaded — exposing it lets handlers build
    *  message DTOs inline without a follow-up user lookup. */
   avatarUrl: string | null;
-  /** Org-approval status of this user's team. SessionGuard rejects any
+  /** Org-approval status of this user's ORGANIZATION. SessionGuard rejects any
    *  non-`active` org (pending review / suspended) before the request reaches
    *  a controller — superAdmins exempt. Bounded by the same 15s session cache
    *  as the deactivation check, so a suspend lands within ~15s on the API. */
-  teamStatus: TeamStatus;
+  orgStatus: OrgStatus;
   /** The team's raw `rolePermissions` JSON (admin-configured per-role
    *  capability overrides). Carried on the session so CapabilityGuard +
    *  handler-level checks resolve permissions with ZERO extra DB read; the
@@ -92,9 +139,9 @@ export class SessionGuard implements CanActivate {
     // Org-approval gate. A pending (awaiting review) or suspended (revoked) org
     // has no API access. superAdmins are exempt — their team is just an anchor
     // row and they manage the platform from the (platform) shell. Checked on
-    // both the cache-hit and cache-miss paths because `teamStatus` rides on the
+    // both the cache-hit and cache-miss paths because `orgStatus` rides on the
     // cached ApiSession; a status flip propagates within the 15s cache TTL.
-    if (session.role !== "superAdmin" && session.teamStatus !== "active") {
+    if (!session.isSuperAdmin && session.orgStatus !== "active") {
       throw new ForbiddenException({ error: "org_not_active" });
     }
     req.session = session;
@@ -327,36 +374,87 @@ export async function resolveSession(
     where: { id: result.user.id },
     select: {
       id: true,
-      teamId: true,
-      role: true,
+      organizationId: true,
+      orgRole: true,
+      isSuperAdmin: true,
       name: true,
       email: true,
       avatarUrl: true,
       deactivatedAt: true,
-      team: {
+      organization: { select: { status: true } },
+      // Every workspace this user may act in. Ordered so the "first membership"
+      // fallback is deterministic across requests/devices.
+      workspaceMemberships: {
+        orderBy: { createdAt: "asc" },
         select: {
-          rolePermissions: true,
-          status: true,
-          agentConversationVisibility: true,
+          role: true,
+          workspace: {
+            select: {
+              id: true,
+              name: true,
+              rolePermissions: true,
+              agentConversationVisibility: true,
+            },
+          },
         },
       },
     },
   });
   if (!user || user.deactivatedAt) return null;
 
+  const memberships = user.workspaceMemberships;
+  // An org admin/owner is implicitly admin in EVERY workspace of their org, so
+  // they may act in workspaces they hold no explicit membership row for.
+  const isOrgAdmin = user.orgRole === "owner" || user.orgRole === "admin";
+  const canAccess = (wsId: string): boolean =>
+    memberships.some((m) => m.workspace.id === wsId) || isOrgAdmin || user.isSuperAdmin;
+
+  // Active-workspace resolution. The `ccp.ws` cookie is CLIENT INPUT and is
+  // never trusted raw — it only selects among workspaces the user provably may
+  // access. Order: validated cookie → this device's stored choice → first
+  // membership. Anything unresolvable means "no workspace", and the guard
+  // treats that as unauthenticated rather than silently picking someone else's.
+  const cookieCandidate = readActiveWorkspaceCookie(cookieHeader);
+  let activeWorkspaceId: string | null =
+    cookieCandidate && canAccess(cookieCandidate) ? cookieCandidate : null;
+  if (!activeWorkspaceId) {
+    const stored = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { activeWorkspaceId: true },
+    });
+    if (stored?.activeWorkspaceId && canAccess(stored.activeWorkspaceId)) {
+      activeWorkspaceId = stored.activeWorkspaceId;
+    }
+  }
+  if (!activeWorkspaceId) activeWorkspaceId = memberships[0]?.workspace.id ?? null;
+  if (!activeWorkspaceId) return null; // no workspace to act in
+
+  const active = memberships.find((m) => m.workspace.id === activeWorkspaceId);
+  // Effective role in the ACTIVE workspace (see ApiSession.role).
+  const effectiveRole: Role =
+    user.isSuperAdmin || isOrgAdmin ? "admin" : ((active?.role ?? "agent") as Role);
+
   const session: ApiSession = {
     sessionId,
     userId: user.id,
-    teamId: user.teamId,
-    role: user.role as Role,
+    organizationId: user.organizationId,
+    orgRole: user.orgRole,
+    isSuperAdmin: user.isSuperAdmin,
+    workspaceId: activeWorkspaceId,
+    role: effectiveRole,
+    workspaceMemberships: memberships.map((m) => ({
+      workspaceId: m.workspace.id,
+      name: m.workspace.name,
+      role: m.role as Role,
+    })),
     name: user.name,
     email: user.email,
     avatarUrl: user.avatarUrl ?? null,
-    teamStatus: (user.team?.status ?? "active") as TeamStatus,
-    rolePermissions: user.team?.rolePermissions ?? {},
+    orgStatus: (user.organization?.status ?? "active") as OrgStatus,
+    rolePermissions: active?.workspace.rolePermissions ?? {},
     // Default "team" = unrestricted, matching the column default, so a missing
-    // team row can never accidentally lock an org out of its own inbox.
-    agentConversationVisibility: user.team?.agentConversationVisibility ?? "team",
+    // workspace row can never accidentally lock an org out of its own inbox.
+    agentConversationVisibility: active?.workspace.agentConversationVisibility ?? "team",
   };
   cacheSet(user.id, session);
   if (typeof cookieHeader === "string" && cookieHeader.length > 0) {

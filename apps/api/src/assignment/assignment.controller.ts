@@ -64,7 +64,7 @@ export class AssignmentController {
 
   @Get()
   async overview(@CurrentSession() session: ApiSession) {
-    return this.assignment.getOverview(session.teamId);
+    return this.assignment.getOverview(session.workspaceId);
   }
 
   @Post("policies")
@@ -72,7 +72,7 @@ export class AssignmentController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreatePolicySchema)) body: CreatePolicyInput,
   ) {
-    return this.assignment.createPolicy(session.teamId, body);
+    return this.assignment.createPolicy(session.workspaceId, body);
   }
 
   @Put("policies/:id")
@@ -81,17 +81,17 @@ export class AssignmentController {
     @Param("id") id: string,
     @Body(zBody(UpdatePolicySchema)) body: UpdatePolicyInput,
   ) {
-    return this.assignment.updatePolicy(session.teamId, id, body);
+    return this.assignment.updatePolicy(session.workspaceId, id, body);
   }
 
   @Post("policies/:id/default")
   async setDefault(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    return this.assignment.setDefaultPolicy(session.teamId, id);
+    return this.assignment.setDefaultPolicy(session.workspaceId, id);
   }
 
   @Delete("policies/:id")
   async archivePolicy(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    return this.assignment.archivePolicy(session.teamId, id);
+    return this.assignment.archivePolicy(session.workspaceId, id);
   }
 
   @Post("rules")
@@ -99,7 +99,7 @@ export class AssignmentController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateRuleSchema)) body: CreateRuleInput,
   ) {
-    return this.assignment.createRule(session.teamId, body);
+    return this.assignment.createRule(session.workspaceId, body);
   }
 
   // Declared BEFORE `rules/:id` so "order" isn't swallowed as an id — Nest
@@ -109,7 +109,7 @@ export class AssignmentController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(ReorderRulesSchema)) body: ReorderRulesInput,
   ) {
-    return this.assignment.reorderRules(session.teamId, body.ruleIds);
+    return this.assignment.reorderRules(session.workspaceId, body.ruleIds);
   }
 
   @Patch("rules/:id")
@@ -118,12 +118,12 @@ export class AssignmentController {
     @Param("id") id: string,
     @Body(zBody(UpdateRuleSchema)) body: UpdateRuleInput,
   ) {
-    return this.assignment.updateRule(session.teamId, id, body);
+    return this.assignment.updateRule(session.workspaceId, id, body);
   }
 
   @Delete("rules/:id")
   async deleteRule(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    return this.assignment.deleteRule(session.teamId, id);
+    return this.assignment.deleteRule(session.workspaceId, id);
   }
 
   @Patch("settings")
@@ -131,7 +131,7 @@ export class AssignmentController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(UpdateAssignmentSettingsSchema)) body: UpdateAssignmentSettingsInput,
   ) {
-    return this.assignment.updateSettings(session.teamId, body);
+    return this.assignment.updateSettings(session.workspaceId, body);
   }
 
   @Post("preview")
@@ -139,6 +139,6 @@ export class AssignmentController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(PreviewAssignmentSchema)) body: PreviewAssignmentInput,
   ) {
-    return this.assignment.preview(session.teamId, body);
+    return this.assignment.preview(session.workspaceId, body);
   }
 }

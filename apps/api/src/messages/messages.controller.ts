@@ -97,7 +97,7 @@ export class MessagesController {
     // failure surfaced via `message:failed`. The frontend reply-box does
     // NOT read `messageId` from this response anymore; the legacy shape
     // returned a real messageId because the send was synchronous.
-    const out = await this.messages.sendText(session.teamId, session.userId, body, retry === "1");
+    const out = await this.messages.sendText(session.workspaceId, session.userId, body, retry === "1");
     return { ok: out.ok, queued: true, ...("clientTempId" in out ? { clientTempId: out.clientTempId } : {}) };
   }
 
@@ -167,7 +167,7 @@ export class MessagesController {
     }
     try {
       const out = await this.messages.sendMedia(
-        session.teamId,
+        session.workspaceId,
         session.userId,
         form,
         file,
@@ -207,8 +207,8 @@ export class MessagesController {
     // are reconstructable from any presigned URL a team ever emitted, e.g. via
     // toExternalMediaUrl in webhook/v1 payloads). Every other media surface
     // checks team ownership before serving bytes; do the same here by requiring
-    // the recovered key to live under the caller's `media/{teamId}/` prefix.
-    if (!rawUrl || !blobStorage.isOwnUrl(rawUrl) || !isOwnTeamMediaUrl(rawUrl, session.teamId)) {
+    // the recovered key to live under the caller's `media/{workspaceId}/` prefix.
+    if (!rawUrl || !blobStorage.isOwnUrl(rawUrl) || !isOwnTeamMediaUrl(rawUrl, session.workspaceId)) {
       throw new NotFoundException({ error: "not_found" });
     }
     await streamBlob(res, rawUrl, range);
@@ -240,7 +240,7 @@ export class MessagesController {
       throw new BadRequestException({ error: "file is required" });
     }
     try {
-      const out = await this.messages.uploadTemplateHeaderMedia(session.teamId, file);
+      const out = await this.messages.uploadTemplateHeaderMedia(session.workspaceId, file);
       return { ok: true, ...out };
     } finally {
       await unlink(file.path).catch(() => undefined);
@@ -252,7 +252,7 @@ export class MessagesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(SendTemplateSchema)) body: SendTemplateInput,
   ) {
-    const out = await this.messages.sendTemplate(session.teamId, session.userId, body);
+    const out = await this.messages.sendTemplate(session.workspaceId, session.userId, body);
     return { ok: true, messageId: out.messageId };
   }
 
@@ -267,7 +267,7 @@ export class MessagesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(SendInteractiveSchema)) body: SendInteractiveInput,
   ) {
-    const out = await this.messages.sendInteractive(session.teamId, session.userId, body);
+    const out = await this.messages.sendInteractive(session.workspaceId, session.userId, body);
     return { ok: true, messageId: out.messageId };
   }
 
@@ -276,7 +276,7 @@ export class MessagesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(SendLocationSchema)) body: SendLocationInput,
   ) {
-    const out = await this.messages.sendLocation(session.teamId, session.userId, body);
+    const out = await this.messages.sendLocation(session.workspaceId, session.userId, body);
     return { ok: true, messageId: out.messageId };
   }
 
@@ -285,7 +285,7 @@ export class MessagesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(SendContactsSchema)) body: SendContactsInput,
   ) {
-    const out = await this.messages.sendContacts(session.teamId, session.userId, body);
+    const out = await this.messages.sendContacts(session.workspaceId, session.userId, body);
     return { ok: true, messageId: out.messageId };
   }
 
@@ -294,7 +294,7 @@ export class MessagesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(SendReactionSchema)) body: SendReactionInput,
   ) {
-    await this.messages.reactToMessage(session.teamId, session.userId, body);
+    await this.messages.reactToMessage(session.workspaceId, session.userId, body);
     return { ok: true };
   }
 
@@ -306,7 +306,7 @@ export class MessagesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(DismissReactionSchema)) body: DismissReactionInput,
   ) {
-    return this.messages.dismissReaction(session.teamId, body.messageId);
+    return this.messages.dismissReaction(session.workspaceId, body.messageId);
   }
 
   @Post("forward")
@@ -314,25 +314,25 @@ export class MessagesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(ForwardMessagesSchema)) body: ForwardMessagesInput,
   ) {
-    return this.messages.forward(session.teamId, session.userId, body);
+    return this.messages.forward(session.workspaceId, session.userId, body);
   }
 }
 
 /**
  * Team-scope gate for the header-media preview. Staged header-media objects are
- * keyed `media/{teamId}/…` (see r2 `buildKey`), so recover the key from our own
+ * keyed `media/{workspaceId}/…` (see r2 `buildKey`), so recover the key from our own
  * stable object URL — path-style `https://…/{bucket}/{key}` — and require it to
  * sit under the caller's team prefix. Assumes `blobStorage.isOwnUrl` already
  * vetted the host. teamIds are URL-safe (cuid) so no re-sanitization needed.
  */
-function isOwnTeamMediaUrl(rawUrl: string, teamId: string): boolean {
+function isOwnTeamMediaUrl(rawUrl: string, workspaceId: string): boolean {
   // Recover the object key via r2's canonical parser (host + `/{bucket}/` prefix
   // check) instead of re-deriving it here — one source of truth for what "our
   // key" means, and it returns null (→ false) for foreign/malformed URLs or an
   // env/config miss rather than throwing. Only the team-scope gate stays local.
   const key = r2Internal.keyFromOwnUrl(rawUrl);
   if (!key) return false;
-  return key.startsWith(`media/${teamId}/`);
+  return key.startsWith(`media/${workspaceId}/`);
 }
 
 /**

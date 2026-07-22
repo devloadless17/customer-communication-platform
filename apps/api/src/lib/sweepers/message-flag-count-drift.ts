@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Reconciler for the `Conversation.openFlagCount` denormalization.
@@ -37,6 +37,12 @@ async function runTick(label: string): Promise<void> {
   try {
     await withSweeperMutex("message-flag-count-drift", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopMessageFlagCountDriftSweeper();
+      return;
+    }
     console.error(`[sweeper.message-flag-count-drift] ${label} failed`, err);
   } finally {
     inFlight = false;
@@ -77,10 +83,10 @@ export function stopMessageFlagCountDriftSweeper(): void {
  * of) threads that have never been flagged.
  */
 export async function sweepMessageFlagCountsOnce(): Promise<number> {
-  const teams = await db.team.findMany({ select: { id: true } });
+  const teams = await db.workspace.findMany({ select: { id: true } });
   let totalDrifted = 0;
 
-  for (const { id: teamId } of teams) {
+  for (const { id: workspaceId } of teams) {
     try {
       const drifted = await db.$executeRaw`
         UPDATE "Conversation" c
@@ -93,23 +99,23 @@ export async function sweepMessageFlagCountsOnce(): Promise<number> {
           LEFT JOIN (
             SELECT "conversationId", COUNT(*) AS open_count
             FROM "MessageFlag"
-            WHERE "teamId" = ${teamId} AND status = 'open'
+            WHERE "workspaceId" = ${workspaceId} AND status = 'open'
             GROUP BY "conversationId"
           ) f ON f."conversationId" = c2.id
-          WHERE c2."teamId" = ${teamId}
+          WHERE c2."workspaceId" = ${workspaceId}
             -- Skip the never-flagged majority: a thread with no flag rows and a
             -- counter already at 0 is by definition correct, and rewriting it
             -- would touch nearly every conversation in the team every day.
             AND (f.open_count IS NOT NULL OR c2."openFlagCount" <> 0)
         ) sub
         WHERE c.id = sub.conversation_id
-          AND c."teamId" = ${teamId}
+          AND c."workspaceId" = ${workspaceId}
           AND c."openFlagCount" IS DISTINCT FROM sub.actual
       `;
       totalDrifted += Number(drifted);
     } catch (err) {
       console.warn(
-        `[sweeper.message-flag-count-drift] reconcile failed for team=${teamId}; continuing`,
+        `[sweeper.message-flag-count-drift] reconcile failed for team=${workspaceId}; continuing`,
         err instanceof Error ? err.message : err,
       );
     }

@@ -48,7 +48,7 @@ type MessageRow = Prisma.TeamChannelMessageGetPayload<{ include: typeof MESSAGE_
 export function mapChannel(
   row: {
     id: string;
-    teamId: string;
+    workspaceId: string;
     name: string | null;
     description: string | null;
     isDefault: boolean;
@@ -65,7 +65,7 @@ export function mapChannel(
 ): TeamChannelDto {
   return {
     id: row.id,
-    teamId: row.teamId,
+    workspaceId: row.workspaceId,
     name: row.name,
     description: row.description,
     isDefault: row.isDefault,
@@ -118,7 +118,7 @@ export function mapMessage(row: MessageRow): TeamChannelMessageDto {
   return {
     id: row.id,
     channelId: row.channelId,
-    teamId: row.teamId,
+    workspaceId: row.workspaceId,
     authorUserId: row.authorUserId,
     authorName: row.author?.name ?? null,
     authorAvatarUrl: row.author?.avatarUrl ?? null,
@@ -145,10 +145,10 @@ export function mapMessage(row: MessageRow): TeamChannelMessageDto {
  */
 export async function loadMessageForEmit(
   messageId: string,
-  teamId: string,
+  workspaceId: string,
 ): Promise<TeamChannelMessageDto | null> {
   const row = await db.teamChannelMessage.findFirst({
-    where: { id: messageId, teamId },
+    where: { id: messageId, workspaceId },
     include: MESSAGE_INCLUDE,
   });
   return row ? mapMessage(row) : null;
@@ -170,7 +170,7 @@ export async function loadMessageForEmit(
  * differs because channels sort by name (muscle memory) and DMs by recency.
  */
 async function listChannelRowsForUser<T extends Prisma.TeamChannelInclude | undefined>(
-  teamId: string,
+  workspaceId: string,
   userId: string,
   where: Prisma.TeamChannelWhereInput,
   orderBy: Prisma.TeamChannelOrderByWithRelationInput[],
@@ -187,7 +187,7 @@ async function listChannelRowsForUser<T extends Prisma.TeamChannelInclude | unde
     // aggregating membership rows for EVERY DM in the tenant — O(users²) —
     // and discarding all but a dozen. This counts only the rows we return.
     db.teamChannel.findMany({
-      where: { teamId, members: { some: { userId } }, ...where },
+      where: { workspaceId, members: { some: { userId } }, ...where },
       orderBy,
       include: {
         ...(include ?? {}),
@@ -195,7 +195,7 @@ async function listChannelRowsForUser<T extends Prisma.TeamChannelInclude | unde
       } as Prisma.TeamChannelInclude,
     }),
     db.teamChannelReadReceipt.findMany({
-      where: { userId, channel: { teamId } },
+      where: { userId, channel: { workspaceId } },
       select: { channelId: true, lastReadAt: true },
     }),
     // Count of (mention, message) pairs newer than the viewer's last-read
@@ -209,7 +209,7 @@ async function listChannelRowsForUser<T extends Prisma.TeamChannelInclude | unde
       LEFT JOIN "TeamChannelReadReceipt" r
         ON r."channelId" = m."channelId" AND r."userId" = ${userId}
       WHERE mn."mentionedUserId" = ${userId}
-        AND m."teamId" = ${teamId}
+        AND m."workspaceId" = ${workspaceId}
         -- COALESCE(editedAt, createdAt) — see the matching comment on
         -- ChannelsService.unreadMentionCount. An edit can ADD a mention, and by
         -- then the message's createdAt is older than the reader's receipt, so
@@ -264,11 +264,11 @@ async function listChannelRowsForUser<T extends Prisma.TeamChannelInclude | unde
  * viewer is in would appear in the channel sidebar with a null name.
  */
 export async function listChannelsForUser(
-  teamId: string,
+  workspaceId: string,
   userId: string,
 ): Promise<TeamChannelListItemDto[]> {
   const rows = await listChannelRowsForUser(
-    teamId,
+    workspaceId,
     userId,
     { kind: "channel" },
     [{ isDefault: "desc" }, { name: "asc" }],
@@ -287,11 +287,11 @@ export async function listChannelsForUser(
  * history survive — deleting it would destroy the survivor's messages).
  */
 export async function listDirectMessagesForUser(
-  teamId: string,
+  workspaceId: string,
   userId: string,
 ): Promise<TeamDmListItemDto[]> {
   const rows = await listChannelRowsForUser(
-    teamId,
+    workspaceId,
     userId,
     { kind: "dm" },
     [{ lastMessageAt: "desc" }],
@@ -369,11 +369,11 @@ function mapDmPeer(members: DmMemberRow[], userId: string): DirectMessagePeerDto
  */
 export async function getChannelById(
   channelId: string,
-  teamId: string,
+  workspaceId: string,
   userId: string,
 ): Promise<TeamChannelDto | null> {
   const row = await db.teamChannel.findFirst({
-    where: { id: channelId, teamId },
+    where: { id: channelId, workspaceId },
     include: {
       _count: { select: { members: true } },
       receipts: { where: { userId }, select: { lastReadAt: true } },
@@ -402,11 +402,11 @@ export async function getChannelById(
  * otherwise redirect the user straight into a DM as their "default channel".
  */
 export async function getDefaultChannel(
-  teamId: string,
+  workspaceId: string,
   userId: string,
 ): Promise<TeamChannelDto | null> {
   const row = await db.teamChannel.findFirst({
-    where: { teamId, kind: "channel", isDefault: true },
+    where: { workspaceId, kind: "channel", isDefault: true },
     orderBy: { createdAt: "asc" },
     include: { _count: { select: { members: true } } },
   });
@@ -421,7 +421,7 @@ export async function getDefaultChannel(
   // of whichever private channel happens to sort first — the same leak class
   // the `OR isDefault: true` removal in searchAllChannels closed.
   const fallback = await db.teamChannel.findFirst({
-    where: { teamId, kind: "channel", members: { some: { userId } } },
+    where: { workspaceId, kind: "channel", members: { some: { userId } } },
     orderBy: { name: "asc" },
     include: { _count: { select: { members: true } } },
   });
@@ -442,7 +442,7 @@ export async function getDefaultChannel(
  * unbranched on visibility).
  */
 export async function browsePublicChannels(
-  teamId: string,
+  workspaceId: string,
   viewerUserId: string,
   q: string | null,
   opts: { before?: string | null; take?: number } = {},
@@ -452,7 +452,7 @@ export async function browsePublicChannels(
 
   const rows = await db.teamChannel.findMany({
     where: {
-      teamId,
+      workspaceId,
       kind: "channel",
       visibility: "public",
       ...(q ? { name: { contains: q, mode: "insensitive" as const } } : {}),
@@ -509,11 +509,11 @@ export async function browsePublicChannels(
  * not exist", which is the point.
  */
 export async function getPublicChannelPreview(
-  teamId: string,
+  workspaceId: string,
   channelId: string,
 ): Promise<TeamChannelBrowseItemDto | null> {
   const row = await db.teamChannel.findFirst({
-    where: { id: channelId, teamId, kind: "channel", visibility: "public" },
+    where: { id: channelId, workspaceId, kind: "channel", visibility: "public" },
     select: {
       id: true,
       name: true,
@@ -547,7 +547,7 @@ export async function getPublicChannelPreview(
  */
 export async function listChannelMessages(
   channelId: string,
-  teamId: string,
+  workspaceId: string,
   opts: { take?: number; before?: { createdAt: string; id: string } | null } = {},
 ): Promise<ChannelMessagesPage> {
   const take = Math.min(opts.take ?? PAGE_SIZE, MAX_PAGE_SIZE);
@@ -557,7 +557,7 @@ export async function listChannelMessages(
   const rows = await db.teamChannelMessage.findMany({
     where: {
       channelId,
-      teamId,
+      workspaceId,
       threadRootId: null,
       ...(opts.before
         ? {
@@ -599,7 +599,7 @@ export async function listChannelMessages(
  */
 export async function listChannelMessagesAround(
   channelId: string,
-  teamId: string,
+  workspaceId: string,
   anchorMessageId: string,
   take = PAGE_SIZE,
 ): Promise<ChannelMessagesAroundPage | null> {
@@ -609,7 +609,7 @@ export async function listChannelMessagesAround(
   // Tenant guard + cursor anchor — refuse foreign-team ids or replies (they
   // aren't on the channel feed, jump-to wouldn't land on a visible row).
   const anchor = await db.teamChannelMessage.findFirst({
-    where: { id: anchorMessageId, channelId, teamId, threadRootId: null },
+    where: { id: anchorMessageId, channelId, workspaceId, threadRootId: null },
     select: { id: true, createdAt: true },
   });
   if (!anchor) return null;
@@ -618,7 +618,7 @@ export async function listChannelMessagesAround(
     db.teamChannelMessage.findMany({
       where: {
         channelId,
-        teamId,
+        workspaceId,
         threadRootId: null,
         OR: [
           { createdAt: { lt: anchor.createdAt } },
@@ -636,7 +636,7 @@ export async function listChannelMessagesAround(
     db.teamChannelMessage.findMany({
       where: {
         channelId,
-        teamId,
+        workspaceId,
         threadRootId: null,
         OR: [
           { createdAt: { gt: anchor.createdAt } },
@@ -695,7 +695,7 @@ export async function listChannelMessagesAround(
  */
 export async function listChannelMessagesAfter(
   channelId: string,
-  teamId: string,
+  workspaceId: string,
   after: { createdAt: string; id: string | null },
   take = PAGE_SIZE,
 ): Promise<{ items: TeamChannelMessageDto[]; nextCursor: string | null }> {
@@ -705,7 +705,7 @@ export async function listChannelMessagesAfter(
   const rows = await db.teamChannelMessage.findMany({
     where: {
       channelId,
-      teamId,
+      workspaceId,
       threadRootId: null,
       ...(after.id
         ? {
@@ -747,14 +747,14 @@ export async function listChannelMessagesAfter(
  */
 export async function listThreadReplies(
   rootMessageId: string,
-  teamId: string,
+  workspaceId: string,
   opts: { take?: number; after?: { createdAt: string; id: string } | null } = {},
 ): Promise<{ items: TeamChannelMessageDto[]; nextCursor: string | null }> {
   const take = Math.min(opts.take ?? PAGE_SIZE, MAX_PAGE_SIZE);
   const rows = await db.teamChannelMessage.findMany({
     where: {
       threadRootId: rootMessageId,
-      teamId,
+      workspaceId,
       ...(opts.after
         ? {
             OR: [
@@ -795,7 +795,7 @@ export async function listThreadReplies(
  */
 export async function searchChannelMessages(
   channelId: string,
-  teamId: string,
+  workspaceId: string,
   q: string,
   opts: { take?: number; before?: { createdAt: string; id: string } | null } = {},
 ): Promise<ChannelMessagesPage> {
@@ -803,7 +803,7 @@ export async function searchChannelMessages(
   const rows = await db.teamChannelMessage.findMany({
     where: {
       channelId,
-      teamId,
+      workspaceId,
       threadRootId: null,
       body: { contains: q, mode: "insensitive" },
       ...(opts.before
@@ -843,10 +843,10 @@ export async function searchChannelMessages(
  * Cursor shape is identical to `searchChannelMessages` so the frontend reuses
  * the same encode/decode helpers. The pg_trgm index dominates the predicate;
  * the planner bitmap-ANDs with the team filter on the channel side via the
- * `teamId` column denormalized on TeamChannelMessage.
+ * `workspaceId` column denormalized on TeamChannelMessage.
  */
 export async function searchAllChannels(
-  teamId: string,
+  workspaceId: string,
   viewerUserId: string,
   q: string,
   opts: { take?: number; before?: { createdAt: string; id: string } | null } = {},
@@ -872,7 +872,7 @@ export async function searchAllChannels(
   // A `?scope=` param can add them later; the trgm index already serves both.
   const rows = await db.teamChannelMessage.findMany({
     where: {
-      teamId,
+      workspaceId,
       threadRootId: null,
       body: { contains: q, mode: "insensitive" },
       channel: {
@@ -919,10 +919,10 @@ export async function searchAllChannels(
 
 export async function listChannelPins(
   channelId: string,
-  teamId: string,
+  workspaceId: string,
 ): Promise<ChannelPinDto[]> {
   const rows = await db.teamChannelPin.findMany({
-    where: { channelId, channel: { teamId } },
+    where: { channelId, channel: { workspaceId } },
     orderBy: { pinnedAt: "desc" },
     include: {
       pinnedBy: { select: { name: true } },

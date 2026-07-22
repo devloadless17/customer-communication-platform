@@ -58,7 +58,7 @@ export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> 
   },
   async run(envelope, config, ctx): Promise<StepResult> {
     const target = await db.workflow.findFirst({
-      where: { id: config.workflowId, teamId: ctx.teamId },
+      where: { id: config.workflowId, workspaceId: ctx.workspaceId },
       select: { id: true, trigger: true, published: true },
     });
     if (!target) return advanceWithError(404, "target workflow not found");
@@ -96,7 +96,7 @@ export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> 
       // stopped firing." Counting alone isn't enough; we want the WHO.
       console.warn(
         `[workflows] trigger_depth_exceeded ` +
-          `(team=${ctx.teamId} originatingWorkflow=${ctx.workflowId} ` +
+          `(team=${ctx.workspaceId} originatingWorkflow=${ctx.workflowId} ` +
           `originatingRun=${ctx.runId} step=${ctx.stepId} ` +
           `targetWorkflow=${target.id} depth=${nextDepth} max=${TRIGGER_DEPTH_MAX}) — ` +
           `refusing to dispatch a deeper hop; likely a workflow chain loop.`,
@@ -115,7 +115,7 @@ export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> 
     const conversationId = envelopeConversation(envelope)?.id ?? null;
 
     const runId = await dispatchManualTrigger({
-      teamId: ctx.teamId,
+      workspaceId: ctx.workspaceId,
       workflowId: target.id,
       contactId,
       conversationId,

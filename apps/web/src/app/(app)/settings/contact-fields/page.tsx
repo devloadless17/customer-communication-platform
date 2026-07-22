@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 export default async function ContactFieldsSettingsPage() {
   const { permissions } = await getSession();
   if (!permissions["contactFields:manage"]) {
-    redirect("/settings/account");
+    redirect("/account");
   }
 
   const { definitions, builtins } = await listContactFieldsWithBuiltins();

@@ -44,7 +44,7 @@ export class SnippetsController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    const snippets = await this.snippets.list(session.teamId);
+    const snippets = await this.snippets.list(session.workspaceId);
     return { snippets };
   }
 
@@ -54,7 +54,7 @@ export class SnippetsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateSnippetSchema)) body: CreateSnippetInput,
   ) {
-    const created = await this.snippets.create(session.teamId, session.userId, body);
+    const created = await this.snippets.create(session.workspaceId, session.userId, body);
     return { ok: true, id: created.id };
   }
 
@@ -65,7 +65,7 @@ export class SnippetsController {
     @Param("id") id: string,
     @Body(zBody(UpdateSnippetSchema)) body: UpdateSnippetInput,
   ) {
-    await this.snippets.update(session.teamId, id, body);
+    await this.snippets.update(session.workspaceId, id, body);
     return { ok: true };
   }
 
@@ -75,7 +75,7 @@ export class SnippetsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.snippets.remove(session.teamId, id);
+    await this.snippets.remove(session.workspaceId, id);
     return { ok: true };
   }
 }

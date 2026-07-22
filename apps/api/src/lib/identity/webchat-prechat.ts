@@ -63,7 +63,7 @@ const BUILTIN_FIELD_BY_SLUG: Record<string, "firstName" | "lastName" | "language
 };
 
 export async function applyWebchatPreChatIdentity(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   contactId: string,
   fields: {
@@ -76,14 +76,14 @@ export async function applyWebchatPreChatIdentity(
   const name = fields.name?.trim() || null;
   const email = fields.email?.trim().toLowerCase() || null;
   // Store phone digits-only like every other channel (partial unique on
-  // (teamId, phoneNumber) is whatsapp-scoped, so stamping it on a widget contact
+  // (workspaceId, phoneNumber) is whatsapp-scoped, so stamping it on a widget contact
   // can't collide — it's exactly the pair we want resolveCustomerId to fuse).
   const phone = fields.phone ? normalizePhoneE164(fields.phone) : null;
   const hasCustom = fields.custom != null && Object.keys(fields.custom).length > 0;
   if (!name && !email && !phone && !hasCustom) return;
 
   const contact = await db.contact.findFirst({
-    where: { id: contactId, teamId, deletedAt: null },
+    where: { id: contactId, workspaceId, deletedAt: null },
     select: {
       id: true,
       name: true,
@@ -172,12 +172,12 @@ export async function applyWebchatPreChatIdentity(
   });
 
   // Make each new custom field visible in the contact panel. Best-effort + race-
-  // safe: the @@unique([teamId, key]) means a concurrent create just no-ops.
+  // safe: the @@unique([workspaceId, key]) means a concurrent create just no-ops.
   for (const def of ensureDefs) {
     await db.contactFieldDefinition
       .upsert({
-        where: { teamId_key: { teamId, key: def.key } },
-        create: { teamId, key: def.key, label: def.label },
+        where: { workspaceId_key: { workspaceId, key: def.key } },
+        create: { workspaceId, key: def.key, label: def.label },
         update: {},
       })
       .catch(() => undefined);
@@ -211,7 +211,7 @@ export async function applyWebchatPreChatIdentity(
     if (fresh) {
       await publish({
         type: "contact.updated",
-        teamId,
+        workspaceId,
         contact: toContactWire(fresh),
         previousStageId: fresh.stageId,
         fieldChanges: [],
@@ -221,7 +221,7 @@ export async function applyWebchatPreChatIdentity(
     }
   } catch (err) {
     console.error(
-      `[webchat-prechat] publish(contact.updated) failed for team=${teamId} contact=${contact.id}:`,
+      `[webchat-prechat] publish(contact.updated) failed for team=${workspaceId} contact=${contact.id}:`,
       err,
     );
   }

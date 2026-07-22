@@ -39,7 +39,7 @@ export function registerAnalyticsSubscribers(): () => void {
     if (e.previousAssignedUserId === e.newAssignedUserId) return;
     await trackOnAssigned({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       assignedUserId: e.newAssignedUserId,
       previousAssignedUserId: e.previousAssignedUserId,
     });
@@ -49,7 +49,7 @@ export function registerAnalyticsSubscribers(): () => void {
     if (e.previousStatus === e.newStatus) return;
     await trackOnStatusChanged({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       previousStatus: e.previousStatus,
       newStatus: e.newStatus,
       // System-driven transitions (e.g. reopen on inbound) carry null
@@ -72,7 +72,7 @@ export function registerAnalyticsSubscribers(): () => void {
     // then bumps firstResponseAt. Bumps outgoingMessagesCount unconditionally.
     await trackOnOutboundMessage({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       senderUserId: e.senderUserId,
     });
   });

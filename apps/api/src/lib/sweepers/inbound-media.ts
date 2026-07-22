@@ -5,7 +5,7 @@ import { MEDIA_SIZE_CAPS } from "@/lib/media-storage";
 import { getMetaProvider } from "@/lib/providers";
 import { MediaTooLargeError } from "@/lib/providers/meta";
 import { getMetaSendConfig } from "@/lib/providers/config";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
 import type { MediaKind } from "@ccp/shared/types";
 
@@ -89,6 +89,12 @@ async function runTick(label: string): Promise<void> {
     // blob-orphan). The batch is already capped in PHASE 1.
     if (retriable.length > 0) await retryParkedRows(retriable);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopInboundMediaSweeper();
+      return;
+    }
     console.error(`[sweeper.inbound-media] ${label} failed`, err);
   } finally {
     inFlight = false;
@@ -140,7 +146,7 @@ async function selectAndDowngrade(): Promise<ParkedRow[]> {
     },
     select: {
       id: true,
-      teamId: true,
+      workspaceId: true,
       conversationId: true,
       channel: true,
       mediaKind: true,
@@ -208,7 +214,7 @@ async function selectAndDowngrade(): Promise<ParkedRow[]> {
       try {
         await publish({
           type: "message.media_ready",
-          teamId: row.teamId,
+          workspaceId: row.workspaceId,
           conversationId: row.conversationId,
           messageId: row.id,
           // No media → socket-fanout emits the "ready" event without payload.
@@ -261,7 +267,7 @@ async function retryParkedRows(rows: ParkedRow[]): Promise<void> {
 
 type ParkedRow = {
   id: string;
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   mediaKind: string | null;
   mediaMimeType: string | null;
@@ -291,7 +297,7 @@ async function retryDownload(row: ParkedRow): Promise<void> {
     return;
   }
 
-  const sendConfig = await getMetaSendConfig(row.teamId);
+  const sendConfig = await getMetaSendConfig(row.workspaceId);
   const cap = MEDIA_SIZE_CAPS[mediaKind];
   // minor#3: pass the cap so fetchMedia rejects via Content-Length BEFORE
   // buffering the binary into heap (RAM guard), same as the webhook path.
@@ -320,7 +326,7 @@ async function retryDownload(row: ParkedRow): Promise<void> {
       mimeType: fetched.mimeType,
       kind: mediaKind,
       context: {
-        teamId: row.teamId,
+        workspaceId: row.workspaceId,
         direction: "in",
         externalId: row.externalId,
         originalFilename: row.mediaFilename ?? null,
@@ -352,7 +358,7 @@ async function retryDownload(row: ParkedRow): Promise<void> {
           mimeType: "image/jpeg",
           kind: "image",
           context: {
-            teamId: row.teamId,
+            workspaceId: row.workspaceId,
             direction: "in",
             // Suffix the wamid so the dashboard filename is distinct from the
             // original video's blob (matches the live path's `_thumb` customId).
@@ -391,7 +397,7 @@ async function retryDownload(row: ParkedRow): Promise<void> {
 
   await publish({
     type: "message.media_ready",
-    teamId: row.teamId,
+    workspaceId: row.workspaceId,
     conversationId: row.conversationId,
     messageId: row.id,
     media: {
@@ -446,7 +452,7 @@ async function clearOne(row: ParkedRow): Promise<void> {
   if (cleared.count === 0) return;
   await publish({
     type: "message.media_ready",
-    teamId: row.teamId,
+    workspaceId: row.workspaceId,
     conversationId: row.conversationId,
     messageId: row.id,
   });

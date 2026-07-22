@@ -16,7 +16,7 @@ import { test, expect } from "@playwright/test";
 import { generateApiKey } from "../../../apps/api/src/auth/api-key";
 import { db, superadminTeam, wipeTestData } from "../_helpers/db";
 
-let teamId: string;
+let workspaceId: string;
 let userId: string;
 let apiToken: string;
 let contactId: string;
@@ -27,22 +27,22 @@ let customerStageId: string;
 test.beforeAll(async () => {
   await wipeTestData();
   const su = await superadminTeam();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
   userId = su.userId;
 
   // wipeTestData intentionally KEEPS ContactStage seeded, so clear our own
   // fixtures by name before recreating (FK: the contact must go first).
   await db().contact.deleteMany({
-    where: { teamId, phoneNumber: "+15557778888" },
+    where: { workspaceId, phoneNumber: "+15557778888" },
   });
   await db().contactStage.deleteMany({
-    where: { teamId, name: { in: ["E2E Lead", "E2E Customer"] } },
+    where: { workspaceId, name: { in: ["E2E Lead", "E2E Customer"] } },
   });
 
   const key = generateApiKey();
-  await db().teamApiKey.create({
+  await db().workspaceApiKey.create({
     data: {
-      teamId,
+      workspaceId,
       name: "E2E /v1 stage key",
       tokenHash: key.tokenHash,
       tokenPrefix: key.tokenPrefix,
@@ -55,17 +55,17 @@ test.beforeAll(async () => {
   // Non-default stages — the team already owns its sole isDefault row, and a
   // partial unique index (ContactStage_teamId_isDefault_key) forbids a second.
   const lead = await db().contactStage.create({
-    data: { teamId, name: "E2E Lead", position: 90 },
+    data: { workspaceId, name: "E2E Lead", position: 90 },
   });
   const customer = await db().contactStage.create({
-    data: { teamId, name: "E2E Customer", position: 91 },
+    data: { workspaceId, name: "E2E Customer", position: 91 },
   });
   leadStageId = lead.id;
   customerStageId = customer.id;
 
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       phoneNumber: "+15557778888",
       identityChannel: "whatsapp",
       name: "Stage API Test",
@@ -75,7 +75,7 @@ test.beforeAll(async () => {
   });
   contactId = contact.id;
   const conv = await db().conversation.create({
-    data: { teamId, contactId: contact.id, channel: "whatsapp", status: "open" },
+    data: { workspaceId, contactId: contact.id, channel: "whatsapp", status: "open" },
   });
   conversationId = conv.id;
 });

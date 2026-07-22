@@ -120,7 +120,7 @@ function ConversationViewersPill({ viewers }: { viewers: User[] }) {
 // props are all stable across those, so it should bail. (Same rationale as the
 // memoized TimelineRows extraction.)
 function ThreadHeaderImpl({
-  teamId,
+  workspaceId,
   conversationId,
   contactId,
   contactName,
@@ -151,7 +151,7 @@ function ThreadHeaderImpl({
   visitorPresent,
   visitorLeftAt,
 }: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   contactId: string;
   contactName: string;
@@ -297,7 +297,7 @@ function ThreadHeaderImpl({
         )}
         <AiStateControl conversationId={conversationId} onState={setAiState} />
         <AssignmentDropdown
-          teamId={teamId}
+          workspaceId={workspaceId}
           conversationId={conversationId}
           currentId={assignedUserId}
           currentName={assignedUserName}
@@ -311,7 +311,7 @@ function ThreadHeaderImpl({
           currentUserId={currentUserId}
         />
         <StatusDropdown
-          teamId={teamId}
+          workspaceId={workspaceId}
           conversationId={conversationId}
           current={status}
           assignedUserId={assignedUserId}

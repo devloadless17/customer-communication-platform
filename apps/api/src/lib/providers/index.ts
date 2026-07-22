@@ -19,10 +19,10 @@ import type { MessagingProvider } from "@ccp/shared/providers/types";
  * Email) later is:
  *
  *   1. implement `MessagingProvider<TheirConfig>` (a sibling of meta.ts),
- *   2. add a `<channel>-config.ts` with a `get…SendConfig(teamId)` loader,
+ *   2. add a `<channel>-config.ts` with a `get…SendConfig(workspaceId)` loader,
  *   3. register a `ProviderBinding` below and add it to `LIVE_CHANNELS`,
  *   4. add a webhook controller that calls `provider.parseWebhook` and hands
- *      off to the SAME `ingestEvents(teamId, provider, events)`.
+ *      off to the SAME `ingestEvents(workspaceId, provider, events)`.
  *
  * Nothing in ingest, the send orchestration, or business logic changes.
  * See `lib/providers/README.md` for the full recipe.
@@ -39,7 +39,46 @@ import type { MessagingProvider } from "@ccp/shared/providers/types";
  */
 export interface ProviderBinding<C = unknown> {
   provider: MessagingProvider<C>;
-  getSendConfig(teamId: string): Promise<C>;
+  /**
+   * Credentials for ONE account.
+   *
+   * `accountId` names a specific `ChannelConnection`; omitting it falls back to
+   * the workspace's default account for this channel (compose-new, and every
+   * pre-multi-account caller). `workspaceId` is always required and always in
+   * the query's WHERE — an account id alone must never be able to reach across
+   * tenants.
+   */
+  getSendConfig(workspaceId: string, accountId?: string | null): Promise<C>;
+}
+
+/**
+ * The account a conversation sends from.
+ *
+ * Throws rather than falling back to "the channel's default account". A wrong
+ * account is not a cosmetic bug: WhatsApp thread affinity and the 24h customer
+ * service window both belong to the ACCOUNT, so replying from a sibling number
+ * breaks the thread and can push a free-form reply outside the window that was
+ * opened on the other number (Meta then rejects it, or bills a template).
+ * Refusing loudly gives the composer something actionable to show instead.
+ */
+export class SendAccountUnresolvedError extends Error {
+  constructor(readonly conversationId: string) {
+    super(
+      `Conversation ${conversationId} is not bound to a channel account; ` +
+        `refusing to guess which account to send from.`,
+    );
+    this.name = "SendAccountUnresolvedError";
+  }
+}
+
+export function resolveSendAccount(conversation: {
+  id: string;
+  channelConnectionId: string | null;
+}): string {
+  if (!conversation.channelConnectionId) {
+    throw new SendAccountUnresolvedError(conversation.id);
+  }
+  return conversation.channelConnectionId;
 }
 
 /** Thrown when a send is routed to a channel that has no registered provider. */
@@ -143,12 +182,12 @@ export function getMetaProvider(): MessagingProvider<MetaSendConfig> {
  * (broadcast customer-mode + workflow customer/trigger_customer targets) so the
  * connected-set logic never drifts between them.
  */
-export async function teamConnectedChannels(teamId: string): Promise<Set<Channel>> {
+export async function teamConnectedChannels(workspaceId: string): Promise<Set<Channel>> {
   const connected = new Set<Channel>();
   await Promise.all(
     [...LIVE_CHANNELS].map(async (ch) => {
       try {
-        await getProviderBinding(ch).getSendConfig(teamId);
+        await getProviderBinding(ch).getSendConfig(workspaceId);
         connected.add(ch);
       } catch {
         // Not connected / creds expired — exclude from best-channel resolution.

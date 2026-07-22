@@ -1,6 +1,6 @@
 "use client";
 
-import type { ContactStage, ConversationWithRefs, User } from "@ccp/shared/types";
+import type { ContactStage, ConversationWithRefs, Tag, User } from "@ccp/shared/types";
 
 import { usePresence } from "@/hooks/use-presence";
 import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
@@ -22,20 +22,27 @@ import { InboxSubSidebar } from "./inbox-sub-sidebar";
 export function InboxSubSidebarLive({
   currentUser,
   stages,
+  tags,
   teammates,
   initialConversations,
+  canManageSharedViews,
 }: {
   currentUser: User;
   stages: ContactStage[];
+  /** Tag catalog — the saved-view builder filters on it. */
+  tags: Tag[];
   teammates: User[];
   initialConversations: ConversationWithRefs[];
+  /** Resolved server-side from `inboxViews:manageShared`; decides whether the
+   *  builder offers the "share with the workspace" toggle. */
+  canManageSharedViews: boolean;
 }) {
   const { filter, setFilter } = useInboxFilter();
   // Drives the green/grey presence dots next to each teammate, and keeps this
   // user visible as online to others while they sit in the inbox (the
   // sub-sidebar is always mounted on /inbox, so the join persists).
   const { onlineUserIds, availabilityByUserId } = usePresence(
-    currentUser.teamId,
+    currentUser.workspaceId,
     currentUser.id,
   );
 
@@ -44,7 +51,9 @@ export function InboxSubSidebarLive({
       currentUser={currentUser}
       conversations={initialConversations}
       stages={stages}
+      tags={tags}
       teammates={teammates}
+      canManageSharedViews={canManageSharedViews}
       onlineUserIds={onlineUserIds}
       availabilityByUserId={availabilityByUserId}
       filter={filter}

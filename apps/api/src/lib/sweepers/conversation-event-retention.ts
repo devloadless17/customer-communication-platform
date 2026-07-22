@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Retention sweeper for the `ConversationEvent` audit-timeline table.
@@ -52,6 +52,12 @@ async function runTick(label: string): Promise<void> {
     // Mutex serializes batched DELETE against other heavy sweepers.
     await withSweeperMutex("conversation-event-retention", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopConversationEventRetentionSweeper();
+      return;
+    }
     console.error(`[sweeper.conversation-event-retention] ${label} failed`, err);
   } finally {
     inFlight = false;

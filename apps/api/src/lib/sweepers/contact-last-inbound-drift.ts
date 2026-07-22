@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Reconciler for the `Contact.lastInboundAt` denormalization.
@@ -39,6 +39,12 @@ async function runTick(label: string): Promise<void> {
     // so the health log can warn if this reconciler hasn't run in >25h.
     await withSweeperMutex("contact-drift", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopContactDriftSweeper();
+      return;
+    }
     console.error(`[sweeper.contact-drift] ${label} failed`, err);
   } finally {
     inFlight = false;
@@ -75,7 +81,7 @@ async function sweepOnce(): Promise<void> {
   // Message table's per-contact MAX(timestamp) — at scale (many teams × millions
   // of messages) that's a long-running, high-lock, whole-table scan in one
   // transaction. Scoping each statement to a single team (via the indexed
-  // Message.teamId / Contact.teamId) bounds the footprint and lets unrelated
+  // Message.workspaceId / Contact.workspaceId) bounds the footprint and lets unrelated
   // tenants' writes proceed between iterations.
   //
   // Per team: join Contact against the per-contact MAX(timestamp) of inbound
@@ -83,9 +89,9 @@ async function sweepOnce(): Promise<void> {
   // NULL as comparable so both drift directions (stale value vs missing value)
   // are caught symmetrically. Message has no contactId — it joins through
   // Conversation.
-  const teams = await db.team.findMany({ select: { id: true } });
+  const teams = await db.workspace.findMany({ select: { id: true } });
   let totalDrifted = 0;
-  for (const { id: teamId } of teams) {
+  for (const { id: workspaceId } of teams) {
     // Per-team isolation: a lock-wait / deadlock on one tenant's hot Message
     // table must not throw out of the whole sweep and skip every later-ordered
     // team — with a 24h cadence the next retry is a full day away.
@@ -102,19 +108,19 @@ async function sweepOnce(): Promise<void> {
             SELECT co."contactId" AS contact_id, MAX(m."timestamp") AS max_ts
             FROM "Message" m
             JOIN "Conversation" co ON co.id = m."conversationId"
-            WHERE m.direction = 'in' AND m."teamId" = ${teamId}
+            WHERE m.direction = 'in' AND m."workspaceId" = ${workspaceId}
             GROUP BY co."contactId"
           ) actual ON actual.contact_id = c2.id
-          WHERE c2."teamId" = ${teamId}
+          WHERE c2."workspaceId" = ${workspaceId}
         ) sub
         WHERE c.id = sub.contact_id
-          AND c."teamId" = ${teamId}
+          AND c."workspaceId" = ${workspaceId}
           AND c."lastInboundAt" IS DISTINCT FROM sub.last_inbound
       `;
       totalDrifted += Number(drifted);
     } catch (err) {
       console.warn(
-        `[sweeper.contact-drift] reconcile failed for team=${teamId}; continuing`,
+        `[sweeper.contact-drift] reconcile failed for team=${workspaceId}; continuing`,
         err instanceof Error ? err.message : err,
       );
     }

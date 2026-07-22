@@ -18,7 +18,7 @@
  * `e2e_tc_` prefix and removed in afterAll. No wipeTestData.
  */
 import { test, expect, type APIRequestContext } from "@playwright/test";
-import { db, appAdmin } from "../_helpers/db";
+import { createTestUser, db, appAdmin } from "../_helpers/db";
 
 test.describe.configure({ mode: "serial" });
 
@@ -30,7 +30,7 @@ const PREFIX = "e2e_tc_";
  */
 const CHAN_PREFIX = "e2e-tc-";
 
-let teamId: string;
+let workspaceId: string;
 let adminUserId: string;
 /** A second real user on the same team — the DM peer / non-member. */
 let peerUserId: string;
@@ -38,23 +38,21 @@ let peerUserId: string;
 let thirdUserId: string;
 
 async function makeUser(name: string): Promise<string> {
-  const u = await db().user.create({
-    data: {
-      teamId,
-      email: `${PREFIX}${name}@example.test`,
-      name: `${PREFIX}${name}`,
-      role: "agent",
-      // These never log in — Better Auth owns credentials in its own tables;
-      // these rows exist only to be DM'd / added as members.
-    },
-    select: { id: true },
+  // These never log in — Better Auth owns credentials in its own tables;
+  // these rows exist only to be DM'd / added as members. The user belongs to
+  // the workspace's ORG, with `agent` granted via WorkspaceMember.
+  const u = await createTestUser({
+    workspaceId,
+    role: "agent",
+    email: `${PREFIX}${name}@example.test`,
+    name: `${PREFIX}${name}`,
   });
   return u.id;
 }
 
 test.beforeAll(async () => {
   const admin = await appAdmin();
-  teamId = admin.teamId;
+  workspaceId = admin.workspaceId;
   adminUserId = admin.userId;
   peerUserId = await makeUser("peer");
   thirdUserId = await makeUser("third");
@@ -64,9 +62,9 @@ test.afterAll(async () => {
   // Channels cascade to messages/members/receipts/pins; users cascade their
   // memberships. Delete channels first so nothing is orphaned mid-teardown.
   await db().teamChannel.deleteMany({
-    where: { teamId, OR: [{ name: { startsWith: CHAN_PREFIX } }, { kind: "dm" }] },
+    where: { workspaceId, OR: [{ name: { startsWith: CHAN_PREFIX } }, { kind: "dm" }] },
   });
-  await db().user.deleteMany({ where: { teamId, email: { startsWith: PREFIX } } });
+  await db().user.deleteMany({ where: { workspaceMemberships: { some: { workspaceId } }, email: { startsWith: PREFIX } } });
 });
 
 async function openDm(request: APIRequestContext, userId: string) {

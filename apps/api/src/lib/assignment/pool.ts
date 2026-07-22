@@ -35,31 +35,34 @@ export interface PoolMember {
  */
 export async function buildPolicyPool(args: {
   db: Db;
-  teamId: string;
+  workspaceId: string;
   policyId?: string | null;
 }): Promise<PoolMember[]> {
-  const { db, teamId, policyId } = args;
+  const { db, workspaceId, policyId } = args;
 
   const policy = policyId
     ? await db.assignmentPolicy.findFirst({
-        where: { id: policyId, teamId, archivedAt: null },
+        where: { id: policyId, workspaceId, archivedAt: null },
       })
     : null;
   const effective =
     policy ??
     (await db.assignmentPolicy.findFirst({
-      where: { teamId, archivedAt: null, isDefault: true },
+      where: { workspaceId, archivedAt: null, isDefault: true },
     })) ??
     (await db.assignmentPolicy.findFirst({
-      where: { teamId, archivedAt: null },
+      where: { workspaceId, archivedAt: null },
       orderBy: { createdAt: "asc" },
     }));
   if (!effective || effective.strategy === "manual") return [];
 
   const [users, overrides] = await Promise.all([
     db.user.findMany({
-      where: { teamId, deactivatedAt: null },
-      select: { id: true, role: true },
+      where: { workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
+      select: {
+        id: true,
+        workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 },
+      },
       // Same stable order the live picker uses, so a campaign's first recipient
       // and a live rotation agree on who "first" is.
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -87,7 +90,7 @@ export async function buildPolicyPool(args: {
       } else if (!o || !o.enabled) {
         return false;
       }
-      if (effective.eligibleRoles.length > 0 && !effective.eligibleRoles.includes(u.role)) {
+      if (effective.eligibleRoles.length > 0 && !effective.eligibleRoles.includes(u.workspaceMemberships[0]?.role ?? "agent")) {
         return false;
       }
       if (weighted && (o?.weight ?? 1) <= 0) return false;

@@ -3,11 +3,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getClientSocket } from "@/lib/socket-client";
 import { apiFetch } from "@/lib/api/client-fetch";
+import {
+  WorkspaceSwitcher,
+  type WorkspaceOption,
+} from "@/components/layouts/workspace-switcher";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   ChevronLeft,
   ChevronRight,
+  Building2,
   ContactRound,
   Flag,
   Inbox,
@@ -15,7 +20,9 @@ import {
   type LucideIcon,
   Megaphone,
   MessageSquareText,
+  Ticket as TicketIcon,
   Settings as SettingsIcon,
+  UserCircle2,
   Workflow,
 } from "lucide-react";
 
@@ -185,6 +192,11 @@ const PRIMARY_ITEMS: RailItem[] = [
   // across every conversation", which is a supervisor's question, not a
   // thread-by-thread one.
   { href: "/flags", label: "Flagged", icon: Flag },
+  // The work queue. Its own entry beside the inbox rather than a tab inside it:
+  // the inbox answers "which conversations need a reply", this answers "what
+  // work is open and what's about to miss its promise" — and one thread can
+  // carry several separate issues over time, which a thread list can't express.
+  { href: "/tickets", label: "Tickets", icon: TicketIcon },
   {
     href: "/broadcasts",
     label: "Broadcasts",
@@ -206,6 +218,8 @@ const WORKFLOWS_ITEM: RailItem = {
 export function AppRail({
   currentUser,
   team,
+  workspaces,
+  organizationName,
   connected,
   onlineUserIds,
   canManageAvailability,
@@ -213,6 +227,12 @@ export function AppRail({
 }: {
   currentUser: User;
   team: Team;
+  /** Every workspace the user may act in. The switcher renders even for one —
+   *  it is where the org→workspace hierarchy is discoverable. */
+  workspaces?: WorkspaceOption[];
+  /** Shown as the switcher dropdown's header. Falls back to the workspace name
+   *  on the (transitional) sessions that don't carry it. */
+  organizationName?: string;
   connected?: boolean;
   onlineUserIds?: Set<string>;
   /** Resolved `availability:manage` capability. When false the picker is
@@ -335,40 +355,44 @@ export function AppRail({
       <div className={cn("px-3 mb-1", collapsed && "flex justify-center")}>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Link
-              href="/inbox"
-              className={cn(
-                "relative flex items-center rounded-xl bg-primary text-primary-foreground shadow-sm transition-opacity hover:opacity-90 active:opacity-80",
-                collapsed
-                  ? "size-9 justify-center"
-                  : "h-9 w-full gap-2.5 px-2.5",
-              )}
-              aria-label={teamName}
+            {/* ALWAYS the switcher, even with one workspace: hiding it below
+                two made the org→workspace model undiscoverable — there was no
+                way to see that workspaces exist or to create a second. */}
+            <WorkspaceSwitcher
+              workspaces={workspaces ?? [{ id: team.id, name: teamName, role: "admin" }]}
+              activeWorkspaceId={team.id}
+              organizationName={organizationName ?? teamName}
+              collapsed={collapsed}
             >
-              <span className="shrink-0 text-sm font-bold leading-none">
-                {teamName.charAt(0).toUpperCase()}
-              </span>
-              <span
-                className="truncate text-sm font-semibold whitespace-nowrap"
-                style={{
-                  opacity: showLabels ? 1 : 0,
-                  transition: "opacity 120ms ease",
-                  width: showLabels ? undefined : 0,
-                  overflow: "hidden",
-                }}
-              >
-                {teamName}
-              </span>
-              {connected !== undefined && (
+              <span className={cn(
+                "relative flex items-center rounded-xl bg-primary text-primary-foreground shadow-sm",
+                collapsed ? "size-9 justify-center" : "h-9 w-full gap-2.5 px-2.5 pr-6",
+              )}>
+                <span className="shrink-0 text-sm font-bold leading-none">
+                  {teamName.charAt(0).toUpperCase()}
+                </span>
                 <span
-                  className={cn(
-                    "absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-sidebar transition-colors",
-                    connected ? "bg-success-fg" : "bg-muted-foreground/40",
-                  )}
-                  aria-label={connected ? "Realtime connected" : "Realtime disconnected"}
-                />
-              )}
-            </Link>
+                  className="truncate text-sm font-semibold whitespace-nowrap"
+                  style={{
+                    opacity: showLabels ? 1 : 0,
+                    transition: "opacity 120ms ease",
+                    width: showLabels ? undefined : 0,
+                    overflow: "hidden",
+                  }}
+                >
+                  {teamName}
+                </span>
+                {connected !== undefined && (
+                  <span
+                    className={cn(
+                      "absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-sidebar transition-colors",
+                      connected ? "bg-success-fg" : "bg-muted-foreground/40",
+                    )}
+                    aria-label={connected ? "Realtime connected" : "Realtime disconnected"}
+                  />
+                )}
+              </span>
+            </WorkspaceSwitcher>
           </TooltipTrigger>
           {collapsed && <TooltipContent side="right">{teamName}</TooltipContent>}
         </Tooltip>
@@ -642,13 +666,26 @@ function UserMenu({
             seedUntil={liveUntil}
           />
           <DropdownMenuSeparator />
-          {/* One Settings entry → the single grouped /settings landing. (Was
-              two items, "Account settings" + "Workspace settings", pointing at
-              two different landings — read as three separate settings areas.) */}
+          {/* Three entries for three real scopes. The single "Settings" link
+              this replaced hid the fact that personal and company settings are
+              separate places — users went looking for "change my password"
+              inside workspace configuration. */}
+          <DropdownMenuItem asChild>
+            <Link href="/account">
+              <UserCircle2 className="size-4 text-muted-foreground" />
+              Personal settings
+            </Link>
+          </DropdownMenuItem>
           <DropdownMenuItem asChild>
             <Link href="/settings">
               <SettingsIcon className="size-4 text-muted-foreground" />
-              Settings
+              Workspace settings
+            </Link>
+          </DropdownMenuItem>
+          <DropdownMenuItem asChild>
+            <Link href="/organization">
+              <Building2 className="size-4 text-muted-foreground" />
+              Organization
             </Link>
           </DropdownMenuItem>
           <DropdownMenuSeparator />

@@ -58,5 +58,7 @@ export const ListFlagsQuerySchema = z.object({
   conversationId: z.string().min(1).optional(),
   cursor: z.string().min(1).optional(),
   take: z.coerce.number().int().min(1).max(50).optional(),
+  /** Free-text over the message body/caption, the contact, and the flag notes. */
+  q: z.string().trim().min(1).max(200).optional(),
 });
 export type ListFlagsQuery = z.infer<typeof ListFlagsQuerySchema>;

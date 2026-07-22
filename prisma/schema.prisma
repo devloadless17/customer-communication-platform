@@ -1,7 +1,7 @@
 // Schema for the WhatsApp Multi-Agent Shared Inbox.
 //
 // Mirrors lib/types.ts exactly so the UI and the DB stay in lockstep.
-// Multi-tenancy is baked in: every domain row carries teamId.
+// Multi-tenancy is baked in: every domain row carries workspaceId.
 
 generator client {
   provider        = "prisma-client-js"
@@ -18,7 +18,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider   = "postgresql"
   // `plpgsql` is the default extension every Postgres install ships with; it
   // must be listed once `extensions = [...]` is non-empty so the introspector
   // doesn't flag it as drift.
@@ -29,15 +29,25 @@ datasource db {
 // Enums
 // ---------------------------------------------------------------------------
 
+// Per-WORKSPACE role, carried on WorkspaceMember. superAdmin is no longer here —
+// it moved to User.isSuperAdmin (platform-level, orthogonal to any workspace).
 enum Role {
-  // Platform-level. One per deployment for now (set via seed).
-  superAdmin
-  // Per-team owner: full team management.
+  // Per-workspace owner: full workspace management.
   admin
   // Conversation-level lead: same conversation powers as agent, plus
   // read-only visibility into /settings/team. No user management.
   manager
   agent
+}
+
+// Org-directory role, carried on User (one per user — a user belongs to exactly
+// one Organization). Governs billing + the user directory + who can create
+// workspaces / invite members. Distinct from the per-WORKSPACE Role above: an
+// `owner`/`admin` here is implicitly `admin` in every workspace of the org.
+enum OrgRole {
+  owner
+  admin
+  member
 }
 
 // Subscription tier per team. Scaffolding only — every team is set to
@@ -57,7 +67,7 @@ enum Plan {
 // (their team is just an anchor row). Default `pending` = secure-by-default:
 // a brand-new org is locked until reviewed. The init migration backfills every
 // PRE-EXISTING team to `active` so current customers aren't locked out.
-enum TeamStatus {
+enum OrgStatus {
   pending
   active
   suspended
@@ -307,6 +317,16 @@ enum ConversationEventKind {
   call_missed
   call_rejected
   call_failed
+  // Ticket lifecycle, rendered as inline pills so an agent reading the thread
+  // sees where one piece of work ended and the next began. `after` carries
+  // { ticketId, number, subject, status } — snapshotted at write time, same
+  // rule as tag_added, so the pill still reads correctly after a rename.
+  // Deliberately a SMALL set: the full ticket history lives on TicketEvent;
+  // only the boundaries that change what the thread means show up inline.
+  ticket_opened
+  ticket_solved
+  ticket_reopened
+  ticket_closed
 }
 
 // WhatsApp Business Calling lifecycle. ringing → in_progress on first agent
@@ -391,6 +411,14 @@ enum WorkflowStepType {
   jump_to_step
   noop
   ask_question
+  // Ticket state. These act on the conversation's ACTIVE ticket (or open one),
+  // never on an arbitrary ticket id — a workflow runs in the context of one
+  // conversation, and letting it name a ticket by id would let workflow A
+  // silently reach into workflow B's work.
+  create_ticket
+  set_ticket_status
+  set_ticket_priority
+  assign_ticket
   // External
   http_request
   trigger_workflow
@@ -420,7 +448,7 @@ enum WorkflowRunStatus {
 enum AiHandoffAction {
   none // just pause AI (legacy behavior)
   unassign // pause + clear assignee (lands in the Unassigned queue)
-  assign_fixed // pause + assign to Team.aiHandoffAssigneeId
+  assign_fixed // pause + assign to Workspace.aiHandoffAssigneeId
   round_robin // pause + rotate across eligible agents
 }
 
@@ -435,40 +463,57 @@ enum FirstTouchGreeter {
 // Models
 // ---------------------------------------------------------------------------
 
-model Team {
+// The tenant / billing root. Owns the user directory + one-or-more Workspaces.
+// The org-approval gate, subscription plan, and the member seat-cap all live
+// here (org-wide), lifted off the former `Workspace` (now `Workspace`).
+model Organization {
   id        String   @id @default(cuid())
   name      String
   createdAt DateTime @default(now())
 
-  // Subscription tier. Default `starter` for every team — feature gating
-  // is not wired up yet. See packages/shared/src/auth/plans.ts. UI hidden.
-  plan      Plan     @default(starter)
+  // Subscription tier. Default `starter` for every org — feature gating is not
+  // wired up yet. See packages/shared/src/auth/plans.ts. UI hidden.
+  plan Plan @default(starter)
 
-  // Hard cap on ACTIVE member accounts (deactivated members don't count). A
-  // new org starts at 2; only a superAdmin can raise it (platform org-detail
-  // page → PATCH /api/admin/teams/:id/max-members). Enforced at the authoritative
-  // chokepoint — invite-accept, under a row lock — with a soft pre-check at
-  // invite-create for early UX. Registration always starts a team at 1 member,
-  // so it never trips the cap.
-  maxMembers Int @default(2)
+  // Hard cap on ACTIVE member accounts across the ORG (deactivated members
+  // don't count). Enforced at the authoritative chokepoint — invite-accept,
+  // under a row lock on THIS org row — with a soft pre-check at invite-create.
+  // How many WORKSPACES this organization may create. Set by a super admin per
+  // org; the seat cap now lives on each Workspace (`Workspace.maxMembers`)
+  // rather than being pooled across the org, because a member belongs to a
+  // workspace, not to the organization as a whole.
+  maxWorkspaces Int @default(2)
 
-  // Org-approval gate (see `TeamStatus`). A new self-signup is `pending` until
-  // a superAdmin approves it; `suspended` when access is revoked. Enforced at
-  // BOTH chokepoints — the NestJS SessionGuard (every API request) and the
-  // Next.js (app) layout (every page). superAdmins are exempt.
-  status            TeamStatus @default(pending)
-  // Optional operator note surfaced on the gate screen — a rejection/suspension
-  // reason ("payment overdue", "flagged for review"). Null while `active`.
+  // Org-approval gate (see `OrgStatus`). A new self-signup is `pending` until a
+  // superAdmin approves it; `suspended` when access is revoked. Enforced at BOTH
+  // chokepoints — the NestJS SessionGuard (every API request) and the Next.js
+  // (app) layout (every page). superAdmins are exempt.
+  status            OrgStatus @default(pending)
   statusReason      String?
-  // When + which superAdmin last changed `status`. `statusUpdatedById` is a
-  // plain User id (no relation) so deleting the acting superAdmin never cascades
+  // Plain User id (no relation) so deleting the acting superAdmin never cascades
   // into / nulls a customer org's audit trail. Reads are display-only.
   statusUpdatedAt   DateTime?
   statusUpdatedById String?
 
-  // Per-team channel credentials live in `ChannelConnection`, one row per
-  // channel keyed by (teamId, channel). Adding a channel = insert a row, not
-  // add a column-set. CLAUDE.md rule #6.
+  workspaces Workspace[]
+  users      User[]
+  invites    Invite[]
+}
+
+// A Workspace is the data-ISOLATION boundary (formerly `Workspace`): every one of
+// the ~50 `workspaceId` columns scopes to exactly one workspace. It belongs to
+// one Organization; a user joins it via `WorkspaceMember` with a per-workspace
+// `Role`. Inbox/operational config + per-role permission overrides live here.
+model Workspace {
+  id             String       @id @default(cuid())
+  name           String
+  createdAt      DateTime     @default(now())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Per-workspace channel credentials live in `ChannelConnection`, one row per
+  // (workspaceId, channel, externalAccountId). Adding a channel = insert a row,
+  // not add a column-set. CLAUDE.md rule #6.
 
   // Contact panel built-in field visibility. JSON map of built-in field key →
   // boolean. Missing key = visible (preserves backwards compat: existing teams
@@ -482,7 +527,7 @@ model Team {
   // alpha-2 column is "country" (NOT "countryCode") — the short key keeps the
   // settings UI readable. Adding more built-ins later just means extending
   // that interface + rendering — no schema bump (missing key = visible).
-  contactPanelBuiltins   Json    @default("{}")
+  contactPanelBuiltins Json @default("{}")
 
   // Per-role capability overrides, set by a team admin. Sparse JSON of the
   // shape `{ manager?: { "<capability>": boolean }, agent?: {...} }`. Missing
@@ -490,14 +535,14 @@ model Team {
   // reproduces pre-feature behavior, so an un-configured team is unchanged).
   // admin/superAdmin are never stored here — they're always-allowed and not
   // editable, so the org owner can't be locked out of their own org.
-  rolePermissions        Json    @default("{}")
+  rolePermissions Json @default("{}")
 
   // Org-default working hours — the schedule every member inherits unless they
   // set `workHoursMode = "custom"` (or opt out with "off"). Null = the team has
   // no schedule, which is the default and reproduces pre-feature behavior
   // exactly: availability stays purely manual until an admin fills this in.
   // Shape: @ccp/shared/work-hours `WorkHours`.
-  workHours              Json?
+  workHours Json?
 
   // Can an AGENT see the whole team's conversations, or only the ones assigned
   // to them?
@@ -523,16 +568,16 @@ model Team {
   // a human reply does NOT write an "AI paused" pill, and the header toggle is
   // hidden. The per-conversation `Conversation.aiEnabled` flag still exists
   // (default true) but is only meaningful when this team flag is on.
-  aiAutopilotEnabled     Boolean @default(false)
+  aiAutopilotEnabled Boolean @default(false)
 
   // What to do with a conversation when the CUSTOMER hands off to a human
   // (the AI flow calls /v1/.../ai with applyHandoffPolicy:true). Only that
   // path applies this — pausing the AI is the critical action; the assignment
   // side-effect is best-effort and never fails the pause. See AiHandoffAction.
-  aiHandoffAction        AiHandoffAction   @default(none)
+  aiHandoffAction          AiHandoffAction   @default(none)
   // Fixed assignee for aiHandoffAction = assign_fixed. SetNull on user delete
   // so removing that member degrades to "leave unassigned", not a broken FK.
-  aiHandoffAssigneeId    String?
+  aiHandoffAssigneeId      String?
   // Round-robin rotation cursor (last user picked) for aiHandoffAction =
   // round_robin AND the workflow assign_to round_robin mode — both read/write
   // this same cursor via pickRoundRobinAssignee. Nullable = start of rotation.
@@ -540,14 +585,40 @@ model Team {
   // Who greets at the start of a session. `workflow` suppresses the AI on the
   // first inbound of a session (the welcome workflow handles it); the rest of
   // the session still gets the AI. See FirstTouchGreeter.
-  firstTouchGreeter      FirstTouchGreeter @default(ai)
+  firstTouchGreeter        FirstTouchGreeter @default(ai)
 
-  users                   User[]
+  // ---- Ticketing ----
+  // Open a ticket automatically when a message arrives on a thread with no
+  // active one. On by default: a helpdesk where work only exists if someone
+  // remembered to press a button has no backlog worth reporting on. Turning it
+  // off leaves tickets a purely manual entity — messages simply carry no
+  // ticketId, and nothing else changes.
+  ticketAutoOpen                      Boolean @default(true)
+  // How long after a ticket is SOLVED a follow-up message reopens it instead of
+  // opening a new one. This is the single most-debatable rule in ticketing —
+  // too short and one issue becomes three tickets, too long and a genuinely new
+  // question gets buried in resolved work — so it is a per-workspace setting,
+  // not a constant. 72h is the helpdesk norm (Zendesk's default). 0 disables
+  // reopening: every message after `solved` starts fresh.
+  ticketReopenWindowHours             Int     @default(72)
+  // Close the CONVERSATION when its last non-terminal ticket is solved.
+  // OFF by default and deliberately so: conversation status and ticket status
+  // are decoupled, because coupling them in both directions is exactly the
+  // recursive event chain §18 forbids. When on, the write is a one-way,
+  // idempotent CAS (ticket → conversation, never back).
+  ticketCloseConversationOnLastSolved Boolean @default(false)
+
+  // Users + invites belong to the ORGANIZATION now, not the workspace.
+  // Membership of a user in THIS workspace is `WorkspaceMember` (per-workspace role).
+  // Seat cap for THIS workspace. Set by a super admin. Default 2 matches the
+  // old org-wide default, so a single-workspace org sees no change.
+  maxMembers Int @default(2)
+
+  members                 WorkspaceMember[]
   contacts                Contact[]
   customers               Customer[]
   conversations           Conversation[]
   messages                Message[]
-  invites                 Invite[]
   contactFieldDefinitions ContactFieldDefinition[]
   contactTransferJobs     ContactTransferJob[]
   contactStages           ContactStage[]
@@ -556,12 +627,18 @@ model Team {
   tags                    Tag[]
   messageFlagDefinitions  MessageFlagDefinition[]
   messageFlags            MessageFlag[]
+  inboxViews              InboxView[]
+  tickets                 Ticket[]
+  ticketEvents            TicketEvent[]
+  ticketSlaPolicies       TicketSlaPolicy[]
+  ticketFieldDefinitions  TicketFieldDefinition[]
+  ticketNumberCounter     TicketNumberCounter?
   audienceGroups          AudienceGroup[]
   workflows               Workflow[]
   workflowRuns            WorkflowRun[]
   workflowContactStates   WorkflowContactState[]
   workflowAwaitingReplies WorkflowAwaitingReply[]
-  apiKeys                 TeamApiKey[]
+  apiKeys                 WorkspaceApiKey[]
   outboundWebhooks        OutboundWebhook[]
   snippets                Snippet[]
   conversationEvents      ConversationEvent[]
@@ -571,6 +648,7 @@ model Team {
   outboundEvents          OutboundEvent[]
   outboundSendAttempts    OutboundSendAttempt[]
   channelConnections      ChannelConnection[]
+  whatsappPortfolios      WhatsappPortfolio[]
   webchatWidgets          WebchatWidget[]
   metaConnection          MetaConnection?
   calls                   Call[]
@@ -579,7 +657,7 @@ model Team {
   assignmentPolicies      AssignmentPolicy[]
   assignmentRules         AssignmentRule[]
   assignmentSettings      AssignmentSettings?
-  aiHandoffAssignee       User?                     @relation("AiHandoffAssignee", fields: [aiHandoffAssigneeId], references: [id], onDelete: SetNull)
+  aiHandoffAssignee       User?                    @relation("AiHandoffAssignee", fields: [aiHandoffAssigneeId], references: [id], onDelete: SetNull)
 
   // --- Native AI Assistant subsystem (SEPARATE from the legacy autopilot/n8n
   // fields above: aiAutopilotEnabled / aiHandoff* / firstTouchGreeter). Nothing
@@ -596,26 +674,68 @@ model Team {
   aiMessageTranscriptions AiMessageTranscription[]
   aiInteractions          AiAssistantInteraction[]
   aiReplySuggestions      AiReplySuggestion[]
+  invites                 Invite[]
+
+  @@index([organizationId])
 }
 
-// Per-(team, channel) connection: credentials + settings for one provider.
-// Replaces the flat `Team.meta*` columns so adding a channel = insert a row,
+// Join table: a user's membership + role in ONE workspace. A user (org-scoped)
+// joins many workspaces, each with its own Role. This is the per-workspace
+// authorization unit read by resolveSession to compute the active workspaceRole.
+model WorkspaceMember {
+  id          String   @id @default(cuid())
+  userId      String
+  workspaceId String
+  role        Role     @default(agent)
+  // Plain id, no relation (audit-trail discipline: deleting the actor never
+  // cascades into a membership row).
+  addedById   String?
+  createdAt   DateTime @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, workspaceId])
+  @@index([workspaceId])
+  @@index([userId])
+}
+
+// Per-(workspace, channel, account) connection: credentials + settings for one provider.
+// Replaces the flat `Workspace.meta*` columns so adding a channel = insert a row,
 // not add a column-set. `config` holds non-secret values (phone number id,
 // waba id, app id, verify token, display number); `secrets` holds the
 // envelope-encrypted ciphertext per field (access token, app secret) — same
 // crypto boundary as before, just relocated. One row per channel per team.
 model ChannelConnection {
-  id        String       @id @default(cuid())
-  teamId    String
-  channel   Channel
-  config    Json         @default("{}")
-  secrets   Json         @default("{}")
-  isActive  Boolean      @default(true)
+  id                String    @id @default(cuid())
+  workspaceId       String
+  channel           Channel
+  // The PROVIDER's own id for this account: WhatsApp phoneNumberId, Messenger
+  // pageId, Instagram igId. Promoted out of `config` into a top-level indexed
+  // column so an inbound webhook resolves its account in ONE indexed lookup
+  // instead of scanning JSON — the same move `WebchatWidget.publicKey` already
+  // makes for the widget channel. This is what makes a workspace able to hold
+  // SEVERAL accounts of one channel.
+  externalAccountId String    @default("")
+  // Human label shown to agents when a channel has more than one account
+  // ("Sales line", "Support UK"). Mirrors WebchatWidget.name.
+  label             String?
+  // The account outbound-initiated sends and broadcasts default to when the
+  // workspace has several on this channel. Exactly one per (workspace, channel).
+  isDefault         Boolean   @default(false)
+  // WhatsApp only. The WABA scopes the TEMPLATE catalog (numbers under one WABA
+  // share templates); the portfolio scopes the 24h MESSAGING LIMIT (Meta moved
+  // it from per-number to per-portfolio on 2025-10-07).
+  wabaId            String?
+  portfolioId       String?
+  config            Json      @default("{}")
+  secrets           Json      @default("{}")
+  isActive          Boolean   @default(true)
   // Set when a send fails with Graph error 190 (access token expired/revoked) so
   // Settings can surface a "reconnect" banner and admins are prompted to re-issue
   // the token — per Meta's access-token best practice. Cleared on reconnect.
-  needsReconnect  Boolean   @default(false)
-  lastAuthErrorAt DateTime?
+  needsReconnect    Boolean   @default(false)
+  lastAuthErrorAt   DateTime?
 
   // ── WhatsApp messaging-health snapshot (whatsapp channel only) ────────────
   // Cached from Meta so large broadcasts can be gated BEFORE sending: WhatsApp
@@ -630,11 +750,12 @@ model ChannelConnection {
   // enums) because Meta's tier/quality vocab churns and we never want a migration
   // just to track a new vendor value.
   //
-  // Raw Meta messaging_limit tier, e.g. "TIER_1K" | "TIER_10K" | "TIER_100K" | "TIER_UNLIMITED".
-  messagingTier            String?
-  // Derived numeric 24h unique-recipient cap for the tier above (1000, 10000,
-  // 100000, …). Null for UNLIMITED (or unknown). Drives the pre-send gate math.
-  messagingDailyCap        Int?
+  // NOTE: `messagingTier` / `messagingDailyCap` used to live here. They moved to
+  // `WhatsappPortfolio` — since 2025-10-07 Meta's 24h messaging limit is scoped
+  // to the BUSINESS PORTFOLIO and shared by every number in it, so holding the
+  // cap per-number let a portfolio's true budget be counted once per number.
+  // Quality + throughput below stay here: both are genuinely per-number.
+  //
   // Quality rating band: "GREEN" | "YELLOW" | "RED". RED = degraded, at risk of
   // a tier downgrade — surfaced as a composer warning.
   qualityRating            String?
@@ -659,11 +780,50 @@ model ChannelConnection {
   // hiding call icons or narrowing call hours can head off the pause.
   callingQualityWarning    String?
 
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
-  team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  workspace     Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  portfolio     WhatsappPortfolio? @relation(fields: [portfolioId], references: [id], onDelete: SetNull)
+  // Threads bound to this account. SetNull on the far side, so removing an
+  // account never deletes conversation history.
+  conversations Conversation[]
+  broadcasts    Broadcast[]
 
-  @@unique([teamId, channel])
+  // One row per ACCOUNT, not per channel: a workspace may connect several
+  // WhatsApp numbers / Pages / IG handles. `externalAccountId` is the provider's
+  // own id, so re-connecting the same number updates rather than duplicates.
+  @@unique([workspaceId, channel, externalAccountId])
+  // "which accounts does this workspace have on channel X" — the connected-set
+  // read on every send/route decision.
+  @@index([workspaceId, channel])
+  // Inbound resolution: payload account id → the owning connection.
+  @@index([channel, externalAccountId])
+  @@index([portfolioId])
+}
+
+/// A Meta BUSINESS PORTFOLIO. Since 2025-10-07 the WhatsApp 24h messaging limit
+/// (max unique recipients messaged outside a customer-service window) is scoped
+/// here and SHARED by every phone number in the portfolio — it is no longer a
+/// per-number budget. Throughput (msg/s) stays per-number on ChannelConnection.
+model WhatsappPortfolio {
+  id                       String    @id @default(cuid())
+  workspaceId              String
+  /// Meta's business-portfolio id. Null until we've read it from Graph.
+  externalPortfolioId      String?
+  /// Raw tier, e.g. "TIER_250" | "TIER_2K" | "TIER_10K" | "TIER_100K" | "TIER_UNLIMITED".
+  messagingTier            String?
+  /// Derived numeric 24h unique-recipient cap. Null = UNLIMITED or unknown
+  /// (unknown deliberately means "ungated" rather than "blocked").
+  messagingDailyCap        Int?
+  messagingHealthUpdatedAt DateTime?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+
+  workspace   Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  connections ChannelConnection[]
+
+  @@unique([workspaceId, externalPortfolioId])
+  @@index([workspaceId])
 }
 
 // A single embeddable website chat widget. Unlike the Meta channels — where a
@@ -676,20 +836,20 @@ model ChannelConnection {
 // its source widget (Conversation.webchatWidgetId) so the inbox shows which
 // website a chat came from.
 model WebchatWidget {
-  id     String @id @default(cuid())
-  teamId String
+  id              String   @id @default(cuid())
+  workspaceId     String
   // Human name shown to agents ("which website is this chat from").
-  name   String
+  name            String
   // Public site key embedded in the <script> tag (`wc_pk_<hex>`). Safe-in-HTML;
   // abuse is bounded by allowedOrigins + rate limits, not secrecy. Globally
   // unique so an anonymous visitor handshake resolves (team, widget) with ONE
   // indexed lookup instead of scanning JSON.
-  publicKey String @unique
+  publicKey       String   @unique
   // Origins allowed to embed this widget: "example.com" or "*.example.com".
   // EMPTY = permissive (any site), deliberately: a brand-new widget must work on
   // the customer's page before they've configured anything. See `firstSeenOrigin`
   // for how that gets closed without breaking first-run.
-  allowedOrigins String[] @default([])
+  allowedOrigins  String[] @default([])
   // Host of the FIRST non-loopback page that ever embedded this widget, recorded
   // write-once and only while `allowedOrigins` is still empty.
   //
@@ -703,15 +863,15 @@ model WebchatWidget {
   firstSeenOrigin String?
   // Non-secret appearance + pre-chat config the widget fetches (theme,
   // welcomeMessage, headerTitle, suggestedQuestions, preChatFields, showBranding).
-  config    Json     @default("{}")
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  config          Json     @default("{}")
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  team          Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   conversations Conversation[]
 
-  @@index([teamId])
+  @@index([workspaceId])
 }
 
 // Shared Meta-app credentials for a team — the ONE App ID + App secret +
@@ -725,31 +885,37 @@ model WebchatWidget {
 // `config` holds non-secret values (appId, verifyToken, graphVersion);
 // `secrets` holds envelope-encrypted ciphertext (appSecret, systemUserToken).
 model MetaConnection {
-  id        String   @id @default(cuid())
-  teamId    String   @unique
-  config    Json     @default("{}")
-  secrets   Json     @default("{}")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  id          String    @id @default(cuid())
+  workspaceId String    @unique
+  config      Json      @default("{}")
+  secrets     Json      @default("{}")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 }
 
 model User {
-  id            String    @id @default(cuid())
-  teamId        String
-  role          Role      @default(agent)
-  name          String
-  email         String    @unique
+  id                  String    @id @default(cuid())
+  // A user belongs to exactly one Organization. Per-workspace role lives on
+  // WorkspaceMember; this is the org-directory role + the platform flag.
+  organizationId      String
+  orgRole             OrgRole   @default(member)
+  // Platform-level operator (replaces the old Role.superAdmin). Bypasses the
+  // org-approval gate and every workspace permission check.
+  isSuperAdmin        Boolean   @default(false)
+  name                String
+  // Globally unique: a user belongs to one org, so one login = one identity.
+  email               String    @unique
   // Better Auth requires this column. Default true: existing users were
   // verified via the invite flow; new sign-ups get true on creation since
   // we don't run an email-confirmation step yet.
-  emailVerified Boolean   @default(true)
+  emailVerified       Boolean   @default(true)
   // Mapped to Better Auth's `image` field via lib/auth/better-auth.ts so the
   // column name stays domain-meaningful while Better Auth sees the standard
   // field name in session payloads.
-  avatarUrl     String?
+  avatarUrl           String?
   // Soft-disable: keeps FK history intact (authored messages, assignments).
-  deactivatedAt DateTime?
+  deactivatedAt       DateTime?
   // User-controlled availability. "available" is the implicit default for the
   // UI when null (kept nullable so the migration doesn't have to backfill
   // every existing row). "offline" hides the user from teammates' online dots
@@ -763,7 +929,7 @@ model User {
   // applies, and the schedule-derived value once one does. Every reader (the
   // realtime gateway, round-robin, mapUser, every UI dot) reads THIS and never
   // recomputes the rule. Writers all go through lib/availability/apply.ts.
-  availabilityStatus  String?  @default("available")
+  availabilityStatus  String?   @default("available")
   // Optional free-form note teammates see ("Back at 3pm", "On a call").
   // Bounded to 100 chars at the API; column is short for sane payloads.
   availabilityMessage String?
@@ -778,7 +944,7 @@ model User {
   // "manual" | "admin" | "schedule" — who decided the effective status.
   availabilitySource        String?   @default("manual")
   // The admin who set it, when source = "admin". Plain id, NO relation: the
-  // same discipline as Team.statusUpdatedById — deleting the acting admin must
+  // same discipline as Workspace.statusUpdatedById — deleting the acting admin must
   // never cascade into, or null out, a teammate's availability row.
   availabilitySetByUserId   String?
   // While in the future, the manual pick out-ranks the schedule. Set to the
@@ -794,51 +960,58 @@ model User {
   // whole-value setting always read and written together — same reasoning as
   // AiAssistantConfig's opening hours.
   workHours                 Json?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
 
-  team                    Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  authoredMsgs            Message[]                 @relation("AuthoredMessages")
+  organization            Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceMemberships    WorkspaceMember[]
+  authoredMsgs            Message[]                @relation("AuthoredMessages")
   authoredNotes           InternalNote[]
-  createdMessageFlags     MessageFlag[]             @relation("CreatedMessageFlags")
-  assignedMessageFlags    MessageFlag[]             @relation("AssignedMessageFlags")
-  resolvedMessageFlags    MessageFlag[]             @relation("ResolvedMessageFlags")
-  assignedConvos          Conversation[]            @relation("AssignedConversations")
-  createdInvites          Invite[]                  @relation("InvitedBy")
-  createdBroadcasts       Broadcast[]               @relation("CreatedBroadcasts")
-  createdAudienceGroups   AudienceGroup[]           @relation("CreatedAudienceGroups")
-  contactTransferJobs     ContactTransferJob[]      @relation("ContactTransferJobs")
-  createdSnippets         Snippet[]                 @relation("CreatedSnippets")
+  createdMessageFlags     MessageFlag[]            @relation("CreatedMessageFlags")
+  assignedMessageFlags    MessageFlag[]            @relation("AssignedMessageFlags")
+  resolvedMessageFlags    MessageFlag[]            @relation("ResolvedMessageFlags")
+  assignedTickets         Ticket[]                 @relation("AssignedTickets")
+  resolvedTickets         Ticket[]                 @relation("ResolvedTickets")
+  ticketEvents            TicketEvent[]
+  assignedConvos          Conversation[]           @relation("AssignedConversations")
+  createdInvites          Invite[]                 @relation("InvitedBy")
+  createdBroadcasts       Broadcast[]              @relation("CreatedBroadcasts")
+  createdAudienceGroups   AudienceGroup[]          @relation("CreatedAudienceGroups")
+  contactTransferJobs     ContactTransferJob[]     @relation("ContactTransferJobs")
+  createdSnippets         Snippet[]                @relation("CreatedSnippets")
+  // Saved inbox views. SetNull on the view side (not Cascade) so a SHARED view
+  // survives its author leaving; personal views are cleaned up explicitly.
+  createdInboxViews       InboxView[]              @relation("CreatedInboxViews")
   // Audit-log authorship. Nullable on the event row + SetNull so deleting a
   // user keeps the audit trail; the timeline just renders "Removed user".
   authoredEvents          ConversationEvent[]
-  // Team-chat (internal messaging between agents). All SetNull on user delete
+  // Workspace-chat (internal messaging between agents). All SetNull on user delete
   // so deactivating a teammate leaves their messages, reactions, pins, and
   // mentions in place with a "Removed user" actor label — same audit-trail
   // discipline as customer conversations.
-  createdChannels         TeamChannel[]             @relation("CreatedChannels")
-  authoredChannelMessages TeamChannelMessage[]      @relation("AuthoredChannelMessages")
-  channelReactions        TeamChannelReaction[]     @relation("ChannelReactions")
-  channelMentions         TeamChannelMention[]      @relation("ChannelMentions")
-  pinnedChannelMessages   TeamChannelPin[]          @relation("PinnedMessages")
+  createdChannels         TeamChannel[]            @relation("CreatedChannels")
+  authoredChannelMessages TeamChannelMessage[]     @relation("AuthoredChannelMessages")
+  channelReactions        TeamChannelReaction[]    @relation("ChannelReactions")
+  channelMentions         TeamChannelMention[]     @relation("ChannelMentions")
+  pinnedChannelMessages   TeamChannelPin[]         @relation("PinnedMessages")
   channelReadReceipts     TeamChannelReadReceipt[]
-  channelMemberships      TeamChannelMember[]       @relation("ChannelMemberships")
-  addedChannelMembers     TeamChannelMember[]       @relation("AddedChannelMembers")
+  channelMemberships      TeamChannelMember[]      @relation("ChannelMemberships")
+  addedChannelMembers     TeamChannelMember[]      @relation("AddedChannelMembers")
   // Outbound voice calls this user placed.
-  initiatedCalls          Call[]                    @relation("InitiatedCalls")
+  initiatedCalls          Call[]                   @relation("InitiatedCalls")
   // Voice calls this user answered (CAS-won the "who answered first" race).
   // SetNull on user delete so call audit history survives deactivation, same
   // discipline as authoredMsgs / authoredNotes.
-  answeredCalls           Call[]                    @relation("AnsweredCalls")
+  answeredCalls           Call[]                   @relation("AnsweredCalls")
   sessions                Session[]
   accounts                Account[]
   // Teams that route customer-initiated AI handoffs to this user (assign_fixed
   // mode). SetNull on delete so removing the member degrades the team setting
   // to "leave unassigned" rather than orphaning the FK.
-  aiHandoffForTeams       Team[]                    @relation("AiHandoffAssignee")
-  assignmentMemberships   AssignmentPolicyMember[]  @relation("AssignmentPolicyMemberships")
+  aiHandoffForWorkspaces  Workspace[]              @relation("AiHandoffAssignee")
+  assignmentMemberships   AssignmentPolicyMember[] @relation("AssignmentPolicyMemberships")
 
-  @@index([teamId])
+  @@index([organizationId])
 }
 
 // ---------------------------------------------------------------------------
@@ -859,6 +1032,14 @@ model Session {
   userAgent String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  // Server-side truth for THIS device's active workspace. The `ccp.ws` cookie
+  // carries a candidate, but it is client input and is never trusted raw —
+  // resolveSession validates it against the user's WorkspaceMember set and
+  // falls back to this column (then to the user's first membership). The
+  // switch endpoint writes here so a workspace choice survives a cookie wipe
+  // and stays per-device rather than global to the user.
+  activeWorkspaceId String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -912,11 +1093,11 @@ model Verification {
 // replaces the trigger text with `$var.contact.*` tokens already resolved
 // against the active conversation's contact.
 //
-// Team-wide for v1: anyone can create / use / edit. Per-user (private)
+// Workspace-wide for v1: anyone can create / use / edit. Per-user (private)
 // snippets are a later add-on; we'd add a nullable `ownerUserId` field then.
 model Snippet {
   id          String   @id @default(cuid())
-  teamId      String
+  workspaceId String
   // Lowercase, digits, underscores. Becomes the slash trigger:
   //   name = "welcome_new_user" → `/welcome_new_user` in the reply box.
   // Unique per-team so two snippets can't fight for the same trigger.
@@ -935,59 +1116,59 @@ model Snippet {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  team      Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  createdBy User? @relation("CreatedSnippets", fields: [createdById], references: [id], onDelete: SetNull)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User?     @relation("CreatedSnippets", fields: [createdById], references: [id], onDelete: SetNull)
 
-  @@unique([teamId, name])
-  @@index([teamId, label])
+  @@unique([workspaceId, name])
+  @@index([workspaceId, label])
 }
 
 model Contact {
-  id                String        @id @default(cuid())
-  teamId            String
+  id                    String        @id @default(cuid())
+  workspaceId           String
   // Nullable so non-phone channels (Instagram, Telegram) can land contacts
   // without a phone number. WhatsApp contacts always populate it; the
   // existing webhook + manual-create + CSV-import paths still set it
   // explicitly. The compound unique below stays valid since Postgres treats
   // multiple NULLs as distinct.
-  phoneNumber       String?
+  phoneNumber           String?
   // Channel this contact lives on. NOT NULL: every contact-create path
   // stamps it explicitly (WhatsApp ingest, manual create, CSV import, /v1,
   // workflow target, seeds). Channel filtering is a clean
   // `WHERE identityChannel = '<value>'` — no NULL handling.
-  identityChannel   Channel
+  identityChannel       Channel
   // Native id on non-phone channels (Instagram scoped-user-id, Telegram
   // chat-id). NULL for WhatsApp where phone IS the identity. Combined with
   // `identityChannel` to form the compound unique below for non-phone dedup.
-  externalContactId String?
+  externalContactId     String?
   // WhatsApp Business-Scoped User ID (BSUID) forward-compat (Meta 2026 privacy
   // rollout). Meta is moving WhatsApp identity from the raw phone number to an
   // opaque per-business id + an optional `@username`; a webhook may then omit
   // the phone. These nullable columns let ingest persist + resolve on the BSUID
   // when the phone is absent, so we don't drop those inbounds once Meta flips.
   // NULL for every contact today (phone stays the identity). See docs/identity.md.
-  bsuid             String?
+  bsuid                 String?
   // The customer's public WhatsApp @username, when they've set one (2026). Kept
   // for display + as a softer future match key; NEVER auto-merged on (name/
   // username fuzzy matching is banned — strong keys only).
-  username          String?
+  username              String?
   // Canonical display name. Derived from `firstName + lastName` when both
   // are populated; otherwise whatever the create path stored (inbound
   // webhook profile name, manual UI, /v1 POST). Source of truth for inbox
   // rendering — first/last are split-offs maintained alongside on writes.
-  name              String
+  name                  String
   // First/last names split from `name` at migration time. Webhook payloads
   // expose these as `first_name`/`last_name` for respond.io/n8n parity.
   // Updating `name` via PATCH does NOT auto-resplit (avoids clobbering an
   // agent's manual edit); updating `firstName`/`lastName` recomputes `name`.
-  firstName         String?
-  lastName          String?
+  firstName             String?
+  lastName              String?
   // BCP-47 tag (e.g. "ar", "en"). Drives WhatsApp template language selection.
-  language          String?
+  language              String?
   // ISO 3166-1 alpha-2 (e.g. "LB"). Derived from `phoneNumber` via libphonenumber
   // at inbound time. Optional — non-WhatsApp / unparseable numbers leave null.
-  countryCode       String?
-  avatarUrl         String?
+  countryCode           String?
+  avatarUrl             String?
   // Provider profile signals for social channels — Instagram exposes
   // follower_count / is_verified_user / is_user_follow_business /
   // is_business_follow_user on its user node (Messenger/WhatsApp expose none).
@@ -995,10 +1176,10 @@ model Contact {
   // future channel can stash its own signals without a schema change; never
   // queried/filtered. Null on channels without them. Shape: SocialProfile in
   // @ccp/shared/types.
-  socialProfile     Json?
+  socialProfile         Json?
   // Optional profile fields surfaced in the right-rail contact panel.
-  email             String?
-  location          String?
+  email                 String?
+  location              String?
   // Bag of contact-level custom field values, keyed by field key.
   // - Keys defined in ContactFieldDefinition are the team-wide schema (always
   //   shown on every contact, even when blank).
@@ -1011,24 +1192,24 @@ model Contact {
   // VALUES is the right fix IF value-substring search ever shows up hot in
   // EXPLAIN (trigger: ~50k contacts/team); it bloats every contact write, so
   // don't add it preemptively.
-  customFields      Json          @default("{}")
+  customFields          Json          @default("{}")
   // Customer-lifecycle stage. Per-team configurable list (managed in
   // /settings/stages). Defaulted to the team's `isDefault` stage at create
   // time — see ensureDefaultStage in lib/queries.ts. SetNull on delete so
   // removing a stage doesn't take its contacts with it; the bulk-move flow
   // in /api/team/stages/[id] DELETE empties this manually first.
-  stageId           String?
+  stageId               String?
   // UNIFIED CUSTOMER (§6 / docs/identity.md). A Contact is one channel identity;
   // the Customer it rolls up to is the PERSON, so an agent sees one profile
   // across all a person's channels. Nullable during rollout; the IdentityService
   // (called from ingest + manual create) ensures every contact gets one. Merge
   // re-points this FK (never deletes a contact); SetNull on customer delete.
-  customerId        String?
+  customerId            String?
   // How this row got into the DB. Defaulted to inbound because the webhook
   // ingest path uses the bare default; the manual create + CSV import paths
   // explicitly set 'manual'.
-  source            ContactSource @default(inbound)
-  createdAt         DateTime      @default(now())
+  source                ContactSource @default(inbound)
+  createdAt             DateTime      @default(now())
   // Denormalized "most recent inbound message timestamp" for this contact.
   // Maintained on every inbound-message commit (see lib/providers/ingest.ts).
   // Used by:
@@ -1037,7 +1218,7 @@ model Contact {
   //   - the contacts-list "by-recency" sort
   // Nullable because contacts created via /contacts/new (manual or CSV)
   // have no inbound yet.
-  lastInboundAt     DateTime?
+  lastInboundAt         DateTime?
   // ── Marketing consent ────────────────────────────────────────────────────
   // Set when the customer opts out: replies STOP (exact-match keyword scan on
   // inbound), or Meta's `user_preferences` webhook reports a marketing opt-out.
@@ -1051,7 +1232,9 @@ model Contact {
   // book un-messageable the moment suppression shipped. Do not "improve" this
   // into an opt-in model without a backfill plan.
   marketingOptOutAt     DateTime?
-  /** "stop_keyword" | "meta_preferences" | "agent" | "api" */
+  /**
+   * "stop_keyword" | "meta_preferences" | "agent" | "api"
+   */
   marketingOptOutSource String?
   // Optimistic concurrency token. Every Contact write CAS-bumps this from
   // the value it just read; concurrent writers on the same row race to the
@@ -1061,7 +1244,7 @@ model Contact {
   // races where one set of changes is silently lost. The conflict-park UI
   // in contact-panel surfaces 409s as a "teammate just edited this" banner
   // so the agent can choose to reload or overwrite.
-  version           Int           @default(0)
+  version               Int           @default(0)
   // Soft-delete tombstone. Deleting a contact is NON-destructive: the row + its
   // conversations/messages are PRESERVED (a contact delete must NOT take the
   // conversation with it). Set = hidden from the contacts DIRECTORY (list /
@@ -1069,7 +1252,7 @@ model Contact {
   // in the inbox and by-id lookups still resolve. Cleared (re-activated) by the
   // ingest upsert when a tombstoned contact messages again. A true hard purge
   // (GDPR) is a separate explicit action that cascades.
-  deletedAt         DateTime?
+  deletedAt             DateTime?
 
   // WhatsApp Business Calling — auto-revocation mirror.
   // Meta revokes calling permission after 4 consecutive unanswered outbound
@@ -1081,13 +1264,14 @@ model Contact {
   callPermissionRevokedUntil    DateTime?
   consecutiveUnansweredOutCalls Int       @default(0)
 
-  team                Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  stage               ContactStage?        @relation(fields: [stageId], references: [id], onDelete: SetNull)
-  customer            Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  conversations       Conversation[]
-  broadcastRecipients BroadcastRecipient[]
+  workspace               Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  stage                   ContactStage?           @relation(fields: [stageId], references: [id], onDelete: SetNull)
+  customer                Customer?               @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  conversations           Conversation[]
+  tickets                 Ticket[]
+  broadcastRecipients     BroadcastRecipient[]
   workflowAwaitingReplies WorkflowAwaitingReply[]
-  callPermissionRequests CallPermissionRequest[]
+  callPermissionRequests  CallPermissionRequest[]
   // Many-to-many: an agent tags a contact with one or more labels for
   // segmentation. Implicit join table — Prisma manages the link rows.
   // Tags live on Contact (NOT Conversation): one contact = one conversation
@@ -1095,11 +1279,28 @@ model Contact {
   // so per-thread tagging would be dead complexity. See the
   // 20260516160000_revert_conversation_tags migration for the history of
   // why this lives here and not on Conversation.
-  tags                Tag[]
+  tags                    Tag[]
   // M2M with saved audience groups via manual membership. Dynamic membership
   // (by tag) doesn't materialize here — it's resolved at send time.
-  audienceGroups      AudienceGroup[]      @relation("AudienceGroupContacts")
+  audienceGroups          AudienceGroup[]         @relation("AudienceGroupContacts")
+  // NOTE: a PARTIAL pg_trgm GIN index `Contact_phoneNumber_trgm_idx`
+  // (USING GIN ("phoneNumber" gin_trgm_ops) WHERE "phoneNumber" IS NOT NULL)
+  // is hand-written in the init migration. Phone search is a substring
+  // match (LIKE/ILIKE '%digits%') in all three call sites (contacts list,
+  // conversation list, global contact search); the btree `(workspaceId,
+  // phoneNumber)` above CAN'T serve a leading-wildcard match, so without the
+  // trgm index those scans were full seq-scans of Contact. It's NOT declared
+  // here because Prisma can't express the `WHERE phoneNumber IS NOT NULL`
+  // partial predicate — Prisma can't model the `WHERE phoneNumber IS NOT NULL`.
+  // (A JSONB GIN `Contact_customFields_gin_idx` once lived here too; it was
+  // dropped in 20260611130200 because no query shape could use a jsonb_path_ops
+  // GIN — all customFields reads are `::text ILIKE` / `->> key ILIKE`. That
+  // also removed the drift workaround its hand-written status existed for.)
 
+  // Compound identity for non-phone channels. Only enforced when both fields
+  // are set — Postgres treats NULL as distinct in unique constraints, so
+  // WhatsApp-only contacts (both nulls) coexist freely.
+  @@unique([workspaceId, identityChannel, externalContactId])
   // Phone uniqueness is enforced by a PARTIAL unique index, not a full one —
   // see `Contact_teamId_phoneNumber_whatsapp_key` (raw SQL in the init
   // migration). It fires ONLY for WhatsApp (identityChannel = 'whatsapp').
@@ -1117,30 +1318,26 @@ model Contact {
   // 20260611130200 — no query could use it.)
   //
   // Ingest path is findFirst+create/update (NOT upsert) because no Prisma
-  // unique key exists for `(teamId, phoneNumber)` after this change. The
+  // unique key exists for `(workspaceId, phoneNumber)` after this change. The
   // partial unique + Serializable wrapper (P2002 + P2034 retry) is the race
   // backstop.
-  @@index([teamId, phoneNumber])
-  // Compound identity for non-phone channels. Only enforced when both fields
-  // are set — Postgres treats NULL as distinct in unique constraints, so
-  // WhatsApp-only contacts (both nulls) coexist freely.
-  @@unique([teamId, identityChannel, externalContactId])
-  // No bare @@index([teamId]) — every teamId-only lookup is already covered by
-  // a teamId-leading composite ([teamId, deletedAt], [teamId, source], etc.).
+  @@index([workspaceId, phoneNumber])
+  // No bare @@index([workspaceId]) — every workspaceId-only lookup is already covered by
+  // a workspaceId-leading composite ([workspaceId, deletedAt], [workspaceId, source], etc.).
   // Dropped as write overhead — migration 20260611130000.
-  @@index([teamId, source])
-  @@index([teamId, stageId])
+  @@index([workspaceId, source])
+  @@index([workspaceId, stageId])
   // BSUID lookup (forward-compat): resolve a WhatsApp contact by its
   // business-scoped id when a webhook omits the phone. Sparse — NULL today.
-  @@index([teamId, identityChannel, bsuid])
+  @@index([workspaceId, identityChannel, bsuid])
   // Customer → its channel-contacts (the profile's channel switcher loads by
   // customerId); also serves the merge/split re-point.
   @@index([customerId])
   // Directory reads filter `deletedAt IS NULL`; index it so the common
   // "active contacts" scan stays cheap as tombstones accumulate.
-  @@index([teamId, deletedAt])
+  @@index([workspaceId, deletedAt])
   // "Contacts by recency of last inbound" — inbox-sidebar surfaces.
-  @@index([teamId, lastInboundAt(sort: Desc)], map: "Contact_teamId_lastInboundAt_idx")
+  @@index([workspaceId, lastInboundAt(sort: Desc)], map: "Contact_teamId_lastInboundAt_idx")
   // Newest-first contact listing — the DEFAULT order for three separate
   // surfaces: `GET /v1/contacts` (external-v1.service.ts), the CSV export, and
   // the global contact search keyset. No index covered `createdAt`, so every
@@ -1148,7 +1345,7 @@ model Contact {
   // verified with `SET enable_seqscan=off`, where the planner still produced a
   // Sort node because nothing could supply the order. Keyset pagination does
   // NOT rescue this: the cursor bounds which rows are returned, not the sort.
-  @@index([teamId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([workspaceId, createdAt(sort: Desc), id(sort: Desc)])
   // pg_trgm GIN index for substring ILIKE search on contact name.
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "Contact_name_trgm_idx")
   // Same, for the email OR-arm of contact search (global-search.ts does
@@ -1156,19 +1353,6 @@ model Contact {
   // partition while name/phone rode their trgm indexes. Non-partial: NULL
   // emails extract no trigrams, so GIN skips them.
   @@index([email(ops: raw("gin_trgm_ops"))], type: Gin, map: "Contact_email_trgm_idx")
-  // NOTE: a PARTIAL pg_trgm GIN index `Contact_phoneNumber_trgm_idx`
-  // (USING GIN ("phoneNumber" gin_trgm_ops) WHERE "phoneNumber" IS NOT NULL)
-  // is hand-written in the init migration. Phone search is a substring
-  // match (LIKE/ILIKE '%digits%') in all three call sites (contacts list,
-  // conversation list, global contact search); the btree `(teamId,
-  // phoneNumber)` above CAN'T serve a leading-wildcard match, so without the
-  // trgm index those scans were full seq-scans of Contact. It's NOT declared
-  // here because Prisma can't express the `WHERE phoneNumber IS NOT NULL`
-  // partial predicate — Prisma can't model the `WHERE phoneNumber IS NOT NULL`.
-  // (A JSONB GIN `Contact_customFields_gin_idx` once lived here too; it was
-  // dropped in 20260611130200 because no query shape could use a jsonb_path_ops
-  // GIN — all customFields reads are `::text ILIKE` / `->> key ILIKE`. That
-  // also removed the drift workaround its hand-written status existed for.)
 }
 
 // The unified CUSTOMER (a person) — the profile layer above channel-scoped
@@ -1182,18 +1366,18 @@ model Contact {
 // fuzzy/name). Everything else is a manual, reversible merge/split with an
 // audit trail. Deleting a Customer SetNulls its contacts (they never vanish).
 model Customer {
-  id        String   @id @default(cuid())
-  teamId    String
-  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   // Person-level display name. Seeded from the first contact; an agent can edit
   // it without touching the underlying per-channel contact names.
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  name        String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   contacts Contact[]
 
-  @@index([teamId])
+  @@index([workspaceId])
 }
 
 // Persisted audit trail for the manual, reversible merge/split of the unified
@@ -1203,13 +1387,13 @@ model Customer {
 // Auto-merge at ingest (deterministic strong keys) is NOT recorded here — it's
 // derived from the contact's strong keys and reversible by the same unlink.
 model CustomerIdentityEvent {
-  id             String                 @id @default(cuid())
-  teamId         String
+  id               String                 @id @default(cuid())
+  workspaceId      String
   // The channel-contact that moved between customers.
-  contactId      String
-  action         CustomerIdentityAction
+  contactId        String
+  action           CustomerIdentityAction
   // Customer the contact belonged to before the action (null if it had none).
-  fromCustomerId String?
+  fromCustomerId   String?
   // The `from` customer's person-level NAME at the time of the action. Captured
   // because a `link` reaps the emptied source customer, hard-deleting its row —
   // without this the source person's deliberate rename ("VIP – do not merge")
@@ -1218,15 +1402,15 @@ model CustomerIdentityEvent {
   // customer. Null when the source had no name or no source customer.
   fromCustomerName String?
   // Customer the contact belongs to after the action.
-  toCustomerId   String
+  toCustomerId     String
   // Who performed it — a human session (null for system/sweeper actions).
-  actorUserId    String?
-  createdAt      DateTime               @default(now())
+  actorUserId      String?
+  createdAt        DateTime               @default(now())
 
-  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
-  @@index([teamId, createdAt(sort: Desc)])
-  @@index([teamId, contactId])
+  @@index([workspaceId, createdAt(sort: Desc)])
+  @@index([workspaceId, contactId])
 }
 
 enum CustomerIdentityAction {
@@ -1250,55 +1434,55 @@ enum CustomerIdentityAction {
 // `color` mirrors the Tag color slot system (lib/tag-colors.ts) so the same
 // safelist of Tailwind classes covers both surfaces.
 model ContactStage {
-  id        String   @id @default(cuid())
-  teamId    String
-  name      String
-  color     String   @default("slate")
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  color       String   @default("slate")
   // Sort order in the stages list — lower first. New stages get the next
   // available slot at create time; reorder is a bulk PATCH.
-  position  Int      @default(0)
+  position    Int      @default(0)
   // Exactly one row per team should carry isDefault = true. The partial
   // unique index `ContactStage_teamId_isDefault_key` (raw SQL — partial
   // indexes can't be expressed in the Prisma DSL, see migration
   // 20260526120000) is the DB-level backstop; the app-code pre-check in
   // /api/team/stages POST + PATCH still runs as a friendlier 4xx.
-  isDefault Boolean  @default(false)
-  createdAt DateTime @default(now())
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
 
-  team     Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  contacts Contact[]
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contacts  Contact[]
 
-  @@unique([teamId, name])
-  @@index([teamId, position])
+  @@unique([workspaceId, name])
+  @@index([workspaceId, position])
 }
 
-// Team-wide contact field definitions: an admin/manager defines a key+label
+// Workspace-wide contact field definitions: an admin/manager defines a key+label
 // once, and every contact in the team renders that field in the panel. The
 // value still lives in Contact.customFields[key] so we don't need a separate
 // values table for MVP. Renaming a field here is a metadata-only change;
 // deleting it strips the key from every contact's customFields in the same
 // transaction (see /api/team/contact-fields/[id] DELETE).
 model ContactFieldDefinition {
-  id        String   @id @default(cuid())
-  teamId    String
+  id          String   @id @default(cuid())
+  workspaceId String
   // Stable identifier used in Contact.customFields. Lowercased + underscored
   // at create time; immutable once set so existing data keeps mapping cleanly.
-  key       String
-  label     String
+  key         String
+  label       String
   // Sort order within the panel — lower first. Tracked so the UI can reorder
   // later without us needing alphabetical-only sorting.
-  order     Int      @default(0)
+  order       Int      @default(0)
   // Admin-controlled visibility for the inbox contact panel. Hidden fields
   // are dropped from the panel for ALL agents (including admins — they can
   // still toggle them back on from /settings/contact-fields). Default true
   // so existing definitions stay visible after the migration.
-  isVisible Boolean  @default(true)
-  createdAt DateTime @default(now())
+  isVisible   Boolean  @default(true)
+  createdAt   DateTime @default(now())
 
-  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
-  @@unique([teamId, key])
-  @@index([teamId, order])
+  @@unique([workspaceId, key])
+  @@index([workspaceId, order])
 }
 
 enum ContactTransferKind {
@@ -1330,7 +1514,7 @@ enum ContactTransferStatus {
 // link — none of which a transient queue entry can provide.
 model ContactTransferJob {
   id              String                @id @default(cuid())
-  teamId          String
+  workspaceId     String
   kind            ContactTransferKind
   format          ContactTransferFormat
   status          ContactTransferStatus @default(pending)
@@ -1375,7 +1559,7 @@ model ContactTransferJob {
 
   // First N row failures inline for the summary panel; the full set lives in
   // errorArtifactKey. Shape: [{ row: number, reason: string }].
-  errorSample Json @default("[]")
+  errorSample Json    @default("[]")
   // Whole-job failure message (not row-level). Null on success.
   error       String?
 
@@ -1390,10 +1574,10 @@ model ContactTransferJob {
   // they must not sit in the bucket forever.
   expiresAt   DateTime
 
-  team    Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  creator User? @relation("ContactTransferJobs", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  creator   User?     @relation("ContactTransferJobs", fields: [createdByUserId], references: [id], onDelete: SetNull)
 
-  @@index([teamId, createdAt(sort: Desc)])
+  @@index([workspaceId, createdAt(sort: Desc)])
   // Drives the sweeper's two scans: expired rows, and running rows with a
   // stale heartbeat.
   @@index([status, heartbeatAt])
@@ -1401,9 +1585,9 @@ model ContactTransferJob {
 }
 
 model Conversation {
-  id                 String             @id @default(cuid())
-  teamId             String
-  contactId          String
+  id                   String             @id @default(cuid())
+  workspaceId          String
+  contactId            String
   // Channel this thread lives on, and the SOURCE OF TRUTH for "which channel"
   // — NOT the contact (contacts are siloed per channel today, but channel
   // ownership belongs to the thread). A conversation is bound to ONE channel
@@ -1413,24 +1597,30 @@ model Conversation {
   // default to the team's WhatsApp channel. `Message.channel` always equals
   // this but exists for a different reason (the dedup key — see its comment);
   // the equality is a consistency invariant, not duplicated data.
-  channel            Channel            @default(whatsapp)
+  channel              Channel            @default(whatsapp)
   // For `webchatwidget` conversations: which named website widget this thread
   // originated from (a team runs many). Null on every other channel. SetNull on
   // delete so removing a widget config never deletes its conversation history.
-  webchatWidgetId    String?
-  assignedUserId     String?
+  webchatWidgetId      String?
+  // The channel ACCOUNT this thread belongs to (which WhatsApp number / Page /
+  // IG handle). Stamped at ingest and RE-STAMPED on every inbound, so a reply
+  // always goes out the account the customer last messaged -- Meta thread
+  // affinity and the 24h window belong to the ACCOUNT, not the channel. This is
+  // deliberately different from `webchatWidgetId`, which stays sticky.
+  channelConnectionId  String?
+  assignedUserId       String?
   // Durable "who handled this customer last" — set whenever an assignee is
   // written, and NEVER cleared (closing a conversation clears `assignedUserId`,
   // which is exactly when this history would otherwise be lost). Powers
   // AssignmentPolicy.preferPreviousAgent so a returning customer goes back to
   // the person who already knows them. Plain id, no FK: a removed member must
   // degrade to "no continuity", not cascade into the thread.
-  lastAssignedUserId String?
+  lastAssignedUserId   String?
   // New chats land in `pending` so they sit in the triage column until an
   // agent claims them (→ open) or closes them out. The webhook ingest, the
   // broadcast runner, and the message-forward path all rely on this
   // default; existing conversations are untouched by the migration.
-  status             ConversationStatus @default(pending)
+  status               ConversationStatus @default(pending)
   // AI Autopilot — when true the conversation is eligible for the external AI
   // auto-reply flow (n8n etc.); when false a human is handling it and the AI
   // must stay silent. Default true (new chats are AI-eligible). Flipped to
@@ -1439,17 +1629,17 @@ model Conversation {
   // "Pause AI" toggle; flipped back to true by the toggle or on close. The
   // value rides the message.received/sent outbound webhook as `ai_enabled`
   // so the partner flow gates on it. NOT a workflow trigger.
-  aiEnabled          Boolean            @default(true)
-  unreadCount        Int                @default(0)
-  lastMessageAt      DateTime           @default(now())
-  lastMessagePreview String             @default("")
+  aiEnabled            Boolean            @default(true)
+  unreadCount          Int                @default(0)
+  lastMessageAt        DateTime           @default(now())
+  lastMessagePreview   String             @default("")
   // Direction of the message behind `lastMessagePreview` — drives the inbox
   // row's triage cue ("we replied" vs "customer waiting"). Nullable: legacy
   // rows + freshly-created conversations have no real last message yet, which
   // the UI renders as no cue. Written alongside lastMessagePreview at every
   // bump site (ingest=in, outbound send/broadcast=out).
   lastMessageDirection MessageDirection?
-  createdAt          DateTime           @default(now())
+  createdAt            DateTime           @default(now())
 
   // ---- Workflow analytics ----
   // Populated incrementally by lib/conversations/analytics.ts on assign /
@@ -1493,72 +1683,42 @@ model Conversation {
   // costs nothing on ingest. Maintained in the same transaction as the flag
   // status change (lib/message-flags/mutations.ts) and reconciled by the
   // message-flag-count-drift sweeper.
-  openFlagCount         Int       @default(0)
+  openFlagCount Int @default(0)
 
-  team         Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  contact      Contact                   @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  assignedUser User?                     @relation("AssignedConversations", fields: [assignedUserId], references: [id], onDelete: SetNull)
-  webchatWidget WebchatWidget?           @relation(fields: [webchatWidgetId], references: [id], onDelete: SetNull)
-  messages     Message[]
-  notes        InternalNote[]
+  // The ticket new messages on this thread attach to. Maintained by
+  // lib/tickets/mutations.ts in the same transaction as the status change that
+  // moved it, so ingest resolves "which ticket" with a single column read
+  // instead of an ordered scan of the thread's ticket history on every inbound
+  // — the message hot path must not pay for ticketing.
+  // SetNull, not Cascade: a deleted ticket must never take the thread with it.
+  activeTicketId  String?
+  // Non-terminal (new/open/pending/on_hold) tickets on this thread. Denormalized
+  // for exactly the same reason as openFlagCount: the inbox list's ticket badge
+  // and filter must be a plain column predicate, never an EXISTS over Ticket.
+  // Bumped only on ticket writes (rare), never per-message.
+  openTicketCount Int     @default(0)
+
+  workspace         Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact           Contact             @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignedUser      User?               @relation("AssignedConversations", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  webchatWidget     WebchatWidget?      @relation(fields: [webchatWidgetId], references: [id], onDelete: SetNull)
+  // SetNull: removing an account must never delete conversation history.
+  channelConnection ChannelConnection?  @relation(fields: [channelConnectionId], references: [id], onDelete: SetNull)
+  messages          Message[]
+  notes             InternalNote[]
   // Audit timeline rows for this conversation. Cascade with the parent —
-  // a deleted conversation drops its history. Team-level audit (if we want
-  // a global "show me everything" feed) lives on the ConversationEvent.teamId
+  // a deleted conversation drops its history. Workspace-level audit (if we want
+  // a global "show me everything" feed) lives on the ConversationEvent.workspaceId
   // index, independent of cascade.
-  events       ConversationEvent[]
+  events            ConversationEvent[]
   // Voice calls placed/received on this thread. Cascade with the parent —
   // deleting a conversation drops its call history alongside its messages.
-  calls        Call[]
+  calls             Call[]
   // Triage flags raised on this thread's messages. Cascade with the parent.
-  messageFlags MessageFlag[]
-
-  @@index([teamId, status, lastMessageAt(sort: Desc)])
-  @@index([teamId, assignedUserId])
-  // "Mine" inbox — the view an agent lives in all day. The filter is
-  // (teamId, assignedUserId) with the list's standard
-  // ORDER BY lastMessageAt DESC, id DESC. The index above stops at
-  // assignedUserId, so Postgres had to read EVERY conversation assigned to that
-  // agent and sort it, and because the keyset predicate is then only a residual
-  // filter, every page repeated the whole sort. Carrying the sort key turns it
-  // into a range scan that stops after `take`. (`status != closed` stays a
-  // residual — an inequality can't be an index prefix — but it is cheap once the
-  // scan is already narrowed to one agent's rows.)
-  @@index([teamId, assignedUserId, lastMessageAt(sort: Desc), id(sort: Desc)])
-  // FK index for the `assignedUser` relation's onDelete: SetNull. The
-  // (teamId, assignedUserId) composite above leads with teamId, so a bare
-  // `WHERE assignedUserId = $1` FK-trigger scan on user-delete can't use it.
-  // Without this, hard-deleting a teammate seq-scans the hot Conversation
-  // table to null their assignments. Migration 20260611130100.
-  @@index([assignedUserId])
-  // DB-5: contactId-leading index. The `@@unique([teamId, contactId])` below
-  // leads with teamId, so a contactId-only scan (a GDPR hard-purge reconciling
-  // every conversation for one contact across the team boundary, or a future
-  // cross-tenant contact tool) can't use it. Cheap btree for that path.
-  @@index([contactId])
-  // Keyset-paginated inbox listing: WHERE teamId = $1 ORDER BY lastMessageAt
-  // DESC, id DESC. The status-leading index above stays for filtered views
-  // (open / pending / closed) but doesn't help the unfiltered list — the
-  // planner needs status to participate in WHERE for that one to be useful.
-  @@index([teamId, lastMessageAt(sort: Desc), id(sort: Desc)])
-  // The "Flagged" inbox preset (WHERE teamId = $1 AND openFlagCount > 0, same
-  // keyset ORDER BY) is served by a PARTIAL index Prisma can't express:
-  //   Conversation_teamId_openFlag_idx ON (teamId, lastMessageAt DESC, id DESC)
-  //   WHERE "openFlagCount" > 0
-  // created in raw SQL by migration 20260722120000_message_flags. A plain
-  // composite would be useless here — `openFlagCount > 0` is a range predicate,
-  // so it can't sit between teamId and the sort key without killing the ordered
-  // scan. Partial keeps the index to just the flagged rows (a tiny fraction),
-  // which is both smaller and faster. Same pattern as
-  // Message_conversationId_timestamp_inbound_idx.
-  // ONE conversation per contact — the core invariant, DB-enforced (a Contact
-  // is already channel-siloed, so this is "one conversation per channel per
-  // contact"). Closed threads REOPEN (→ pending) rather than fragment. Code
-  // upholds it too — ingest via a Serializable retry, the find-or-create sites
-  // (forward / broadcast / external-v1 / workflow target) via catch-P2002→
-  // refetch — but this constraint is the backstop that makes a fragmented
-  // inbox structurally impossible. Doubles as the index the broadcast runner's
-  // per-recipient `findFirst({ teamId, contactId })` + contact-detail pages use.
-  @@unique([teamId, contactId])
+  messageFlags      MessageFlag[]
+  // Every piece of work raised on this thread, oldest to newest.
+  tickets           Ticket[]            @relation("ConversationTickets")
+  activeTicket      Ticket?             @relation("ConversationActiveTicket", fields: [activeTicketId], references: [id], onDelete: SetNull)
   // NO trgm GIN on lastMessagePreview. The inbox-list search ORs a
   // `lastMessagePreview contains` arm with two Contact RELATION filters
   // (contact.name / contact.phoneNumber) — Prisma renders relations as a
@@ -1569,31 +1729,79 @@ model Conversation {
   // system (the summary bump, once per message). If list search ever goes hot,
   // split it into a contact-id prefilter + a preview-only query (unioned) and
   // index THOSE — don't re-add a cross-table-OR'd GIN.
+
+  // The "Flagged" inbox preset (WHERE workspaceId = $1 AND openFlagCount > 0, same
+  // keyset ORDER BY) is served by a PARTIAL index Prisma can't express:
+  //   Conversation_teamId_openFlag_idx ON (workspaceId, lastMessageAt DESC, id DESC)
+  //   WHERE "openFlagCount" > 0
+  // created in raw SQL by migration 20260722120000_message_flags. A plain
+  // composite would be useless here — `openFlagCount > 0` is a range predicate,
+  // so it can't sit between workspaceId and the sort key without killing the ordered
+  // scan. Partial keeps the index to just the flagged rows (a tiny fraction),
+  // which is both smaller and faster. Same pattern as
+  // Message_conversationId_timestamp_inbound_idx.
+  // ONE conversation per contact — the core invariant, DB-enforced (a Contact
+  // is already channel-siloed, so this is "one conversation per channel per
+  // contact"). Closed threads REOPEN (→ pending) rather than fragment. Code
+  // upholds it too — ingest via a Serializable retry, the find-or-create sites
+  // (forward / broadcast / external-v1 / workflow target) via catch-P2002→
+  // refetch — but this constraint is the backstop that makes a fragmented
+  // inbox structurally impossible. Doubles as the index the broadcast runner's
+  // per-recipient `findFirst({ workspaceId, contactId })` + contact-detail pages use.
+  @@unique([workspaceId, contactId])
+  @@index([workspaceId, status, lastMessageAt(sort: Desc)])
+  @@index([workspaceId, assignedUserId])
+  // "Mine" inbox — the view an agent lives in all day. The filter is
+  // (workspaceId, assignedUserId) with the list's standard
+  // ORDER BY lastMessageAt DESC, id DESC. The index above stops at
+  // assignedUserId, so Postgres had to read EVERY conversation assigned to that
+  // agent and sort it, and because the keyset predicate is then only a residual
+  // filter, every page repeated the whole sort. Carrying the sort key turns it
+  // into a range scan that stops after `take`. (`status != closed` stays a
+  // residual — an inequality can't be an index prefix — but it is cheap once the
+  // scan is already narrowed to one agent's rows.)
+  @@index([workspaceId, assignedUserId, lastMessageAt(sort: Desc), id(sort: Desc)])
+  // FK index for the `assignedUser` relation's onDelete: SetNull. The
+  // (workspaceId, assignedUserId) composite above leads with workspaceId, so a bare
+  // `WHERE assignedUserId = $1` FK-trigger scan on user-delete can't use it.
+  // Without this, hard-deleting a teammate seq-scans the hot Conversation
+  // table to null their assignments. Migration 20260611130100.
+  @@index([assignedUserId])
+  // DB-5: contactId-leading index. The `@@unique([workspaceId, contactId])` below
+  // leads with workspaceId, so a contactId-only scan (a GDPR hard-purge reconciling
+  // every conversation for one contact across the team boundary, or a future
+  // cross-tenant contact tool) can't use it. Cheap btree for that path.
+  @@index([contactId])
+  // Keyset-paginated inbox listing: WHERE workspaceId = $1 ORDER BY lastMessageAt
+  // DESC, id DESC. The status-leading index above stays for filtered views
+  // (open / pending / closed) but doesn't help the unfiltered list — the
+  // planner needs status to participate in WHERE for that one to be useful.
+  @@index([workspaceId, lastMessageAt(sort: Desc), id(sort: Desc)])
 }
 
 model Message {
-  id             String           @id @default(cuid())
-  teamId         String
-  conversationId String
+  id                    String           @id @default(cuid())
+  workspaceId           String
+  conversationId        String
   // Provider-assigned id (Meta wamid for WhatsApp). Dedupe via the compound
   // unique below — bare `@unique` would collide across channels because
   // Meta's WhatsApp wamid and Instagram message-id share the same opaque-
   // string shape and could theoretically clash (Telegram numeric ids
-  // definitely will against something). Compound on (teamId, channel,
+  // definitely will against something). Compound on (workspaceId, channel,
   // externalId) keeps each channel's id space isolated.
-  externalId     String
+  externalId            String
   // null on inbound — only outbound has an authoring agent.
-  senderUserId   String?
+  senderUserId          String?
   // For text-only messages this is the body. For media messages this holds
   // the caption (or empty) so search keeps matching across both kinds.
-  body           String
-  direction      MessageDirection
+  body                  String
+  direction             MessageDirection
   // Provenance of an outbound row — see `enum MessageOrigin`. Defaults to `api`
   // so every existing row (all sent through the platform) and every inbound row
   // is correct without a backfill; only Coexistence phone-app echoes set
   // `business_app`.
-  origin         MessageOrigin    @default(api)
-  // Half of the dedup key `@@unique([teamId, channel, externalId])` below —
+  origin                MessageOrigin    @default(api)
+  // Half of the dedup key `@@unique([workspaceId, channel, externalId])` below —
   // that's its job, NOT to classify the channel for routing. It is enforced
   // at INSERT, before any conversation link exists (dedupe runs first in
   // ingest), and a DB unique index can't span a JOIN, so channel must live
@@ -1602,8 +1810,8 @@ model Message {
   // redundancy. Don't "simplify" by dropping either: lose this and dedup
   // breaks once a 2nd channel exists; lose Conversation.channel and empty
   // threads (no messages yet) have no channel.
-  channel        Channel
-  status         MessageStatus    @default(sent)
+  channel               Channel
+  status                MessageStatus    @default(sent)
   // Delivery-failure diagnostics from Meta's async `status: "failed"` webhook.
   // Meta surfaces post-acceptance failures (131047 outside-window on an
   // API-accepted send, 131049 per-user marketing frequency caps, 131026
@@ -1613,9 +1821,9 @@ model Message {
   // report per-recipient reasons. All null on every non-failed status.
   // statusErrorTitle is Meta's short human label; statusErrorDetail is
   // error_data.details (the actionable text).
-  statusErrorCode   Int?
-  statusErrorTitle  String?
-  statusErrorDetail String?
+  statusErrorCode       Int?
+  statusErrorTitle      String?
+  statusErrorDetail     String?
   // The broadcast this outbound message belongs to (null for every ordinary
   // send). Two jobs, both load-bearing:
   //   1. DURABILITY — the same link used to live only in `rawPayload`, which
@@ -1628,7 +1836,7 @@ model Message {
   // Combined with conversation.contactId this yields (broadcastId, contactId)
   // — already the @@unique on BroadcastRecipient — so the propagation needs no
   // new index and no lookup by wamid.
-  broadcastId       String?
+  broadcastId           String?
   // The structured button / list-row tap behind an inbound message. `body`
   // holds the user-facing TITLE, which an operator can rename in a template at
   // any time; this holds the STABLE machine id the template defined. Reporting
@@ -1641,29 +1849,29 @@ model Message {
   // contact react to any message). A single value because a conversation has
   // exactly one customer; a new reaction REPLACES it and an empty reaction
   // payload CLEARS it (null). Set by the ingest `reaction` path; null = none.
-  reaction       String?
+  reaction              String?
   // OUR team's outbound reaction to THIS message — the business-side twin of
   // `reaction`. A SEPARATE column so a customer reaction and an agent reaction
   // on the SAME message coexist instead of clobbering one field (the bug when
   // both sides reacted). Meta allows one business reaction per message: a new
   // one REPLACES it, an empty emoji CLEARS it (null). Set by the send-reaction
   // path; null = we haven't reacted.
-  agentReaction  String?
+  agentReaction         String?
   // The CUSTOMER's 👍/👎 "message feedback" on THIS (our outbound) message —
   // Messenger's `response_feedback`, which is Meta's business-message feedback,
   // NOT an emoji reaction (customers can't emoji-react to a business message).
   // Rendered as a distinct "helpful / not helpful" chip, never as a reaction.
   // "positive" | "negative"; null = no feedback given.
-  feedback       String?
+  feedback              String?
   // Structured non-media content (shared location pin / contact card) that gets
   // a dedicated bubble. Shape = MessageStructured (discriminated by `kind`:
   // location | contacts); `body` still holds the text placeholder for search /
   // list preview. Null for normal text/media messages.
-  structured     Json?
+  structured            Json?
   // Ad / deep-link attribution (Click-to-WhatsApp / Click-to-Messenger) on the
   // first inbound of an ad-sourced conversation. Shape = MessageAttribution
   // (source + headline/body/sourceUrl/clickId/ref). Null otherwise.
-  attribution    Json?
+  attribution           Json?
   // Message unsend / edit (WhatsApp revoke + Messenger/Instagram unsend, and
   // WhatsApp edits). `deletedAt` tombstones a message the CUSTOMER removed — the
   // row is KEPT (audit + dedup) but the bubble renders "message was deleted" and
@@ -1671,14 +1879,14 @@ model Message {
   // edited (body already updated in place). Both null on a normal message. These
   // are the inbound customer action — distinct from `Contact.deletedAt` (a
   // contact tombstone) and from an agent deleting their own send (not built).
-  deletedAt      DateTime?
-  editedAt       DateTime?
+  deletedAt             DateTime?
+  editedAt              DateTime?
   // Original webhook payload kept verbatim for debugging (CLAUDE.md rule #4).
   // Nullable so the opt-in rawPayload-retention sweeper (DB-1) can NULL ancient
   // payloads to bound table/dump bloat at scale; every WRITE still sets it.
-  rawPayload     Json?
-  timestamp      DateTime         @default(now())
-  createdAt      DateTime         @default(now())
+  rawPayload            Json?
+  timestamp             DateTime         @default(now())
+  createdAt             DateTime         @default(now())
 
   // Media fields. All nullable — text-only rows leave them null. `mediaKind`
   // is the discriminator; when set, the binary lives in the active blob
@@ -1719,12 +1927,19 @@ model Message {
   // snapshot the UI renders comes from JOINing this row at read time, not
   // from a denormalized copy — we don't want stale quotes when bodies edit.
   replyToMessageId String?
-  replyTo          Message?  @relation("MessageReply", fields: [replyToMessageId], references: [id], onDelete: SetNull)
-  replies          Message[] @relation("MessageReply")
+  replyTo          Message?      @relation("MessageReply", fields: [replyToMessageId], references: [id], onDelete: SetNull)
+  replies          Message[]     @relation("MessageReply")
   // Triage flags raised on this message. Cascade with the parent.
   flags            MessageFlag[]
+  // The ticket this message belongs to. An EXPLICIT column, not derived from
+  // timestamps against ticket open/close ranges: a ticket's boundaries move
+  // (reopen, merge) and a derived answer would silently rewrite which work a
+  // message belonged to. Null on messages that predate ticketing and on threads
+  // where auto-open is off. SetNull so deleting a ticket never deletes history.
+  ticketId         String?
+  ticket           Ticket?       @relation(fields: [ticketId], references: [id], onDelete: SetNull)
 
-  team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace    Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User?        @relation("AuthoredMessages", fields: [senderUserId], references: [id], onDelete: SetNull)
   // NOTE: a partial index on inbound-only messages also exists in the DB
@@ -1734,16 +1949,19 @@ model Message {
   // (24h-window UI + lastInboundAt drift sweeper) without scanning outbound
   // rows.
 
-  @@unique([teamId, channel, externalId])
-  // No bare @@index([teamId]) — it's a leftmost prefix of the dedupe unique
-  // ([teamId, channel, externalId]) AND Message_teamId_timestamp_id_idx below,
-  // so a teamId-only lookup already has coverage. No bare
+  @@unique([workspaceId, channel, externalId])
+  // No bare @@index([workspaceId]) — it's a leftmost prefix of the dedupe unique
+  // ([workspaceId, channel, externalId]) AND Message_teamId_timestamp_id_idx below,
+  // so a workspaceId-only lookup already has coverage. No bare
   // @@index([conversationId, timestamp]) — fully covered by the
   // (conversationId, timestamp DESC, id DESC) keyset index below (Postgres
   // walks a btree in either direction, so DESC,DESC serves equality-on-
   // conversationId + an ASC/range timestamp scan too). Both dropped as pure
   // write overhead on the hottest-write table — migration 20260611130000.
   @@index([replyToMessageId])
+  // FK index for the ticket relation's SetNull, and for the ticket detail
+  // page's "the messages that belong to THIS piece of work" read.
+  @@index([ticketId, timestamp])
   // FK index for the `sender` relation's `onDelete: SetNull`. Without it,
   // hard-deleting a teammate seq-scans the (largest) Message table to null
   // their authored rows. Cheap btree; the hottest write path gains one small
@@ -1769,14 +1987,14 @@ model Message {
   // needed — its data is already inside `body`. See global-search.ts
   // searchAllMessages.
   @@index([body(ops: raw("gin_trgm_ops"))], type: Gin, map: "Message_body_trgm_idx")
-  // Team-wide search SORT support. The trgm index above serves the ILIKE
+  // Workspace-wide search SORT support. The trgm index above serves the ILIKE
   // filter, but the global "Messages" search then ORDER BY (timestamp DESC,
   // id DESC) had no composite to satisfy it — a broad search term returned a
   // large GIN bitmap that Postgres had to sort in memory. This btree lets the
   // planner walk newest-first and stop at LIMIT for broad terms. Selective
   // terms still ride the trgm path. Mirrors the conversation-scoped keyset
-  // index above, but keyed on teamId for the cross-conversation search.
-  @@index([teamId, timestamp(sort: Desc), id(sort: Desc)], map: "Message_teamId_timestamp_id_idx")
+  // index above, but keyed on workspaceId for the cross-conversation search.
+  @@index([workspaceId, timestamp(sort: Desc), id(sort: Desc)], map: "Message_teamId_timestamp_id_idx")
 }
 
 // One-row-per-attempt log for outbound text sends, written BEFORE the Meta
@@ -1787,7 +2005,7 @@ model Message {
 // without completing. Meta has no native idempotency key on POST /messages,
 // so a process death between Meta receiving the request and the worker
 // recording the response → BullMQ retry → Meta sends the message AGAIN.
-// The DB-level unique on `(teamId, channel, externalId)` dedupes the
+// The DB-level unique on `(workspaceId, channel, externalId)` dedupes the
 // resulting Message row, but the customer was already charged twice and
 // saw two messages on WhatsApp.
 //
@@ -1816,7 +2034,7 @@ model OutboundSendAttempt {
   // SAME jobId is used across all retry attempts of the same client-side
   // send action — that's the property we exploit to detect a retry.
   jobId            String    @unique
-  teamId           String
+  workspaceId      String
   conversationId   String
   attemptStartedAt DateTime  @default(now())
   // Set when the Meta fetch returned successfully AND we recorded the
@@ -1833,7 +2051,7 @@ model OutboundSendAttempt {
   failedAt         DateTime?
   failureReason    String?
 
-  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   // Sweeper picks rows by (completedAt || failedAt) older than the
   // retention window — index on attemptStartedAt for the scan.
@@ -1846,7 +2064,7 @@ model OutboundSendAttempt {
 // acceptedAt — we don't delete so admins can audit who invited whom.
 model Invite {
   id          String    @id @default(cuid())
-  teamId      String
+  workspaceId String
   email       String
   role        Role      @default(agent)
   tokenHash   String    @unique
@@ -1858,10 +2076,12 @@ model Invite {
   expiresAt   DateTime
   acceptedAt  DateTime?
 
-  team      Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  createdBy User? @relation("InvitedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  workspace      Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy      User?         @relation("InvitedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  organizationId String?
 
-  @@index([teamId, email])
+  @@index([workspaceId, email])
 }
 
 // Cached snapshot of a WhatsApp message template registered on the team's
@@ -1871,14 +2091,19 @@ model Invite {
 // the customer will see — header (text/media), body with {{n}} placeholders,
 // footer, and buttons.
 //
-// `externalId` is Meta's template id; we keep `(teamId, name, language)` as
+// `externalId` is Meta's template id; we keep `(workspaceId, name, language)` as
 // the natural key since the same template can have multiple language variants
 // under a single name. Updating a template in WhatsApp Manager bumps Meta's
 // id — the sync upserts by the natural key so the cached row tracks the
 // latest version.
 model MessageTemplate {
   id               String           @id @default(cuid())
-  teamId           String
+  workspaceId      String
+  // The WABA whose catalog this template belongs to. Part of the uniqueness key,
+  // so it is NOT NULL: Postgres treats NULLs as distinct, which would have let
+  // two templates with the same name+language coexist under an unknown WABA.
+  // Empty string = legacy/unknown WABA (rows synced before multi-account).
+  wabaId           String           @default("")
   externalId       String?
   name             String
   language         String
@@ -1907,12 +2132,21 @@ model MessageTemplate {
   // runner treats a missing binding the same as `manual`, so old broadcasts
   // keep working.
   variableBindings Json             @default("{}")
+  // Meta's `parameter_format`: "positional" (`{{1}}`) or "named" (`{{order_id}}`).
+  // Stored rather than inferred from the body text — a regex misreads a
+  // positional template that contains `{{order_id}}` as literal copy, and the
+  // wrong wire shape fails every recipient with Meta error 132000. Defaults to
+  // positional so every row synced before this column keeps its exact behaviour.
+  parameterFormat  String           @default("positional")
   syncedAt         DateTime         @default(now())
 
-  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
-  @@unique([teamId, name, language])
-  @@index([teamId, status])
+  // Templates live on a WABA, and numbers under one WABA SHARE a catalog, so
+  // two WABAs in the same workspace may each hold a template of the same
+  // (name, language). Keying on the workspace alone collided them.
+  @@unique([workspaceId, wabaId, name, language])
+  @@index([workspaceId, status])
 }
 
 // Free-form label applied to contacts for segmentation ("VIP", "Ramadan
@@ -1922,13 +2156,13 @@ model MessageTemplate {
 // `color` is a named slot ("slate", "rose", "amber", …) NOT a hex, so the UI
 // can map to a safelist of Tailwind classes without dynamic class strings.
 model Tag {
-  id        String   @id @default(cuid())
-  teamId    String
-  name      String
-  color     String   @default("slate")
-  createdAt DateTime @default(now())
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  color       String   @default("slate")
+  createdAt   DateTime @default(now())
 
-  team           Team            @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace      Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   // Tags live on Contact. Implicit M2M; join table is `_ContactToTag` (re-
   // created by the revert migration). One contact = one conversation in
   // this app, so per-thread tagging would be dead complexity.
@@ -1937,10 +2171,12 @@ model Tag {
   // tags = "ramadan, women" includes the union of contacts carrying any
   // of them.
   audienceGroups AudienceGroup[] @relation("AudienceGroupTags")
+  // Same taxonomy applied to tickets. Implicit M2M (`_TicketTags`).
+  tickets        Ticket[]        @relation("TicketTags")
 
-  // (teamId, name) unique already serves teamId-prefix lookups, so a standalone
-  // @@index([teamId]) was redundant write overhead. Dropped 2026-06-01.
-  @@unique([teamId, name])
+  // (workspaceId, name) unique already serves workspaceId-prefix lookups, so a standalone
+  // @@index([workspaceId]) was redundant write overhead. Dropped 2026-06-01.
+  @@unique([workspaceId, name])
 }
 
 // Saved audience for broadcasts. Hybrid composition:
@@ -1957,7 +2193,7 @@ model Tag {
 // contacts that match the criteria afterwards don't join the in-flight job.
 model AudienceGroup {
   id          String   @id @default(cuid())
-  teamId      String
+  workspaceId String
   name        String
   description String?
   // Nullable + SetNull — audience groups are team-shared and shouldn't be
@@ -1966,14 +2202,14 @@ model AudienceGroup {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy User?     @relation("CreatedAudienceGroups", fields: [createdById], references: [id], onDelete: SetNull)
   tags      Tag[]     @relation("AudienceGroupTags")
   contacts  Contact[] @relation("AudienceGroupContacts")
 
-  // (teamId, name) unique already covers teamId-prefix lookups — standalone
-  // @@index([teamId]) was redundant. Dropped 2026-06-01.
-  @@unique([teamId, name])
+  // (workspaceId, name) unique already covers workspaceId-prefix lookups — standalone
+  // @@index([workspaceId]) was redundant. Dropped 2026-06-01.
+  @@unique([workspaceId, name])
 }
 
 // A batch template send to many recipients in one go. Inspired by Front /
@@ -1985,52 +2221,55 @@ model AudienceGroup {
 // body changes mid-broadcast, this row keeps the version that was actually
 // sent. We do keep `templateId` for ergonomic linkage in the UI.
 model Broadcast {
-  id                String          @id @default(cuid())
-  teamId            String
+  id                    String              @id @default(cuid())
+  workspaceId           String
+  // The channel ACCOUNT this campaign sends from. Null = fall back to the
+  // channel default (pre-multi-account rows).
+  channelConnectionId   String?
   // Nullable + SetNull — broadcasts are audit history; we never want them
   // destroyed when the agent who launched them is removed.
-  createdById       String?
-  status            BroadcastStatus @default(queued)
+  createdById           String?
+  status                BroadcastStatus     @default(queued)
   // Optional operator-given label for the list/audit ("Ramadan promo").
   // Falls back to the template name in the UI when null.
-  name              String?
+  name                  String?
   // Future send time. Null = send immediately (legacy behavior). When set +
   // in the future, the broadcast is created `scheduled` and a delayed BullMQ
   // job (jobId = broadcast id) fires it at this instant.
-  scheduledAt       DateTime?
+  scheduledAt           DateTime?
   // What this broadcast sends + which channel it targets. `template` broadcasts
   // are WhatsApp-only (the historical default); `freeform` broadcasts send plain
   // text to in-window Messenger/Instagram contacts.
-  kind              BroadcastKind   @default(template)
+  kind                  BroadcastKind       @default(template)
   // contact-mode (default) = single-channel, today's behavior. customer-mode =
   // omnichannel, one send per PERSON on their best channel. See BroadcastTargetMode.
-  targetMode        BroadcastTargetMode @default(contact)
-  channel           Channel         @default(whatsapp)
+  targetMode            BroadcastTargetMode @default(contact)
+  channel               Channel             @default(whatsapp)
   // Snapshot of the template at send time — NULL for `freeform` broadcasts.
-  templateId        String?
-  templateName      String?
-  templateLanguage  String?
+  templateId            String?
+  templateName          String?
+  templateLanguage      String?
   // Free-form message body — set for `freeform` broadcasts, null for templates.
-  bodyText          String?
+  bodyText              String?
   // The values the agent filled into {{1}}, {{2}}, … (and optional header).
   // Schema: { body: string[], header?: string }. Empty for freeform.
-  variables         Json
+  variables             Json
   // Audience picker mode the agent chose at creation.
   //   "all"       — every team contact at the moment of creation.
   //   "selected"  — the recipient list was hand-picked.
   //   "by_tag"    — `audienceTagIds` were resolved to the recipient list at
   //                 the moment of creation (snapshot). A contact re-tagged
   //                 later does NOT get added to an in-flight broadcast.
-  audienceMode      String
+  audienceMode          String
   // Tag ids the agent originally selected (mode = by_tag). Kept for the
   // detail page so the audit trail can show "Sent to VIP, Ramadan buyers"
   // even after the tag is renamed.
-  audienceTagIds    String[]        @default([])
+  audienceTagIds        String[]            @default([])
   // Group used when mode = "group". Held as a soft reference (just the id +
   // a denormalized name) — no FK because we never want to cascade-delete a
   // broadcast's audit trail when the group gets removed.
-  audienceGroupId   String?
-  audienceGroupName String?
+  audienceGroupId       String?
+  audienceGroupName     String?
   // Counters live on the parent for cheap progress reads — derived from
   // BroadcastRecipient.status, kept in sync by the runner.
   // Recipients removed from the audience at create time because they had
@@ -2038,17 +2277,17 @@ model Broadcast {
   // counters it has no drift surface and needs no sweeper. Surfaced in the
   // report ("targeted 10,000 · 47 suppressed · 9,953 queued") — without it
   // totalCount silently shrinks and generates "why did only N get this?" tickets.
-  suppressedCount   Int             @default(0)
+  suppressedCount       Int                 @default(0)
   // Template category snapshot (MARKETING | UTILITY | AUTHENTICATION) taken at
   // send time. Gates opt-out suppression (only marketing suppresses) and labels
   // the cost breakdown, so it pays for itself twice.
-  templateCategory  String?
-  totalCount        Int             @default(0)
-  sentCount         Int             @default(0)
-  failedCount       Int             @default(0)
+  templateCategory      String?
+  totalCount            Int                 @default(0)
+  sentCount             Int                 @default(0)
+  failedCount           Int                 @default(0)
   // Free-form last-error captured if the whole runner crashed (not per-
   // recipient errors, those live on the BroadcastRecipient row).
-  lastError         String?
+  lastError             String?
   // When this broadcast was last parked `paused` (dead credentials at fire time,
   // or the mid-run permanent-error breaker). Null unless currently/previously
   // paused. Exists so the drift sweeper can auto-resume a paused campaign after
@@ -2056,7 +2295,7 @@ model Broadcast {
   // paused at 2am sat dead until the next deploy. The cooldown is what makes
   // auto-resume safe: a still-broken cause re-parks the row, so retrying is
   // bounded to once per cooldown instead of a hot loop.
-  pausedAt          DateTime?
+  pausedAt              DateTime?
   // WHY this broadcast was parked `paused`, so auto-resume can tell a transient
   // cause from a hopeless one. Free-form string (not an enum) to match how
   // `lastError` is already carried and to avoid a migration per new cause:
@@ -2068,7 +2307,7 @@ model Broadcast {
   //                     the fix is entirely operator-side in Meta's console, and
   //                     each retry burns PERMANENT_ERROR_PAUSE_THRESHOLD more
   //                     recipients into `failed` for nothing.
-  pausedReason      String?
+  pausedReason          String?
   // Staging area for a LARGE broadcast's recipients while it is `materializing`.
   // Audience is resolved to `{ contactId, customerId? }[]` in the create request
   // (so the snapshot is locked at creation), but the actual BroadcastRecipient
@@ -2116,21 +2355,27 @@ model Broadcast {
   // false: a campaign never steals a thread a human is already handling.
   assignmentOverwrite Boolean                 @default(false)
 
-  createdAt         DateTime        @default(now())
-  startedAt         DateTime?
-  completedAt       DateTime?
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
 
-  team       Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  createdBy  User?                @relation("CreatedBroadcasts", fields: [createdById], references: [id], onDelete: SetNull)
-  recipients BroadcastRecipient[]
+  workspace         Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channelConnection ChannelConnection?   @relation(fields: [channelConnectionId], references: [id], onDelete: SetNull)
+  createdBy         User?                @relation("CreatedBroadcasts", fields: [createdById], references: [id], onDelete: SetNull)
+  recipients        BroadcastRecipient[]
 
-  @@index([teamId, createdAt(sort: Desc)])
-  @@index([teamId, status])
+  @@index([workspaceId, createdAt(sort: Desc)])
+  @@index([workspaceId, status])
   // Calendar view + scheduler boot-reconcile scan upcoming scheduled sends.
-  @@index([teamId, scheduledAt])
+  @@index([workspaceId, scheduledAt])
   // Backs the paused-broadcast drift sweeper:
   // WHERE status = 'paused' AND pausedAt <= cutoff.
   @@index([status, pausedAt])
+  // FK index for the channelConnection relation's onDelete: SetNull. Without it,
+  // disconnecting a channel account seq-scans every broadcast the workspace has
+  // ever run. Created by migration 20260722180000; declared here so it stops
+  // reading as schema drift.
+  @@index([channelConnectionId])
 }
 
 model BroadcastRecipient {
@@ -2168,30 +2413,32 @@ model BroadcastRecipient {
   // handset already acked, a later failure webhook is a Meta duplicate, not a
   // regression — Meta batches `delivered` + `failed` for one wamid more often
   // than you'd expect on marketing sends).
-  deliveryState  BroadcastDeliveryState @default(pending)
-  deliveredAt    DateTime?
-  readAt         DateTime?
+  deliveryState BroadcastDeliveryState @default(pending)
+  deliveredAt   DateTime?
+  readAt        DateTime?
   // Normalized failure reason, sharing ONE vocabulary with the send path (the
   // `MetaErrorCode` union in lib/providers/meta-send-error.ts) so the failure
   // report is a single GROUP BY instead of two disjoint taxonomies. Stored as
   // String, not a Prisma enum, so a new Meta code is a code change rather than
   // a migration — and an unmapped code degrades to `provider_rejected` instead
   // of failing the webhook write.
-  errorCode      String?
+  errorCode     String?
   // Meta's raw numeric code, kept for forensics + for classifying codes we
   // haven't mapped yet.
-  metaErrorCode  Int?
+  metaErrorCode Int?
   // Required by the /v1 `updatedSince` incremental sync: without it a client
   // pulling late-arriving delivery/read updates must re-fetch all 100k rows.
-  updatedAt      DateTime                 @updatedAt
+  updatedAt     DateTime               @updatedAt
 
   // ── Engagement (attributed post-commit from inbound ingest) ───────────────
   // First reply only — the CAS is `where repliedAt: null`, so this counts
   // unique RECIPIENTS who replied, not messages. That's the right denominator
   // for a reply RATE, and the UI labels it accordingly.
-  repliedAt         DateTime?
-  /** Soft pointer (no FK) to the inbound message credited, for audit. */
-  repliedMessageId  String?
+  repliedAt          DateTime?
+  /**
+   * Soft pointer (no FK) to the inbound message credited, for audit.
+   */
+  repliedMessageId   String?
   /**
    * How the reply was credited: "direct" = the customer quoted our campaign
    * message (exact), "window" = first inbound inside the attribution window
@@ -2203,10 +2450,12 @@ model BroadcastRecipient {
   // Template quick-reply button tap. Keyed on the STABLE option id, never the
   // button's display title (titles are editable, which would silently reset a
   // click report's history).
-  clickedAt         DateTime?
-  clickedOptionId   String?
-  /** Set when this recipient opted out within the campaign's attribution window. */
-  optedOutAt        DateTime?
+  clickedAt          DateTime?
+  clickedOptionId    String?
+  /**
+   * Set when this recipient opted out within the campaign's attribution window.
+   */
+  optedOutAt         DateTime?
 
   // ── Cost (from Meta's status webhook `pricing` object) ────────────────────
   // Stored HERE rather than on Message because campaign cost is always
@@ -2218,9 +2467,9 @@ model BroadcastRecipient {
   // a computed amount would freeze a wrong number into the audit trail. The
   // report shows billable conversation counts by category and lets the operator
   // apply their own rate card.
-  pricingCategory   String?
-  pricingBillable   Boolean?
-  pricingModel      String?
+  pricingCategory String?
+  pricingBillable Boolean?
+  pricingModel    String?
 
   broadcast Broadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
   contact   Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
@@ -2258,8 +2507,8 @@ model InternalNote {
   // sibling audit table ConversationEvent). A note's team always equals its
   // conversation's team (conversations never change team), so this is a stable
   // denorm — kept for direct team-scoped queries / future RLS, not for delete
-  // cascades (those already flow Team -> Conversation -> InternalNote).
-  teamId         String
+  // cascades (those already flow Workspace -> Conversation -> InternalNote).
+  workspaceId    String
   conversationId String
   // Nullable + SetNull — internal notes are critical audit trail. When the
   // author is removed, the note STAYS and the UI renders "Removed user".
@@ -2268,13 +2517,13 @@ model InternalNote {
   body           String
   timestamp      DateTime @default(now())
 
-  team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace    Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   author       User?        @relation(fields: [authorUserId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, timestamp])
-  // No bare @@index([teamId]) — covered by InternalNote_teamId_timestamp_id_idx
-  // below (teamId-leading), which serves teamId-prefix lookups too. Dropped as
+  // No bare @@index([workspaceId]) — covered by InternalNote_teamId_timestamp_id_idx
+  // below (workspaceId-leading), which serves workspaceId-prefix lookups too. Dropped as
   // write overhead — migration 20260611130000.
   // FK index for the `author` relation's onDelete: SetNull — without it,
   // hard-deleting a teammate seq-scans InternalNote to null their authored
@@ -2285,11 +2534,11 @@ model InternalNote {
   // Message_body_trgm_idx: no conversation predicate to narrow the team-wide
   // scan, so the index carries it.
   @@index([body(ops: raw("gin_trgm_ops"))], type: Gin, map: "InternalNote_body_trgm_idx")
-  // Team-wide "Comments" search SORT support — same rationale as
+  // Workspace-wide "Comments" search SORT support — same rationale as
   // Message_teamId_timestamp_id_idx: the trgm index filters, this btree serves
   // the ORDER BY (timestamp DESC, id DESC) so a broad term doesn't sort a large
   // GIN bitmap in memory.
-  @@index([teamId, timestamp(sort: Desc), id(sort: Desc)], map: "InternalNote_teamId_timestamp_id_idx")
+  @@index([workspaceId, timestamp(sort: Desc), id(sort: Desc)], map: "InternalNote_teamId_timestamp_id_idx")
 }
 
 // ---------------------------------------------------------------------------
@@ -2311,14 +2560,78 @@ model InternalNote {
 // not useful; "THIS message is a complaint" points at the exact thing to act on
 // and is what an agent — or later the AI, mid-chat — actually observes.
 
-// A flag definition the team can raise. Team-scoped catalog, modelled on `Tag`.
+enum InboxViewVisibility {
+  personal
+  shared
+}
+
+// A saved inbox view — a named, reusable filter over the conversation list.
+//
+// The built-in presets (Active/All/Mine/Unassigned/Closed/Flagged) answer
+// "what state is this thread in". A view answers "which slice of work is mine
+// to look at": "Support · unassigned · WhatsApp", "VIP escalations".
+//
+// WHY `filters` IS JSON, not columns: every criterion is optional and
+// orthogonal, and the set will grow (ticket status, SLA breach, custom
+// fields). As columns that is a migration per criterion and a wide sparse
+// table. As one validated document it is one Zod schema
+// (inbox-views.schemas.ts) and one WHERE builder (lib/inbox-views/where.ts) —
+// and both are shared with the /v1 API. The cost accepted: the DB cannot
+// enforce that a referenced tag/stage/user still exists, so the builder drops
+// dangling ids at read time (INBOX_VIEW_DANGLING_POLICY in @ccp/shared).
+model InboxView {
+  id          String              @id @default(cuid())
+  workspaceId String
+  name        String
+  // Named color slot from TAG_COLORS ("rose", "amber", …) — never a hex, so
+  // the UI maps to a safelist without dynamic class strings. Same contract as
+  // Tag.color and MessageFlagDefinition.color.
+  color       String              @default("slate")
+  // Key from INBOX_VIEW_ICONS. Stored as a key, not a component name, so an
+  // unknown value degrades to the default icon instead of breaking the rail.
+  icon        String              @default("filter")
+  visibility  InboxViewVisibility @default(personal)
+  createdById String?
+  // Validated InboxViewFilters document. See @ccp/shared/inbox-views/types.
+  filters     Json                @default("{}")
+  // Manual ordering within its visibility group. Ties broken by name.
+  position    Int                 @default(0)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // SetNull, not Cascade: a SHARED view outlives the agent who created it.
+  // Deleting the team's "Escalations" inbox because its author left would be a
+  // silent, unrecoverable loss of team configuration. PERSONAL views are the
+  // opposite case — an owner-less one is visible to nobody — so
+  // `UsersService.remove` deletes them explicitly right after the user row
+  // goes, next to the avatar GC.
+  createdBy User?     @relation("CreatedInboxViews", fields: [createdById], references: [id], onDelete: SetNull)
+
+  // The list query is always "views visible to me in this workspace" =
+  // shared ones + my personal ones, so both reads are workspace-prefixed.
+  //
+  // NAME UNIQUENESS is enforced by two PARTIAL unique indexes created in raw
+  // SQL by migration 20260722220000_inbox_views, because the rule is
+  // conditional and Prisma cannot express it:
+  //   shared   → unique per (workspace, lower(name))              — one team list
+  //   personal → unique per (workspace, owner, lower(name))       — per person
+  // A single @@unique([workspaceId, visibility, createdById, name]) would let
+  // two admins each create a SHARED "Escalations" (different createdById), and
+  // would compare names case-sensitively. Violations still surface as P2002 →
+  // 409 through PrismaExceptionFilter.
+  @@index([workspaceId, visibility])
+  @@index([workspaceId, createdById])
+}
+
+// A flag definition the team can raise. Workspace-scoped catalog, modelled on `Tag`.
 //
 // `color` is a named slot ("rose", "amber", …) NOT a hex, so the UI maps to a
 // safelist of Tailwind classes without dynamic class strings — same contract as
 // Tag.color, sharing TAG_COLORS from @ccp/shared.
 model MessageFlagDefinition {
   id          String   @id @default(cuid())
-  teamId      String
+  workspaceId String
   name        String
   color       String   @default("slate")
   // Shown as helper text in the flag picker — "what does this one mean", so a
@@ -2335,22 +2648,22 @@ model MessageFlagDefinition {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  team  Team          @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  flags MessageFlag[]
+  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  flags     MessageFlag[]
 
-  // (teamId, name) unique already serves teamId-prefix lookups, so no separate
-  // @@index([teamId]) — same call as Tag.
-  @@unique([teamId, name])
+  // (workspaceId, name) unique already serves workspaceId-prefix lookups, so no separate
+  // @@index([workspaceId]) — same call as Tag.
+  @@unique([workspaceId, name])
 }
 
 // One raised flag. Modelled on InternalNote (the canonical "attached to a
 // conversation by a user, survives that user leaving" shape).
 model MessageFlag {
-  id             String            @id @default(cuid())
-  // Tenant scope, same stable denorm rationale as InternalNote.teamId — every
-  // read is teamId-scoped, and the queue lists flags across conversations so it
-  // needs teamId directly rather than through a join.
-  teamId         String
+  id             String @id @default(cuid())
+  // Tenant scope, same stable denorm rationale as InternalNote.workspaceId — every
+  // read is workspaceId-scoped, and the queue lists flags across conversations so it
+  // needs workspaceId directly rather than through a join.
+  workspaceId    String
   messageId      String
   // Denormalized from the message. The queue list groups/filters by thread and
   // the openFlagCount maintenance needs the parent id inside the same write —
@@ -2358,17 +2671,17 @@ model MessageFlag {
   conversationId String
   definitionId   String
 
-  status         MessageFlagStatus @default(open)
+  status     MessageFlagStatus @default(open)
   // Who raised it: "human" | "ai" | "workflow" | "api". A plain string, not an
   // enum, because the set is provenance metadata rather than behaviour — new
   // sources must not require a migration + enum rollout. Nothing branches on it
   // beyond rendering an "AI" chip.
-  source         String            @default("human")
+  source     String            @default("human")
   // 0..1, AI-raised flags only; null for every human flag. Lets the UI show a
   // low-confidence AI flag as a suggestion rather than a fact.
-  confidence     Float?
+  confidence Float?
   // Why it was flagged, written when raising it.
-  note           String?
+  note       String?
 
   // All four actor columns are nullable + SetNull: a flag is triage history and
   // must outlive the departure of whoever touched it (same rule as
@@ -2382,10 +2695,10 @@ model MessageFlag {
   resolvedAt     DateTime?
   resolutionNote String?
 
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  team         Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace    Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   message      Message               @relation(fields: [messageId], references: [id], onDelete: Cascade)
   conversation Conversation          @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   // Restrict, not Cascade: deleting a definition must never silently erase the
@@ -2402,12 +2715,12 @@ model MessageFlag {
   // same message are fine — a message can be both a complaint and a refund
   // request.
   @@unique([messageId, definitionId])
-  // The triage queue: WHERE teamId = $1 AND status = 'open'
+  // The triage queue: WHERE workspaceId = $1 AND status = 'open'
   // ORDER BY createdAt DESC, id DESC — keyset-paginated, so the sort key rides
   // along and the scan stops at `take`.
-  @@index([teamId, status, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([workspaceId, status, createdAt(sort: Desc), id(sort: Desc)])
   // "Assigned to me, still open" — the queue's default personal view.
-  @@index([teamId, assignedToId, status])
+  @@index([workspaceId, assignedToId, status])
   // Thread hydration loads flags for the current page of messages
   // (WHERE messageId IN (...)), and the drift sweeper reconciles per
   // conversation.
@@ -2423,6 +2736,289 @@ model MessageFlag {
 }
 
 // ---------------------------------------------------------------------------
+// Ticketing
+// ---------------------------------------------------------------------------
+//
+// A CONVERSATION is the long-lived thread with one contact on one channel —
+// it never fragments (`@@unique([workspaceId, contactId])`). A TICKET is the
+// unit of WORK on that thread, and there are MANY over time: the same customer
+// asks about a refund in March and a delivery in June, and those are two
+// pieces of work with their own assignee, priority, SLA clock and resolution —
+// on one unbroken thread. That is the whole reason this entity exists; folding
+// work state onto the conversation would have forced either a fragmented inbox
+// or a single ever-open thread with no reportable outcomes.
+//
+// The inbox is deliberately UNTOUCHED by this: its reducers, rooms and fanout
+// keep operating on conversations. The ticket board is a parallel lens over the
+// same messages, and `Message.ticketId` is the join between them.
+
+enum TicketStatus {
+  // Auto-opened, nobody has picked it up yet. Distinct from `open` so "never
+  // touched" is reportable — an untriaged backlog is a different problem from
+  // a worked one.
+  new
+  open
+  // Waiting on the CUSTOMER. The SLA clock optionally pauses here (per policy)
+  // because time we spend waiting on them isn't time we owe them.
+  pending
+  // Waiting on US but deliberately parked (escalation, a part on order).
+  on_hold
+  // Work is done; the reopen window is still running, so a follow-up message
+  // lands back on THIS ticket rather than opening a new one.
+  solved
+  // Terminal. A message after this always opens a new ticket.
+  closed
+}
+
+enum TicketPriority {
+  low
+  normal
+  high
+  urgent
+}
+
+// Ticket audit timeline. Separate from ConversationEvent on purpose: the
+// conversation timeline answers "what happened on this thread", this answers
+// "what happened to this piece of work", and mixing them would make either
+// feed unreadable. Only four ticket boundaries cross over as inline pills
+// (see ConversationEventKind.ticket_*).
+enum TicketEventKind {
+  created
+  assigned
+  unassigned
+  status_changed
+  priority_changed
+  subject_changed
+  tag_added
+  tag_removed
+  field_changed
+  sla_breached
+  reopened
+  merged
+}
+
+model Ticket {
+  id          String @id @default(cuid())
+  workspaceId String
+  // Human-facing sequential id ("#1042"), unique per workspace. NOT the cuid —
+  // agents and customers quote this number to each other. Allocated from
+  // TicketNumberCounter inside the create transaction; gaps are acceptable
+  // (a rolled-back create burns a number), collisions are not.
+  number      Int
+
+  conversationId String
+  // Denormalized from the conversation. The board lists tickets ACROSS
+  // conversations and filters by channel, so both would otherwise be a join
+  // on the hottest ticket read. Conversation.channel is immutable for the
+  // thread's lifetime, so this can't drift.
+  contactId      String
+  channel        Channel
+
+  // Free text, agent- or automation-authored. Null means "not titled yet" and
+  // the UI falls back to the first inbound message excerpt — deliberately not
+  // auto-filled into the column, so a real subject is distinguishable from a
+  // guess.
+  subject  String?
+  status   TicketStatus   @default(new)
+  priority TicketPriority @default(normal)
+
+  // Independent of Conversation.assignedUserId: the thread can belong to one
+  // agent while a specific ticket on it is owned by someone else. Same
+  // never-cleared continuity column as the conversation (see its comment).
+  assignedUserId     String?
+  lastAssignedUserId String?
+  // The AssignmentPolicy that routed it, for reporting "which queue did this
+  // come through". Plain id, no FK — an archived policy must not cascade into
+  // closed work.
+  policyId           String?
+
+  // ---- SLA ----
+  // Due dates are COMPUTED at create / priority-change from the matching
+  // TicketSlaPolicy and then STORED, not derived on read: the policy can be
+  // edited later and a ticket must keep the commitment it was created under.
+  slaPolicyId           String?
+  firstResponseDueAt    DateTime?
+  resolutionDueAt       DateTime?
+  firstResponseAt       DateTime?
+  firstResponseBreached Boolean   @default(false)
+  resolutionBreached    Boolean   @default(false)
+  // Accumulated paused time in ms + the open pause's start. Storing the
+  // accumulation (rather than recomputing from the event log) keeps the
+  // breach sweeper a single indexed range scan instead of a per-ticket replay.
+  slaPausedMs           Int       @default(0)
+  slaPausedAt           DateTime?
+
+  // ---- Resolution ----
+  resolvedAt     DateTime?
+  closedAt       DateTime?
+  resolvedById   String?
+  // Short reportable outcome ("refunded", "duplicate", "no_response"). Free
+  // string rather than an enum for the same reason as MessageFlag.source — the
+  // set is per-org vocabulary, not behaviour.
+  resolutionCode String?
+  resolutionNote String?
+  // How many times this ticket came back from `solved`. A high number is the
+  // signal that "solved" was optimistic — worth reporting on.
+  reopenCount    Int       @default(0)
+  lastSolvedAt   DateTime?
+
+  // ---- Provenance ----
+  // "auto" (opened by an inbound message), "human", "workflow", "api".
+  source            String  @default("auto")
+  createdById       String?
+  createdByApiKeyId String?
+
+  // Values keyed by TicketFieldDefinition.key — same shape and rationale as
+  // Contact.customFields.
+  customFields Json @default("{}")
+
+  // Optimistic-concurrency token. Two agents dragging the same card on a board
+  // is the normal case here, not the exotic one.
+  version   Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspace    Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversation Conversation     @relation("ConversationTickets", fields: [conversationId], references: [id], onDelete: Cascade)
+  contact      Contact          @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignedUser User?            @relation("AssignedTickets", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  resolvedBy   User?            @relation("ResolvedTickets", fields: [resolvedById], references: [id], onDelete: SetNull)
+  slaPolicy    TicketSlaPolicy? @relation(fields: [slaPolicyId], references: [id], onDelete: SetNull)
+  // Shared taxonomy with contacts — an org that already colour-codes "VIP" and
+  // "billing" should not maintain a second parallel tag list.
+  tags         Tag[]            @relation("TicketTags")
+  events       TicketEvent[]
+  messages     Message[]
+  // Back-reference for Conversation.activeTicketId.
+  activeOn     Conversation[]   @relation("ConversationActiveTicket")
+  // The SLA breach sweeper scans ACROSS workspaces for tickets whose clock has
+  // run out and that aren't already flagged. That is a tiny fraction of rows,
+  // so it is served by two PARTIAL indexes Prisma cannot express (raw SQL in
+  // migration 20260722190000_ticketing):
+  //   Ticket_first_response_due_idx ON ("firstResponseDueAt")
+  //     WHERE "firstResponseDueAt" IS NOT NULL AND NOT "firstResponseBreached"
+  //   Ticket_resolution_due_idx ON ("resolutionDueAt")
+  //     WHERE "resolutionDueAt" IS NOT NULL AND NOT "resolutionBreached"
+  // A plain composite would be useless: the sweeper's predicate is a range on
+  // the due date, so nothing can sit between it and the workspace key without
+  // killing the ordered scan. Same pattern as Conversation's openFlagCount
+  // partial index.
+
+  @@unique([workspaceId, number])
+  // Board + list, keyset-paginated: WHERE workspaceId = $1 [AND status = $2]
+  // ORDER BY createdAt DESC, id DESC.
+  @@index([workspaceId, status, createdAt(sort: Desc), id(sort: Desc)])
+  // "My tickets" — the view an agent lives in, same shape as the Mine inbox.
+  @@index([workspaceId, assignedUserId, status, createdAt(sort: Desc), id(sort: Desc)])
+  // Priority-sorted board column.
+  @@index([workspaceId, priority, status])
+  // The conversation rail ("other work on this thread") and the ingest-time
+  // active-ticket lookup.
+  @@index([conversationId, createdAt(sort: Desc)])
+  // "Everything this person ever raised", across their threads.
+  @@index([workspaceId, contactId, createdAt(sort: Desc)])
+  // FK indexes for the SetNull relations — without them, removing a teammate
+  // seq-scans this table (same rationale as MessageFlag's).
+  @@index([assignedUserId])
+  @@index([resolvedById])
+  @@index([slaPolicyId])
+  @@index([contactId])
+}
+
+model TicketEvent {
+  id            String          @id @default(cuid())
+  workspaceId   String
+  ticketId      String
+  kind          TicketEventKind
+  // Same before/after shape as ConversationEvent so one renderer covers both
+  // timelines. Names (assignee, tag, field label) are SNAPSHOTTED at write time
+  // so history keeps reading correctly after a rename or a departure.
+  before        Json?
+  after         Json?
+  // Nullable + SetNull: ticket history must outlive whoever made it.
+  actorUserId   String?
+  // Set when a /v1 partner call or a workflow made the change (actorUserId is
+  // null then) — so automation is never attributed to nobody.
+  actorApiKeyId String?
+  createdAt     DateTime        @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ticket    Ticket    @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  actorUser User?     @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  // The detail page reads one ticket's timeline oldest-first.
+  @@index([ticketId, createdAt])
+  @@index([workspaceId, createdAt(sort: Desc)])
+  @@index([actorUserId])
+}
+
+// One SLA commitment per priority. Modelled per-priority rather than as a
+// free-form policy list because that is the only dimension every helpdesk
+// actually varies, and it makes "which policy applies" a lookup with no
+// matching rules to get wrong.
+model TicketSlaPolicy {
+  id                String         @id @default(cuid())
+  workspaceId       String
+  priority          TicketPriority
+  // Null = no commitment on that leg (an org may promise a first response but
+  // never a resolution time). Null is NOT zero — nothing is due, nothing breaches.
+  firstResponseMins Int?
+  resolutionMins    Int?
+  // Time spent waiting on us-by-choice / on the customer doesn't count against
+  // the promise. Defaults follow the industry norm: on_hold pauses, pending
+  // does not (a customer being slow is still their ticket aging).
+  pauseOnHold       Boolean        @default(true)
+  pauseWhenPending  Boolean        @default(false)
+  // Count only the workspace's configured working hours (Workspace.workHours).
+  // Off by default — an org that hasn't set hours must not silently get a
+  // clock that never advances.
+  businessHoursOnly Boolean        @default(false)
+  isActive          Boolean        @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  tickets   Ticket[]
+
+  @@unique([workspaceId, priority])
+}
+
+// Per-workspace custom fields on a ticket. A near-mirror of
+// ContactFieldDefinition rather than a shared table: a contact field describes
+// a PERSON and lives forever, a ticket field describes one piece of work — the
+// two vocabularies diverge immediately ("company size" vs "root cause"), and
+// merging them would put every contact field on every ticket form.
+model TicketFieldDefinition {
+  id          String   @id @default(cuid())
+  workspaceId String
+  key         String
+  label       String
+  order       Int      @default(0)
+  isVisible   Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, key])
+  @@index([workspaceId, order])
+}
+
+// Sequential ticket numbers, one counter row per workspace.
+//
+// The row lock taken by `update({ next: { increment: 1 } })` serializes
+// concurrent allocations — Postgres blocks the second writer until the first
+// commits, so two simultaneous creates can never read the same value. The
+// @@unique([workspaceId, number]) on Ticket is the backstop, and the create
+// path retries on P2002.
+model TicketNumberCounter {
+  workspaceId String @id
+  next        Int    @default(1)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
 // Workflows
 // ---------------------------------------------------------------------------
 //
@@ -2433,7 +3029,7 @@ model MessageFlag {
 //   - optional once-per-contact dedupe (welcome flows don't want to fire twice)
 //   - a graph of steps with edges, including branch / wait / jump control flow
 //
-// Dispatch path: a domain event calls `dispatch(teamId, event, payload)` in
+// Dispatch path: a domain event calls `dispatch(workspaceId, event, payload)` in
 // lib/workflows/dispatcher.ts. The dispatcher loads published workflows for
 // this team+trigger, evaluates `triggerConditions`, optionally checks the
 // once-per-contact ledger (`WorkflowContactState`), and enqueues a BullMQ
@@ -2448,7 +3044,7 @@ model MessageFlag {
 
 model Workflow {
   id                    String               @id @default(cuid())
-  teamId                String
+  workspaceId           String
   name                  String
   // `published` is the single live/draft gate: the dispatcher (and manual /
   // webhook / trigger_workflow paths) run a workflow iff `published = true`.
@@ -2484,22 +3080,22 @@ model Workflow {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  team          Team                   @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  runs          WorkflowRun[]
-  contactStates WorkflowContactState[]
+  workspace       Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  runs            WorkflowRun[]
+  contactStates   WorkflowContactState[]
   awaitingReplies WorkflowAwaitingReply[]
 
-  @@unique([teamId, name])
-  // Hot path: dispatcher loads `WHERE teamId=? AND trigger=? AND published=true`.
-  @@index([teamId, trigger, published])
+  @@unique([workspaceId, name])
+  // Hot path: dispatcher loads `WHERE workspaceId=? AND trigger=? AND published=true`.
+  @@index([workspaceId, trigger, published])
 }
 
 model WorkflowRun {
-  id         String               @id @default(cuid())
-  workflowId String
-  teamId     String
-  status     WorkflowRunStatus    @default(queued)
-  trigger    WorkflowTriggerEvent
+  id          String               @id @default(cuid())
+  workflowId  String
+  workspaceId String
+  status      WorkflowRunStatus    @default(queued)
+  trigger     WorkflowTriggerEvent
 
   // The contact this run is acting on. Nullable for triggers that aren't
   // contact-scoped (none today, but keeps the schema flexible if we add a
@@ -2560,12 +3156,12 @@ model WorkflowRun {
   startedAt    DateTime  @default(now())
   finishedAt   DateTime?
 
-  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
-  team     Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workflow      Workflow               @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  workspace     Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   awaitingReply WorkflowAwaitingReply?
 
   @@index([workflowId, startedAt(sort: Desc)])
-  @@index([teamId, startedAt(sort: Desc)])
+  @@index([workspaceId, startedAt(sort: Desc)])
   // Status-leading index for the worker's "find runs to resume" sweep
   // (round 3 fallback if a wait job goes missing).
   @@index([status, waitUntil])
@@ -2573,7 +3169,7 @@ model WorkflowRun {
 
 // One row per `ask_question` step that's currently paused waiting for the
 // contact's next inbound message. The message-ingest hook does
-// `findFirst({ where: { teamId, contactId } })` on each inbound and, if it
+// `findFirst({ where: { workspaceId, contactId } })` on each inbound and, if it
 // finds a match, drops the message body onto `WorkflowRun.pendingAnswer`,
 // deletes this row, and enqueues an immediate resume for the run. The
 // runner's timeout job re-fires the same step independently — whoever wins
@@ -2584,25 +3180,25 @@ model WorkflowRun {
 // (workflow, contact) for life-of-deployment; this table is one row per
 // in-flight question with a near-term expiresAt.
 model WorkflowAwaitingReply {
-  id         String   @id @default(cuid())
-  teamId     String
-  contactId  String
-  runId      String   @unique
-  workflowId String
-  stepId     String
-  expiresAt  DateTime
-  createdAt  DateTime @default(now())
+  id          String   @id @default(cuid())
+  workspaceId String
+  contactId   String
+  runId       String   @unique
+  workflowId  String
+  stepId      String
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
 
-  team     Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  contact  Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  run      WorkflowRun @relation(fields: [runId], references: [id], onDelete: Cascade)
-  workflow Workflow    @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  workspace Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact   Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  run       WorkflowRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  workflow  Workflow    @relation(fields: [workflowId], references: [id], onDelete: Cascade)
 
   // Inbound-resume lookup: every inbound message hits this index to ask
   // "is anyone awaiting from this contact?"
-  @@index([teamId, contactId])
+  @@index([workspaceId, contactId])
   // contactId-leading index backs the Contact-cascade delete (GDPR hard-purge)
-  // — the composite above is teamId-leading and can't serve a bare contactId.
+  // — the composite above is workspaceId-leading and can't serve a bare contactId.
   @@index([contactId])
   // Timeout sweeper fallback (round 3): find awaiting rows past expiresAt
   // in case the BullMQ delayed job got lost.
@@ -2614,17 +3210,17 @@ model WorkflowAwaitingReply {
 // look up via the compound unique; cleared when the workflow is deleted via
 // cascade.
 model WorkflowContactState {
-  id         String   @id @default(cuid())
-  workflowId String
-  contactId  String
-  teamId     String
-  firedAt    DateTime @default(now())
+  id          String   @id @default(cuid())
+  workflowId  String
+  contactId   String
+  workspaceId String
+  firedAt     DateTime @default(now())
 
-  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
-  team     Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workflow  Workflow  @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@unique([workflowId, contactId])
-  @@index([teamId])
+  @@index([workspaceId])
   // The (workflowId, contactId) unique leads with workflowId, so a
   // contactId-only lookup (reconciling rows after a contact hard-purge)
   // couldn't use it. Btree on contactId for that scan.
@@ -2638,9 +3234,9 @@ model WorkflowContactState {
 //
 // Plaintext is shown EXACTLY ONCE at creation time. Lost keys are rotated,
 // not recovered.
-model TeamApiKey {
+model WorkspaceApiKey {
   id          String    @id @default(cuid())
-  teamId      String
+  workspaceId String
   name        String
   tokenHash   String    @unique
   tokenPrefix String
@@ -2655,11 +3251,11 @@ model TeamApiKey {
   /// keep working — new keys ask for specific scopes from the settings UI.
   scopes      String[]  @default(["*"])
 
-  team               Team                @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace          Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   idempotencyKeys    ApiIdempotencyKey[]
   conversationEvents ConversationEvent[]
 
-  @@index([teamId, revokedAt])
+  @@index([workspaceId, revokedAt])
 }
 
 /// Stores `Idempotency-Key` headers from external /v1 POSTs so a partner's
@@ -2674,7 +3270,7 @@ model TeamApiKey {
 /// of the file purges expired rows.
 model ApiIdempotencyKey {
   id             String   @id @default(cuid())
-  teamId         String
+  workspaceId    String
   apiKeyId       String
   key            String
   responseBody   Json
@@ -2689,9 +3285,9 @@ model ApiIdempotencyKey {
   createdAt      DateTime @default(now())
   expiresAt      DateTime
 
-  apiKey TeamApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  apiKey WorkspaceApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
 
-  @@unique([teamId, apiKeyId, key])
+  @@unique([workspaceId, apiKeyId, key])
   @@index([expiresAt])
 }
 
@@ -2705,36 +3301,36 @@ model ApiIdempotencyKey {
 /// Auto-disabled after a sustained run of failures so a dead URL doesn't
 /// keep our queue busy forever.
 model OutboundWebhook {
-  id                String   @id @default(cuid())
-  teamId            String
-  name              String
-  url               String
+  id                  String    @id @default(cuid())
+  workspaceId         String
+  name                String
+  url                 String
   /// HMAC-SHA256 signing secret. Stored as `enc:v1:<base64>` (envelope encryption).
-  secret            String
+  secret              String
   /// Allowlisted public event type names (e.g. ["message.received", "contact.updated"]).
-  eventTypes        String[]
-  enabled           Boolean  @default(true)
-  createdById       String
-  createdAt         DateTime @default(now())
+  eventTypes          String[]
+  enabled             Boolean   @default(true)
+  createdById         String
+  createdAt           DateTime  @default(now())
   /// Last successful delivery (2xx response) — surfaced in the UI as "Last delivered".
-  lastDeliveredAt   DateTime?
+  lastDeliveredAt     DateTime?
   /// Last failure — last error message + when. Reset after a successful delivery.
-  lastErrorAt       DateTime?
-  lastErrorMessage  String?
+  lastErrorAt         DateTime?
+  lastErrorMessage    String?
   /// Rolling failure count for the auto-disable circuit breaker. Reset to 0 on
   /// every 2xx. When it crosses the threshold, `enabled` flips to false.
-  consecutiveFailures Int    @default(0)
+  consecutiveFailures Int       @default(0)
   /// Set when `enabled` flips to false from automatic action (circuit breaker
   /// vs. an explicit admin toggle). Together with `disabledReason` they're
   /// the audit trail the UI surfaces as "auto-disabled at … because …".
   /// Manual toggles via the settings UI clear both back to null.
-  disabledAt        DateTime?
-  disabledReason    String?
+  disabledAt          DateTime?
+  disabledReason      String?
 
-  team       Team                       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace  Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   deliveries OutboundWebhookDelivery[]
 
-  @@index([teamId, enabled])
+  @@index([workspaceId, enabled])
 }
 
 /// One row per delivery attempt. Powers the "delivery log" UI so partners can
@@ -2744,7 +3340,7 @@ model OutboundWebhook {
 /// (apps/api/src/lib/sweepers/outbound-webhook-delivery-cleanup.ts) drops
 /// rows older than 30 days; override via WEBHOOK_DELIVERY_RETENTION_DAYS.
 model OutboundWebhookDelivery {
-  id             String   @id @default(cuid())
+  id             String    @id @default(cuid())
   webhookId      String
   eventType      String
   /// Public-shape payload the receiver was sent. Stored verbatim so a retry
@@ -2754,7 +3350,7 @@ model OutboundWebhookDelivery {
   /// timeout, TLS) — `errorMessage` carries the reason in that case.
   responseStatus Int?
   responseBody   String?
-  attemptCount   Int      @default(0)
+  attemptCount   Int       @default(0)
   deliveredAt    DateTime?
   failedAt       DateTime?
   errorMessage   String?
@@ -2772,8 +3368,8 @@ model OutboundWebhookDelivery {
   /// depth+1 on the outbound X-CCP-Depth header. Persisted (not just passed as a
   /// BullMQ job arg) so the orphan-delivery sweeper's re-enqueue preserves it
   /// instead of resetting the counter to 1 on recovered deliveries.
-  chainDepth     Int      @default(0)
-  createdAt      DateTime @default(now())
+  chainDepth     Int       @default(0)
+  createdAt      DateTime  @default(now())
 
   webhook OutboundWebhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
 
@@ -2796,7 +3392,7 @@ model OutboundWebhookDelivery {
 // but no UI ever consumed it (the list item always rendered against
 // unreadCount) — it was computed, shipped to the client, and dropped. Both
 // the table and the field were removed. Do NOT re-introduce per-agent inbox
-// unread without a real per-agent inbox UX to justify it. Team chat already
+// unread without a real per-agent inbox UX to justify it. Workspace chat already
 // has its own per-user receipts (TeamChannelReadReceipt) for the cases where
 // personal read state genuinely matters.
 
@@ -2828,7 +3424,7 @@ model OutboundWebhookDelivery {
 model ConversationEvent {
   id             String                @id @default(cuid())
   conversationId String
-  teamId         String
+  workspaceId    String
   userId         String?
   /// Set when the mutation came from an external /v1 API call instead of a
   /// human session. Mutually exclusive with userId in practice — partner
@@ -2846,10 +3442,10 @@ model ConversationEvent {
   after          Json?
   at             DateTime              @default(now())
 
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
-  apiKey       TeamApiKey?  @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+  conversation Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  workspace    Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user         User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+  apiKey       WorkspaceApiKey? @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, at(sort: Desc)])
   // Drives the retention sweeper's `WHERE at < cutoff` scan — the composite
@@ -2864,7 +3460,7 @@ model ConversationEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Team chat (internal channels)
+// Workspace chat (internal channels)
 // ---------------------------------------------------------------------------
 //
 // Slack-style group chat between agents on the same team. Distinct from
@@ -2907,8 +3503,8 @@ enum TeamChannelVisibility {
 }
 
 model TeamChannel {
-  id                 String   @id @default(cuid())
-  teamId             String
+  id                 String                @id @default(cuid())
+  workspaceId        String
   // Lowercase slug, unique per team. Becomes the URL: /team/<slug>.
   // The default channel "general" is auto-created at team setup time and
   // protected — the DELETE and rename routes refuse to touch it.
@@ -2916,7 +3512,7 @@ model TeamChannel {
   // NULL for DMs: a DM has no name, it's rendered from the peer's identity.
   // Deliberately NULL rather than a synthetic "dm:<cuid>" — a synthetic name
   // would leak into WorkspaceSearchHit.channelName, the page <h1>, and the
-  // sidebar filter, and would silently occupy the @@unique([teamId, name])
+  // sidebar filter, and would silently occupy the @@unique([workspaceId, name])
   // namespace. NULL forces every consumer to be surfaced by the type checker.
   name               String?
   description        String?
@@ -2924,7 +3520,7 @@ model TeamChannel {
   // Used to (a) redirect /team to the default channel, (b) protect from
   // deletion/rename. At-most-one-default-per-team is enforced in app code,
   // not by a partial unique (Prisma can't model those).
-  isDefault          Boolean  @default(false)
+  isDefault          Boolean               @default(false)
   kind               TeamChannelKind       @default(channel)
   // Defaults to `private`: every channel that existed before this column was
   // created under invite-only semantics, so the default is what keeps the
@@ -2940,16 +3536,16 @@ model TeamChannel {
   // Nullable + SetNull — channels are team-shared and shouldn't be destroyed
   // when their creator leaves. The audit label degrades to "Removed user."
   createdById        String?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
   // Denormalized for cheap list rendering. Kept in sync by the message-send
   // route; reads never have to join through TeamChannelMessage to render the
   // sidebar. Best-effort consistency — a race that leaves these slightly
   // stale is fine; the next message corrects them.
-  lastMessageAt      DateTime @default(now())
-  lastMessagePreview String   @default("")
+  lastMessageAt      DateTime              @default(now())
+  lastMessagePreview String                @default("")
 
-  team      Team                     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy User?                    @relation("CreatedChannels", fields: [createdById], references: [id], onDelete: SetNull)
   messages  TeamChannelMessage[]
   receipts  TeamChannelReadReceipt[]
@@ -2958,12 +3554,12 @@ model TeamChannel {
 
   // Postgres treats NULLs as distinct in a unique index, so unlimited DM
   // rows (name = NULL) coexist under this constraint unchanged.
-  @@unique([teamId, name])
-  // The DM dedup guarantee. Team-scoped rather than global to match the
+  @@unique([workspaceId, name])
+  // The DM dedup guarantee. Workspace-scoped rather than global to match the
   // tenant-isolation idiom used everywhere else — and it's free.
-  @@unique([teamId, dmKey])
-  @@index([teamId, lastMessageAt(sort: Desc)])
-  @@index([teamId, kind, lastMessageAt(sort: Desc)])
+  @@unique([workspaceId, dmKey])
+  @@index([workspaceId, lastMessageAt(sort: Desc)])
+  @@index([workspaceId, kind, lastMessageAt(sort: Desc)])
 }
 
 // Per-channel membership. The default channel ("general") implicitly includes
@@ -3004,9 +3600,9 @@ model TeamChannelMessage {
   id           String  @id @default(cuid())
   channelId    String
   // Denormalized for cheap tenant guards. The channel obviously already
-  // carries teamId, but every read site otherwise has to JOIN — and the
-  // socket-emit path wants teamId without a lookup.
-  teamId       String
+  // carries workspaceId, but every read site otherwise has to JOIN — and the
+  // socket-emit path wants workspaceId without a lookup.
+  workspaceId  String
   // Null when the original author was deactivated/removed. UI renders
   // "Removed user" — same pattern as InternalNote.authorUserId.
   authorUserId String?
@@ -3057,7 +3653,7 @@ model TeamChannelMessage {
   createdAt DateTime @default(now())
 
   channel       TeamChannel           @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  team          Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace     Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   author        User?                 @relation("AuthoredChannelMessages", fields: [authorUserId], references: [id], onDelete: SetNull)
   threadRoot    TeamChannelMessage?   @relation("ChannelThread", fields: [threadRootId], references: [id], onDelete: Cascade)
   threadReplies TeamChannelMessage[]  @relation("ChannelThread")
@@ -3065,6 +3661,11 @@ model TeamChannelMessage {
   reactions     TeamChannelReaction[]
   pin           TeamChannelPin?
 
+  // Send idempotency: a retried POST reusing the same clientTempId is rejected
+  // with P2002 instead of inserting a duplicate (see channels.service.ts
+  // dedupCommittedSend). NULL clientTempId rows (legacy/system) are distinct in
+  // Postgres so they never collide.
+  @@unique([channelId, authorUserId, clientTempId], map: "TeamChannelMessage_send_idem_key")
   // Keyset on the main feed: WHERE channelId = ? AND threadRootId IS NULL
   // ORDER BY createdAt DESC, id DESC. The partial index for top-level rows
   // (`TeamChannelMessage_channel_toplevel_keyset_idx` in the init migration's
@@ -3073,12 +3674,7 @@ model TeamChannelMessage {
   // read: WHERE threadRootId = ? ORDER BY createdAt ASC.
   @@index([channelId, createdAt(sort: Desc), id(sort: Desc)])
   @@index([threadRootId, createdAt])
-  @@index([teamId])
-  // Send idempotency: a retried POST reusing the same clientTempId is rejected
-  // with P2002 instead of inserting a duplicate (see channels.service.ts
-  // dedupCommittedSend). NULL clientTempId rows (legacy/system) are distinct in
-  // Postgres so they never collide.
-  @@unique([channelId, authorUserId, clientTempId], map: "TeamChannelMessage_send_idem_key")
+  @@index([workspaceId])
   // FK index for the `author` relation's onDelete: SetNull — without it,
   // hard-deleting a teammate seq-scans this (growing) chat table to null their
   // authored rows. Migration 20260611130100.
@@ -3145,7 +3741,7 @@ model TeamChannelPin {
 
 // Per-(user, channel) read state. `lastReadAt` vs `channel.lastMessageAt`
 // yields "unread for me" without a per-message receipt row. Mention-with-
-// unread is a JOIN against TeamChannelMention. Team chat is the ONLY surface
+// unread is a JOIN against TeamChannelMention. Workspace chat is the ONLY surface
 // with per-user read state — the customer inbox is team-wide (see the
 // "Inbox unread = team-wide ONLY" note above Conversation's audit log).
 model TeamChannelReadReceipt {
@@ -3213,8 +3809,8 @@ model LoginAttempt {
 // sweep was "not wired yet"; it has been wired since the retention-index
 // migration.)
 model OutboundEvent {
-  id     String @id @default(cuid())
-  teamId String
+  id          String @id @default(cuid())
+  workspaceId String
 
   // Domain-event type — e.g. "contact.updated", "conversation.assigned".
   // Stored as a plain string (not enum) so adding a new event type is a
@@ -3224,20 +3820,20 @@ model OutboundEvent {
   // reconstruct the typed event by combining `type` + `payload`.
   payload Json
 
-  createdAt   DateTime  @default(now())
+  createdAt    DateTime  @default(now())
   // Set when the drainer (or the synchronous publish path) successfully
   // ran all subscribers. Null = pending OR failed (see `failedAt`).
-  publishedAt DateTime?
+  publishedAt  DateTime?
   // Set when dispatch threw. The row is NOT retried — the operator queries
   // failed rows and decides what to do (manual re-publish, drop, or fix
   // the subscriber + bulk re-publish).
-  failedAt    DateTime?
+  failedAt     DateTime?
   // Truncated error message from the throwing subscriber. NULL when the
   // dispatch succeeded.
-  lastError   String?
+  lastError    String?
   // Reserved for future at-least-once mode. Today the drainer increments
   // once on pickup and never retries — so this is always 0 or 1.
-  attempts    Int       @default(0)
+  attempts     Int       @default(0)
   // Stamped AFTER the drainer finished dispatching ALL subscribers for this
   // row. publishedAt is set BEFORE dispatch (at-most-once, so a crash can never
   // re-dispatch + double-fire — that's the deliberate no-duplicates posture).
@@ -3258,14 +3854,14 @@ model OutboundEvent {
   chainDepth    Int     @default(0)
   correlationId String?
 
-  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   // Drainer hot-path is served by the partial index
   // `OutboundEvent_drainer_pending_idx` (WHERE publishedAt IS NULL AND
   // failedAt IS NULL, raw SQL — partial indexes aren't expressible in the
   // Prisma DSL, see the init migration).
   // No team-id-keyed index here on purpose: the drainer never filters by
-  // teamId, and that index was a non-trivial write tax on every publish.
+  // workspaceId, and that index was a non-trivial write tax on every publish.
 }
 
 // ---------------------------------------------------------------------------
@@ -3281,7 +3877,7 @@ model OutboundEvent {
 // stream.
 //
 // Schema rules:
-//   - Compound unique `(teamId, channel, externalCallId)` mirrors Message
+//   - Compound unique `(workspaceId, channel, externalCallId)` mirrors Message
 //     dedupe — Meta retries calls webhooks the same way it retries messages,
 //     and the P2002 catch + Serializable wrapper are the same idempotency
 //     pattern.
@@ -3295,17 +3891,17 @@ model OutboundEvent {
 //     text, not a synthetic "call" line.
 //   - `missed` vs `rejected` is intentional. Workflow trigger differentiation.
 model Call {
-  id               String        @id @default(cuid())
-  teamId           String
-  conversationId   String
+  id             String        @id @default(cuid())
+  workspaceId    String
+  conversationId String
   // Meta's call id — half of the dedup key. Same shape as Message.externalId.
-  externalCallId   String
+  externalCallId String
   // Calling channel. Hard-coded `whatsapp` today; mirrors Message.channel
   // for future-channel parity. Pre-existing rule: channel on the row is the
   // dedup key half, conversation.channel is the ownership truth.
-  channel          Channel       @default(whatsapp)
-  direction        CallDirection
-  status           CallStatus    @default(ringing)
+  channel        Channel       @default(whatsapp)
+  direction      CallDirection
+  status         CallStatus    @default(ringing)
 
   // Agent who PLACED an outbound call. Set at create time from the session.
   // Null for inbound calls (the customer initiated) and for the rare webhook-
@@ -3318,26 +3914,26 @@ model Call {
   // agent (Meta enforces this at the call-object level).
   answeredByUserId String?
 
-  ringingAt        DateTime
-  answeredAt       DateTime?
-  endedAt          DateTime?
+  ringingAt       DateTime
+  answeredAt      DateTime?
+  endedAt         DateTime?
   // Computed at terminal transition: endedAt - answeredAt. Null when the
   // call never reached `in_progress` (missed / rejected / failed-pre-answer).
-  durationSeconds  Int?
+  durationSeconds Int?
 
   // Verbatim Meta call object (mirrors Message.rawPayload). Kept for
   // forensics + debugging — call signaling is complex and the raw payload
   // is the only ground truth when something goes sideways.
-  rawPayload       Json
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
+  rawPayload Json
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
-  team             Team          @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  conversation     Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  initiatedBy      User?         @relation("InitiatedCalls", fields: [initiatedByUserId], references: [id], onDelete: SetNull)
-  answeredBy       User?         @relation("AnsweredCalls", fields: [answeredByUserId], references: [id], onDelete: SetNull)
+  workspace    Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  initiatedBy  User?        @relation("InitiatedCalls", fields: [initiatedByUserId], references: [id], onDelete: SetNull)
+  answeredBy   User?        @relation("AnsweredCalls", fields: [answeredByUserId], references: [id], onDelete: SetNull)
 
-  @@unique([teamId, channel, externalCallId])
+  @@unique([workspaceId, channel, externalCallId])
   // Thread-timeline read path: GET /api/conversations/:id/calls.
   @@index([conversationId, ringingAt(sort: Desc)])
   // FK index for the initiatedBy relation's onDelete: SetNull (mirrors the
@@ -3347,10 +3943,10 @@ model Call {
   // migration that added initiatedBy cited "mirrors answeredByUserId" but only
   // indexed initiatedBy — this closes the gap. Migration 20260611130100.
   @@index([answeredByUserId])
-  // "Currently ringing" + "calls today" queues: filter by (teamId, status)
+  // "Currently ringing" + "calls today" queues: filter by (workspaceId, status)
   // ordered by recency. Also serves the 5-calls-per-24h pre-flight gauntlet.
-  @@index([teamId, status, ringingAt(sort: Desc)])
-  @@index([teamId])
+  @@index([workspaceId, status, ringingAt(sort: Desc)])
+  @@index([workspaceId])
 }
 
 // One row per outbound calling-permission request to a contact. Meta caps
@@ -3362,7 +3958,7 @@ model Call {
 //     endpoint
 model CallPermissionRequest {
   id                String               @id @default(cuid())
-  teamId            String
+  workspaceId       String
   contactId         String
   // The id of the request MESSAGE we sent (permission requests are ordinary
   // interactive messages, not a calling endpoint). The customer's reply webhook
@@ -3398,12 +3994,12 @@ model CallPermissionRequest {
   // Set when Meta returned 1/24h or 2/7d; cleared on next successful request.
   rateLimitedUntil  DateTime?
 
-  team    Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact   Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
-  @@index([teamId, contactId, requestedAt(sort: Desc)])
+  @@index([workspaceId, contactId, requestedAt(sort: Desc)])
   // contactId-leading index backs the Contact-cascade delete (GDPR hard-purge)
-  // — the composite above is teamId-leading and can't serve a bare contactId.
+  // — the composite above is workspaceId-leading and can't serve a bare contactId.
   @@index([contactId])
 }
 
@@ -3411,13 +4007,13 @@ model CallPermissionRequest {
 // Native AI Assistant subsystem
 // ---------------------------------------------------------------------------
 // A first-party, in-app AI auto-responder. DELIBERATELY SEPARATE from the
-// legacy n8n "autopilot" (Team.aiAutopilotEnabled / AiHandoffAction /
+// legacy n8n "autopilot" (Workspace.aiAutopilotEnabled / AiHandoffAction /
 // FirstTouchGreeter / Conversation.aiEnabled). Nothing here shares state with
 // that system. The two are kept from ever answering the same inbound message
 // by the atomic ConversationAutomationClaim below — a unique
-// (teamId, inboundMessageId) row that exactly one owner can insert.
+// (workspaceId, inboundMessageId) row that exactly one owner can insert.
 //
-// FK discipline: every table cascades from Team (tenant hard-delete). Other
+// FK discipline: every table cascades from Workspace (tenant hard-delete). Other
 // references (conversationId / messageId / customerId) are PLAIN string columns
 // with their own index — matching CustomerIdentityEvent.contactId — so this
 // subsystem can be dropped without altering Conversation/Message/Customer.
@@ -3532,13 +4128,13 @@ enum AiTranscriptionStatus {
 // settings tabs). `configVersion` is bumped on every save, stamped onto every
 // AiAssistantInteraction (audit traceability) and used as the CAS token on the
 // settings PUT. `enabled` is the master switch, SEPARATE from
-// Team.aiAutopilotEnabled.
+// Workspace.aiAutopilotEnabled.
 model AiAssistantConfig {
-  id            String  @id @default(cuid())
-  teamId        String  @unique
-  team          Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  enabled       Boolean @default(false)
-  configVersion Int     @default(1)
+  id            String    @id @default(cuid())
+  workspaceId   String    @unique
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  enabled       Boolean   @default(false)
+  configVersion Int       @default(1)
 
   // --- Company Identity ---
   companyName      String?
@@ -3623,25 +4219,25 @@ model AiAssistantConfig {
 // key; text is extracted (bounded, encrypted-PDF rejected) into AiContextChunk
 // rows for retrieval. Deleting a row cleans up R2 + chunks (correction #13).
 model AiContextDocument {
-  id           String             @id @default(cuid())
-  teamId       String
-  team         Team               @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  filename     String
-  mimeType     String
-  sizeBytes    Int
-  r2Key        String
-  status       AiContextDocStatus @default(processing)
-  enabled      Boolean            @default(true)
-  error        String?            @db.Text
-  chunkCount   Int                @default(0)
-  tokenCount   Int                @default(0)
-  createdAt    DateTime           @default(now())
-  updatedAt    DateTime           @updatedAt
-  processedAt  DateTime?
+  id          String             @id @default(cuid())
+  workspaceId String
+  workspace   Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  filename    String
+  mimeType    String
+  sizeBytes   Int
+  r2Key       String
+  status      AiContextDocStatus @default(processing)
+  enabled     Boolean            @default(true)
+  error       String?            @db.Text
+  chunkCount  Int                @default(0)
+  tokenCount  Int                @default(0)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  processedAt DateTime?
 
   chunks AiContextChunk[]
 
-  @@index([teamId, createdAt(sort: Desc)])
+  @@index([workspaceId, createdAt(sort: Desc)])
 }
 
 // A retrievable slice of a knowledge document. Retrieval uses a Postgres
@@ -3650,17 +4246,17 @@ model AiContextDocument {
 // model change). Only the top tenant-filtered chunks are injected per prompt —
 // never every document's full text (correction #8).
 model AiContextChunk {
-  id         String            @id @default(cuid())
-  teamId     String
-  team       Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  documentId String
-  document   AiContextDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  ordinal    Int
-  content    String            @db.Text
-  tokenCount Int               @default(0)
-  createdAt  DateTime          @default(now())
+  id          String            @id @default(cuid())
+  workspaceId String
+  workspace   Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  documentId  String
+  document    AiContextDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  ordinal     Int
+  content     String            @db.Text
+  tokenCount  Int               @default(0)
+  createdAt   DateTime          @default(now())
 
-  @@index([teamId])
+  @@index([workspaceId])
   @@index([documentId, ordinal])
 }
 
@@ -3668,8 +4264,8 @@ model AiContextChunk {
 // lazily on first eligibility check as ai_active when the team config is on.
 model AiConversationState {
   id             String                @id @default(cuid())
-  teamId         String
-  team           Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  workspace      Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   conversationId String                @unique
   state          AiConvAutomationState @default(ai_active)
   // Who/when for an explicit pause (state = ai_paused). Plain user id, no FK.
@@ -3681,26 +4277,26 @@ model AiConversationState {
   autoReplyCount Int                   @default(0)
   updatedAt      DateTime              @updatedAt
 
-  @@index([teamId])
+  @@index([workspaceId])
 }
 
 // Atomic mutual-exclusion arbiter (correction #3). Exactly one owner may claim
-// a given inbound message. The unique (teamId, inboundMessageId) makes the
+// a given inbound message. The unique (workspaceId, inboundMessageId) makes the
 // first INSERT win; every other automation system's insert hits P2002 and must
 // not answer. Native AI inserts owner = native_ai; a future autopilot/workflow
 // integration inserts its own owner. This is the ONLY cross-system coupling and
 // it is write-based, not a read-only guard.
 model ConversationAutomationClaim {
-  id              String            @id @default(cuid())
-  teamId          String
-  team            Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  conversationId  String
+  id               String            @id @default(cuid())
+  workspaceId      String
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversationId   String
   inboundMessageId String
-  owner           AiAutomationOwner
-  claimedAt       DateTime          @default(now())
+  owner            AiAutomationOwner
+  claimedAt        DateTime          @default(now())
 
-  @@unique([teamId, inboundMessageId])
-  @@index([teamId, conversationId])
+  @@unique([workspaceId, inboundMessageId])
+  @@index([workspaceId, conversationId])
 }
 
 // Session-level rollup (correction #6). A session is open until the
@@ -3710,33 +4306,33 @@ model ConversationAutomationClaim {
 // bumps each pass. Temporary order/complaint details live HERE, not in
 // permanent customer memory (correction #7).
 model ConversationSessionSummary {
-  id                    String    @id @default(cuid())
-  teamId                String
-  team                  Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  conversationId        String
-  sessionStartAt        DateTime
-  sessionEndAt          DateTime?
+  id                      String    @id @default(cuid())
+  workspaceId             String
+  workspace               Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversationId          String
+  sessionStartAt          DateTime
+  sessionEndAt            DateTime?
   lastSummarizedMessageId String?
-  summaryVersion        Int       @default(0)
+  summaryVersion          Int       @default(0)
   // Structured session fields for the panel.
-  customerGoal          String?   @db.Text
-  importantContext      String?   @db.Text
-  questions             Json      @default("[]")
-  answers               Json      @default("[]")
-  commitments           Json      @default("[]") // company commitments/promises
-  openQuestions         Json      @default("[]")
-  requiredFollowUp      String?   @db.Text
-  sentiment             String?
-  language              String?
-  tone                  String?
-  latestStatus          String?   @db.Text
+  customerGoal            String?   @db.Text
+  importantContext        String?   @db.Text
+  questions               Json      @default("[]")
+  answers                 Json      @default("[]")
+  commitments             Json      @default("[]") // company commitments/promises
+  openQuestions           Json      @default("[]")
+  requiredFollowUp        String?   @db.Text
+  sentiment               String?
+  language                String?
+  tone                    String?
+  latestStatus            String?   @db.Text
   // A 1-2 sentence brief of the WHOLE conversation/relationship (across all
   // sessions), distinct from the current-session fields above.
-  overallBrief          String?   @db.Text
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
+  overallBrief            String?   @db.Text
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
 
-  @@index([teamId, conversationId, sessionStartAt(sort: Desc)])
+  @@index([workspaceId, conversationId, sessionStartAt(sort: Desc)])
 }
 
 // Permanent, PERSON-level memory (correction #1 + #7). Structured candidates,
@@ -3745,8 +4341,8 @@ model ConversationSessionSummary {
 // Customer/Message.
 model AiCustomerMemory {
   id                   String         @id @default(cuid())
-  teamId               String
-  team                 Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspaceId          String
+  workspace            Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   customerId           String
   kind                 AiMemoryKind
   // VarChar(500) (not Text) so the dedup unique below is a safe btree key.
@@ -3761,30 +4357,30 @@ model AiCustomerMemory {
   updatedAt            DateTime       @updatedAt
 
   // DB-level dedup of a person's memory items. NOTE: this is
-  // (teamId, customerId, kind, value) — NOT unique(teamId, customerId), which
+  // (workspaceId, customerId, kind, value) — NOT unique(workspaceId, customerId), which
   // would force one row per customer and contradicts the approved
   // structured-candidates design (multiple kind/value items per person).
-  @@unique([teamId, customerId, kind, value])
-  @@index([teamId, customerId, status])
-  @@index([teamId, customerId, kind])
+  @@unique([workspaceId, customerId, kind, value])
+  @@index([workspaceId, customerId, status])
+  @@index([workspaceId, customerId, kind])
 }
 
 // Per-message AI metadata, kept OFF the Message row (correction #1). The
 // aiGenerated flag is the loop guard: the assistant never answers a message
 // that carries an aiGenerated=true metadata row (correction #15, last case).
 model AiMessageMetadata {
-  id            String   @id @default(cuid())
-  teamId        String
-  team          Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  messageId     String   @unique
-  aiGenerated   Boolean  @default(false)
-  model         String?
-  language      String?
-  dialect       String?
-  script        String?
-  intent        String?
-  confidence    Float?
-  interactionId String?
+  id                 String    @id @default(cuid())
+  workspaceId        String
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messageId          String    @unique
+  aiGenerated        Boolean   @default(false)
+  model              String?
+  language           String?
+  dialect            String?
+  script             String?
+  intent             String?
+  confidence         Float?
+  interactionId      String?
   // Model self-reported risk (0..1) that this reply contains a claim not
   // grounded in the company info / retrieved knowledge (see REPLY_SCHEMA).
   // Null for replies generated before this field existed. A conversation's
@@ -3792,96 +4388,96 @@ model AiMessageMetadata {
   // lib/ai/hallucination.ts); messages at/above HALLUCINATION_FLAG_THRESHOLD
   // are surfaced to the agent for review via `ai.message_flagged`.
   hallucinationRisk  Float?
-  hallucinationNotes String? @db.Text
-  createdAt     DateTime @default(now())
+  hallucinationNotes String?   @db.Text
+  createdAt          DateTime  @default(now())
 
-  @@index([teamId])
+  @@index([workspaceId])
 }
 
 // Inbound-voice transcription, kept OFF the Message row (correction #1 + #5).
 model AiMessageTranscription {
-  id            String                @id @default(cuid())
-  teamId        String
-  team          Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  messageId     String                @unique
-  status        AiTranscriptionStatus @default(pending)
-  transcript    String?               @db.Text
-  language      String?
-  provider      String?
-  durationMs    Int?
+  id                String                @id @default(cuid())
+  workspaceId       String
+  workspace         Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messageId         String                @unique
+  status            AiTranscriptionStatus @default(pending)
+  transcript        String?               @db.Text
+  language          String?
+  provider          String?
+  durationMs        Int?
   // Agent correction of the machine transcript (correction: allow correction).
-  correctedText String?               @db.Text
+  correctedText     String?               @db.Text
   correctedByUserId String?
-  error         String?               @db.Text
-  createdAt     DateTime              @default(now())
-  updatedAt     DateTime              @updatedAt
+  error             String?               @db.Text
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
 
-  @@index([teamId])
+  @@index([workspaceId])
 }
 
 // Durable per-attempt audit (correction #9). One row per assistant run —
 // what it decided and why, for observability + debugging + cost tracking.
 model AiAssistantInteraction {
-  id               String                @id @default(cuid())
-  teamId           String
-  team             Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  conversationId   String
-  inboundMessageId String
+  id                String                @id @default(cuid())
+  workspaceId       String
+  workspace         Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversationId    String
+  inboundMessageId  String
   outboundMessageId String?
-  suggestionId     String?
-  configVersion    Int
-  model            String?
-  language         String?
-  dialect          String?
-  intent           String?
-  confidence       Float?
-  decision         AiInteractionDecision
-  skipReason       String?
-  selectedChunkIds Json                  @default("[]")
-  inputTokens      Int?
-  outputTokens     Int?
-  cacheReadTokens  Int?
-  latencyMs        Int?
-  error            String?               @db.Text
-  createdAt        DateTime              @default(now())
+  suggestionId      String?
+  configVersion     Int
+  model             String?
+  language          String?
+  dialect           String?
+  intent            String?
+  confidence        Float?
+  decision          AiInteractionDecision
+  skipReason        String?
+  selectedChunkIds  Json                  @default("[]")
+  inputTokens       Int?
+  outputTokens      Int?
+  cacheReadTokens   Int?
+  latencyMs         Int?
+  error             String?               @db.Text
+  createdAt         DateTime              @default(now())
 
-  @@index([teamId, conversationId, createdAt(sort: Desc)])
-  @@index([teamId, createdAt(sort: Desc)])
+  @@index([workspaceId, conversationId, createdAt(sort: Desc)])
+  @@index([workspaceId, createdAt(sort: Desc)])
 }
 
 // Durable draft (correction #10). Survives refresh/reconnect because it lives
 // in Postgres, not client state. One per inbound; regenerate updates in place.
 model AiReplySuggestion {
-  id               String            @id @default(cuid())
-  teamId           String
-  team             Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  id               String             @id @default(cuid())
+  workspaceId      String
+  workspace        Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   conversationId   String
   inboundMessageId String
-  text             String            @db.Text
+  text             String             @db.Text
   replyLanguage    String?
   replyScript      String?
   channelMode      AiReplyChannelMode @default(text)
   // Set when a voice draft was pre-rendered; R2 key of the preview audio.
   audioR2Key       String?
-  usedChunkIds     Json              @default("[]")
-  state            AiSuggestionState @default(pending)
+  usedChunkIds     Json               @default("[]")
+  state            AiSuggestionState  @default(pending)
   // Regenerate version (correction: deterministic attempt/version number). The
   // first draft is attempt 1; each Regenerate supersedes the current pending
   // draft and creates attempt+1, preserving prior attempts as history rows.
-  attempt          Int               @default(1)
-  editedText       String?           @db.Text
+  attempt          Int                @default(1)
+  editedText       String?            @db.Text
   decidedByUserId  String?
   decidedAt        DateTime?
   expiresAt        DateTime
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
 
-  // NO full @@unique([teamId, inboundMessageId]) — Regenerate keeps superseded
+  // NO full @@unique([workspaceId, inboundMessageId]) — Regenerate keeps superseded
   // history rows. "Only one UNRESOLVED (pending) suggestion per inbound" is
   // enforced by a PARTIAL unique index (WHERE state = 'pending') added in raw
   // SQL in the migration (Prisma can't express partial uniques).
-  @@index([teamId, inboundMessageId, attempt])
-  @@index([teamId, conversationId, state])
+  @@index([workspaceId, inboundMessageId, attempt])
+  @@index([workspaceId, conversationId, state])
 }
 
 // ---------------------------------------------------------------------------
@@ -3954,7 +4550,7 @@ enum AssignmentOverflow {
 
 model AssignmentPolicy {
   id          String  @id @default(cuid())
-  teamId      String
+  workspaceId String
   name        String
   description String?
 
@@ -3990,7 +4586,7 @@ model AssignmentPolicy {
   fixedUserId    String?
 
   // Rotation cursor (last user picked) — PER POLICY, so two policies rotate
-  // independently. Replaces the single team-wide Team.aiRoundRobinCursorUserId.
+  // independently. Replaces the single team-wide Workspace.aiRoundRobinCursorUserId.
   cursorUserId String?
 
   // CONTINUITY. When a returning customer already has a history with someone,
@@ -4007,11 +4603,11 @@ model AssignmentPolicy {
   // Defaults ON because it is what customers expect and what every mature
   // product does; it can only ever fire for a contact who HAS a history, so a
   // new org is unaffected.
-  preferPreviousAgent Boolean @default(true)
+  preferPreviousAgent     Boolean @default(true)
   // How long a relationship stays "warm". Past this, the previous agent is
   // treated as cold and the normal strategy decides — a 6-month-old thread
   // shouldn't pin a customer to someone who has since changed teams.
-  previousAgentWindowDays Int @default(30)
+  previousAgentWindowDays Int     @default(30)
 
   // Optimistic-concurrency token for the settings UI (same pattern as
   // AiAssistantConfig.configVersion): a save carrying a stale version is
@@ -4025,19 +4621,19 @@ model AssignmentPolicy {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  team    Team                     @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  members AssignmentPolicyMember[]
-  rules   AssignmentRule[]
+  workspace Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  members   AssignmentPolicyMember[]
+  rules     AssignmentRule[]
 
-  @@index([teamId, archivedAt])
-  @@index([teamId, isDefault])
+  @@index([workspaceId, archivedAt])
+  @@index([workspaceId, isDefault])
 }
 
 model AssignmentPolicyMember {
-  id       String @id @default(cuid())
-  teamId   String
-  policyId String
-  userId   String
+  id          String @id @default(cuid())
+  workspaceId String
+  policyId    String
+  userId      String
 
   // Relative share for strategy = weighted. 0 = never picked (a clean way to
   // pause someone without deleting their row/history). Ignored by the other
@@ -4062,14 +4658,14 @@ model AssignmentPolicyMember {
   user   User             @relation("AssignmentPolicyMemberships", fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([policyId, userId])
-  @@index([teamId])
+  @@index([workspaceId])
 }
 
 model AssignmentRule {
-  id       String @id @default(cuid())
-  teamId   String
-  name     String
-  policyId String
+  id          String @id @default(cuid())
+  workspaceId String
+  name        String
+  policyId    String
 
   // First match wins; ascending. Ties broken by id for determinism.
   position Int     @default(0)
@@ -4088,15 +4684,15 @@ model AssignmentRule {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  team   Team             @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  policy AssignmentPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  policy    AssignmentPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
 
-  @@index([teamId, enabled, position])
+  @@index([workspaceId, enabled, position])
 }
 
 model AssignmentSettings {
-  // One row per team, id == teamId (same shape as a settings singleton).
-  teamId String @id
+  // One row per team, id == workspaceId (same shape as a settings singleton).
+  workspaceId String @id
 
   // Route a BRAND-NEW conversation the moment its first inbound lands.
   autoAssignOnNewConversation Boolean @default(false)
@@ -4132,7 +4728,7 @@ model AssignmentSettings {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 }
 
 // How a broadcast pre-assigns the conversations it touches. Resolved ONCE per

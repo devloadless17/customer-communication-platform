@@ -40,11 +40,11 @@ const FIXTURES = [
   { kind: "document", mime: "application/pdf", name: "report.pdf", buf: PDF },
 ] as const;
 
-let teamId: string;
+let workspaceId: string;
 let channelId: string;
 
 test.beforeAll(async ({ request }) => {
-  teamId = (await superadminTeam()).teamId;
+  workspaceId = (await superadminTeam()).workspaceId;
   const r = await request.get("/api/team/channels/default");
   expect(r.ok(), `default channel lookup failed: ${r.status()}`).toBeTruthy();
   channelId = (await r.json()).channel.id;
@@ -127,7 +127,7 @@ test.describe("R2 media serving — streaming proxy, all kinds", () => {
 
     const contact = await db().contact.create({
       data: {
-        teamId,
+        workspaceId,
         phoneNumber: `+1555${String(Date.now()).slice(-7)}`,
         identityChannel: "whatsapp",
         name: "R2 e2e",
@@ -135,11 +135,11 @@ test.describe("R2 media serving — streaming proxy, all kinds", () => {
       },
     });
     const conv = await db().conversation.create({
-      data: { teamId, contactId: contact.id, channel: "whatsapp", status: "open" },
+      data: { workspaceId, contactId: contact.id, channel: "whatsapp", status: "open" },
     });
     const msg = await db().message.create({
       data: {
-        team: { connect: { id: teamId } },
+        workspace: { connect: { id: workspaceId } },
         conversation: { connect: { id: conv.id } },
         externalId: `e2e-r2-${Date.now()}`,
         direction: "out",
@@ -172,7 +172,7 @@ test.describe("R2 media serving — streaming proxy, all kinds", () => {
       // (image.png here), never the opaque message id.
       const noName = await db().message.create({
         data: {
-          team: { connect: { id: teamId } },
+          workspace: { connect: { id: workspaceId } },
           conversation: { connect: { id: conv.id } },
           externalId: `e2e-r2-noname-${Date.now()}`,
           direction: "out",

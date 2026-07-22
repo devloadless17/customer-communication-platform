@@ -48,13 +48,13 @@ export class MessageFlagsController {
     @CurrentSession() session: ApiSession,
     @Query(zQuery(ListFlagsQuerySchema)) query: ListFlagsQuery,
   ) {
-    return this.flags.list(session.teamId, session.userId, query, session);
+    return this.flags.list(session.workspaceId, session.userId, query, session);
   }
 
   /** Static segment — must be declared before any `:id` route. */
   @Get("counts")
   async counts(@CurrentSession() session: ApiSession) {
-    const counts = await this.flags.counts(session.teamId, session.userId, session);
+    const counts = await this.flags.counts(session.workspaceId, session.userId, session);
     return { counts };
   }
 
@@ -63,7 +63,7 @@ export class MessageFlagsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(RaiseFlagSchema)) body: RaiseFlagInput,
   ) {
-    return this.flags.raise(session.teamId, session.userId, body, session);
+    return this.flags.raise(session.workspaceId, session.userId, body, session);
   }
 
   @Patch(":id")
@@ -72,11 +72,11 @@ export class MessageFlagsController {
     @Param("id") id: string,
     @Body(zBody(UpdateFlagSchema)) body: UpdateFlagInput,
   ) {
-    return this.flags.update(session.teamId, session.userId, id, body, session);
+    return this.flags.update(session.workspaceId, session.userId, id, body, session);
   }
 
   @Delete(":id")
   async remove(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    return this.flags.remove(session.teamId, session.userId, id, session);
+    return this.flags.remove(session.workspaceId, session.userId, id, session);
   }
 }

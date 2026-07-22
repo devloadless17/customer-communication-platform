@@ -31,7 +31,7 @@ import { db, appAdmin, wipeTestData, pollUntil } from "../_helpers/db";
 // ─── Fixture: team + base contact reused as the parent for siloed
 // per-spec contacts. Each spec creates its own Contact + Conversation so
 // the cap counts and permission rows can't bleed between cases.
-let teamId: string;
+let workspaceId: string;
 let userId: string;
 
 test.beforeAll(async () => {
@@ -39,7 +39,7 @@ test.beforeAll(async () => {
   // The browsing/request identity is the e2e app-admin (the super-admin can't
   // use the customer app). answerCall is attributed to THIS user.
   const su = await appAdmin();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
   userId = su.userId;
 });
 
@@ -61,7 +61,7 @@ async function seedContactAndConversation(opts: {
   const lastInboundAt = opts.insideWindow ? new Date() : null;
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       phoneNumber: opts.phoneNumber,
       identityChannel: "whatsapp",
       name: "Calls E2E",
@@ -74,7 +74,7 @@ async function seedContactAndConversation(opts: {
   });
   const conv = await db().conversation.create({
     data: {
-      teamId,
+      workspaceId,
       contactId: contact.id,
       channel: "whatsapp",
       status: "open",
@@ -98,17 +98,35 @@ async function setBusinessNumber(displayPhoneNumber: string): Promise<void> {
   // Must be a REAL, parseable number for its country — libphonenumber rejects
   // the +1-555 fictional exchange, which yields no country at all and makes the
   // region gate silently un-testable.
-  const existing = await db().channelConnection.findUnique({
-    where: { teamId_channel: { teamId, channel: "whatsapp" } },
+  const existing = await db().channelConnection.findFirst({
+    where: { workspaceId, channel: "whatsapp", isDefault: true },
     select: { config: true },
   });
   const config = {
     ...((existing?.config as Record<string, unknown> | null) ?? {}),
     displayPhoneNumber,
   };
+  // Accounts are keyed by the provider's phone-number id.
+  const phoneNumberId = String(
+    (existing?.config as Record<string, unknown> | null)?.phoneNumberId ?? "e2e_calls_wa",
+  );
   await db().channelConnection.upsert({
-    where: { teamId_channel: { teamId, channel: "whatsapp" } },
-    create: { teamId, channel: "whatsapp", config, secrets: {}, isActive: true },
+    where: {
+      workspaceId_channel_externalAccountId: {
+        workspaceId,
+        channel: "whatsapp",
+        externalAccountId: phoneNumberId,
+      },
+    },
+    create: {
+      workspaceId,
+      channel: "whatsapp",
+      externalAccountId: phoneNumberId,
+      isDefault: true,
+      config,
+      secrets: {},
+      isActive: true,
+    },
     update: { config },
   });
 }
@@ -230,7 +248,7 @@ test.describe("C. Outbound pre-flight — calling_restricted", () => {
     await setBusinessNumber("+33600000000");
     const liftsAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
     await db().channelConnection.updateMany({
-      where: { teamId, channel: "whatsapp" },
+      where: { workspaceId, channel: "whatsapp" },
       data: {
         callingRestrictedUntil: liftsAt,
         callingRestrictionType: "RESTRICTED_BUSINESS_INITIATED_CALLING",
@@ -257,7 +275,7 @@ test.describe("C. Outbound pre-flight — calling_restricted", () => {
 
     // Clean up so later specs aren't blocked by the restriction.
     await db().channelConnection.updateMany({
-      where: { teamId, channel: "whatsapp" },
+      where: { workspaceId, channel: "whatsapp" },
       data: { callingRestrictedUntil: null },
     });
   });
@@ -265,7 +283,7 @@ test.describe("C. Outbound pre-flight — calling_restricted", () => {
   test("an EXPIRED restriction does not block", async ({ request }) => {
     await setBusinessNumber("+33600000000");
     await db().channelConnection.updateMany({
-      where: { teamId, channel: "whatsapp" },
+      where: { workspaceId, channel: "whatsapp" },
       data: { callingRestrictedUntil: new Date(Date.now() - 60_000) },
     });
     const { conversationId } = await seedContactAndConversation({
@@ -282,7 +300,7 @@ test.describe("C. Outbound pre-flight — calling_restricted", () => {
     expect((await resp.json()).reason).not.toBe("calling_restricted");
 
     await db().channelConnection.updateMany({
-      where: { teamId, channel: "whatsapp" },
+      where: { workspaceId, channel: "whatsapp" },
       data: { callingRestrictedUntil: null },
     });
   });
@@ -309,7 +327,7 @@ test.describe("D. answerCall — CAS race produces exactly one winner", () => {
     });
     const call = await db().call.create({
       data: {
-        teamId,
+        workspaceId,
         conversationId,
         externalCallId: `e2e-cas-${Date.now()}`,
         channel: "whatsapp",
@@ -372,7 +390,7 @@ test.describe("E. endCall — terminal-row idempotency", () => {
     const endedAt = new Date(answeredAt.getTime() + 42_000);
     const call = await db().call.create({
       data: {
-        teamId,
+        workspaceId,
         conversationId,
         externalCallId: `e2e-end-idem-${Date.now()}`,
         channel: "whatsapp",
@@ -432,7 +450,7 @@ test.describe("F. GET /api/conversations/:id/calls — listing", () => {
     for (const s of seeds) {
       await db().call.create({
         data: {
-          teamId,
+          workspaceId,
           conversationId,
           externalCallId: `e2e-list-${s.label}-${base}`,
           channel: "whatsapp",

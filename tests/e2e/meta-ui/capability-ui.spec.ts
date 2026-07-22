@@ -32,10 +32,10 @@ test.afterEach(async () => {
 });
 
 async function seedThread(channel: "messenger" | "instagram"): Promise<string> {
-  const { teamId } = await appAdmin();
+  const { workspaceId } = await appAdmin();
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       name: `E2E ${channel} Cap`,
       identityChannel: channel,
       externalContactId: `cap_${channel}_${Date.now()}`,
@@ -46,7 +46,7 @@ async function seedThread(channel: "messenger" | "instagram"): Promise<string> {
   seededContactIds.push(contact.id);
   const convo = await db().conversation.create({
     data: {
-      teamId,
+      workspaceId,
       contactId: contact.id,
       channel,
       status: "open",
@@ -56,7 +56,7 @@ async function seedThread(channel: "messenger" | "instagram"): Promise<string> {
   });
   await db().message.create({
     data: {
-      teamId,
+      workspaceId,
       conversationId: convo.id,
       channel,
       externalId: `cap_in_${channel}_${Date.now()}`,

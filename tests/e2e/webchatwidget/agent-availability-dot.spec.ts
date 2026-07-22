@@ -31,7 +31,7 @@ const TZ = "UTC";
 const RUN = `dot${Date.now().toString(36)}`;
 const PUBLIC_KEY = `wc_pk_${RUN}${"0".repeat(24)}`.slice(0, 34);
 
-let teamId = "";
+let workspaceId = "";
 let adminUserId = "";
 let widgetId = "";
 
@@ -43,10 +43,10 @@ function closedNow(): WorkHours {
 }
 
 test.beforeAll(async () => {
-  ({ teamId, userId: adminUserId } = await appAdmin());
+  ({ workspaceId, userId: adminUserId } = await appAdmin());
   const widget = await db().webchatWidget.create({
     data: {
-      teamId,
+      workspaceId,
       name: `Dot probe ${RUN}`,
       publicKey: PUBLIC_KEY,
       allowedOrigins: [],
@@ -58,9 +58,9 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  await db().team.update({ where: { id: teamId }, data: { workHours: Prisma.DbNull } });
+  await db().workspace.update({ where: { id: workspaceId }, data: { workHours: Prisma.DbNull } });
   await db().user.updateMany({
-    where: { teamId },
+    where: { workspaceMemberships: { some: { workspaceId } } },
     data: {
       availabilityStatus: "available",
       availabilityMessage: null,
@@ -74,7 +74,7 @@ test.afterAll(async () => {
     },
   });
   await db().contact.deleteMany({
-    where: { teamId, identityChannel: "webchatwidget", externalContactId: { startsWith: widgetId } },
+    where: { workspaceId, identityChannel: "webchatwidget", externalContactId: { startsWith: widgetId } },
   });
   await db().webchatWidget.deleteMany({ where: { id: widgetId } });
 });

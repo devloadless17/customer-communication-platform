@@ -13,7 +13,7 @@ import { transcribeInboundAudio } from "./voice";
  * off, in which case the text is returned but not persisted).
  */
 export async function ensureTranscription(
-  teamId: string,
+  workspaceId: string,
   messageId: string,
 ): Promise<string | null> {
   const existing = await db.aiMessageTranscription.findUnique({ where: { messageId } });
@@ -35,13 +35,13 @@ export async function ensureTranscription(
   });
   if (!msg || msg.direction !== "in" || msg.mediaKind !== "audio" || !msg.mediaKey) return null;
 
-  const config = await loadAiConfig(teamId);
+  const config = await loadAiConfig(workspaceId);
   if (!configEnabled(config) || !config.incomingTranscription) return null;
 
   // Claim the work with a unique pending row.
   try {
     await db.aiMessageTranscription.create({
-      data: { teamId, messageId, status: "pending", provider: "openai" },
+      data: { workspaceId, messageId, status: "pending", provider: "openai" },
     });
   } catch (err) {
     if ((err as { code?: string })?.code === "P2002") return null; // lost the race
@@ -73,7 +73,7 @@ export async function ensureTranscription(
     });
     void publish({
       type: "ai.transcription_changed",
-      teamId,
+      workspaceId,
       conversationId: msg.conversationId,
       messageId,
       status: "ready",
@@ -88,7 +88,7 @@ export async function ensureTranscription(
       .catch(() => {});
     void publish({
       type: "ai.transcription_changed",
-      teamId,
+      workspaceId,
       conversationId: msg.conversationId,
       messageId,
       status: "failed",

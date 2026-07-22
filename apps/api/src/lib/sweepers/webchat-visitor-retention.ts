@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 import { EPHEMERAL_CONTACT_CHANNELS } from "@ccp/shared/providers/capabilities";
 
 /**
@@ -57,6 +57,12 @@ async function runTick(label: string): Promise<void> {
   try {
     await withSweeperMutex("webchat-visitor-retention", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopWebchatVisitorRetentionSweeper();
+      return;
+    }
     console.error(`[sweeper.webchat-visitor-retention] ${label} failed`, err);
   } finally {
     inFlight = false;

@@ -32,7 +32,7 @@ export const dynamic = "force-dynamic";
 export default async function IntegrationsLanding() {
   const { user } = await getSession();
   if (!canManageUsers(user.role)) {
-    redirect("/settings/account");
+    redirect("/account");
   }
 
   // One round-trip serves both the "Connect" status on tiles AND the

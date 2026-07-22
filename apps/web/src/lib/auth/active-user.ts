@@ -26,8 +26,9 @@ export const loadActiveUser = cache(async (userId: string) => {
     where: { id: userId },
     select: {
       id: true,
-      teamId: true,
-      role: true,
+      organizationId: true,
+      orgRole: true,
+      isSuperAdmin: true,
       name: true,
       email: true,
       avatarUrl: true,
@@ -43,7 +44,16 @@ export const loadActiveUser = cache(async (userId: string) => {
       // `status` powers the org-approval gate in (app)/layout.tsx. Loaded here
       // (alongside rolePermissions) so the gate never has to call the now
       // org-gated /api/team endpoint for a pending/suspended org.
-      team: { select: { rolePermissions: true, status: true } },
+      organization: { select: { status: true, name: true } },
+      // Active workspace + effective role come from membership now (mirrors the
+      // API resolveSession); ordered so the fallback pick is deterministic.
+      workspaceMemberships: {
+        orderBy: { createdAt: "asc" },
+        select: {
+          role: true,
+          workspace: { select: { id: true, name: true, rolePermissions: true } },
+        },
+      },
     },
   });
   if (!user || user.deactivatedAt) return null;

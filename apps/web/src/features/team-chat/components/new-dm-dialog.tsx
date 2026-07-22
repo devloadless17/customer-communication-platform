@@ -16,7 +16,7 @@ import type { User } from "@ccp/shared/types";
 /**
  * Roster picker for starting a 1:1 DM.
  *
- * The POST is idempotent server-side (unique on (teamId, dmKey)), so picking
+ * The POST is idempotent server-side (unique on (workspaceId, dmKey)), so picking
  * someone you already have a DM with just navigates to the existing thread —
  * no duplicate, no error, no special-casing here.
  */

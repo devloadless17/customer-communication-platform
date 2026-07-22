@@ -27,7 +27,7 @@ import { test, expect } from "@playwright/test";
 
 import { setSharedDb } from "../../../apps/api/src/lib/db";
 import { resumePausedBroadcasts } from "../../../apps/api/src/lib/broadcast-runner";
-import { db } from "../_helpers/db";
+import { createTestWorkspace, db } from "../_helpers/db";
 
 test.describe.configure({ mode: "serial" });
 
@@ -44,7 +44,7 @@ async function seedPaused(opts: {
 }): Promise<string> {
   const b = await db().broadcast.create({
     data: {
-      teamId: TEAM_ID,
+      workspaceId: TEAM_ID,
       name: `paused-${Math.random().toString(36).slice(2)}`,
       channel: "whatsapp",
       status: "paused",
@@ -60,7 +60,7 @@ async function seedPaused(opts: {
   await db().broadcastRecipient.createMany({
     data: opts.statuses.map((status, i) => ({
       broadcastId: b.id,
-      contactId: contactIds[i],
+      contactId: contactIds[i]!,
       status,
       ...(status === "sent"
         ? { deliveryState: "sent" as const, sentAt: new Date(), externalId: `wamid-${b.id}-${i}` }
@@ -81,12 +81,10 @@ async function statusOf(id: string): Promise<string> {
 test.beforeAll(async () => {
   test.setTimeout(120_000);
   setSharedDb(db());
-  await db().team.create({
-    data: { id: TEAM_ID, name: "E2E Paused Recovery Team", status: "active" },
-  });
+  await createTestWorkspace({ id: TEAM_ID, name: "E2E Paused Recovery Team", status: "active" });
   await db().contact.createMany({
     data: Array.from({ length: 10 }, (_, i) => ({
-      teamId: TEAM_ID,
+      workspaceId: TEAM_ID,
       name: `paused-contact-${i}`,
       phoneNumber: `16665${String(i).padStart(6, "0")}`,
       identityChannel: "whatsapp" as const,
@@ -94,16 +92,18 @@ test.beforeAll(async () => {
     })),
   });
   contactIds = (
-    await db().contact.findMany({ where: { teamId: TEAM_ID }, select: { id: true } })
+    await db().contact.findMany({ where: { workspaceId: TEAM_ID }, select: { id: true } })
   ).map((c) => c.id);
   expect(contactIds.length).toBe(10);
 });
 
 test.afterAll(async () => {
   test.setTimeout(120_000);
-  await db().broadcast.deleteMany({ where: { teamId: TEAM_ID } });
-  await db().contact.deleteMany({ where: { teamId: TEAM_ID } });
-  await db().team.delete({ where: { id: TEAM_ID } });
+  await db().broadcast.deleteMany({ where: { workspaceId: TEAM_ID } });
+  await db().contact.deleteMany({ where: { workspaceId: TEAM_ID } });
+  // Delete the ORG — it cascades to the workspace. Deleting only the workspace
+  // leaves an orphan Organization behind on every run.
+  await db().organization.deleteMany({ where: { workspaces: { some: { id: TEAM_ID } } } });
 });
 
 test("THE FIX: a broadcast paused past the cooldown is resumed, not left dead", async () => {
@@ -113,7 +113,7 @@ test("THE FIX: a broadcast paused past the cooldown is resumed, not left dead", 
   });
   const resumed = await resumePausedBroadcasts({
     pausedBefore: new Date(Date.now() - 10 * 60_000),
-    teamId: TEAM_ID,
+    workspaceId: TEAM_ID,
     label: "test",
   });
   // The return count IS the assertion: it only increments after the
@@ -137,7 +137,7 @@ test("a broadcast paused INSIDE the cooldown is left alone (no hot retry loop)",
   });
   await resumePausedBroadcasts({
     pausedBefore: new Date(Date.now() - 10 * 60_000),
-    teamId: TEAM_ID,
+    workspaceId: TEAM_ID,
     label: "test",
   });
   expect(await statusOf(id)).toBe("paused");
@@ -150,7 +150,7 @@ test("a paused row with nothing left to send is COMPLETED, not resumed", async (
   });
   await resumePausedBroadcasts({
     pausedBefore: new Date(Date.now() - 10 * 60_000),
-    teamId: TEAM_ID,
+    workspaceId: TEAM_ID,
     label: "test",
   });
   // Without this branch the row would flip to `queued` and stall forever with
@@ -171,7 +171,7 @@ test("SAFETY: resuming never resets an already-sent recipient (no re-bill)", asy
 
   await resumePausedBroadcasts({
     pausedBefore: new Date(Date.now() - 10 * 60_000),
-    teamId: TEAM_ID,
+    workspaceId: TEAM_ID,
     label: "test",
   });
 
@@ -190,7 +190,7 @@ test("a NULL pausedAt (paused before the column existed) is treated as eligible"
   await seedPaused({ pausedAt: null, statuses: ["queued"] });
   const resumed = await resumePausedBroadcasts({
     pausedBefore: new Date(Date.now() - 10 * 60_000),
-    teamId: TEAM_ID,
+    workspaceId: TEAM_ID,
     label: "test",
   });
   // Same reasoning as the first test: count, not status — the runner may
@@ -206,7 +206,7 @@ test("a template-fatal pause is NOT auto-resumed by the SWEEPER (retrying only b
   });
   const resumed = await resumePausedBroadcasts({
     pausedBefore: new Date(Date.now() - 10 * 60_000),
-    teamId: TEAM_ID,
+    workspaceId: TEAM_ID,
     skipTemplatePauses: true, // what the sweeper passes
     label: "test",
   });
@@ -225,7 +225,7 @@ test("a rate-limit pause IS auto-resumed — that cause clears on its own", asyn
   });
   const resumed = await resumePausedBroadcasts({
     pausedBefore: new Date(Date.now() - 10 * 60_000),
-    teamId: TEAM_ID,
+    workspaceId: TEAM_ID,
     // Sweeper semantics: the template row seeded by the previous test must be
     // skipped, leaving exactly this rate-limited one.
     skipTemplatePauses: true,
@@ -246,6 +246,6 @@ test("REGRESSION: BOOT still resumes a template pause — excluding it everywher
   // route — so if BOTH callers skipped template pauses, a template-paused
   // broadcast could never be released by any code path or operator action, and
   // its queued recipients would sit forever.
-  const resumed = await resumePausedBroadcasts({ teamId: TEAM_ID, label: "test" });
+  const resumed = await resumePausedBroadcasts({ workspaceId: TEAM_ID, label: "test" });
   expect(resumed).toBeGreaterThanOrEqual(1);
 });

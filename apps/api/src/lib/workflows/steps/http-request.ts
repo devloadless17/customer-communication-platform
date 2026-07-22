@@ -113,7 +113,7 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
     const { contact, extras } = await buildTokenContext(
       envelope,
       ctx,
-      ctx.teamId,
+      ctx.workspaceId,
       envelopeContact(envelope)?.id,
     );
     const resolvedUrl = resolveFieldTokens(config.url, contact, extras);

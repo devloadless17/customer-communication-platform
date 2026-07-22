@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
  * deletes it here. The MANAGEMENT page is gated by the admin-configurable
  * `tags:manage` capability (default true for manager + agent, so today's
  * behavior is unchanged until an admin restricts it). Mirrors the stages /
- * contact-fields settings pages. Redirect to /settings/account when gated.
+ * contact-fields settings pages. Redirect to /account when gated.
  *
  * The page ships the live contact-count per tag so the admin knows what
  * they're nuking before they confirm a delete.
@@ -24,7 +24,7 @@ export const dynamic = "force-dynamic";
 export default async function TagsSettingsPage() {
   const { permissions } = await getSession();
   if (!permissions["tags:manage"]) {
-    redirect("/settings/account");
+    redirect("/account");
   }
 
   const [tags, usage] = await Promise.all([listTags(), getTagUsage()]);

@@ -15,11 +15,11 @@ import { apiFetch } from "@/lib/api/client-fetch";
  * self-destruct.
  */
 export function DeleteTeamButton({
-  teamId,
+  workspaceId,
   teamName,
   isOwnTeam,
 }: {
-  teamId: string;
+  workspaceId: string;
   teamName: string;
   isOwnTeam: boolean;
 }) {
@@ -51,7 +51,7 @@ export function DeleteTeamButton({
       ),
     });
     if (!ok) return;
-    const res = await apiFetch(`/api/admin/teams/${teamId}`, { method: "DELETE" });
+    const res = await apiFetch(`/api/admin/teams/${workspaceId}`, { method: "DELETE" });
     if (!res.ok) {
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       setError(data.error ?? "Failed to delete organization");

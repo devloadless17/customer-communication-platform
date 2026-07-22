@@ -86,7 +86,7 @@ export class ChannelsController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    const items = await this.channels.list(session.teamId, session.userId);
+    const items = await this.channels.list(session.workspaceId, session.userId);
     return { items };
   }
 
@@ -97,7 +97,7 @@ export class ChannelsController {
   // defense in depth. Keep the two lists in sync.
   @Get("default")
   async getDefault(@CurrentSession() session: ApiSession) {
-    const channel = await this.channels.getDefault(session.teamId, session.userId);
+    const channel = await this.channels.getDefault(session.workspaceId, session.userId);
     return { channel };
   }
 
@@ -105,7 +105,7 @@ export class ChannelsController {
   @Get("dms")
   async listDms(@CurrentSession() session: ApiSession) {
     const items = await this.channels.listDirectMessages(
-      session.teamId,
+      session.workspaceId,
       session.userId,
     );
     return { items };
@@ -120,7 +120,7 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Query(zQuery(BrowseChannelsQuerySchema)) query: BrowseChannelsQuery,
   ) {
-    return this.channels.browse(session.teamId, session.userId, query.q || null, {
+    return this.channels.browse(session.workspaceId, session.userId, query.q || null, {
       before: query.before,
       take: query.take,
     });
@@ -130,7 +130,7 @@ export class ChannelsController {
   @Get("unread-count")
   async unreadCount(@CurrentSession() session: ApiSession) {
     const mentions = await this.channels.unreadMentionCount(
-      session.teamId,
+      session.workspaceId,
       session.userId,
     );
     return { mentions };
@@ -146,7 +146,7 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Query(zQuery(ChannelListQuerySchema)) query: ChannelListQuery,
   ) {
-    return this.channels.searchAllMessages(session.teamId, session.userId, query.q ?? "", {
+    return this.channels.searchAllMessages(session.workspaceId, session.userId, query.q ?? "", {
       before: query.before,
       take: query.take,
     });
@@ -157,7 +157,7 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    const channel = await this.channels.getById(session.teamId, session.userId, id);
+    const channel = await this.channels.getById(session.workspaceId, session.userId, id);
     return { channel };
   }
 
@@ -166,7 +166,7 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    const pins = await this.channels.listPins(session.teamId, session.userId, id);
+    const pins = await this.channels.listPins(session.workspaceId, session.userId, id);
     return { pins };
   }
 
@@ -175,7 +175,7 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    const members = await this.channels.listMembers(session.teamId, session.userId, id);
+    const members = await this.channels.listMembers(session.workspaceId, session.userId, id);
     return { members };
   }
 
@@ -186,7 +186,7 @@ export class ChannelsController {
     @Body(zBody(AddChannelMembersSchema)) body: AddChannelMembersInput,
   ) {
     const out = await this.channels.addMembers(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       session.role,
       id,
@@ -202,7 +202,7 @@ export class ChannelsController {
     @Param("userId") userId: string,
   ) {
     await this.channels.removeMember(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       session.role,
       id,
@@ -217,12 +217,12 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateChannelSchema)) body: CreateChannelInput,
   ) {
-    const channel = await this.channels.create(session.teamId, session.userId, session.role, body);
+    const channel = await this.channels.create(session.workspaceId, session.userId, session.role, body);
     return { channel };
   }
 
   /**
-   * Open (or re-open) a 1:1 DM with a teammate. Idempotent — the (teamId,
+   * Open (or re-open) a 1:1 DM with a teammate. Idempotent — the (workspaceId,
    * dmKey) unique guarantees one row per pair, so calling this repeatedly
    * always resolves to the same channel. `dm` can't collide with the bare
    * @Post() above because that route has no path segment.
@@ -233,7 +233,7 @@ export class ChannelsController {
     @Body(zBody(CreateDmSchema)) body: CreateDmInput,
   ) {
     const channel = await this.channels.createOrGetDm(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       body.userId,
     );
@@ -247,7 +247,7 @@ export class ChannelsController {
   @Post(":id/join")
   async join(@CurrentSession() session: ApiSession, @Param("id") id: string) {
     const { joined } = await this.channels.joinPublicChannel(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       id,
     );
@@ -261,7 +261,7 @@ export class ChannelsController {
    */
   @Get(":id/preview")
   async preview(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    const channel = await this.channels.getPreview(session.teamId, id);
+    const channel = await this.channels.getPreview(session.workspaceId, id);
     return { channel };
   }
 
@@ -271,7 +271,7 @@ export class ChannelsController {
     @Param("id") id: string,
     @Body(zBody(UpdateChannelSchema)) body: UpdateChannelInput,
   ) {
-    const channel = await this.channels.update(session.teamId, session.role, id, body);
+    const channel = await this.channels.update(session.workspaceId, session.role, id, body);
     return { channel };
   }
 
@@ -280,7 +280,7 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.channels.remove(session.teamId, session.role, id);
+    await this.channels.remove(session.workspaceId, session.role, id);
     return { ok: true };
   }
 
@@ -290,7 +290,7 @@ export class ChannelsController {
     @Param("id") id: string,
     @Query(zQuery(ChannelListQuerySchema)) query: ChannelListQuery,
   ) {
-    return this.channels.listMessages(session.teamId, session.userId, id, {
+    return this.channels.listMessages(session.workspaceId, session.userId, id, {
       after: query.after,
       before: query.before,
       take: query.take,
@@ -314,7 +314,7 @@ export class ChannelsController {
     @Param("mid") mid: string,
     @Body(zBody(EditChannelMessageSchema)) body: EditChannelMessageInput,
   ) {
-    const out = await this.channels.editMessage(session.teamId, session.userId, id, mid, body);
+    const out = await this.channels.editMessage(session.workspaceId, session.userId, id, mid, body);
     return { ok: true, ...out };
   }
 
@@ -325,7 +325,7 @@ export class ChannelsController {
     @Param("mid") mid: string,
   ) {
     await this.channels.deleteMessage(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       session.role,
       id,
@@ -340,7 +340,7 @@ export class ChannelsController {
     @Param("id") id: string,
     @Param("mid") mid: string,
   ) {
-    await this.channels.pinMessage(session.teamId, session.userId, session.role, id, mid);
+    await this.channels.pinMessage(session.workspaceId, session.userId, session.role, id, mid);
     return { ok: true };
   }
 
@@ -350,7 +350,7 @@ export class ChannelsController {
     @Param("id") id: string,
     @Param("mid") mid: string,
   ) {
-    await this.channels.unpinMessage(session.teamId, session.userId, session.role, id, mid);
+    await this.channels.unpinMessage(session.workspaceId, session.userId, session.role, id, mid);
     return { ok: true };
   }
 
@@ -361,7 +361,7 @@ export class ChannelsController {
     @Param("mid") mid: string,
     @Body(zBody(ToggleReactionSchema)) body: ToggleReactionInput,
   ) {
-    const out = await this.channels.toggleReaction(session.teamId, session.userId, id, mid, body);
+    const out = await this.channels.toggleReaction(session.workspaceId, session.userId, id, mid, body);
     return { ok: true, ...out };
   }
 
@@ -370,7 +370,7 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    const out = await this.channels.markRead(session.teamId, session.userId, id);
+    const out = await this.channels.markRead(session.workspaceId, session.userId, id);
     return { ok: true, ...out };
   }
 
@@ -381,7 +381,7 @@ export class ChannelsController {
     @Param("mid") mid: string,
     @Query(zQuery(ChannelListQuerySchema)) query: ChannelListQuery,
   ) {
-    return this.channels.listThreadReplies(session.teamId, session.userId, id, mid, {
+    return this.channels.listThreadReplies(session.workspaceId, session.userId, id, mid, {
       after: query.after,
       take: query.take,
     });
@@ -399,7 +399,7 @@ export class ChannelsController {
     @Param("id") id: string,
     @Query(zQuery(ChannelListQuerySchema)) query: ChannelListQuery,
   ) {
-    return this.channels.searchMessages(session.teamId, session.userId, id, query.q ?? "", {
+    return this.channels.searchMessages(session.workspaceId, session.userId, id, query.q ?? "", {
       before: query.before,
       take: query.take,
     });
@@ -421,7 +421,7 @@ export class ChannelsController {
       throw new BadRequestException({ error: "messageId required" });
     }
     return this.channels.getMessagesAround(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       id,
       query.messageId,
@@ -448,7 +448,7 @@ export class ChannelsController {
     @Res() res: Response,
   ): Promise<void> {
     const key = await this.channels.getMessageMediaKey(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       id,
       mid,
@@ -519,7 +519,7 @@ export class ChannelsController {
 
     try {
       const bytes = await readFile(file.path);
-      const out = await this.channels.uploadMedia(session.teamId, session.userId, id, {
+      const out = await this.channels.uploadMedia(session.workspaceId, session.userId, id, {
         file: {
           bytes: new Uint8Array(bytes),
           mimeType: file.mimetype || "application/octet-stream",

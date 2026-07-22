@@ -15,9 +15,9 @@ import { createTokenBucket } from "../common/token-bucket";
  * zero proxy-side throttle on the stock-Caddy deploy (the rate_limit
  * Caddyfile directive requires the xcaddy plugin we don't compile in).
  *
- * Bucketing by teamId (path param) means one chatty team can't drain the
- * api process for everyone. Fallback to req.ip on a path with no teamId
- * (defense in depth — every current webhook route has :teamId, but a
+ * Bucketing by workspaceId (path param) means one chatty team can't drain the
+ * api process for everyone. Fallback to req.ip on a path with no workspaceId
+ * (defense in depth — every current webhook route has :workspaceId, but a
  * future route might forget the guard then forget the param).
  *
  * Default ceiling: 600 req/min per team. Meta's outbound rate cap per
@@ -46,12 +46,12 @@ export class WebhookRateLimitGuard implements CanActivate {
     const req = http.getRequest<Request>();
     const res = http.getResponse<Response>();
 
-    // teamId is set on every current webhook route. Fall back to the
+    // workspaceId is set on every current webhook route. Fall back to the
     // proxy-resolved IP so a future un-parameterized webhook route still
     // gets bucket-scoped throttling instead of one global bucket.
-    const teamId = (req.params as { teamId?: string }).teamId;
+    const workspaceId = (req.params as { workspaceId?: string }).workspaceId;
     const ip = req.ip ?? "unknown";
-    const key = teamId ? `team:${teamId}` : `ip:${ip}`;
+    const key = workspaceId ? `team:${workspaceId}` : `ip:${ip}`;
 
     const result = metaWebhookBucket.consume(key);
     if (!result.ok) {
@@ -68,7 +68,7 @@ export class WebhookRateLimitGuard implements CanActivate {
     }
 
     // Per-IP bucket second — the per-team key is an attacker-chosen path
-    // param, so this is the ceiling that actually bounds a random-teamId
+    // param, so this is the ceiling that actually bounds a random-workspaceId
     // spray from a single source.
     const ipResult = metaWebhookIpBucket.consume(`ip:${ip}`);
     if (!ipResult.ok) {

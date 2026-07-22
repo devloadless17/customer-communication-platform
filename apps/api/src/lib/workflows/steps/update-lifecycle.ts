@@ -53,7 +53,7 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
   async run(envelope, config, ctx): Promise<StepResult> {
     let resolved;
     try {
-      resolved = await resolveStepTarget(config.target, envelope, ctx.teamId, {
+      resolved = await resolveStepTarget(config.target, envelope, ctx.workspaceId, {
         createConversation: false,
       });
     } catch (err) {
@@ -64,11 +64,11 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
 
     const [contact, stage] = await Promise.all([
       db.contact.findFirst({
-        where: { id: contactId, teamId: ctx.teamId },
+        where: { id: contactId, workspaceId: ctx.workspaceId },
         include: { tags: { select: { id: true } } },
       }),
       db.contactStage.findFirst({
-        where: { id: config.stageId, teamId: ctx.teamId },
+        where: { id: config.stageId, workspaceId: ctx.workspaceId },
         select: { id: true },
       }),
     ]);
@@ -84,7 +84,7 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
     let updated;
     try {
       updated = await db.contact.update({
-        where: { id: contactId, teamId: ctx.teamId, version: contact.version },
+        where: { id: contactId, workspaceId: ctx.workspaceId, version: contact.version },
         data: { stageId: stage.id, version: { increment: 1 } },
         include: { tags: { select: { id: true } } },
       });
@@ -105,7 +105,7 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
     // step if explicit chaining is wanted.
     await publish({
       type: "contact.updated",
-      teamId: ctx.teamId,
+      workspaceId: ctx.workspaceId,
       contact: payload,
       previousStageId,
       fieldChanges: [],
@@ -123,7 +123,7 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
     // does it MUST skip step-driven changes or this step loops into itself.
     await publish({
       type: "contact.lifecycle_changed",
-      teamId: ctx.teamId,
+      workspaceId: ctx.workspaceId,
       contactId: updated.id,
       before: { stageId: previousStageId },
       after: { stageId: updated.stageId },

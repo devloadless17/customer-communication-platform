@@ -22,6 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@ccp/shared/utils";
+import { templateNamedPlaceholders } from "@ccp/shared/template-render";
 import {
   CampaignAssignment,
   EMPTY_CAMPAIGN_ASSIGNMENT,
@@ -343,10 +344,38 @@ export function NewBroadcastForm({
   const footerComp = components.find((c) => c.type === "FOOTER");
   const buttonsComp = components.find((c) => c.type === "BUTTONS");
 
-  const bodyVarCount = selectedTemplate ? countPlaceholders(selectedTemplate.bodyText) : 0;
+  // NAMED vs POSITIONAL comes from Meta's stored `parameter_format`, never from
+  // a regex over the body: a positional template containing `{{order_id}}` as
+  // literal copy would be misread, and the wrong wire shape fails every
+  // recipient with Meta error 132000.
+  const isNamedTemplate = selectedTemplate?.parameterFormat === "named";
+  // Placeholder NAMES in first-appearance order — the order the runner zips
+  // these values back against on the wire, so the inputs must be collected in
+  // exactly this order too.
+  const namedBodyVars = useMemo(
+    () =>
+      isNamedTemplate && selectedTemplate
+        ? templateNamedPlaceholders(selectedTemplate.bodyText)
+        : [],
+    [isNamedTemplate, selectedTemplate],
+  );
+  const namedHeaderVar =
+    isNamedTemplate && headerComp?.format === "TEXT" && headerComp.text
+      ? templateNamedPlaceholders(headerComp.text)[0]
+      : undefined;
+
+  const bodyVarCount = !selectedTemplate
+    ? 0
+    : isNamedTemplate
+      ? namedBodyVars.length
+      : countPlaceholders(selectedTemplate.bodyText);
   const headerVarCount =
     headerComp?.format === "TEXT" && headerComp.text
-      ? countPlaceholders(headerComp.text)
+      ? isNamedTemplate
+        ? namedHeaderVar
+          ? 1
+          : 0
+        : countPlaceholders(headerComp.text)
       : 0;
   // IMAGE/VIDEO/DOCUMENT headers need one campaign media (reused for everyone).
   const headerMediaKind: "image" | "video" | "document" | null =
@@ -1104,7 +1133,7 @@ export function NewBroadcastForm({
               )}
               {headerVarCount > 0 && (
                 <VarField
-                  label="Header {{1}}"
+                  label={namedHeaderVar ? `Header {{${namedHeaderVar}}}` : "Header {{1}}"}
                   value={headerVar}
                   onChange={setHeaderVar}
                   fieldDefinitions={fieldDefinitions}
@@ -1113,7 +1142,13 @@ export function NewBroadcastForm({
               {bodyVars.map((v, i) => (
                 <VarField
                   key={i}
-                  label={`Body {{${i + 1}}}`}
+                  // Named templates show the real placeholder name, so an
+                  // author fills "order_id" rather than counting braces.
+                  label={
+                    isNamedTemplate
+                      ? `Body {{${namedBodyVars[i] ?? i + 1}}}`
+                      : `Body {{${i + 1}}}`
+                  }
                   value={v}
                   onChange={(next) => {
                     setBodyVars((cur) => {

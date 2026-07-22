@@ -53,10 +53,14 @@ export class RoleGuard implements CanActivate {
 
     const role: Role = session.role;
     if (required === "superAdmin") {
-      if (role !== "superAdmin") throw new ForbiddenException({ error: "forbidden" });
+      // Platform-level gate: keys on the `isSuperAdmin` FLAG, never on the
+      // workspace role — resolveSession resolves both a platform superAdmin and
+      // an ordinary org admin to role "admin", so a role check here would hand
+      // every org admin the platform console.
+      if (!session.isSuperAdmin) throw new ForbiddenException({ error: "forbidden" });
       return true;
     }
-    // admin OR superAdmin
+    // admin (a superAdmin already resolves to "admin", so this covers both)
     if (!canManageUsers(role)) throw new ForbiddenException({ error: "forbidden" });
     return true;
   }

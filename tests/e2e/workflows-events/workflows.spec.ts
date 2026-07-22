@@ -25,7 +25,7 @@ import {
 import { db, superadminTeam, wipeTestData, pollUntil } from "../_helpers/db";
 
 // ─── Fixture: one contact + one conversation for the suite ───────────────
-let teamId: string;
+let workspaceId: string;
 let userId: string;
 let contactId: string;
 let conversationId: string;
@@ -36,7 +36,7 @@ test.beforeAll(async () => {
   await wipeTestData();
 
   const su = await superadminTeam();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
   userId = su.userId;
 
   // Single canonical contact + conversation reused across specs. Created
@@ -45,7 +45,7 @@ test.beforeAll(async () => {
   // predeploy.spec.ts.
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       phoneNumber: "+15551234567",
       identityChannel: "whatsapp",
       name: "E2E Test Contact",
@@ -56,7 +56,7 @@ test.beforeAll(async () => {
 
   const conv = await db().conversation.create({
     data: {
-      teamId,
+      workspaceId,
       contactId: contact.id,
       channel: "whatsapp",
       status: "open",
@@ -397,7 +397,7 @@ test.describe("C. Realtime two-tab sync", () => {
       }),
       db().message.create({
         data: {
-          teamId,
+          workspaceId,
           conversationId,
           externalId: `e2e-reopen-${Date.now()}`,
           direction: "in",
@@ -410,7 +410,7 @@ test.describe("C. Realtime two-tab sync", () => {
       }),
       db().outboundEvent.create({
         data: {
-          teamId,
+          workspaceId,
           type: "conversation.status_changed",
           payload: {
             conversationId,
@@ -505,7 +505,7 @@ test.describe("D. Outbound webhook delivery", () => {
     expect(delivery.eventType).toBe("conversation.assigned");
     expect(delivery.correlationId).toBeTruthy();
     const payload = delivery.payload as Record<string, unknown>;
-    expect(payload.team_id).toBe(teamId);
+    expect(payload.team_id).toBe(workspaceId);
 
     // 6. Verify count incremented by EXACTLY one (no duplicate fanout).
     const afterCount = await db().outboundWebhookDelivery.count({
@@ -555,7 +555,7 @@ test.describe("E. Outbox drainer", () => {
     // accidentally create cascading side effects.
     const row = await db().outboundEvent.create({
       data: {
-        teamId,
+        workspaceId,
         type: "team.catalog_changed",
         payload: { scope: "tags" },
       },

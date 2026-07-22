@@ -36,6 +36,10 @@ import type {
   TemplateComponent,
 } from "@ccp/shared/providers/types";
 import type { TemplateDto } from "@ccp/shared/types";
+import {
+  templateNamedPlaceholders,
+  validateTemplateComponents,
+} from "@ccp/shared/template-render";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -55,7 +59,7 @@ const UPLOAD_ALLOWED_MIME = new Set<string>([
   "application/pdf",
 ]);
 
-// Credentials live on a `ChannelConnection` row keyed by (teamId, provider).
+// Credentials live on a `ChannelConnection` row keyed by (workspaceId, provider).
 // `config` = non-secret fields; `secrets` = envelope-encrypted ciphertext.
 const META_PROVIDER = "whatsapp" as const;
 interface MetaChannelConfig {
@@ -101,15 +105,15 @@ export class WhatsappService {
    * the old RSC page that imported `decryptSecret` directly into apps/web,
    * which is why the envelope key no longer needs to live in the web image.
    */
-  async getConfig(teamId: string): Promise<WhatsappConfigView> {
-    const conn = await this.db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId, channel: META_PROVIDER } },
+  async getConfig(workspaceId: string): Promise<WhatsappConfigView> {
+    const conn = await this.db.channelConnection.findFirst({
+      where: { workspaceId, channel: META_PROVIDER, isDefault: true },
       select: {
         config: true,
         secrets: true,
         needsReconnect: true,
-        messagingTier: true,
-        messagingDailyCap: true,
+        // Messaging limit is portfolio-scoped (Meta, 2025-10-07).
+        portfolio: { select: { messagingTier: true, messagingDailyCap: true } },
         qualityRating: true,
         throughputLevel: true,
       },
@@ -137,11 +141,22 @@ export class WhatsappService {
       const minted = randomBytes(24).toString("hex");
       try {
         const mergedConfig = pruneUndefined({ ...config, verifyToken: minted });
+        // Mints the verify token on the DEFAULT account for this channel (or
+        // creates the first, credential-less one). Account-keyed like every
+        // other write now that a channel can hold several.
         await this.db.channelConnection.upsert({
-          where: { teamId_channel: { teamId, channel: META_PROVIDER } },
+          where: {
+            workspaceId_channel_externalAccountId: {
+              workspaceId,
+              channel: META_PROVIDER,
+              externalAccountId: config.phoneNumberId ?? "",
+            },
+          },
           create: {
-            teamId,
+            workspaceId,
             channel: META_PROVIDER,
+            externalAccountId: config.phoneNumberId ?? "",
+            isDefault: true,
             config: mergedConfig as Prisma.InputJsonValue,
             secrets: {},
             isActive: false,
@@ -159,15 +174,15 @@ export class WhatsappService {
     return {
       phoneNumberId: config.phoneNumberId ?? null,
       displayPhoneNumber: config.displayPhoneNumber ?? null,
-      wabaId: config.wabaId ?? null,
+      wabaId: config.wabaId ?? "",
       appId: config.appId ?? null,
       verifyToken,
       accessToken,
       appSecret,
       credentialsUndecryptable,
       needsReconnect: conn?.needsReconnect ?? false,
-      messagingTier: conn?.messagingTier ?? null,
-      messagingDailyCap: conn?.messagingDailyCap ?? null,
+      messagingTier: conn?.portfolio?.messagingTier ?? null,
+      messagingDailyCap: conn?.portfolio?.messagingDailyCap ?? null,
       qualityRating: conn?.qualityRating ?? null,
       throughputLevel: conn?.throughputLevel ?? null,
     };
@@ -200,7 +215,7 @@ export class WhatsappService {
    *   or webhook receive; admins paste it separately for template management.
    */
   async updateConfig(
-    teamId: string,
+    workspaceId: string,
     input: UpdateWhatsappConfigInput,
   ): Promise<{
     config: {
@@ -213,7 +228,7 @@ export class WhatsappService {
 
     // Source the access token (system-user) + App secret from the shared Meta
     // App connection unless overridden on this form.
-    const meta = await getMetaConnection(teamId);
+    const meta = await getMetaConnection(workspaceId);
     const accessToken = input.accessToken?.trim() || meta?.systemUserToken || null;
     const appSecret = input.appSecret?.trim() || meta?.appSecret || null;
     if (!accessToken || !appSecret) {
@@ -257,8 +272,8 @@ export class WhatsappService {
       });
     }
 
-    const existing = await this.db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId, channel: META_PROVIDER } },
+    const existing = await this.db.channelConnection.findFirst({
+      where: { workspaceId, channel: META_PROVIDER, isDefault: true },
       select: { config: true },
     });
     const existingConfig = (existing?.config ?? {}) as MetaChannelConfig;
@@ -284,7 +299,7 @@ export class WhatsappService {
     const clash = await this.db.channelConnection.findFirst({
       where: {
         channel: META_PROVIDER,
-        teamId: { not: teamId },
+        workspaceId: { not: workspaceId },
         config: { path: ["phoneNumberId"], equals: phoneNumberId },
       },
       select: { id: true },
@@ -326,16 +341,32 @@ export class WhatsappService {
       appSecret: encryptSecret(appSecret),
     };
 
+    // Keyed on the ACCOUNT (phone-number id), not just the channel: a workspace
+    // may now hold several WhatsApp numbers, so re-pasting credentials for one
+    // number must update THAT row rather than overwrite a sibling number.
     await this.db.channelConnection.upsert({
-      where: { teamId_channel: { teamId, channel: META_PROVIDER } },
+      where: {
+        workspaceId_channel_externalAccountId: {
+          workspaceId,
+          channel: META_PROVIDER,
+          externalAccountId: phoneNumberId,
+        },
+      },
       create: {
-        teamId,
+        workspaceId,
         channel: META_PROVIDER,
+        externalAccountId: phoneNumberId,
+        wabaId: newConfig.wabaId ?? null,
+        // First account on this channel becomes the send default.
+        isDefault: !(await this.db.channelConnection.count({
+          where: { workspaceId, channel: META_PROVIDER },
+        })),
         config: newConfig as Prisma.InputJsonValue,
         secrets: newSecrets as Prisma.InputJsonValue,
         isActive: true,
       },
       update: {
+        wabaId: newConfig.wabaId ?? null,
         config: newConfig as Prisma.InputJsonValue,
         secrets: newSecrets as Prisma.InputJsonValue,
         isActive: true,
@@ -345,7 +376,7 @@ export class WhatsappService {
       },
     });
 
-    invalidateProviderConfig(teamId);
+    invalidateProviderConfig(workspaceId);
 
     // A reconnect can mint a brand-new ChannelConnection row (new id/createdAt).
     // Publish catalog_changed so the outbound-webhooks subscriber flushes its
@@ -354,7 +385,7 @@ export class WhatsappService {
     // view (whose availability tracks the connection) refreshes too.
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "whatsapp-templates",
     });
 
@@ -363,9 +394,9 @@ export class WhatsappService {
     // connection and it will auto-resume" is true on a stable box, not just
     // after a deploy. Fire-and-forget; per-recipient CAS makes resume
     // double-send-safe.
-    void resumePausedBroadcastsForTeam(teamId).catch((err) => {
+    void resumePausedBroadcastsForTeam(workspaceId).catch((err) => {
       this.logger.warn(
-        `failed to resume paused broadcasts after WhatsApp settings save for team ${teamId}: ${
+        `failed to resume paused broadcasts after WhatsApp settings save for team ${workspaceId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -375,9 +406,9 @@ export class WhatsappService {
     // large template broadcast can be gated on real capacity immediately after
     // connecting (before the first quality webhook arrives). Fire-and-forget +
     // best-effort — a fetch failure just leaves the snapshot null (ungated).
-    void fetchWhatsappHealthFromGraph(teamId).catch((err) => {
+    void fetchWhatsappHealthFromGraph(workspaceId).catch((err) => {
       this.logger.warn(
-        `failed to fetch WhatsApp messaging health after settings save for team ${teamId}: ${
+        `failed to fetch WhatsApp messaging health after settings save for team ${workspaceId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -448,22 +479,22 @@ export class WhatsappService {
    * Wipe credentials but leave historical messages intact (multi-tenancy
    * rule #2 — integration toggles must not erase audit trail).
    */
-  async disconnect(teamId: string): Promise<void> {
+  async disconnect(workspaceId: string): Promise<void> {
     // Drop the connection row entirely (wipes creds + verify token, matching
     // the old "null every meta_* column" behavior). Historical messages are
     // untouched — they live on their own tables. deleteMany so a
     // not-yet-connected team is a no-op rather than a 404.
     await this.db.channelConnection.deleteMany({
-      where: { teamId, channel: META_PROVIDER },
+      where: { workspaceId, channel: META_PROVIDER },
     });
-    invalidateProviderConfig(teamId);
+    invalidateProviderConfig(workspaceId);
 
     // Deleting the row leaves a stale id in the outbound-webhooks subscriber's
     // channelCache; catalog_changed flushes it (see updateConfig for the same
     // reasoning) so post-disconnect webhook payloads don't carry a dangling id.
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "whatsapp-templates",
     });
   }
@@ -477,7 +508,7 @@ export class WhatsappService {
    * `hasWabaId` / `connected` to decide between "go set up your WABA" vs
    * "no templates yet, click refresh" without a POST round-trip.
    */
-  async listTemplates(teamId: string): Promise<{
+  async listTemplates(workspaceId: string): Promise<{
     templates: TemplateDto[];
     hasWabaId: boolean;
     hasAppId: boolean;
@@ -485,11 +516,11 @@ export class WhatsappService {
   }> {
     const [rows, conn] = await Promise.all([
       this.db.messageTemplate.findMany({
-        where: { teamId },
+        where: { workspaceId },
         orderBy: [{ status: "asc" }, { name: "asc" }, { language: "asc" }],
       }),
-      this.db.channelConnection.findUnique({
-        where: { teamId_channel: { teamId, channel: META_PROVIDER } },
+      this.db.channelConnection.findFirst({
+        where: { workspaceId, channel: META_PROVIDER, isDefault: true },
         select: { config: true },
       }),
     ]);
@@ -504,7 +535,7 @@ export class WhatsappService {
 
   /**
    * Force a sync from Meta. Idempotent locally — upsert by
-   * `(teamId, name, language)`, then RECONCILE: drop local rows Meta no longer
+   * `(workspaceId, name, language)`, then RECONCILE: drop local rows Meta no longer
    * returns for the connection's WABA. `fetchTemplates` pages fully or throws,
    * so a returned list is the complete, authoritative catalog for that WABA;
    * paused/disabled templates STAY in it (with a status), so pruning doesn't
@@ -514,11 +545,11 @@ export class WhatsappService {
    * stale rows left behind when a connection's wabaId is corrected — e.g. the
    * shared `jaspers_market_*` sample templates imported under an old test WABA.
    */
-  async syncTemplates(teamId: string): Promise<{
+  async syncTemplates(workspaceId: string): Promise<{
     templates: TemplateDto[];
     syncedCount: number;
   }> {
-    const config = await this.requireSendConfig(teamId);
+    const config = await this.requireSendConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.fetchTemplates) {
       throw new HttpException(
@@ -544,11 +575,19 @@ export class WhatsappService {
     await this.db.$transaction(
       fetched.map((t) =>
         this.db.messageTemplate.upsert({
+          // Templates are scoped to a WABA (numbers under one WABA share a
+          // catalog), so the key includes it: two WABAs in one workspace may each
+          // hold a template with the same name+language.
           where: {
-            teamId_name_language: { teamId, name: t.name, language: t.language },
+            workspaceId_wabaId_name_language: {
+              workspaceId,
+              wabaId: config.wabaId ?? "",
+              name: t.name,
+              language: t.language,
+            },
           },
           create: {
-            teamId,
+            workspaceId,
             externalId: t.externalId ?? null,
             name: t.name,
             language: t.language,
@@ -556,6 +595,8 @@ export class WhatsappService {
             status: t.status,
             bodyText: t.bodyText,
             components: t.components as unknown as Prisma.InputJsonValue,
+            // Meta's own answer, not our inference — see the schema comment.
+            parameterFormat: t.parameterFormat,
             syncedAt: now,
           },
           update: {
@@ -564,6 +605,7 @@ export class WhatsappService {
             status: t.status,
             bodyText: t.bodyText,
             components: t.components as unknown as Prisma.InputJsonValue,
+            parameterFormat: t.parameterFormat,
             syncedAt: now,
           },
         }),
@@ -582,7 +624,7 @@ export class WhatsappService {
     );
     const graceCutoff = new Date(now.getTime() - 60_000);
     const localRows = await this.db.messageTemplate.findMany({
-      where: { teamId },
+      where: { workspaceId },
       select: { id: true, name: true, language: true, syncedAt: true },
     });
     const staleIds = localRows
@@ -594,15 +636,15 @@ export class WhatsappService {
       .map((r) => r.id);
     if (staleIds.length > 0) {
       await this.db.messageTemplate.deleteMany({
-        where: { teamId, id: { in: staleIds } },
+        where: { workspaceId, id: { in: staleIds } },
       });
       this.logger.log(
-        `template sync for team ${teamId} pruned ${staleIds.length} stale template(s)`,
+        `template sync for team ${workspaceId} pruned ${staleIds.length} stale template(s)`,
       );
     }
 
     const rows = await this.db.messageTemplate.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: [{ status: "asc" }, { name: "asc" }, { language: "asc" }],
     });
 
@@ -611,7 +653,7 @@ export class WhatsappService {
     // different lists until one navigates.
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "whatsapp-templates",
     });
 
@@ -630,7 +672,7 @@ export class WhatsappService {
    * reimplement, so we surface them verbatim as 422.
    */
   async createTemplate(
-    teamId: string,
+    workspaceId: string,
     raw: unknown,
   ): Promise<{ templateId: string; status: string }> {
     const obj = (raw ?? {}) as Record<string, unknown>;
@@ -674,7 +716,21 @@ export class WhatsappService {
       });
     }
 
-    const config = await this.requireSendConfig(teamId);
+    // Meta's own field limits, checked BEFORE the Graph call. A rejection from
+    // Meta arrives as an opaque `#100 Invalid parameter` with no field name, so
+    // an author who pasted a 1,200-character body would learn only that
+    // "something" was wrong. Same pure validator the create form uses, so the
+    // character counter and this rejection can't disagree.
+    const issues = validateTemplateComponents(name, components);
+    if (issues.length > 0) {
+      throw new BadRequestException({
+        error: "template_invalid",
+        detail: issues.map((i) => i.message).join(" "),
+        issues,
+      });
+    }
+
+    const config = await this.requireSendConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.createTemplate) {
       throw new HttpException(
@@ -699,11 +755,21 @@ export class WhatsappService {
       });
     }
 
+    const authoredParameterFormat =
+      templateNamedPlaceholders(body.text).length > 0 ? "named" : "positional";
+
     const now = new Date();
     const saved = await this.db.messageTemplate.upsert({
-      where: { teamId_name_language: { teamId, name, language } },
+      where: {
+        workspaceId_wabaId_name_language: {
+          workspaceId,
+          wabaId: config.wabaId ?? "",
+          name,
+          language,
+        },
+      },
       create: {
-        teamId,
+        workspaceId,
         externalId: created.externalId,
         name,
         language,
@@ -712,6 +778,11 @@ export class WhatsappService {
         bodyText: body.text,
         components: components as unknown as Prisma.InputJsonValue,
         variableBindings: variableBindings as Prisma.InputJsonValue,
+        // Derived from the body WE authored, which is the one case where
+        // inference is safe: we know there is no literal `{{word}}` copy in it,
+        // because the composer wrote every placeholder. The next sync replaces
+        // this with Meta's authoritative `parameter_format` anyway.
+        parameterFormat: authoredParameterFormat,
         syncedAt: now,
       },
       update: {
@@ -721,13 +792,14 @@ export class WhatsappService {
         bodyText: body.text,
         components: components as unknown as Prisma.InputJsonValue,
         variableBindings: variableBindings as Prisma.InputJsonValue,
+        parameterFormat: authoredParameterFormat,
         syncedAt: now,
       },
     });
 
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "whatsapp-templates",
     });
 
@@ -741,13 +813,13 @@ export class WhatsappService {
    * WhatsApp Manager. The provider treats Meta's 404 as success, so
    * re-deleting an already-gone template still cleans up locally.
    */
-  async deleteTemplate(teamId: string, id: string): Promise<void> {
+  async deleteTemplate(workspaceId: string, id: string): Promise<void> {
     const template = await this.db.messageTemplate.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
     });
     if (!template) throw new NotFoundException({ error: "template not found" });
 
-    const config = await this.requireSendConfig(teamId);
+    const config = await this.requireSendConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.deleteTemplate) {
       throw new HttpException(
@@ -777,19 +849,19 @@ export class WhatsappService {
     await this.db.messageTemplate.delete({ where: { id: template.id } });
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "whatsapp-templates",
     });
   }
 
   /** Update variableBindings only — the part of the template our app owns. */
   async updateTemplateBindings(
-    teamId: string,
+    workspaceId: string,
     id: string,
     input: UpdateTemplateBindingsInput,
   ): Promise<void> {
     const updated = await this.db.messageTemplate.updateMany({
-      where: { id, teamId },
+      where: { id, workspaceId },
       data: {
         variableBindings: input.variableBindings as Prisma.InputJsonValue,
       },
@@ -799,7 +871,7 @@ export class WhatsappService {
     }
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "whatsapp-templates",
     });
   }
@@ -816,7 +888,7 @@ export class WhatsappService {
    * session anyway. Header media tops out under 10 MB in practice.
    */
   async uploadHeaderMedia(
-    teamId: string,
+    workspaceId: string,
     file: Express.Multer.File,
   ): Promise<{ headerHandle: string }> {
     if (file.size > UPLOAD_MAX_BYTES) {
@@ -834,7 +906,7 @@ export class WhatsappService {
     }
     const filename = file.originalname || "upload";
 
-    const config = await this.requireSendConfig(teamId);
+    const config = await this.requireSendConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.uploadHeaderMedia) {
       throw new HttpException(
@@ -871,9 +943,9 @@ export class WhatsappService {
   // Helpers
   // -------------------------------------------------------------------------
 
-  private async requireSendConfig(teamId: string) {
+  private async requireSendConfig(workspaceId: string) {
     try {
-      return await getMetaSendConfig(teamId);
+      return await getMetaSendConfig(workspaceId);
     } catch (err) {
       if (err instanceof ProviderNotConfiguredError) {
         throw new ConflictException({
@@ -920,6 +992,7 @@ function toTemplateDto(row: {
   bodyText: string;
   components: Prisma.JsonValue;
   variableBindings: Prisma.JsonValue;
+  parameterFormat: string;
   syncedAt: Date;
 }): TemplateDto {
   return {
@@ -934,6 +1007,7 @@ function toTemplateDto(row: {
       ? (row.components as unknown as TemplateComponent[])
       : [],
     variableBindings: row.variableBindings ?? {},
+    parameterFormat: row.parameterFormat === "named" ? "named" : "positional",
     syncedAt: row.syncedAt.toISOString(),
   };
 }

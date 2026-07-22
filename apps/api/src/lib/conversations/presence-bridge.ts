@@ -9,7 +9,7 @@
  * standalone worker, or right after a restart before anyone reconnects), which
  * tells callers to fall back to the DB availabilityStatus only.
  */
-type OnlineResolver = (teamId: string) => Set<string>;
+type OnlineResolver = (workspaceId: string) => Set<string>;
 
 let resolver: OnlineResolver | null = null;
 
@@ -18,6 +18,6 @@ export function setOnlinePresenceResolver(fn: OnlineResolver): void {
 }
 
 /** Connected userIds for the team, or null if presence is unavailable here. */
-export function getOnlineUserIds(teamId: string): Set<string> | null {
-  return resolver ? resolver(teamId) : null;
+export function getOnlineUserIds(workspaceId: string): Set<string> | null {
+  return resolver ? resolver(workspaceId) : null;
 }

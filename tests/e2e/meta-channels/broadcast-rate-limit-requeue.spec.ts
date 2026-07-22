@@ -68,14 +68,14 @@ test("THE FIX: a sustained rate limit pauses the broadcast and leaves recipients
   // Contacts to send to. Reuse whatever the meta test team already has so this
   // spec stays light; create a couple if it's empty.
   let contacts = await db().contact.findMany({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: "whatsapp", deletedAt: null },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "whatsapp", deletedAt: null },
     select: { id: true },
     take: 2,
   });
   if (contacts.length < 2) {
     await db().contact.createMany({
       data: [0, 1].map((i) => ({
-        teamId: META_TEST_TEAM_ID,
+        workspaceId: META_TEST_TEAM_ID,
         name: `ratelimit-contact-${i}`,
         phoneNumber: `15558${String(i).padStart(6, "0")}`,
         identityChannel: "whatsapp" as const,
@@ -84,12 +84,23 @@ test("THE FIX: a sustained rate limit pauses the broadcast and leaves recipients
       skipDuplicates: true,
     });
     contacts = await db().contact.findMany({
-      where: { teamId: META_TEST_TEAM_ID, identityChannel: "whatsapp", deletedAt: null },
+      where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "whatsapp", deletedAt: null },
       select: { id: true },
       take: 2,
     });
   }
   expect(contacts.length).toBe(2);
+
+  // This broadcast is FREEFORM, and a freeform WhatsApp send past the 24h
+  // window is refused before it ever reaches Meta (`window_closed`). The
+  // contacts above are whatever the shared team happens to hold, and nothing
+  // guarantees they have an open window — so open one explicitly. Without this
+  // the spec passes or fails on which two rows Postgres returned, which has
+  // nothing to do with the rate-limit behaviour under test.
+  await db().contact.updateMany({
+    where: { id: { in: contacts.map((c) => c.id) } },
+    data: { lastInboundAt: new Date() },
+  });
 
   // Every send rate-limited, including the in-lane retry, so the branch under
   // test (retry ALSO rate-limited) is the one that fires.
@@ -97,7 +108,7 @@ test("THE FIX: a sustained rate limit pauses the broadcast and leaves recipients
 
   const b = await db().broadcast.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       name: `ratelimit-${Date.now()}`,
       channel: "whatsapp",
       status: "queued",

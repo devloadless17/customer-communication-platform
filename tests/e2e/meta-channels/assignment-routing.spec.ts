@@ -37,7 +37,7 @@ import {
 test.describe.configure({ mode: "serial" });
 
 const PREFIX = "e2e_assign_";
-/** Unique per run: contacts are unique on (teamId, phoneNumber) and the inbound
+/** Unique per run: contacts are unique on (workspaceId, phoneNumber) and the inbound
  *  webhook creates its own rows, so a fixed number collides with leftovers. */
 const PHONE_BASE = `1777${String(Date.now()).slice(-6)}`;
 let phoneSeq = 0;
@@ -103,14 +103,14 @@ interface PolicyRow {
 async function makeUser(name: string): Promise<string> {
   const u = await db().user.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
-      role: "agent",
+      organizationId: (await db().workspace.findUniqueOrThrow({ where: { id: META_TEST_TEAM_ID }, select: { organizationId: true } })).organizationId,
       name: `${PREFIX}${name}`,
       email: `${PREFIX}${name}.${Date.now()}@loadless.test`,
       availabilityStatus: "available",
     },
     select: { id: true },
   });
+  await db().workspaceMember.create({ data: { userId: u.id, workspaceId: META_TEST_TEAM_ID, role: "agent" } });
   return u.id;
 }
 
@@ -123,7 +123,7 @@ async function makeConversation(opts: {
   const digits = `${PHONE_BASE}${phoneSeq++}`;
   const contact = await db().contact.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       name: `${PREFIX}${opts.tag}`,
       // Digits only, no "+": that's how ingest normalizes a WhatsApp number.
       phoneNumber: digits,
@@ -134,7 +134,7 @@ async function makeConversation(opts: {
   });
   const conversation = await db().conversation.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       contactId: contact.id,
       channel: "whatsapp",
       status: opts.status ?? "pending",
@@ -196,11 +196,11 @@ async function assigneeOf(conversationId: string): Promise<string | null> {
 /** The conversation ingest resolved for a phone (it may create its own). */
 async function conversationForPhone(digits: string): Promise<string> {
   const contact = await db().contact.findFirstOrThrow({
-    where: { teamId: META_TEST_TEAM_ID, phoneNumber: digits },
+    where: { workspaceId: META_TEST_TEAM_ID, phoneNumber: digits },
     select: { id: true },
   });
   const conv = await db().conversation.findFirstOrThrow({
-    where: { teamId: META_TEST_TEAM_ID, contactId: contact.id },
+    where: { workspaceId: META_TEST_TEAM_ID, contactId: contact.id },
     select: { id: true },
   });
   return conv.id;
@@ -262,11 +262,14 @@ test.beforeAll(async () => {
   // A clean slate: prior runs' agents would otherwise sit in every policy pool
   // and make "who got it" nondeterministic.
   await db().user.deleteMany({
-    where: { teamId: META_TEST_TEAM_ID, name: { startsWith: PREFIX } },
+    where: {
+      workspaceMemberships: { some: { workspaceId: META_TEST_TEAM_ID } },
+      name: { startsWith: PREFIX },
+    },
   });
-  await db().assignmentRule.deleteMany({ where: { teamId: META_TEST_TEAM_ID } });
-  await db().assignmentPolicy.deleteMany({ where: { teamId: META_TEST_TEAM_ID } });
-  await db().assignmentSettings.deleteMany({ where: { teamId: META_TEST_TEAM_ID } });
+  await db().assignmentRule.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
+  await db().assignmentPolicy.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
+  await db().assignmentSettings.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
 
   ALI = await makeUser("ali");
   SARA = await makeUser("sara");
@@ -281,18 +284,21 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   await db().conversation.deleteMany({
-    where: { teamId: META_TEST_TEAM_ID, contact: { name: { startsWith: PREFIX } } },
+    where: { workspaceId: META_TEST_TEAM_ID, contact: { name: { startsWith: PREFIX } } },
   });
   await db().contact.deleteMany({
-    where: { teamId: META_TEST_TEAM_ID, phoneNumber: { startsWith: PHONE_BASE } },
+    where: { workspaceId: META_TEST_TEAM_ID, phoneNumber: { startsWith: PHONE_BASE } },
   });
   await db().contact.deleteMany({
-    where: { teamId: META_TEST_TEAM_ID, name: { startsWith: PREFIX } },
+    where: { workspaceId: META_TEST_TEAM_ID, name: { startsWith: PREFIX } },
   });
-  await db().assignmentRule.deleteMany({ where: { teamId: META_TEST_TEAM_ID } });
-  await db().assignmentPolicy.deleteMany({ where: { teamId: META_TEST_TEAM_ID } });
+  await db().assignmentRule.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
+  await db().assignmentPolicy.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
   await db().user.deleteMany({
-    where: { teamId: META_TEST_TEAM_ID, name: { startsWith: PREFIX } },
+    where: {
+      workspaceMemberships: { some: { workspaceId: META_TEST_TEAM_ID } },
+      name: { startsWith: PREFIX },
+    },
   });
 });
 
@@ -362,10 +368,10 @@ test.describe("configuration", () => {
     expect(res.ok).toBeTruthy();
 
     expect(
-      await db().assignmentRule.count({ where: { teamId: META_TEST_TEAM_ID, policyId: policy.id } }),
+      await db().assignmentRule.count({ where: { workspaceId: META_TEST_TEAM_ID, policyId: policy.id } }),
     ).toBe(0);
     const settings = await db().assignmentSettings.findUniqueOrThrow({
-      where: { teamId: META_TEST_TEAM_ID },
+      where: { workspaceId: META_TEST_TEAM_ID },
     });
     expect(settings.aiHandoffPolicyId).toBeNull();
   });
@@ -407,7 +413,7 @@ test.describe("strategies", () => {
 
   test("preview is read-only — polling it never skews the rotation", async () => {
     const before = await db().assignmentPolicy.findFirstOrThrow({
-      where: { teamId: META_TEST_TEAM_ID, isDefault: true },
+      where: { workspaceId: META_TEST_TEAM_ID, isDefault: true },
       select: { cursorUserId: true },
     });
     for (let i = 0; i < 5; i++) {
@@ -417,7 +423,7 @@ test.describe("strategies", () => {
       });
     }
     const after = await db().assignmentPolicy.findFirstOrThrow({
-      where: { teamId: META_TEST_TEAM_ID, isDefault: true },
+      where: { workspaceId: META_TEST_TEAM_ID, isDefault: true },
       select: { cursorUserId: true },
     });
     expect(after.cursorUserId).toBe(before.cursorUserId);
@@ -435,7 +441,7 @@ test.describe("strategies", () => {
     });
     // Reset the counters so the ratio starts clean.
     await db().assignmentPolicyMember.updateMany({
-      where: { teamId: META_TEST_TEAM_ID },
+      where: { workspaceId: META_TEST_TEAM_ID },
       data: { served: 0 },
     });
 
@@ -557,11 +563,11 @@ test.describe("routing rules", () => {
       body: JSON.stringify({ name: "VIP", strategy: "fixed", fixedUserId: ALI }),
     });
 
-    // Tags are unique on (teamId, name) and this team is reused across runs —
+    // Tags are unique on (workspaceId, name) and this team is reused across runs —
     // upsert so a leftover from a previous run doesn't fail the setup.
     const tag = await db().tag.upsert({
-      where: { teamId_name: { teamId: META_TEST_TEAM_ID, name: `${PREFIX}vip` } },
-      create: { teamId: META_TEST_TEAM_ID, name: `${PREFIX}vip`, color: "sky" },
+      where: { workspaceId_name: { workspaceId: META_TEST_TEAM_ID, name: `${PREFIX}vip` } },
+      create: { workspaceId: META_TEST_TEAM_ID, name: `${PREFIX}vip`, color: "sky" },
       update: {},
       select: { id: true },
     });
@@ -594,7 +600,7 @@ test.describe("routing rules", () => {
     });
     expect(await assigneeOf(plain.conversationId)).toBe(OMAR);
 
-    await db().assignmentRule.deleteMany({ where: { teamId: META_TEST_TEAM_ID } });
+    await db().assignmentRule.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
   });
 
   test("an explicit policyId overrides the rules entirely", async () => {
@@ -682,12 +688,12 @@ test.describe("auto-assign on inbound", () => {
       { timeoutMs: 25_000, label: "first assign" },
     ).catch(async (err: unknown) => {
       const contact = await db().contact.findFirst({
-        where: { teamId: META_TEST_TEAM_ID, phoneNumber: digits },
+        where: { workspaceId: META_TEST_TEAM_ID, phoneNumber: digits },
         select: { id: true },
       });
       const conv = contact
         ? await db().conversation.findFirst({
-            where: { teamId: META_TEST_TEAM_ID, contactId: contact.id },
+            where: { workspaceId: META_TEST_TEAM_ID, contactId: contact.id },
             select: { id: true, assignedUserId: true, status: true, createdAt: true },
           })
         : null;
@@ -702,7 +708,7 @@ test.describe("auto-assign on inbound", () => {
         body: JSON.stringify({ source: "inbound" }),
       }).then((r) => r.text());
       const outbox = await db().outboundEvent.count({
-        where: { teamId: META_TEST_TEAM_ID, dispatchedAt: null },
+        where: { workspaceId: META_TEST_TEAM_ID, dispatchedAt: null },
       });
       throw new Error(
         `${String(err)} | preview=${preview} | pendingOutbox=${outbox} | conv=${JSON.stringify(conv)} | msgs=${JSON.stringify(msgs)}`,
@@ -744,7 +750,7 @@ test.describe("campaign assignment", () => {
   test("exact counts are exact, and interleaved across the audience", async () => {
     const plan = await buildBroadcastAssignmentPlan({
       db: db(),
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       total: 100,
       config: {
         mode: "split_counts",
@@ -774,7 +780,7 @@ test.describe("campaign assignment", () => {
   test("percentages apportion to exactly the audience size", async () => {
     const plan = await buildBroadcastAssignmentPlan({
       db: db(),
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       total: 10,
       config: {
         mode: "split_percent",
@@ -798,7 +804,7 @@ test.describe("campaign assignment", () => {
 
     const plan = await buildBroadcastAssignmentPlan({
       db: db(),
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       total: 5,
       config: {
         mode: "fixed",
@@ -815,7 +821,7 @@ test.describe("campaign assignment", () => {
     const conv = await makeConversation({ tag: "camp_reply" });
     const broadcast = await db().broadcast.create({
       data: {
-        teamId: META_TEST_TEAM_ID,
+        workspaceId: META_TEST_TEAM_ID,
         status: "completed",
         kind: "template",
         targetMode: "contact",
@@ -868,7 +874,7 @@ test.describe("campaign assignment", () => {
     const conv = await makeConversation({ tag: "camp_race" });
     const broadcast = await db().broadcast.create({
       data: {
-        teamId: META_TEST_TEAM_ID,
+        workspaceId: META_TEST_TEAM_ID,
         status: "completed",
         kind: "template",
         targetMode: "contact",

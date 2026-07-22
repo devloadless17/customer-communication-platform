@@ -139,7 +139,7 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
       workflow: {
         select: {
           id: true,
-          teamId: true,
+          workspaceId: true,
           published: true,
           graph: true,
           trigger: true,
@@ -281,7 +281,7 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
     },
   });
 
-  const envelope = buildEnvelope(wf.teamId, run.trigger, run.eventPayload);
+  const envelope = buildEnvelope(wf.workspaceId, run.trigger, run.eventPayload);
   // VIII — media_url rehydrate. The trigger-time message snapshot pinned on
   // eventPayload predates the async media download (inbound media is fetched
   // out-of-band; see CLAUDE.md "Inbound media downloads ASYNC"), so its
@@ -595,7 +595,7 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
             db.workflowAwaitingReply.upsert({
               where: { runId: run.id },
               create: {
-                teamId: wf.teamId,
+                workspaceId: wf.workspaceId,
                 contactId: run.contactId,
                 runId: run.id,
                 workflowId: wf.id,
@@ -728,7 +728,7 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
     try {
       const config = handler.parseConfig(node.config);
       result = await handler.run(envelope, config, {
-        teamId: wf.teamId,
+        workspaceId: wf.workspaceId,
         workflowId: wf.id,
         runId: run.id,
         trigger: run.trigger,
@@ -901,7 +901,7 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
         db.workflowAwaitingReply.upsert({
           where: { runId: run.id },
           create: {
-            teamId: wf.teamId,
+            workspaceId: wf.workspaceId,
             contactId,
             runId: run.id,
             workflowId: wf.id,
@@ -1170,7 +1170,7 @@ function producesAwaitReply(type: WorkflowStepType): boolean {
 }
 
 function buildEnvelope(
-  teamId: string,
+  workspaceId: string,
   trigger: WorkflowTriggerEvent,
   payload: unknown,
 ): WorkflowEventEnvelope {
@@ -1203,7 +1203,7 @@ function buildEnvelope(
   return {
     version: 1,
     event: trigger,
-    teamId,
+    workspaceId,
     occurredAt: new Date().toISOString(),
     data: payload as WorkflowEventEnvelope["data"],
     depth,
@@ -1301,7 +1301,7 @@ export async function failRunFromRetryExhaustion(
       where: { id: runId },
       select: {
         id: true,
-        teamId: true,
+        workspaceId: true,
         workflowId: true,
         contactId: true,
         status: true,

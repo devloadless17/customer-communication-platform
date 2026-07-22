@@ -23,18 +23,18 @@ const h = vi.hoisted(() => {
 
   const db = {
     conversationAutomationClaim: {
-      create: async ({ data }: { data: { teamId: string; inboundMessageId: string } }) => {
-        const key = `${data.teamId}:${data.inboundMessageId}`;
+      create: async ({ data }: { data: { workspaceId: string; inboundMessageId: string } }) => {
+        const key = `${data.workspaceId}:${data.inboundMessageId}`;
         if (claims.has(key)) throw p2002();
         claims.add(key);
         return { id: "claim", ...data };
       },
-      findUnique: async ({ where }: { where: { teamId_inboundMessageId: { teamId: string; inboundMessageId: string } } }) => {
-        const { teamId, inboundMessageId } = where.teamId_inboundMessageId;
-        return claims.has(`${teamId}:${inboundMessageId}`) ? { teamId, inboundMessageId } : null;
+      findUnique: async ({ where }: { where: { workspaceId_inboundMessageId: { workspaceId: string; inboundMessageId: string } } }) => {
+        const { workspaceId, inboundMessageId } = where.workspaceId_inboundMessageId;
+        return claims.has(`${workspaceId}:${inboundMessageId}`) ? { workspaceId, inboundMessageId } : null;
       },
     },
-    team: {
+    workspace: {
       findUnique: async ({ where }: { where: { id: string } }) => teams.get(where.id) ?? null,
     },
     aiConversationState: {
@@ -211,11 +211,11 @@ describe("voice", () => {
 });
 
 describe("knowledge retrieval (tenant isolation)", () => {
-  it("#6 retrieval is scoped by teamId (tenant A cannot read tenant B chunks)", async () => {
+  it("#6 retrieval is scoped by workspaceId (tenant A cannot read tenant B chunks)", async () => {
     h.state.setQueryRows([{ id: "ch1", content: "hours are 9-5", documentId: "d1" }]);
     const rows = await retrieveContextChunks("teamA", "opening hours", 6);
     expect(rows).toHaveLength(1);
-    // The teamId MUST be a bound parameter of the query (never interpolated).
+    // The workspaceId MUST be a bound parameter of the query (never interpolated).
     const values = h.state.captured.at(-1)?.values ?? [];
     expect(values).toContain("teamA");
     expect(values).not.toContain("teamB");
@@ -240,7 +240,7 @@ describe("loop guard", () => {
  * Structurally covered (asserted by construction, not a runtime test here):
  *
  *  #5 Suggestions survive refresh/reconnect — AiReplySuggestion is a persisted
- *     row keyed by @@unique([teamId, inboundMessageId]); the composer rehydrates
+ *     row keyed by @@unique([workspaceId, inboundMessageId]); the composer rehydrates
  *     it via GET /api/ai-assistant/conversations/:id/overview on mount. No
  *     client-only state holds the draft.
  *

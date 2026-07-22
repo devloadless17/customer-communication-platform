@@ -26,7 +26,7 @@ export default async function AccountPage() {
         <ProfileForm
           user={{
             id: user.id,
-            teamId: user.teamId,
+            workspaceId: user.workspaceId,
             name: user.name,
             email: user.email,
             avatarUrl: user.avatarUrl ?? null,

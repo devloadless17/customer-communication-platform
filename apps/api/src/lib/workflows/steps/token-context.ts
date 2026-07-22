@@ -26,12 +26,12 @@ const EMPTY_CONTACT: ContactLike = { name: "", phoneNumber: null, customFields: 
  * superset.
  */
 export async function loadContactLikeById(
-  teamId: string,
+  workspaceId: string,
   contactId: string | null | undefined,
 ): Promise<ContactLike> {
   if (!contactId) return EMPTY_CONTACT;
   const row = await db.contact.findFirst({
-    where: { id: contactId, teamId },
+    where: { id: contactId, workspaceId },
     include: {
       stage: { select: { name: true } },
       tags: { select: { id: true, name: true } },
@@ -52,17 +52,17 @@ export async function loadContactLikeById(
 export async function buildTokenContext(
   envelope: WorkflowEventEnvelope,
   ctx: StepRunContext,
-  teamId: string,
+  workspaceId: string,
   resolveContactId: string | null | undefined,
 ): Promise<{ contact: ContactLike; extras: ResolverExtras }> {
-  const contact = await loadContactLikeById(teamId, resolveContactId);
+  const contact = await loadContactLikeById(workspaceId, resolveContactId);
   const extras = envelopeExtras(envelope, ctx);
   const triggerId = envelopeContact(envelope)?.id;
   if (triggerId) {
     extras.triggerContact =
       triggerId === resolveContactId
         ? contact
-        : await loadContactLikeById(teamId, triggerId);
+        : await loadContactLikeById(workspaceId, triggerId);
   }
   return { contact, extras };
 }

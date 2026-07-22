@@ -46,9 +46,9 @@ export interface OutboundWebhookCreatedDto extends OutboundWebhookDto {
 export class OutboundWebhooksService {
   constructor(private readonly db: DbService) {}
 
-  async list(teamId: string): Promise<OutboundWebhookDto[]> {
+  async list(workspaceId: string): Promise<OutboundWebhookDto[]> {
     const rows = await this.db.outboundWebhook.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: { createdAt: "desc" },
       select: this.dtoSelect(),
     });
@@ -56,7 +56,7 @@ export class OutboundWebhooksService {
   }
 
   async create(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: CreateOutboundWebhookInput,
   ): Promise<OutboundWebhookCreatedDto> {
@@ -64,7 +64,7 @@ export class OutboundWebhooksService {
     const secret = generateWebhookSecret();
     const row = await this.db.outboundWebhook.create({
       data: {
-        teamId,
+        workspaceId,
         name: input.name,
         url: input.url,
         secret: encryptSecret(secret),
@@ -78,12 +78,12 @@ export class OutboundWebhooksService {
   }
 
   async update(
-    teamId: string,
+    workspaceId: string,
     id: string,
     input: UpdateOutboundWebhookInput,
   ): Promise<OutboundWebhookDto> {
     const existing = await this.db.outboundWebhook.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true },
     });
     if (!existing) throw new NotFoundException({ error: "webhook not found" });
@@ -164,11 +164,11 @@ export class OutboundWebhooksService {
    * enqueue time). Receivers must update their verifier when they rotate.
    */
   async rotateSecret(
-    teamId: string,
+    workspaceId: string,
     id: string,
   ): Promise<{ secret: string; webhook: OutboundWebhookDto }> {
     const existing = await this.db.outboundWebhook.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true },
     });
     if (!existing) throw new NotFoundException({ error: "webhook not found" });
@@ -182,9 +182,9 @@ export class OutboundWebhooksService {
     return { secret, webhook: this.toDto(updated) };
   }
 
-  async remove(teamId: string, id: string): Promise<void> {
+  async remove(workspaceId: string, id: string): Promise<void> {
     const existing = await this.db.outboundWebhook.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true },
     });
     if (!existing) throw new NotFoundException({ error: "webhook not found" });
@@ -193,12 +193,12 @@ export class OutboundWebhooksService {
   }
 
   async listDeliveries(
-    teamId: string,
+    workspaceId: string,
     webhookId: string,
     q: ListDeliveriesQueryInput,
   ) {
     const owned = await this.db.outboundWebhook.findFirst({
-      where: { id: webhookId, teamId },
+      where: { id: webhookId, workspaceId },
       select: { id: true },
     });
     if (!owned) throw new NotFoundException({ error: "webhook not found" });
@@ -237,9 +237,9 @@ export class OutboundWebhooksService {
    * message-shaped stub. Reuses the same delivery + worker pipeline so the test
    * exercises the production path (signing, retries, log row).
    */
-  async test(teamId: string, id: string): Promise<{ deliveryId: string }> {
+  async test(workspaceId: string, id: string): Promise<{ deliveryId: string }> {
     const wh = await this.db.outboundWebhook.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true, eventTypes: true },
     });
     if (!wh) throw new NotFoundException({ error: "webhook not found" });
@@ -258,11 +258,11 @@ export class OutboundWebhooksService {
     // Instagram-only workspace's test body still carries a real channel block.
     const conn =
       (await this.db.channelConnection.findFirst({
-        where: { teamId, channel: "whatsapp", isActive: true },
+        where: { workspaceId, channel: "whatsapp", isActive: true },
         select: { id: true, channel: true, createdAt: true },
       })) ??
       (await this.db.channelConnection.findFirst({
-        where: { teamId, isActive: true },
+        where: { workspaceId, isActive: true },
         orderBy: { createdAt: "asc" },
         select: { id: true, channel: true, createdAt: true },
       }));
@@ -279,8 +279,8 @@ export class OutboundWebhooksService {
 
     // Reflect the workspace AI Autopilot opt-in in the test ping's `ai_enabled`
     // so a Test fired while the feature is off matches what a real inbound shows.
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
+    const team = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { aiAutopilotEnabled: true },
     });
 
@@ -289,7 +289,7 @@ export class OutboundWebhooksService {
     // shape — exactly what the production fanout produces (subscriber.ts:245).
     const payload = {
       v: WEBHOOK_WIRE_VERSION,
-      team_id: teamId,
+      team_id: workspaceId,
       test: true,
       // Top-level `timestamp` — production fanout always stamps it (epoch ms)
       // BEFORE the spread, so a Test ping must too, or it wouldn't be byte-shape

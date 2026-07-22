@@ -54,7 +54,7 @@ export class MediaController {
       // leaked by any surface become a direct file-read.
       where: {
         id: messageId,
-        teamId: session.teamId,
+        workspaceId: session.workspaceId,
         ...conversationRelationWhere(session),
       },
       select: { mediaKey: true, mediaFilename: true, mediaKind: true, mediaMimeType: true },
@@ -100,7 +100,7 @@ export class MediaController {
       // leaked by any surface become a direct file-read.
       where: {
         id: messageId,
-        teamId: session.teamId,
+        workspaceId: session.workspaceId,
         ...conversationRelationWhere(session),
       },
       select: { mediaThumbnailKey: true },

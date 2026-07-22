@@ -27,7 +27,7 @@ export class WebchatwidgetController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    return { widgets: await this.widgets.list(session.teamId) };
+    return { widgets: await this.widgets.list(session.workspaceId) };
   }
 
   @Post()
@@ -35,7 +35,7 @@ export class WebchatwidgetController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateWidgetSchema)) body: CreateWidgetInput,
   ) {
-    return { widget: await this.widgets.create(session.teamId, body) };
+    return { widget: await this.widgets.create(session.workspaceId, body) };
   }
 
   @Patch(":id")
@@ -44,12 +44,12 @@ export class WebchatwidgetController {
     @Param("id") id: string,
     @Body(zBody(UpdateWidgetSchema)) body: UpdateWidgetInput,
   ) {
-    return { widget: await this.widgets.update(session.teamId, id, body) };
+    return { widget: await this.widgets.update(session.workspaceId, id, body) };
   }
 
   @Delete(":id")
   async remove(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    await this.widgets.remove(session.teamId, id);
+    await this.widgets.remove(session.workspaceId, id);
     return { ok: true };
   }
 }

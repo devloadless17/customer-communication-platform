@@ -34,7 +34,7 @@ import { deliverReply, renderDraftAudio, wantsVoiceDraft } from "./voice-deliver
  */
 
 export interface AiReplyJob {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   inboundMessageId: string;
   text: string;
@@ -42,18 +42,18 @@ export interface AiReplyJob {
 }
 
 export async function runAiReply(job: AiReplyJob): Promise<void> {
-  const { teamId, conversationId, inboundMessageId } = job;
+  const { workspaceId, conversationId, inboundMessageId } = job;
   if (!aiGloballyEnabled() || !openaiConfigured()) return;
 
-  const config = await loadAiConfig(teamId);
+  const config = await loadAiConfig(workspaceId);
   if (!configEnabled(config)) return;
-  if (await legacyAutopilotOwnsTeam(teamId)) return; // mutual exclusion with n8n autopilot
+  if (await legacyAutopilotOwnsTeam(workspaceId)) return; // mutual exclusion with n8n autopilot
 
   // Auto-resume (human_active -> ai_active on the next customer inbound), then
   // gate. paused / disabled stop here.
-  const state = await onCustomerInbound(teamId, conversationId);
+  const state = await onCustomerInbound(workspaceId, conversationId);
   if (state.state !== "ai_active") {
-    await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+    await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
       decision: "skipped",
       skipReason: `state_${state.state}`,
     });
@@ -64,7 +64,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
     config.maxAutoRepliesPerConv > 0 &&
     state.autoReplyCount >= config.maxAutoRepliesPerConv
   ) {
-    await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+    await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
       decision: "skipped",
       skipReason: "max_auto_replies",
     });
@@ -72,11 +72,11 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
   }
 
   // Atomic claim — first writer wins; a redelivery or the autopilot loses here.
-  const won = await claimInbound(teamId, conversationId, inboundMessageId, "native_ai");
+  const won = await claimInbound(workspaceId, conversationId, inboundMessageId, "native_ai");
   if (!won) return; // already claimed → no double reply
 
   const startedAt = Date.now();
-  const { memory, recentMessages: recent } = await loadReplyContext(teamId, conversationId);
+  const { memory, recentMessages: recent } = await loadReplyContext(workspaceId, conversationId);
 
   let generated;
   try {
@@ -88,7 +88,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       recentMessages: recent,
     });
   } catch (err) {
-    await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+    await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
       decision: "failed",
       error: errText(err),
       latencyMs: Date.now() - startedAt,
@@ -100,7 +100,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
   // the model was generating, onHumanReply moved us to human_active — abort.
   const fresh = await getState(conversationId);
   if (!fresh || fresh.state !== "ai_active") {
-    await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+    await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
       decision: "cancelled",
       skipReason: `human_active_midflight:${fresh?.state ?? "missing"}`,
       model: generated.model,
@@ -139,7 +139,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
     let delivery;
     try {
       delivery = await deliverReply({
-        teamId,
+        workspaceId,
         conversationId,
         inboundMessageId,
         payload,
@@ -147,7 +147,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
         inboundWasVoice: job.isVoice,
       });
     } catch (err) {
-      await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+      await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
         ...auditBase,
         decision: "failed",
         error: errText(err),
@@ -163,7 +163,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       await db.aiMessageMetadata
         .create({
           data: {
-            teamId,
+            workspaceId,
             messageId: mid,
             aiGenerated: true,
             model: generated.model,
@@ -182,7 +182,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       if (payload.hallucinationRisk >= HALLUCINATION_FLAG_THRESHOLD) {
         void publish({
           type: "ai.message_flagged",
-          teamId,
+          workspaceId,
           conversationId,
           messageId: mid,
           risk: payload.hallucinationRisk,
@@ -212,11 +212,11 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       // outbound webhooks watching `conversation.assigned` see it.
       let agentId: string | null = null;
       try {
-        const settings = await loadAssignmentSettings(db, teamId);
+        const settings = await loadAssignmentSettings(db, workspaceId);
         const outcome = await assignByPolicy({
           db,
           publish,
-          teamId,
+          workspaceId,
           conversationId,
           source: "ai_handoff",
           policyId: settings.aiHandoffPolicyId,
@@ -229,18 +229,18 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
         // The agent can still take over manually.
       }
       try {
-        await handoffToHuman(teamId, conversationId, agentId);
+        await handoffToHuman(workspaceId, conversationId, agentId);
       } catch {
         // Pause bookkeeping only — the assignment (if any) already committed.
       }
-      await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+      await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
         ...auditBase,
         decision: "escalated",
         outboundMessageId: delivery.voiceMessageId ?? delivery.textMessageId,
       });
     } else {
       await incrementAutoReply(conversationId);
-      await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+      await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
         ...auditBase,
         decision: "replied",
         outboundMessageId: delivery.voiceMessageId ?? delivery.textMessageId,
@@ -250,10 +250,10 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
     // Draft (suggest): pre-render a voice preview when the mode wants voice
     // (null on any TTS failure — the draft still ships as text).
     const audioR2Key = wantsVoiceDraft(config.replyChannelMode, job.isVoice)
-      ? await renderDraftAudio(teamId, inboundMessageId, payload, config)
+      ? await renderDraftAudio(workspaceId, inboundMessageId, payload, config)
       : null;
     const suggestion = await persistSuggestion({
-      teamId,
+      workspaceId,
       conversationId,
       inboundMessageId,
       payload,
@@ -261,7 +261,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       channelMode: config.replyChannelMode,
       audioR2Key,
     });
-    await audit(teamId, conversationId, inboundMessageId, config.configVersion, {
+    await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
       ...auditBase,
       decision: "suggested",
       suggestionId: suggestion.id,
@@ -290,7 +290,7 @@ interface AuditExtra {
 }
 
 async function audit(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   inboundMessageId: string,
   configVersion: number,
@@ -299,7 +299,7 @@ async function audit(
   try {
     await db.aiAssistantInteraction.create({
       data: {
-        teamId,
+        workspaceId,
         conversationId,
         inboundMessageId,
         configVersion,

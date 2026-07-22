@@ -63,13 +63,13 @@ export function fieldHeader(def: TeamFieldDef): string {
  * streaming export cannot do — the header has to be written before the first
  * row is read.
  */
-export async function resolveExportColumns(teamId: string): Promise<{
+export async function resolveExportColumns(workspaceId: string): Promise<{
   columns: string[];
   fieldDefs: TeamFieldDef[];
   oneOffKeys: string[];
 }> {
   const fieldDefs = await db.contactFieldDefinition.findMany({
-    where: { teamId },
+    where: { workspaceId },
     orderBy: [{ order: "asc" }, { createdAt: "asc" }],
     select: { key: true, label: true },
   });
@@ -89,7 +89,7 @@ export async function resolveExportColumns(teamId: string): Promise<{
     SELECT DISTINCT k AS key
     FROM "Contact" c,
          LATERAL jsonb_object_keys(c."customFields") AS k
-    WHERE c."teamId" = ${teamId}
+    WHERE c."workspaceId" = ${workspaceId}
       AND c."deletedAt" IS NULL
       AND jsonb_typeof(c."customFields") = 'object'
     ORDER BY k

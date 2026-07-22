@@ -54,20 +54,20 @@ export class AssignmentService {
    *
    * Both creates tolerate a P2002 from a concurrent request (two admins opening
    * the page at once) by falling back to a read — the partial unique index on
-   * `(teamId) WHERE isDefault` is what makes that race safe rather than
+   * `(workspaceId) WHERE isDefault` is what makes that race safe rather than
    * producing two competing defaults.
    */
-  async ensureBootstrap(teamId: string): Promise<void> {
+  async ensureBootstrap(workspaceId: string): Promise<void> {
     const [policyCount, settings] = await Promise.all([
-      this.db.assignmentPolicy.count({ where: { teamId, archivedAt: null } }),
-      this.db.assignmentSettings.findUnique({ where: { teamId }, select: { teamId: true } }),
+      this.db.assignmentPolicy.count({ where: { workspaceId, archivedAt: null } }),
+      this.db.assignmentSettings.findUnique({ where: { workspaceId }, select: { workspaceId: true } }),
     ]);
 
     if (policyCount === 0) {
       await this.db.assignmentPolicy
         .create({
           data: {
-            teamId,
+            workspaceId,
             name: "Default",
             description:
               "Balances new conversations across everyone online and available, fewest open chats first.",
@@ -83,12 +83,12 @@ export class AssignmentService {
 
     if (!settings) {
       await this.db.assignmentSettings
-        .create({ data: { teamId } })
+        .create({ data: { workspaceId } })
         .catch((err) => {
           if (!isUniqueViolation(err)) throw err;
         });
     }
-    invalidateAssignmentCache(teamId);
+    invalidateAssignmentCache(workspaceId);
   }
 
   // -------------------------------------------------------------------------
@@ -99,16 +99,16 @@ export class AssignmentService {
    *  their members, ordered rules, settings, and the member roster (with live
    *  open-conversation counts, so an admin sizing capacity can see actual
    *  load next to the cap they're about to set). */
-  async getOverview(teamId: string) {
-    await this.ensureBootstrap(teamId);
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
+  async getOverview(workspaceId: string) {
+    await this.ensureBootstrap(workspaceId);
+    const team = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { agentConversationVisibility: true },
     });
 
     const [policies, rules, settings, members, grouped] = await Promise.all([
       this.db.assignmentPolicy.findMany({
-        where: { teamId, archivedAt: null },
+        where: { workspaceId, archivedAt: null },
         orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
         include: {
           members: {
@@ -117,25 +117,34 @@ export class AssignmentService {
         },
       }),
       this.db.assignmentRule.findMany({
-        where: { teamId },
+        where: { workspaceId },
         orderBy: [{ position: "asc" }, { id: "asc" }],
       }),
-      this.db.assignmentSettings.findUnique({ where: { teamId } }),
+      this.db.assignmentSettings.findUnique({ where: { workspaceId } }),
+      // Members of THIS workspace: users are org-scoped now, so membership is
+      // the filter and the role comes off the (workspace-filtered) membership.
       this.db.user.findMany({
-        where: { teamId, deactivatedAt: null },
+        where: {
+          workspaceMemberships: { some: { workspaceId } },
+          deactivatedAt: null,
+        },
         select: {
           id: true,
           name: true,
           email: true,
-          role: true,
           avatarUrl: true,
           availabilityStatus: true,
+          workspaceMemberships: {
+            where: { workspaceId },
+            select: { role: true },
+            take: 1,
+          },
         },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       }),
       this.db.conversation.groupBy({
         by: ["assignedUserId"],
-        where: { teamId, assignedUserId: { not: null }, status: { not: "closed" } },
+        where: { workspaceId, assignedUserId: { not: null }, status: { not: "closed" } },
         _count: { _all: true },
       }),
     ]);
@@ -148,10 +157,16 @@ export class AssignmentService {
       policies,
       rules,
       settings: {
-        ...(settings ?? { teamId, ...DEFAULT_ASSIGNMENT_SETTINGS, version: 1 }),
+        ...(settings ?? { workspaceId, ...DEFAULT_ASSIGNMENT_SETTINGS, version: 1 }),
         agentConversationVisibility: team?.agentConversationVisibility ?? "team",
       },
-      members: members.map((m) => ({ ...m, openCount: openCounts.get(m.id) ?? 0 })),
+      // Flatten the workspace-scoped membership back onto the member DTO so the
+      // wire shape keeps a plain `role` (the UI + /v1 consumers read it there).
+      members: members.map(({ workspaceMemberships, ...m }) => ({
+        ...m,
+        role: workspaceMemberships[0]?.role ?? "agent",
+        openCount: openCounts.get(m.id) ?? 0,
+      })),
     };
   }
 
@@ -159,18 +174,18 @@ export class AssignmentService {
   // Policies
   // -------------------------------------------------------------------------
 
-  async createPolicy(teamId: string, input: CreatePolicyInput) {
+  async createPolicy(workspaceId: string, input: CreatePolicyInput) {
     const count = await this.db.assignmentPolicy.count({
-      where: { teamId, archivedAt: null },
+      where: { workspaceId, archivedAt: null },
     });
     if (count >= ASSIGNMENT_LIMITS.maxPoliciesPerTeam) {
       throw new BadRequestException({ error: "too_many_policies" });
     }
-    await this.validateTargets(teamId, input);
+    await this.validateTargets(workspaceId, input);
 
     const policy = await this.db.assignmentPolicy.create({
       data: {
-        teamId,
+        workspaceId,
         name: input.name,
         description: input.description ?? null,
         strategy: input.strategy ?? "least_busy",
@@ -189,23 +204,23 @@ export class AssignmentService {
         isDefault: false,
       },
     });
-    if (input.members) await this.syncMembers(teamId, policy.id, input.members);
-    invalidateAssignmentCache(teamId);
-    return this.getPolicy(teamId, policy.id);
+    if (input.members) await this.syncMembers(workspaceId, policy.id, input.members);
+    invalidateAssignmentCache(workspaceId);
+    return this.getPolicy(workspaceId, policy.id);
   }
 
-  async updatePolicy(teamId: string, policyId: string, input: UpdatePolicyInput) {
+  async updatePolicy(workspaceId: string, policyId: string, input: UpdatePolicyInput) {
     const existing = await this.db.assignmentPolicy.findFirst({
-      where: { id: policyId, teamId, archivedAt: null },
+      where: { id: policyId, workspaceId, archivedAt: null },
     });
     if (!existing) throw new NotFoundException({ error: "policy_not_found" });
-    await this.validateTargets(teamId, input);
+    await this.validateTargets(workspaceId, input);
 
     // Optimistic concurrency: the CAS is on `version`, and the same statement
     // bumps it, so a co-admin's stale save fails loudly instead of silently
     // reverting the weights that just landed.
     const { count } = await this.db.assignmentPolicy.updateMany({
-      where: { id: policyId, teamId, version: input.expectedVersion },
+      where: { id: policyId, workspaceId, version: input.expectedVersion },
       data: {
         ...(input.name !== undefined ? { name: input.name } : {}),
         ...(input.description !== undefined ? { description: input.description } : {}),
@@ -230,9 +245,9 @@ export class AssignmentService {
     });
     if (count === 0) throw new ConflictException({ error: "version_conflict" });
 
-    if (input.members) await this.syncMembers(teamId, policyId, input.members);
-    invalidateAssignmentCache(teamId);
-    return this.getPolicy(teamId, policyId);
+    if (input.members) await this.syncMembers(workspaceId, policyId, input.members);
+    invalidateAssignmentCache(workspaceId);
+    return this.getPolicy(workspaceId, policyId);
   }
 
   /**
@@ -241,16 +256,16 @@ export class AssignmentService {
    * would reject the latter anyway, but ordering the clear before the set keeps
    * it from ever being attempted.
    */
-  async setDefaultPolicy(teamId: string, policyId: string) {
+  async setDefaultPolicy(workspaceId: string, policyId: string) {
     const policy = await this.db.assignmentPolicy.findFirst({
-      where: { id: policyId, teamId, archivedAt: null },
+      where: { id: policyId, workspaceId, archivedAt: null },
       select: { id: true },
     });
     if (!policy) throw new NotFoundException({ error: "policy_not_found" });
 
     await this.db.$transaction(async (tx) => {
       await tx.assignmentPolicy.updateMany({
-        where: { teamId, isDefault: true, id: { not: policyId } },
+        where: { workspaceId, isDefault: true, id: { not: policyId } },
         data: { isDefault: false },
       });
       await tx.assignmentPolicy.update({
@@ -258,8 +273,8 @@ export class AssignmentService {
         data: { isDefault: true },
       });
     });
-    invalidateAssignmentCache(teamId);
-    return this.getPolicy(teamId, policyId);
+    invalidateAssignmentCache(workspaceId);
+    return this.getPolicy(workspaceId, policyId);
   }
 
   /**
@@ -269,9 +284,9 @@ export class AssignmentService {
    * than left dangling: a rule that can't resolve is a rule that silently does
    * nothing, and silent is the enemy here.
    */
-  async archivePolicy(teamId: string, policyId: string) {
+  async archivePolicy(workspaceId: string, policyId: string) {
     const policy = await this.db.assignmentPolicy.findFirst({
-      where: { id: policyId, teamId, archivedAt: null },
+      where: { id: policyId, workspaceId, archivedAt: null },
       select: { id: true, isDefault: true },
     });
     if (!policy) throw new NotFoundException({ error: "policy_not_found" });
@@ -280,7 +295,7 @@ export class AssignmentService {
     }
 
     await this.db.$transaction(async (tx) => {
-      await tx.assignmentRule.deleteMany({ where: { teamId, policyId } });
+      await tx.assignmentRule.deleteMany({ where: { workspaceId, policyId } });
       await tx.assignmentPolicy.update({
         where: { id: policyId },
         data: { archivedAt: new Date(), isDefault: false },
@@ -289,17 +304,17 @@ export class AssignmentService {
       // breaking. Broadcasts keep their historical `assignmentPolicyId` for the
       // audit trail — resolution already tolerates a missing policy.
       await tx.assignmentSettings.updateMany({
-        where: { teamId, aiHandoffPolicyId: policyId },
+        where: { workspaceId, aiHandoffPolicyId: policyId },
         data: { aiHandoffPolicyId: null },
       });
     });
-    invalidateAssignmentCache(teamId);
+    invalidateAssignmentCache(workspaceId);
     return { ok: true };
   }
 
-  private async getPolicy(teamId: string, policyId: string) {
+  private async getPolicy(workspaceId: string, policyId: string) {
     const policy = await this.db.assignmentPolicy.findFirst({
-      where: { id: policyId, teamId },
+      where: { id: policyId, workspaceId },
       include: {
         members: {
           select: { userId: true, weight: true, maxOpen: true, enabled: true, served: true },
@@ -322,14 +337,14 @@ export class AssignmentService {
    * their counter untouched so a weight edit doesn't reset history.
    */
   private async syncMembers(
-    teamId: string,
+    workspaceId: string,
     policyId: string,
     members: { userId: string; weight: number; maxOpen?: number | null; enabled: boolean }[],
   ): Promise<void> {
     const submittedIds = members.map((m) => m.userId);
     if (submittedIds.length > 0) {
       const valid = await this.db.user.findMany({
-        where: { id: { in: submittedIds }, teamId, deactivatedAt: null },
+        where: { id: { in: submittedIds }, workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
         select: { id: true },
       });
       if (valid.length !== new Set(submittedIds).size) {
@@ -357,7 +372,7 @@ export class AssignmentService {
         await tx.assignmentPolicyMember.upsert({
           where: { policyId_userId: { policyId, userId: m.userId } },
           create: {
-            teamId,
+            workspaceId,
             policyId,
             userId: m.userId,
             weight: m.weight,
@@ -380,7 +395,7 @@ export class AssignmentService {
    *  caught at save time so a misconfiguration surfaces in the settings form
    *  rather than as silently-unrouted conversations at 2am. */
   private async validateTargets(
-    teamId: string,
+    workspaceId: string,
     input: { fixedUserId?: string | null; fallbackUserId?: string | null },
   ): Promise<void> {
     const ids = [input.fixedUserId, input.fallbackUserId].filter(
@@ -388,7 +403,12 @@ export class AssignmentService {
     );
     if (ids.length === 0) return;
     const found = await this.db.user.count({
-      where: { id: { in: ids }, teamId, deactivatedAt: null },
+      where: {
+        id: { in: ids },
+        // Users are org-scoped; "belongs to this workspace" is a membership.
+        workspaceMemberships: { some: { workspaceId } },
+        deactivatedAt: null,
+      },
     });
     if (found !== new Set(ids).size) {
       throw new BadRequestException({ error: "invalid_member" });
@@ -399,11 +419,11 @@ export class AssignmentService {
   // Rules
   // -------------------------------------------------------------------------
 
-  async createRule(teamId: string, input: CreateRuleInput) {
+  async createRule(workspaceId: string, input: CreateRuleInput) {
     const [count, policy] = await Promise.all([
-      this.db.assignmentRule.count({ where: { teamId } }),
+      this.db.assignmentRule.count({ where: { workspaceId } }),
       this.db.assignmentPolicy.findFirst({
-        where: { id: input.policyId, teamId, archivedAt: null },
+        where: { id: input.policyId, workspaceId, archivedAt: null },
         select: { id: true },
       }),
     ]);
@@ -413,13 +433,13 @@ export class AssignmentService {
     if (!policy) throw new BadRequestException({ error: "policy_not_found" });
 
     const last = await this.db.assignmentRule.findFirst({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: { position: "desc" },
       select: { position: true },
     });
     const rule = await this.db.assignmentRule.create({
       data: {
-        teamId,
+        workspaceId,
         name: input.name,
         policyId: input.policyId,
         enabled: input.enabled,
@@ -427,20 +447,20 @@ export class AssignmentService {
         position: (last?.position ?? -1) + 1,
       },
     });
-    invalidateAssignmentCache(teamId);
+    invalidateAssignmentCache(workspaceId);
     return { rule };
   }
 
-  async updateRule(teamId: string, ruleId: string, input: UpdateRuleInput) {
+  async updateRule(workspaceId: string, ruleId: string, input: UpdateRuleInput) {
     if (input.policyId) {
       const policy = await this.db.assignmentPolicy.findFirst({
-        where: { id: input.policyId, teamId, archivedAt: null },
+        where: { id: input.policyId, workspaceId, archivedAt: null },
         select: { id: true },
       });
       if (!policy) throw new BadRequestException({ error: "policy_not_found" });
     }
     const { count } = await this.db.assignmentRule.updateMany({
-      where: { id: ruleId, teamId },
+      where: { id: ruleId, workspaceId },
       data: {
         ...(input.name !== undefined ? { name: input.name } : {}),
         ...(input.policyId !== undefined ? { policyId: input.policyId } : {}),
@@ -449,17 +469,17 @@ export class AssignmentService {
       },
     });
     if (count === 0) throw new NotFoundException({ error: "rule_not_found" });
-    invalidateAssignmentCache(teamId);
+    invalidateAssignmentCache(workspaceId);
     const rule = await this.db.assignmentRule.findUnique({ where: { id: ruleId } });
     return { rule };
   }
 
-  async deleteRule(teamId: string, ruleId: string) {
+  async deleteRule(workspaceId: string, ruleId: string) {
     const { count } = await this.db.assignmentRule.deleteMany({
-      where: { id: ruleId, teamId },
+      where: { id: ruleId, workspaceId },
     });
     if (count === 0) throw new NotFoundException({ error: "rule_not_found" });
-    invalidateAssignmentCache(teamId);
+    invalidateAssignmentCache(workspaceId);
     return { ok: true };
   }
 
@@ -468,9 +488,9 @@ export class AssignmentService {
    * the client omitted keeps a position AFTER the listed ones, so a stale
    * client can't accidentally promote a rule it never saw to the top.
    */
-  async reorderRules(teamId: string, ruleIds: string[]) {
+  async reorderRules(workspaceId: string, ruleIds: string[]) {
     const owned = await this.db.assignmentRule.findMany({
-      where: { teamId },
+      where: { workspaceId },
       select: { id: true },
     });
     const ownedIds = new Set(owned.map((r) => r.id));
@@ -493,7 +513,7 @@ export class AssignmentService {
         ),
       );
     }
-    invalidateAssignmentCache(teamId);
+    invalidateAssignmentCache(workspaceId);
     return { ok: true };
   }
 
@@ -501,12 +521,12 @@ export class AssignmentService {
   // Settings
   // -------------------------------------------------------------------------
 
-  async updateSettings(teamId: string, input: UpdateAssignmentSettingsInput) {
-    await this.ensureBootstrap(teamId);
+  async updateSettings(workspaceId: string, input: UpdateAssignmentSettingsInput) {
+    await this.ensureBootstrap(workspaceId);
 
     if (input.aiHandoffPolicyId) {
       const policy = await this.db.assignmentPolicy.findFirst({
-        where: { id: input.aiHandoffPolicyId, teamId, archivedAt: null },
+        where: { id: input.aiHandoffPolicyId, workspaceId, archivedAt: null },
         select: { id: true },
       });
       if (!policy) throw new BadRequestException({ error: "policy_not_found" });
@@ -517,27 +537,27 @@ export class AssignmentService {
     // sees one atomic-looking save).
     const { expectedVersion, agentConversationVisibility, ...fields } = input;
     if (agentConversationVisibility !== undefined) {
-      await this.db.team.update({
-        where: { id: teamId },
+      await this.db.workspace.update({
+        where: { id: workspaceId },
         data: { agentConversationVisibility },
       });
       // Sessions cache the flag for 15s and sockets decide room membership
       // from it at CONNECT time. Existing sockets therefore keep their current
       // audience until they reconnect — acceptable for a setting changed a
       // handful of times in an org's life, and called out in the UI copy.
-      invalidateTeamVisibilityCaches(teamId);
+      invalidateTeamVisibilityCaches(workspaceId);
     }
     const data = Object.fromEntries(
       Object.entries(fields).filter(([, v]) => v !== undefined),
     );
     const { count } = await this.db.assignmentSettings.updateMany({
-      where: { teamId, ...(expectedVersion ? { version: expectedVersion } : {}) },
+      where: { workspaceId, ...(expectedVersion ? { version: expectedVersion } : {}) },
       data: { ...data, version: { increment: 1 } },
     });
     if (count === 0) throw new ConflictException({ error: "version_conflict" });
 
-    invalidateAssignmentCache(teamId);
-    const settings = await this.db.assignmentSettings.findUnique({ where: { teamId } });
+    invalidateAssignmentCache(workspaceId);
+    const settings = await this.db.assignmentSettings.findUnique({ where: { workspaceId } });
     return { settings };
   }
 
@@ -548,11 +568,11 @@ export class AssignmentService {
   /** Dry run — `commit: false` so previewing never advances rotation or
    *  weighted counters. An admin can hit it repeatedly without skewing the
    *  fairness state they're trying to configure. */
-  async preview(teamId: string, input: PreviewAssignmentInput) {
-    await this.ensureBootstrap(teamId);
+  async preview(workspaceId: string, input: PreviewAssignmentInput) {
+    await this.ensureBootstrap(workspaceId);
     const decision = await resolveAssignee({
       db: this.db,
-      teamId,
+      workspaceId,
       policyId: input.policyId ?? null,
       commit: false,
       ctx: {

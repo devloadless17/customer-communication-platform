@@ -37,6 +37,7 @@ import type {
   Tag,
 } from "@ccp/shared/types";
 import { useConversationCounts } from "@/features/inbox/hooks/use-conversation-counts";
+import { useInboxViews } from "@/features/inbox/contexts/inbox-views-context";
 import { ConversationListItem } from "./conversation-list-item";
 import { InboxSearchPanel, type SearchResultTarget } from "./inbox-search-panel";
 import type { Filter, PresetFilterId } from "./inbox-controls";
@@ -265,6 +266,8 @@ function ConversationListImpl({
     });
   }, [conversations, sortMode]);
 
+  const { views: savedViews, counts: viewCounts } = useInboxViews();
+
   const headerTitle = useMemo(() => {
     if (filter.kind === "preset") {
       return PRESET_LABELS[filter.id];
@@ -272,9 +275,15 @@ function ConversationListImpl({
     // The list isn't rendered for the calls view (the shell swaps in the
     // calls history), but keep the union exhaustive for the type checker.
     if (filter.kind === "calls") return "Calls";
+    if (filter.kind === "view") {
+      // A view that vanished (deleted, or un-shared out from under this agent)
+      // still has its id in the cookie for one render. "View" beats printing a
+      // cuid; the layout drops the stale id on the next load.
+      return savedViews.find((v) => v.id === filter.viewId)?.name ?? "View";
+    }
     const stage = stages.find((s) => s.id === filter.stageId);
     return stage ? `Stage · ${stage.name}` : "Stage";
-  }, [filter, stages]);
+  }, [filter, stages, savedViews]);
 
   // Authoritative bucket total for the CURRENT view. The loaded slice
   // (`visible.length`) only counts paginated-in rows, so the header used to
@@ -290,11 +299,14 @@ function ConversationListImpl({
   // slice count (visually correct, just possibly short) until then.
   const serverCounts = useConversationCounts();
   const headerTotal = useMemo<number | null>(() => {
+    // Saved views are counted by their own endpoint, on a slower cadence —
+    // see InboxViewsProvider for why they don't ride the preset counts.
+    if (filter.kind === "view") return viewCounts?.[filter.viewId]?.total ?? null;
     if (!serverCounts) return null;
     if (filter.kind === "preset") return serverCounts[filter.id] ?? 0;
     if (filter.kind === "stage") return serverCounts.byStage[filter.stageId] ?? 0;
     return null; // calls view doesn't render this list
-  }, [serverCounts, filter]);
+  }, [serverCounts, filter, viewCounts]);
 
   // ---- Virtualization wiring ----------------------------------------------
   //

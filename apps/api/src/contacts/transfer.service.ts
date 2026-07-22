@@ -57,7 +57,7 @@ export class ContactTransferService {
    * that will actually run the import.
    */
   async preview(
-    teamId: string,
+    workspaceId: string,
     file: Express.Multer.File | undefined,
   ): Promise<{
     headers: string[];
@@ -87,7 +87,7 @@ export class ContactTransferService {
       await source.close();
 
       const fields = await this.db.contactFieldDefinition.findMany({
-        where: { teamId },
+        where: { workspaceId },
         orderBy: [{ order: "asc" }, { createdAt: "asc" }],
         select: { key: true, label: true },
       });
@@ -96,7 +96,7 @@ export class ContactTransferService {
       // re-upload it. The user has already waited for one upload; making them
       // wait again after the mapping step would be the slowest part of the
       // whole flow for a 50 MB file.
-      const uploadKey = `contact-imports/${teamId}/staged-${randomUUID()}.${format}`;
+      const uploadKey = `contact-imports/${workspaceId}/staged-${randomUUID()}.${format}`;
       await blobStorage.putObjectFromFile({
         key: uploadKey,
         path,
@@ -128,7 +128,7 @@ export class ContactTransferService {
    * worker streams it from there, so nothing large crosses this request.
    */
   async startImport(args: {
-    teamId: string;
+    workspaceId: string;
     /** null for an API-key caller — there is no acting human. */
     userId: string | null;
     uploadKey: string;
@@ -140,15 +140,15 @@ export class ContactTransferService {
     // The staged key comes from the client, so it must be proven to belong to
     // THIS team before the worker is pointed at it — otherwise a caller could
     // hand us another tenant's staged file and import their contact book.
-    const expectedPrefix = `contact-imports/${args.teamId}/`;
+    const expectedPrefix = `contact-imports/${args.workspaceId}/`;
     if (!args.uploadKey.startsWith(expectedPrefix) || args.uploadKey.includes("..")) {
       throw new BadRequestException({ error: "invalid_upload_key" });
     }
 
-    await this.assertNoRunningJob(args.teamId);
+    await this.assertNoRunningJob(args.workspaceId);
 
     const job = await this.createJob({
-      teamId: args.teamId,
+      workspaceId: args.workspaceId,
       kind: "import",
       format: args.format,
       createdByUserId: args.userId,
@@ -168,17 +168,17 @@ export class ContactTransferService {
   }
 
   async startExport(args: {
-    teamId: string;
+    workspaceId: string;
     /** null for an API-key caller — there is no acting human. */
     userId: string | null;
     input: CreateExportInput;
   }): Promise<{ jobId: string }> {
-    await this.assertNoRunningJob(args.teamId);
+    await this.assertNoRunningJob(args.workspaceId);
 
     const format = args.input.format as TransferFormat;
     const stamp = new Date().toISOString().slice(0, 10);
     const job = await this.createJob({
-      teamId: args.teamId,
+      workspaceId: args.workspaceId,
       kind: "export",
       format,
       createdByUserId: args.userId,
@@ -194,9 +194,9 @@ export class ContactTransferService {
     return { jobId: job.id };
   }
 
-  async list(teamId: string, opts: { limit: number; kind?: "import" | "export" }) {
+  async list(workspaceId: string, opts: { limit: number; kind?: "import" | "export" }) {
     const rows = await this.db.contactTransferJob.findMany({
-      where: { teamId, ...(opts.kind ? { kind: opts.kind } : {}) },
+      where: { workspaceId, ...(opts.kind ? { kind: opts.kind } : {}) },
       orderBy: { createdAt: "desc" },
       take: opts.limit,
       select: JOB_SELECT,
@@ -204,11 +204,11 @@ export class ContactTransferService {
     return { jobs: rows.map(toWire) };
   }
 
-  async get(teamId: string, id: string) {
+  async get(workspaceId: string, id: string) {
     const row = await this.db.contactTransferJob.findFirst({
-      // teamId in the where, not a post-hoc check: a job id from another tenant
+      // workspaceId in the where, not a post-hoc check: a job id from another tenant
       // must 404, and the only way to guarantee that is to never load it.
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: JOB_SELECT,
     });
     if (!row) throw new NotFoundException({ error: "not_found" });
@@ -217,12 +217,12 @@ export class ContactTransferService {
 
   /** Presigned URL for the produced artifact (`result`) or the failed-rows report. */
   async downloadUrl(
-    teamId: string,
+    workspaceId: string,
     id: string,
     which: "result" | "errors",
   ): Promise<string> {
     const row = await this.db.contactTransferJob.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { artifactKey: true, errorArtifactKey: true, filename: true, format: true },
     });
     if (!row) throw new NotFoundException({ error: "not_found" });
@@ -245,14 +245,14 @@ export class ContactTransferService {
    * (a partial import is not rolled back — the counters and the error report
    * say exactly what landed).
    */
-  async cancel(teamId: string, id: string): Promise<{ ok: true }> {
+  async cancel(workspaceId: string, id: string): Promise<{ ok: true }> {
     const res = await this.db.contactTransferJob.updateMany({
-      where: { id, teamId, status: { in: ["pending", "running"] } },
+      where: { id, workspaceId, status: { in: ["pending", "running"] } },
       data: { status: "canceled", finishedAt: new Date() },
     });
     if (res.count === 0) {
       const exists = await this.db.contactTransferJob.findFirst({
-        where: { id, teamId },
+        where: { id, workspaceId },
         select: { id: true },
       });
       if (!exists) throw new NotFoundException({ error: "not_found" });
@@ -272,11 +272,11 @@ export class ContactTransferService {
    * so a fresh download always matches what the server will accept.
    */
   async template(
-    teamId: string,
+    workspaceId: string,
     format: TransferFormat,
   ): Promise<{ path: string; filename: string; cleanup: () => Promise<void> }> {
     const fieldDefs = await this.db.contactFieldDefinition.findMany({
-      where: { teamId, isVisible: true },
+      where: { workspaceId, isVisible: true },
       orderBy: [{ order: "asc" }, { createdAt: "asc" }],
       select: { key: true, label: true },
     });
@@ -313,14 +313,14 @@ export class ContactTransferService {
    * by the other worker slot, and 500 ms is far below the wait budget.
    */
   async waitForTerminal(
-    teamId: string,
+    workspaceId: string,
     id: string,
     budgetMs: number,
   ): Promise<{ status: string; error: string | null } | null> {
     const deadline = Date.now() + budgetMs;
     for (;;) {
       const row = await this.db.contactTransferJob.findFirst({
-        where: { id, teamId },
+        where: { id, workspaceId },
         select: { status: true, error: true },
       });
       if (!row) return null;
@@ -331,8 +331,8 @@ export class ContactTransferService {
   }
 
   /** Column list for the export preview ("this file will have these columns"). */
-  async exportColumns(teamId: string): Promise<{ columns: string[] }> {
-    const { columns } = await resolveExportColumns(teamId);
+  async exportColumns(workspaceId: string): Promise<{ columns: string[] }> {
+    const { columns } = await resolveExportColumns(workspaceId);
     return { columns };
   }
 
@@ -348,9 +348,9 @@ export class ContactTransferService {
    * unique index `ContactTransferJob_teamId_active_key` is what actually
    * enforces the invariant, and `createJob` maps its P2002 to this same error.
    */
-  private async assertNoRunningJob(teamId: string): Promise<void> {
+  private async assertNoRunningJob(workspaceId: string): Promise<void> {
     const running = await this.db.contactTransferJob.count({
-      where: { teamId, status: { in: ["pending", "running"] } },
+      where: { workspaceId, status: { in: ["pending", "running"] } },
     });
     if (running >= MAX_CONCURRENT_TRANSFERS_PER_TEAM) throw transferInProgress();
   }

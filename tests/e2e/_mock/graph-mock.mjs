@@ -75,7 +75,7 @@ const server = createServer(async (req, res) => {
   if (path === "/__mock/reset" && method === "POST") {
     // Clear only the recorded calls — NOT `seq`. The message-id counter must
     // stay monotonic across resets so every send gets a globally-unique mid;
-    // reusing ids would collide on the app's real (teamId,channel,externalId)
+    // reusing ids would collide on the app's real (workspaceId,channel,externalId)
     // dedup and fold two distinct sends into one row.
     calls = [];
     failSendsRemaining = 0;

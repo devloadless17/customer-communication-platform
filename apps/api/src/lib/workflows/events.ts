@@ -60,7 +60,7 @@ export function parseChainDepth(raw: string | undefined): number {
 export interface WorkflowEventEnvelope<P = EventPayload> {
   version: 1;
   event: WorkflowTriggerEvent;
-  teamId: string;
+  workspaceId: string;
   occurredAt: string;
   data: P;
   /**

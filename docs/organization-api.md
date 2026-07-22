@@ -256,7 +256,8 @@ Stops within a batch. Rows already imported stay imported; the counters tell you
 One conversation per contact (closed threads reopen, never fork). Scopes: `read:conversations`, `write:conversations`.
 
 **List conversations** — `GET /conversations` · `read:conversations`
-Optional: `phone`, `status` (`open|pending|closed`), `limit`, `cursor`.
+Optional: `phone`, `status` (`open|pending|closed`), `viewId` (a saved inbox
+view — see §4b), `limit`, `cursor`.
 ```bash
 curl -s "$CCP_BASE_URL/api/external/v1/conversations?status=open&limit=50" \
   -H "Authorization: Bearer $CCP_API_KEY"
@@ -320,6 +321,90 @@ curl -s -X POST "$CCP_BASE_URL/api/external/v1/contacts/CONTACT_ID/status" \
   -H "Content-Type: application/json" \
   -d '{ "status": "open" }'
 ```
+
+---
+
+## 4b. Saved inbox views
+
+A **view** is a named, reusable filter over the conversation list — "Support ·
+unassigned · WhatsApp", "VIP escalations". The same views the team sees in the
+inbox rail, backed by the same service, so a view can never select different
+conversations here than it shows in the product. Scopes: `read:catalog`,
+`write:catalog`.
+
+Two things follow from an API key not being a person:
+
+- **Shared views only.** A personal view belongs to one teammate; a key has no
+  personal scope, so it neither sees nor creates them (`POST` without
+  `visibility` defaults to `shared`; an explicit `"personal"` returns
+  `inbox_view_requires_user`).
+- **`{"kind":"me"}` matches nothing here.** A view whose assignee filter is
+  "me" resolves against the *viewer*, and a key has no user. It returns an
+  empty set rather than silently widening to everyone.
+
+**List / get** — `GET /inbox-views` · `GET /inbox-views/:id` · `read:catalog`
+```bash
+curl -s "$CCP_BASE_URL/api/external/v1/inbox-views" \
+  -H "Authorization: Bearer $CCP_API_KEY"
+```
+
+**Use one to filter conversations** — pass its id to the conversation list. The
+view's criteria are **ANDed** with `status` / `phone`, not substituted for them.
+```bash
+curl -s "$CCP_BASE_URL/api/external/v1/conversations?viewId=VIEW_ID&limit=50" \
+  -H "Authorization: Bearer $CCP_API_KEY"
+```
+
+**Create** — `POST /inbox-views` · `write:catalog`
+
+| Field | Notes |
+|---|---|
+| `name` | required, ≤60 chars, unique per workspace among shared views (case-insensitive) |
+| `filters` | the criteria document, below. `{}` means every conversation |
+| `color` | a palette name (`slate`, `rose`, `amber`, …) — not a hex |
+| `icon` | one of a fixed set (`inbox`, `star`, `flame`, `filter`, …) |
+| `visibility` | `shared` (the default for a key) |
+
+Every `filters` field is optional and **ANDed**; an omitted field means "no
+opinion", so `{}` is the widest possible view.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `statuses` | `["open","pending","closed"]` | any status when omitted |
+| `assignee` | `{"kind":"anyone"\|"me"\|"unassigned"}` or `{"kind":"users","userIds":[…]}` | see the `me` caveat above |
+| `channels` | `["whatsapp","instagram",…]` | the channel the thread arrived on |
+| `stageIds` | `[…]` | contact lifecycle stage |
+| `tagIds` + `tagMatch` | `[…]` + `"any"` (default) or `"all"` | `all` requires every tag |
+| `hasOpenFlags` | `true` | only threads with an unresolved triage flag |
+| `unreadOnly` | `true` | only threads with unread inbound messages |
+
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/inbox-views" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "Unassigned WhatsApp",
+        "icon": "flame",
+        "color": "rose",
+        "filters": {
+          "statuses": ["open"],
+          "assignee": { "kind": "unassigned" },
+          "channels": ["whatsapp"]
+        }
+      }'
+```
+
+**Update / delete** — `PATCH /inbox-views/:id` · `DELETE /inbox-views/:id` ·
+`write:catalog`. `PATCH` takes any subset of the create fields.
+
+A view referencing a tag, stage or teammate that has since been deleted is
+**widened**, not emptied: the dead ids are dropped at read time and, if that
+empties a criterion, the criterion is ignored. Deleting one tag of five must not
+silently blank a view.
+
+Errors: `inbox_view_not_found` (404 — also returned for another workspace's id,
+so it can't be used to probe), `inbox_view_name_taken` (400),
+`inbox_view_limit_reached` (400, 30 per scope), `inbox_view_requires_user` (400).
 
 ---
 
@@ -549,6 +634,147 @@ Concurrency-safe: two clients resolving the same flag both succeed, and the open
 
 ---
 
+## 5c. Tickets (the unit of work)
+
+A **conversation** is the long-lived thread with one contact — it never fragments. A **ticket** is one piece of *work* on that thread, and there are many over time:
+
+```
+new → open → pending / on_hold → solved → closed
+                                    ↑         (reopen window)
+                              a follow-up inside the window comes back here
+```
+
+The refund raised in March and the delivery question in June are two tickets on one unbroken thread, each with its own assignee, priority, SLA clock and outcome. `Message.ticketId` is the join: every message carries the ticket it belongs to.
+
+**Tickets open by themselves.** An inbound message on a thread with no active ticket opens one (`source: "auto"`); a follow-up inside the workspace's reopen window (default 72h) reopens the solved one instead of starting a third. Both behaviours are workspace settings — see *Settings* below. **Broadcasts never open tickets**; a customer who *replies* to one does.
+
+Scopes: `read:tickets`, `write:tickets`.
+
+### The board
+
+**`GET /tickets`** · `read:tickets` — newest first, keyset-paginated.
+
+| Query param | Meaning |
+|---|---|
+| `status` | Comma list: `new,open,pending,on_hold,solved,closed` |
+| `priority` | Comma list: `low,normal,high,urgent` |
+| `assignee` | A user id, `me`, or `none` (unassigned — a real filter, not "any") |
+| `contactId` · `conversationId` · `channel` | Narrow to one person, thread, or channel |
+| `tagIds` | Comma list; matches any |
+| `breached` | `true` → only tickets that missed a promise |
+| `cursorCreatedAt` + `cursorId` | The previous page's last row (both required) |
+| `limit` | 1–50, default 50 |
+
+An unknown enum value is a `400` that names it — a filter is never silently ignored, because that would quietly return the whole board.
+
+```bash
+curl -s "$CCP_BASE_URL/api/external/v1/tickets?status=new,open&priority=urgent&breached=true" \
+  -H "Authorization: Bearer $CCP_API_KEY"
+```
+
+```json
+{
+  "tickets": [
+    {
+      "id": "tkt_123",
+      "number": 1042,
+      "conversationId": "cnv_9",
+      "contactId": "ctc_4",
+      "contactName": "Layla",
+      "channel": "whatsapp",
+      "subject": "Refund not received",
+      "status": "open",
+      "priority": "urgent",
+      "assignedUserId": "usr_2",
+      "assignedUserName": "Omar",
+      "tags": [{ "id": "tag_1", "name": "billing", "color": "amber" }],
+      "sla": {
+        "firstResponseDueAt": "2026-07-22T10:15:00.000Z",
+        "resolutionDueAt": "2026-07-22T13:00:00.000Z",
+        "firstResponseAt": null,
+        "firstResponseBreached": false,
+        "resolutionBreached": false,
+        "paused": false
+      },
+      "resolvedAt": null, "closedAt": null,
+      "resolutionCode": null, "resolutionNote": null,
+      "reopenCount": 0, "source": "auto",
+      "customFields": { "root_cause": "" },
+      "version": 3,
+      "createdAt": "2026-07-22T09:00:00.000Z",
+      "updatedAt": "2026-07-22T09:41:12.004Z"
+    }
+  ],
+  "nextCursor": { "createdAt": "2026-07-22T09:00:00.000Z", "id": "tkt_123" }
+}
+```
+
+`number` is the human-facing id people quote to each other (`#1042`), unique per workspace. `version` is the concurrency token — see *Updating* below.
+
+**`GET /tickets/counts`** · `read:tickets` — `{ totalActive, mineActive, breached, byStatus }` for header badges. `mineActive` is always `0` for an API key (a key has no agent identity).
+
+**`GET /tickets/:id`** · `read:tickets` — one ticket plus its full timeline:
+
+```json
+{ "ticket": { … }, "events": [ { "id": "…", "kind": "created", "before": null, "after": {…}, "actorUserId": null, "actorName": null, "createdAt": "…" } ] }
+```
+
+### Opening one
+
+**`POST /tickets`** · `write:tickets` — for a second issue raised in the same breath, or work created from your own system.
+
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/tickets" \
+  -H "Authorization: Bearer $CCP_API_KEY" -H "Content-Type: application/json" \
+  -d '{"conversationId":"cnv_9","subject":"Also: wrong invoice","priority":"high","tagIds":["tag_1"]}'
+```
+
+Fields: `conversationId` (required), `subject`, `priority`, `assignedUserId`, `tagIds`, `customFields`. A ticket created with an assignee starts `open`; without one it starts `new`, which is what makes an untriaged backlog reportable.
+
+### Updating
+
+**`PATCH /tickets/:id`** · `write:tickets` — status, priority, assignee, subject, tags, custom fields, resolution.
+
+```bash
+curl -s -X PATCH "$CCP_BASE_URL/api/external/v1/tickets/tkt_123" \
+  -H "Authorization: Bearer $CCP_API_KEY" -H "Content-Type: application/json" \
+  -d '{"expectedVersion":3,"status":"solved","resolutionCode":"refunded"}'
+```
+
+Send `expectedVersion` (from your last read) and a write built on a stale view returns **`409 version_conflict`** instead of overwriting someone else's change — re-read and retry. Omit it and the write always applies; that is the right choice for automation, which has no stale view to protect.
+
+Lifecycle side effects, so you don't have to replicate them:
+- → `solved` stamps `resolvedAt` and starts the reopen window.
+- → `closed` is terminal; a later message always opens a new ticket.
+- Back from `solved`/`closed` clears the resolution and increments `reopenCount`.
+- → `on_hold` (and `pending`, if the policy says so) **pauses** the SLA clock; leaving it pushes both deadlines out by exactly the parked time rather than restarting the commitment.
+
+### Settings
+
+**`GET` / `PATCH /tickets-settings`** · `read:tickets` / `write:tickets`
+
+| Field | Meaning |
+|---|---|
+| `ticketAutoOpen` | Open a ticket automatically on an inbound with no active one. Default `true`. Off = messages simply carry no `ticketId`. |
+| `ticketReopenWindowHours` | How long after `solved` a follow-up reopens instead of starting fresh. Default `72`, `0` disables, max `720`. |
+| `ticketCloseConversationOnLastSolved` | Close the conversation when its last active ticket is solved. Default `false` — the two lifecycles are deliberately decoupled. |
+
+**`GET` / `POST /ticket-sla`** · `read:tickets` / `write:tickets` — one commitment per priority; `POST` upserts on `priority`.
+
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/ticket-sla" \
+  -H "Authorization: Bearer $CCP_API_KEY" -H "Content-Type: application/json" \
+  -d '{"priority":"urgent","firstResponseMins":15,"resolutionMins":60,"pauseOnHold":true,"businessHoursOnly":false}'
+```
+
+`null` minutes means **no commitment on that leg** — not zero. Nothing is due, so nothing breaches. `businessHoursOnly` consumes the minutes only inside the workspace's working hours. Due dates are computed **when the ticket is created** and then stored, so editing a policy never retroactively breaches open work.
+
+A missed deadline flips `firstResponseBreached` / `resolutionBreached` and fires the `ticket.changed` webhook with `action: "sla_breached"` and `breachedLeg` — exactly once, however long it stays missed.
+
+**`GET` / `POST /ticket-fields`**, **`PATCH` / `DELETE /ticket-fields/:id`** · custom fields on a ticket. The `key` is derived from the label at create time and is **immutable** (values in `customFields` are keyed by it). Deleting a definition leaves stored values in place — they are history on closed work — they just stop rendering.
+
+---
+
 ## 6. Catalog (tags, fields, stages, channels, users)
 
 Reference data for the routes above. Scopes: `read:catalog`, `write:catalog`.
@@ -569,6 +795,53 @@ Reference data for the routes above. Scopes: `read:catalog`, `write:catalog`.
 | Get a teammate (by id or email) | `GET /users/:idOrEmail` |
 
 Tag `color` must be one of: `slate`, `rose`, `amber`, `emerald`, `sky`, `violet`, `pink`, `lime`, `orange`.
+
+### Channel accounts
+
+`GET /channels` lists which *channels* the workspace has connected. A channel can hold
+**more than one account** — two WhatsApp numbers, two Facebook Pages — so this returns the
+accounts under one channel:
+
+**`GET /channels/:channel/accounts`** · `read:channels`
+
+`:channel` is `whatsapp`, `messenger` or `instagram` (channels whose accounts carry
+credentials; the web chat widget is managed separately).
+
+```bash
+curl -s "$CCP_BASE_URL/api/external/v1/channels/whatsapp/accounts" \
+  -H "Authorization: Bearer $CCP_API_KEY"
+```
+
+```json
+{
+  "accounts": [
+    {
+      "id": "cnx_123",
+      "channel": "whatsapp",
+      "externalAccountId": "10987654321",
+      "label": "Sales line",
+      "isDefault": true,
+      "isActive": true,
+      "needsReconnect": false,
+      "displayPhoneNumber": "+961 70 000 000",
+      "wabaId": "220044…",
+      "createdAt": "2026-07-22T09:12:04.118Z"
+    }
+  ]
+}
+```
+
+- `externalAccountId` is the provider's own id — the WhatsApp phone-number id, the Page id,
+  or the Instagram account id. Use it to correlate a webhook you receive from Meta directly
+  with the account it belongs to here.
+- `isDefault` is the account used when a conversation doesn't name one — an outbound-initiated
+  send or a broadcast. A reply to an existing thread always goes out the account the customer
+  messaged, never the default.
+- `needsReconnect` means the stored credentials were rejected by the provider; sends on that
+  account will fail until an admin re-authorizes it in the app.
+
+Read-only by design. Connecting or disconnecting an account moves real credentials and silently
+changes which number a customer hears from, so it stays an in-app admin action.
 
 ### Teammate availability & working hours
 
@@ -990,7 +1263,8 @@ pick the events. We generate a signing secret (`ccp_whsec_…`) shown once.
 `conversation.assigned`, `conversation.opened`, `conversation.closed`,
 `conversation.status_changed`, `conversation.ai_changed`, `contact.created`,
 `contact.updated`, `contact.tag_changed`, `contact.lifecycle_changed`,
-`contact.deleted`, `note.created`, `note.deleted`, `message.flag_changed`.
+`contact.deleted`, `note.created`, `note.deleted`, `message.flag_changed`,
+`ticket.changed`.
 
 **Example body — `message.received`:**
 ```jsonc
@@ -1045,6 +1319,45 @@ want flagged work to reach another system):
   }
 }
 ```
+**Example body — `ticket.changed`** (subscribe to this to mirror the work queue
+into a helpdesk or BI system):
+```jsonc
+{
+  "team_id": "...",
+  "timestamp": 1753196400000,
+  "event_type": "ticket.changed",
+  // The TRANSITION, never merely the post-state: created | assigned |
+  // status_changed | priority_changed | reopened | solved | closed |
+  // sla_breached | updated (metadata edit that moved no lifecycle).
+  "action": "solved",
+  "conversationId": "...",
+  "contact": { "id": "...", "phoneNumber": "+961...", "name": "Layla H." },
+  "previousStatus": "open",
+  "openTicketCount": 0,                // the thread's active-ticket count AFTER the change
+  // "breachedLeg": "first_response",  // present ONLY on action = sla_breached
+  "ticket": {
+    "id": "...",
+    "number": 1042,                    // what people quote to each other — "#1042"
+    "subject": "Refund not received",
+    "status": "solved",                // new | open | pending | on_hold | solved | closed
+    "priority": "urgent",
+    "channel": "whatsapp",
+    "assignedUserId": "...", "assignedUserName": "Omar",
+    "tags": ["billing"],               // names — no catalog sync needed
+    "firstResponseDueAt": 1753189200000, "resolutionDueAt": 1753199400000,
+    "firstResponseAt": 1753188120000,
+    "firstResponseBreached": false, "resolutionBreached": false,
+    "resolvedAt": 1753196400000, "closedAt": null,
+    "resolutionCode": "refunded", "resolutionNote": "Refunded to the original card.",
+    "reopenCount": 0,
+    "source": "auto",                  // auto | human | workflow | api
+    "createdAt": 1753174800000, "updatedAt": 1753196400000
+  }
+}
+```
+`sla_breached` fires **exactly once per leg**, however long the ticket stays
+overdue — a missed promise is not a repeating alarm.
+
 `message.sent` is the same minus the inbound-only flags. The other events carry
 top-level `conversationId`/`contactId`, the changed fields, and `changedBy`
 attribution.

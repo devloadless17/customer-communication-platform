@@ -105,7 +105,7 @@ export default async function PlatformOverviewPage() {
                     Signed up <LocalTime iso={o.createdAt} format="listTime" />
                   </div>
                 </div>
-                <QuickApproveButton teamId={o.id} />
+                <QuickApproveButton workspaceId={o.id} />
                 <Link
                   href={`/platform/organizations/${o.id}`}
                   className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"

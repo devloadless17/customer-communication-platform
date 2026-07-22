@@ -18,7 +18,7 @@ export default async function PlatformLayout({
   children: React.ReactNode;
 }) {
   const { user } = await getSession();
-  if (user.role !== "superAdmin") redirect("/inbox");
+  if (!user.isSuperAdmin) redirect("/inbox");
 
   return (
     <div className="flex h-svh w-full flex-col overflow-hidden bg-background text-foreground md:flex-row">

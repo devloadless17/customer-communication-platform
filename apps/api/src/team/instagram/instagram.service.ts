@@ -67,7 +67,7 @@ function pruneUndefined<T extends object>(o: T): T {
 
 /**
  * Instagram DM connection settings — admin-only. Same credential model as
- * WhatsApp / Messenger (a `ChannelConnection` row keyed (teamId, "instagram");
+ * WhatsApp / Messenger (a `ChannelConnection` row keyed (workspaceId, "instagram");
  * `config` non-secret, `secrets` envelope-encrypted) but with IG account fields.
  */
 @Injectable()
@@ -90,9 +90,9 @@ export class InstagramService {
     }
   }
 
-  async getConfig(teamId: string): Promise<InstagramConfigView> {
-    const conn = await this.db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId, channel: CHANNEL } },
+  async getConfig(workspaceId: string): Promise<InstagramConfigView> {
+    const conn = await this.db.channelConnection.findFirst({
+      where: { workspaceId, channel: CHANNEL, isDefault: true },
       select: { config: true, secrets: true, needsReconnect: true },
     });
     const config = (conn?.config ?? {}) as InstagramChannelConfig;
@@ -118,7 +118,7 @@ export class InstagramService {
         };
       } catch (err) {
         this.logger.warn(
-          `[${teamId}] could not read instagram page subscription: ${err instanceof Error ? err.message : String(err)}`,
+          `[${workspaceId}] could not read instagram page subscription: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
@@ -129,10 +129,18 @@ export class InstagramService {
       try {
         const mergedConfig = pruneUndefined({ ...config, verifyToken: minted });
         await this.db.channelConnection.upsert({
-          where: { teamId_channel: { teamId, channel: CHANNEL } },
+          where: {
+            workspaceId_channel_externalAccountId: {
+              workspaceId,
+              channel: CHANNEL,
+              externalAccountId: config.igId ?? "",
+            },
+          },
           create: {
-            teamId,
+            workspaceId,
             channel: CHANNEL,
+            externalAccountId: config.igId ?? "",
+            isDefault: true,
             config: mergedConfig as Prisma.InputJsonValue,
             secrets: {},
             isActive: false,
@@ -163,7 +171,7 @@ export class InstagramService {
   }
 
   async updateConfig(
-    teamId: string,
+    workspaceId: string,
     input: UpdateInstagramConfigInput,
   ): Promise<{
     config: { igId: string; igUsername: string | null; pageId: string; verifyToken: string };
@@ -172,7 +180,7 @@ export class InstagramService {
 
     // Source app-level credentials from the shared Meta App connection unless
     // overridden on this form. The Page access token is derived below.
-    const meta = await getMetaConnection(teamId);
+    const meta = await getMetaConnection(workspaceId);
     const appSecret = input.appSecret?.trim() || meta?.appSecret || null;
     const sourceToken = input.igAccessToken?.trim() || meta?.systemUserToken || null;
     const appId = input.appId?.trim() || meta?.appId || undefined;
@@ -254,8 +262,8 @@ export class InstagramService {
     }
     const tokenToStore = derivedPageToken ?? sourceToken;
 
-    const existing = await this.db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId, channel: CHANNEL } },
+    const existing = await this.db.channelConnection.findFirst({
+      where: { workspaceId, channel: CHANNEL, isDefault: true },
       select: { config: true },
     });
     const existingConfig = (existing?.config ?? {}) as InstagramChannelConfig;
@@ -278,11 +286,23 @@ export class InstagramService {
       appSecret: encryptSecret(appSecret),
     };
 
+    // Account-keyed: a workspace may hold several accounts on this channel, so
+    // re-pasting one account's credentials must not overwrite a sibling.
     await this.db.channelConnection.upsert({
-      where: { teamId_channel: { teamId, channel: CHANNEL } },
+      where: {
+        workspaceId_channel_externalAccountId: {
+          workspaceId,
+          channel: CHANNEL,
+          externalAccountId: igId ?? "",
+        },
+      },
       create: {
-        teamId,
+        workspaceId,
         channel: CHANNEL,
+        externalAccountId: igId ?? "",
+        isDefault: !(await this.db.channelConnection.count({
+          where: { workspaceId, channel: CHANNEL },
+        })),
         config: newConfig as Prisma.InputJsonValue,
         secrets: newSecrets as Prisma.InputJsonValue,
         isActive: true,
@@ -297,7 +317,7 @@ export class InstagramService {
       },
     });
 
-    invalidateInstagramConfig(teamId);
+    invalidateInstagramConfig(workspaceId);
 
     // Instagram DMs ride the linked Page, so the Page must be subscribed to the
     // app. The helper posts the UNION of existing + required fields — critical
@@ -306,18 +326,18 @@ export class InstagramService {
     const sub = await ensurePageSubscribedToMessaging(pageId, tokenToStore, GRAPH_VERSION);
     if (!sub.ok) {
       this.logger.warn(
-        `[${teamId}] instagram connected but page subscription failed for page=${pageId}: ${sub.error}`,
+        `[${workspaceId}] instagram connected but page subscription failed for page=${pageId}: ${sub.error}`,
       );
     }
 
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "channels" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "channels" });
 
     return { config: { igId, igUsername: igUsername ?? null, pageId, verifyToken } };
   }
 
-  async disconnect(teamId: string): Promise<void> {
-    await this.db.channelConnection.deleteMany({ where: { teamId, channel: CHANNEL } });
-    invalidateInstagramConfig(teamId);
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "channels" });
+  async disconnect(workspaceId: string): Promise<void> {
+    await this.db.channelConnection.deleteMany({ where: { workspaceId, channel: CHANNEL } });
+    invalidateInstagramConfig(workspaceId);
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "channels" });
   }
 }

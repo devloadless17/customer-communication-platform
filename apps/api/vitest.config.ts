@@ -18,6 +18,9 @@ export default defineConfig({
     alias: {
       "@": path.join(root, "src"),
       "@ccp/shared": path.join(root, "../../packages/shared/src"),
+      // See the stub's header: `server-only` throws on import, which would block
+      // testing anything downstream of the envelope-crypto module.
+      "server-only": path.join(root, "test/stubs/server-only.ts"),
     },
   },
 });

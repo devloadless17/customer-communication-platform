@@ -360,7 +360,7 @@ export default function proxy(req: NextRequest): NextResponse {
     // response carries privileged data, so the prefix is safe. Keep this in
     // sync with the Caddyfile web-block `health_uri` (deploy/Caddyfile.template).
     pathname.startsWith("/api/health") ||
-    // External API uses bearer-token auth (TeamApiKey), not session cookies —
+    // External API uses bearer-token auth (WorkspaceApiKey), not session cookies —
     // bypass the cookie gate so n8n / partner integrations can reach it. The
     // NestJS ApiKeyGuard (apps/api/src/auth/api-key.guard.ts) does the auth.
     pathname.startsWith("/api/external/");

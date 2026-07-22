@@ -10,12 +10,12 @@ import type { Channel } from "@ccp/shared/types";
  * failure to record this must never mask or block the send-failure path.
  */
 export async function flagChannelNeedsReconnect(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
 ): Promise<void> {
   await db.channelConnection
     .updateMany({
-      where: { teamId, channel },
+      where: { workspaceId, channel },
       data: { needsReconnect: true, lastAuthErrorAt: new Date() },
     })
     .catch(() => undefined);
@@ -30,12 +30,12 @@ export async function flagChannelNeedsReconnect(
  * instant banner dismiss on reconnect.
  */
 export async function clearChannelNeedsReconnect(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
 ): Promise<void> {
   await db.channelConnection
     .updateMany({
-      where: { teamId, channel, needsReconnect: true },
+      where: { workspaceId, channel, needsReconnect: true },
       data: { needsReconnect: false, lastAuthErrorAt: null },
     })
     .catch(() => undefined);

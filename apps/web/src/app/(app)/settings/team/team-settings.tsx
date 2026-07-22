@@ -78,6 +78,8 @@ export interface TeamUserRow {
   name: string;
   email: string;
   role: Role;
+  // Platform operator flag — protects them from edits by a workspace admin.
+  isSuperAdmin?: boolean;
   deactivated: boolean;
   createdAt: string;
   /** Serve-route path for the member's avatar, or null → initials fallback. */
@@ -110,7 +112,8 @@ interface InviteResult {
 export function TeamSettings({
   currentUserId,
   currentUserRole,
-  teamId,
+  currentUserIsSuperAdmin = false,
+  workspaceId,
   teamName,
   users,
   pendingInvites,
@@ -119,8 +122,9 @@ export function TeamSettings({
 }: {
   currentUserId: string;
   currentUserRole: Role;
+  currentUserIsSuperAdmin?: boolean;
   /** Needed for the live presence subscription behind the member status dots. */
-  teamId: string;
+  workspaceId: string;
   teamName: string;
   users: TeamUserRow[];
   /** Empty for non-admins (they can't see this panel). */
@@ -152,12 +156,12 @@ export function TeamSettings({
   // with no presence check, so a teammate who wasn't connected at all still
   // showed a green "Available" here while the sidebar correctly showed them
   // grey — the two surfaces disagreed about the same person.
-  const { onlineUserIds, availabilityByUserId } = usePresence(teamId, currentUserId);
+  const { onlineUserIds, availabilityByUserId } = usePresence(workspaceId, currentUserId);
   const { confirm, confirmDialog } = useConfirm();
 
   const refresh = softRefresh;
   const canManage = canManageUsers(currentUserRole);
-  const inviteRoles = useMemo(() => assignableRoles(currentUserRole), [currentUserRole]);
+  const inviteRoles = useMemo(() => assignableRoles({ role: currentUserRole, isSuperAdmin: currentUserIsSuperAdmin }), [currentUserRole, currentUserIsSuperAdmin]);
   // Org-delete is admin/superAdmin only — same gate as user-management.
   const canDeleteOrg = canManage;
 
@@ -263,7 +267,7 @@ export function TeamSettings({
     // wired in team-name-live-sync.tsx, so we don't need to setLiveTeamName
     // separately — the dispatched frame routes through the same listener.
     dispatchLocalSocketEvent("team:renamed", {
-      teamId: "", // listener doesn't filter by id (only one team per session)
+      workspaceId: "", // listener doesn't filter by id (only one team per session)
       name: trimmed,
       renamedByUserId: currentUserId,
     });
@@ -278,7 +282,7 @@ export function TeamSettings({
       setError(data.error ?? "Failed to rename organization");
       // Roll the optimistic patch back to the server-truth name.
       dispatchLocalSocketEvent("team:renamed", {
-        teamId: "",
+        workspaceId: "",
         name: liveTeamName,
         renamedByUserId: currentUserId,
       });
@@ -411,6 +415,7 @@ export function TeamSettings({
               user={u}
               isSelf={u.id === currentUserId}
               actorRole={currentUserRole}
+              actorIsSuperAdmin={currentUserIsSuperAdmin}
               online={onlineUserIds.has(u.id)}
               liveAvailability={availabilityByUserId[u.id]?.status}
               liveNote={availabilityByUserId[u.id]?.message ?? undefined}
@@ -503,6 +508,7 @@ function UserRow({
   user,
   isSelf,
   actorRole,
+  actorIsSuperAdmin = false,
   online,
   liveAvailability,
   liveNote,
@@ -517,6 +523,7 @@ function UserRow({
   user: TeamUserRow;
   isSelf: boolean;
   actorRole: Role;
+  actorIsSuperAdmin?: boolean;
   /** Has a live socket. Offline wins over any availability — see PresenceDot. */
   online: boolean;
   /** Live status/note from the socket; falls back to the SSR snapshot. */
@@ -530,17 +537,17 @@ function UserRow({
   onDelete: () => void;
   onResetPassword: () => void;
 }) {
-  const editable = canManageUsers(actorRole) && canModifyUser(actorRole, user.role);
+  const editable = canManageUsers(actorRole) && canModifyUser({ role: actorRole, isSuperAdmin: actorIsSuperAdmin }, { role: user.role, isSuperAdmin: user.isSuperAdmin ?? false });
   // Live socket value wins; the SSR snapshot is the fallback for the first
   // paint (and for a member the sparse presence map omits, i.e. the default
   // "available, no note").
   const status: UserAvailabilityStatus = liveAvailability ?? user.availabilityStatus;
   const note = liveNote ?? user.availabilityMessage ?? "";
   const options = useMemo(() => {
-    const set = new Set<Role>(assignableRoles(actorRole));
+    const set = new Set<Role>(assignableRoles({ role: actorRole, isSuperAdmin: actorIsSuperAdmin }));
     set.add(user.role);
     return Array.from(set);
-  }, [actorRole, user.role]);
+  }, [actorRole, actorIsSuperAdmin, user.role]);
 
   return (
     <li className="flex items-center gap-3 px-4 py-3">
@@ -556,7 +563,7 @@ function UserRow({
               you
             </Badge>
           )}
-          {user.role === "superAdmin" && (
+          {user.isSuperAdmin && (
             <Badge
               variant="muted"
               className="flex items-center gap-1 px-1.5 py-0 text-3xs text-primary"

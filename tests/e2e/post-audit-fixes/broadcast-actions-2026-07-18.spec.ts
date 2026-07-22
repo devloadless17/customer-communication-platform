@@ -13,14 +13,14 @@ import { db, appAdmin } from "../_helpers/db";
 test.describe.configure({ mode: "serial" });
 
 const PREFIX = "e2e_actions_";
-let teamId: string;
+let workspaceId: string;
 let broadcastId: string;
 
 test.beforeAll(async () => {
-  teamId = (await appAdmin()).teamId;
+  workspaceId = (await appAdmin()).workspaceId;
   const b = await db().broadcast.create({
     data: {
-      teamId,
+      workspaceId,
       status: "completed",
       kind: "template",
       targetMode: "contact",
@@ -49,7 +49,7 @@ test.beforeAll(async () => {
   for (const p of plan) {
     const c = await db().contact.create({
       data: {
-        teamId,
+        workspaceId,
         name: `${PREFIX}${i}`,
         phoneNumber: `1555${String(Date.now()).slice(-6)}${i++}`,
         identityChannel: "whatsapp",
@@ -80,7 +80,7 @@ test.afterAll(async () => {
     await db().broadcastRecipient.deleteMany({ where: { broadcastId: { in: ids } } });
     await db().broadcast.deleteMany({ where: { id: { in: ids } } });
   }
-  await db().contact.deleteMany({ where: { teamId, name: { startsWith: PREFIX } } });
+  await db().contact.deleteMany({ where: { workspaceId, name: { startsWith: PREFIX } } });
   await db().$disconnect();
 });
 

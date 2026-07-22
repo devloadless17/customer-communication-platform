@@ -7,7 +7,7 @@ import {
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
-import { assignableRoles, canModifyUser } from "@ccp/shared/auth/permissions";
+import { assignableRoles, canModifyUser, type UserActor } from "@ccp/shared/auth/permissions";
 import type { Role, User } from "@ccp/shared/types";
 
 import { rebalanceDeactivatedUser } from "@/lib/sweepers/assignment-rebalance";
@@ -23,20 +23,8 @@ import {
 } from "../lib/blob-storage/avatar";
 import { AVAILABILITY_SELECT, applyAvailability } from "../lib/availability/apply";
 
-/** Exactly the columns `mapUser` reads — so the availability round-trips stop
- *  pulling every User column (auth material included) to render ~10 fields. */
-const MAP_USER_SELECT = {
-  id: true,
-  teamId: true,
-  role: true,
-  name: true,
-  email: true,
-  avatarUrl: true,
-  deactivatedAt: true,
-  createdAt: true,
-} as const;
 import { teamScheduleOf } from "../lib/availability/schedule";
-import { mapUser } from "../lib/queries/_shared";
+import { assignedUserSelect, mapUser } from "../lib/queries/_shared";
 import type {
   SetUserAvailabilityInput,
   SetUserWorkHoursInput,
@@ -100,7 +88,7 @@ export class UsersService {
    * `avatarUrl: "<url>"` swaps it, omitting the field leaves it alone.
    */
   async updateMyProfile(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: UpdateMyProfileInput,
   ): Promise<User> {
@@ -121,6 +109,7 @@ export class UsersService {
     const updated = await this.db.user.update({
       where: { id: userId },
       data,
+      select: assignedUserSelect(workspaceId),
     });
     // Bust the session cache so the next request from this user sees the
     // new name/avatar without a 15s lag.
@@ -128,13 +117,13 @@ export class UsersService {
 
     await this.bus.publish({
       type: "user.profile_updated",
-      teamId,
+      workspaceId,
       userId,
       ...(data.name !== undefined ? { name: data.name } : {}),
       ...(data.avatarUrl !== undefined ? { avatarUrl: data.avatarUrl } : {}),
     });
 
-    return mapUser(updated);
+    return mapUser(updated, workspaceId);
   }
 
   /**
@@ -158,11 +147,11 @@ export class UsersService {
    * orchestration-agnostic.
    */
   async updateMyAvailability(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: UpdateMyAvailabilityInput,
   ): Promise<User> {
-    return this.writeAvailability(teamId, userId, input, userId);
+    return this.writeAvailability(workspaceId, userId, input, userId);
   }
 
   /**
@@ -176,22 +165,22 @@ export class UsersService {
    * wondering why their status changed by itself.
    */
   async setUserAvailability(
-    teamId: string,
+    workspaceId: string,
     /** Null when the caller is an API key rather than a member. */
     actorUserId: string | null,
-    actorRole: Role,
+    actor: UserActor,
     targetUserId: string,
     input: SetUserAvailabilityInput,
   ): Promise<User> {
     const target = await this.db.user.findFirst({
-      where: { id: targetUserId, teamId },
-      select: { id: true, role: true },
+      where: { id: targetUserId, workspaceMemberships: { some: { workspaceId } } },
+      select: { id: true, isSuperAdmin: true, workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
     });
     if (!target) throw new NotFoundException({ error: "not_found" });
-    if (!canModifyUser(actorRole, target.role as Role)) {
+    if (!canModifyUser(actor, { role: (target.workspaceMemberships[0]?.role ?? "agent") as Role, isSuperAdmin: target.isSuperAdmin })) {
       throw new ForbiddenException({ error: "forbidden" });
     }
-    return this.writeAvailability(teamId, targetUserId, input, actorUserId);
+    return this.writeAvailability(workspaceId, targetUserId, input, actorUserId);
   }
 
   /**
@@ -199,23 +188,24 @@ export class UsersService {
    * what makes the write count as the user's own pick rather than an admin's.
    */
   private async writeAvailability(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: UpdateMyAvailabilityInput,
     actorUserId: string | null,
   ): Promise<User> {
     const user = await this.db.user.findFirstOrThrow({
-      where: { id: userId, teamId },
-      select: { ...AVAILABILITY_SELECT, ...MAP_USER_SELECT },
+      where: { id: userId, workspaceMemberships: { some: { workspaceId } } },
+      select: { ...AVAILABILITY_SELECT, ...assignedUserSelect(workspaceId) },
     });
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
+    const team = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { workHours: true },
     });
 
     await applyAvailability({
       db: this.db,
       user,
+      workspaceId,
       teamSchedule: teamScheduleOf(team),
       intent: input.followSchedule
         ? { kind: "followSchedule" }
@@ -230,24 +220,24 @@ export class UsersService {
     // Team-scoped, and SELECTED: the default select pulls every User column
     // (including auth material) to feed mapUser, which reads ~10 fields.
     const updated = await this.db.user.findFirstOrThrow({
-      where: { id: userId, teamId },
-      select: { ...AVAILABILITY_SELECT, ...MAP_USER_SELECT },
+      where: { id: userId, workspaceMemberships: { some: { workspaceId } } },
+      select: { ...AVAILABILITY_SELECT, ...assignedUserSelect(workspaceId) },
     });
-    return mapUser(updated);
+    return mapUser(updated, workspaceId);
   }
 
   /** A teammate's schedule config + the org default they'd inherit. */
   async getUserWorkHours(
-    teamId: string,
+    workspaceId: string,
     userId: string,
   ): Promise<{ mode: string; workHours: unknown; teamWorkHours: unknown }> {
     const user = await this.db.user.findFirst({
-      where: { id: userId, teamId },
+      where: { id: userId, workspaceMemberships: { some: { workspaceId } } },
       select: { workHoursMode: true, workHours: true },
     });
     if (!user) throw new NotFoundException({ error: "not_found" });
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
+    const team = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { workHours: true },
     });
     return {
@@ -263,17 +253,17 @@ export class UsersService {
    * 60s sweeper tick.
    */
   async setUserWorkHours(
-    teamId: string,
-    actorRole: Role,
+    workspaceId: string,
+    actor: UserActor,
     targetUserId: string,
     input: SetUserWorkHoursInput,
   ): Promise<User> {
     const target = await this.db.user.findFirst({
-      where: { id: targetUserId, teamId },
-      select: { id: true, role: true },
+      where: { id: targetUserId, workspaceMemberships: { some: { workspaceId } } },
+      select: { id: true, isSuperAdmin: true, workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
     });
     if (!target) throw new NotFoundException({ error: "not_found" });
-    if (!canModifyUser(actorRole, target.role as Role)) {
+    if (!canModifyUser(actor, { role: (target.workspaceMemberships[0]?.role ?? "agent") as Role, isSuperAdmin: target.isSuperAdmin })) {
       throw new ForbiddenException({ error: "forbidden" });
     }
 
@@ -290,12 +280,12 @@ export class UsersService {
       },
     });
 
-    await this.resyncAvailability(teamId, [targetUserId]);
+    await this.resyncAvailability(workspaceId, [targetUserId]);
     const updated = await this.db.user.findFirstOrThrow({
-      where: { id: targetUserId, teamId },
-      select: { ...AVAILABILITY_SELECT, ...MAP_USER_SELECT },
+      where: { id: targetUserId, workspaceMemberships: { some: { workspaceId } } },
+      select: { ...AVAILABILITY_SELECT, ...assignedUserSelect(workspaceId) },
     });
-    return mapUser(updated);
+    return mapUser(updated, workspaceId);
   }
 
   /**
@@ -304,25 +294,26 @@ export class UsersService {
    * schedule edit so the effect is immediate; the sweeper does the same thing
    * on its own cadence for the boundaries nobody is around to trigger.
    */
-  async resyncAvailability(teamId: string, userIds?: string[]): Promise<void> {
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
+  async resyncAvailability(workspaceId: string, userIds?: string[]): Promise<void> {
+    const team = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { workHours: true },
     });
     const teamSchedule = teamScheduleOf(team);
     const users = await this.db.user.findMany({
       where: {
-        teamId,
+        workspaceMemberships: { some: { workspaceId } },
         deactivatedAt: null,
         ...(userIds ? { id: { in: userIds } } : {}),
       },
-      select: { ...AVAILABILITY_SELECT, ...MAP_USER_SELECT },
+      select: { ...AVAILABILITY_SELECT, ...assignedUserSelect(workspaceId) },
     });
     const nowMs = Date.now();
     for (const user of users) {
       await applyAvailability({
         db: this.db,
         user,
+        workspaceId,
         teamSchedule,
         // Every caller of this method is a SCHEDULE EDIT (org default or a
         // member's own), so a live override must be re-anchored to the new
@@ -343,7 +334,7 @@ export class UsersService {
    * don't need a separate handler.
    */
   async uploadMyAvatar(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     file: AvatarUploadFile,
   ): Promise<{ url: string }> {
@@ -370,7 +361,7 @@ export class UsersService {
       this.sessionInvalidator.bustCache(userId);
       await this.bus.publish({
         type: "user.profile_updated",
-        teamId,
+        workspaceId,
         userId,
         avatarUrl,
       });
@@ -392,20 +383,21 @@ export class UsersService {
    * never redirect to a nonexistent R2 object. Team-scoped so one team can't
    * probe another's avatars.
    */
-  async hasAvatar(teamId: string, userId: string): Promise<boolean> {
+  async hasAvatar(workspaceId: string, userId: string): Promise<boolean> {
     const row = await this.db.user.findFirst({
-      where: { id: userId, teamId },
+      where: { id: userId, workspaceMemberships: { some: { workspaceId } } },
       select: { avatarUrl: true },
     });
     return Boolean(row?.avatarUrl);
   }
 
-  async list(teamId: string): Promise<User[]> {
+  async list(workspaceId: string): Promise<User[]> {
     const rows = await this.db.user.findMany({
-      where: { teamId },
+      where: { workspaceMemberships: { some: { workspaceId } } },
       orderBy: { name: "asc" },
+      select: assignedUserSelect(workspaceId),
     });
-    return rows.map((u) => mapUser(u));
+    return rows.map((u) => mapUser(u, workspaceId));
   }
 
   /**
@@ -426,7 +418,7 @@ export class UsersService {
    * team-scoped, all default to 0.
    */
   async getMemberStats(
-    teamId: string,
+    workspaceId: string,
     since: Date | null,
   ): Promise<MemberStat[]> {
     const atWindow = since ? { gte: since } : undefined;
@@ -434,13 +426,13 @@ export class UsersService {
     const [users, activeAssigned, sent, assignedCounts, closed] =
       await Promise.all([
         this.db.user.findMany({
-          where: { teamId },
+          where: { workspaceMemberships: { some: { workspaceId } } },
           orderBy: { name: "asc" },
           select: {
             id: true,
             name: true,
             email: true,
-            role: true,
+            workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 },
             deactivatedAt: true,
           },
         }),
@@ -450,7 +442,7 @@ export class UsersService {
         this.db.conversation.groupBy({
           by: ["assignedUserId"],
           where: {
-            teamId,
+            workspaceId,
             assignedUserId: { not: null },
             status: { not: "closed" },
           },
@@ -460,7 +452,7 @@ export class UsersService {
         this.db.message.groupBy({
           by: ["senderUserId"],
           where: {
-            teamId,
+            workspaceId,
             direction: "out",
             senderUserId: { not: null },
             ...(atWindow ? { timestamp: atWindow } : {}),
@@ -474,7 +466,7 @@ export class UsersService {
         this.db.$queryRaw<{ uid: string | null; count: bigint }[]>`
           SELECT "after"->>'assignedUserId' AS uid, COUNT(*) AS count
           FROM "ConversationEvent"
-          WHERE "teamId" = ${teamId}
+          WHERE "workspaceId" = ${workspaceId}
             AND kind = 'assigned'::"ConversationEventKind"
             ${since ? Prisma.sql`AND "at" >= ${since}` : Prisma.empty}
           GROUP BY 1
@@ -483,7 +475,7 @@ export class UsersService {
         this.db.conversationEvent.groupBy({
           by: ["userId"],
           where: {
-            teamId,
+            workspaceId,
             kind: "status_changed",
             userId: { not: null },
             after: { path: ["status"], equals: "closed" },
@@ -508,7 +500,7 @@ export class UsersService {
       userId: u.id,
       name: u.name,
       email: u.email,
-      role: u.role as Role,
+      role: (u.workspaceMemberships[0]?.role ?? "agent") as Role,
       deactivated: u.deactivatedAt != null,
       activeAssigned: activeBy.get(u.id) ?? 0,
       assigned: assignedBy.get(u.id) ?? 0,
@@ -523,11 +515,11 @@ export class UsersService {
    * be re-polled on every assignment/status socket event. Keyed by userId;
    * users with zero are simply absent (the client defaults them to 0).
    */
-  async getActiveAssignments(teamId: string): Promise<Record<string, number>> {
+  async getActiveAssignments(workspaceId: string): Promise<Record<string, number>> {
     const rows = await this.db.conversation.groupBy({
       by: ["assignedUserId"],
       where: {
-        teamId,
+        workspaceId,
         assignedUserId: { not: null },
         status: { not: "closed" },
       },
@@ -548,24 +540,24 @@ export class UsersService {
    *   4. last-active-admin guard — never strip the team of every manager.
    */
   async update(
-    teamId: string,
-    actorRole: Role,
+    workspaceId: string,
+    actor: UserActor,
     actorUserId: string,
     targetId: string,
     input: UpdateUserInput,
   ) {
     const target = await this.db.user.findFirst({
-      where: { id: targetId, teamId },
-      select: { id: true, role: true, deactivatedAt: true },
+      where: { id: targetId, workspaceMemberships: { some: { workspaceId } } },
+      select: { id: true, isSuperAdmin: true, deactivatedAt: true, workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
     });
     if (!target) throw new NotFoundException({ error: "user not found" });
 
-    if (!canModifyUser(actorRole, target.role as Role)) {
+    if (!canModifyUser(actor, { role: (target.workspaceMemberships[0]?.role ?? "agent") as Role, isSuperAdmin: target.isSuperAdmin })) {
       throw new ForbiddenException({ error: "cannot modify this user" });
     }
 
     const data: { role?: Role; deactivatedAt?: Date | null } = {};
-    const allowed = assignableRoles(actorRole);
+    const allowed = assignableRoles(actor);
 
     if (typeof input.role === "string") {
       if (!(allowed as string[]).includes(input.role)) {
@@ -579,7 +571,7 @@ export class UsersService {
 
     // Self-edit safeguards.
     if (targetId === actorUserId) {
-      if (data.role && data.role !== actorRole) {
+      if (data.role && data.role !== actor.role) {
         throw new BadRequestException({ error: "cannot change your own role" });
       }
       if (data.deactivatedAt) {
@@ -589,17 +581,17 @@ export class UsersService {
 
     // Last-active-manager guard.
     const willLoseManagerPowers =
-      (data.role && data.role !== "admin" && data.role !== "superAdmin") ||
+      (data.role && data.role !== "admin") ||
       data.deactivatedAt;
     const targetCurrentlyManages =
-      (target.role === "admin" || target.role === "superAdmin") &&
+      (target.workspaceMemberships[0]?.role === "admin" || target.isSuperAdmin) &&
       !target.deactivatedAt;
 
     const userSelect = {
       id: true,
       name: true,
       email: true,
-      role: true,
+      workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 },
       deactivatedAt: true,
       createdAt: true,
     } satisfies Prisma.UserSelect;
@@ -613,11 +605,15 @@ export class UsersService {
     const updated =
       willLoseManagerPowers && targetCurrentlyManages
         ? await this.db.$transaction(async (tx) => {
-            await tx.$queryRaw`SELECT id FROM "Team" WHERE id = ${teamId} FOR UPDATE`;
+            await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
+            // "Another active admin exists" = an admin MEMBERSHIP in this
+            // workspace, or a platform operator. Role lives on WorkspaceMember.
             const otherManagers = await tx.user.count({
               where: {
-                teamId,
-                role: { in: ["admin", "superAdmin"] },
+                OR: [
+                  { workspaceMemberships: { some: { workspaceId, role: "admin" } } },
+                  { isSuperAdmin: true, workspaceMemberships: { some: { workspaceId } } },
+                ],
                 deactivatedAt: null,
                 NOT: { id: targetId },
               },
@@ -642,7 +638,7 @@ export class UsersService {
     // bust the cache so the next render shows the new value without a 15s
     // lag — sockets stay alive so the user isn't logged out on a profile
     // edit.
-    const roleChanged = data.role !== undefined && data.role !== (target.role as Role);
+    const roleChanged = data.role !== undefined && data.role !== ((target.workspaceMemberships[0]?.role ?? "agent") as Role);
     const deactivated = Boolean(data.deactivatedAt);
     if (roleChanged || deactivated) {
       await this.db.session.deleteMany({ where: { userId: targetId } });
@@ -664,7 +660,7 @@ export class UsersService {
     // re-route stays visible in the team inbox, and the deactivated user is
     // excluded from every future candidate pool anyway.
     if (deactivated) {
-      void rebalanceDeactivatedUser(teamId, targetId)
+      void rebalanceDeactivatedUser(workspaceId, targetId)
         .then((moved) => {
           if (moved > 0) {
             this.logger.log(
@@ -679,7 +675,7 @@ export class UsersService {
         });
     }
 
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "members" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "members" });
     return updated;
   }
 
@@ -694,7 +690,7 @@ export class UsersService {
    * Gates:
    *   1. canModifyUser(actor, target) — admin can't reset a superAdmin's
    *      password; superAdmin can reset anyone's.
-   *   2. team scope — `targetId` must belong to `teamId` (a team admin can
+   *   2. team scope — `targetId` must belong to `workspaceId` (a team admin can
    *      only touch their own org; the superAdmin path passes the org's id).
    *
    * On success EVERY session for the target is deleted + revoked, so any
@@ -705,8 +701,8 @@ export class UsersService {
    * always operates on someone else; the unconditional revoke is correct.)
    */
   async resetPassword(
-    teamId: string,
-    actorRole: Role,
+    workspaceId: string,
+    actor: UserActor,
     targetId: string,
     newPassword: string,
   ): Promise<void> {
@@ -716,12 +712,12 @@ export class UsersService {
     }
 
     const target = await this.db.user.findFirst({
-      where: { id: targetId, teamId },
-      select: { id: true, role: true },
+      where: { id: targetId, workspaceMemberships: { some: { workspaceId } } },
+      select: { id: true, isSuperAdmin: true, workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
     });
     if (!target) throw new NotFoundException({ error: "user not found" });
 
-    if (!canModifyUser(actorRole, target.role as Role)) {
+    if (!canModifyUser(actor, { role: (target.workspaceMemberships[0]?.role ?? "agent") as Role, isSuperAdmin: target.isSuperAdmin })) {
       throw new ForbiddenException({ error: "cannot reset this user's password" });
     }
 
@@ -758,18 +754,18 @@ export class UsersService {
    * survives via SetNull FKs.
    */
   async remove(
-    teamId: string,
-    actorRole: Role,
+    workspaceId: string,
+    actor: UserActor,
     actorUserId: string,
     targetId: string,
   ): Promise<void> {
     const target = await this.db.user.findFirst({
-      where: { id: targetId, teamId },
-      select: { id: true, role: true, deactivatedAt: true },
+      where: { id: targetId, workspaceMemberships: { some: { workspaceId } } },
+      select: { id: true, isSuperAdmin: true, deactivatedAt: true, workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
     });
     if (!target) throw new NotFoundException({ error: "user not found" });
 
-    if (!canModifyUser(actorRole, target.role as Role)) {
+    if (!canModifyUser(actor, { role: (target.workspaceMemberships[0]?.role ?? "agent") as Role, isSuperAdmin: target.isSuperAdmin })) {
       throw new ForbiddenException({ error: "cannot delete this user" });
     }
     if (targetId === actorUserId) {
@@ -777,7 +773,7 @@ export class UsersService {
     }
 
     const targetCurrentlyManages =
-      (target.role === "admin" || target.role === "superAdmin") &&
+      (target.workspaceMemberships[0]?.role === "admin" || target.isSuperAdmin) &&
       !target.deactivatedAt;
 
     // Serialize the last-active-manager re-check + delete under a per-team lock
@@ -786,11 +782,14 @@ export class UsersService {
     // Same pattern as update() and invites.accept().
     if (targetCurrentlyManages) {
       await this.db.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT id FROM "Team" WHERE id = ${teamId} FOR UPDATE`;
+        await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
+        // Role lives on WorkspaceMember now; a platform operator also counts.
         const otherManagers = await tx.user.count({
           where: {
-            teamId,
-            role: { in: ["admin", "superAdmin"] },
+            OR: [
+              { workspaceMemberships: { some: { workspaceId, role: "admin" } } },
+              { isSuperAdmin: true, workspaceMemberships: { some: { workspaceId } } },
+            ],
             deactivatedAt: null,
             NOT: { id: targetId },
           },
@@ -803,6 +802,17 @@ export class UsersService {
     } else {
       await this.db.user.delete({ where: { id: targetId } });
     }
+    // GC this user's PERSONAL inbox views. `InboxView.createdById` is SetNull
+    // (deliberately — a SHARED view must outlive the agent who created it), so
+    // without this a personal view survives as a row nobody can ever see or
+    // delete: it belongs to no one, and the visibility read requires a real
+    // owner id. Shared views are untouched. Same best-effort GC placement as
+    // the avatar below — the user row is already gone at this point, so these
+    // rows are unreachable either way.
+    await this.db.inboxView
+      .deleteMany({ where: { visibility: "personal", createdById: null } })
+      .catch(() => undefined);
+
     // GC the R2 avatar object — the orphan sweeper skips the `avatars/` prefix,
     // so a hard-deleted user's blob would otherwise leak forever. Best-effort
     // (never throws), same as the clear-avatar path in updateMyProfile.
@@ -811,7 +821,7 @@ export class UsersService {
     // per-process session cache + any live Socket.io connections so the
     // user is kicked instantly rather than waiting for the 15s TTL.
     this.sessionInvalidator.revoke(targetId, "deletion");
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "members" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "members" });
   }
 }
 

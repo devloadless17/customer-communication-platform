@@ -86,28 +86,28 @@ async function runTick(): Promise<void> {
 async function sweepOnce(): Promise<void> {
   const teams = await db.assignmentSettings.findMany({
     where: { reassignOnOffline: true },
-    select: { teamId: true },
+    select: { workspaceId: true },
   });
-  for (const { teamId } of teams) {
+  for (const { workspaceId } of teams) {
     try {
-      await rebalanceTeam(teamId);
+      await rebalanceTeam(workspaceId);
     } catch (err) {
       // Per-team isolation: one tenant's failure must not skip the rest.
       console.warn(
-        `[sweeper.assignment-rebalance] team=${teamId} failed; continuing`,
+        `[sweeper.assignment-rebalance] team=${workspaceId} failed; continuing`,
         err instanceof Error ? err.message : err,
       );
     }
   }
 }
 
-async function rebalanceTeam(teamId: string): Promise<void> {
-  const online = getOnlineUserIds(teamId);
+async function rebalanceTeam(workspaceId: string): Promise<void> {
+  const online = getOnlineUserIds(workspaceId);
   // Presence unknown in this process → do nothing. Treating "I can't see
   // sockets" as "everyone is offline" would reassign the entire inbox.
   if (!online) return;
 
-  const settings = await loadAssignmentSettings(db, teamId);
+  const settings = await loadAssignmentSettings(db, workspaceId);
   if (!settings.reassignOnOffline) return; // raced a settings change
 
   const graceCutoff = new Date(
@@ -116,7 +116,7 @@ async function rebalanceTeam(teamId: string): Promise<void> {
 
   const stale = await db.conversation.findMany({
     where: {
-      teamId,
+      workspaceId,
       status: { not: "closed" },
       assignedUserId: { not: null },
       // The grace window. `lastAssignedAt` is the moment this agent took the
@@ -141,7 +141,7 @@ async function rebalanceTeam(teamId: string): Promise<void> {
     const outcome = await assignByPolicy({
       db,
       publish,
-      teamId,
+      workspaceId,
       conversationId: conv.id,
       source: "rebalance",
       // This is the one sweep that MUST move an existing assignee — that's its
@@ -158,7 +158,7 @@ async function rebalanceTeam(teamId: string): Promise<void> {
 
   if (moved > 0) {
     console.warn(
-      `[sweeper.assignment-rebalance] team=${teamId} moved ${moved} conversation(s) off offline agents`,
+      `[sweeper.assignment-rebalance] team=${workspaceId} moved ${moved} conversation(s) off offline agents`,
     );
   }
 }
@@ -175,14 +175,14 @@ async function rebalanceTeam(teamId: string): Promise<void> {
  * visible in the team inbox.
  */
 export async function rebalanceDeactivatedUser(
-  teamId: string,
+  workspaceId: string,
   userId: string,
 ): Promise<number> {
-  const settings = await loadAssignmentSettings(db, teamId);
+  const settings = await loadAssignmentSettings(db, workspaceId);
   if (!settings.reassignOnDeactivate) return 0;
 
   const open = await db.conversation.findMany({
-    where: { teamId, assignedUserId: userId, status: { not: "closed" } },
+    where: { workspaceId, assignedUserId: userId, status: { not: "closed" } },
     select: { id: true },
     orderBy: { lastMessageAt: "desc" },
     // Bounded: a departing manager with 5k threads shouldn't stall the
@@ -196,7 +196,7 @@ export async function rebalanceDeactivatedUser(
     const outcome = await assignByPolicy({
       db,
       publish,
-      teamId,
+      workspaceId,
       conversationId: conv.id,
       source: "rebalance",
       onlyIfUnassigned: false,

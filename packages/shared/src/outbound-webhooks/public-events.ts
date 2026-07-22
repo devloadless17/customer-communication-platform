@@ -45,6 +45,7 @@ import type {
   DomainEvent,
   DomainEventType,
   MessageFlagChangedEvent,
+  TicketChangedEvent,
   MessageReceivedEvent,
   MessageSentEvent,
   MessageStatusChangedEvent,
@@ -86,6 +87,11 @@ export const PUBLIC_EVENT_TYPES = [
   // inbox lands in another system the moment it happens, carrying the message,
   // the contact and the flag's lifecycle state — no polling, no extra API call.
   "message.flag_changed",
+  // A ticket — the unit of WORK on a conversation — was opened, reassigned,
+  // moved, solved, closed, or missed its SLA. The routing seam for a helpdesk
+  // or BI system: subscribe once and every state change arrives carrying the
+  // whole ticket and the contact, with no polling and no follow-up call.
+  "ticket.changed",
 ] as const;
 export type PublicEventType = (typeof PUBLIC_EVENT_TYPES)[number];
 
@@ -443,6 +449,47 @@ export const PUBLIC_EVENT_GROUPS: Array<{
     ],
   },
   {
+    group: "Tickets",
+    events: [
+      {
+        type: "ticket.changed",
+        label: "On Ticket changed",
+        description:
+          "A ticket was opened, assigned, moved, solved, closed, reopened, or missed its SLA. `action` is the TRANSITION (`created` | `assigned` | `status_changed` | `priority_changed` | `reopened` | `solved` | `closed` | `sla_breached`, plus `updated` for edits that moved no lifecycle) — so a \"work finished\" automation keys on `action === \"solved\"` without firing again when someone later edits the note. `sla_breached` carries `breached_leg` and fires exactly once per leg.",
+        samplePayload: {
+          action: "solved",
+          conversation_id: "cmpconv_01",
+          previous_status: "open",
+          open_ticket_count: 0,
+          ticket: {
+            id: "cmptkt_01",
+            number: 1042,
+            subject: "Refund not received",
+            status: "solved",
+            priority: "urgent",
+            channel: "whatsapp",
+            assigned_user_id: "cmpusr_01",
+            assigned_user_name: "Omar",
+            tags: ["billing"],
+            first_response_due_at: "2026-07-22T10:15:00.000Z",
+            resolution_due_at: "2026-07-22T13:00:00.000Z",
+            first_response_at: "2026-07-22T10:02:00.000Z",
+            first_response_breached: false,
+            resolution_breached: false,
+            resolved_at: "2026-07-22T12:40:00.000Z",
+            closed_at: null,
+            resolution_code: "refunded",
+            resolution_note: "Refunded to the original card.",
+            reopen_count: 0,
+            source: "auto",
+            created_at: "2026-07-22T09:00:00.000Z",
+            updated_at: "2026-07-22T12:40:00.000Z",
+          },
+        },
+      },
+    ],
+  },
+  {
     group: "Notes",
     events: [
       {
@@ -748,7 +795,7 @@ export function toPublicEnvelopes(
       const e = event as MessageReceivedEvent;
       out.push({
         type: "message.received",
-        envelope: build(e.teamId, occurredAt, "message.received", {
+        envelope: build(e.workspaceId, occurredAt, "message.received", {
           message: messageFromDomain(e.message, "in", null, e.contact.id),
           contact: contactFromSnapshot(e),
           conversation: {
@@ -777,7 +824,7 @@ export function toPublicEnvelopes(
       const e = event as MessageSentEvent;
       out.push({
         type: "message.sent",
-        envelope: build(e.teamId, occurredAt, "message.sent", {
+        envelope: build(e.workspaceId, occurredAt, "message.sent", {
           message: messageFromDomain(e.message, "out", e.senderApiKeyId ?? null, e.contactId),
           // `contact` + the conversation's status/unread_count/assignee are
           // stamped by the subscriber (DB-derived; this mapper can't query).
@@ -799,7 +846,7 @@ export function toPublicEnvelopes(
       const e = event as MessageStatusChangedEvent;
       out.push({
         type: "message.status_changed",
-        envelope: build(e.teamId, occurredAt, "message.status_changed", {
+        envelope: build(e.workspaceId, occurredAt, "message.status_changed", {
           message_id: e.messageId,
           conversation_id: e.conversationId,
           contact_id: e.contactId,
@@ -821,7 +868,7 @@ export function toPublicEnvelopes(
       const e = event as ConversationAssignedEvent;
       out.push({
         type: "conversation.assigned",
-        envelope: build(e.teamId, occurredAt, "conversation.assigned", {
+        envelope: build(e.workspaceId, occurredAt, "conversation.assigned", {
           conversation_id: e.conversationId,
           contact_id: e.contact.id,
           // Post-mutation thread state from the event snapshot, so a partner
@@ -853,7 +900,7 @@ export function toPublicEnvelopes(
       };
       out.push({
         type: "conversation.status_changed",
-        envelope: build(e.teamId, occurredAt, "conversation.status_changed", data),
+        envelope: build(e.workspaceId, occurredAt, "conversation.status_changed", data),
       });
       // Filtered synthetics — fire ONLY when the new status matches the
       // synthetic's filter. A pending → open transition fires opened ✓ but
@@ -864,12 +911,12 @@ export function toPublicEnvelopes(
       if (e.newStatus === "open") {
         out.push({
           type: "conversation.opened",
-          envelope: build(e.teamId, occurredAt, "conversation.opened", data),
+          envelope: build(e.workspaceId, occurredAt, "conversation.opened", data),
         });
       } else if (e.newStatus === "closed") {
         out.push({
           type: "conversation.closed",
-          envelope: build(e.teamId, occurredAt, "conversation.closed", data),
+          envelope: build(e.workspaceId, occurredAt, "conversation.closed", data),
         });
       }
       break;
@@ -878,7 +925,7 @@ export function toPublicEnvelopes(
       const e = event as ConversationAiChangedEvent;
       out.push({
         type: "conversation.ai_changed",
-        envelope: build(e.teamId, occurredAt, "conversation.ai_changed", {
+        envelope: build(e.workspaceId, occurredAt, "conversation.ai_changed", {
           conversation_id: e.conversationId,
           contact_id: e.contact.id,
           ai_enabled: e.newAiEnabled,
@@ -893,7 +940,7 @@ export function toPublicEnvelopes(
       const e = event as ContactCreatedEvent;
       out.push({
         type: "contact.created",
-        envelope: build(e.teamId, occurredAt, "contact.created", {
+        envelope: build(e.workspaceId, occurredAt, "contact.created", {
           contact: contactRowToPublic(e.contact),
           source: e.source,
           created_by_user_id: e.createdByUserId,
@@ -911,7 +958,7 @@ export function toPublicEnvelopes(
       // — they'll see it on contact.updated only.
       out.push({
         type: "contact.updated",
-        envelope: build(e.teamId, occurredAt, "contact.updated", {
+        envelope: build(e.workspaceId, occurredAt, "contact.updated", {
           contact: contactRowToPublic(e.contact),
           field_changes: e.fieldChanges,
           tag_changes: e.tagChanges,
@@ -926,7 +973,7 @@ export function toPublicEnvelopes(
       const e = event as ContactTagChangedEvent;
       out.push({
         type: "contact.tag_changed",
-        envelope: build(e.teamId, occurredAt, "contact.tag_changed", {
+        envelope: build(e.workspaceId, occurredAt, "contact.tag_changed", {
           contact_id: e.contactId,
           before: { tag_ids: e.before.tagIds },
           after: { tag_ids: e.after.tagIds },
@@ -942,7 +989,7 @@ export function toPublicEnvelopes(
       const e = event as ContactLifecycleChangedEvent;
       out.push({
         type: "contact.lifecycle_changed",
-        envelope: build(e.teamId, occurredAt, "contact.lifecycle_changed", {
+        envelope: build(e.workspaceId, occurredAt, "contact.lifecycle_changed", {
           contact_id: e.contactId,
           before: { stage_id: e.before.stageId },
           after: { stage_id: e.after.stageId },
@@ -956,7 +1003,7 @@ export function toPublicEnvelopes(
       const e = event as ContactDeletedEvent;
       out.push({
         type: "contact.deleted",
-        envelope: build(e.teamId, occurredAt, "contact.deleted", {
+        envelope: build(e.workspaceId, occurredAt, "contact.deleted", {
           contact_id: e.contactId,
           conversation_ids: e.conversationIds,
           deleted_by_user_id: e.deletedByUserId,
@@ -969,7 +1016,7 @@ export function toPublicEnvelopes(
       const e = event as NoteCreatedEvent;
       out.push({
         type: "note.created",
-        envelope: build(e.teamId, occurredAt, "note.created", {
+        envelope: build(e.workspaceId, occurredAt, "note.created", {
           note: {
             id: e.note.id,
             conversation_id: e.conversationId,
@@ -985,7 +1032,7 @@ export function toPublicEnvelopes(
       const e = event as MessageFlagChangedEvent;
       out.push({
         type: "message.flag_changed",
-        envelope: build(e.teamId, occurredAt, "message.flag_changed", {
+        envelope: build(e.workspaceId, occurredAt, "message.flag_changed", {
           action: e.action,
           conversation_id: e.conversationId,
           message_id: e.messageId,
@@ -1017,6 +1064,47 @@ export function toPublicEnvelopes(
       });
       break;
     }
+    case "ticket.changed": {
+      const e = event as TicketChangedEvent;
+      out.push({
+        type: "ticket.changed",
+        envelope: build(e.workspaceId, occurredAt, "ticket.changed", {
+          action: e.action,
+          conversation_id: e.conversationId,
+          previous_status: e.previousStatus,
+          ...(e.breachedLeg ? { breached_leg: e.breachedLeg } : {}),
+          open_ticket_count: e.openTicketCount,
+          ticket: {
+            id: e.ticket.id,
+            number: e.ticket.number,
+            subject: e.ticket.subject,
+            status: e.ticket.status,
+            priority: e.ticket.priority,
+            channel: e.ticket.channel,
+            assigned_user_id: e.ticket.assignedUserId,
+            // The assignee NAME is inlined, not just the id, for the same
+            // reason the flag event inlines its definition: a receiver routes
+            // on the human label without first syncing our roster.
+            assigned_user_name: e.ticket.assignedUserName,
+            tags: e.ticket.tags.map((t) => t.name),
+            first_response_due_at: e.ticket.sla.firstResponseDueAt,
+            resolution_due_at: e.ticket.sla.resolutionDueAt,
+            first_response_at: e.ticket.sla.firstResponseAt,
+            first_response_breached: e.ticket.sla.firstResponseBreached,
+            resolution_breached: e.ticket.sla.resolutionBreached,
+            resolved_at: e.ticket.resolvedAt,
+            closed_at: e.ticket.closedAt,
+            resolution_code: e.ticket.resolutionCode,
+            resolution_note: e.ticket.resolutionNote,
+            reopen_count: e.ticket.reopenCount,
+            source: e.ticket.source,
+            created_at: e.ticket.createdAt,
+            updated_at: e.ticket.updatedAt,
+          },
+        }),
+      });
+      break;
+    }
     case "note.deleted": {
       // Symmetric with note.created so a partner syncing internal notes can
       // remove the row on their side. The note is gone, so only the ids +
@@ -1024,7 +1112,7 @@ export function toPublicEnvelopes(
       const e = event as NoteDeletedEvent;
       out.push({
         type: "note.deleted",
-        envelope: build(e.teamId, occurredAt, "note.deleted", {
+        envelope: build(e.workspaceId, occurredAt, "note.deleted", {
           note_id: e.noteId,
           conversation_id: e.conversationId,
           deleted_by_user_id: e.deletedByUserId,
@@ -1075,6 +1163,7 @@ export function busEventTypesToSubscribe(): DomainEventType[] {
     "note.created",
     "note.deleted",
     "message.flag_changed",
+    "ticket.changed",
   ];
 }
 
@@ -1083,7 +1172,7 @@ export function busEventTypesToSubscribe(): DomainEventType[] {
 // ---------------------------------------------------------------------------
 
 function build<T extends PublicEventType, P>(
-  teamId: string,
+  workspaceId: string,
   occurredAt: string,
   type: T,
   data: P,
@@ -1092,7 +1181,7 @@ function build<T extends PublicEventType, P>(
     event_id: "", // subscriber stamps this with the delivery row id
     event_type: type,
     occurred_at: occurredAt,
-    team_id: teamId,
+    team_id: workspaceId,
     channel: null, // subscriber stamps this from the team's Meta config
     data,
   };
@@ -1327,7 +1416,7 @@ function wireSender(s: SenderInfo | null | undefined): Record<string, unknown> {
   return {
     source: type,
     userId: type === "user" ? id : null,
-    teamId: null,
+    workspaceId: null,
     workflowId: type === "workflow" ? id : null,
     broadcastHistoryId: type === "broadcast" ? id : null,
     // The originating API key for `/v1` sends. Surfaced here (and read back by
@@ -1677,6 +1766,42 @@ export function toWirePayload(
           createdByName: flag.created_by_name ?? null,
           createdAt: toEpochMs(flag.created_at as string | undefined),
           updatedAt: toEpochMs(flag.updated_at as string | undefined),
+        },
+      };
+    }
+    case "ticket.changed": {
+      const ticket = (d.ticket ?? {}) as Record<string, unknown>;
+      return {
+        event_type: type,
+        action: d.action,
+        conversationId: d.conversation_id,
+        contact: wireContactLean(d.contact),
+        previousStatus: d.previous_status ?? null,
+        ...(d.breached_leg ? { breachedLeg: d.breached_leg } : {}),
+        openTicketCount: d.open_ticket_count,
+        ticket: {
+          id: ticket.id,
+          number: ticket.number,
+          subject: ticket.subject ?? null,
+          status: ticket.status,
+          priority: ticket.priority,
+          channel: ticket.channel,
+          assignedUserId: ticket.assigned_user_id ?? null,
+          assignedUserName: ticket.assigned_user_name ?? null,
+          tags: ticket.tags ?? [],
+          firstResponseDueAt: toEpochMs(ticket.first_response_due_at as string | undefined),
+          resolutionDueAt: toEpochMs(ticket.resolution_due_at as string | undefined),
+          firstResponseAt: toEpochMs(ticket.first_response_at as string | undefined),
+          firstResponseBreached: ticket.first_response_breached ?? false,
+          resolutionBreached: ticket.resolution_breached ?? false,
+          resolvedAt: toEpochMs(ticket.resolved_at as string | undefined),
+          closedAt: toEpochMs(ticket.closed_at as string | undefined),
+          resolutionCode: ticket.resolution_code ?? null,
+          resolutionNote: ticket.resolution_note ?? null,
+          reopenCount: ticket.reopen_count ?? 0,
+          source: ticket.source,
+          createdAt: toEpochMs(ticket.created_at as string | undefined),
+          updatedAt: toEpochMs(ticket.updated_at as string | undefined),
         },
       };
     }

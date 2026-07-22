@@ -20,6 +20,7 @@ import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { zBody, zQuery } from "../common/zod-validation.pipe";
 import { RateLimit } from "../common/rate-limit.interceptor";
+import { actorFromSession, InboxViewsService } from "../inbox-views/inbox-views.service";
 import { ConversationsService } from "./conversations.service";
 import {
   AssignConversationSchema,
@@ -70,20 +71,37 @@ import {
 // (deletes) capability-gated, so the generous ceiling carries no abuse vector.
 @RateLimit({ perMinute: 1200 })
 export class ConversationsController {
-  constructor(private readonly conversations: ConversationsService) {}
+  constructor(
+    private readonly conversations: ConversationsService,
+    private readonly views: InboxViewsService,
+  ) {}
 
   @Get()
   async list(
     @CurrentSession() session: ApiSession,
     @Query(zQuery(ListConversationsQuerySchema)) query: ListConversationsQuery,
   ) {
-    return this.conversations.list(session.teamId, session.userId, {
+    // A saved view is resolved HERE, not in the service: the lookup is
+    // membership-scoped (`shared OR mine`), so an id belonging to another
+    // workspace — or to a teammate's personal view — 404s before it can ever
+    // become a WHERE clause. `resolveFilters` then drops references to tags /
+    // stages / teammates that have since been deleted, so a view widens
+    // visibly instead of silently emptying.
+    const viewFilters = query.viewId
+      ? await this.views.resolveFilters(
+          session.workspaceId,
+          (await this.views.get(actorFromSession(session), query.viewId)).filters,
+        )
+      : undefined;
+
+    return this.conversations.list(session.workspaceId, session.userId, {
       viewer: session,
       take: query.take,
       cursor: query.cursor ?? null,
       search: query.search,
       filter: query.filter,
       stageId: query.stageId,
+      viewFilters,
     });
   }
 
@@ -99,7 +117,7 @@ export class ConversationsController {
    */
   @Get("counts")
   async counts(@CurrentSession() session: ApiSession) {
-    return this.conversations.counts(session.teamId, session.userId, session);
+    return this.conversations.counts(session.workspaceId, session.userId, session);
   }
 
   /**
@@ -110,7 +128,7 @@ export class ConversationsController {
    */
   @Get("unread-count")
   async unreadCount(@CurrentSession() session: ApiSession) {
-    return this.conversations.unreadTotal(session.teamId, session);
+    return this.conversations.unreadTotal(session.workspaceId, session);
   }
 
   /**
@@ -126,7 +144,7 @@ export class ConversationsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(StartConversationSchema)) body: StartConversationInput,
   ) {
-    return this.conversations.startConversation(session.teamId, session.userId, body);
+    return this.conversations.startConversation(session.workspaceId, session.userId, body);
   }
 
   @Post("bulk")
@@ -135,7 +153,7 @@ export class ConversationsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(BulkDeleteConversationsSchema)) body: BulkDeleteConversationsInput,
   ) {
-    const out = await this.conversations.bulkDelete(session.teamId, session.userId, body);
+    const out = await this.conversations.bulkDelete(session.workspaceId, session.userId, body);
     return { ok: true, count: out.count };
   }
 
@@ -151,7 +169,7 @@ export class ConversationsController {
     // the legacy `gte` delta, so old clients keep working mid-deploy.
     @Query("afterId") afterId?: string,
   ) {
-    return this.conversations.listMessages(session.teamId, id, {
+    return this.conversations.listMessages(session.workspaceId, id, {
       before: query.before ?? null,
       after: query.after ?? null,
       afterId: afterId ?? null,
@@ -169,7 +187,7 @@ export class ConversationsController {
     if (q.length === 0) {
       return { items: [], nextCursor: null, totalMatched: 0 };
     }
-    return this.conversations.searchMessages(session.teamId, id, {
+    return this.conversations.searchMessages(session.workspaceId, id, {
       query: q,
       take: query.take,
       cursor: query.cursor,
@@ -181,7 +199,7 @@ export class ConversationsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    const events = await this.conversations.listEvents(session.teamId, id);
+    const events = await this.conversations.listEvents(session.workspaceId, id);
     return { events };
   }
 
@@ -191,7 +209,7 @@ export class ConversationsController {
     @Param("id") id: string,
     @Query(zQuery(MessageContextQuerySchema)) query: MessageContextQuery,
   ) {
-    return this.conversations.messageContext(session.teamId, id, {
+    return this.conversations.messageContext(session.workspaceId, id, {
       messageId: query.messageId,
       before: query.before,
       after: query.after,
@@ -210,7 +228,7 @@ export class ConversationsController {
     @Param("id") id: string,
     @Query(zQuery(ListAttachmentsQuerySchema)) query: ListAttachmentsQuery,
   ) {
-    return this.conversations.listAttachments(session.teamId, id, {
+    return this.conversations.listAttachments(session.workspaceId, id, {
       cursor: query.cursor,
       take: query.take,
       kind: query.kind,
@@ -223,7 +241,7 @@ export class ConversationsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.conversations.remove(session.teamId, session.userId, id);
+    await this.conversations.remove(session.workspaceId, session.userId, id);
     return { ok: true };
   }
 
@@ -241,7 +259,7 @@ export class ConversationsController {
     const canAssignOthers = resolvePermissions(session.role, session.rolePermissions)[
       "conversations:assignOthers"
     ];
-    await this.conversations.assign(session.teamId, session.userId, id, body, {
+    await this.conversations.assign(session.workspaceId, session.userId, id, body, {
       canAssignOthers,
     });
     return { ok: true };
@@ -254,7 +272,7 @@ export class ConversationsController {
     @Param("id") id: string,
     @Body(zBody(SetConversationStatusSchema)) body: SetConversationStatusInput,
   ) {
-    await this.conversations.setStatus(session.teamId, session.userId, id, body);
+    await this.conversations.setStatus(session.workspaceId, session.userId, id, body);
     return { ok: true };
   }
 
@@ -265,7 +283,7 @@ export class ConversationsController {
     @Param("id") id: string,
     @Body(zBody(SetConversationAiEnabledSchema)) body: SetConversationAiEnabledInput,
   ) {
-    await this.conversations.setAiEnabled(session.teamId, session.userId, id, body);
+    await this.conversations.setAiEnabled(session.workspaceId, session.userId, id, body);
     return { ok: true };
   }
 
@@ -275,7 +293,7 @@ export class ConversationsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.conversations.markRead(session.teamId, session.userId, id);
+    await this.conversations.markRead(session.workspaceId, session.userId, id);
     return { ok: true };
   }
 
@@ -286,6 +304,6 @@ export class ConversationsController {
     @Param("id") id: string,
     @Body(zBody(TypingSchema)) body: TypingInput,
   ) {
-    return this.conversations.sendTyping(session.teamId, id, body.active ?? true);
+    return this.conversations.sendTyping(session.workspaceId, id, body.active ?? true);
   }
 }

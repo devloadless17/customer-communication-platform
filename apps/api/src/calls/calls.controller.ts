@@ -291,7 +291,7 @@ export class CallsController {
    * `media_update` webhook carrying a new SDP offer; the agent's browser answers
    * it and POSTs that answer here to relay to Meta. No capability decorator (an
    * agent already on the live call must be able to keep its media alive — same
-   * posture as /end); the service scopes by teamId + `in_progress`.
+   * posture as /end); the service scopes by workspaceId + `in_progress`.
    */
   @Post("api/calls/:callId/media-update")
   @HttpCode(200)

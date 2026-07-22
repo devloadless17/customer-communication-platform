@@ -35,7 +35,7 @@ export class CustomersController {
     @CurrentSession() session: ApiSession,
     @Param("contactId") contactId: string,
   ) {
-    const customer = await this.customers.getProfileByContact(session.teamId, contactId);
+    const customer = await this.customers.getProfileByContact(session.workspaceId, contactId);
     return { customer };
   }
 
@@ -48,13 +48,13 @@ export class CustomersController {
     @CurrentSession() session: ApiSession,
     @Param("contactId") contactId: string,
   ) {
-    const suggestions = await this.customers.suggestLinks(session.teamId, contactId);
+    const suggestions = await this.customers.suggestLinks(session.workspaceId, contactId);
     return { suggestions };
   }
 
   @Get(":id")
   async get(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    const customer = await this.customers.getProfile(session.teamId, id);
+    const customer = await this.customers.getProfile(session.workspaceId, id);
     return { customer };
   }
 
@@ -64,7 +64,7 @@ export class CustomersController {
     @Param("id") id: string,
     @Body(zBody(RenameCustomerSchema)) body: RenameCustomerInput,
   ) {
-    const customer = await this.customers.rename(session.teamId, id, body.name);
+    const customer = await this.customers.rename(session.workspaceId, id, body.name);
     return { ok: true, customer };
   }
 
@@ -75,7 +75,7 @@ export class CustomersController {
     @Body(zBody(LinkContactSchema)) body: LinkContactInput,
   ) {
     const customer = await this.customers.linkContact(
-      session.teamId,
+      session.workspaceId,
       id,
       body.contactId,
       session.userId,
@@ -90,7 +90,7 @@ export class CustomersController {
     @Body(zBody(UnlinkContactSchema)) body: UnlinkContactInput,
   ) {
     const out = await this.customers.unlinkContact(
-      session.teamId,
+      session.workspaceId,
       id,
       body.contactId,
       session.userId,

@@ -2,7 +2,7 @@
 // via @swc-node/register, outside the Next bundler context.
 
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Reconciles `BroadcastRecipient.deliveryState` against the `Message` row it
@@ -54,6 +54,12 @@ async function runTick(label: string): Promise<void> {
   try {
     await withSweeperMutex("broadcast-delivery-drift", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopBroadcastDeliveryDriftSweeper();
+      return;
+    }
     console.error(`[sweeper.broadcast-delivery-drift] ${label} failed`, err);
   } finally {
     inFlight = false;
@@ -91,9 +97,9 @@ async function sweepOnce(): Promise<void> {
     },
     orderBy: { createdAt: "desc" },
     take: MAX_BROADCASTS_PER_TICK,
-    // teamId comes along so the join below can lean on the Message dedupe index
-    // (teamId, channel, externalId) instead of seq-scanning the whole table.
-    select: { id: true, teamId: true },
+    // workspaceId comes along so the join below can lean on the Message dedupe index
+    // (workspaceId, channel, externalId) instead of seq-scanning the whole table.
+    select: { id: true, workspaceId: true },
   });
   if (broadcasts.length === 0) return;
 
@@ -116,13 +122,13 @@ async function sweepOnce(): Promise<void> {
             "metaErrorCode" = COALESCE(r."metaErrorCode",
               CASE WHEN m.status = 'failed' THEN m."statusErrorCode" ELSE NULL END)
         FROM "Message" m
-        -- teamId scopes the join onto the leading column of Message's
-        -- (teamId, channel, externalId) unique index, turning a full-table scan
+        -- workspaceId scopes the join onto the leading column of Message's
+        -- (workspaceId, channel, externalId) unique index, turning a full-table scan
         -- into a per-team index range scan. NOT constrained on channel: a
         -- customer-mode broadcast sends each recipient on their best channel, so
         -- m.channel can differ from broadcast.channel — matching on it would
         -- silently skip those recipients.
-        WHERE m."teamId" = ${b.teamId}
+        WHERE m."workspaceId" = ${b.workspaceId}
           AND m."externalId" = r."externalId"
           AND r."broadcastId" = ${b.id}
           AND r."externalId" IS NOT NULL

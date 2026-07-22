@@ -2,7 +2,7 @@
 //
 // On every successful inbound-message commit, the ingest path calls
 // `findAndConsumeAwaitingReplies()` INSIDE its transaction to find any
-// `ask_question` step paused on this (teamId, contactId), drop the answer
+// `ask_question` step paused on this (workspaceId, contactId), drop the answer
 // onto each run's `pendingAnswer`, and delete the awaiting rows. The
 // caller then enqueues the resume jobs AFTER the tx commits so the worker
 // can pick up the run knowing the message row + pendingAnswer are both
@@ -32,14 +32,14 @@ export interface InboundAnswer {
 }
 
 /**
- * Find every `WorkflowAwaitingReply` row for (teamId, contactId), update the
+ * Find every `WorkflowAwaitingReply` row for (workspaceId, contactId), update the
  * corresponding `WorkflowRun.pendingAnswer`, delete the awaiting rows, and
  * return the run ids so the caller can enqueue immediate resumes after the
  * outer tx commits.
  */
 export async function findAndConsumeAwaitingReplies(
   tx: Prisma.TransactionClient,
-  args: { teamId: string; contactId: string; answer: InboundAnswer },
+  args: { workspaceId: string; contactId: string; answer: InboundAnswer },
 ): Promise<string[]> {
   // Skip rows whose timeout already fired — those are the sweeper's to clean
   // up. Without the filter, a stale awaiting row past `expiresAt` would
@@ -49,7 +49,7 @@ export async function findAndConsumeAwaitingReplies(
   // primary cleanup; this filter is the read-side defense.
   const rows = await tx.workflowAwaitingReply.findMany({
     where: {
-      teamId: args.teamId,
+      workspaceId: args.workspaceId,
       contactId: args.contactId,
       expiresAt: { gt: new Date() },
     },

@@ -102,7 +102,7 @@ async function seedRingingOutboundCall(externalCallId: string) {
   const contact =
     (await db().contact.findFirst({
       where: {
-        teamId: META_TEST_TEAM_ID,
+        workspaceId: META_TEST_TEAM_ID,
         identityChannel: "whatsapp",
         phoneNumber: CUSTOMER_PHONE,
       },
@@ -110,7 +110,7 @@ async function seedRingingOutboundCall(externalCallId: string) {
     })) ??
     (await db().contact.create({
       data: {
-        teamId: META_TEST_TEAM_ID,
+        workspaceId: META_TEST_TEAM_ID,
         phoneNumber: CUSTOMER_PHONE,
         identityChannel: "whatsapp",
         name: "Calling E2E",
@@ -120,12 +120,12 @@ async function seedRingingOutboundCall(externalCallId: string) {
     }));
   const conversation =
     (await db().conversation.findFirst({
-      where: { teamId: META_TEST_TEAM_ID, contactId: contact.id },
+      where: { workspaceId: META_TEST_TEAM_ID, contactId: contact.id },
       select: { id: true },
     })) ??
     (await db().conversation.create({
       data: {
-        teamId: META_TEST_TEAM_ID,
+        workspaceId: META_TEST_TEAM_ID,
         contactId: contact.id,
         channel: "whatsapp",
         status: "open",
@@ -136,7 +136,7 @@ async function seedRingingOutboundCall(externalCallId: string) {
     }));
   const call = await db().call.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       conversationId: conversation.id,
       externalCallId,
       channel: "whatsapp",
@@ -244,7 +244,7 @@ test("a RINGING status does not downgrade a call that already connected", async 
 test("a call status is not mistaken for a message delivery status", async () => {
   const externalCallId = `wacid.notmsg.${Date.now()}`;
   await seedRingingOutboundCall(externalCallId);
-  const before = await db().message.count({ where: { teamId: META_TEST_TEAM_ID } });
+  const before = await db().message.count({ where: { workspaceId: META_TEST_TEAM_ID } });
 
   await postMetaWebhook(
     META_TEST_TEAM_ID,
@@ -263,7 +263,7 @@ test("a call status is not mistaken for a message delivery status", async () => 
 
   // The two arrays share a name; only `type` tells them apart. A call id must
   // never be written as a message status.
-  expect(await db().message.count({ where: { teamId: META_TEST_TEAM_ID } })).toBe(before);
+  expect(await db().message.count({ where: { workspaceId: META_TEST_TEAM_ID } })).toBe(before);
 });
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -276,7 +276,7 @@ test("an accepted permission reply is recorded with WhatsApp's own expiry", asyn
   // The request we sent, which the reply will reference by context.
   await db().callPermissionRequest.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       contactId,
       externalRequestId: requestWamid,
       status: "pending",
@@ -306,7 +306,7 @@ test("an accepted permission reply is recorded with WhatsApp's own expiry", asyn
   );
 
   const row = await db().callPermissionRequest.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, externalRequestId: requestWamid },
+    where: { workspaceId: META_TEST_TEAM_ID, externalRequestId: requestWamid },
     select: { status: true, grantedAt: true, expiresAt: true, isPermanent: true },
   });
   expect(row?.status).toBe("granted");
@@ -319,7 +319,7 @@ test("an accepted permission reply is recorded with WhatsApp's own expiry", asyn
 });
 
 test("a permission reply is NOT persisted as a chat message", async () => {
-  const before = await db().message.count({ where: { teamId: META_TEST_TEAM_ID } });
+  const before = await db().message.count({ where: { workspaceId: META_TEST_TEAM_ID } });
 
   await postMetaWebhook(
     META_TEST_TEAM_ID,
@@ -342,7 +342,7 @@ test("a permission reply is NOT persisted as a chat message", async () => {
   // Before it was parsed, this fell through to the generic interactive branch
   // and rendered in the customer's thread as a meaningless
   // "💬 Interactive reply" bubble.
-  expect(await db().message.count({ where: { teamId: META_TEST_TEAM_ID } })).toBe(before);
+  expect(await db().message.count({ where: { workspaceId: META_TEST_TEAM_ID } })).toBe(before);
 });
 
 test("a permanent grant is stored as permanent, not as a far-future date", async () => {
@@ -367,7 +367,7 @@ test("a permanent grant is stored as permanent, not as a far-future date", async
   );
 
   const row = await db().callPermissionRequest.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, contactId, status: "granted" },
+    where: { workspaceId: META_TEST_TEAM_ID, contactId, status: "granted" },
     orderBy: { requestedAt: "desc" },
     select: { isPermanent: true },
   });

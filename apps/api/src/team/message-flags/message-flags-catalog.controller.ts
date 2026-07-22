@@ -46,7 +46,7 @@ export class MessageFlagsCatalogController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    const definitions = await this.catalog.list(session.teamId);
+    const definitions = await this.catalog.list(session.workspaceId);
     return { definitions };
   }
 
@@ -55,7 +55,7 @@ export class MessageFlagsCatalogController {
   @Get("usage")
   @RequireCapability("messageFlags:manage")
   async usage(@CurrentSession() session: ApiSession) {
-    const definitions = await this.catalog.listWithUsage(session.teamId);
+    const definitions = await this.catalog.listWithUsage(session.workspaceId);
     return { definitions };
   }
 
@@ -65,7 +65,7 @@ export class MessageFlagsCatalogController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateFlagDefinitionSchema)) body: CreateFlagDefinitionInput,
   ) {
-    const definition = await this.catalog.create(session.teamId, body);
+    const definition = await this.catalog.create(session.workspaceId, body);
     return { definition };
   }
 
@@ -76,14 +76,14 @@ export class MessageFlagsCatalogController {
     @Param("id") id: string,
     @Body(zBody(UpdateFlagDefinitionSchema)) body: UpdateFlagDefinitionInput,
   ) {
-    const definition = await this.catalog.update(session.teamId, id, body);
+    const definition = await this.catalog.update(session.workspaceId, id, body);
     return { definition };
   }
 
   @Delete(":id")
   @RequireCapability("messageFlags:manage")
   async remove(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    await this.catalog.remove(session.teamId, id);
+    await this.catalog.remove(session.workspaceId, id);
     return { ok: true };
   }
 }

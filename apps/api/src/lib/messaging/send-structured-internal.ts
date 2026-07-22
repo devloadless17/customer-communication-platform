@@ -31,7 +31,7 @@ import { SendTextValidationError } from "./send-text-internal";
  */
 
 export type SendStructuredInternalArgs = {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   senderUserId?: string | null;
   senderApiKeyId?: string | null;
@@ -58,10 +58,12 @@ export async function sendStructuredInternal(
   const receivedAt = new Date();
 
   const conversation = await db.conversation.findFirst({
-    where: { id: args.conversationId, teamId: args.teamId },
+    where: { id: args.conversationId, workspaceId: args.workspaceId },
     select: {
       id: true,
       contactId: true,
+      // The account this thread belongs to — sends must go out from it.
+      channelConnectionId: true,
       channel: true,
       lastMessageAt: true,
       contact: {
@@ -110,7 +112,7 @@ export async function sendStructuredInternal(
 
   let sendConfig;
   try {
-    sendConfig = await binding.getSendConfig(args.teamId);
+    sendConfig = await binding.getSendConfig(args.workspaceId, conversation.channelConnectionId);
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) {
       throw new SendTextValidationError("provider_not_configured", "channel_not_connected", err.message);
@@ -179,7 +181,7 @@ export async function sendStructuredInternal(
 
   const rawPayload = { sentVia: args.sentVia };
   const created = await createOutboundMessageIdempotent({
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     conversationId: args.conversationId,
     externalId: send.externalId,
     senderUserId: args.senderUserId ?? null,
@@ -195,7 +197,7 @@ export async function sendStructuredInternal(
   const senderUserId = args.senderUserId ?? null;
   const message: Message = {
     id: created.id,
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     conversationId: args.conversationId,
     externalId: send.externalId,
     senderUserId,
@@ -213,7 +215,7 @@ export async function sendStructuredInternal(
     preview: body,
     event: {
       type: "message.sent",
-      teamId: args.teamId,
+      workspaceId: args.workspaceId,
       conversationId: args.conversationId,
       contactId: conversation.contactId,
       message,

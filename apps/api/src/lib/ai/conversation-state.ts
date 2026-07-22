@@ -25,7 +25,7 @@ export type AiConvState = "ai_active" | "human_active" | "ai_paused" | "disabled
 
 export interface AiConvStateRow {
   conversationId: string;
-  teamId: string;
+  workspaceId: string;
   state: AiConvState;
   pausedByUserId: string | null;
   pausedAt: Date | null;
@@ -33,16 +33,16 @@ export interface AiConvStateRow {
 }
 
 /** Fire-and-forget realtime signal that a conversation's AI state changed. */
-function emitState(teamId: string, conversationId: string, state: AiConvState): void {
-  void publish({ type: "ai.state_changed", teamId, conversationId, state }).catch(() => {});
+function emitState(workspaceId: string, conversationId: string, state: AiConvState): void {
+  void publish({ type: "ai.state_changed", workspaceId, conversationId, state }).catch(() => {});
 }
 
-async function ensureState(teamId: string, conversationId: string): Promise<AiConvStateRow> {
+async function ensureState(workspaceId: string, conversationId: string): Promise<AiConvStateRow> {
   const existing = await db.aiConversationState.findUnique({ where: { conversationId } });
   if (existing) return existing as AiConvStateRow;
   try {
     return (await db.aiConversationState.create({
-      data: { teamId, conversationId, state: "ai_active" },
+      data: { workspaceId, conversationId, state: "ai_active" },
     })) as AiConvStateRow;
   } catch (err) {
     if ((err as { code?: string })?.code === "P2002") {
@@ -65,11 +65,11 @@ export async function getState(conversationId: string): Promise<AiConvStateRow |
  * paused/disabled are left as-is. Never permanently pauses.
  */
 export async function onHumanReply(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   userId?: string | null,
 ): Promise<AiConvStateRow> {
-  const s = await ensureState(teamId, conversationId);
+  const s = await ensureState(workspaceId, conversationId);
   if (s.state === "ai_active") {
     const row = (await db.aiConversationState.update({
       where: { conversationId },
@@ -80,7 +80,7 @@ export async function onHumanReply(
         pausedByUserId: userId ?? null,
       },
     })) as AiConvStateRow;
-    emitState(teamId, conversationId, "human_active");
+    emitState(workspaceId, conversationId, "human_active");
     return row;
   }
   // human_active / ai_paused / disabled: just reset the auto-reply counter.
@@ -95,16 +95,16 @@ export async function onHumanReply(
  * resumption). paused/disabled stay put. Returns the post-transition state.
  */
 export async function onCustomerInbound(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
 ): Promise<AiConvStateRow> {
-  const s = await ensureState(teamId, conversationId);
+  const s = await ensureState(workspaceId, conversationId);
   if (s.state === "human_active") {
     const row = (await db.aiConversationState.update({
       where: { conversationId },
       data: { state: "ai_active", stateChangedAt: new Date(), autoReplyCount: 0 },
     })) as AiConvStateRow;
-    emitState(teamId, conversationId, "ai_active");
+    emitState(workspaceId, conversationId, "ai_active");
     return row;
   }
   return s;
@@ -112,34 +112,34 @@ export async function onCustomerInbound(
 
 // --- explicit agent controls (inbox header actions) ---
 
-export async function pauseByAgent(teamId: string, conversationId: string, userId: string) {
-  await ensureState(teamId, conversationId);
+export async function pauseByAgent(workspaceId: string, conversationId: string, userId: string) {
+  await ensureState(workspaceId, conversationId);
   const row = await db.aiConversationState.update({
     where: { conversationId },
     data: { state: "ai_paused", pausedByUserId: userId, pausedAt: new Date(), stateChangedAt: new Date() },
   });
-  emitState(teamId, conversationId, "ai_paused");
+  emitState(workspaceId, conversationId, "ai_paused");
   return row;
 }
 
-export async function resumeByAgent(teamId: string, conversationId: string) {
-  await ensureState(teamId, conversationId);
+export async function resumeByAgent(workspaceId: string, conversationId: string) {
+  await ensureState(workspaceId, conversationId);
   const row = await db.aiConversationState.update({
     where: { conversationId },
     data: { state: "ai_active", pausedByUserId: null, pausedAt: null, stateChangedAt: new Date(), autoReplyCount: 0 },
   });
-  emitState(teamId, conversationId, "ai_active");
+  emitState(workspaceId, conversationId, "ai_active");
   return row;
 }
 
 /** "Take over" = agent grabs the thread (human_active). */
-export async function takeOverByAgent(teamId: string, conversationId: string, userId: string) {
-  await ensureState(teamId, conversationId);
+export async function takeOverByAgent(workspaceId: string, conversationId: string, userId: string) {
+  await ensureState(workspaceId, conversationId);
   const row = await db.aiConversationState.update({
     where: { conversationId },
     data: { state: "human_active", pausedByUserId: userId, stateChangedAt: new Date() },
   });
-  emitState(teamId, conversationId, "human_active");
+  emitState(workspaceId, conversationId, "human_active");
   return row;
 }
 
@@ -152,7 +152,7 @@ export async function takeOverByAgent(teamId: string, conversationId: string, us
  * took the thread over stays in control across the reopen). No-op (and no
  * event) when the conversation wasn't paused.
  */
-export async function resumeOnReopen(teamId: string, conversationId: string): Promise<boolean> {
+export async function resumeOnReopen(workspaceId: string, conversationId: string): Promise<boolean> {
   const res = await db.aiConversationState.updateMany({
     where: { conversationId, state: "ai_paused" },
     data: {
@@ -163,7 +163,7 @@ export async function resumeOnReopen(teamId: string, conversationId: string): Pr
       autoReplyCount: 0,
     },
   });
-  if (res.count > 0) emitState(teamId, conversationId, "ai_active");
+  if (res.count > 0) emitState(workspaceId, conversationId, "ai_active");
   return res.count > 0;
 }
 
@@ -175,11 +175,11 @@ export async function resumeOnReopen(teamId: string, conversationId: string): Pr
  * agent (recorded as who it was handed to), or null if none was available.
  */
 export async function handoffToHuman(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   agentUserId: string | null,
 ) {
-  await ensureState(teamId, conversationId);
+  await ensureState(workspaceId, conversationId);
   const row = await db.aiConversationState.update({
     where: { conversationId },
     data: {
@@ -189,7 +189,7 @@ export async function handoffToHuman(
       stateChangedAt: new Date(),
     },
   });
-  emitState(teamId, conversationId, "ai_paused");
+  emitState(workspaceId, conversationId, "ai_paused");
   return row;
 }
 
@@ -201,16 +201,16 @@ export async function handoffToHuman(
  * a production effect — wire it up first, or change `handoffToHuman` instead.
  */
 export async function escalateToHuman(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
 ): Promise<AiConvStateRow> {
-  const s = await ensureState(teamId, conversationId);
+  const s = await ensureState(workspaceId, conversationId);
   if (s.state === "ai_paused" || s.state === "disabled") return s;
   const row = (await db.aiConversationState.update({
     where: { conversationId },
     data: { state: "ai_paused", pausedByUserId: null, pausedAt: new Date(), stateChangedAt: new Date() },
   })) as AiConvStateRow;
-  emitState(teamId, conversationId, "ai_paused");
+  emitState(workspaceId, conversationId, "ai_paused");
   return row;
 }
 

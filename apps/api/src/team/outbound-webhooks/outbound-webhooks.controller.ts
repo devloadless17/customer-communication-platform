@@ -43,7 +43,7 @@ export class OutboundWebhooksController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    const webhooks = await this.webhooks.list(session.teamId);
+    const webhooks = await this.webhooks.list(session.workspaceId);
     return { webhooks };
   }
 
@@ -52,7 +52,7 @@ export class OutboundWebhooksController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateOutboundWebhookSchema)) body: CreateOutboundWebhookInput,
   ) {
-    return this.webhooks.create(session.teamId, session.userId, body);
+    return this.webhooks.create(session.workspaceId, session.userId, body);
   }
 
   @Patch(":id")
@@ -61,7 +61,7 @@ export class OutboundWebhooksController {
     @Param("id") id: string,
     @Body(zBody(UpdateOutboundWebhookSchema)) body: UpdateOutboundWebhookInput,
   ) {
-    const webhook = await this.webhooks.update(session.teamId, id, body);
+    const webhook = await this.webhooks.update(session.workspaceId, id, body);
     return { webhook };
   }
 
@@ -70,7 +70,7 @@ export class OutboundWebhooksController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    return this.webhooks.rotateSecret(session.teamId, id);
+    return this.webhooks.rotateSecret(session.workspaceId, id);
   }
 
   @Delete(":id")
@@ -78,7 +78,7 @@ export class OutboundWebhooksController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.webhooks.remove(session.teamId, id);
+    await this.webhooks.remove(session.workspaceId, id);
     return { ok: true };
   }
 
@@ -88,11 +88,11 @@ export class OutboundWebhooksController {
     @Param("id") id: string,
     @Query(zQuery(ListDeliveriesQuerySchema)) query: ListDeliveriesQueryInput,
   ) {
-    return this.webhooks.listDeliveries(session.teamId, id, query);
+    return this.webhooks.listDeliveries(session.workspaceId, id, query);
   }
 
   @Post(":id/test")
   async test(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    return this.webhooks.test(session.teamId, id);
+    return this.webhooks.test(session.workspaceId, id);
   }
 }

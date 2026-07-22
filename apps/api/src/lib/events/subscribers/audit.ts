@@ -27,17 +27,17 @@ import { recordConversationEvent } from "@/lib/inbox/events";
 
 /**
  * Resolve the conversation for a contact. Contact↔Conversation is 1:1
- * (DB-enforced via `@@unique([teamId, contactId])`), so the result is at most
+ * (DB-enforced via `@@unique([workspaceId, contactId])`), so the result is at most
  * one row. Returns null when the contact was created without a conversation
  * yet (manual create / CSV import that never messaged in) — those mutations
  * have no in-conversation surface to attach an audit row to, so we skip.
  */
 async function resolveConversationIdForContact(
-  teamId: string,
+  workspaceId: string,
   contactId: string,
 ): Promise<string | null> {
   const conv = await db.conversation.findFirst({
-    where: { teamId, contactId },
+    where: { workspaceId, contactId },
     select: { id: true },
   });
   return conv?.id ?? null;
@@ -59,7 +59,7 @@ export function registerAuditSubscribers(): () => void {
     if (e.previousAssignedUserId === e.newAssignedUserId) return;
     await recordConversationEvent({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       userId: e.changedByUserId,
       // External /v1 mutations set changedByApiKeyId so the audit row
       // attributes the change to the API key. Mutually exclusive with
@@ -82,7 +82,7 @@ export function registerAuditSubscribers(): () => void {
     if (e.previousStatus === e.newStatus) return;
     await recordConversationEvent({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       userId: e.changedByUserId,
       apiKeyId: e.changedByApiKeyId ?? null,
       workflowId: e.changedByWorkflowId ?? null,
@@ -98,7 +98,7 @@ export function registerAuditSubscribers(): () => void {
     if (e.previousAiEnabled === e.newAiEnabled) return;
     await recordConversationEvent({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       userId: e.changedByUserId,
       apiKeyId: e.changedByApiKeyId ?? null,
       workflowId: e.changedByWorkflowId ?? null,
@@ -119,7 +119,7 @@ export function registerAuditSubscribers(): () => void {
   subscribe("note.created", async (e) => {
     await recordConversationEvent({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       userId: e.note.authorUserId,
       kind: "note_added",
       after: {
@@ -133,7 +133,7 @@ export function registerAuditSubscribers(): () => void {
   subscribe("note.deleted", async (e) => {
     await recordConversationEvent({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       // Attributed to whoever deleted the note (author or an admin). null only
       // for system/automation deletions, which the timeline renders as "System".
       userId: e.deletedByUserId,
@@ -149,7 +149,7 @@ export function registerAuditSubscribers(): () => void {
   subscribe("contact.lifecycle_changed", async (e) => {
     if (e.before.stageId === e.after.stageId) return;
     const conversationId = await resolveConversationIdForContact(
-      e.teamId,
+      e.workspaceId,
       e.contactId,
     );
     if (!conversationId) return;
@@ -158,14 +158,14 @@ export function registerAuditSubscribers(): () => void {
     );
     const stages = stageIds.length
       ? await db.contactStage.findMany({
-          where: { teamId: e.teamId, id: { in: stageIds } },
+          where: { workspaceId: e.workspaceId, id: { in: stageIds } },
           select: { id: true, name: true },
         })
       : [];
     const nameById = new Map(stages.map((s) => [s.id, s.name] as const));
     await recordConversationEvent({
       conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       userId: e.changedByUserId,
       apiKeyId: e.changedByApiKeyId ?? null,
       kind: "stage_changed",
@@ -188,20 +188,20 @@ export function registerAuditSubscribers(): () => void {
   subscribe("contact.tag_changed", async (e) => {
     if (e.added.length === 0 && e.removed.length === 0) return;
     const conversationId = await resolveConversationIdForContact(
-      e.teamId,
+      e.workspaceId,
       e.contactId,
     );
     if (!conversationId) return;
     const allTagIds = [...e.added, ...e.removed];
     const tags = await db.tag.findMany({
-      where: { teamId: e.teamId, id: { in: allTagIds } },
+      where: { workspaceId: e.workspaceId, id: { in: allTagIds } },
       select: { id: true, name: true },
     });
     const nameById = new Map(tags.map((t) => [t.id, t.name] as const));
     for (const tagId of e.added) {
       await recordConversationEvent({
         conversationId,
-        teamId: e.teamId,
+        workspaceId: e.workspaceId,
         userId: e.changedByUserId,
         apiKeyId: e.changedByApiKeyId ?? null,
         kind: "tag_added",
@@ -211,7 +211,7 @@ export function registerAuditSubscribers(): () => void {
     for (const tagId of e.removed) {
       await recordConversationEvent({
         conversationId,
-        teamId: e.teamId,
+        workspaceId: e.workspaceId,
         userId: e.changedByUserId,
         apiKeyId: e.changedByApiKeyId ?? null,
         kind: "tag_removed",
@@ -263,7 +263,7 @@ export function registerAuditSubscribers(): () => void {
     };
     await recordConversationEvent({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       userId: e.changedByUserId,
       apiKeyId: e.changedByApiKeyId ?? null,
       kind,
@@ -282,7 +282,7 @@ export function registerAuditSubscribers(): () => void {
   subscribe("call.ended", async (e) => {
     await recordConversationEvent({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       // Hangup actor is currently inferred from the `reason` field —
       // `hangup_by_agent` carries no specific userId from the bus, but
       // the audit row is meaningful regardless ("call completed, X seconds").
@@ -300,7 +300,7 @@ export function registerAuditSubscribers(): () => void {
   subscribe("call.missed", async (e) => {
     await recordConversationEvent({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       userId: null,
       kind: "call_missed",
       after: { callId: e.callId },
@@ -310,7 +310,7 @@ export function registerAuditSubscribers(): () => void {
   subscribe("call.rejected", async (e) => {
     await recordConversationEvent({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       userId: e.rejectedByUserId,
       kind: "call_rejected",
       after: { callId: e.callId },
@@ -320,7 +320,7 @@ export function registerAuditSubscribers(): () => void {
   subscribe("call.failed", async (e) => {
     await recordConversationEvent({
       conversationId: e.conversationId,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       userId: null,
       kind: "call_failed",
       after: { callId: e.callId, reason: e.reason },

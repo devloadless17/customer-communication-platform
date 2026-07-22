@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Retention sweeper for the `WorkflowRun` table.
@@ -37,6 +37,12 @@ async function runTick(label: string): Promise<void> {
     // Mutex serializes the batched DELETE against other heavy sweepers.
     await withSweeperMutex("workflow-run-retention", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopWorkflowRunRetentionSweeper();
+      return;
+    }
     console.error(`[sweeper.workflow-run-retention] ${label} failed`, err);
   } finally {
     inFlight = false;

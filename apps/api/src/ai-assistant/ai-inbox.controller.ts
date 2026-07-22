@@ -48,7 +48,7 @@ export class AiInboxController {
   @ScopedByConversation("id")
   @Get("conversations/:id/overview")
   async overview(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    return this.svc.overview(session.teamId, id);
+    return this.svc.overview(session.workspaceId, id);
   }
 
   /** On-demand summary for an agent-picked `from`/`to` date range. */
@@ -61,7 +61,7 @@ export class AiInboxController {
     @Param("id") id: string,
     @Query(zQuery(SummaryRangeQuerySchema)) query: SummaryRangeQuery,
   ) {
-    return this.svc.rangeSummary(session.teamId, id, new Date(query.from), new Date(query.to));
+    return this.svc.rangeSummary(session.workspaceId, id, new Date(query.from), new Date(query.to));
   }
 
   @ScopedByConversation("id")
@@ -71,7 +71,7 @@ export class AiInboxController {
     @Param("id") id: string,
     @Body(zBody(StateActionSchema)) body: StateActionInput,
   ) {
-    const state = await this.svc.setState(session.teamId, id, session.userId, body.action);
+    const state = await this.svc.setState(session.workspaceId, id, session.userId, body.action);
     return { state };
   }
 
@@ -82,7 +82,7 @@ export class AiInboxController {
     @Body(zBody(SuggestionDecisionSchema)) body: SuggestionDecisionInput,
   ) {
     const suggestion = await this.svc.decideSuggestion(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       id,
       body.action,
@@ -98,7 +98,7 @@ export class AiInboxController {
     @Param("id") id: string,
     @Res() res: Response,
   ) {
-    const obj = await this.svc.getSuggestionAudio(session.teamId, id);
+    const obj = await this.svc.getSuggestionAudio(session.workspaceId, id);
     if (!obj) {
       res.status(404).json({ error: "no_audio" });
       return;
@@ -110,13 +110,13 @@ export class AiInboxController {
 
   @Post("suggestions/:id/regenerate")
   async regenerateSuggestion(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    const suggestion = await this.svc.regenerateSuggestion(session.teamId, session.userId, id);
+    const suggestion = await this.svc.regenerateSuggestion(session.workspaceId, session.userId, id);
     return { suggestion };
   }
 
   @Get("customers/:id/memory")
   async listMemory(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    const memory = await this.svc.listMemory(session.teamId, id);
+    const memory = await this.svc.listMemory(session.workspaceId, id);
     return { memory };
   }
 
@@ -126,24 +126,24 @@ export class AiInboxController {
     @Param("id") id: string,
     @Body(zBody(PatchMemorySchema)) body: PatchMemoryInput,
   ) {
-    const memory = await this.svc.patchMemory(session.teamId, session.userId, id, body);
+    const memory = await this.svc.patchMemory(session.workspaceId, session.userId, id, body);
     return { memory };
   }
 
   @Delete("memory/:id")
   async deleteMemory(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    return this.svc.deleteMemory(session.teamId, id);
+    return this.svc.deleteMemory(session.workspaceId, id);
   }
 
   /** Whether a given (AI-authored) message was flagged as a hallucination risk. */
   @Get("messages/:messageId/hallucination")
   async messageFlag(@CurrentSession() session: ApiSession, @Param("messageId") messageId: string) {
-    return this.svc.getMessageFlag(session.teamId, messageId, session);
+    return this.svc.getMessageFlag(session.workspaceId, messageId, session);
   }
 
   @Get("transcriptions/:messageId")
   async getTranscription(@CurrentSession() session: ApiSession, @Param("messageId") messageId: string) {
-    const transcription = await this.svc.getTranscription(session.teamId, messageId, session);
+    const transcription = await this.svc.getTranscription(session.workspaceId, messageId, session);
     return { transcription };
   }
 
@@ -154,7 +154,7 @@ export class AiInboxController {
     @Body(zBody(CorrectTranscriptionSchema)) body: CorrectTranscriptionInput,
   ) {
     const transcription = await this.svc.correctTranscription(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       messageId,
       body.correctedText,

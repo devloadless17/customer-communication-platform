@@ -37,7 +37,7 @@ export function AiTranscript({ messageId }: { messageId: string }) {
   // Realtime: transcription completed/failed (ai.transcription_changed).
   useEffect(() => {
     const socket = getClientSocket();
-    const onTx = (p: { teamId: string; conversationId: string; messageId: string; status: string }) => {
+    const onTx = (p: { workspaceId: string; conversationId: string; messageId: string; status: string }) => {
       if (p.messageId === messageId) void load();
     };
     socket.on("ai:transcription", onTx);

@@ -33,7 +33,7 @@ test.setTimeout(120_000);
 
 const PREFIX = "e2e_mf_";
 
-let teamId: string;
+let workspaceId: string;
 let adminUserId: string;
 let contactId: string;
 let conversationId: string;
@@ -45,12 +45,12 @@ let complaintId: string;
 
 test.beforeAll(async () => {
   const admin = await appAdmin();
-  teamId = admin.teamId;
+  workspaceId = admin.workspaceId;
   adminUserId = admin.userId;
 
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       name: `${PREFIX}Layla`,
       phoneNumber: `+99${Date.now().toString().slice(-10)}`,
       identityChannel: "whatsapp",
@@ -59,7 +59,7 @@ test.beforeAll(async () => {
   contactId = contact.id;
 
   const conversation = await db().conversation.create({
-    data: { teamId, contactId, channel: "whatsapp", status: "open" },
+    data: { workspaceId, contactId, channel: "whatsapp", status: "open" },
   });
   conversationId = conversation.id;
 
@@ -74,7 +74,7 @@ test.beforeAll(async () => {
   for (let i = 0; i < 40; i++) {
     const msg = await db().message.create({
       data: {
-        teamId,
+        workspaceId,
         conversationId,
         externalId: `${PREFIX}${conversation.id}_${i}`,
         body:
@@ -92,7 +92,7 @@ test.beforeAll(async () => {
   // touches the in-memory ThreadCache the test is actually about).
   const other = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       name: `${PREFIX}Omar`,
       phoneNumber: `+98${Date.now().toString().slice(-10)}`,
       identityChannel: "whatsapp",
@@ -100,11 +100,11 @@ test.beforeAll(async () => {
   });
   otherContactId = other.id;
   const otherConv = await db().conversation.create({
-    data: { teamId, contactId: other.id, channel: "whatsapp", status: "open" },
+    data: { workspaceId, contactId: other.id, channel: "whatsapp", status: "open" },
   });
   await db().message.create({
     data: {
-      teamId,
+      workspaceId,
       conversationId: otherConv.id,
       externalId: `${PREFIX}${otherConv.id}_0`,
       body: `${PREFIX}unrelated thread`,
@@ -115,36 +115,57 @@ test.beforeAll(async () => {
   });
 
   const complaint = await db().messageFlagDefinition.create({
-    data: { teamId, name: `${PREFIX}Complaint`, color: "rose" },
+    data: { workspaceId, name: `${PREFIX}Complaint`, color: "rose" },
   });
   complaintId = complaint.id;
   // A second definition so the "Flag as" submenu has more than one entry —
   // a one-item menu would pass even if the picker rendered the wrong list.
   await db().messageFlagDefinition.create({
-    data: { teamId, name: `${PREFIX}Refund`, color: "amber" },
+    data: { workspaceId, name: `${PREFIX}Refund`, color: "amber" },
   });
 });
 
 test.afterAll(async () => {
   // Order matters: flags reference definitions with onDelete: Restrict.
-  await db().messageFlag.deleteMany({ where: { teamId } });
+  await db().messageFlag.deleteMany({ where: { workspaceId } });
   await db().messageFlagDefinition.deleteMany({
-    where: { teamId, name: { startsWith: PREFIX } },
+    where: { workspaceId, name: { startsWith: PREFIX } },
   });
   await db().conversation.deleteMany({
-    where: { teamId, contactId: { in: [contactId, otherContactId] } },
+    where: { workspaceId, contactId: { in: [contactId, otherContactId] } },
   });
   await db().contact.deleteMany({
-    where: { teamId, id: { in: [contactId, otherContactId] } },
+    where: { workspaceId, id: { in: [contactId, otherContactId] } },
   });
 });
 
-/** Open the inbox on our seeded thread and wait for the bubbles to render. */
+/**
+ * Open the inbox on our seeded thread and wait for the bubbles to render.
+ *
+ * Retries once on the per-user rate limit. Every spec in this serial suite
+ * drives the SAME admin account and a full inbox load costs ~10 API calls, so
+ * a fast run legitimately trips the 300 req/min/user ceiling — the inbox then
+ * renders its error boundary and no bubble ever appears. That's correct
+ * product behaviour reacting to an artificial burst, not a defect, so the
+ * accommodation belongs here rather than in a weakened rate limiter.
+ */
 async function openThread(page: Page): Promise<void> {
-  await page.goto(`/inbox?c=${conversationId}`);
-  await expect(
-    page.locator(`[data-message-id="${targetMessageId}"]`),
-  ).toBeVisible({ timeout: 60_000 });
+  const bubble = page.locator(`[data-message-id="${targetMessageId}"]`);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await page.goto(`/inbox?c=${conversationId}`);
+    try {
+      await expect(bubble).toBeVisible({ timeout: attempt === 0 ? 25_000 : 60_000 });
+      return;
+    } catch (err) {
+      const rateLimited = await page
+        .getByText(/rate_limited|too many requests/i)
+        .count()
+        .catch(() => 0);
+      if (attempt === 1 || !rateLimited) throw err;
+      // Token bucket is per MINUTE — wait for it to refill, then retry once.
+      await page.waitForTimeout(15_000);
+    }
+  }
 }
 
 /**
@@ -192,7 +213,7 @@ test("flag a message from the bubble menu, and the chip appears", async ({ page 
     .poll(
       async () =>
         db().messageFlag.findFirst({
-          where: { teamId, messageId: targetMessageId, definitionId: complaintId },
+          where: { workspaceId, messageId: targetMessageId, definitionId: complaintId },
           select: { status: true, source: true, createdById: true },
         }),
       { timeout: 20_000 },
@@ -279,7 +300,7 @@ test("a teammate's resolve lands live in another browser, with no reload", async
         async () =>
           (
             await db().messageFlag.findFirstOrThrow({
-              where: { teamId, messageId: targetMessageId, definitionId: complaintId },
+              where: { workspaceId, messageId: targetMessageId, definitionId: complaintId },
               select: { status: true },
             })
           ).status,
@@ -318,7 +339,7 @@ test("the audit trail records each real lifecycle change exactly once", async ({
   // Drive the API directly here — this is about the audit subscriber's mapping,
   // and the UI paths are covered above. Cookies come from the storageState.
   const existing = await db().messageFlag.findFirstOrThrow({
-    where: { teamId, messageId: targetMessageId, definitionId: complaintId },
+    where: { workspaceId, messageId: targetMessageId, definitionId: complaintId },
     select: { id: true, status: true },
   });
   expect(existing.status).toBe("resolved"); // left resolved by the previous spec
@@ -327,7 +348,7 @@ test("the audit trail records each real lifecycle change exactly once", async ({
     (
       await db().conversationEvent.findMany({
         where: {
-          teamId,
+          workspaceId,
           conversationId,
           kind: { in: ["flag_added", "flag_reopened", "flag_resolved", "flag_removed"] },
         },
@@ -393,7 +414,7 @@ test("the queue deep-links into the inbox anchored on the flagged message", asyn
 }) => {
   // Re-open the flag so it's in the default queue view.
   const existing = await db().messageFlag.findFirstOrThrow({
-    where: { teamId, messageId: targetMessageId, definitionId: complaintId },
+    where: { workspaceId, messageId: targetMessageId, definitionId: complaintId },
     select: { id: true },
   });
   await db().messageFlag.update({
@@ -418,15 +439,96 @@ test("the queue deep-links into the inbox anchored on the flagged message", asyn
   await expect(target).toBeInViewport({ timeout: 15_000 });
 });
 
+test("the conversation panel has a Flags tab listing this thread's flags", async ({
+  page,
+}) => {
+  // Re-open the flag so the tab has an OPEN item with actions on it.
+  const existing = await db().messageFlag.findFirstOrThrow({
+    where: { workspaceId, messageId: targetMessageId, definitionId: complaintId },
+    select: { id: true },
+  });
+  await db().messageFlag.update({
+    where: { id: existing.id },
+    data: { status: "open", resolvedAt: null, resolvedById: null },
+  });
+  await db().conversation.update({
+    where: { id: conversationId },
+    data: { openFlagCount: 1 },
+  });
+
+  await openThread(page);
+  await waitForSocket(page);
+
+  // Flags is a TOP-LEVEL tab now, not a chip buried inside Files.
+  const flagsTab = page.getByRole("tab", { name: /Flags/ });
+  await expect(flagsTab).toBeVisible({ timeout: 30_000 });
+  await flagsTab.click();
+
+  // The flagged message is listed with its definition, scoped to THIS thread.
+  await expect(
+    page.getByText(`${PREFIX}the order arrived late again`).first(),
+  ).toBeVisible({ timeout: 20_000 });
+
+  // Resolving from the panel converges through the same socket frame.
+  await page.getByRole("button", { name: "Mark resolved" }).first().click();
+  await expect
+    .poll(
+      async () =>
+        (
+          await db().messageFlag.findFirstOrThrow({
+            where: { id: existing.id },
+            select: { status: true },
+          })
+        ).status,
+      { timeout: 15_000 },
+    )
+    .toBe("resolved");
+});
+
+test("the /flags queue search narrows by message text and by contact", async ({
+  page,
+}) => {
+  await page.goto("/flags");
+  const search = page.getByRole("searchbox", { name: /Search flagged messages/i });
+  await expect(search).toBeVisible({ timeout: 30_000 });
+
+  // A term that matches nothing must empty the list — proves the query is
+  // actually reaching the server rather than being ignored.
+  await search.fill("zzz-no-such-flag-zzz");
+  await expect(
+    page.getByText(`${PREFIX}the order arrived late again`),
+  ).toBeHidden({ timeout: 20_000 });
+
+  // Searching by CONTACT name finds it again (the flag is resolved by now, so
+  // look under Handled).
+  await page.getByRole("button", { name: "Handled" }).click();
+  await search.fill(`${PREFIX}Layla`);
+  await expect(
+    page.getByText(`${PREFIX}the order arrived late again`).first(),
+  ).toBeVisible({ timeout: 20_000 });
+});
+
 test("the Flagged inbox preset finds the thread — even once it is CLOSED", async ({
   page,
 }) => {
+  // Establish the precondition explicitly rather than inheriting whatever the
+  // previous test left behind — in a serial suite that coupling silently
+  // inverts the moment a test is added or reordered.
+  const existing = await db().messageFlag.findFirstOrThrow({
+    where: { workspaceId, messageId: targetMessageId, definitionId: complaintId },
+    select: { id: true },
+  });
+  await db().messageFlag.update({
+    where: { id: existing.id },
+    data: { status: "open", resolvedAt: null, resolvedById: null },
+  });
+
   // Every other working preset excludes closed threads. Flagged deliberately
   // does not: an unresolved complaint on a thread someone closed is exactly
   // what must not fall off the radar.
   await db().conversation.update({
     where: { id: conversationId },
-    data: { status: "closed" },
+    data: { status: "closed", openFlagCount: 1 },
   });
 
   await page.goto("/inbox");
@@ -437,7 +539,7 @@ test("the Flagged inbox preset finds the thread — even once it is CLOSED", asy
 
   // And the counterpart: a thread with NO open flag must not appear here.
   await db().messageFlag.updateMany({
-    where: { teamId, conversationId },
+    where: { workspaceId, conversationId },
     data: { status: "resolved" },
   });
   await db().conversation.update({

@@ -28,10 +28,10 @@ export class SnippetsService {
     private readonly bus: EventBus,
   ) {}
 
-  async list(teamId: string): Promise<SnippetDto[]> {
+  async list(workspaceId: string): Promise<SnippetDto[]> {
     // No pagination — small N, the picker needs the full set on first open.
     const rows = await this.db.snippet.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: [{ label: "asc" }],
       include: { createdBy: { select: { id: true, name: true } } },
     });
@@ -47,15 +47,15 @@ export class SnippetsService {
   }
 
   async create(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: CreateSnippetInput,
   ): Promise<{ id: string }> {
     try {
       const created = await this.db.snippet.create({
-        data: { teamId, createdById: userId, ...input },
+        data: { workspaceId, createdById: userId, ...input },
       });
-      await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "snippets" });
+      await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "snippets" });
       return { id: created.id };
     } catch (err) {
       throwIfUniqueViolation(err, `A snippet named "${input.name}" already exists.`);
@@ -64,19 +64,19 @@ export class SnippetsService {
   }
 
   async update(
-    teamId: string,
+    workspaceId: string,
     id: string,
     input: UpdateSnippetInput,
   ): Promise<void> {
     try {
       const result = await this.db.snippet.updateMany({
-        where: { id, teamId },
+        where: { id, workspaceId },
         data: input,
       });
       if (result.count === 0) {
         throw new NotFoundException({ error: "snippet not found" });
       }
-      await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "snippets" });
+      await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "snippets" });
     } catch (err) {
       if (err instanceof NotFoundException) throw err;
       throwIfUniqueViolation(err, "Another snippet already uses that name.");
@@ -84,12 +84,12 @@ export class SnippetsService {
     }
   }
 
-  async remove(teamId: string, id: string): Promise<void> {
-    const result = await this.db.snippet.deleteMany({ where: { id, teamId } });
+  async remove(workspaceId: string, id: string): Promise<void> {
+    const result = await this.db.snippet.deleteMany({ where: { id, workspaceId } });
     if (result.count === 0) {
       throw new NotFoundException({ error: "snippet not found" });
     }
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "snippets" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "snippets" });
   }
 }
 

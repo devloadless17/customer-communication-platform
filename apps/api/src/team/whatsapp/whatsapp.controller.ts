@@ -31,7 +31,7 @@ export class WhatsappController {
 
   @Get()
   async get(@CurrentSession() session: ApiSession) {
-    const config = await this.whatsapp.getConfig(session.teamId);
+    const config = await this.whatsapp.getConfig(session.workspaceId);
     return { config };
   }
 
@@ -40,13 +40,13 @@ export class WhatsappController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(UpdateWhatsappConfigSchema)) body: UpdateWhatsappConfigInput,
   ) {
-    const out = await this.whatsapp.updateConfig(session.teamId, body);
+    const out = await this.whatsapp.updateConfig(session.workspaceId, body);
     return { ok: true, ...out };
   }
 
   @Delete()
   async disconnect(@CurrentSession() session: ApiSession) {
-    await this.whatsapp.disconnect(session.teamId);
+    await this.whatsapp.disconnect(session.workspaceId);
     return { ok: true };
   }
 }

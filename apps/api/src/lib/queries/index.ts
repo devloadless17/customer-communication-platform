@@ -32,6 +32,7 @@ export {
   getPlatformAnalytics,
   getTeamDetailForSuperAdmin,
   invalidateSuperAdminAggregates,
+  listAllOrgsForSuperAdmin,
   listAllTeamsForSuperAdmin,
 } from "./super-admin";
 export type {

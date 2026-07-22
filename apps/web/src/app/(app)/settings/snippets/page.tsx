@@ -12,12 +12,12 @@ export const dynamic = "force-dynamic";
  * Snippet (canned-reply) manager. Gated by the admin-configurable
  * `snippets:manage` capability (default true for manager + agent — unchanged
  * until an admin restricts it). Mirrors the stages / contact-fields / tags
- * settings pages. Redirect to /settings/account when gated.
+ * settings pages. Redirect to /account when gated.
  */
 export default async function SnippetsSettingsPage() {
   const { permissions } = await getSession();
   if (!permissions["snippets:manage"]) {
-    redirect("/settings/account");
+    redirect("/account");
   }
 
   const [snippets, fieldDefinitions] = await Promise.all([

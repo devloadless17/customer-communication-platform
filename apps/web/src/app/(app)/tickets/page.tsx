@@ -1,0 +1,23 @@
+import { listTeamMembers } from "@/lib/api/queries";
+
+import { TicketsBoardClient } from "./tickets-board-client";
+
+/**
+ * The ticket board — every piece of work across every conversation, grouped by
+ * where it stands.
+ *
+ * Distinct from the inbox on purpose. The inbox answers "which CONVERSATIONS
+ * need a reply"; this answers "what WORK is open, who owns it, and what's about
+ * to miss its promise" — a supervisor's question, and one a thread-by-thread
+ * view can't express because a single thread can carry several separate issues
+ * over time.
+ *
+ * Only the roster is SSR-seeded (tiny, and the assignee filter needs it on
+ * first paint). The cards themselves are fetched client-side: they're
+ * keyset-paginated, filterable, and live-patched by the `ticket:changed` socket
+ * frame, so an SSR seed would be discarded by the first interaction.
+ */
+export default async function TicketsPage() {
+  const users = await listTeamMembers();
+  return <TicketsBoardClient users={users} />;
+}

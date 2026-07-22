@@ -38,13 +38,13 @@ function track(page: Page): string[] {
 
 const P1 = "+15550779001";
 const P2 = "+15550779002";
-let teamId: string;
+let workspaceId: string;
 let userId: string;
 let conv1: string;
 let conv2: string;
 
 test.beforeAll(async () => {
-  ({ teamId, userId } = await appAdmin());
+  ({ workspaceId, userId } = await appAdmin());
   const now = Date.now();
   // idempotent cleanup from a prior run
   for (const ph of [P1, P2]) {
@@ -56,37 +56,37 @@ test.beforeAll(async () => {
 
   // Rich primary thread
   const c1 = await db().contact.create({
-    data: { teamId, phoneNumber: P1, identityChannel: "whatsapp", name: "FullE2E Customer", source: "manual", lastInboundAt: new Date(now) },
+    data: { workspaceId, phoneNumber: P1, identityChannel: "whatsapp", name: "FullE2E Customer", source: "manual", lastInboundAt: new Date(now) },
   });
   const cv1 = await db().conversation.create({
-    data: { teamId, contactId: c1.id, channel: "whatsapp", status: "open", assignedUserId: userId, lastMessageAt: new Date(now), lastMessagePreview: "thanks!" },
+    data: { workspaceId, contactId: c1.id, channel: "whatsapp", status: "open", assignedUserId: userId, lastMessageAt: new Date(now), lastMessagePreview: "thanks!" },
   });
   conv1 = cv1.id;
   const inText = await db().message.create({
-    data: { teamId, conversationId: conv1, externalId: `fe2e-in-${now}`, direction: "in", channel: "whatsapp", status: "delivered", body: "hello, I need help with my order", timestamp: new Date(now - 26 * 3600_000), rawPayload: {} },
+    data: { workspaceId, conversationId: conv1, externalId: `fe2e-in-${now}`, direction: "in", channel: "whatsapp", status: "delivered", body: "hello, I need help with my order", timestamp: new Date(now - 26 * 3600_000), rawPayload: {} },
   });
   await db().message.createMany({
     data: [
-      { teamId, conversationId: conv1, externalId: `fe2e-out-${now}`, direction: "out", channel: "whatsapp", status: "read", senderUserId: userId, body: "Hi! Happy to help — what's the order number?", timestamp: new Date(now - 25 * 3600_000), rawPayload: {}, reaction: "👍" },
-      { teamId, conversationId: conv1, externalId: `fe2e-img-${now}`, direction: "in", channel: "whatsapp", status: "delivered", body: "", timestamp: new Date(now - 7200_000), rawPayload: {}, mediaKind: "image", mediaMimeType: "image/jpeg", mediaUrl: "stored://x" },
-      { teamId, conversationId: conv1, externalId: `fe2e-voice-${now}`, direction: "in", channel: "whatsapp", status: "delivered", body: "", timestamp: new Date(now - 3600_000), rawPayload: {}, mediaKind: "audio", mediaMimeType: "audio/ogg", mediaUrl: "stored://y", mediaVoice: true },
-      { teamId, conversationId: conv1, externalId: `fe2e-reply-${now}`, direction: "out", channel: "whatsapp", status: "delivered", senderUserId: userId, body: "thanks!", timestamp: new Date(now), rawPayload: {}, replyToMessageId: inText.id },
+      { workspaceId, conversationId: conv1, externalId: `fe2e-out-${now}`, direction: "out", channel: "whatsapp", status: "read", senderUserId: userId, body: "Hi! Happy to help — what's the order number?", timestamp: new Date(now - 25 * 3600_000), rawPayload: {}, reaction: "👍" },
+      { workspaceId, conversationId: conv1, externalId: `fe2e-img-${now}`, direction: "in", channel: "whatsapp", status: "delivered", body: "", timestamp: new Date(now - 7200_000), rawPayload: {}, mediaKind: "image", mediaMimeType: "image/jpeg", mediaUrl: "stored://x" },
+      { workspaceId, conversationId: conv1, externalId: `fe2e-voice-${now}`, direction: "in", channel: "whatsapp", status: "delivered", body: "", timestamp: new Date(now - 3600_000), rawPayload: {}, mediaKind: "audio", mediaMimeType: "audio/ogg", mediaUrl: "stored://y", mediaVoice: true },
+      { workspaceId, conversationId: conv1, externalId: `fe2e-reply-${now}`, direction: "out", channel: "whatsapp", status: "delivered", senderUserId: userId, body: "thanks!", timestamp: new Date(now), rawPayload: {}, replyToMessageId: inText.id },
     ],
   });
   await db().internalNote.create({
-    data: { teamId, conversationId: conv1, authorUserId: userId, body: "VIP customer — handle with care", timestamp: new Date(now - 1800_000) },
+    data: { workspaceId, conversationId: conv1, authorUserId: userId, body: "VIP customer — handle with care", timestamp: new Date(now - 1800_000) },
   });
 
   // Secondary thread for list/sort
   const c2 = await db().contact.create({
-    data: { teamId, phoneNumber: P2, identityChannel: "whatsapp", name: "FullE2E Two", source: "manual", lastInboundAt: new Date(now - 40000 * 60000) },
+    data: { workspaceId, phoneNumber: P2, identityChannel: "whatsapp", name: "FullE2E Two", source: "manual", lastInboundAt: new Date(now - 40000 * 60000) },
   });
   const cv2 = await db().conversation.create({
-    data: { teamId, contactId: c2.id, channel: "whatsapp", status: "open", lastMessageAt: new Date(now - 5000), lastMessagePreview: "older waiter" },
+    data: { workspaceId, contactId: c2.id, channel: "whatsapp", status: "open", lastMessageAt: new Date(now - 5000), lastMessagePreview: "older waiter" },
   });
   conv2 = cv2.id;
   await db().message.create({
-    data: { teamId, conversationId: conv2, externalId: `fe2e-2-${now}`, direction: "in", channel: "whatsapp", status: "delivered", body: "waited longest", timestamp: new Date(now - 40000 * 60000), rawPayload: {} },
+    data: { workspaceId, conversationId: conv2, externalId: `fe2e-2-${now}`, direction: "in", channel: "whatsapp", status: "delivered", body: "waited longest", timestamp: new Date(now - 40000 * 60000), rawPayload: {} },
   });
 });
 

@@ -44,7 +44,7 @@ export function canCreateChannel(
   visibility: TeamChannelVisibility = "private",
 ): boolean {
   if (visibility === "public") return true;
-  return role === "superAdmin" || role === "admin" || role === "manager";
+  return role === "admin" || role === "manager";
 }
 
 /**
@@ -59,20 +59,20 @@ export function canPinInChannel(role: Role, kind: TeamChannelKind): boolean {
 }
 
 export function canManageChannel(role: Role): boolean {
-  return role === "superAdmin" || role === "admin" || role === "manager";
+  return role === "admin" || role === "manager";
 }
 
 export function canDeleteChannel(role: Role): boolean {
-  return role === "superAdmin" || role === "admin";
+  return role === "admin";
 }
 
 export function canPinMessage(role: Role): boolean {
-  return role === "superAdmin" || role === "admin" || role === "manager";
+  return role === "admin" || role === "manager";
 }
 
 export function canDeleteMessage(role: Role, authorUserId: string | null, viewerUserId: string): boolean {
   if (authorUserId === viewerUserId) return true;
-  return role === "superAdmin" || role === "admin";
+  return role === "admin";
 }
 
 /**

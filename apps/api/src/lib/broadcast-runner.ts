@@ -351,7 +351,7 @@ const inFlightRuns = new Map<string, Promise<void>>();
  *
  * Tunable via BROADCAST_PER_TEAM_CONCURRENCY (default 2). Single-process only;
  * cross-process fairness would need Redis counters (deferred — pilot is one
- * process). Keyed by teamId; the entry is dropped when the team goes idle so
+ * process). Keyed by workspaceId; the entry is dropped when the team goes idle so
  * the Map stays bounded.
  */
 function perTeamBroadcastConcurrency(): number {
@@ -367,23 +367,23 @@ const BROADCAST_TEAM_BUSY_DEFER_MS = 5_000;
 
 const broadcastTeamSlots = new Map<string, { active: number }>();
 
-function tryAcquireBroadcastTeamSlot(teamId: string): boolean {
+function tryAcquireBroadcastTeamSlot(workspaceId: string): boolean {
   const cap = perTeamBroadcastConcurrency();
-  let entry = broadcastTeamSlots.get(teamId);
+  let entry = broadcastTeamSlots.get(workspaceId);
   if (!entry) {
     entry = { active: 0 };
-    broadcastTeamSlots.set(teamId, entry);
+    broadcastTeamSlots.set(workspaceId, entry);
   }
   if (entry.active >= cap) return false;
   entry.active += 1;
   return true;
 }
 
-function releaseBroadcastTeamSlot(teamId: string): void {
-  const entry = broadcastTeamSlots.get(teamId);
+function releaseBroadcastTeamSlot(workspaceId: string): void {
+  const entry = broadcastTeamSlots.get(workspaceId);
   if (!entry) return;
   entry.active = Math.max(0, entry.active - 1);
-  if (entry.active === 0) broadcastTeamSlots.delete(teamId);
+  if (entry.active === 0) broadcastTeamSlots.delete(workspaceId);
 }
 
 /**
@@ -450,7 +450,7 @@ function releaseGlobalBroadcastSlot(): void {
  * per-run rate is min(pacing.lanes, this cap), so this must be ≥ the largest
  * pacing.lanes (16) or it silently caps throughput.
  *
- * Keyed by teamId. Entry is dropped when the team has zero active + zero
+ * Keyed by workspaceId. Entry is dropped when the team has zero active + zero
  * waiters so the Map stays bounded with one entry per actively-sending team.
  */
 function perTeamRecipientConcurrency(): number {
@@ -478,11 +478,11 @@ interface TeamRecipientSlotState {
 }
 const teamRecipientSlots = new Map<string, TeamRecipientSlotState>();
 
-function getOrCreateRecipientSlotEntry(teamId: string): TeamRecipientSlotState {
-  let entry = teamRecipientSlots.get(teamId);
+function getOrCreateRecipientSlotEntry(workspaceId: string): TeamRecipientSlotState {
+  let entry = teamRecipientSlots.get(workspaceId);
   if (!entry) {
     entry = { active: 0, waiters: [], lastWarnAt: 0 };
-    teamRecipientSlots.set(teamId, entry);
+    teamRecipientSlots.set(workspaceId, entry);
   }
   return entry;
 }
@@ -498,9 +498,9 @@ function getOrCreateRecipientSlotEntry(teamId: string): TeamRecipientSlotState {
  * dropping below cap, so a concurrent arrival can't observe a stale "free"
  * slot).
  */
-async function acquireTeamRecipientSlot(teamId: string): Promise<void> {
+async function acquireTeamRecipientSlot(workspaceId: string): Promise<void> {
   const cap = perTeamRecipientConcurrency();
-  const entry = getOrCreateRecipientSlotEntry(teamId);
+  const entry = getOrCreateRecipientSlotEntry(workspaceId);
   if (entry.active < cap) {
     entry.active += 1;
     return;
@@ -510,7 +510,7 @@ async function acquireTeamRecipientSlot(teamId: string): Promise<void> {
     if (now - entry.lastWarnAt > RECIPIENT_QUEUE_WARN_INTERVAL_MS) {
       entry.lastWarnAt = now;
       console.warn(
-        `[broadcast] team ${teamId} starving on recipient slots: ${entry.waiters.length} waiter(s), cap=${cap}`,
+        `[broadcast] team ${workspaceId} starving on recipient slots: ${entry.waiters.length} waiter(s), cap=${cap}`,
       );
     }
   }
@@ -521,8 +521,8 @@ async function acquireTeamRecipientSlot(teamId: string): Promise<void> {
   // dequeued us — DO NOT bump again here.
 }
 
-function releaseTeamRecipientSlot(teamId: string): void {
-  const entry = teamRecipientSlots.get(teamId);
+function releaseTeamRecipientSlot(workspaceId: string): void {
+  const entry = teamRecipientSlots.get(workspaceId);
   if (!entry) return;
   const next = entry.waiters.shift();
   if (next) {
@@ -534,7 +534,7 @@ function releaseTeamRecipientSlot(teamId: string): void {
   }
   entry.active = Math.max(0, entry.active - 1);
   if (entry.active === 0 && entry.waiters.length === 0) {
-    teamRecipientSlots.delete(teamId);
+    teamRecipientSlots.delete(workspaceId);
   }
 }
 
@@ -574,14 +574,14 @@ export async function startBroadcast(broadcastId: string): Promise<void> {
   // Already running in this process (e.g. a duplicate kick from API + the
   // scheduled worker) — don't double-claim a team slot or spawn a second
   // lane pool. The CAS claim in runBroadcast also guards this, but bailing
-  // here avoids the wasted teamId lookup + slot churn.
+  // here avoids the wasted workspaceId lookup + slot churn.
   if (inFlightRuns.has(broadcastId)) return;
 
   // Per-team concurrency gate. Resolve the owning team cheaply (PK lookup,
-  // teamId only) so we can cap concurrent broadcasts per team.
+  // workspaceId only) so we can cap concurrent broadcasts per team.
   const owner = await db.broadcast.findUnique({
     where: { id: broadcastId },
-    select: { teamId: true, status: true },
+    select: { workspaceId: true, status: true },
   });
   if (!owner) {
     console.warn(`[broadcast ${broadcastId}] not found at start`);
@@ -591,7 +591,7 @@ export async function startBroadcast(broadcastId: string): Promise<void> {
   // terminal and runBroadcast would bail anyway.
   if (owner.status !== "queued") return;
 
-  if (!tryAcquireBroadcastTeamSlot(owner.teamId)) {
+  if (!tryAcquireBroadcastTeamSlot(owner.workspaceId)) {
     // Team at its concurrent-broadcast cap. Leave the row `queued` and
     // re-attempt shortly — the slot frees when one of the team's running
     // broadcasts finishes. (If the process dies while a row is parked here,
@@ -609,7 +609,7 @@ export async function startBroadcast(broadcastId: string): Promise<void> {
   // process at the global cap would leak one team slot per deferred attempt
   // and permanently wedge that team below its own cap.
   if (!tryAcquireGlobalBroadcastSlot()) {
-    releaseBroadcastTeamSlot(owner.teamId);
+    releaseBroadcastTeamSlot(owner.workspaceId);
     console.warn(
       `[broadcast ${broadcastId}] deferred: process at the global ` +
         `concurrent-broadcast cap (${maxRunningBroadcasts()})`,
@@ -628,7 +628,7 @@ export async function startBroadcast(broadcastId: string): Promise<void> {
     })
     .finally(() => {
       inFlightRuns.delete(broadcastId);
-      releaseBroadcastTeamSlot(owner.teamId);
+      releaseBroadcastTeamSlot(owner.workspaceId);
       releaseGlobalBroadcastSlot();
     });
   inFlightRuns.set(broadcastId, run);
@@ -682,7 +682,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     for (const ch of LIVE_CHANNELS) {
       try {
         const b = getProviderBinding(ch);
-        bindingByChannel.set(ch, { provider: b.provider, config: await b.getSendConfig(broadcast.teamId) });
+        bindingByChannel.set(ch, { provider: b.provider, config: await b.getSendConfig(broadcast.workspaceId) });
       } catch {
         // Not connected — recipients resolved onto this channel fail individually.
       }
@@ -697,7 +697,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     const binding = getProviderBinding(broadcast.channel);
     let config;
     try {
-      config = await binding.getSendConfig(broadcast.teamId);
+      config = await binding.getSendConfig(broadcast.workspaceId);
     } catch (err) {
       const msg =
         err instanceof ProviderNotConfiguredError
@@ -726,7 +726,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       );
       await publish({
         type: "broadcast.status_changed",
-        teamId: broadcast.teamId,
+        workspaceId: broadcast.workspaceId,
         broadcastId: broadcast.id,
         status: "paused",
         error: msg,
@@ -750,25 +750,43 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // (Messenger/Instagram) carry a plain `bodyText` and skip all of that.
   const template =
     broadcast.kind === "template"
-      ? await loadTemplate(broadcast.teamId, broadcast.templateId!)
+      ? await loadTemplate(broadcast.workspaceId, broadcast.templateId!)
       : null;
   const templateBody = template?.bodyText ?? "";
   const bindings = parseVariableBindings(template?.variableBindings ?? null);
+  // Meta's own answer for this template, stored at sync time. NOT inferred from
+  // the body text: a positional template containing `{{order_id}}` as literal
+  // copy would be misread, and the wrong wire shape fails every recipient.
+  const templateParameterFormat: "named" | "positional" =
+    template?.parameterFormat === "named" ? "named" : "positional";
+  // Placeholder names in FIRST-APPEARANCE order — the order the composer
+  // collected values in, and therefore the order we zip them back in.
+  const namedBodyVars =
+    templateParameterFormat === "named" ? templateNamedPlaceholders(templateBody) : [];
+  const headerText = (Array.isArray(template?.components) ? template.components : [])
+    .map((c) =>
+      c && typeof c === "object" ? (c as { type?: string; format?: string; text?: string }) : null,
+    )
+    .find((c) => c?.type === "HEADER" && c?.format === "TEXT")?.text;
+  const namedHeaderVar =
+    templateParameterFormat === "named" && headerText
+      ? templateNamedPlaceholders(headerText)[0]
+      : undefined;
+
+  // One object rather than three more positional params on an already-8-arg
+  // function — and it keeps the three facts that must agree together.
+  const wireFormat: TemplateWireFormat = {
+    parameterFormat: templateParameterFormat,
+    namedBodyVars,
+    ...(namedHeaderVar ? { namedHeaderVar } : {}),
+  };
+
   if (template) {
-    // The broadcast composer only binds POSITIONAL body variables. A template
-    // whose body is NAMED-format, or whose buttons carry a send-time parameter
-    // (dynamic URL suffix / coupon copy-code), cannot be filled from a broadcast
-    // — Meta would reject every single recipient. Fail the whole broadcast HERE,
-    // before the CAS claim and before one message is sent, rather than burning
-    // the audience on a guaranteed provider rejection.
-    const namedBodyVars = templateNamedPlaceholders(templateBody);
-    if (namedBodyVars.length > 0) {
-      await fail(
-        broadcast.id,
-        `Template uses named variables (${namedBodyVars.join(", ")}), which broadcasts can't fill. Use a template with numbered {{1}} placeholders.`,
-      );
-      return;
-    }
+    // A button carrying a send-time parameter (dynamic URL suffix / coupon
+    // copy-code) still can't be filled from a broadcast — there is no
+    // per-recipient button UI — so Meta would reject every recipient. Fail the
+    // whole broadcast HERE, before the CAS claim and before one message is sent,
+    // rather than burning the audience on a guaranteed rejection.
     const requiredButtons = requiredTemplateButtonParams(template.components);
     if (requiredButtons.length > 0) {
       await fail(
@@ -779,25 +797,17 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       );
       return;
     }
-    // A NAMED-format HEADER ({{customer_name}}) also can't be filled from a
-    // broadcast (the composer binds only a positional header) and needs a
-    // parameter_name on the wire — so it too would 132000 every recipient.
-    // Backstop the create-time guard here for the same reason as the body check.
-    const headerText = (Array.isArray(template.components) ? template.components : [])
-      .map((c) =>
-        c && typeof c === "object"
-          ? (c as { type?: string; format?: string; text?: string })
-          : null,
-      )
-      .find((c) => c?.type === "HEADER" && c?.format === "TEXT")?.text;
-    if (headerText && templateNamedPlaceholders(headerText).length > 0) {
-      await fail(
-        broadcast.id,
-        `Template's header uses a named variable, which broadcasts can't fill. Use a template with numbered {{1}} placeholders.`,
-      );
-      return;
-    }
-    const bodyVarCount = countTemplatePlaceholders(templateBody);
+    // Named templates ARE broadcastable. The composer collects one value per
+    // named placeholder in FIRST-APPEARANCE order, and the runner zips that
+    // array back against the placeholder names below — so `Broadcast.variables`
+    // keeps its `{ body: string[] }` shape and no data migration was needed.
+    //
+    // The count guard adapts to the format: a named body's expected count is
+    // the number of DISTINCT names, not the highest `{{n}}`.
+    const bodyVarCount =
+      templateParameterFormat === "named"
+        ? namedBodyVars.length
+        : countTemplatePlaceholders(templateBody);
     if (variables.body.length !== bodyVarCount) {
       await fail(
         broadcast.id,
@@ -826,7 +836,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
 
   await publish({
     type: "broadcast.status_changed",
-    teamId: broadcast.teamId,
+    workspaceId: broadcast.workspaceId,
     broadcastId: broadcast.id,
     status: "running",
   });
@@ -1029,7 +1039,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // One health read per run — cheap, and the level rarely changes mid-run.
   const throughputLevel =
     !isCustomerMode && broadcast.channel === "whatsapp"
-      ? (await getWhatsappHealth(broadcast.teamId).catch(() => null))?.throughputLevel ?? null
+      ? (await getWhatsappHealth(broadcast.workspaceId).catch(() => null))?.throughputLevel ?? null
       : null;
   const pacing = resolveSendPacing(broadcast.channel, throughputLevel);
   const lanes = Math.min(pacing.lanes, queue.length);
@@ -1113,7 +1123,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         // pin every Meta call slot while others starve. Slot is released in a
         // `finally` so a thrown recipient (shouldn't happen — processOneRecipient
         // swallows its errors — but defensive) doesn't leak the slot.
-        await acquireTeamRecipientSlot(broadcast.teamId);
+        await acquireTeamRecipientSlot(broadcast.workspaceId);
         try {
           await processOneRecipient(
             broadcast,
@@ -1122,11 +1132,12 @@ async function runBroadcast(broadcastId: string): Promise<void> {
             bindings,
             variables,
             templateBody,
+            wireFormat,
             pendingBumps,
             conversationCache,
           );
         } finally {
-          releaseTeamRecipientSlot(broadcast.teamId);
+          releaseTeamRecipientSlot(broadcast.workspaceId);
         }
         if (pacing.gapMs > 0) await sleep(pacing.gapMs);
       }
@@ -1196,7 +1207,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     if (paused.count > 0) {
       await publish({
         type: "broadcast.status_changed",
-        teamId: broadcast.teamId,
+        workspaceId: broadcast.workspaceId,
         broadcastId: broadcast.id,
         status: "paused",
       });
@@ -1226,7 +1237,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     if (finished.count > 0) {
       await publish({
         type: "broadcast.status_changed",
-        teamId: broadcast.teamId,
+        workspaceId: broadcast.workspaceId,
         broadcastId: broadcast.id,
         status: finalStatus,
       });
@@ -1256,7 +1267,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       if (paused.count > 0) {
         await publish({
           type: "broadcast.status_changed",
-          teamId: broadcast.teamId,
+          workspaceId: broadcast.workspaceId,
           broadcastId: broadcast.id,
           status: "paused",
           error: message,
@@ -1292,10 +1303,27 @@ async function runBroadcast(broadcastId: string): Promise<void> {
  * concurrency pool above calls this once per recipient and applies the
  * inter-send delay around the call.
  */
+/**
+ * The wire shape a template's parameters must take, resolved ONCE per broadcast
+ * from Meta's stored `parameter_format`.
+ *
+ * Grouped because the three facts must agree: a `named` format with an empty
+ * name list would send zero body parameters and fail every recipient, and a
+ * `positional` format carrying names would be silently ignored.
+ */
+interface TemplateWireFormat {
+  parameterFormat: "named" | "positional";
+  /** Placeholder names in first-appearance order — the order the composer
+   *  collected values in, and therefore the order the runner zips them back. */
+  namedBodyVars: string[];
+  /** The header's single placeholder name, when the header is named-format. */
+  namedHeaderVar?: string;
+}
+
 async function processOneRecipient(
   broadcast: {
     id: string;
-    teamId: string;
+    workspaceId: string;
     kind: "template" | "freeform";
     targetMode: "contact" | "customer";
     channel: Channel;
@@ -1333,6 +1361,7 @@ async function processOneRecipient(
   bindings: VariableBindings,
   variables: BroadcastVariables,
   templateBody: string,
+  wireFormat: TemplateWireFormat,
   pendingBumps: Set<Promise<unknown>>,
   // M5 — per-runBroadcast cache; avoids N+1 conversation.findFirst when
   // the same contact appears multiple times in a single broadcast.
@@ -1353,7 +1382,7 @@ async function processOneRecipient(
       recipient.id,
       `${sendChannel} is not connected.`,
       broadcast.id,
-      broadcast.teamId,
+      broadcast.workspaceId,
       pendingBumps,
     );
     return;
@@ -1389,7 +1418,7 @@ async function processOneRecipient(
       recipient.id,
       "provider does not support templates",
       broadcast.id,
-      broadcast.teamId,
+      broadcast.workspaceId,
       pendingBumps,
     );
     return;
@@ -1407,7 +1436,7 @@ async function processOneRecipient(
       recipient.id,
       "Contact was deleted after the broadcast was created.",
       broadcast.id,
-      broadcast.teamId,
+      broadcast.workspaceId,
       pendingBumps,
     );
     return;
@@ -1428,7 +1457,7 @@ async function processOneRecipient(
       recipient.id,
       "Contact opted out of marketing after the broadcast was created.",
       broadcast.id,
-      broadcast.teamId,
+      broadcast.workspaceId,
       pendingBumps,
       "marketing_opt_out",
     );
@@ -1463,7 +1492,7 @@ async function processOneRecipient(
         cached ?? null;
       if (!conversation) {
         const existing = await db.conversation.findFirst({
-          where: { teamId: broadcast.teamId, contactId: recipient.contactId },
+          where: { workspaceId: broadcast.workspaceId, contactId: recipient.contactId },
           orderBy: { lastMessageAt: "desc" },
           select: { id: true, status: true, unreadCount: true },
         });
@@ -1473,7 +1502,7 @@ async function processOneRecipient(
         try {
           conversation = await db.conversation.create({
             data: {
-              teamId: broadcast.teamId,
+              workspaceId: broadcast.workspaceId,
               contactId: recipient.contactId,
               // Stamp the broadcast's channel so conv.channel == msg.channel ==
               // the contact's identity channel (WhatsApp for templates, the
@@ -1486,10 +1515,10 @@ async function processOneRecipient(
           });
         } catch (err) {
           // Lost the race for this contact's single conversation (unique
-          // [teamId, contactId]) to a concurrent inbound — reuse the winner.
+          // [workspaceId, contactId]) to a concurrent inbound — reuse the winner.
           if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
             conversation = await db.conversation.findFirstOrThrow({
-              where: { teamId: broadcast.teamId, contactId: recipient.contactId },
+              where: { workspaceId: broadcast.workspaceId, contactId: recipient.contactId },
               orderBy: { lastMessageAt: "desc" },
               select: { id: true, status: true, unreadCount: true },
             });
@@ -1516,7 +1545,7 @@ async function processOneRecipient(
         recipient.id,
         errorDetail(err),
         broadcast.id,
-        broadcast.teamId,
+        broadcast.workspaceId,
         pendingBumps,
       );
       return;
@@ -1549,7 +1578,7 @@ async function processOneRecipient(
           ? "Contact has no phone number for this channel."
           : "Contact has no messaging id for this channel.",
         broadcast.id,
-        broadcast.teamId,
+        broadcast.workspaceId,
         pendingBumps,
       );
       return;
@@ -1579,7 +1608,7 @@ async function processOneRecipient(
           recipient.id,
           "Messaging window closed since the broadcast was created — the contact must message first to reopen it.",
           broadcast.id,
-          broadcast.teamId,
+          broadcast.workspaceId,
           pendingBumps,
           "window_closed",
         );
@@ -1606,7 +1635,7 @@ async function processOneRecipient(
         recipient.id,
         `Skipped — ${which} resolved to empty for this contact (a mapped field like email is missing and the template has no default value). WhatsApp rejects templates with an empty variable.`,
         broadcast.id,
-        broadcast.teamId,
+        broadcast.workspaceId,
         pendingBumps,
       );
       return;
@@ -1619,7 +1648,7 @@ async function processOneRecipient(
     // see claimBroadcastSendAttempt).
     const attemptClaim = await claimBroadcastSendAttempt(
       recipient.id,
-      broadcast.teamId,
+      broadcast.workspaceId,
       conversationId,
     );
     if (attemptClaim.kind === "abort") {
@@ -1627,7 +1656,7 @@ async function processOneRecipient(
         recipient.id,
         attemptClaim.reason,
         broadcast.id,
-        broadcast.teamId,
+        broadcast.workspaceId,
         pendingBumps,
       );
       return;
@@ -1676,11 +1705,44 @@ async function processOneRecipient(
           recipient.id,
           errorDetail(err),
           broadcast.id,
-          broadcast.teamId,
+          broadcast.workspaceId,
           pendingBumps,
         );
         return;
       }
+
+    // The template variables in Meta's wire shape, built ONCE and reused by
+      // both the initial send and the 429 retry below. Two inline copies is
+      // exactly how the monotonicity check in commit-outbound-send once drifted.
+      //
+      // NAMED templates zip the composer's first-appearance-ordered values back
+      // against the placeholder NAMES; positional ones pass the array straight
+      // through. Getting this wrong is not a cosmetic bug — the wrong parameter
+      // shape fails every recipient with Meta error 132000.
+        const templateVariables =
+        wireFormat.parameterFormat === "named"
+          ? {
+              body: [] as string[],
+              bodyNamed: wireFormat.namedBodyVars.map((name, i) => ({
+                name,
+                text: perRecipientVars.body[i] ?? "",
+              })),
+              ...(wireFormat.namedHeaderVar && perRecipientVars.header !== undefined
+                ? {
+                    headerNamed: {
+                      name: wireFormat.namedHeaderVar,
+                      text: perRecipientVars.header,
+                    },
+                  }
+                : {}),
+              ...(headerMedia ? { headerMedia } : {}),
+            }
+          : {
+              body: perRecipientVars.body,
+              ...(perRecipientVars.header ? { header: perRecipientVars.header } : {}),
+              ...(headerMedia ? { headerMedia } : {}),
+            };
+
       try {
         send = isFreeform
           ? await provider.sendText({ to: toPhone, body: broadcast.bodyText ?? "", useHumanAgentTag }, config)
@@ -1689,11 +1751,7 @@ async function processOneRecipient(
                 to: toPhone,
                 name: broadcast.templateName!,
                 language: broadcast.templateLanguage!,
-                variables: {
-                  body: perRecipientVars.body,
-                  ...(perRecipientVars.header ? { header: perRecipientVars.header } : {}),
-                  ...(headerMedia ? { headerMedia } : {}),
-                },
+                variables: templateVariables,
               },
               config,
             );
@@ -1735,13 +1793,7 @@ async function processOneRecipient(
                     to: toPhone,
                     name: broadcast.templateName!,
                     language: broadcast.templateLanguage!,
-                    variables: {
-                      body: perRecipientVars.body,
-                      ...(perRecipientVars.header
-                        ? { header: perRecipientVars.header }
-                        : {}),
-                      ...(headerMedia ? { headerMedia } : {}),
-                    },
+                    variables: templateVariables,
                   },
                   config,
                 );
@@ -1769,7 +1821,7 @@ async function processOneRecipient(
               recipient.id,
               errorDetail(retryErr),
               broadcast.id,
-              broadcast.teamId,
+              broadcast.workspaceId,
               pendingBumps,
               normalizeMetaSendError(retryErr)?.code ?? null,
             );
@@ -1790,7 +1842,7 @@ async function processOneRecipient(
             recipient.id,
             errorDetail(err),
             broadcast.id,
-            broadcast.teamId,
+            broadcast.workspaceId,
             pendingBumps,
             normalizeMetaSendError(err)?.code ?? null,
           );
@@ -1877,7 +1929,7 @@ async function processOneRecipient(
       // no separate {sent:1} bump (that lives only in the normal-lock `else`).
       // Swallow-and-log: a counter miss must never abort the (already-delivered)
       // recipient.
-      await reconcileCancelRaceCounters(broadcast.id, broadcast.teamId).catch((err) => {
+      await reconcileCancelRaceCounters(broadcast.id, broadcast.workspaceId).catch((err) => {
         console.error(
           `[broadcast ${broadcast.id}] cancel-race counter reconcile failed for recipient ${recipient.id}`,
           err,
@@ -1888,12 +1940,12 @@ async function processOneRecipient(
       // (not a trailing flagged bump) so it's structurally impossible to
       // double-count with the cancel-race reconcile above, even if a future
       // early-return is added to that branch.
-      bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { sent: 1 }, pendingBumps);
+      bumpCountersFireAndForget(broadcast.id, broadcast.workspaceId, { sent: 1 }, pendingBumps);
     }
 
     // I-3: the send DEFINITIVELY succeeded (recipient locked `sent`) — NOW
     // perform the deferred closed→pending reopen + publish. CAS-guarded on
-    // status=closed AND teamId-scoped so a concurrent inbound that already
+    // status=closed AND workspaceId-scoped so a concurrent inbound that already
     // reopened it doesn't double-publish; wrapped so a reopen wobble can't undo
     // the already-committed send. A FAILED send returns earlier and never
     // reaches here, so a deliberately-closed thread is only resurrected when a
@@ -1901,7 +1953,7 @@ async function processOneRecipient(
     if (needsReopen) {
       try {
         const reopened = await db.conversation.updateMany({
-          where: { id: conversationId, teamId: broadcast.teamId, status: "closed" },
+          where: { id: conversationId, workspaceId: broadcast.workspaceId, status: "closed" },
           data: { status: "pending" },
         });
         if (reopened.count > 0) {
@@ -1912,7 +1964,7 @@ async function processOneRecipient(
           });
           await publish({
             type: "broadcast.conversation_reopened",
-            teamId: broadcast.teamId,
+            workspaceId: broadcast.workspaceId,
             broadcastId: broadcast.id,
             conversationId,
           });
@@ -1949,7 +2001,7 @@ async function processOneRecipient(
     if (recipient.assignedUserId && broadcast.assignmentTrigger === "on_send") {
       try {
         const current = await db.conversation.findFirst({
-          where: { id: conversationId, teamId: broadcast.teamId },
+          where: { id: conversationId, workspaceId: broadcast.workspaceId },
           select: { assignedUserId: true },
         });
         const free = current != null && current.assignedUserId === null;
@@ -1957,7 +2009,7 @@ async function processOneRecipient(
           await assignConversation({
             db,
             publish,
-            teamId: broadcast.teamId,
+            workspaceId: broadcast.workspaceId,
             conversationId,
             targetUserId: recipient.assignedUserId,
             changedByUserId: null,
@@ -1991,7 +2043,7 @@ async function processOneRecipient(
       const preview = renderedBody.slice(0, 200);
 
       const created = await createOutboundMessageIdempotent({
-        teamId: broadcast.teamId,
+        workspaceId: broadcast.workspaceId,
         conversationId,
         externalId: send.externalId,
         senderUserId: broadcast.createdById,
@@ -2020,11 +2072,11 @@ async function processOneRecipient(
       // inbound from the same contact must not overwrite the inbound's
       // newer summary with the broadcast's outbound timestamp.
       await db.conversation.updateMany({
-        // minor#2: teamId-scope the CAS for defense-in-depth consistency with
+        // minor#2: workspaceId-scope the CAS for defense-in-depth consistency with
         // every other conversation write (conversationId is a globally-unique
         // cuid so this isn't exploitable today, but the codebase scopes every
-        // tenant-owned write by teamId).
-        where: { id: conversationId, teamId: broadcast.teamId, lastMessageAt: { lte: send.timestamp } },
+        // tenant-owned write by workspaceId).
+        where: { id: conversationId, workspaceId: broadcast.workspaceId, lastMessageAt: { lte: send.timestamp } },
         data: {
           lastMessageAt: send.timestamp,
           lastMessagePreview: preview,
@@ -2046,7 +2098,7 @@ async function processOneRecipient(
 
       const messagePayload: Message = {
         id: created.id,
-        teamId: broadcast.teamId,
+        workspaceId: broadcast.workspaceId,
         conversationId,
         externalId: send.externalId,
         senderUserId: broadcast.createdById,
@@ -2060,7 +2112,7 @@ async function processOneRecipient(
 
       await publish({
         type: "broadcast.recipient_message_sent",
-        teamId: broadcast.teamId,
+        workspaceId: broadcast.workspaceId,
         broadcastId: broadcast.id,
         conversationId,
         message: messagePayload,
@@ -2116,7 +2168,7 @@ async function failRecipientAndCount(
   recipientId: string,
   message: string,
   broadcastId: string,
-  teamId: string,
+  workspaceId: string,
   pendingBumps: Set<Promise<unknown>>,
   /** Normalized MetaErrorCode, when the caller has the underlying error. Drives
    *  the campaign report's failure buckets (retry / clean list / suppress). */
@@ -2124,7 +2176,7 @@ async function failRecipientAndCount(
 ): Promise<void> {
   const flipped = await markRecipientFailed(recipientId, message, errorCode);
   if (flipped) {
-    bumpCountersFireAndForget(broadcastId, teamId, { failed: 1 }, pendingBumps);
+    bumpCountersFireAndForget(broadcastId, workspaceId, { failed: 1 }, pendingBumps);
   }
 }
 
@@ -2163,7 +2215,7 @@ function isFatalTemplateError(err: unknown): boolean {
  * keeps resume double-send-safe.
  */
 async function maybeTripPermanentBreaker(
-  broadcast: { id: string; teamId: string; channel: Channel },
+  broadcast: { id: string; workspaceId: string; channel: Channel },
   err: unknown,
 ): Promise<void> {
   const credentialFatal = isPermanentCredentialError(err);
@@ -2179,7 +2231,7 @@ async function maybeTripPermanentBreaker(
   // mid-broadcast pauses the broadcast but leaves the reconnect CTA dark. (Not
   // for a template fault — that's not a connection problem.)
   if (normalizeMetaSendError(err)?.code === "auth_expired") {
-    void flagChannelNeedsReconnect(broadcast.teamId, broadcast.channel);
+    void flagChannelNeedsReconnect(broadcast.workspaceId, broadcast.channel);
   }
   const streak = trackPermanentHit(broadcast.id);
   if (streak < PERMANENT_ERROR_PAUSE_THRESHOLD) return;
@@ -2211,7 +2263,7 @@ async function maybeTripPermanentBreaker(
   );
   await publish({
     type: "broadcast.status_changed",
-    teamId: broadcast.teamId,
+    workspaceId: broadcast.workspaceId,
     broadcastId: broadcast.id,
     status: "paused",
     error: reason,
@@ -2238,7 +2290,7 @@ function isProviderNotConfigured(err: unknown): boolean {
  */
 async function pauseForSustainedRateLimit(broadcast: {
   id: string;
-  teamId: string;
+  workspaceId: string;
 }): Promise<void> {
   if (FATAL_PAUSE.has(broadcast.id)) return; // another lane already parked it
   // Claim in-memory before the DB write so two lanes hitting the wall in the
@@ -2266,7 +2318,7 @@ async function pauseForSustainedRateLimit(broadcast: {
   );
   await publish({
     type: "broadcast.status_changed",
-    teamId: broadcast.teamId,
+    workspaceId: broadcast.workspaceId,
     broadcastId: broadcast.id,
     status: "paused",
     error: reason,
@@ -2296,12 +2348,12 @@ function broadcastAttemptJobId(recipientId: string): string {
 
 async function claimBroadcastSendAttempt(
   recipientId: string,
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
 ): Promise<BroadcastAttemptClaim> {
   const jobId = broadcastAttemptJobId(recipientId);
   try {
-    await db.outboundSendAttempt.create({ data: { jobId, teamId, conversationId } });
+    await db.outboundSendAttempt.create({ data: { jobId, workspaceId, conversationId } });
     return { kind: "proceed" };
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
@@ -2367,14 +2419,14 @@ const PROGRESS_EMIT_INTERVAL_MS = 500;
 interface ProgressThrottle {
   lastEmitAt: number;
   pendingTimer: NodeJS.Timeout | null;
-  latest: { sentCount: number; failedCount: number; totalCount: number; teamId: string };
+  latest: { sentCount: number; failedCount: number; totalCount: number; workspaceId: string };
 }
 const progressThrottles = new Map<string, ProgressThrottle>();
 
 function emitProgress(broadcastId: string, state: ProgressThrottle["latest"]): void {
   void publish({
     type: "broadcast.progress",
-    teamId: state.teamId,
+    workspaceId: state.workspaceId,
     broadcastId,
     sentCount: state.sentCount,
     failedCount: state.failedCount,
@@ -2424,7 +2476,7 @@ function scheduleProgress(
 
 async function bumpCounters(
   broadcastId: string,
-  teamId: string,
+  workspaceId: string,
   delta: { sent?: number; failed?: number },
 ): Promise<void> {
   // A transient P2024/P1017/P2034 blip here would otherwise permanently lose the
@@ -2444,7 +2496,7 @@ async function bumpCounters(
   // Throttled emit (see scheduleProgress). DB write is authoritative and
   // unthrottled; the wire-level emit is coalesced.
   scheduleProgress(broadcastId, {
-    teamId,
+    workspaceId,
     sentCount: updated.sentCount,
     failedCount: updated.failedCount,
     totalCount: updated.totalCount,
@@ -2462,7 +2514,7 @@ async function bumpCounters(
  */
 async function reconcileCancelRaceCounters(
   broadcastId: string,
-  teamId: string,
+  workspaceId: string,
 ): Promise<void> {
   const rows = await withTransientRetry(() =>
     db.$queryRaw<
@@ -2478,7 +2530,7 @@ async function reconcileCancelRaceCounters(
   const updated = rows[0];
   if (!updated) return;
   scheduleProgress(broadcastId, {
-    teamId,
+    workspaceId,
     sentCount: Number(updated.sentCount),
     failedCount: Number(updated.failedCount),
     totalCount: Number(updated.totalCount),
@@ -2499,11 +2551,11 @@ async function reconcileCancelRaceCounters(
  */
 function bumpCountersFireAndForget(
   broadcastId: string,
-  teamId: string,
+  workspaceId: string,
   delta: { sent?: number; failed?: number },
   pendingBumps: Set<Promise<unknown>>,
 ): void {
-  const p = bumpCounters(broadcastId, teamId, delta).catch((err) => {
+  const p = bumpCounters(broadcastId, workspaceId, delta).catch((err) => {
     console.error(
       `[broadcast ${broadcastId}] counter bump failed (delta=${JSON.stringify(delta)})`,
       err,
@@ -2530,11 +2582,11 @@ async function fail(broadcastId: string, message: string): Promise<void> {
       lastError: message.slice(0, 1000),
       completedAt: new Date(),
     },
-    select: { teamId: true },
+    select: { workspaceId: true },
   });
   await publish({
     type: "broadcast.status_changed",
-    teamId: row.teamId,
+    workspaceId: row.workspaceId,
     broadcastId,
     status: "failed",
     error: message,
@@ -2599,7 +2651,7 @@ async function fail(broadcastId: string, message: string): Promise<void> {
  *   everywhere would strand such a broadcast PERMANENTLY, with its remaining
  *   recipients queued forever and no operator action able to release them.
  *   Boot is therefore the backstop that always resumes everything.
- * @param teamId Restrict to one tenant. Unset in both production callers (boot
+ * @param workspaceId Restrict to one tenant. Unset in both production callers (boot
  *   recovery and the sweep are platform-wide); used to scope a recovery to a
  *   single org when operating on one, and by tests that must not resume another
  *   fixture's rows.
@@ -2611,20 +2663,20 @@ async function fail(broadcastId: string, message: string): Promise<void> {
 export async function resumePausedBroadcasts({
   pausedBefore,
   limit,
-  teamId,
+  workspaceId,
   skipTemplatePauses = false,
   label = "broadcast-reconciler",
 }: {
   pausedBefore?: Date;
   limit?: number;
-  teamId?: string;
+  workspaceId?: string;
   skipTemplatePauses?: boolean;
   label?: string;
 } = {}): Promise<number> {
   const pausedRows = await db.broadcast.findMany({
     where: {
       status: "paused",
-      ...(teamId ? { teamId } : {}),
+      ...(workspaceId ? { workspaceId } : {}),
       // NEVER auto-resume a template-fatal pause. The template is disabled or
       // paused at Meta; only an operator can fix that in Meta's console, and
       // each retry burns another PERMANENT_ERROR_PAUSE_THRESHOLD recipients into
@@ -2648,7 +2700,7 @@ export async function resumePausedBroadcasts({
           : []),
       ],
     },
-    select: { id: true, teamId: true },
+    select: { id: true, workspaceId: true },
     ...(limit !== undefined ? { take: limit } : {}),
   });
 
@@ -2667,7 +2719,7 @@ export async function resumePausedBroadcasts({
       });
       await publish({
         type: "broadcast.status_changed",
-        teamId: row.teamId,
+        workspaceId: row.workspaceId,
         broadcastId: row.id,
         status: "completed",
       });
@@ -2718,7 +2770,7 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
   // them up uniformly with broadcasts that were paused by graceful shutdown.
   const runningOrphans = await db.broadcast.findMany({
     where: { status: "running" },
-    select: { id: true, teamId: true },
+    select: { id: true, workspaceId: true },
   });
   if (runningOrphans.length > 0) {
     console.warn(
@@ -2914,7 +2966,7 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
     const template =
       broadcast.kind === "freeform"
         ? null
-        : await loadTemplate(broadcast.teamId, broadcast.templateId!);
+        : await loadTemplate(broadcast.workspaceId, broadcast.templateId!);
     const ctx: RenderCtx = {
       broadcast,
       variables: parseVariables(broadcast.variables),
@@ -2988,7 +3040,7 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
                 )
               : broadcast.bodyText ?? "";
           await createOutboundMessageIdempotent({
-            teamId: broadcast.teamId,
+            workspaceId: broadcast.workspaceId,
             conversationId,
             externalId: attempt.externalId,
             senderUserId: broadcast.createdById,
@@ -3021,7 +3073,7 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
       //   queued → sent : it was NEVER counted, so ONLY increment sent (no failed
       //                   decrement). Clamp sent to totalCount defensively.
       if (row.sourceStatus === "failed") {
-        await reconcileCancelRaceCounters(broadcast.id, broadcast.teamId).catch((err) => {
+        await reconcileCancelRaceCounters(broadcast.id, broadcast.workspaceId).catch((err) => {
           console.error(
             `[broadcast-reconciler] cancel-race counter reconcile failed for recipient ${recipient.id}`,
             err,
@@ -3040,7 +3092,7 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
             const u = rows[0];
             if (u)
               scheduleProgress(broadcast.id, {
-                teamId: broadcast.teamId,
+                workspaceId: broadcast.workspaceId,
                 sentCount: Number(u.sentCount),
                 failedCount: Number(u.failedCount),
                 totalCount: Number(u.totalCount),
@@ -3072,10 +3124,10 @@ async function reconcileCanceledMarkerRecipients(): Promise<void> {
  * the boot reconciler to mark completed — not this credential-recovery path.
  */
 export async function resumePausedBroadcastsForTeam(
-  teamId: string,
+  workspaceId: string,
 ): Promise<void> {
   const paused = await db.broadcast.findMany({
-    where: { teamId, status: "paused" },
+    where: { workspaceId, status: "paused" },
     select: { id: true },
   });
   for (const row of paused) {
@@ -3130,7 +3182,7 @@ export async function pruneBroadcastInMemoryStateForTerminalRows(): Promise<void
       progressThrottles.delete(row.id);
       cleared++;
     }
-    // broadcastTeamSlots + teamRecipientSlots are keyed by teamId, and
+    // broadcastTeamSlots + teamRecipientSlots are keyed by workspaceId, and
     // runningBroadcastCount is a bare process counter — none is pruned
     // per-row here. A truly stuck entry would
     // only happen if a runner crashed BETWEEN acquire and the release in
@@ -3147,18 +3199,27 @@ export async function pruneBroadcastInMemoryStateForTerminalRows(): Promise<void
 }
 
 async function loadTemplate(
-  teamId: string,
+  workspaceId: string,
   templateId: string,
 ): Promise<{
   bodyText: string;
   variableBindings: Prisma.JsonValue;
   components: Prisma.JsonValue;
+  parameterFormat: string;
 }> {
   const row = await db.messageTemplate.findFirst({
-    where: { id: templateId, teamId },
-    select: { bodyText: true, variableBindings: true, components: true },
+    where: { id: templateId, workspaceId },
+    select: {
+      bodyText: true,
+      variableBindings: true,
+      components: true,
+      parameterFormat: true,
+    },
   });
   return {
+    // Falls back to positional for a template row that vanished — the same
+    // default the column carries, so a missing row can't flip the wire shape.
+    parameterFormat: row?.parameterFormat ?? "positional",
     bodyText: row?.bodyText ?? "",
     variableBindings: row?.variableBindings ?? {},
     components: row?.components ?? [],

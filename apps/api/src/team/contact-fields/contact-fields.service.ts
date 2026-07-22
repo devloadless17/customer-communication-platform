@@ -60,29 +60,29 @@ export class ContactFieldsService {
     private readonly bus: EventBus,
   ) {}
 
-  async list(teamId: string): Promise<ContactFieldDefinition[]> {
+  async list(workspaceId: string): Promise<ContactFieldDefinition[]> {
     const rows = await this.db.contactFieldDefinition.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: [{ order: "asc" }, { createdAt: "asc" }],
     });
     return rows.map(toDto);
   }
 
-  async getBuiltins(teamId: string): Promise<Required<ContactPanelBuiltins>> {
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
+  async getBuiltins(workspaceId: string): Promise<Required<ContactPanelBuiltins>> {
+    const team = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { contactPanelBuiltins: true },
     });
     return resolveBuiltins(team?.contactPanelBuiltins ?? null);
   }
 
   async updateBuiltins(
-    teamId: string,
+    workspaceId: string,
     canManage: boolean,
     patch: ContactPanelBuiltins,
   ): Promise<Required<ContactPanelBuiltins>> {
     requireManage(canManage);
-    const current = await this.getBuiltins(teamId);
+    const current = await this.getBuiltins(workspaceId);
     const next: Required<ContactPanelBuiltins> = {
       firstName: patch.firstName ?? current.firstName,
       lastName: patch.lastName ?? current.lastName,
@@ -92,20 +92,20 @@ export class ContactFieldsService {
       country: patch.country ?? current.country,
       firstContacted: patch.firstContacted ?? current.firstContacted,
     };
-    await this.db.team.update({
-      where: { id: teamId },
+    await this.db.workspace.update({
+      where: { id: workspaceId },
       data: { contactPanelBuiltins: next },
     });
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "contact-fields",
     });
     return next;
   }
 
   async create(
-    teamId: string,
+    workspaceId: string,
     canManage: boolean,
     input: CreateContactFieldInput,
   ): Promise<ContactFieldDefinition> {
@@ -114,7 +114,7 @@ export class ContactFieldsService {
     // Cap definitions so a runaway client can't bloat the panel + the JSONB
     // column on every contact (every key gets rendered + serialized).
     const existing = await this.db.contactFieldDefinition.findMany({
-      where: { teamId },
+      where: { workspaceId },
       select: { key: true, order: true },
       orderBy: { order: "desc" },
       take: MAX_FIELDS_PER_TEAM,
@@ -140,15 +140,15 @@ export class ContactFieldsService {
       });
     }
 
-    // Reject a duplicate LABEL (case-insensitive). There's a [teamId, key]
+    // Reject a duplicate LABEL (case-insensitive). There's a [workspaceId, key]
     // unique but NONE on label, so two fields named "Notes" both write to
     // row["Notes"] on CSV export (last-write-wins → the first field's data
     // silently vanishes + a duplicate column) and collapse to one key on
     // import (the other is unimportable). Silent CRM data loss; guard it here.
-    await this.assertLabelAvailable(teamId, input.label, null);
+    await this.assertLabelAvailable(workspaceId, input.label, null);
 
     // Disambiguate against existing keys — two labels that collapse to the
-    // same slug would otherwise hit the [teamId, key] unique index.
+    // same slug would otherwise hit the [workspaceId, key] unique index.
     const usedKeys = new Set(existing.map((e) => e.key));
     let key = baseKey;
     let suffix = 2;
@@ -160,11 +160,11 @@ export class ContactFieldsService {
 
     try {
       const created = await this.db.contactFieldDefinition.create({
-        data: { teamId, key, label: input.label, order: nextOrder },
+        data: { workspaceId, key, label: input.label, order: nextOrder },
       });
       await this.bus.publish({
         type: "team.catalog_changed",
-        teamId,
+        workspaceId,
         scope: "contact-fields",
       });
       return toDto(created);
@@ -175,7 +175,7 @@ export class ContactFieldsService {
   }
 
   async update(
-    teamId: string,
+    workspaceId: string,
     canManage: boolean,
     id: string,
     input: UpdateContactFieldInput,
@@ -183,7 +183,7 @@ export class ContactFieldsService {
     requireManage(canManage);
 
     const existing = await this.db.contactFieldDefinition.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true },
     });
     if (!existing) throw new NotFoundException({ error: "not found" });
@@ -201,16 +201,16 @@ export class ContactFieldsService {
     // Block a rename that collides with another field's label (case-insensitive,
     // excluding this row) — same CSV-corruption guard as create().
     if (typeof input.label === "string") {
-      await this.assertLabelAvailable(teamId, input.label, id);
+      await this.assertLabelAvailable(workspaceId, input.label, id);
     }
 
     // Team-scoped mutation (defense-in-depth): even though the findFirst above
-    // already proved ownership, the WRITE itself carries the teamId predicate
+    // already proved ownership, the WRITE itself carries the workspaceId predicate
     // so a bare-id update can never touch another tenant's row. `input` no
     // longer carries `order` (dropped from the schema) — order changes only via
     // the transactional /reorder endpoint.
     const result = await this.db.contactFieldDefinition.updateMany({
-      where: { id, teamId },
+      where: { id, workspaceId },
       data: input,
     });
     if (result.count === 0) throw new NotFoundException({ error: "not found" });
@@ -220,7 +220,7 @@ export class ContactFieldsService {
     });
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "contact-fields",
     });
     return toDto(updated);
@@ -233,7 +233,7 @@ export class ContactFieldsService {
    * the per-row update transaction stays tiny.
    */
   async reorder(
-    teamId: string,
+    workspaceId: string,
     canManage: boolean,
     input: ReorderContactFieldsInput,
   ): Promise<void> {
@@ -245,7 +245,7 @@ export class ContactFieldsService {
     // request rejects. Without this a malicious client could rewrite
     // orders on another tenant's fields.
     const owned = await this.db.contactFieldDefinition.findMany({
-      where: { teamId, id: { in: ids } },
+      where: { workspaceId, id: { in: ids } },
       select: { id: true },
     });
     if (owned.length !== ids.length) {
@@ -259,16 +259,16 @@ export class ContactFieldsService {
     );
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "contact-fields",
     });
   }
 
-  async remove(teamId: string, canManage: boolean, id: string): Promise<void> {
+  async remove(workspaceId: string, canManage: boolean, id: string): Promise<void> {
     requireManage(canManage);
 
     const def = await this.db.contactFieldDefinition.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
     });
     if (!def) throw new NotFoundException({ error: "not found" });
 
@@ -278,25 +278,25 @@ export class ContactFieldsService {
     //
     // Postgres `-` operator is the right tool here; Prisma doesn't expose
     // it typed so we drop to $executeRaw. The `?` (key existence) on the
-    // WHERE keeps the indexable teamId predicate first for the bulk path.
+    // WHERE keeps the indexable workspaceId predicate first for the bulk path.
     // Team-scoped delete (defense-in-depth): the findFirst above proved
-    // ownership, but the DELETE itself carries the teamId predicate so a bare-id
+    // ownership, but the DELETE itself carries the workspaceId predicate so a bare-id
     // delete can never remove another tenant's definition. deleteMany returns a
     // count we assert is non-zero.
     const [, deleted] = await this.db.$transaction([
       this.db.$executeRaw`
         UPDATE "Contact"
         SET "customFields" = "customFields" - ${def.key}
-        WHERE "teamId" = ${teamId}
+        WHERE "workspaceId" = ${workspaceId}
           AND "customFields" ? ${def.key}
       `,
-      this.db.contactFieldDefinition.deleteMany({ where: { id, teamId } }),
+      this.db.contactFieldDefinition.deleteMany({ where: { id, workspaceId } }),
     ]);
     if (deleted.count === 0) throw new NotFoundException({ error: "not found" });
 
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "contact-fields",
     });
   }
@@ -309,14 +309,14 @@ export class ContactFieldsService {
    * column headers, which silently drops one field's data on export/import.
    */
   private async assertLabelAvailable(
-    teamId: string,
+    workspaceId: string,
     label: string,
     excludeId: string | null,
   ): Promise<void> {
     const slug = slugifyKey(label);
     if (!slug) return; // empty/invalid labels are rejected elsewhere by the key check
     const siblings = await this.db.contactFieldDefinition.findMany({
-      where: { teamId, ...(excludeId ? { id: { not: excludeId } } : {}) },
+      where: { workspaceId, ...(excludeId ? { id: { not: excludeId } } : {}) },
       select: { label: true },
     });
     if (siblings.some((s) => slugifyKey(s.label) === slug)) {
@@ -330,7 +330,7 @@ export class ContactFieldsService {
 
 function toDto(r: {
   id: string;
-  teamId: string;
+  workspaceId: string;
   key: string;
   label: string;
   order: number;
@@ -338,7 +338,7 @@ function toDto(r: {
 }): ContactFieldDefinition {
   return {
     id: r.id,
-    teamId: r.teamId,
+    workspaceId: r.workspaceId,
     key: r.key,
     label: r.label,
     order: r.order,

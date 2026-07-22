@@ -6,7 +6,7 @@ import { getMetaConnection, resolveWebhookSecrets } from "@/lib/providers/meta-c
 
 /**
  * Per-team Instagram DM config. Same credential model as WhatsApp / Messenger
- * (a `ChannelConnection` row keyed (teamId, "instagram"); `config` non-secret,
+ * (a `ChannelConnection` row keyed (workspaceId, "instagram"); `config` non-secret,
  * `secrets` envelope-encrypted). Identity is the Instagram business account id
  * (`igId`) + an Instagram access token; no phone / no Page / no WABA. The Meta
  * app secret verifies the inbound webhook HMAC. "cache ciphertext, decrypt on
@@ -74,14 +74,25 @@ const sendCache = new TtlCache<CachedSend>();
 const webhookCache = new TtlCache<WebhookCipher | null>();
 
 /** Drop cached Instagram credentials for a team. Call after the settings save. */
-export function invalidateInstagramConfig(teamId: string): void {
-  sendCache.delete(teamId);
-  webhookCache.delete(teamId);
+function sendKey(workspaceId: string, accountId?: string | null): string {
+  return `${workspaceId}::${accountId ?? "default"}`;
 }
 
-async function loadSendCipher(teamId: string): Promise<CachedSend> {
-  const conn = await db.channelConnection.findUnique({
-    where: { teamId_channel: { teamId, channel: "instagram" } },
+export function invalidateInstagramConfig(workspaceId: string): void {
+  sendCache.deletePrefix(`${workspaceId}::`);
+  webhookCache.delete(workspaceId);
+}
+
+async function loadSendCipher(
+  workspaceId: string,
+  accountId?: string | null,
+): Promise<CachedSend> {
+  // SECURITY: workspaceId stays in the WHERE even with an explicit account, so a
+  // mis-stamped/foreign id can never load another tenant's credentials.
+  const conn = await db.channelConnection.findFirst({
+    where: accountId
+      ? { id: accountId, workspaceId, channel: "instagram" }
+      : { workspaceId, channel: "instagram", isDefault: true },
     select: { config: true, secrets: true, isActive: true },
   });
   if (!conn || !conn.isActive) return { kind: "err", missing: ["not-connected"] };
@@ -105,17 +116,17 @@ async function loadSendCipher(teamId: string): Promise<CachedSend> {
   };
 }
 
-function materialize(teamId: string, cipher: SendCipher): InstagramSendConfig {
+function materialize(workspaceId: string, cipher: SendCipher): InstagramSendConfig {
   let igAccessToken: string;
   try {
     igAccessToken = decryptSecret(cipher.igAccessTokenCipher);
   } catch (err) {
     console.error(
-      `[instagram-config] failed to decrypt send secrets for team=${teamId}: ${
+      `[instagram-config] failed to decrypt send secrets for team=${workspaceId}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
-    throw new ProviderNotConfiguredError(teamId, ["igAccessToken (decrypt failed)"], "instagram");
+    throw new ProviderNotConfiguredError(workspaceId, ["igAccessToken (decrypt failed)"], "instagram");
   }
   // App secret for appsecret_proof — best-effort; a decrypt failure must not
   // break sending (the proof is additive).
@@ -137,31 +148,35 @@ function materialize(teamId: string, cipher: SendCipher): InstagramSendConfig {
 }
 
 /** Send-side Instagram config. Throws ProviderNotConfigured when unconnected. */
-export async function getInstagramSendConfig(teamId: string): Promise<InstagramSendConfig> {
-  const hit = sendCache.get(teamId);
+export async function getInstagramSendConfig(
+  workspaceId: string,
+  accountId?: string | null,
+): Promise<InstagramSendConfig> {
+  const key = sendKey(workspaceId, accountId);
+  const hit = sendCache.get(key);
   if (hit) {
     if (hit.kind === "err") {
-      throw new ProviderNotConfiguredError(teamId, [...hit.missing], "instagram");
+      throw new ProviderNotConfiguredError(workspaceId, [...hit.missing], "instagram");
     }
-    return materialize(teamId, hit.cipher);
+    return materialize(workspaceId, hit.cipher);
   }
-  const entry = await loadSendCipher(teamId);
-  sendCache.set(teamId, entry);
-  if (entry.kind === "err") throw new ProviderNotConfiguredError(teamId, [...entry.missing], "instagram");
-  return materialize(teamId, entry.cipher);
+  const entry = await loadSendCipher(workspaceId, accountId);
+  sendCache.set(key, entry);
+  if (entry.kind === "err") throw new ProviderNotConfiguredError(workspaceId, [...entry.missing], "instagram");
+  return materialize(workspaceId, entry.cipher);
 }
 
 /** Webhook-side Instagram config (GET verify + POST HMAC). Null when unconfigured. */
 export async function getInstagramWebhookConfig(
-  teamId: string,
+  workspaceId: string,
 ): Promise<InstagramWebhookConfig | null> {
-  const hit = webhookCache.get(teamId);
+  const hit = webhookCache.get(workspaceId);
   let cipher: WebhookCipher | null;
   if (hit !== undefined) {
     cipher = hit;
   } else {
-    const conn = await db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId, channel: "instagram" } },
+    const conn = await db.channelConnection.findFirst({
+      where: { workspaceId, channel: "instagram", isDefault: true },
       select: { config: true, secrets: true, isActive: true },
     });
     const config = (conn?.config ?? {}) as InstagramChannelConfig;
@@ -174,14 +189,14 @@ export async function getInstagramWebhookConfig(
             igId: config.igId ?? null,
           }
         : null;
-    webhookCache.set(teamId, cipher);
+    webhookCache.set(workspaceId, cipher);
   }
   if (!cipher) return null;
   try {
     // Prefer the shared Meta App secret (single source — rotation there applies
     // to every channel at once); fall back to the per-channel cipher for legacy
     // / pre-Meta-App rows. See getMetaWebhookConfig for the rationale.
-    const meta = await getMetaConnection(teamId);
+    const meta = await getMetaConnection(workspaceId);
     return {
       ...resolveWebhookSecrets(meta?.appSecret, decryptSecret(cipher.appSecretCipher)),
       verifyToken: cipher.verifyToken,
@@ -189,7 +204,7 @@ export async function getInstagramWebhookConfig(
     };
   } catch (err) {
     console.error(
-      `[instagram-config] failed to decrypt webhook secrets for team=${teamId}: ${
+      `[instagram-config] failed to decrypt webhook secrets for team=${workspaceId}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );

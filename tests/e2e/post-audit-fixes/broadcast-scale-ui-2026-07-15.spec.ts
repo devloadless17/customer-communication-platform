@@ -16,19 +16,19 @@ import { db, appAdmin } from "../_helpers/db";
 test.describe.configure({ mode: "serial" });
 
 const PREFIX = "e2e_scale_";
-let teamId: string;
+let workspaceId: string;
 let broadcastId: string;
 
 test.beforeAll(async () => {
   const su = await appAdmin();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
   // A broadcast frozen in `materializing` — as if its large audience is still
   // being inserted by the materialize worker. Provisional totalCount, no
   // recipients yet (the worker would add them). No wipe: this is the only row
   // we touch and we purge it by id below.
   const b = await db().broadcast.create({
     data: {
-      teamId,
+      workspaceId,
       status: "materializing",
       kind: "template",
       targetMode: "contact",

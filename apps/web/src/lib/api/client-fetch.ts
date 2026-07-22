@@ -37,6 +37,30 @@ export async function apiFetch(
   const url = path.startsWith("http") ? path : `${BROWSER_API_BASE}${path}`;
   return fetchWithSessionGuard(url, {
     ...init,
+    headers: withJsonContentType(init),
     credentials: init.credentials ?? "include",
   });
+}
+
+/**
+ * Default `content-type: application/json` when the caller sends a string body
+ * and hasn't set one.
+ *
+ * This is defaulted HERE, not left to each call site, because forgetting it
+ * fails in the most confusing way possible: Express's `express.json()` skips a
+ * body with no JSON content-type, so the route receives `{}`, the Zod pipe
+ * rejects it, and the caller gets a 400 for a request that looks perfectly
+ * correct in the network tab. The workspace switcher shipped with exactly that
+ * bug — clicking a workspace did nothing at all.
+ *
+ * Only string bodies get it. FormData (file uploads) MUST keep the browser's
+ * generated `multipart/form-data; boundary=…`; setting a content-type there
+ * would strip the boundary and corrupt every upload.
+ */
+function withJsonContentType(init: RequestInit): HeadersInit | undefined {
+  const body = init.body;
+  if (typeof body !== "string") return init.headers;
+  const headers = new Headers(init.headers);
+  if (!headers.has("content-type")) headers.set("content-type", "application/json");
+  return headers;
 }

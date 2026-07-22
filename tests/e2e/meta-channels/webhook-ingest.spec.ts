@@ -43,8 +43,8 @@ test.afterAll(async () => {
 async function msgFor(externalId: string) {
   return db().message.findUnique({
     where: {
-      teamId_channel_externalId: {
-        teamId: META_TEST_TEAM_ID,
+      workspaceId_channel_externalId: {
+        workspaceId: META_TEST_TEAM_ID,
         channel: externalId.startsWith("ig.") ? "instagram" : "messenger",
         externalId,
       },
@@ -63,7 +63,7 @@ test("Messenger inbound text creates a PSID-scoped contact + conversation + mess
   expect(res.status, res.text).toBe(200);
 
   const contact = await db().contact.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: psid },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: psid },
     select: { id: true, phoneNumber: true, externalContactId: true },
   });
   expect(contact, "PSID contact created").not.toBeNull();
@@ -72,7 +72,7 @@ test("Messenger inbound text creates a PSID-scoped contact + conversation + mess
   expect(contact?.externalContactId).toBe(psid);
 
   const convo = await db().conversation.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, contactId: contact!.id },
+    where: { workspaceId: META_TEST_TEAM_ID, contactId: contact!.id },
     select: { channel: true },
   });
   expect(convo?.channel).toBe("messenger");
@@ -93,7 +93,7 @@ test("Instagram inbound text creates an IGSID-scoped contact + message", async (
   expect(res.status, res.text).toBe(200);
 
   const contact = await db().contact.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: "instagram", externalContactId: igsid },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "instagram", externalContactId: igsid },
     select: { id: true },
   });
   expect(contact, "IGSID contact created").not.toBeNull();
@@ -117,7 +117,7 @@ test("same digits across channels resolve to DISTINCT contacts (no collision)", 
   );
 
   const rows = await db().contact.findMany({
-    where: { teamId: META_TEST_TEAM_ID, externalContactId: shared },
+    where: { workspaceId: META_TEST_TEAM_ID, externalContactId: shared },
     select: { identityChannel: true },
   });
   const channels = rows.map((r) => r.identityChannel).sort();
@@ -132,7 +132,7 @@ test("redelivery of the same mid dedupes to one message", async () => {
   await postMetaWebhook(META_TEST_TEAM_ID, payload); // Meta at-least-once redelivery
 
   const count = await db().message.count({
-    where: { teamId: META_TEST_TEAM_ID, channel: "messenger", externalId: mid },
+    where: { workspaceId: META_TEST_TEAM_ID, channel: "messenger", externalId: mid },
   });
   expect(count).toBe(1);
 });
@@ -146,17 +146,17 @@ test("quoted reply links the new inbound message to the original", async () => {
       socialInbound({ object: "page", accountId: MSGR_PAGE_ID, senderId: psid, mid: "m.reply.seed", text: "seed" }),
     );
     const contact = await db().contact.findFirstOrThrow({
-      where: { teamId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: psid },
+      where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: psid },
       select: { id: true },
     });
     return db().conversation.findFirstOrThrow({
-      where: { teamId: META_TEST_TEAM_ID, contactId: contact.id },
+      where: { workspaceId: META_TEST_TEAM_ID, contactId: contact.id },
       select: { id: true },
     });
   })());
   const original = await db().message.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       conversationId: convoId,
       channel: "messenger",
       externalId: "m.reply.original",
@@ -193,17 +193,17 @@ test("read receipt marks the OUTBOUND message read but never an inbound one", as
     socialInbound({ object: "instagram", accountId: IG_ID, senderId: igsid, mid: "ig.rd.seed", text: "seed" }),
   );
   const contact = await db().contact.findFirstOrThrow({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: "instagram", externalContactId: igsid },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "instagram", externalContactId: igsid },
     select: { id: true },
   });
   const convo = await db().conversation.findFirstOrThrow({
-    where: { teamId: META_TEST_TEAM_ID, contactId: contact.id },
+    where: { workspaceId: META_TEST_TEAM_ID, contactId: contact.id },
     select: { id: true },
   });
   await db().message.createMany({
     data: [
       {
-        teamId: META_TEST_TEAM_ID,
+        workspaceId: META_TEST_TEAM_ID,
         conversationId: convo.id,
         channel: "instagram",
         externalId: "ig.rd.out",
@@ -213,7 +213,7 @@ test("read receipt marks the OUTBOUND message read but never an inbound one", as
         timestamp: new Date(),
       },
       {
-        teamId: META_TEST_TEAM_ID,
+        workspaceId: META_TEST_TEAM_ID,
         conversationId: convo.id,
         channel: "instagram",
         externalId: "ig.rd.in",
@@ -252,14 +252,14 @@ test("Messenger inbound call creates a ringing Call + PSID contact, then complet
   expect(connect.status, connect.text).toBe(200);
 
   const contact = await db().contact.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: psid },
+    where: { workspaceId: META_TEST_TEAM_ID, identityChannel: "messenger", externalContactId: psid },
     select: { id: true, phoneNumber: true },
   });
   expect(contact, "PSID caller contact created").not.toBeNull();
   expect(contact?.phoneNumber).toBeNull(); // never digit-stripped into a phone
 
   const call = await db().call.findUnique({
-    where: { teamId_channel_externalCallId: { teamId: META_TEST_TEAM_ID, channel: "messenger", externalCallId: callId } },
+    where: { workspaceId_channel_externalCallId: { workspaceId: META_TEST_TEAM_ID, channel: "messenger", externalCallId: callId } },
     select: { direction: true, status: true, channel: true },
   });
   expect(call?.channel).toBe("messenger");
@@ -273,7 +273,7 @@ test("Messenger inbound call creates a ringing Call + PSID contact, then complet
   );
   expect(term.status, term.text).toBe(200);
   const ended = await db().call.findUnique({
-    where: { teamId_channel_externalCallId: { teamId: META_TEST_TEAM_ID, channel: "messenger", externalCallId: callId } },
+    where: { workspaceId_channel_externalCallId: { workspaceId: META_TEST_TEAM_ID, channel: "messenger", externalCallId: callId } },
     select: { status: true, durationSeconds: true },
   });
   expect(ended?.status).toBe("completed");
@@ -292,7 +292,7 @@ test("Messenger call that terminates with no duration is recorded as missed", as
     socialCallTerminate({ object: "page", accountId: MSGR_PAGE_ID, callId, durationSeconds: 0 }),
   );
   const call = await db().call.findUnique({
-    where: { teamId_channel_externalCallId: { teamId: META_TEST_TEAM_ID, channel: "messenger", externalCallId: callId } },
+    where: { workspaceId_channel_externalCallId: { workspaceId: META_TEST_TEAM_ID, channel: "messenger", externalCallId: callId } },
     select: { status: true },
   });
   expect(call?.status).toBe("missed");
@@ -308,14 +308,14 @@ test("the unified callback verifies with the shared Meta App verify token", asyn
 });
 
 test("a bad HMAC signature is rejected and writes nothing", async () => {
-  const before = await db().message.count({ where: { teamId: META_TEST_TEAM_ID } });
+  const before = await db().message.count({ where: { workspaceId: META_TEST_TEAM_ID } });
   const res = await postMetaWebhook(
     META_TEST_TEAM_ID,
     socialInbound({ object: "page", accountId: MSGR_PAGE_ID, senderId: "6003", mid: "m.badsig.1", text: "nope" }),
     { signature: "sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" },
   );
   expect(res.status).not.toBe(200);
-  const after = await db().message.count({ where: { teamId: META_TEST_TEAM_ID } });
+  const after = await db().message.count({ where: { workspaceId: META_TEST_TEAM_ID } });
   expect(after).toBe(before);
   // Sanity: the same payload WITH a valid signature (default) would be accepted.
   void APP_SECRET;

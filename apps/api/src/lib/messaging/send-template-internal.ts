@@ -43,7 +43,7 @@ import type { Message } from "@ccp/shared/types";
  */
 
 export interface SendTemplateInternalArgs {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   templateId: string;
   /**
@@ -112,14 +112,14 @@ export async function sendTemplateInternal(
 ): Promise<SendTemplateInternalResult> {
   const receivedAt = new Date();
 
-  // Single round trip to fetch both rows. teamId scoping prevents cross-tenant
+  // Single round trip to fetch both rows. workspaceId scoping prevents cross-tenant
   // leakage on either id.
   const [conversation, template] = await Promise.all([
     db.conversation.findFirst({
-      where: { id: args.conversationId, teamId: args.teamId },
+      where: { id: args.conversationId, workspaceId: args.workspaceId },
       include: { contact: true },
     }),
-    db.messageTemplate.findFirst({ where: { id: args.templateId, teamId: args.teamId } }),
+    db.messageTemplate.findFirst({ where: { id: args.templateId, workspaceId: args.workspaceId } }),
   ]);
 
   if (!conversation) {
@@ -303,7 +303,7 @@ export async function sendTemplateInternal(
 
   let sendConfig;
   try {
-    sendConfig = await binding.getSendConfig(args.teamId);
+    sendConfig = await binding.getSendConfig(args.workspaceId, conversation.channelConnectionId);
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) {
       throw new SendTemplateValidationError(
@@ -369,7 +369,7 @@ export async function sendTemplateInternal(
       : receivedAt;
 
   const created = await createOutboundMessageIdempotent({
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     conversationId: args.conversationId,
     externalId: send.externalId,
     senderUserId: args.senderUserId,
@@ -399,7 +399,7 @@ export async function sendTemplateInternal(
 
   const message: Message = {
     id: created.id,
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     conversationId: args.conversationId,
     externalId: send.externalId,
     senderUserId: args.senderUserId,
@@ -423,7 +423,7 @@ export async function sendTemplateInternal(
     preview: previewBody,
     event: {
       type: "message.sent",
-      teamId: args.teamId,
+      workspaceId: args.workspaceId,
       conversationId: args.conversationId,
       contactId: conversation.contactId,
       message,

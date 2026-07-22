@@ -13,7 +13,7 @@ export const metadata = {
 export const dynamic = "force-dynamic";
 
 export default async function MetaSettingsPage() {
-  const { user, teamId } = await getSession();
+  const { user, workspaceId } = await getSession();
   const canManage = canManageUsers(user.role);
 
   let current: MetaCurrent;
@@ -46,7 +46,7 @@ export default async function MetaSettingsPage() {
     <MetaSettings
       current={current}
       webhookBaseUrl={webhookBaseUrl}
-      teamId={teamId}
+      workspaceId={workspaceId}
       canManage={canManage}
     />
   );

@@ -22,7 +22,10 @@ test.describe("Team-chat reconnect convergence (state-management-1)", () => {
     // at), NOT the superadmin — it must be a member of the channel under test.
     const user = await prisma.user.findFirst({
       where: { email: APP_ADMIN_EMAIL },
-      select: { teamId: true, id: true },
+      select: {
+        id: true,
+        workspaceMemberships: { select: { workspaceId: true }, orderBy: { createdAt: "asc" }, take: 1 },
+      },
     });
     if (!user) throw new Error("e2e app-admin not seeded");
 
@@ -38,7 +41,7 @@ test.describe("Team-chat reconnect convergence (state-management-1)", () => {
     // deterministic. Reconnect convergence itself is channel-agnostic.
     const channel = await prisma.teamChannel.create({
       data: {
-        teamId: user.teamId,
+        workspaceId: user.workspaceMemberships[0]!.workspaceId,
         name: `e2e-reconnect-${stamp}`,
         isDefault: false,
         createdById: user.id,
@@ -53,7 +56,7 @@ test.describe("Team-chat reconnect convergence (state-management-1)", () => {
     const msg = await prisma.teamChannelMessage.create({
       data: {
         channelId: channel.id,
-        teamId: user.teamId,
+        workspaceId: user.workspaceMemberships[0]!.workspaceId,
         authorUserId: user.id,
         body: OLD,
       },

@@ -14,7 +14,7 @@ import { db } from "@/lib/db";
 
 interface OnAssignedArgs {
   conversationId: string;
-  teamId: string;
+  workspaceId: string;
   assignedUserId: string | null;
   previousAssignedUserId: string | null;
 }
@@ -28,7 +28,7 @@ export async function trackOnAssigned(args: OnAssignedArgs): Promise<void> {
 
   try {
     await db.conversation.update({
-      where: { id: args.conversationId, teamId: args.teamId },
+      where: { id: args.conversationId, workspaceId: args.workspaceId },
       data: {
         assignmentsCount: { increment: 1 },
         lastAssignedAt: new Date(),
@@ -41,7 +41,7 @@ export async function trackOnAssigned(args: OnAssignedArgs): Promise<void> {
     await db.conversation.updateMany({
       where: {
         id: args.conversationId,
-        teamId: args.teamId,
+        workspaceId: args.workspaceId,
         firstAssignedAt: null,
       },
       data: {
@@ -59,7 +59,7 @@ export async function trackOnAssigned(args: OnAssignedArgs): Promise<void> {
 
 interface OnStatusChangedArgs {
   conversationId: string;
-  teamId: string;
+  workspaceId: string;
   previousStatus: string;
   newStatus: string;
   changedByUserId: string | null;
@@ -94,7 +94,7 @@ export async function trackOnStatusChanged(args: OnStatusChangedArgs): Promise<v
     }
     if (Object.keys(data).length === 0) return;
     await db.conversation.update({
-      where: { id: args.conversationId, teamId: args.teamId },
+      where: { id: args.conversationId, workspaceId: args.workspaceId },
       data,
     });
   } catch (err) {
@@ -107,7 +107,7 @@ export async function trackOnStatusChanged(args: OnStatusChangedArgs): Promise<v
 
 interface OnOutboundMessageArgs {
   conversationId: string;
-  teamId: string;
+  workspaceId: string;
   /** Null for system / workflow sends. */
   senderUserId: string | null;
 }
@@ -133,7 +133,7 @@ export async function trackOnOutboundMessage(args: OnOutboundMessageArgs): Promi
     const result = await db.conversation.updateMany({
       where: {
         id: args.conversationId,
-        teamId: args.teamId,
+        workspaceId: args.workspaceId,
         incomingMessagesCount: { gt: 0 },
       },
       data: {
@@ -144,7 +144,7 @@ export async function trackOnOutboundMessage(args: OnOutboundMessageArgs): Promi
     if (result.count === 0) {
       // No inbound yet — outbound is outreach. Bump outgoing only.
       await db.conversation.updateMany({
-        where: { id: args.conversationId, teamId: args.teamId },
+        where: { id: args.conversationId, workspaceId: args.workspaceId },
         data: { outgoingMessagesCount: { increment: 1 } },
       });
       return;
@@ -155,7 +155,7 @@ export async function trackOnOutboundMessage(args: OnOutboundMessageArgs): Promi
     await db.conversation.updateMany({
       where: {
         id: args.conversationId,
-        teamId: args.teamId,
+        workspaceId: args.workspaceId,
         firstResponseAt: null,
         incomingMessagesCount: { gt: 0 },
       },

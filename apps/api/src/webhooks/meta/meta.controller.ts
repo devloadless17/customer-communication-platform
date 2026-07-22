@@ -117,13 +117,13 @@ import { WebhookRateLimitGuard } from "../webhook-rate-limit.guard";
 /**
  * Per-team Meta WhatsApp Cloud API webhook.
  *
- *   GET  /webhooks/meta/:teamId   → one-time subscription verify challenge
- *   POST /webhooks/meta/:teamId   → real events; HMAC over the raw body
+ *   GET  /webhooks/meta/:workspaceId   → one-time subscription verify challenge
+ *   POST /webhooks/meta/:workspaceId   → real events; HMAC over the raw body
  *
  * Fail-soft posture: malformed payloads still return 200 so Meta doesn't
  * retry-storm.
  *
- * Multi-tenancy: `teamId` in the path is a routing signal, NOT proof of
+ * Multi-tenancy: `workspaceId` in the path is a routing signal, NOT proof of
  * origin. The HMAC against the team's per-tenant `metaAppSecret` is the
  * actual authentication.
  */
@@ -159,9 +159,9 @@ export class MetaWebhookController implements OnModuleDestroy {
     ]);
   }
 
-  @Get(":teamId")
+  @Get(":workspaceId")
   async verify(
-    @Param("teamId") teamId: string,
+    @Param("workspaceId") workspaceId: string,
     @Query("hub.mode") mode: string | undefined,
     @Query("hub.verify_token") token: string | undefined,
     @Query("hub.challenge") challenge: string | undefined,
@@ -175,10 +175,10 @@ export class MetaWebhookController implements OnModuleDestroy {
     // connection is fully wired (Meta's natural setup order: verify first, add
     // the app secret + send credentials after). The POST path independently
     // requires the app secret, so honoring a token here grants no access.
-    const verifyTokens = await getTeamVerifyTokens(teamId);
+    const verifyTokens = await getTeamVerifyTokens(workspaceId);
     if (verifyTokens.length === 0) {
       // Silent 403 — leaking "team unconfigured" vs "team not found" gives
-      // attackers a teamId enumeration oracle on a public endpoint.
+      // attackers a workspaceId enumeration oracle on a public endpoint.
       res.status(403).type("text/plain").send("forbidden");
       return;
     }
@@ -200,10 +200,10 @@ export class MetaWebhookController implements OnModuleDestroy {
     res.status(403).type("text/plain").send("forbidden");
   }
 
-  @Post(":teamId")
+  @Post(":workspaceId")
   @HttpCode(200)
   async receive(
-    @Param("teamId") teamId: string,
+    @Param("workspaceId") workspaceId: string,
     @Headers("x-hub-signature-256") signature: string | undefined,
     @Req() req: Request,
   ): Promise<{ ok: boolean; ingested?: number; dropped?: string }> {
@@ -214,14 +214,14 @@ export class MetaWebhookController implements OnModuleDestroy {
     // existing, byte-identical path below.
     const channel = channelForMetaObject(req.body);
     if (channel === "messenger" || channel === "instagram") {
-      return this.receiveSocial(teamId, signature, req, channel);
+      return this.receiveSocial(workspaceId, signature, req, channel);
     }
     if (channel !== "whatsapp") {
       return { ok: true, ingested: 0, dropped: "unsupported_object" };
     }
 
-    const config = await getMetaWebhookConfig(teamId);
-    if (!config) throw webhookForbidden(this.logger, teamId, "whatsapp", req, "no_config");
+    const config = await getMetaWebhookConfig(workspaceId);
+    if (!config) throw webhookForbidden(this.logger, workspaceId, "whatsapp", req, "no_config");
 
     // Verify against the EXACT bytes Meta signed. main.ts's bodyParser
     // captures req.rawBody on every JSON-parsed request. Without it,
@@ -234,16 +234,16 @@ export class MetaWebhookController implements OnModuleDestroy {
       // or content-type drift breaks the verify hook. Log loudly so the
       // regression is discoverable, but return 200 to bound the damage.
       this.logger.error(
-        `[${teamId}] missing rawBody — main.ts verify hook regressed? returning 200 to avoid retry storm`,
+        `[${workspaceId}] missing rawBody — main.ts verify hook regressed? returning 200 to avoid retry storm`,
       );
       return { ok: true, ingested: 0, dropped: "missing_raw_body" };
     }
     if (!insecureSkipVerify(this.logger)) {
-      if (!signature) throw webhookForbidden(this.logger, teamId, "whatsapp", req, "no_signature");
+      if (!signature) throw webhookForbidden(this.logger, workspaceId, "whatsapp", req, "no_signature");
       const cands = [config.appSecret, config.appSecretFallback];
       if (!verifySignature(rawBody, signature, cands)) {
         logSignatureDiag(this.logger, signature, rawBody, cands);
-        throw webhookForbidden(this.logger, teamId, "whatsapp", req, "bad_signature");
+        throw webhookForbidden(this.logger, workspaceId, "whatsapp", req, "bad_signature");
       }
     }
 
@@ -267,11 +267,15 @@ export class MetaWebhookController implements OnModuleDestroy {
     // is configured for the team — newly-onboarded teams that haven't
     // wired the field yet still receive events (the appSecret check is
     // the gate, and Meta won't sign anything to a non-onboarded team).
-    if (phoneNumberMismatch(config.phoneNumberId, payload)) {
+    // Which of this workspace's WhatsApp numbers received it? A workspace may
+    // now hold several, so this RESOLVES the account rather than checking the
+    // payload against a single configured number.
+    const inboundAccount = await resolveInboundAccount(this.db, workspaceId, "whatsapp", payload);
+    if (!inboundAccount) {
       this.logger.warn(
-        `[${teamId}] webhook payload phone_number_id does not match team configuration — dropping`,
+        `[${workspaceId}] webhook payload phone_number_id matches no connected account — dropping`,
       );
-      return { ok: true, ingested: 0, dropped: "phone_number_id_mismatch" };
+      return { ok: true, ingested: 0, dropped: "unknown_account" };
     }
 
     // WhatsApp Coexistence history backfill. The `history` webhook can carry
@@ -285,13 +289,13 @@ export class MetaWebhookController implements OnModuleDestroy {
     // chunk is safe.
     if (containsHistory(payload)) {
       try {
-        await enqueueHistoryChunk(teamId, payload);
+        await enqueueHistoryChunk(workspaceId, payload);
         return { ok: true, ingested: 0 };
       } catch (err) {
         // Redis down / enqueue failed → 503 so Meta redelivers the chunk (the
         // worker dedups by wamid, so a redelivery is safe). Better than dropping
         // history the customer can never re-fetch.
-        this.logger.error(`[${teamId}] failed to enqueue history chunk`, err);
+        this.logger.error(`[${workspaceId}] failed to enqueue history chunk`, err);
         throw new ServiceUnavailableException("history enqueue failed");
       }
     }
@@ -305,7 +309,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     try {
       events = getMetaProvider().parseWebhook(payload);
     } catch (err) {
-      this.logger.error(`[${teamId}] webhook parse failed; dropping batch`, err);
+      this.logger.error(`[${workspaceId}] webhook parse failed; dropping batch`, err);
       return { ok: true, ingested: 0, dropped: "parse_failed" };
     }
     if (events.length === 0) return { ok: true, ingested: 0 };
@@ -328,7 +332,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     // task writes outcomes as each event completes; `completePendingMedia`
     // reads the map after `downloadPromise` settles.
     const downloadOutcomes = new Map<string, DownloadOutcome>();
-    const downloadPromise = this.downloadInboundMedia(teamId, events, downloadOutcomes);
+    const downloadPromise = this.downloadInboundMedia(workspaceId, events, downloadOutcomes);
     // The ingest-failure branches below return/throw WITHOUT ever consuming
     // `downloadPromise` (only the success path threads it into
     // `completePendingMedia`). A rejection on that orphaned promise would
@@ -336,17 +340,17 @@ export class MetaWebhookController implements OnModuleDestroy {
     // can never float — the original promise is unchanged, so the success
     // path's `await downloadPromise` still observes the real settlement.
     downloadPromise.catch((err) =>
-      this.logger.error(`[${teamId}] inbound media download failed`, err),
+      this.logger.error(`[${workspaceId}] inbound media download failed`, err),
     );
 
     try {
-      await ingestEvents(teamId, "whatsapp", events);
+      await ingestEvents(workspaceId, "whatsapp", events, inboundAccount.id);
     } catch (err) {
       // Meta retries on any non-2xx. Map error classes to the response that
       // actually matches the intent:
       //   - Transient DB pressure (pool timeout / serialization) → 503 so
       //     Meta retries the same batch after backoff. Re-ingest is safe
-      //     because every event is deduped on (teamId, provider, externalId).
+      //     because every event is deduped on (workspaceId, provider, externalId).
       //   - Anything else (parse drift, invariant violations) → 200 with
       //     `dropped`. Meta retrying a permanently-bad payload forever
       //     drains both our and their resources; logging + swallowing here
@@ -363,12 +367,12 @@ export class MetaWebhookController implements OnModuleDestroy {
               ? "init"
               : `driver:${String((err as { code?: unknown })?.code ?? "timeout")}`;
         this.logger.warn(
-          `[${teamId}] transient ingest failure (${code}); asking Meta to retry`,
+          `[${workspaceId}] transient ingest failure (${code}); asking Meta to retry`,
         );
         throw new ServiceUnavailableException("transient ingest failure");
       }
       this.logger.error(
-        `[${teamId}] permanent ingest failure; dropping batch of ${events.length}`,
+        `[${workspaceId}] permanent ingest failure; dropping batch of ${events.length}`,
         err,
       );
       return { ok: true, ingested: 0, dropped: "ingest_failed" };
@@ -379,12 +383,12 @@ export class MetaWebhookController implements OnModuleDestroy {
     // filters internally). Tracked in `inFlightMedia` so onModuleDestroy can
     // drain it on shutdown rather than letting a SIGTERM abandon the patch.
     const completion = this.completePendingMedia(
-      teamId,
+      workspaceId,
       events,
       downloadPromise,
       downloadOutcomes,
     ).catch((err) =>
-      this.logger.error(`[${teamId}] background media completion failed`, err),
+      this.logger.error(`[${workspaceId}] background media completion failed`, err),
     );
     this.inFlightMedia.add(completion);
     void completion.finally(() => this.inFlightMedia.delete(completion));
@@ -402,28 +406,28 @@ export class MetaWebhookController implements OnModuleDestroy {
    * as WhatsApp.
    */
   private async receiveSocial(
-    teamId: string,
+    workspaceId: string,
     signature: string | undefined,
     req: Request,
     channel: "messenger" | "instagram",
   ): Promise<{ ok: boolean; ingested?: number; dropped?: string }> {
     const { provider, getWebhookConfig } = SOCIAL[channel];
-    const config = await getWebhookConfig(teamId);
-    if (!config) throw webhookForbidden(this.logger, teamId, channel, req, "no_config");
+    const config = await getWebhookConfig(workspaceId);
+    if (!config) throw webhookForbidden(this.logger, workspaceId, channel, req, "no_config");
 
     const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
     if (!rawBody) {
       this.logger.error(
-        `[${teamId}] ${channel} webhook missing rawBody — returning 200 to avoid retry storm`,
+        `[${workspaceId}] ${channel} webhook missing rawBody — returning 200 to avoid retry storm`,
       );
       return { ok: true, ingested: 0, dropped: "missing_raw_body" };
     }
     if (!insecureSkipVerify(this.logger)) {
-      if (!signature) throw webhookForbidden(this.logger, teamId, channel, req, "no_signature");
+      if (!signature) throw webhookForbidden(this.logger, workspaceId, channel, req, "no_signature");
       const cands = [config.appSecret, config.appSecretFallback];
       if (!verifySignature(rawBody, signature, cands)) {
         logSignatureDiag(this.logger, signature, rawBody, cands);
-        throw webhookForbidden(this.logger, teamId, channel, req, "bad_signature");
+        throw webhookForbidden(this.logger, workspaceId, channel, req, "bad_signature");
       }
     }
 
@@ -432,24 +436,23 @@ export class MetaWebhookController implements OnModuleDestroy {
 
     const payload = req.body as unknown;
 
-    // Defense-in-depth: the webhook's `entry[].id` must match the team's
-    // configured business account (Page id for Messenger, IG account id for
-    // Instagram). Parity with WhatsApp's phone_number_id mismatch guard.
-    const cfgIds = config as { pageId?: string | null; igId?: string | null };
-    const expectedEntryId =
-      (channel === "messenger" ? cfgIds.pageId : cfgIds.igId) ?? null;
-    if (socialEntryIdMismatch(expectedEntryId, payload)) {
+    // Which of this workspace's accounts received it? `entry[].id` is the Page
+    // id (Messenger) or the IG account id (Instagram). Resolving beats the old
+    // match-against-the-one-configured-account check, which dropped payloads for
+    // every account after the first.
+    const inboundAccount = await resolveInboundAccount(this.db, workspaceId, channel, payload);
+    if (!inboundAccount) {
       this.logger.warn(
-        `[${teamId}] ${channel} webhook entry.id does not match team configuration — dropping`,
+        `[${workspaceId}] ${channel} webhook entry.id matches no connected account — dropping`,
       );
-      return { ok: true, ingested: 0, dropped: "entry_id_mismatch" };
+      return { ok: true, ingested: 0, dropped: "unknown_account" };
     }
 
     let events: NormalizedEvent[];
     try {
       events = provider.parseWebhook(payload);
     } catch (err) {
-      this.logger.error(`[${teamId}] ${channel} webhook parse failed; dropping batch`, err);
+      this.logger.error(`[${workspaceId}] ${channel} webhook parse failed; dropping batch`, err);
       return { ok: true, ingested: 0, dropped: "parse_failed" };
     }
     if (events.length === 0) return { ok: true, ingested: 0 };
@@ -460,17 +463,17 @@ export class MetaWebhookController implements OnModuleDestroy {
     // completePendingMedia awaits the same promise on the success path.
     const downloadOutcomes = new Map<string, DownloadOutcome>();
     const downloadPromise = this.downloadSocialMedia(
-      teamId,
+      workspaceId,
       channel,
       events,
       downloadOutcomes,
     );
     downloadPromise.catch((err) =>
-      this.logger.error(`[${teamId}] ${channel} media download failed`, err),
+      this.logger.error(`[${workspaceId}] ${channel} media download failed`, err),
     );
 
     try {
-      await ingestEvents(teamId, channel, events);
+      await ingestEvents(workspaceId, channel, events, inboundAccount.id);
     } catch (err) {
       // Same transient-vs-permanent split as WhatsApp: 503 → Meta retries the
       // (deduped) batch on transient DB pressure; 200-dropped otherwise so a
@@ -479,7 +482,7 @@ export class MetaWebhookController implements OnModuleDestroy {
         throw new ServiceUnavailableException("transient ingest failure");
       }
       this.logger.error(
-        `[${teamId}] permanent ${channel} ingest failure; dropping batch of ${events.length}`,
+        `[${workspaceId}] permanent ${channel} ingest failure; dropping batch of ${events.length}`,
         err,
       );
       return { ok: true, ingested: 0, dropped: "ingest_failed" };
@@ -492,8 +495,8 @@ export class MetaWebhookController implements OnModuleDestroy {
       e.kind === "message" && e.externalContactId ? [e.externalContactId] : [],
     );
     if (senderIds.length > 0) {
-      void enrichSocialContactNames(teamId, channel, senderIds).catch((err) =>
-        this.logger.error(`[${teamId}] ${channel} name enrichment failed`, err),
+      void enrichSocialContactNames(workspaceId, channel, senderIds).catch((err) =>
+        this.logger.error(`[${workspaceId}] ${channel} name enrichment failed`, err),
       );
     }
 
@@ -502,13 +505,13 @@ export class MetaWebhookController implements OnModuleDestroy {
     // failure). Tracked in inFlightMedia so onModuleDestroy drains it on
     // shutdown rather than abandoning a half-written patch.
     const completion = this.completePendingMedia(
-      teamId,
+      workspaceId,
       events,
       downloadPromise,
       downloadOutcomes,
       channel,
     ).catch((err) =>
-      this.logger.error(`[${teamId}] ${channel} media completion failed`, err),
+      this.logger.error(`[${workspaceId}] ${channel} media completion failed`, err),
     );
     this.inFlightMedia.add(completion);
     void completion.finally(() => this.inFlightMedia.delete(completion));
@@ -524,7 +527,7 @@ export class MetaWebhookController implements OnModuleDestroy {
    * case never calls this.
    */
   private async completePendingMedia(
-    teamId: string,
+    workspaceId: string,
     events: NormalizedEvent[],
     downloadPromise: Promise<void>,
     outcomes: Map<string, DownloadOutcome>,
@@ -546,7 +549,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     // turns the per-event loop into pure CPU + a single later updateMany.
     const externalIds = candidates.map((e) => e.externalId);
     const rows = await this.db.message.findMany({
-      where: { teamId, channel, externalId: { in: externalIds } },
+      where: { workspaceId, channel, externalId: { in: externalIds } },
       select: {
         id: true,
         externalId: true,
@@ -598,7 +601,7 @@ export class MetaWebhookController implements OnModuleDestroy {
         if (updated.count === 0) continue;
         await publish({
           type: "message.media_ready",
-          teamId,
+          workspaceId,
           conversationId: row.conversationId,
           messageId: row.id,
           media: {
@@ -665,7 +668,7 @@ export class MetaWebhookController implements OnModuleDestroy {
         if (cleared.count === 0) continue;
         await publish({
           type: "message.media_ready",
-          teamId,
+          workspaceId,
           conversationId: row.conversationId,
           messageId: row.id,
           // No media (download failed) — the reducer strips the media block. The
@@ -692,7 +695,7 @@ export class MetaWebhookController implements OnModuleDestroy {
    */
   // (Free function below — moved out of the controller class so it can read
   // the cached `phoneNumberId` from getMetaWebhookConfig instead of a per-
-  // request `db.team.findUnique`.)
+  // request `db.workspace.findUnique`.)
 
   /**
    * Did the parser originally attach media to this event? Used to tell
@@ -723,7 +726,7 @@ export class MetaWebhookController implements OnModuleDestroy {
    * WhatsApp send-config needed, so a social-only team downloads media fine.
    */
   private async downloadSocialMedia(
-    teamId: string,
+    workspaceId: string,
     channel: Channel,
     events: NormalizedEvent[],
     outcomes: Map<string, DownloadOutcome>,
@@ -740,7 +743,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     // re-download. An existing row with a mediaUrl → record success + skip.
     const externalIds = mediaEvents.map((e) => e.externalId);
     const existing = await this.db.message.findMany({
-      where: { teamId, channel, externalId: { in: externalIds } },
+      where: { workspaceId, channel, externalId: { in: externalIds } },
       select: {
         externalId: true,
         mediaKey: true,
@@ -766,8 +769,8 @@ export class MetaWebhookController implements OnModuleDestroy {
     });
     if (todo.length === 0) return;
 
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
+    const team = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { name: true },
     });
 
@@ -795,7 +798,7 @@ export class MetaWebhookController implements OnModuleDestroy {
         );
         if (fetched.bytes.length > cap) {
           this.logger.warn(
-            `[${teamId}] dropping social ${mediaKind} over cap (${fetched.bytes.length} > ${cap})`,
+            `[${workspaceId}] dropping social ${mediaKind} over cap (${fetched.bytes.length} > ${cap})`,
           );
           outcomes.set(evt.externalId, { ok: false, retriable: false });
           return;
@@ -810,7 +813,7 @@ export class MetaWebhookController implements OnModuleDestroy {
               mimeType: storeMime,
               kind: mediaKind,
               context: {
-                teamId,
+                workspaceId,
                 teamSlug: team?.name,
                 direction: blobDirection,
                 // Social has no phone; use the opaque id for the dashboard name.
@@ -842,7 +845,7 @@ export class MetaWebhookController implements OnModuleDestroy {
                     mimeType: "image/jpeg",
                     kind: "image",
                     context: {
-                      teamId,
+                      workspaceId,
                       teamSlug: team?.name,
                       direction: blobDirection,
                       contactPhone: evt.externalContactId,
@@ -858,7 +861,7 @@ export class MetaWebhookController implements OnModuleDestroy {
             }
           } catch (err) {
             this.logger.warn(
-              `[${teamId}] social video poster failed for ${evt.externalId}: ${err instanceof Error ? err.message : err}`,
+              `[${workspaceId}] social video poster failed for ${evt.externalId}: ${err instanceof Error ? err.message : err}`,
             );
           }
         }
@@ -881,7 +884,7 @@ export class MetaWebhookController implements OnModuleDestroy {
         });
       } catch (err) {
         this.logger.warn(
-          `[${teamId}] social media download failed for ${evt.externalId}: ${err instanceof Error ? err.message : err}`,
+          `[${workspaceId}] social media download failed for ${evt.externalId}: ${err instanceof Error ? err.message : err}`,
         );
         // The inbound-media sweeper re-fetches by WhatsApp media-id, which social
         // has none of (and the CDN URL expires), so mark non-retriable — the row
@@ -905,7 +908,7 @@ export class MetaWebhookController implements OnModuleDestroy {
    * with the caption — visible failure, not a stuck shimmer.
    */
   private async downloadInboundMedia(
-    teamId: string,
+    workspaceId: string,
     events: NormalizedEvent[],
     outcomes: Map<string, DownloadOutcome>,
   ): Promise<void> {
@@ -923,7 +926,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     // P2002 and we save the Meta fetch + blob upload entirely.
     const externalIds = mediaEvents.map((e) => e.externalId);
     const existing = await this.db.message.findMany({
-      where: { teamId, channel: "whatsapp", externalId: { in: externalIds } },
+      where: { workspaceId, channel: "whatsapp", externalId: { in: externalIds } },
       select: {
         externalId: true,
         mediaKey: true,
@@ -951,9 +954,9 @@ export class MetaWebhookController implements OnModuleDestroy {
 
     let sendConfig;
     try {
-      sendConfig = await getMetaSendConfig(teamId);
+      sendConfig = await getMetaSendConfig(workspaceId);
     } catch (err) {
-      this.logger.warn(`[${teamId}] cannot download media — send config missing`, err);
+      this.logger.warn(`[${workspaceId}] cannot download media — send config missing`, err);
       // No way to fetch any of them — record failure so each row is created
       // as text-only with the caption preserved. Non-retriable: a missing send
       // config is a structural/config issue, not a transient blip — parking
@@ -962,8 +965,8 @@ export class MetaWebhookController implements OnModuleDestroy {
       return;
     }
 
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
+    const team = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { name: true },
     });
 
@@ -1008,7 +1011,7 @@ export class MetaWebhookController implements OnModuleDestroy {
         );
         if (fetched.bytes.length > cap) {
           this.logger.warn(
-            `[${teamId}] dropping ${mediaKind} over cap (${fetched.bytes.length} > ${cap})`,
+            `[${workspaceId}] dropping ${mediaKind} over cap (${fetched.bytes.length} > ${cap})`,
           );
           // Deterministic: re-downloading yields the same over-cap bytes.
           outcomes.set(evt.externalId, { ok: false, retriable: false });
@@ -1025,7 +1028,7 @@ export class MetaWebhookController implements OnModuleDestroy {
               mimeType: storeMime,
               kind: mediaKind,
               context: {
-                teamId,
+                workspaceId,
                 teamSlug: team?.name,
                 direction: blobDirection,
                 contactPhone: evt.contactPhone,
@@ -1061,7 +1064,7 @@ export class MetaWebhookController implements OnModuleDestroy {
                     mimeType: "image/jpeg",
                     kind: "image",
                     context: {
-                      teamId,
+                      workspaceId,
                       teamSlug: team?.name,
                       direction: blobDirection,
                       contactPhone: evt.contactPhone,
@@ -1079,7 +1082,7 @@ export class MetaWebhookController implements OnModuleDestroy {
             }
           } catch (err) {
             this.logger.warn(
-              `[${teamId}] video poster generation failed for ${evt.externalId}: ${err instanceof Error ? err.message : err}`,
+              `[${workspaceId}] video poster generation failed for ${evt.externalId}: ${err instanceof Error ? err.message : err}`,
             );
             // Swallow — the video itself is fine; the bubble just won't
             // have a poster. Strictly better than failing the whole ingest.
@@ -1114,13 +1117,13 @@ export class MetaWebhookController implements OnModuleDestroy {
         // check above. Parking it for the sweeper would loop forever.
         if (err instanceof MediaTooLargeError) {
           this.logger.warn(
-            `[${teamId}] dropping ${mediaKind} over cap before download (${err.declaredBytes} > ${err.maxBytes})`,
+            `[${workspaceId}] dropping ${mediaKind} over cap before download (${err.declaredBytes} > ${err.maxBytes})`,
           );
           outcomes.set(evt.externalId, { ok: false, retriable: false });
           return;
         }
         this.logger.error(
-          `[${teamId}] media download failed for ${evt.externalId} after retries`,
+          `[${workspaceId}] media download failed for ${evt.externalId} after retries`,
           err,
         );
         // Transient (Meta-CDN / blob blip survived the in-request retry) —
@@ -1325,30 +1328,70 @@ async function readBodyCapped(
  * Reads from the cached `MetaWebhookConfig.phoneNumberId` instead of a
  * per-request DB lookup — see provider/config.ts for the cache TTL.
  */
-function phoneNumberMismatch(
-  expected: string | null,
+
+/**
+ * Resolve the ChannelConnection an inbound payload belongs to.
+ *
+ * Replaces the old "validate against the workspace's single configured account
+ * and drop on mismatch" check. That check was correct only while a workspace
+ * could hold exactly one account per channel — with several, a payload for the
+ * SECOND number matched nothing and was silently dropped as a mismatch.
+ *
+ * Returns the connection, or null when the payload NAMES an account no
+ * connection in this workspace claims (caller drops fail-soft, exactly as the
+ * old mismatch check did).
+ *
+ * When the payload names no account at all, this falls back to the workspace's
+ * DEFAULT account rather than dropping. That matters: only message webhooks
+ * carry `metadata.phone_number_id` / `entry[].id`. Account-level notifications
+ * (`phone_number_quality_update`, `account_alerts`, template status updates) do
+ * not, and the previous mismatch check also treated "no id in payload" as "no
+ * mismatch — proceed". Dropping them here silently stopped messaging-tier and
+ * quality snapshots from ever updating.
+ */
+async function resolveInboundAccount(
+  db: DbService,
+  workspaceId: string,
+  channel: "whatsapp" | "messenger" | "instagram",
   payload: unknown,
-): boolean {
-  if (!expected) return false;
+): Promise<{ id: string; externalAccountId: string } | null> {
+  const externalAccountId =
+    channel === "whatsapp"
+      ? whatsappPayloadAccountId(payload)
+      : socialPayloadAccountId(payload);
+  if (!externalAccountId) {
+    return db.channelConnection.findFirst({
+      where: { workspaceId, channel, isDefault: true },
+      select: { id: true, externalAccountId: true },
+    });
+  }
+  return db.channelConnection.findFirst({
+    where: { workspaceId, channel, externalAccountId },
+    select: { id: true, externalAccountId: true },
+  });
+}
+
+/** `entry[].changes[].value.metadata.phone_number_id` — the receiving number. */
+function whatsappPayloadAccountId(payload: unknown): string | null {
   const p = payload as {
-    entry?: Array<{
-      changes?: Array<{
-        value?: { metadata?: { phone_number_id?: string } };
-      }>;
-    }>;
+    entry?: Array<{ changes?: Array<{ value?: { metadata?: { phone_number_id?: string } } }> }>;
   };
-  const entries = p?.entry;
-  if (!Array.isArray(entries)) return false;
-  for (const entry of entries) {
-    const changes = entry?.changes;
-    if (!Array.isArray(changes)) continue;
-    for (const change of changes) {
-      const incoming = change?.value?.metadata?.phone_number_id;
-      if (incoming && incoming !== expected) return true;
+  for (const entry of p?.entry ?? []) {
+    for (const change of entry?.changes ?? []) {
+      const id = change?.value?.metadata?.phone_number_id;
+      if (id) return id;
     }
   }
-  return false;
+  return null;
 }
+
+/** `entry[].id` — the Page id (Messenger) or IG account id (Instagram). */
+function socialPayloadAccountId(payload: unknown): string | null {
+  const p = payload as { entry?: Array<{ id?: string }> };
+  for (const entry of p?.entry ?? []) if (entry?.id) return entry.id;
+  return null;
+}
+
 
 /**
  * Defense-in-depth for the social webhook, parallel to `phoneNumberMismatch` on
@@ -1359,17 +1402,6 @@ function phoneNumberMismatch(
  * attributed to the wrong tenant. Skipped when the id isn't configured yet
  * (HMAC against the per-team appSecret remains the primary gate).
  */
-function socialEntryIdMismatch(expected: string | null, payload: unknown): boolean {
-  if (!expected) return false;
-  const p = payload as { entry?: Array<{ id?: string }> };
-  const entries = p?.entry;
-  if (!Array.isArray(entries)) return false;
-  for (const entry of entries) {
-    const incoming = entry?.id;
-    if (incoming && incoming !== expected) return true;
-  }
-  return false;
-}
 
 /**
  * True if any change in the payload is a Coexistence `history` backfill. Cheap
@@ -1442,7 +1474,7 @@ function insecureSkipVerify(logger: Logger): boolean {
  */
 function webhookForbidden(
   logger: Logger,
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   req: Request,
   reason: "no_config" | "no_signature" | "bad_signature",
@@ -1455,7 +1487,7 @@ function webhookForbidden(
       : reason === "no_config"
         ? "no webhook config for this team+channel."
         : "Meta sent no signature header.";
-  logger.warn(`[${teamId}] ${channel} webhook 403 — ${reason} (object=${objectType}): ${hint}`);
+  logger.warn(`[${workspaceId}] ${channel} webhook 403 — ${reason} (object=${objectType}): ${hint}`);
   const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
   if (rawBody) wireIn(`${channel} REJECTED (${reason})`, rawBody.toString("utf8"));
   return new HttpException("forbidden", 403);

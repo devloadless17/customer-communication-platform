@@ -48,7 +48,7 @@ export async function runSetStatus(
   const result = await setConversationStatus({
     db,
     publish,
-    teamId: ctx.teamId,
+    workspaceId: ctx.workspaceId,
     conversationId,
     status,
     changedByUserId: null,

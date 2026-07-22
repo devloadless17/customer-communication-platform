@@ -115,3 +115,135 @@ export function requiredTemplateButtonParams(components: unknown): RequiredTempl
   }
   return required;
 }
+
+// ---------------------------------------------------------------------------
+// Meta field limits.
+// ---------------------------------------------------------------------------
+
+/**
+ * The hard limits Meta enforces on a template's components, from the WhatsApp
+ * Business "Template fundamentals" documentation.
+ *
+ * Enforced BEFORE the Graph call rather than letting Meta reject: a rejection
+ * arrives as an opaque `#100 Invalid parameter` with no field name, so an
+ * author who pasted a 1,200-character body learns only that "something" was
+ * wrong. Checking here names the field and the number.
+ *
+ * These are Meta's numbers, not ours — do not tighten them to be "safe". A
+ * limit stricter than the provider's silently blocks templates that would have
+ * been accepted, which is indistinguishable from a bug.
+ */
+export const TEMPLATE_LIMITS = {
+  /** `^[a-z0-9_]{1,512}$` — lowercase, digits and underscores only. */
+  nameMaxLength: 512,
+  bodyMaxLength: 1024,
+  headerMaxLength: 60,
+  footerMaxLength: 60,
+  buttonTextMaxLength: 25,
+  /** Quick-reply button labels are capped tighter than CTA labels. */
+  quickReplyTextMaxLength: 25,
+  maxQuickReplyButtons: 10,
+  maxCallToActionButtons: 2,
+  maxButtons: 10,
+} as const;
+
+export const TEMPLATE_NAME_PATTERN = /^[a-z0-9_]{1,512}$/;
+
+export interface TemplateValidationIssue {
+  /** `body` · `header` · `footer` · `name` · `buttons` — the field to highlight. */
+  field: string;
+  message: string;
+}
+
+interface ValidatableComponent {
+  type?: string;
+  format?: string;
+  text?: string;
+  buttons?: Array<{ type?: string; text?: string }>;
+}
+
+/**
+ * Check a template's name + components against Meta's limits.
+ *
+ * Pure, so the create form and the API share ONE definition of the rules — the
+ * counter under the textarea and the server's rejection can't disagree about
+ * what "too long" means.
+ *
+ * Returns every issue rather than the first, so an author fixes one form pass
+ * instead of playing whack-a-mole with a 400 per field.
+ */
+export function validateTemplateComponents(
+  name: string,
+  components: ReadonlyArray<unknown>,
+): TemplateValidationIssue[] {
+  const issues: TemplateValidationIssue[] = [];
+
+  if (!TEMPLATE_NAME_PATTERN.test(name)) {
+    issues.push({
+      field: "name",
+      message:
+        "Name must be lowercase letters, digits and underscores only (up to 512 characters).",
+    });
+  }
+
+  const comps = components.filter(
+    (c): c is ValidatableComponent => Boolean(c) && typeof c === "object",
+  );
+
+  const body = comps.find((c) => c.type === "BODY");
+  if ((body?.text?.length ?? 0) > TEMPLATE_LIMITS.bodyMaxLength) {
+    issues.push({
+      field: "body",
+      message: `Body is ${body!.text!.length} characters — the limit is ${TEMPLATE_LIMITS.bodyMaxLength}.`,
+    });
+  }
+
+  const header = comps.find((c) => c.type === "HEADER");
+  // Only a TEXT header has a length limit; media headers carry no text.
+  if (header?.format === "TEXT" && (header.text?.length ?? 0) > TEMPLATE_LIMITS.headerMaxLength) {
+    issues.push({
+      field: "header",
+      message: `Header is ${header.text!.length} characters — the limit is ${TEMPLATE_LIMITS.headerMaxLength}.`,
+    });
+  }
+
+  const footer = comps.find((c) => c.type === "FOOTER");
+  if ((footer?.text?.length ?? 0) > TEMPLATE_LIMITS.footerMaxLength) {
+    issues.push({
+      field: "footer",
+      message: `Footer is ${footer!.text!.length} characters — the limit is ${TEMPLATE_LIMITS.footerMaxLength}.`,
+    });
+  }
+
+  const buttons = comps.find((c) => c.type === "BUTTONS")?.buttons ?? [];
+  if (buttons.length > TEMPLATE_LIMITS.maxButtons) {
+    issues.push({
+      field: "buttons",
+      message: `A template can have at most ${TEMPLATE_LIMITS.maxButtons} buttons.`,
+    });
+  }
+  const quickReplies = buttons.filter((b) => b.type === "QUICK_REPLY");
+  if (quickReplies.length > TEMPLATE_LIMITS.maxQuickReplyButtons) {
+    issues.push({
+      field: "buttons",
+      message: `At most ${TEMPLATE_LIMITS.maxQuickReplyButtons} quick-reply buttons.`,
+    });
+  }
+  const ctas = buttons.filter((b) => b.type === "URL" || b.type === "PHONE_NUMBER");
+  if (ctas.length > TEMPLATE_LIMITS.maxCallToActionButtons) {
+    issues.push({
+      field: "buttons",
+      message: `At most ${TEMPLATE_LIMITS.maxCallToActionButtons} call-to-action buttons (URL or phone).`,
+    });
+  }
+  for (const [i, b] of buttons.entries()) {
+    if ((b.text?.length ?? 0) > TEMPLATE_LIMITS.buttonTextMaxLength) {
+      issues.push({
+        field: "buttons",
+        message: `Button ${i + 1} label is ${b.text!.length} characters — the limit is ${TEMPLATE_LIMITS.buttonTextMaxLength}.`,
+      });
+    }
+  }
+
+  return issues;
+}

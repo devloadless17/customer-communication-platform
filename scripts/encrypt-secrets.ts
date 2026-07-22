@@ -32,7 +32,7 @@
  *   - Workflow.triggerConfig.secret     string (incoming_webhook HMAC)
  *   - Workflow.graph.nodes[].config     http_request bearerToken + customHeaders
  *
- * NOT covered (by design): TeamApiKey stores a one-way `tokenHash`, not
+ * NOT covered (by design): WorkspaceApiKey stores a one-way `tokenHash`, not
  * reversible ciphertext — there's nothing to re-encrypt, and a key rotation
  * leaves it untouched.
  *

@@ -62,7 +62,7 @@ export class MessageFlagsService {
       ? await this.db.message.findFirst({
           where: {
             id: where.messageId,
-            teamId: viewer.teamId,
+            workspaceId: viewer.workspaceId,
             conversation: conversationWhere,
           },
           select: { id: true },
@@ -70,7 +70,7 @@ export class MessageFlagsService {
       : await this.db.messageFlag.findFirst({
           where: {
             id: where.flagId,
-            teamId: viewer.teamId,
+            workspaceId: viewer.workspaceId,
             conversation: conversationWhere,
           },
           select: { id: true },
@@ -81,7 +81,7 @@ export class MessageFlagsService {
   }
 
   async raise(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: RaiseFlagInput,
     viewer?: ConversationViewer,
@@ -89,7 +89,7 @@ export class MessageFlagsService {
     const actor: FlagActor = { userId };
     await this.assertVisible(viewer, { messageId: input.messageId });
     const outcome = await raiseFlag(this.db, {
-      teamId,
+      workspaceId,
       messageId: input.messageId,
       definitionId: input.definitionId,
       actor,
@@ -101,7 +101,7 @@ export class MessageFlagsService {
   }
 
   async update(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     flagId: string,
     input: UpdateFlagInput,
@@ -109,7 +109,7 @@ export class MessageFlagsService {
   ): Promise<{ flag: MessageFlag; openFlagCount: number }> {
     await this.assertVisible(viewer, { flagId });
     const outcome = await updateFlag(this.db, {
-      teamId,
+      workspaceId,
       flagId,
       actor: { userId },
       ...(input.status !== undefined
@@ -125,23 +125,23 @@ export class MessageFlagsService {
   }
 
   async remove(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     flagId: string,
     viewer?: ConversationViewer,
   ): Promise<{ flag: MessageFlag; openFlagCount: number }> {
     await this.assertVisible(viewer, { flagId });
-    const outcome = await removeFlag(this.db, { teamId, flagId, actor: { userId } });
+    const outcome = await removeFlag(this.db, { workspaceId, flagId, actor: { userId } });
     return this.unwrap(outcome);
   }
 
   async list(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     query: ListFlagsQuery,
     viewer?: ConversationViewer,
   ): Promise<{ items: MessageFlagQueueItem[]; nextCursor: string | null }> {
-    return listFlags(this.db, teamId, {
+    return listFlags(this.db, workspaceId, {
       // Agent conversation-visibility boundary. The queue selects message body,
       // media caption and the contact's name + phone, so an unscoped read hands
       // a restricted agent excerpts of every flagged conversation in the org.
@@ -158,16 +158,17 @@ export class MessageFlagsService {
       ...(query.conversationId ? { conversationId: query.conversationId } : {}),
       ...(query.cursor ? { cursor: query.cursor } : {}),
       ...(query.take ? { take: query.take } : {}),
+      ...(query.q ? { search: query.q } : {}),
     });
   }
 
   async counts(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     viewer?: ConversationViewer,
   ): Promise<MessageFlagCounts> {
     // Scoped so the badge counts what this viewer can actually open.
-    return flagCounts(this.db, teamId, userId, viewer ? visibilityWhere(viewer) : undefined);
+    return flagCounts(this.db, workspaceId, userId, viewer ? visibilityWhere(viewer) : undefined);
   }
 
   /**

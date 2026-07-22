@@ -53,14 +53,14 @@ export class AiKnowledgeService {
 
   constructor(private readonly db: DbService) {}
 
-  async list(teamId: string) {
+  async list(workspaceId: string) {
     return this.db.aiContextDocument.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: { createdAt: "desc" },
     });
   }
 
-  async upload(teamId: string, input: UploadInput) {
+  async upload(workspaceId: string, input: UploadInput) {
     const mimeType = normalizeMime(input.mimeType, input.filename);
     if (!ALLOWED_MIME.has(mimeType)) {
       throw new BadRequestException({
@@ -74,19 +74,19 @@ export class AiKnowledgeService {
     if (input.bytes.length > MAX_FILE_BYTES) {
       throw new PayloadTooLargeException({ error: "file_too_large", maxBytes: MAX_FILE_BYTES });
     }
-    const count = await this.db.aiContextDocument.count({ where: { teamId } });
+    const count = await this.db.aiContextDocument.count({ where: { workspaceId } });
     if (count >= MAX_FILES_PER_TEAM) {
       throw new BadRequestException({ error: "too_many_files", max: MAX_FILES_PER_TEAM });
     }
 
     // Private, tenant-scoped key. putObject skips the media magic-byte sniff
     // (these are first-party admin uploads, validated above).
-    const key = `ai-knowledge/${teamId}/${randomUUID()}`;
+    const key = `ai-knowledge/${workspaceId}/${randomUUID()}`;
     await blobStorage.putObject({ key, bytes: input.bytes, contentType: mimeType });
 
     const doc = await this.db.aiContextDocument.create({
       data: {
-        teamId,
+        workspaceId,
         filename: input.filename.slice(0, 255),
         mimeType,
         sizeBytes: input.bytes.length,
@@ -98,36 +98,36 @@ export class AiKnowledgeService {
     // Extract + chunk detached from the request. The row already carries
     // status=processing so the settings UI shows a spinner; process() flips it
     // to ready/failed. Errors are swallowed into the row, never thrown here.
-    void this.process(doc.id, teamId, input.bytes, mimeType).catch((err) => {
+    void this.process(doc.id, workspaceId, input.bytes, mimeType).catch((err) => {
       this.logger.error(`process(${doc.id}) failed: ${String(err)}`);
     });
 
     return doc;
   }
 
-  async setEnabled(teamId: string, id: string, enabled: boolean) {
-    const doc = await this.db.aiContextDocument.findFirst({ where: { teamId, id } });
+  async setEnabled(workspaceId: string, id: string, enabled: boolean) {
+    const doc = await this.db.aiContextDocument.findFirst({ where: { workspaceId, id } });
     if (!doc) throw new NotFoundException({ error: "document_not_found" });
     return this.db.aiContextDocument.update({ where: { id }, data: { enabled } });
   }
 
-  async reprocess(teamId: string, id: string) {
-    const doc = await this.db.aiContextDocument.findFirst({ where: { teamId, id } });
+  async reprocess(workspaceId: string, id: string) {
+    const doc = await this.db.aiContextDocument.findFirst({ where: { workspaceId, id } });
     if (!doc) throw new NotFoundException({ error: "document_not_found" });
     const fetched = await blobStorage.fetch(doc.r2Key);
     await this.db.aiContextDocument.update({
       where: { id },
       data: { status: "processing", error: null },
     });
-    void this.process(id, teamId, fetched.bytes, doc.mimeType).catch((err) => {
+    void this.process(id, workspaceId, fetched.bytes, doc.mimeType).catch((err) => {
       this.logger.error(`reprocess(${id}) failed: ${String(err)}`);
     });
     return { ok: true };
   }
 
   /** Delete the document, its R2 object, and (via FK cascade) its chunks. */
-  async remove(teamId: string, id: string) {
-    const doc = await this.db.aiContextDocument.findFirst({ where: { teamId, id } });
+  async remove(workspaceId: string, id: string) {
+    const doc = await this.db.aiContextDocument.findFirst({ where: { workspaceId, id } });
     if (!doc) throw new NotFoundException({ error: "document_not_found" });
     // Storage first — a leaked chunk row is harmless; a leaked private blob is
     // not. delete() is idempotent, so a retry after a partial failure is safe.
@@ -138,7 +138,7 @@ export class AiKnowledgeService {
 
   // --- internal ---
 
-  private async process(id: string, teamId: string, bytes: Uint8Array, mimeType: string) {
+  private async process(id: string, workspaceId: string, bytes: Uint8Array, mimeType: string) {
     try {
       const raw = await withTimeout(
         extractText(bytes, mimeType),
@@ -156,7 +156,7 @@ export class AiKnowledgeService {
         ...chunks.map((content, ordinal) =>
           this.db.aiContextChunk.create({
             data: {
-              teamId,
+              workspaceId,
               documentId: id,
               ordinal,
               content,

@@ -15,7 +15,7 @@ import { looksLikeApiKey } from "./api-key";
 
 /**
  * Shape attached to req.apiKey on success. Used by /external/v1/* controllers.
- * Same teamId scoping as the session guard so downstream services don't have
+ * Same workspaceId scoping as the session guard so downstream services don't have
  * to branch on auth method.
  *
  * `scopes` lists every capability granted to this key. The wildcard `"*"`
@@ -24,7 +24,7 @@ import { looksLikeApiKey } from "./api-key";
  * re-check scopes themselves, that's a layering violation.
  */
 export interface ApiKeyContext {
-  teamId: string;
+  workspaceId: string;
   apiKeyId: string;
   scopes: readonly string[];
 }
@@ -59,7 +59,7 @@ const apiKeyBucket = createTokenBucket({ perMin: 60, maxKeys: 10_000 });
 const unauthIpBucket = createTokenBucket({ perMin: 30, maxKeys: 10_000 });
 
 // Debounce `lastUsedAt` writes per key. Without this a high-frequency partner
-// hot-writes the SAME TeamApiKey row on every request (write amplification +
+// hot-writes the SAME WorkspaceApiKey row on every request (write amplification +
 // row-lock contention on one row). We persist at most once per window per key;
 // `lastUsedAt` is a coarse "last seen" display, so window-grained accuracy is
 // fine. In-memory only (single-process pilot — bounded by key count); a restart
@@ -116,7 +116,7 @@ function rejectUnauth(req: Request, detail: string): never {
  *
  *   - Read `Authorization: Bearer <token>` header
  *   - Hash with SHA-256 (same as token generation in ./api-key.ts)
- *   - Look up `TeamApiKey` by tokenHash
+ *   - Look up `WorkspaceApiKey` by tokenHash
  *   - Reject if revoked
  *   - Stamp lastUsedAt (best-effort, non-blocking)
  *
@@ -145,14 +145,14 @@ export class ApiKeyGuard implements CanActivate {
     }
 
     const tokenHash = createHash("sha256").update(token).digest("hex");
-    const row = await this.db.teamApiKey.findUnique({
+    const row = await this.db.workspaceApiKey.findUnique({
       where: { tokenHash },
       select: {
         id: true,
-        teamId: true,
+        workspaceId: true,
         revokedAt: true,
         scopes: true,
-        team: { select: { status: true } },
+        workspace: { select: { organization: { select: { status: true } } } },
       },
     });
     if (!row || row.revokedAt) rejectUnauth(req, "invalid api key");
@@ -177,7 +177,7 @@ export class ApiKeyGuard implements CanActivate {
     // /v1 access, same as it has no session access. Without this a suspended
     // org keeps full API-key reach. 403 (authenticated but forbidden), not
     // 401, so a valid key isn't treated as "bad credentials".
-    if (row.team?.status !== "active") {
+    if (row.workspace?.organization.status !== "active") {
       throw new HttpException(
         { error: "org_not_active", detail: "organization is not active" },
         403,
@@ -206,7 +206,7 @@ export class ApiKeyGuard implements CanActivate {
       );
     }
 
-    req.apiKey = { teamId: row.teamId, apiKeyId: row.id, scopes: row.scopes };
+    req.apiKey = { workspaceId: row.workspaceId, apiKeyId: row.id, scopes: row.scopes };
 
     // Stamp lastUsedAt async + DEBOUNCED — failing this should NOT fail the
     // request, and a hot partner shouldn't hot-write the same row on every
@@ -214,7 +214,7 @@ export class ApiKeyGuard implements CanActivate {
     const now = Date.now();
     if (now - (lastUsedStampedAt.get(row.id) ?? 0) >= LAST_USED_DEBOUNCE_MS) {
       lastUsedStampedAt.set(row.id, now);
-      this.db.teamApiKey
+      this.db.workspaceApiKey
         .update({ where: { id: row.id }, data: { lastUsedAt: new Date() } })
         .catch(() => {});
     }

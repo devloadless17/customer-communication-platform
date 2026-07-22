@@ -77,6 +77,10 @@ import {
   stopStaleCallsSweeper,
 } from "@/lib/sweepers/stale-calls";
 import {
+  startTicketSlaBreachSweeper,
+  stopTicketSlaBreachSweeper,
+} from "@/lib/sweepers/ticket-sla-breach";
+import {
   startWorkflowWaitingSweeper,
   stopWorkflowWaitingSweeper,
 } from "@/lib/sweepers/workflow-waiting";
@@ -142,6 +146,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private started = false;
   private mediaSweeperStarted = false;
   private staleCallsSweeperStarted = false;
+  private ticketSlaSweeperStarted = false;
   private waitingSweeperStarted = false;
   private awaitingReplySweeperStarted = false;
   private contactDriftSweeperStarted = false;
@@ -197,6 +202,15 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log("Stale-calls sweeper started");
     } catch (err) {
       this.logger.error("Failed to start stale-calls sweeper", err);
+    }
+    try {
+      // An SLA breach is time-based with no request behind it — the deadline
+      // just passes. Nothing but a sweeper can notice.
+      startTicketSlaBreachSweeper();
+      this.ticketSlaSweeperStarted = true;
+      this.logger.log("Ticket SLA-breach sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start ticket SLA-breach sweeper", err);
     }
     try {
       // Recovers `waiting` workflow runs whose BullMQ resume job is missing
@@ -573,6 +587,11 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       if (this.staleCallsSweeperStarted) stopStaleCallsSweeper();
     } catch (err) {
       this.logger.warn(`stopStaleCallsSweeper threw: ${err instanceof Error ? err.message : err}`);
+    }
+    try {
+      if (this.ticketSlaSweeperStarted) stopTicketSlaBreachSweeper();
+    } catch (err) {
+      this.logger.warn(`stopTicketSlaBreachSweeper threw: ${err instanceof Error ? err.message : err}`);
     }
     try {
       if (this.mediaSweeperStarted) stopInboundMediaSweeper();

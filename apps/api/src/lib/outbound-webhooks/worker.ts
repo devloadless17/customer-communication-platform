@@ -138,12 +138,12 @@ interface TeamSlotState {
 }
 const teamSlots = new Map<string, TeamSlotState>();
 
-function tryAcquireTeamSlot(teamId: string): boolean {
+function tryAcquireTeamSlot(workspaceId: string): boolean {
   const cap = perTeamConcurrency();
-  let entry = teamSlots.get(teamId);
+  let entry = teamSlots.get(workspaceId);
   if (!entry) {
     entry = { active: 0, consecutiveDefers: 0, lastWarnAt: 0 };
-    teamSlots.set(teamId, entry);
+    teamSlots.set(workspaceId, entry);
   }
   if (entry.active >= cap) {
     entry.consecutiveDefers += 1;
@@ -152,7 +152,7 @@ function tryAcquireTeamSlot(teamId: string): boolean {
       if (now - entry.lastWarnAt > TEAM_DEFER_WARN_INTERVAL_MS) {
         entry.lastWarnAt = now;
         console.warn(
-          `[webhooks] team ${teamId} starving on delivery slots: ${entry.consecutiveDefers} consecutive defer(s), cap=${cap}`,
+          `[webhooks] team ${workspaceId} starving on delivery slots: ${entry.consecutiveDefers} consecutive defer(s), cap=${cap}`,
         );
       }
     }
@@ -163,8 +163,8 @@ function tryAcquireTeamSlot(teamId: string): boolean {
   return true;
 }
 
-function releaseTeamSlot(teamId: string): void {
-  const entry = teamSlots.get(teamId);
+function releaseTeamSlot(workspaceId: string): void {
+  const entry = teamSlots.get(workspaceId);
   if (!entry) return;
   entry.active = Math.max(0, entry.active - 1);
   // minor#7: GC once NO deliveries are in flight, regardless of the defer
@@ -175,7 +175,7 @@ function releaseTeamSlot(teamId: string): void {
   // that went idle right after a defer (active drained to 0 while the counter
   // was still > 0). A later acquire re-creates the entry fresh.
   if (entry.active === 0) {
-    teamSlots.delete(teamId);
+    teamSlots.delete(workspaceId);
   }
 }
 
@@ -191,17 +191,17 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
   const worker = new Worker<WebhookDeliverJobData>(
     WEBHOOK_DELIVER_QUEUE_NAME,
     async (job: Job<WebhookDeliverJobData>, token?: string) => {
-      // Per-team concurrency gate. teamId rides on the job (set at enqueue from
+      // Per-team concurrency gate. workspaceId rides on the job (set at enqueue from
       // the publishing event), so the common path needs NO DB read — critical
       // because a single-team burst that keeps deferring used to re-run this
       // findUnique on every re-pickup, a DB/Redis busy-spin. Only legacy jobs
       // enqueued before the field existed fall back to the delivery-row read
       // (drains within one queue cycle post-deploy).
-      let teamId = job.data.teamId;
-      if (!teamId) {
+      let workspaceId = job.data.workspaceId;
+      if (!workspaceId) {
         const owner = await db.outboundWebhookDelivery.findUnique({
           where: { id: job.data.deliveryId },
-          select: { webhook: { select: { teamId: true } } },
+          select: { webhook: { select: { workspaceId: true } } },
         });
         if (!owner) {
           // Row deleted between enqueue and pickup (webhook revoked).
@@ -209,9 +209,9 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
           // team slot for a no-op.
           return;
         }
-        teamId = owner.webhook.teamId;
+        workspaceId = owner.webhook.workspaceId;
       }
-      if (!tryAcquireTeamSlot(teamId)) {
+      if (!tryAcquireTeamSlot(workspaceId)) {
         // Team at cap — defer this delivery and free the BullMQ slot for other
         // teams' work. moveToDelayed + DelayedError doesn't count against
         // `attempts`.
@@ -232,7 +232,7 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
           job.data.chainDepth ?? 0,
         );
       } finally {
-        releaseTeamSlot(teamId);
+        releaseTeamSlot(workspaceId);
       }
     },
     {
@@ -555,7 +555,7 @@ async function deliverOnce(
       try {
         await publish({
           type: "webhook.subscription_recovered",
-          teamId: webhook.teamId,
+          workspaceId: webhook.workspaceId,
           webhookId: webhook.id,
         });
       } catch (err) {
@@ -707,10 +707,10 @@ async function recordFailure(
       lastErrorMessage: errorMessage,
       consecutiveFailures: { increment: 1 },
     },
-    select: { consecutiveFailures: true, enabled: true, teamId: true },
+    select: { consecutiveFailures: true, enabled: true, workspaceId: true },
   });
 
-  let tripped: { teamId: string; reason: string } | null = null;
+  let tripped: { workspaceId: string; reason: string } | null = null;
   if (updated.enabled && updated.consecutiveFailures >= AUTO_DISABLE_THRESHOLD) {
     const reason = `${updated.consecutiveFailures} consecutive failures`;
     // Second concurrent worker may attempt the same disable — fine, the
@@ -726,7 +726,7 @@ async function recordFailure(
       },
     });
     if (flip.count > 0) {
-      tripped = { teamId: updated.teamId, reason };
+      tripped = { workspaceId: updated.workspaceId, reason };
       console.warn(
         `[webhooks] auto-disabled webhook ${webhookId} after ${updated.consecutiveFailures} consecutive failures`,
       );
@@ -738,10 +738,10 @@ async function recordFailure(
     // operator who's watching knows their integration just went silent.
     // Fire-and-forget: if the bus is degraded, the DB state is still correct
     // and the UI will show the disabled badge on next page load.
-    const t = tripped as { teamId: string; reason: string };
+    const t = tripped as { workspaceId: string; reason: string };
     void publish({
       type: "webhook.subscription_disabled",
-      teamId: t.teamId,
+      workspaceId: t.workspaceId,
       webhookId,
       reason: t.reason,
     }).catch((err) => {

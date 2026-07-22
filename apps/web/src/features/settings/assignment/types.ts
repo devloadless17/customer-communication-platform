@@ -51,7 +51,7 @@ export interface RuleRow {
 }
 
 export interface AssignmentSettingsRow {
-  teamId: string;
+  workspaceId: string;
   autoAssignOnNewConversation: boolean;
   skipWhenAiHandling: boolean;
   autoAssignOnReopen: boolean;

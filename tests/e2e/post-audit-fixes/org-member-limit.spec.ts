@@ -19,10 +19,10 @@ test.describe("org member limit", () => {
     playwright,
     baseURL,
   }) => {
-    const { teamId } = await appAdmin();
+    const { workspaceId } = await appAdmin();
     const su = await playwright.request.newContext({ baseURL, storageState: SUPER });
     try {
-      const set5 = await su.patch(`/api/admin/teams/${teamId}/max-members`, {
+      const set5 = await su.patch(`/api/admin/teams/${workspaceId}/max-members`, {
         data: { maxMembers: 5 },
       });
       expect(set5.status()).toBe(200);
@@ -33,10 +33,10 @@ test.describe("org member limit", () => {
 
       // Validation: out-of-range values rejected.
       expect(
-        (await su.patch(`/api/admin/teams/${teamId}/max-members`, { data: { maxMembers: 0 } })).status(),
+        (await su.patch(`/api/admin/teams/${workspaceId}/max-members`, { data: { maxMembers: 0 } })).status(),
       ).toBe(400);
       expect(
-        (await su.patch(`/api/admin/teams/${teamId}/max-members`, { data: { maxMembers: 5000 } })).status(),
+        (await su.patch(`/api/admin/teams/${workspaceId}/max-members`, { data: { maxMembers: 5000 } })).status(),
       ).toBe(400);
       // Unknown team → 404.
       expect(
@@ -44,7 +44,7 @@ test.describe("org member limit", () => {
       ).toBe(404);
     } finally {
       await su
-        .patch(`/api/admin/teams/${teamId}/max-members`, { data: { maxMembers: 2 } })
+        .patch(`/api/admin/teams/${workspaceId}/max-members`, { data: { maxMembers: 2 } })
         .catch(() => undefined);
       await su.dispose();
     }
@@ -62,14 +62,14 @@ test.describe("org member limit", () => {
     playwright,
     baseURL,
   }) => {
-    const { teamId } = await appAdmin();
+    const { workspaceId } = await appAdmin();
     const su = await playwright.request.newContext({ baseURL, storageState: SUPER });
     const admin = await playwright.request.newContext({ baseURL, storageState: APP });
     try {
       // Cap the org at 1. The seeded org has ≥1 member, so it's now at/over the
       // limit and a new invite must be refused.
       expect(
-        (await su.patch(`/api/admin/teams/${teamId}/max-members`, { data: { maxMembers: 1 } })).status(),
+        (await su.patch(`/api/admin/teams/${workspaceId}/max-members`, { data: { maxMembers: 1 } })).status(),
       ).toBe(200);
       const blocked = await admin.post("/api/invites", {
         data: { email: TEST_EMAIL, role: "agent" },
@@ -79,7 +79,7 @@ test.describe("org member limit", () => {
 
       // Raise the cap → the same invite now succeeds.
       expect(
-        (await su.patch(`/api/admin/teams/${teamId}/max-members`, { data: { maxMembers: 5 } })).status(),
+        (await su.patch(`/api/admin/teams/${workspaceId}/max-members`, { data: { maxMembers: 5 } })).status(),
       ).toBe(200);
       const allowed = await admin.post("/api/invites", {
         data: { email: TEST_EMAIL, role: "agent" },
@@ -92,7 +92,7 @@ test.describe("org member limit", () => {
         .invite.deleteMany({ where: { email: TEST_EMAIL } })
         .catch(() => undefined);
       await su
-        .patch(`/api/admin/teams/${teamId}/max-members`, { data: { maxMembers: 2 } })
+        .patch(`/api/admin/teams/${workspaceId}/max-members`, { data: { maxMembers: 2 } })
         .catch(() => undefined);
       await su.dispose();
       await admin.dispose();

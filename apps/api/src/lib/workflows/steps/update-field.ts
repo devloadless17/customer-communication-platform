@@ -63,7 +63,7 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
   async run(envelope, config, ctx): Promise<StepResult> {
     let resolved;
     try {
-      resolved = await resolveStepTarget(config.target, envelope, ctx.teamId, {
+      resolved = await resolveStepTarget(config.target, envelope, ctx.workspaceId, {
         createConversation: false,
       });
     } catch (err) {
@@ -74,11 +74,11 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
 
     const [contact, fieldDef] = await Promise.all([
       db.contact.findFirst({
-        where: { id: contactId, teamId: ctx.teamId },
+        where: { id: contactId, workspaceId: ctx.workspaceId },
         include: { tags: { select: { id: true } } },
       }),
       db.contactFieldDefinition.findFirst({
-        where: { teamId: ctx.teamId, key: config.fieldKey },
+        where: { workspaceId: ctx.workspaceId, key: config.fieldKey },
         select: { key: true },
       }),
     ]);
@@ -94,7 +94,7 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
     const { contact: contactLike, extras } = await buildTokenContext(
       envelope,
       ctx,
-      ctx.teamId,
+      ctx.workspaceId,
       contactId,
     );
     const resolvedValue = resolveFieldTokens(config.value, contactLike, extras);
@@ -113,7 +113,7 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
     let updated;
     try {
       updated = await db.contact.update({
-        where: { id: contactId, teamId: ctx.teamId, version: contact.version },
+        where: { id: contactId, workspaceId: ctx.workspaceId, version: contact.version },
         data: {
           customFields: nextFields as Prisma.InputJsonValue,
           version: { increment: 1 },
@@ -139,7 +139,7 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
     // case stays undelivered because it publishes `silent` with the flag unset.
     await publish({
       type: "contact.updated",
-      teamId: ctx.teamId,
+      workspaceId: ctx.workspaceId,
       contact: payload,
       previousStageId: updated.stageId, // stage didn't change here
       fieldChanges: [{ key: config.fieldKey, previous: previousValue, next: resolvedValue }],

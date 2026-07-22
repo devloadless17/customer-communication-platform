@@ -84,8 +84,8 @@ export async function createOutboundMessageIdempotentDetailed(
       ) {
         const existing = await (txOrDb as Prisma.TransactionClient).message.findUnique({
           where: {
-            teamId_channel_externalId: {
-              teamId: data.teamId,
+            workspaceId_channel_externalId: {
+              workspaceId: data.workspaceId,
               channel: data.channel,
               externalId: data.externalId,
             },
@@ -109,7 +109,7 @@ export async function createOutboundMessageIdempotentDetailed(
           });
           if (convo) {
             void drainWithRetry(
-              c.teamId,
+              c.workspaceId,
               c.channel as Channel,
               c.externalId,
               c.id,
@@ -144,7 +144,7 @@ export async function createOutboundMessageIdempotentDetailed(
         });
         if (convo) {
           void drainWithRetry(
-            created.teamId,
+            created.workspaceId,
             created.channel as Channel,
             created.externalId,
             created.id,
@@ -157,15 +157,15 @@ export async function createOutboundMessageIdempotentDetailed(
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError) {
         // P2002: duplicate externalId — legitimate, return existing row.
-        // Uniqueness is now compound on (teamId, channel, externalId)
+        // Uniqueness is now compound on (workspaceId, channel, externalId)
         // (post the multi-channel refactor) so cross-tenant collisions
         // can't surface here in the first place; the lookup mirrors the
         // unique key.
         if (err.code === "P2002" && data.externalId && data.channel) {
           const existing = await db.message.findUnique({
             where: {
-              teamId_channel_externalId: {
-                teamId: data.teamId,
+              workspaceId_channel_externalId: {
+                workspaceId: data.workspaceId,
                 channel: data.channel,
                 externalId: data.externalId,
               },
@@ -202,7 +202,7 @@ export async function createOutboundMessageIdempotentDetailed(
  * is stuck at its create-time status with no operator clue.
  */
 async function drainWithRetry(
-  teamId: string,
+  workspaceId: string,
   channel: Channel,
   externalId: string,
   messageId: string,
@@ -210,12 +210,12 @@ async function drainWithRetry(
   contactId: string,
 ): Promise<void> {
   try {
-    await drainParkedStatus(teamId, channel, externalId, messageId, conversationId, contactId);
+    await drainParkedStatus(workspaceId, channel, externalId, messageId, conversationId, contactId);
     return;
   } catch (firstErr) {
     await new Promise((r) => setTimeout(r, 250));
     try {
-      await drainParkedStatus(teamId, channel, externalId, messageId, conversationId, contactId);
+      await drainParkedStatus(workspaceId, channel, externalId, messageId, conversationId, contactId);
       return;
     } catch (secondErr) {
       console.error(
@@ -223,7 +223,7 @@ async function drainWithRetry(
           event: "drainParkedStatus.failed",
           severity: "error",
           correlationId: getCorrelationId() ?? null,
-          teamId,
+          workspaceId,
           channel,
           externalId,
           messageId,

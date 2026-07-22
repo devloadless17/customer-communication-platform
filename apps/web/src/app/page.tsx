@@ -12,8 +12,8 @@ import { getSession } from "@/lib/auth/current-user";
  * super-admins + locked-out orgs without an extra (app)-layout bounce.
  */
 export default async function HomePage() {
-  const { user, teamStatus } = await getSession();
-  if (user.role === "superAdmin") redirect("/platform");
-  if (teamStatus !== "active") redirect("/pending");
+  const { user, orgStatus } = await getSession();
+  if (user.isSuperAdmin) redirect("/platform");
+  if (orgStatus !== "active") redirect("/pending");
   redirect("/inbox");
 }

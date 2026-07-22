@@ -566,7 +566,7 @@ function MessageThreadImpl({
       const stageActivity =
         prev !== next
           ? buildOptimisticStageChange({
-              teamId: contact.teamId,
+              workspaceId: contact.workspaceId,
               conversationId: conversation.id,
               actorName: currentUser.name,
               fromStageName: stageCatalog.find((s) => s.id === prev)?.name ?? null,
@@ -578,7 +578,7 @@ function MessageThreadImpl({
         [
           "contact:updated",
           {
-            teamId: contact.teamId,
+            workspaceId: contact.workspaceId,
             contact: { ...contact, stageId: next },
             optimistic: true,
           },
@@ -609,12 +609,12 @@ function MessageThreadImpl({
         // Roll back the optimistic update so the chip reflects truth.
         setStageId(prev);
         dispatchLocalSocketEvent("contact:updated", {
-          teamId: contact.teamId,
+          workspaceId: contact.workspaceId,
           contact: { ...contact, stageId: prev },
           optimistic: true,
         });
         if (stageActivityId) {
-          rollbackOptimisticActivity(contact.teamId, conversation.id, stageActivityId);
+          rollbackOptimisticActivity(contact.workspaceId, conversation.id, stageActivityId);
         }
         if (prev !== next && typeof window !== "undefined") {
           window.dispatchEvent(
@@ -1296,7 +1296,7 @@ function MessageThreadImpl({
       // GET instead, so the pill lands with the card. Same guard status/assign/
       // ai/contact use (see use-conversation-events ACTIVITY_REFRESH_EVENTS).
       dispatchLocalSocketEvent("note:deleted", {
-        teamId: conversation.teamId,
+        workspaceId: conversation.workspaceId,
         conversationId: conversation.id,
         noteId,
         optimistic: true,
@@ -1309,7 +1309,7 @@ function MessageThreadImpl({
         softRefresh();
       }
     },
-    [alert, confirm, conversation.id, conversation.teamId, softRefresh],
+    [alert, confirm, conversation.id, conversation.workspaceId, softRefresh],
   );
 
   const { typingUserIds, visitorTyping, visitorPresent, visitorLeftAt, notifyTyping, stopTyping } = useTyping(
@@ -1731,7 +1731,7 @@ function MessageThreadImpl({
         channel={conversation.channel ?? undefined}
         visitorPresent={visitorPresent}
         visitorLeftAt={visitorLeftAt}
-        teamId={conversation.teamId}
+        workspaceId={conversation.workspaceId}
         conversationId={conversation.id}
         contactId={contact.id}
         contactName={contact.name}

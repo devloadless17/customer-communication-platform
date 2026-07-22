@@ -2,7 +2,7 @@
  * Harness for the Meta-channels e2e suite (WhatsApp / Messenger / Instagram).
  *
  * WHY A DEDICATED TEST TEAM. This box's dev DB holds the maintainer's REAL,
- * live-tested channel connections, and `@@unique([teamId, channel])` means we
+ * live-tested channel connections, and `@@unique([workspaceId, channel])` means we
  * can't seed test connections next to them without clobbering the real ones. So
  * every backend meta spec runs under a throwaway team (`META_TEST_TEAM_ID`) with
  * its own MetaConnection + per-channel connections (known test secrets) + an API
@@ -50,7 +50,7 @@ export const IG_PAGE_ID = "e2e_ig_page_1";
 export const IG_ACCESS_TOKEN = "e2e_ig_access_token";
 
 export interface MetaTestTeam {
-  teamId: string;
+  workspaceId: string;
   userId: string;
   apiToken: string;
 }
@@ -63,30 +63,49 @@ export interface MetaTestTeam {
 export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
   const d = db();
 
-  await d.team.upsert({
-    where: { id: META_TEST_TEAM_ID },
-    create: { id: META_TEST_TEAM_ID, name: "E2E Meta Test Team", status: "active" },
+  // META_TEST_TEAM_ID is now the WORKSPACE id (the isolation scope every
+  // `workspaceId` column points at); it hangs off a throwaway Organization,
+  // which is where the approval gate lives.
+  const orgId = `${META_TEST_TEAM_ID}_org`;
+  await d.organization.upsert({
+    where: { id: orgId },
+    create: { id: orgId, name: "E2E Meta Test Org", status: "active" },
     update: { status: "active" },
+  });
+
+  await d.workspace.upsert({
+    where: { id: META_TEST_TEAM_ID },
+    create: { id: META_TEST_TEAM_ID, name: "E2E Meta Test Team", organizationId: orgId },
+    update: { organizationId: orgId },
   });
 
   await d.user.upsert({
     where: { id: META_TEST_USER_ID },
     create: {
       id: META_TEST_USER_ID,
-      teamId: META_TEST_TEAM_ID,
-      role: "admin",
+      organizationId: orgId,
+      orgRole: "admin",
       name: "E2E Meta User",
       email: "e2e-meta-user@loadless.test",
     },
-    update: { teamId: META_TEST_TEAM_ID },
+    update: { organizationId: orgId },
+  });
+
+  // The admin role is a per-workspace grant now.
+  await d.workspaceMember.upsert({
+    where: {
+      userId_workspaceId: { userId: META_TEST_USER_ID, workspaceId: META_TEST_TEAM_ID },
+    },
+    create: { userId: META_TEST_USER_ID, workspaceId: META_TEST_TEAM_ID, role: "admin" },
+    update: { role: "admin" },
   });
 
   // Shared Meta App connection — the single source the webhook loaders prefer
   // for the HMAC secret and the verify token.
   await d.metaConnection.upsert({
-    where: { teamId: META_TEST_TEAM_ID },
+    where: { workspaceId: META_TEST_TEAM_ID },
     create: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       config: { appId: "e2e_app_id", verifyToken: VERIFY_TOKEN },
       secrets: {
         appSecret: encryptSecret(APP_SECRET),
@@ -106,31 +125,45 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
   // the webhook loader's gate requires before it prefers the shared secret.
   const channels: Array<{
     channel: "whatsapp" | "messenger" | "instagram";
+    /** The provider's own account id — the key a workspace's accounts differ by. */
+    accountId: string;
     config: Prisma.InputJsonObject;
     secrets: Prisma.InputJsonObject;
   }> = [
     {
       channel: "whatsapp",
+      accountId: WA_PHONE_NUMBER_ID,
       config: { phoneNumberId: WA_PHONE_NUMBER_ID, wabaId: WA_WABA_ID, verifyToken: VERIFY_TOKEN },
       secrets: { accessToken: encryptSecret(WA_ACCESS_TOKEN), appSecret: encryptSecret(APP_SECRET) },
     },
     {
       channel: "messenger",
+      accountId: MSGR_PAGE_ID,
       config: { pageId: MSGR_PAGE_ID, pageName: "Mock Page", verifyToken: VERIFY_TOKEN },
       secrets: { pageAccessToken: encryptSecret(MSGR_PAGE_TOKEN), appSecret: encryptSecret(APP_SECRET) },
     },
     {
       channel: "instagram",
+      accountId: IG_ID,
       config: { igId: IG_ID, pageId: IG_PAGE_ID, igUsername: "mock_ig", verifyToken: VERIFY_TOKEN },
       secrets: { igAccessToken: encryptSecret(IG_ACCESS_TOKEN), appSecret: encryptSecret(APP_SECRET) },
     },
   ];
   for (const c of channels) {
     await d.channelConnection.upsert({
-      where: { teamId_channel: { teamId: META_TEST_TEAM_ID, channel: c.channel } },
+      where: {
+        workspaceId_channel_externalAccountId: {
+          workspaceId: META_TEST_TEAM_ID,
+          channel: c.channel,
+          externalAccountId: c.accountId,
+        },
+      },
       create: {
-        teamId: META_TEST_TEAM_ID,
+        workspaceId: META_TEST_TEAM_ID,
         channel: c.channel,
+        externalAccountId: c.accountId,
+        isDefault: true,
+        ...(c.channel === "whatsapp" ? { wabaId: WA_WABA_ID } : {}),
         config: c.config,
         secrets: c.secrets,
         isActive: true,
@@ -141,10 +174,10 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
 
   // Unrestricted API key so /v1 sends run without a browser session.
   const key = generateApiKey();
-  await d.teamApiKey.deleteMany({ where: { teamId: META_TEST_TEAM_ID } });
-  await d.teamApiKey.create({
+  await d.workspaceApiKey.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
+  await d.workspaceApiKey.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       name: "e2e-meta",
       tokenHash: key.tokenHash,
       tokenPrefix: key.tokenPrefix,
@@ -153,27 +186,30 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
     },
   });
 
-  return { teamId: META_TEST_TEAM_ID, userId: META_TEST_USER_ID, apiToken: key.token };
+  return { workspaceId: META_TEST_TEAM_ID, userId: META_TEST_USER_ID, apiToken: key.token };
 }
 
 /** Full teardown — the whole team and everything under it. */
 export async function wipeMetaTestTeam(): Promise<void> {
   const d = db();
-  const teamId = META_TEST_TEAM_ID;
+  const workspaceId = META_TEST_TEAM_ID;
   // Child → parent. Wrapped in a single tx so a mid-delete failure rolls back.
   await d.$transaction([
-    d.outboundSendAttempt.deleteMany({ where: { teamId } }),
-    d.apiIdempotencyKey.deleteMany({ where: { teamId } }),
-    d.conversationEvent.deleteMany({ where: { teamId } }),
-    d.internalNote.deleteMany({ where: { teamId } }),
-    d.message.deleteMany({ where: { teamId } }),
-    d.conversation.deleteMany({ where: { teamId } }),
-    d.contact.deleteMany({ where: { teamId } }),
-    d.teamApiKey.deleteMany({ where: { teamId } }),
-    d.channelConnection.deleteMany({ where: { teamId } }),
-    d.metaConnection.deleteMany({ where: { teamId } }),
-    d.user.deleteMany({ where: { teamId } }),
-    d.team.deleteMany({ where: { id: teamId } }),
+    d.outboundSendAttempt.deleteMany({ where: { workspaceId } }),
+    d.apiIdempotencyKey.deleteMany({ where: { workspaceId } }),
+    d.conversationEvent.deleteMany({ where: { workspaceId } }),
+    d.internalNote.deleteMany({ where: { workspaceId } }),
+    d.message.deleteMany({ where: { workspaceId } }),
+    d.conversation.deleteMany({ where: { workspaceId } }),
+    d.contact.deleteMany({ where: { workspaceId } }),
+    d.workspaceApiKey.deleteMany({ where: { workspaceId } }),
+    d.channelConnection.deleteMany({ where: { workspaceId } }),
+    d.metaConnection.deleteMany({ where: { workspaceId } }),
+    // Users are ORG-scoped now, so drop memberships then the org itself (which
+    // cascades to the workspace AND its users).
+    d.workspaceMember.deleteMany({ where: { workspaceId } }),
+    d.workspace.deleteMany({ where: { id: workspaceId } }),
+    d.organization.deleteMany({ where: { id: `${META_TEST_TEAM_ID}_org` } }),
   ]);
 }
 
@@ -184,14 +220,14 @@ export async function wipeMetaTestTeam(): Promise<void> {
  * HMAC-SHA256 over the RAW body bytes, so we sign the exact string we send.
  */
 export async function postMetaWebhook(
-  teamId: string,
+  workspaceId: string,
   payload: unknown,
   opts: { secret?: string; signature?: string } = {},
 ): Promise<{ status: number; text: string }> {
   const raw = JSON.stringify(payload);
   const secret = opts.secret ?? APP_SECRET;
   const sig = opts.signature ?? `sha256=${createHmac("sha256", secret).update(raw).digest("hex")}`;
-  const res = await fetch(`${META_API_BASE}/webhooks/meta/${teamId}`, {
+  const res = await fetch(`${META_API_BASE}/webhooks/meta/${workspaceId}`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-hub-signature-256": sig },
     body: raw,
@@ -201,7 +237,7 @@ export async function postMetaWebhook(
 
 /** The unauthenticated Meta subscription-verify GET (`hub.challenge` echo). */
 export async function getWebhookVerify(
-  teamId: string,
+  workspaceId: string,
   token: string,
   challenge = "challenge123",
 ): Promise<{ status: number; text: string }> {
@@ -210,7 +246,7 @@ export async function getWebhookVerify(
     "hub.verify_token": token,
     "hub.challenge": challenge,
   });
-  const res = await fetch(`${META_API_BASE}/webhooks/meta/${teamId}?${qs.toString()}`);
+  const res = await fetch(`${META_API_BASE}/webhooks/meta/${workspaceId}?${qs.toString()}`);
   return { status: res.status, text: await res.text() };
 }
 
@@ -405,7 +441,7 @@ export async function v1Send(
 // ─── Seeding a social contact + conversation directly (for send/UI specs) ──
 
 export async function seedSocialConversation(o: {
-  teamId: string;
+  workspaceId: string;
   channel: "whatsapp" | "messenger" | "instagram";
   externalContactId?: string;
   phoneNumber?: string;
@@ -415,7 +451,7 @@ export async function seedSocialConversation(o: {
   const d = db();
   const contact = await d.contact.create({
     data: {
-      teamId: o.teamId,
+      workspaceId: o.workspaceId,
       name: o.name,
       identityChannel: o.channel,
       externalContactId: o.externalContactId ?? null,
@@ -426,7 +462,7 @@ export async function seedSocialConversation(o: {
   });
   const conversation = await d.conversation.create({
     data: {
-      teamId: o.teamId,
+      workspaceId: o.workspaceId,
       contactId: contact.id,
       channel: o.channel,
       status: "open",

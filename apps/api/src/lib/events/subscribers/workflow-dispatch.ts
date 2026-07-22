@@ -84,12 +84,12 @@ export function registerWorkflowDispatchSubscribers(): () => void {
   // ---- message.received → message_received (+ conversation_created on first) ----
   subscribe("message.received", async (e) => {
     if (e.isNewConversation) {
-      await dispatch(e.teamId, "conversation_created", {
+      await dispatch(e.workspaceId, "conversation_created", {
         conversation: e.conversation,
         contact: e.contact,
       });
     }
-    await dispatch(e.teamId, "message_received", {
+    await dispatch(e.workspaceId, "message_received", {
       message: e.workflowMessage,
       conversation: e.conversation,
       contact: e.contact,
@@ -103,7 +103,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
     if (e.silent) return; // workflow-step driven; skip chain dispatch
     if (e.previousAssignedUserId === e.newAssignedUserId) return;
     // Snapshot rides on the event payload — see file-level doc-comment.
-    await dispatch(e.teamId, "conversation_assigned", {
+    await dispatch(e.workspaceId, "conversation_assigned", {
       conversation: e.conversation,
       contact: e.contact,
       assignedUser: e.assignedUser
@@ -120,7 +120,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
     // Snapshot rides on the event payload — see file-level doc-comment.
     const snapshot = e.conversation;
 
-    await dispatch(e.teamId, "conversation_status_changed", {
+    await dispatch(e.workspaceId, "conversation_status_changed", {
       conversation: snapshot,
       contact: e.contact,
       previousStatus: e.previousStatus,
@@ -128,14 +128,14 @@ export function registerWorkflowDispatchSubscribers(): () => void {
       changedByUserId: e.changedByUserId,
     });
     if (e.newStatus === "open") {
-      await dispatch(e.teamId, "conversation_opened", {
+      await dispatch(e.workspaceId, "conversation_opened", {
         conversation: snapshot,
         contact: e.contact,
         previousStatus: e.previousStatus,
         openedByUserId: e.changedByUserId,
       });
     } else if (e.newStatus === "closed") {
-      await dispatch(e.teamId, "conversation_closed", {
+      await dispatch(e.workspaceId, "conversation_closed", {
         conversation: snapshot,
         contact: e.contact,
         previousStatus: e.previousStatus,
@@ -176,7 +176,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
       // must NOT fan out a workflow trigger. See BUILT_IN_KEYS above.
       if (BUILT_IN_KEYS.has(change.key)) continue;
       dispatches.push(
-        dispatch(e.teamId, "contact_field_updated", {
+        dispatch(e.workspaceId, "contact_field_updated", {
           contact: e.workflowContact,
           fieldKey: change.key,
           previousValue: change.previous,
@@ -187,7 +187,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
     }
     if (e.previousStageId !== newStageId) {
       dispatches.push(
-        dispatch(e.teamId, "contact_lifecycle_updated", {
+        dispatch(e.workspaceId, "contact_lifecycle_updated", {
           contact: e.workflowContact,
           previousStageId: e.previousStageId,
           newStageId,
@@ -198,7 +198,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
     if (e.tagChanges) {
       for (const tagId of e.tagChanges.added) {
         dispatches.push(
-          dispatch(e.teamId, "contact_tag_updated", {
+          dispatch(e.workspaceId, "contact_tag_updated", {
             contact: e.workflowContact,
             kind: "added",
             tagId,
@@ -208,7 +208,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
       }
       for (const tagId of e.tagChanges.removed) {
         dispatches.push(
-          dispatch(e.teamId, "contact_tag_updated", {
+          dispatch(e.workspaceId, "contact_tag_updated", {
             contact: e.workflowContact,
             kind: "removed",
             tagId,

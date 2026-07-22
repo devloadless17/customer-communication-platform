@@ -9,15 +9,19 @@ import { CallsModule } from "./calls/calls.module";
 import { CommonModule } from "./common/common.module";
 import { ContactsModule } from "./contacts/contacts.module";
 import { ConversationsModule } from "./conversations/conversations.module";
+import { InboxViewsModule } from "./inbox-views/inbox-views.module";
 import { CustomersModule } from "./customers/customers.module";
 import { DevModule } from "./dev/dev.module";
 import { EventBusModule } from "./events/event-bus.module";
 import { ExternalV1Module } from "./external/v1/external-v1.module";
 import { HealthModule } from "./health/health.module";
 import { InvitesModule } from "./invites/invites.module";
+import { WorkspacesModule } from "./workspaces/workspaces.module";
+import { ChannelAccountsModule } from "./team/channel-accounts/channel-accounts.module";
 import { MediaModule } from "./media/media.module";
 import { MessagesModule } from "./messages/messages.module";
 import { MessageFlagsModule } from "./message-flags/message-flags.module";
+import { TicketsModule } from "./tickets/tickets.module";
 import { NotesModule } from "./notes/notes.module";
 import { OutboundWebhooksModule } from "./outbound-webhooks/outbound-webhooks.module";
 import { DbModule } from "./db/db.module";
@@ -51,11 +55,15 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     TeamModule,
     TeamsModule,
     InvitesModule,
+    WorkspacesModule,
+    ChannelAccountsModule,
     UsersModule,
     AdminModule,
     ConversationsModule,
+    InboxViewsModule,
     NotesModule,
     MessageFlagsModule,
+    TicketsModule,
     ContactsModule,
     CustomersModule,
     BroadcastsModule,

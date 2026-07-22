@@ -22,6 +22,7 @@ import {
 import { createTokenBucket } from "../common/token-bucket";
 import { zBody } from "../common/zod-validation.pipe";
 import { DbService } from "../db/db.service";
+import { provisionWorkspace } from "@/lib/workspaces/provision";
 
 // Per-IP register bucket. Tighter than the global 600/min/IP cap because
 // register is unauthenticated AND creates an entire Team+User+Account+...
@@ -54,14 +55,6 @@ const RegisterSchema = z.object({
 });
 type RegisterInput = z.infer<typeof RegisterSchema>;
 
-/** Seeded into every new org — kept in lockstep with the backfill in
- *  prisma/migrations/20260722140000_seed_default_message_flags. */
-const DEFAULT_MESSAGE_FLAGS = [
-  { name: "Complaint", color: "rose", description: "The customer is unhappy — needs a follow-up." },
-  { name: "Refund request", color: "amber", description: "The customer asked for money back." },
-  { name: "Follow up", color: "sky", description: "Come back to this one later." },
-  { name: "Urgent", color: "orange", description: "Needs attention before anything else in the queue." },
-] as const;
 
 @Controller("api/register")
 export class RegisterController {
@@ -96,28 +89,18 @@ export class RegisterController {
         // `status: pending` (explicit, though it's the column default too) — the
         // org is created but locked out of the app until a superAdmin approves
         // it. The web action redirects the new admin to /pending afterward.
-        const team = await tx.team.create({
+        // A signup provisions the whole hierarchy: the Organization is the
+        // tenant/billing root and carries the approval gate, and it gets one
+        // starter Workspace which is what all the data below scopes to.
+        const organization = await tx.organization.create({
           data: { name: body.orgName, status: "pending" },
         });
-        // Starter message-flag definitions. The flags feature is invisible
-        // until a definition exists (the message "…" menu hides "Flag as" on an
-        // empty catalog), so a brand-new org would otherwise never discover it.
-        // Existing orgs were seeded the same set by
-        // 20260722140000_seed_default_message_flags. Admins can rename,
-        // recolour or delete any of them in Settings.
-        await tx.messageFlagDefinition.createMany({
-          data: DEFAULT_MESSAGE_FLAGS.map((f, i) => ({
-            teamId: team.id,
-            name: f.name,
-            color: f.color,
-            description: f.description,
-            sortOrder: i,
-          })),
-        });
+        // The founder owns the ORG (billing + directory) and is admin of the
+        // starter workspace — two separate grants now, not one `role` column.
         const user = await tx.user.create({
           data: {
-            teamId: team.id,
-            role: "admin",
+            organizationId: organization.id,
+            orgRole: "owner",
             name: body.name,
             email: body.email,
           },
@@ -130,40 +113,16 @@ export class RegisterController {
             password: passwordHash,
           },
         });
-        // Seed the pipeline with three lifecycle stages so the inbox sidebar
-        // shows a real pipeline from the first login. Admin can rename /
-        // recolor / add more in /settings/stages.
-        await tx.contactStage.createMany({
-          data: [
-            { teamId: team.id, name: "Stage 1", color: "lime", position: 0, isDefault: true },
-            { teamId: team.id, name: "Stage 2", color: "amber", position: 1, isDefault: false },
-            { teamId: team.id, name: "Stage 3", color: "emerald", position: 2, isDefault: false },
-          ],
+        // Everything a new workspace contains — stages, starter flags,
+        // #general, and the founder's admin membership — lives in ONE place so
+        // a workspace created later from Organization settings is identical to
+        // this one. See lib/workspaces/provision.ts.
+        const team = await provisionWorkspace(tx, {
+          organizationId: organization.id,
+          name: body.orgName,
+          founderUserId: user.id,
         });
-        // Default #general channel. The schema documents this as auto-created
-        // at team setup; /team redirects to it on first login. Without this
-        // row the team-chat surface lands on the "No channels yet" dead-end.
-        // Auto-membership for the founder so they can see + post immediately;
-        // every future invite-accepted user is also auto-added to the default
-        // channel via apps/api/src/team/invites/.
-        const channel = await tx.teamChannel.create({
-          data: {
-            teamId: team.id,
-            name: "general",
-            isDefault: true,
-            // EXPLICIT: the column defaults to `private` (so the visibility
-            // migration couldn't accidentally widen existing invite-only
-            // channels). #general must be public — it's the one channel every
-            // member is guaranteed to reach, and `update` refuses to change a
-            // default channel's visibility, so a private one is unfixable.
-            visibility: "public",
-            createdById: user.id,
-          },
-        });
-        await tx.teamChannelMember.create({
-          data: { channelId: channel.id, userId: user.id, addedById: user.id },
-        });
-        return { email: body.email, teamId: team.id };
+        return { email: body.email, workspaceId: team.id };
       });
 
       // The super-admin roster + overview are memoized for 60s. A brand-new

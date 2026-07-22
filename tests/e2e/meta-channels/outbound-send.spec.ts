@@ -47,7 +47,7 @@ const DAY = 24 * 60 * 60 * 1000;
 test("Messenger send inside the window → RESPONSE to the PSID via the Page host", async () => {
   const psid = "6100000000001";
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "messenger",
     externalContactId: psid,
     name: "Msgr Customer",
@@ -69,7 +69,7 @@ test("Messenger send inside the window → RESPONSE to the PSID via the Page hos
   expect(s.body.messaging_product).toBeUndefined();
 
   const msg = await db().message.findFirst({
-    where: { teamId: META_TEST_TEAM_ID, conversationId, direction: "out" },
+    where: { workspaceId: META_TEST_TEAM_ID, conversationId, direction: "out" },
     select: { status: true, externalId: true, channel: true },
   });
   expect(msg?.channel).toBe("messenger");
@@ -79,7 +79,7 @@ test("Messenger send inside the window → RESPONSE to the PSID via the Page hos
 test("Messenger send past 24h → HUMAN_AGENT tag (still inside the 7d support window)", async () => {
   const psid = "6100000000002";
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "messenger",
     externalContactId: psid,
     name: "Old Thread",
@@ -97,7 +97,7 @@ test("Messenger send past 24h → HUMAN_AGENT tag (still inside the 7d support w
 test("Instagram send targets the linked Page host with the IGSID recipient", async () => {
   const igsid = "17840000000101";
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "instagram",
     externalContactId: igsid,
     name: "IG Customer",
@@ -117,7 +117,7 @@ test("Instagram send targets the linked Page host with the IGSID recipient", asy
 test("quoted reply attaches a top-level reply_to.mid", async () => {
   const psid = "6100000000003";
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "messenger",
     externalContactId: psid,
     name: "Reply Thread",
@@ -125,7 +125,7 @@ test("quoted reply attaches a top-level reply_to.mid", async () => {
   });
   const original = await db().message.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       conversationId,
       channel: "messenger",
       externalId: "mid.orig.reply",
@@ -152,7 +152,7 @@ test("quoted reply attaches a top-level reply_to.mid", async () => {
 test("a repeated Idempotency-Key never double-posts to Meta", async () => {
   const psid = "6100000000004";
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "messenger",
     externalContactId: psid,
     name: "Idem Thread",
@@ -167,7 +167,7 @@ test("a repeated Idempotency-Key never double-posts to Meta", async () => {
   // Exactly one Meta send, and exactly one outbound message row.
   expect(await mockSends()).toHaveLength(1);
   const count = await db().message.count({
-    where: { teamId: META_TEST_TEAM_ID, conversationId, direction: "out" },
+    where: { workspaceId: META_TEST_TEAM_ID, conversationId, direction: "out" },
   });
   expect(count).toBe(1);
 });
@@ -175,7 +175,7 @@ test("a repeated Idempotency-Key never double-posts to Meta", async () => {
 test("send past the 7d effective window is refused with no Meta call", async () => {
   const psid = "6100000000005";
   const { conversationId } = await seedSocialConversation({
-    teamId: META_TEST_TEAM_ID,
+    workspaceId: META_TEST_TEAM_ID,
     channel: "messenger",
     externalContactId: psid,
     name: "Stale Thread",

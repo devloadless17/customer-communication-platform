@@ -2646,7 +2646,15 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = new URL(
       `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`,
     );
-    url.searchParams.set("fields", "name,language,status,category,components,id");
+    // `parameter_format` tells us NAMED vs POSITIONAL authoritatively. Without it
+    // we were inferring it from a regex over the body text, which is a guess: a
+    // POSITIONAL template whose body happens to contain `{{order_id}}` as
+    // literal text would be misread, and the wire assembly would then send the
+    // wrong parameter shape and 132000 every recipient.
+    url.searchParams.set(
+      "fields",
+      "name,language,status,category,components,id,parameter_format",
+    );
     url.searchParams.set("limit", "200");
 
     const results: ProviderTemplate[] = [];
@@ -3560,6 +3568,8 @@ interface MetaTemplateRow {
   status?: string;
   category?: string;
   components?: TemplateComponent[];
+  /** Meta's own answer: "POSITIONAL" | "NAMED". Absent on old rows. */
+  parameter_format?: string;
 }
 
 function normalizeMetaTemplate(row: MetaTemplateRow): ProviderTemplate | null {
@@ -3576,6 +3586,10 @@ function normalizeMetaTemplate(row: MetaTemplateRow): ProviderTemplate | null {
     category,
     bodyText: body?.text ?? "",
     components,
+    // Default POSITIONAL when Meta omits it: that is the historical default and
+    // the shape every pre-existing row was synced under, so an omitted field
+    // can't silently flip a working template to the named wire format.
+    parameterFormat: (row.parameter_format ?? "").toUpperCase() === "NAMED" ? "named" : "positional",
     ...(row.id ? { externalId: row.id } : {}),
   };
 }

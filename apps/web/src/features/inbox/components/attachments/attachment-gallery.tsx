@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Film, Loader2, Paperclip, StickyNote } from "lucide-react";
+import { Film, Loader2, Paperclip } from "lucide-react";
 
 import {
   type AttachmentKind,
@@ -13,17 +13,19 @@ import { fileIconForName } from "@/features/inbox/lib/file-icon";
 import { cn, formatLocaleString } from "@ccp/shared/utils";
 import { LocalTime } from "@/components/local-time";
 import { useTimezone } from "@/providers/tz-provider";
-import type { InternalNote, Message, User } from "@ccp/shared/types";
+import type { Message } from "@ccp/shared/types";
 
 import { MediaLightbox } from "./media-lightbox";
 
-const KIND_CHIPS: Array<{ id: AttachmentKind | "all" | "notes"; label: string }> = [
+// These chips mean exactly one thing: what KIND of attachment. Notes and
+// flags used to be crammed in here, which was a category error (a note is not
+// a file) and buried them two clicks deep — they're top-level panel tabs now.
+const KIND_CHIPS: Array<{ id: AttachmentKind | "all"; label: string }> = [
   { id: "all", label: "All" },
   { id: "image", label: "Photos" },
   { id: "video", label: "Videos" },
   { id: "audio", label: "Audio" },
-  { id: "document", label: "Files" },
-  { id: "notes", label: "Notes" },
+  { id: "document", label: "Docs" },
 ];
 
 /**
@@ -38,21 +40,17 @@ const KIND_CHIPS: Array<{ id: AttachmentKind | "all" | "notes"; label: string }>
 export function AttachmentGallery({
   conversationId,
   onGoToMessage,
-  notes,
-  teamMembers,
 }: {
   conversationId: string;
   onGoToMessage: (messageId: string) => void;
-  notes: InternalNote[];
-  teamMembers: User[];
 }) {
-  const [filter, setFilter] = useState<AttachmentKind | "all" | "notes">("all");
+  const [filter, setFilter] = useState<AttachmentKind | "all">("all");
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
   const { items, loading, loadingMore, error, hasMore, loadMore } =
     useConversationAttachments(
       conversationId,
-      filter === "all" || filter === "notes" ? null : filter,
+      filter === "all" ? null : filter,
     );
 
   // Subset of items that the lightbox can render — images + stickers + videos.
@@ -101,14 +99,6 @@ export function AttachmentGallery({
 
       {/* Body */}
       <div className="flex-1 px-5 py-4">
-        {filter === "notes" ? (
-          <NotesPanel
-            notes={notes}
-            teamMembers={teamMembers}
-            conversationId={conversationId}
-          />
-        ) : (
-          <>
         {loading && items.length === 0 && <SkeletonGrid />}
         {!loading && error && (
           <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -159,8 +149,6 @@ export function AttachmentGallery({
             <div ref={sentinelRef} className="mt-4 flex items-center justify-center py-3">
               {loadingMore && <Loader2 className="size-4 animate-spin text-muted-foreground" />}
             </div>
-          </>
-        )}
           </>
         )}
       </div>
@@ -322,71 +310,6 @@ function EmptyState({ filter }: { filter: AttachmentKind | "all" }) {
  * and the thread are siblings, so this avoids threading a callback through four
  * layers (same pattern the inbox uses for `ccp:contact-stage-delta`).
  */
-function NotesPanel({
-  notes,
-  teamMembers,
-  conversationId,
-}: {
-  notes: InternalNote[];
-  teamMembers: User[];
-  conversationId: string;
-}) {
-  const memberById = useMemo(
-    () => new Map(teamMembers.map((u) => [u.id, u])),
-    [teamMembers],
-  );
-  const sorted = useMemo(
-    () => [...notes].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)),
-    [notes],
-  );
-  if (sorted.length === 0) {
-    return (
-      <div className="flex flex-col items-center gap-2 py-12 text-center text-sm text-muted-foreground">
-        <StickyNote className="size-6 opacity-40" />
-        <div>No internal notes in this conversation yet.</div>
-      </div>
-    );
-  }
-  return (
-    <ul className="flex flex-col gap-2">
-      {sorted.map((n) => {
-        const author = n.authorUserId ? memberById.get(n.authorUserId) : null;
-        return (
-          <li
-            key={n.id}
-            className="rounded-md border border-note-border bg-note-bg p-3 text-note-fg"
-          >
-            <div className="mb-1 flex items-center justify-between gap-2">
-              <span className="truncate text-xs font-medium opacity-80">
-                {author?.name ?? "Removed user"}
-              </span>
-              <button
-                type="button"
-                onClick={() =>
-                  window.dispatchEvent(
-                    new CustomEvent("ccp:jump-to-note", {
-                      detail: { conversationId, noteId: n.id },
-                    }),
-                  )
-                }
-                className="shrink-0 rounded-md px-2 py-0.5 text-xs font-medium text-primary hover:bg-primary/10"
-                title="Jump to this note in the chat"
-              >
-                Jump
-              </button>
-            </div>
-            <p className="whitespace-pre-wrap wrap-break-word text-sm">
-              {n.body}
-            </p>
-            <div className="mt-1.5 text-2xs opacity-70">
-              <LocalTime iso={n.timestamp} format="listTime" />
-            </div>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
 
 function isViewable(m: Message): boolean {
   const k = m.media?.kind;

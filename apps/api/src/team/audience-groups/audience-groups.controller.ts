@@ -29,7 +29,7 @@ export class AudienceGroupsController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    const groups = await this.groups.list(session.teamId);
+    const groups = await this.groups.list(session.workspaceId);
     return { groups };
   }
 
@@ -38,7 +38,7 @@ export class AudienceGroupsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    const group = await this.groups.get(session.teamId, id);
+    const group = await this.groups.get(session.workspaceId, id);
     return { group };
   }
 
@@ -48,7 +48,7 @@ export class AudienceGroupsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateAudienceGroupSchema)) body: CreateAudienceGroupInput,
   ) {
-    const group = await this.groups.create(session.teamId, session.userId, body);
+    const group = await this.groups.create(session.workspaceId, session.userId, body);
     return { group };
   }
 
@@ -59,7 +59,7 @@ export class AudienceGroupsController {
     @Param("id") id: string,
     @Body(zBody(UpdateAudienceGroupSchema)) body: UpdateAudienceGroupInput,
   ) {
-    const group = await this.groups.update(session.teamId, id, body);
+    const group = await this.groups.update(session.workspaceId, id, body);
     return { group };
   }
 
@@ -69,7 +69,7 @@ export class AudienceGroupsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.groups.remove(session.teamId, id);
+    await this.groups.remove(session.workspaceId, id);
     return { ok: true };
   }
 }

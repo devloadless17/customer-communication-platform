@@ -14,7 +14,7 @@ export const AI_QUEUE_NAME = "ai-replies";
 export type AiJob =
   | {
       kind: "reply";
-      teamId: string;
+      workspaceId: string;
       conversationId: string;
       inboundMessageId: string;
       text: string;
@@ -40,7 +40,7 @@ export function getAiQueue(): Queue<AiJob> {
 }
 
 export async function enqueueAiReply(data: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   inboundMessageId: string;
   text: string;
@@ -53,7 +53,7 @@ export async function enqueueAiReply(data: {
   const q = getAiQueue();
   const jobData: AiJob = {
     kind: "reply",
-    teamId: data.teamId,
+    workspaceId: data.workspaceId,
     conversationId: data.conversationId,
     inboundMessageId: data.inboundMessageId,
     text: data.text,
@@ -97,7 +97,7 @@ export async function enqueueAiPost(
 /**
  * Final memory-extraction pass when a chat closes (session end). Consolidates
  * durable interests/preferences for the person so they seed FUTURE chats.
- * Idempotent: the memory job dedups on (teamId, customerId, kind, value), and
+ * Idempotent: the memory job dedups on (workspaceId, customerId, kind, value), and
  * the per-conversation jobId collapses repeated close events.
  */
 export async function enqueueAiMemoryOnClose(conversationId: string): Promise<void> {

@@ -51,7 +51,7 @@ export class WorkflowsController {
   @Get()
   @RequireRole("admin")
   async list(@CurrentSession() session: ApiSession) {
-    return this.workflows.list(session.teamId);
+    return this.workflows.list(session.workspaceId);
   }
 
   @Post()
@@ -64,7 +64,7 @@ export class WorkflowsController {
     // `{ error, details, stepErrors }`. Note: the error envelope differs
     // from zBody's `{ error, issues }` — clients of this endpoint must
     // read `details` rather than `issues`.
-    return this.workflows.create(session.teamId, body);
+    return this.workflows.create(session.workspaceId, body);
   }
 
   // ---- :id sub-paths (must precede :id leaf) -----------------------------
@@ -77,7 +77,7 @@ export class WorkflowsController {
     @Body(zBody(PublishWorkflowSchema)) body: PublishWorkflowInput,
   ) {
     const out = await this.workflows.publish(
-      session.teamId,
+      session.workspaceId,
       id,
       body.publish,
     );
@@ -97,7 +97,7 @@ export class WorkflowsController {
     @Body(zBody(ManualTriggerSchema)) body: ManualTriggerInput,
   ) {
     const out = await this.workflows.manualTrigger(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       id,
       body,
@@ -112,7 +112,7 @@ export class WorkflowsController {
     @Param("id") id: string,
     @Body(zBody(TestWorkflowSchema)) body: TestWorkflowInput,
   ) {
-    const out = await this.workflows.test(session.teamId, id, body);
+    const out = await this.workflows.test(session.workspaceId, id, body);
     return { ok: true, ...out };
   }
 
@@ -123,7 +123,7 @@ export class WorkflowsController {
     @Param("id") id: string,
     @Query(zQuery(ListWorkflowRunsQuerySchema)) query: ListWorkflowRunsQuery,
   ) {
-    return this.workflows.listRuns(session.teamId, id, query);
+    return this.workflows.listRuns(session.workspaceId, id, query);
   }
 
   @Get(":id/runs/:runId")
@@ -133,7 +133,7 @@ export class WorkflowsController {
     @Param("id") id: string,
     @Param("runId") runId: string,
   ) {
-    return this.workflows.getRun(session.teamId, id, runId);
+    return this.workflows.getRun(session.workspaceId, id, runId);
   }
 
   // ---- :id leaf ----------------------------------------------------------
@@ -144,7 +144,7 @@ export class WorkflowsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    return this.workflows.get(session.teamId, id);
+    return this.workflows.get(session.workspaceId, id);
   }
 
   @Patch(":id")
@@ -156,7 +156,7 @@ export class WorkflowsController {
   ) {
     // Same `unknown` rationale as create() above — parseWorkflowBody owns
     // the deep validation; errors come back as `{ details, stepErrors }`.
-    return this.workflows.update(session.teamId, id, body);
+    return this.workflows.update(session.workspaceId, id, body);
   }
 
   @Delete(":id")
@@ -165,7 +165,7 @@ export class WorkflowsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.workflows.remove(session.teamId, id);
+    await this.workflows.remove(session.workspaceId, id);
     return { ok: true };
   }
 }

@@ -18,7 +18,7 @@ export type TeamChannelVisibility = "public" | "private";
 
 export interface TeamChannelDto {
   id: string;
-  teamId: string;
+  workspaceId: string;
   /** NULL for DMs — they render from the peer's identity, not a name. */
   name: string | null;
   description: string | null;

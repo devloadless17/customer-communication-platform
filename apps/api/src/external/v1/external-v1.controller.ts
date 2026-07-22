@@ -40,6 +40,25 @@ import {
   type ListTransfersQueryInput,
 } from "@/contacts/transfer.schemas";
 import { AssignmentService } from "@/assignment/assignment.service";
+import { ChannelAccountsService } from "@/team/channel-accounts/channel-accounts.service";
+import { TicketsService } from "@/tickets/tickets.service";
+import {
+  CreateTicketFieldSchema,
+  CreateTicketSchema,
+  ListTicketsQuerySchema,
+  TicketSettingsSchema,
+  UpdateTicketFieldSchema,
+  UpdateTicketSchema,
+  UpsertSlaPolicySchema,
+  type CreateTicketFieldInput,
+  type CreateTicketInput,
+  type ListTicketsQuery,
+  type TicketSettingsInput,
+  type UpdateTicketFieldInput,
+  type UpdateTicketInput,
+  type UpsertSlaPolicyInput,
+} from "@/tickets/tickets.schemas";
+import { parseAccountChannel } from "@/team/channel-accounts/channel-accounts.schemas";
 import {
   CreatePolicySchema,
   CreateRuleSchema,
@@ -59,6 +78,14 @@ import {
 
 import { ExternalV1Service } from "./external-v1.service";
 import { ExternalV1FlagsService } from "./external-v1-flags.service";
+import { InboxViewsService, type InboxViewActor } from "@/inbox-views/inbox-views.service";
+import { inboxViewWhereClauses } from "@/lib/inbox-views/where";
+import {
+  CreateInboxViewSchema,
+  UpdateInboxViewSchema,
+  type CreateInboxViewInput,
+  type UpdateInboxViewInput,
+} from "@/inbox-views/inbox-views.schemas";
 import {
   ExternalAssignSchema,
   ExternalBulkTagSchema,
@@ -180,8 +207,8 @@ import {
  *   DELETE /v1/conversations/:id/notes/:noteId — remove a note (fires note.deleted)
  *   GET    /v1/messages/:id                   — find a single message
  *
- * Bearer auth via TeamApiKey; ApiKeyGuard validates and exposes ApiKeyContext
- * with teamId + apiKeyId. All writes publish the SAME domain events the
+ * Bearer auth via WorkspaceApiKey; ApiKeyGuard validates and exposes ApiKeyContext
+ * with workspaceId + apiKeyId. All writes publish the SAME domain events the
  * internal routes do — downstream subscribers can't tell which entry point
  * fired.
  */
@@ -199,6 +226,9 @@ export class ExternalV1Controller {
     private readonly transfers: ContactTransferService,
     private readonly assignment: AssignmentService,
     private readonly flags: ExternalV1FlagsService,
+    private readonly inboxViews: InboxViewsService,
+    private readonly channelAccounts: ChannelAccountsService,
+    private readonly tickets: TicketsService,
   ) {}
 
   /**
@@ -282,13 +312,13 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Query(zQuery(ListContactsQuerySchema)) query: ListContactsQueryInput,
   ) {
-    return this.api.listContacts(auth.teamId, query);
+    return this.api.listContacts(auth.workspaceId, query);
   }
 
   @Get("contacts/:id")
   @RequireScope("read:contacts")
   async getContact(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
-    const contact = await this.api.getContact(auth.teamId, id);
+    const contact = await this.api.getContact(auth.workspaceId, id);
     return { contact };
   }
 
@@ -316,7 +346,7 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     return this.api.bulkContactTags(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       "tag-add",
       body,
@@ -335,7 +365,7 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     return this.api.bulkContactTags(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       "tag-remove",
       body,
@@ -371,7 +401,7 @@ export class ExternalV1Controller {
   ) {
     // No acting user on an API-key call; the job records the key's team and is
     // fetched back through the same team-scoped reads.
-    return this.transfers.startExport({ teamId: auth.teamId, userId: null, input: body });
+    return this.transfers.startExport({ workspaceId: auth.workspaceId, userId: null, input: body });
   }
 
   /**
@@ -391,7 +421,7 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     return this.api.startContactImport(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       body,
       this.idemKey(idempotencyKey),
@@ -412,7 +442,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @UploadedFile() file: Express.Multer.File | undefined,
   ) {
-    return this.transfers.preview(auth.teamId, file);
+    return this.transfers.preview(auth.workspaceId, file);
   }
 
   @Get("contacts/transfers")
@@ -421,13 +451,13 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Query(zQuery(ListTransfersQuerySchema)) query: ListTransfersQueryInput,
   ) {
-    return this.transfers.list(auth.teamId, query);
+    return this.transfers.list(auth.workspaceId, query);
   }
 
   @Get("contacts/transfers/:id")
   @RequireScope("read:contacts")
   async getContactTransfer(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
-    return { job: await this.transfers.get(auth.teamId, id) };
+    return { job: await this.transfers.get(auth.workspaceId, id) };
   }
 
   /**
@@ -441,7 +471,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Res() res: Response,
   ): Promise<void> {
-    res.redirect(302, await this.transfers.downloadUrl(auth.teamId, id, "result"));
+    res.redirect(302, await this.transfers.downloadUrl(auth.workspaceId, id, "result"));
   }
 
   @Get("contacts/transfers/:id/errors")
@@ -451,13 +481,13 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Res() res: Response,
   ): Promise<void> {
-    res.redirect(302, await this.transfers.downloadUrl(auth.teamId, id, "errors"));
+    res.redirect(302, await this.transfers.downloadUrl(auth.workspaceId, id, "errors"));
   }
 
   @Post("contacts/transfers/:id/cancel")
   @RequireScope("write:contacts")
   async cancelContactTransfer(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
-    return this.transfers.cancel(auth.teamId, id);
+    return this.transfers.cancel(auth.workspaceId, id);
   }
 
   // ---- Contacts: create / upsert / update / delete ------------------
@@ -470,7 +500,7 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     this.guardChainDepth(xCcpDepth);
-    const contact = await this.api.createContact(auth.teamId, auth.apiKeyId, body);
+    const contact = await this.api.createContact(auth.workspaceId, auth.apiKeyId, body);
     return { contact };
   }
 
@@ -484,7 +514,7 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     return this.api.upsertContact(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       body,
       this.idemKey(idempotencyKey),
@@ -523,7 +553,7 @@ export class ExternalV1Controller {
       });
     }
     const contact = await this.api.updateContact(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       id,
       parsed.data,
@@ -541,7 +571,7 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     this.guardChainDepth(xCcpDepth);
-    await this.api.deleteContact(auth.teamId, auth.apiKeyId, id);
+    await this.api.deleteContact(auth.workspaceId, auth.apiKeyId, id);
     return { ok: true };
   }
 
@@ -553,7 +583,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
   ) {
-    return this.api.getContactChannels(auth.teamId, id);
+    return this.api.getContactChannels(auth.workspaceId, id);
   }
 
   @Post("contacts/:id/tags")
@@ -567,7 +597,7 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     const contact = await this.api.addContactTags(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
@@ -588,7 +618,7 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     const contact = await this.api.removeContactTag(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       id,
       tagId,
@@ -615,7 +645,7 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     const contact = await this.api.removeContactTags(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       id,
       body.tagIds,
@@ -631,7 +661,7 @@ export class ExternalV1Controller {
   @Get("contact-fields")
   @RequireScope("read:catalog")
   async listContactFields(@CurrentApiKey() auth: ApiKeyContext) {
-    return this.api.listContactFields(auth.teamId);
+    return this.api.listContactFields(auth.workspaceId);
   }
 
   @Get("contact-fields/:idOrKey")
@@ -640,7 +670,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("idOrKey") idOrKey: string,
   ) {
-    const field = await this.api.findContactField(auth.teamId, idOrKey);
+    const field = await this.api.findContactField(auth.workspaceId, idOrKey);
     return { field };
   }
 
@@ -650,7 +680,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ExternalCreateContactFieldSchema)) body: ExternalCreateContactFieldInput,
   ) {
-    const field = await this.api.createContactField(auth.teamId, body);
+    const field = await this.api.createContactField(auth.workspaceId, body);
     return { field };
   }
 
@@ -659,7 +689,7 @@ export class ExternalV1Controller {
   @Get("tags")
   @RequireScope("read:catalog")
   async listTags(@CurrentApiKey() auth: ApiKeyContext) {
-    return this.api.listTags(auth.teamId);
+    return this.api.listTags(auth.workspaceId);
   }
 
   @Post("tags")
@@ -668,7 +698,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ExternalCreateTagSchema)) body: ExternalCreateTagInput,
   ) {
-    const tag = await this.api.createTag(auth.teamId, body);
+    const tag = await this.api.createTag(auth.workspaceId, body);
     return { tag };
   }
 
@@ -679,14 +709,14 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(ExternalUpdateTagSchema)) body: ExternalUpdateTagInput,
   ) {
-    const tag = await this.api.updateTag(auth.teamId, id, body);
+    const tag = await this.api.updateTag(auth.workspaceId, id, body);
     return { tag };
   }
 
   @Delete("tags/:id")
   @RequireScope("write:catalog")
   async deleteTag(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
-    await this.api.deleteTag(auth.teamId, id);
+    await this.api.deleteTag(auth.workspaceId, id);
     return { ok: true };
   }
 
@@ -695,7 +725,7 @@ export class ExternalV1Controller {
   @Get("stages")
   @RequireScope("read:catalog")
   async listStages(@CurrentApiKey() auth: ApiKeyContext) {
-    return this.api.listStages(auth.teamId);
+    return this.api.listStages(auth.workspaceId);
   }
 
   // ---- Channels (synthetic single-row) ------------------------------
@@ -703,7 +733,7 @@ export class ExternalV1Controller {
   @Get("channels")
   @RequireScope("read:catalog")
   async listChannels(@CurrentApiKey() auth: ApiKeyContext) {
-    return this.api.listChannels(auth.teamId);
+    return this.api.listChannels(auth.workspaceId);
   }
 
   // ---- Users --------------------------------------------------------
@@ -711,7 +741,7 @@ export class ExternalV1Controller {
   @Get("users")
   @RequireScope("read:catalog")
   async listUsers(@CurrentApiKey() auth: ApiKeyContext) {
-    return this.api.listUsers(auth.teamId);
+    return this.api.listUsers(auth.workspaceId);
   }
 
   /**
@@ -729,7 +759,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(SetUserAvailabilitySchema)) body: SetUserAvailabilityInput,
   ) {
-    return this.api.setUserAvailability(auth.teamId, id, body);
+    return this.api.setUserAvailability(auth.workspaceId, id, body);
   }
 
   /** Set a teammate's working-hours mode/schedule (inherit | custom | off). */
@@ -740,7 +770,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(SetUserWorkHoursSchema)) body: SetUserWorkHoursInput,
   ) {
-    return this.api.setUserWorkHours(auth.teamId, id, body);
+    return this.api.setUserWorkHours(auth.workspaceId, id, body);
   }
 
   @Get("users/:idOrEmail")
@@ -749,7 +779,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("idOrEmail") idOrEmail: string,
   ) {
-    return this.api.findUser(auth.teamId, idOrEmail);
+    return this.api.findUser(auth.workspaceId, idOrEmail);
   }
 
   // ---- Assignment routing -------------------------------------------
@@ -763,7 +793,7 @@ export class ExternalV1Controller {
   @Get("assignment")
   @RequireScope("read:catalog")
   async getAssignment(@CurrentApiKey() auth: ApiKeyContext) {
-    return this.assignment.getOverview(auth.teamId);
+    return this.assignment.getOverview(auth.workspaceId);
   }
 
   @Post("assignment/policies")
@@ -774,7 +804,7 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     this.guardChainDepth(xCcpDepth);
-    return this.assignment.createPolicy(auth.teamId, body);
+    return this.assignment.createPolicy(auth.workspaceId, body);
   }
 
   @Put("assignment/policies/:id")
@@ -786,7 +816,7 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     this.guardChainDepth(xCcpDepth);
-    return this.assignment.updatePolicy(auth.teamId, id, body);
+    return this.assignment.updatePolicy(auth.workspaceId, id, body);
   }
 
   @Post("assignment/policies/:id/default")
@@ -795,7 +825,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
   ) {
-    return this.assignment.setDefaultPolicy(auth.teamId, id);
+    return this.assignment.setDefaultPolicy(auth.workspaceId, id);
   }
 
   @Delete("assignment/policies/:id")
@@ -804,7 +834,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
   ) {
-    return this.assignment.archivePolicy(auth.teamId, id);
+    return this.assignment.archivePolicy(auth.workspaceId, id);
   }
 
   @Post("assignment/rules")
@@ -813,7 +843,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(CreateRuleSchema)) body: CreateRuleInput,
   ) {
-    return this.assignment.createRule(auth.teamId, body);
+    return this.assignment.createRule(auth.workspaceId, body);
   }
 
   // Before `rules/:id` — Nest matches in declaration order.
@@ -823,7 +853,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ReorderRulesSchema)) body: ReorderRulesInput,
   ) {
-    return this.assignment.reorderRules(auth.teamId, body.ruleIds);
+    return this.assignment.reorderRules(auth.workspaceId, body.ruleIds);
   }
 
   @Patch("assignment/rules/:id")
@@ -833,7 +863,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(UpdateRuleSchema)) body: UpdateRuleInput,
   ) {
-    return this.assignment.updateRule(auth.teamId, id, body);
+    return this.assignment.updateRule(auth.workspaceId, id, body);
   }
 
   @Delete("assignment/rules/:id")
@@ -842,7 +872,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
   ) {
-    return this.assignment.deleteRule(auth.teamId, id);
+    return this.assignment.deleteRule(auth.workspaceId, id);
   }
 
   @Patch("assignment/settings")
@@ -851,7 +881,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(UpdateAssignmentSettingsSchema)) body: UpdateAssignmentSettingsInput,
   ) {
-    return this.assignment.updateSettings(auth.teamId, body);
+    return this.assignment.updateSettings(auth.workspaceId, body);
   }
 
   /** Dry run: "who would take a conversation like this?" Read-only — never
@@ -862,7 +892,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(PreviewAssignmentSchema)) body: PreviewAssignmentInput,
   ) {
-    return this.assignment.preview(auth.teamId, body);
+    return this.assignment.preview(auth.workspaceId, body);
   }
 
   // ---- Conversations ------------------------------------------------
@@ -871,19 +901,155 @@ export class ExternalV1Controller {
   // Clients pull campaign results into their own BI. Same DTO the in-app report
   // renders, so the API and the UI can never disagree about a number.
 
+  // ── Tickets ─────────────────────────────────────────────────────────────
+  // Full parity with the in-app board: the same domain functions the UI calls,
+  // with an API-key actor instead of a session. A partner helpdesk can read the
+  // backlog, open work, reassign it and resolve it without polling messages.
+
+  @Get("tickets")
+  @RequireScope("read:tickets")
+  async listTickets(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query(zQuery(ListTicketsQuerySchema)) query: ListTicketsQuery,
+  ) {
+    // No viewer → no conversation-visibility restriction. An API key is
+    // workspace-scoped by construction and has no agent identity to narrow to.
+    return this.tickets.list(auth.workspaceId, "", query);
+  }
+
+  @Get("tickets/counts")
+  @RequireScope("read:tickets")
+  async ticketCounts(@CurrentApiKey() auth: ApiKeyContext) {
+    // `mineActive` is meaningless for a key (no agent identity) and comes back
+    // as 0 — documented, rather than silently omitted from the shape.
+    const counts = await this.tickets.counts(auth.workspaceId, "");
+    return { counts };
+  }
+
+  @Get("tickets/:id")
+  @RequireScope("read:tickets")
+  async getTicket(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+    return this.tickets.get(auth.workspaceId, id);
+  }
+
+  @Post("tickets")
+  @RequireScope("write:tickets")
+  async createTicketV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(CreateTicketSchema)) body: CreateTicketInput,
+  ) {
+    return this.tickets.create(auth.workspaceId, { apiKeyId: auth.apiKeyId }, body);
+  }
+
+  @Patch("tickets/:id")
+  @RequireScope("write:tickets")
+  async updateTicketV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(UpdateTicketSchema)) body: UpdateTicketInput,
+  ) {
+    return this.tickets.update(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body);
+  }
+
+  // Ticketing configuration. Read is deliberately under `read:tickets` (a BI
+  // system needs the SLA promise to report against it); every write changes
+  // what FUTURE tickets promise, so it needs `write:tickets`.
+
+  @Get("tickets-settings")
+  @RequireScope("read:tickets")
+  async ticketSettings(@CurrentApiKey() auth: ApiKeyContext) {
+    return this.tickets.getSettings(auth.workspaceId);
+  }
+
+  @Patch("tickets-settings")
+  @RequireScope("write:tickets")
+  async updateTicketSettings(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(TicketSettingsSchema)) body: TicketSettingsInput,
+  ) {
+    return this.tickets.updateSettings(auth.workspaceId, body);
+  }
+
+  @Get("ticket-sla")
+  @RequireScope("read:tickets")
+  async listTicketSla(@CurrentApiKey() auth: ApiKeyContext) {
+    const policies = await this.tickets.listSlaPolicies(auth.workspaceId);
+    return { policies };
+  }
+
+  @Post("ticket-sla")
+  @RequireScope("write:tickets")
+  async upsertTicketSla(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(UpsertSlaPolicySchema)) body: UpsertSlaPolicyInput,
+  ) {
+    const policy = await this.tickets.upsertSlaPolicy(auth.workspaceId, body);
+    return { policy };
+  }
+
+  @Get("ticket-fields")
+  @RequireScope("read:tickets")
+  async listTicketFields(@CurrentApiKey() auth: ApiKeyContext) {
+    const fields = await this.tickets.listFields(auth.workspaceId);
+    return { fields };
+  }
+
+  @Post("ticket-fields")
+  @RequireScope("write:tickets")
+  async createTicketField(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(CreateTicketFieldSchema)) body: CreateTicketFieldInput,
+  ) {
+    const field = await this.tickets.createField(auth.workspaceId, body);
+    return { field };
+  }
+
+  @Patch("ticket-fields/:id")
+  @RequireScope("write:tickets")
+  async updateTicketField(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(UpdateTicketFieldSchema)) body: UpdateTicketFieldInput,
+  ) {
+    const field = await this.tickets.updateField(auth.workspaceId, id, body);
+    return { field };
+  }
+
+  @Delete("ticket-fields/:id")
+  @RequireScope("write:tickets")
+  async deleteTicketField(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+    await this.tickets.deleteField(auth.workspaceId, id);
+    return { ok: true };
+  }
+
+  // ── Channel accounts ────────────────────────────────────────────────────
+  // Which accounts a workspace has connected per channel, and which one is the
+  // send default. Read-only: connecting/disconnecting moves real credentials
+  // and changes which number a customer hears from (see the scope comment).
+
+  @Get("channels/:channel/accounts")
+  @RequireScope("read:channels")
+  async listChannelAccounts(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("channel") channel: string,
+  ) {
+    const ch = parseAccountChannel(channel);
+    return { accounts: await this.channelAccounts.list(auth.workspaceId, ch) };
+  }
+
   @Get("broadcasts")
   @RequireScope("read:broadcasts")
   async listBroadcasts(
     @CurrentApiKey() auth: ApiKeyContext,
     @Query(zQuery(ListBroadcastsQuerySchema)) query: ListBroadcastsQueryInput,
   ) {
-    return this.api.listBroadcasts(auth.teamId, query);
+    return this.api.listBroadcasts(auth.workspaceId, query);
   }
 
   @Get("broadcasts/:id")
   @RequireScope("read:broadcasts")
   async getBroadcast(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
-    const broadcast = await this.api.getBroadcast(auth.teamId, id);
+    const broadcast = await this.api.getBroadcast(auth.workspaceId, id);
     return { broadcast };
   }
 
@@ -891,7 +1057,7 @@ export class ExternalV1Controller {
   @Get("broadcasts/:id/report")
   @RequireScope("read:broadcasts")
   async getBroadcastReport(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
-    const report = await this.api.getBroadcastReport(auth.teamId, id);
+    const report = await this.api.getBroadcastReport(auth.workspaceId, id);
     return { report };
   }
 
@@ -907,7 +1073,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Query(zQuery(ListBroadcastRecipientsQuerySchema)) query: ListBroadcastRecipientsQueryInput,
   ) {
-    return this.api.listBroadcastRecipients(auth.teamId, id, query);
+    return this.api.listBroadcastRecipients(auth.workspaceId, id, query);
   }
 
   @Get("conversations")
@@ -916,10 +1082,27 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Query(zQuery(ListConversationsQuerySchema)) query: ListConversationsQueryInput,
   ) {
+    // Resolve the saved view HERE, where the membership check lives — a key
+    // only sees shared views, and an id from another workspace 404s before it
+    // can become a WHERE clause. `resolveFilters` then drops references to
+    // tags / stages / teammates that have since been deleted.
+    const viewClauses = query.viewId
+      ? inboxViewWhereClauses(
+          await this.inboxViews.resolveFilters(
+            auth.workspaceId,
+            (await this.inboxViews.get(apiKeyViewActor(auth), query.viewId)).filters,
+          ),
+          // No viewer: an API key is not a person, so a view whose assignee is
+          // "me" matches nothing rather than everything.
+          undefined,
+        )
+      : [];
+
     return this.api.listConversations(
-      auth.teamId,
+      auth.workspaceId,
       query,
       hasScope(auth.scopes, "read:contacts"),
+      viewClauses,
     );
   }
 
@@ -930,7 +1113,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
   ) {
     return this.api.getConversation(
-      auth.teamId,
+      auth.workspaceId,
       id,
       hasScope(auth.scopes, "read:contacts"),
     );
@@ -946,7 +1129,7 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     this.guardChainDepth(xCcpDepth);
-    await this.api.assign(auth.teamId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
+    await this.api.assign(auth.workspaceId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
     return { ok: true, conversationId: id };
   }
 
@@ -960,7 +1143,7 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     this.guardChainDepth(xCcpDepth);
-    await this.api.setStatus(auth.teamId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
+    await this.api.setStatus(auth.workspaceId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
     return { ok: true, conversationId: id };
   }
 
@@ -977,7 +1160,7 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     this.guardChainDepth(xCcpDepth);
-    await this.api.setAiEnabled(auth.teamId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
+    await this.api.setAiEnabled(auth.workspaceId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
     return { ok: true };
   }
 
@@ -998,7 +1181,7 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     return this.api.assignByContact(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
@@ -1017,7 +1200,7 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     return this.api.setStatusByContact(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
@@ -1043,7 +1226,7 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     const contact = await this.api.updateContact(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       id,
       { stageId: body.stageId },
@@ -1080,7 +1263,7 @@ export class ExternalV1Controller {
     // guard depth first; the send routes must too.
     this.guardChainDepth(xCcpDepth);
     return this.api.sendTopLevelMessage(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       body,
       this.idemKeyRequired(idempotencyKey),
@@ -1095,7 +1278,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
   ) {
     return this.api.findMessage(
-      auth.teamId,
+      auth.workspaceId,
       id,
       hasScope(auth.scopes, "read:contacts"),
     );
@@ -1109,7 +1292,7 @@ export class ExternalV1Controller {
     @Query(zQuery(ListMessagesQuerySchema)) query: ListMessagesQueryInput,
   ) {
     return this.api.listMessages(
-      auth.teamId,
+      auth.workspaceId,
       id,
       query,
       hasScope(auth.scopes, "read:contacts"),
@@ -1137,7 +1320,7 @@ export class ExternalV1Controller {
     // Loop guard before idempotency/body checks — see sendTopLevelMessage.
     this.guardChainDepth(xCcpDepth);
     const out = await this.api.sendMessage(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
@@ -1187,7 +1370,7 @@ export class ExternalV1Controller {
     // Loop guard before idempotency/body checks — see sendTopLevelMessage.
     this.guardChainDepth(xCcpDepth);
     return this.api.sendInteractive(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
@@ -1207,7 +1390,7 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     const out = await this.api.createNote(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
@@ -1224,7 +1407,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Param("noteId") noteId: string,
   ) {
-    return this.api.deleteNote(auth.teamId, id, noteId);
+    return this.api.deleteNote(auth.workspaceId, id, noteId);
   }
   // ---- Message flags ------------------------------------------------
   //
@@ -1242,14 +1425,14 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Query(zQuery(ExternalListFlagsQuerySchema)) query: ExternalListFlagsQueryInput,
   ) {
-    return this.flags.list(auth.teamId, query);
+    return this.flags.list(auth.workspaceId, query);
   }
 
   /** Static segments before the `:flagId` routes below. */
   @Get("message-flags/counts")
   @RequireScope("read:flags")
   async messageFlagCounts(@CurrentApiKey() auth: ApiKeyContext) {
-    return this.flags.counts(auth.teamId);
+    return this.flags.counts(auth.workspaceId);
   }
 
   /** The flag CATALOG (which flags exist), archived included. Lives under
@@ -1257,7 +1440,7 @@ export class ExternalV1Controller {
   @Get("message-flag-definitions")
   @RequireScope("read:catalog")
   async listMessageFlagDefinitions(@CurrentApiKey() auth: ApiKeyContext) {
-    return this.flags.listDefinitions(auth.teamId);
+    return this.flags.listDefinitions(auth.workspaceId);
   }
 
   @Post("message-flag-definitions")
@@ -1266,7 +1449,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ExternalCreateFlagDefinitionSchema)) body: ExternalCreateFlagDefinitionInput,
   ) {
-    return this.flags.createDefinition(auth.teamId, body);
+    return this.flags.createDefinition(auth.workspaceId, body);
   }
 
   @Patch("message-flag-definitions/:id")
@@ -1276,7 +1459,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(ExternalUpdateFlagDefinitionSchema)) body: ExternalUpdateFlagDefinitionInput,
   ) {
-    return this.flags.updateDefinition(auth.teamId, id, body);
+    return this.flags.updateDefinition(auth.workspaceId, id, body);
   }
 
   /** Only permitted while the definition has never been raised — otherwise 409
@@ -1288,7 +1471,70 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
   ) {
-    return this.flags.deleteDefinition(auth.teamId, id);
+    return this.flags.deleteDefinition(auth.workspaceId, id);
+  }
+
+  // ---- Saved inbox views ---------------------------------------------
+  //
+  // A named, reusable filter over the conversation list ("Support ·
+  // unassigned · WhatsApp"). Full parity with the inbox rail — the SAME
+  // service backs both, so a view can never select different conversations
+  // through the API than it shows in the product.
+  //
+  // API-KEY SPECIFICS, both consequences of a key not being a person:
+  //   - only SHARED views are visible or creatable (a personal view needs an
+  //     owner; creating one returns `inbox_view_requires_user`);
+  //   - a view whose assignee is "me" matches NOTHING here, deliberately —
+  //     silently widening it to everyone would be the dangerous direction.
+  //
+  // To LIST the conversations a view selects, pass its id to
+  // `GET /v1/conversations?viewId=…`.
+
+  @Get("inbox-views")
+  @RequireScope("read:catalog")
+  async listInboxViews(@CurrentApiKey() auth: ApiKeyContext) {
+    const views = await this.inboxViews.list(apiKeyViewActor(auth));
+    return { views };
+  }
+
+  @Get("inbox-views/:id")
+  @RequireScope("read:catalog")
+  async getInboxView(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+    const view = await this.inboxViews.get(apiKeyViewActor(auth), id);
+    return { view };
+  }
+
+  @Post("inbox-views")
+  @RequireScope("write:catalog")
+  async createInboxView(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(CreateInboxViewSchema)) body: CreateInboxViewInput,
+  ) {
+    const view = await this.inboxViews.create(apiKeyViewActor(auth), {
+      ...body,
+      // A key has no personal scope, so default to shared rather than letting
+      // the service's personal default throw on every unqualified create.
+      visibility: body.visibility ?? "shared",
+    });
+    return { view };
+  }
+
+  @Patch("inbox-views/:id")
+  @RequireScope("write:catalog")
+  async updateInboxView(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(UpdateInboxViewSchema)) body: UpdateInboxViewInput,
+  ) {
+    const view = await this.inboxViews.update(apiKeyViewActor(auth), id, body);
+    return { view };
+  }
+
+  @Delete("inbox-views/:id")
+  @RequireScope("write:catalog")
+  async deleteInboxView(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+    await this.inboxViews.remove(apiKeyViewActor(auth), id);
+    return { ok: true };
   }
 
   @Post("messages/:messageId/flags")
@@ -1301,7 +1547,7 @@ export class ExternalV1Controller {
     // No Idempotency-Key requirement here, unlike sends: raising a flag is
     // idempotent by construction (@@unique([messageId, definitionId]) + upsert)
     // and costs nothing, so demanding a key would be friction with no payoff.
-    return this.flags.raise(auth.teamId, auth.apiKeyId, messageId, body);
+    return this.flags.raise(auth.workspaceId, auth.apiKeyId, messageId, body);
   }
 
   @Patch("message-flags/:flagId")
@@ -1311,7 +1557,7 @@ export class ExternalV1Controller {
     @Param("flagId") flagId: string,
     @Body(zBody(ExternalUpdateFlagSchema)) body: ExternalUpdateFlagInput,
   ) {
-    return this.flags.update(auth.teamId, auth.apiKeyId, flagId, body);
+    return this.flags.update(auth.workspaceId, auth.apiKeyId, flagId, body);
   }
 
   @Delete("message-flags/:flagId")
@@ -1320,7 +1566,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("flagId") flagId: string,
   ) {
-    return this.flags.remove(auth.teamId, auth.apiKeyId, flagId);
+    return this.flags.remove(auth.workspaceId, auth.apiKeyId, flagId);
   }
 
   // ---- Calls --------------------------------------------------------
@@ -1337,7 +1583,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Query(zQuery(ExternalListCallsQuerySchema)) query: ExternalListCallsQueryInput,
   ) {
-    return this.api.listCalls(auth.teamId, query);
+    return this.api.listCalls(auth.workspaceId, query);
   }
 
   /**
@@ -1352,7 +1598,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
   ) {
-    return this.api.getCallPermission(auth.teamId, id);
+    return this.api.getCallPermission(auth.workspaceId, id);
   }
 
   /**
@@ -1367,7 +1613,7 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
   ) {
     return this.api.requestCallPermission(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       id,
       this.idemKeyRequired(idempotencyKey),
@@ -1389,11 +1635,25 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
   ) {
     return this.api.sendCallButton(
-      auth.teamId,
+      auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
       this.idemKeyRequired(idempotencyKey),
     );
   }
+}
+
+/**
+ * An API key as a saved-view actor.
+ *
+ * `userId: null` is the whole point — it makes the service treat this caller
+ * as "not a person": shared views only, no personal ownership, and `me`
+ * assignee filters resolve to nothing. `canManageShared: true` because a key
+ * holding `write:catalog` is already trusted with workspace-wide
+ * configuration; gating it further would only mean a partner can create tags
+ * and stages but not the view that uses them.
+ */
+function apiKeyViewActor(auth: ApiKeyContext): InboxViewActor {
+  return { workspaceId: auth.workspaceId, userId: null, canManageShared: true };
 }

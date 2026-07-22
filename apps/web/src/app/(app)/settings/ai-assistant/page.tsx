@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 
 export default async function AiAssistantSettingsPage() {
   const { permissions } = await getSession();
-  if (!permissions["aiAssistant:manage"]) redirect("/settings/account");
+  if (!permissions["aiAssistant:manage"]) redirect("/account");
 
   const [{ config }, { documents }] = await Promise.all([
     api<{ config: AiConfig }>("/api/team/ai-assistant"),

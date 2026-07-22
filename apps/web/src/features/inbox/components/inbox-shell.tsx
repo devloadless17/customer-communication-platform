@@ -26,6 +26,7 @@ import { useTeamEvents } from "@/features/team-chat/hooks/use-team-events";
 import { useConnectionStatus } from "@/hooks/use-connection-status";
 import { useLiveTeamName } from "@/hooks/use-live-team-name";
 import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
+import { useInboxViews } from "@/features/inbox/contexts/inbox-views-context";
 import { dispatchLocalSocketEvent, getClientSocket } from "@/lib/socket-client";
 import { ThreadCache, type CachedThread } from "@/features/inbox/lib/thread-cache";
 import {
@@ -766,6 +767,10 @@ export function InboxShell({
   // stage with a stage filter active, or closing a chat with the Closed
   // preset active. The hook only reads this when handling such an event;
   // a fresh ref on cache.patch doesn't cost extra re-renders.
+  // Saved-view criteria, so a live row can be evaluated against the active
+  // view without a refetch (the `Filter` object carries only the id).
+  const { filtersById: viewFiltersById } = useInboxViews();
+
   const live = useTeamEvents(
     team.id,
     initialConversations,
@@ -775,6 +780,7 @@ export function InboxShell({
     filter,
     restrictedToOwnConversations,
     displayedThread?.data ?? null,
+    viewFiltersById,
   );
 
   // Memoized lookup for the cache-miss skeleton (needs the contact for the
@@ -1026,7 +1032,7 @@ export function InboxShell({
   const handleMarkRead = useCallback(
     (conversationId: string) => {
       dispatchLocalSocketEvent("conversation:read", {
-        teamId: team.id,
+        workspaceId: team.id,
         conversationId,
         readByUserId: currentUser.id,
       });

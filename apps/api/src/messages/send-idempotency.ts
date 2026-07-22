@@ -1,6 +1,6 @@
 /**
  * In-process idempotency lock for browser-driven sends, keyed by
- * `(teamId, userId, conversationId, clientTempId)`. The frontend already
+ * `(workspaceId, userId, conversationId, clientTempId)`. The frontend already
  * guards against double-click via `sendInFlightRef`, but a refresh / second
  * tab / network retry can still race; this gives the server the final word.
  *
@@ -68,12 +68,12 @@ interface Entry<T> {
 const inflight = new Map<string, Entry<unknown>>();
 
 function buildKey(
-  teamId: string,
+  workspaceId: string,
   userId: string,
   conversationId: string,
   clientTempId: string,
 ): string {
-  return `${teamId}|${userId}|${conversationId}|${clientTempId}`;
+  return `${workspaceId}|${userId}|${conversationId}|${clientTempId}`;
 }
 
 function evictExpired(now: number): void {
@@ -96,7 +96,7 @@ function evictExpired(now: number): void {
  */
 export async function runWithSendIdempotency<T>(
   scope: {
-    teamId: string;
+    workspaceId: string;
     userId: string;
     conversationId: string;
     clientTempId: string | undefined;
@@ -105,7 +105,7 @@ export async function runWithSendIdempotency<T>(
 ): Promise<T> {
   if (!scope.clientTempId) return work();
 
-  const key = buildKey(scope.teamId, scope.userId, scope.conversationId, scope.clientTempId);
+  const key = buildKey(scope.workspaceId, scope.userId, scope.conversationId, scope.clientTempId);
   const now = Date.now();
   const existing = inflight.get(key);
   if (existing && existing.expiresAt > now) {
@@ -152,13 +152,13 @@ export async function runWithSendIdempotency<T>(
  * clientTempId.
  */
 export function invalidateSendIdempotency(scope: {
-  teamId: string;
+  workspaceId: string;
   userId: string;
   conversationId: string;
   clientTempId: string | undefined;
 }): void {
   if (!scope.clientTempId) return;
   inflight.delete(
-    buildKey(scope.teamId, scope.userId, scope.conversationId, scope.clientTempId),
+    buildKey(scope.workspaceId, scope.userId, scope.conversationId, scope.clientTempId),
   );
 }

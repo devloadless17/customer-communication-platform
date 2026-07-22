@@ -8,7 +8,7 @@ import type {
   SocketData,
 } from "@ccp/shared/socket/events";
 
-import { channelRoom, conversationRoom, teamRoom, userRoom } from "./rooms";
+import { channelRoom, conversationRoom, workspaceRoom, userRoom } from "./rooms";
 
 export type TypedIO = Server<
   ClientToServerEvents,
@@ -51,14 +51,14 @@ export class RealtimeEmitter {
   // ordering change. Only opted-in teams pay, and even they hit an in-process
   // cache rather than the database on the hot path.
 
-  /** teamId → restricted?, with a short TTL. */
+  /** workspaceId → restricted?, with a short TTL. */
   private readonly restrictedTeams = new Map<string, { at: number; value: boolean }>();
   /** conversationId → assignee, invalidated whenever an assignment changes. */
   private readonly assigneeCache = new Map<string, { at: number; value: string | null }>();
   private static readonly SCOPE_TTL_MS = 30_000;
 
   private scopeResolver:
-    | ((teamId: string) => Promise<boolean>)
+    | ((workspaceId: string) => Promise<boolean>)
     | null = null;
   private assigneeResolver:
     | ((conversationId: string) => Promise<string | null>)
@@ -75,7 +75,7 @@ export class RealtimeEmitter {
   /** Bound on boot by RealtimeModule — keeps this service free of a Prisma
    *  import and mirrors how `channelActivityResolver` is wired. */
   bindVisibilityResolvers(
-    isTeamRestricted: (teamId: string) => Promise<boolean>,
+    isTeamRestricted: (workspaceId: string) => Promise<boolean>,
     assigneeOf: (conversationId: string) => Promise<string | null>,
     assigneeOfContact: (contactId: string) => Promise<string | null>,
   ): void {
@@ -93,7 +93,7 @@ export class RealtimeEmitter {
    * panel still updates live for their own customers.
    */
   emitAboutContact<E extends keyof ServerToClientEvents>(
-    teamId: string,
+    workspaceId: string,
     contactId: string | null | undefined,
     event: E,
     ...args: Parameters<ServerToClientEvents[E]>
@@ -103,25 +103,25 @@ export class RealtimeEmitter {
       this.logger.warn(`emitAboutContact("${String(event)}") dropped — IO not ready yet`);
       return;
     }
-    const cachedScope = this.restrictedTeams.get(teamId);
+    const cachedScope = this.restrictedTeams.get(workspaceId);
     const scopeFresh =
       cachedScope && Date.now() - cachedScope.at < RealtimeEmitter.SCOPE_TTL_MS;
     if (scopeFresh && !cachedScope.value) {
-      io.to(teamRoom(teamId)).emit(event, ...args);
+      io.to(workspaceRoom(workspaceId)).emit(event, ...args);
       return;
     }
     if (scopeFresh && cachedScope.value && contactId) {
       const hit = this.contactAssigneeCache.get(contactId);
       if (hit && Date.now() - hit.at < RealtimeEmitter.SCOPE_TTL_MS) {
-        this.emitToRooms(io, teamId, hit.value, event, args);
+        this.emitToRooms(io, workspaceId, hit.value, event, args);
         return;
       }
     }
-    void this.emitAboutContactSlow(teamId, contactId, event, args);
+    void this.emitAboutContactSlow(workspaceId, contactId, event, args);
   }
 
   private async emitAboutContactSlow<E extends keyof ServerToClientEvents>(
-    teamId: string,
+    workspaceId: string,
     contactId: string | null | undefined,
     event: E,
     args: Parameters<ServerToClientEvents[E]>,
@@ -131,17 +131,17 @@ export class RealtimeEmitter {
     try {
       let restricted = false;
       if (this.scopeResolver) {
-        const hit = this.restrictedTeams.get(teamId);
+        const hit = this.restrictedTeams.get(workspaceId);
         restricted =
           hit && Date.now() - hit.at < RealtimeEmitter.SCOPE_TTL_MS
             ? hit.value
-            : await this.scopeResolver(teamId).then((v) => {
-                this.restrictedTeams.set(teamId, { at: Date.now(), value: v });
+            : await this.scopeResolver(workspaceId).then((v) => {
+                this.restrictedTeams.set(workspaceId, { at: Date.now(), value: v });
                 return v;
               });
       }
       if (!restricted) {
-        io.to(teamRoom(teamId)).emit(event, ...args);
+        io.to(workspaceRoom(workspaceId)).emit(event, ...args);
         return;
       }
       let assignee: string | null = null;
@@ -149,14 +149,14 @@ export class RealtimeEmitter {
         assignee = await this.contactAssigneeResolver(contactId);
         this.contactAssigneeCache.set(contactId, { at: Date.now(), value: assignee });
       }
-      this.emitToRooms(io, teamId, assignee, event, args);
+      this.emitToRooms(io, workspaceId, assignee, event, args);
     } catch (err) {
       this.logger.warn(
         `emitAboutContact("${String(event)}") degraded to staff-only: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
-      io.to(teamRoom(teamId)).emit(event, ...args);
+      io.to(workspaceRoom(workspaceId)).emit(event, ...args);
     }
   }
 
@@ -167,8 +167,8 @@ export class RealtimeEmitter {
   }
 
   /** Called when an admin flips the team setting. */
-  invalidateTeamScope(teamId: string): void {
-    this.restrictedTeams.delete(teamId);
+  invalidateTeamScope(workspaceId: string): void {
+    this.restrictedTeams.delete(workspaceId);
   }
 
   /**
@@ -179,12 +179,12 @@ export class RealtimeEmitter {
    * team-wide, non-conversation frames (catalog changes, presence, broadcasts).
    */
   emitAboutConversation<E extends keyof ServerToClientEvents>(
-    teamId: string,
+    workspaceId: string,
     conversationId: string | null | undefined,
     event: E,
     ...args: Parameters<ServerToClientEvents[E]>
   ): void {
-    this.emitAboutConversationAlso(teamId, conversationId, [], event, ...args);
+    this.emitAboutConversationAlso(workspaceId, conversationId, [], event, ...args);
   }
 
   /**
@@ -197,7 +197,7 @@ export class RealtimeEmitter {
    * explicitly from the event payload.
    */
   emitAboutConversationAlso<E extends keyof ServerToClientEvents>(
-    teamId: string,
+    workspaceId: string,
     conversationId: string | null | undefined,
     alsoUserIds: readonly (string | null | undefined)[],
     event: E,
@@ -209,7 +209,7 @@ export class RealtimeEmitter {
       return;
     }
 
-    const cachedScope = this.restrictedTeams.get(teamId);
+    const cachedScope = this.restrictedTeams.get(workspaceId);
     const scopeFresh =
       cachedScope && Date.now() - cachedScope.at < RealtimeEmitter.SCOPE_TTL_MS;
 
@@ -217,24 +217,24 @@ export class RealtimeEmitter {
 
     // FAST PATH — known-unrestricted team: byte-identical to the old behavior.
     if (scopeFresh && !cachedScope.value) {
-      io.to(teamRoom(teamId)).emit(event, ...args);
+      io.to(workspaceRoom(workspaceId)).emit(event, ...args);
       return;
     }
     // FAST PATH — restricted team whose assignee we already know.
     if (scopeFresh && cachedScope.value && conversationId) {
       const cachedAssignee = this.assigneeCache.get(conversationId);
       if (cachedAssignee && Date.now() - cachedAssignee.at < RealtimeEmitter.SCOPE_TTL_MS) {
-        this.emitToRooms(io, teamId, cachedAssignee.value, event, args, extra);
+        this.emitToRooms(io, workspaceId, cachedAssignee.value, event, args, extra);
         return;
       }
     }
 
-    void this.emitAboutConversationSlow(teamId, conversationId, event, args, extra);
+    void this.emitAboutConversationSlow(workspaceId, conversationId, event, args, extra);
   }
 
   private emitToRooms<E extends keyof ServerToClientEvents>(
     io: TypedIO,
-    teamId: string,
+    workspaceId: string,
     assignee: string | null,
     event: E,
     args: Parameters<ServerToClientEvents[E]>,
@@ -244,14 +244,14 @@ export class RealtimeEmitter {
     // everyone); the assignee room adds the one restricted agent who owns it;
     // `alsoUserIds` covers a handover's PREVIOUS owner. socket.io de-duplicates
     // a socket matching several of these, so nobody receives the frame twice.
-    const rooms = new Set<string>([teamRoom(teamId)]);
+    const rooms = new Set<string>([workspaceRoom(workspaceId)]);
     if (assignee) rooms.add(userRoom(assignee));
     for (const uid of alsoUserIds) rooms.add(userRoom(uid));
     io.to([...rooms]).emit(event, ...args);
   }
 
   private async emitAboutConversationSlow<E extends keyof ServerToClientEvents>(
-    teamId: string,
+    workspaceId: string,
     conversationId: string | null | undefined,
     event: E,
     args: Parameters<ServerToClientEvents[E]>,
@@ -262,16 +262,16 @@ export class RealtimeEmitter {
     try {
       let restricted = false;
       if (this.scopeResolver) {
-        const hit = this.restrictedTeams.get(teamId);
+        const hit = this.restrictedTeams.get(workspaceId);
         if (hit && Date.now() - hit.at < RealtimeEmitter.SCOPE_TTL_MS) {
           restricted = hit.value;
         } else {
-          restricted = await this.scopeResolver(teamId);
-          this.restrictedTeams.set(teamId, { at: Date.now(), value: restricted });
+          restricted = await this.scopeResolver(workspaceId);
+          this.restrictedTeams.set(workspaceId, { at: Date.now(), value: restricted });
         }
       }
       if (!restricted) {
-        io.to(teamRoom(teamId)).emit(event, ...args);
+        io.to(workspaceRoom(workspaceId)).emit(event, ...args);
         return;
       }
       let assignee: string | null = null;
@@ -284,7 +284,7 @@ export class RealtimeEmitter {
           this.assigneeCache.set(conversationId, { at: Date.now(), value: assignee });
         }
       }
-      this.emitToRooms(io, teamId, assignee, event, args, alsoUserIds);
+      this.emitToRooms(io, workspaceId, assignee, event, args, alsoUserIds);
     } catch (err) {
       // Fail CLOSED to the staff room. Dropping an agent's own frame is
       // self-healing (the client reconciles on reconnect / next event);
@@ -295,12 +295,12 @@ export class RealtimeEmitter {
           err instanceof Error ? err.message : String(err)
         }`,
       );
-      io.to(teamRoom(teamId)).emit(event, ...args);
+      io.to(workspaceRoom(workspaceId)).emit(event, ...args);
     }
   }
 
   emitToTeam<E extends keyof ServerToClientEvents>(
-    teamId: string,
+    workspaceId: string,
     event: E,
     ...args: Parameters<ServerToClientEvents[E]>
   ): void {
@@ -309,7 +309,7 @@ export class RealtimeEmitter {
       this.logger.warn(`emitToTeam("${String(event)}") dropped — IO not ready yet`);
       return;
     }
-    io.to(teamRoom(teamId)).emit(event, ...args);
+    io.to(workspaceRoom(workspaceId)).emit(event, ...args);
   }
 
   /**
@@ -366,10 +366,10 @@ export class RealtimeEmitter {
   // doesn't take a DB dep — same indirection as the presence snapshotter).
   // `isDefault` channels = the whole team; non-default = membership-gated.
   private channelActivityResolver:
-    | ((channelId: string, teamId: string) => Promise<{ isDefault: boolean; memberUserIds: string[] }>)
+    | ((channelId: string, workspaceId: string) => Promise<{ isDefault: boolean; memberUserIds: string[] }>)
     | null = null;
   bindChannelActivityResolver(
-    fn: (channelId: string, teamId: string) => Promise<{ isDefault: boolean; memberUserIds: string[] }>,
+    fn: (channelId: string, workspaceId: string) => Promise<{ isDefault: boolean; memberUserIds: string[] }>,
   ): void {
     this.channelActivityResolver = fn;
   }
@@ -390,7 +390,7 @@ export class RealtimeEmitter {
    */
   async emitChannelScoped<E extends keyof ServerToClientEvents>(
     channelId: string,
-    teamId: string,
+    workspaceId: string,
     event: E,
     ...args: Parameters<ServerToClientEvents[E]>
   ): Promise<void> {
@@ -410,7 +410,7 @@ export class RealtimeEmitter {
     }
     let audience: { isDefault: boolean; memberUserIds: string[] };
     try {
-      audience = await resolver(channelId, teamId);
+      audience = await resolver(channelId, workspaceId);
     } catch (err) {
       // Fail closed: a self-healing badge/read-receipt frame dropped on a rare
       // DB fault is preferable to leaking private-channel metadata team-wide.
@@ -421,7 +421,7 @@ export class RealtimeEmitter {
       return;
     }
     if (audience.isDefault) {
-      io.to(teamRoom(teamId)).emit(event, ...args);
+      io.to(workspaceRoom(workspaceId)).emit(event, ...args);
       return;
     }
     for (const uid of audience.memberUserIds) {
@@ -435,10 +435,10 @@ export class RealtimeEmitter {
    */
   async emitChannelActivity(
     channelId: string,
-    teamId: string,
+    workspaceId: string,
     payload: Parameters<ServerToClientEvents["team:channel:activity"]>[0],
   ): Promise<void> {
-    await this.emitChannelScoped(channelId, teamId, "team:channel:activity", payload);
+    await this.emitChannelScoped(channelId, workspaceId, "team:channel:activity", payload);
   }
 
   /**
@@ -448,8 +448,8 @@ export class RealtimeEmitter {
    * emitter so fanout rules can re-emit presence after a status change
    * without taking a circular dep on PresenceService / UsersService.
    */
-  private presenceSnapshotter: ((teamId: string) => Promise<string[]>) | null = null;
-  bindPresenceSnapshotter(fn: (teamId: string) => Promise<string[]>): void {
+  private presenceSnapshotter: ((workspaceId: string) => Promise<string[]>) | null = null;
+  bindPresenceSnapshotter(fn: (workspaceId: string) => Promise<string[]>): void {
     this.presenceSnapshotter = fn;
   }
 
@@ -473,19 +473,19 @@ export class RealtimeEmitter {
    * the single emitted frame carries the by-then current state — the same
    * idempotence argument the viewers debounce above relies on.
    */
-  emitPresenceSnapshot(teamId: string): void {
-    const existing = this.presenceDebounceTimers.get(teamId);
+  emitPresenceSnapshot(workspaceId: string): void {
+    const existing = this.presenceDebounceTimers.get(workspaceId);
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
-      this.presenceDebounceTimers.delete(teamId);
-      void this.doEmitPresenceSnapshot(teamId);
+      this.presenceDebounceTimers.delete(workspaceId);
+      void this.doEmitPresenceSnapshot(workspaceId);
     }, RealtimeEmitter.PRESENCE_DEBOUNCE_MS);
     // Don't hold the event loop open on shutdown for a presence frame.
     timer.unref?.();
-    this.presenceDebounceTimers.set(teamId, timer);
+    this.presenceDebounceTimers.set(workspaceId, timer);
   }
 
-  private async doEmitPresenceSnapshot(teamId: string): Promise<void> {
+  private async doEmitPresenceSnapshot(workspaceId: string): Promise<void> {
     const io = this.server;
     const snapshot = this.presenceSnapshotter;
     if (!io || !snapshot) {
@@ -494,8 +494,8 @@ export class RealtimeEmitter {
       );
       return;
     }
-    const onlineUserIds = await snapshot(teamId);
-    io.to(teamRoom(teamId)).emit("presence:update", { teamId, onlineUserIds });
+    const onlineUserIds = await snapshot(workspaceId);
+    io.to(workspaceRoom(workspaceId)).emit("presence:update", { workspaceId, onlineUserIds });
   }
 
   // Snapshotters wired by the gateway so the "also viewing" pill can be

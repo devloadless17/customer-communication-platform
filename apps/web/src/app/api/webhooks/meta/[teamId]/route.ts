@@ -5,8 +5,8 @@ import { NextResponse } from "next/server";
  * points at the pre-migration path. Forwards bytes verbatim to the NestJS
  * api so HMAC verification (computed over the raw body) still passes.
  *
- *   Old URL (this file):   /api/webhooks/meta/{teamId}  → handled by Next.js
- *   New URL (canonical):   /webhooks/meta/{teamId}      → handled by NestJS
+ *   Old URL (this file):   /api/webhooks/meta/{workspaceId}  → handled by Next.js
+ *   New URL (canonical):   /webhooks/meta/{workspaceId}      → handled by NestJS
  *
  * Meta's webhook client does NOT follow 3xx redirects on POST in practice,
  * so a 308 would surface as a delivery failure even though the new endpoint
@@ -30,7 +30,7 @@ import { NextResponse } from "next/server";
  *
  * (Originally added during the NestJS migration cutover on 2026-05-17.
  * One pilot tenant + a 30-day window to confirm every Meta subscription
- * is on the new /webhooks/meta/{teamId} URL. After the deadline:
+ * is on the new /webhooks/meta/{workspaceId} URL. After the deadline:
  *
  *   1. Confirm zero hits to this route in the access logs for the prior 7d
  *      (`grep '/api/webhooks/meta/' /var/log/caddy/access.log` or whatever
@@ -129,10 +129,10 @@ function buildResponseHeaders(upstream: Headers): Headers {
 
 async function forward(
   req: Request,
-  teamId: string,
+  workspaceId: string,
   method: "GET" | "POST",
 ): Promise<Response> {
-  const target = new URL(`/webhooks/meta/${encodeURIComponent(teamId)}`, INTERNAL_API_URL);
+  const target = new URL(`/webhooks/meta/${encodeURIComponent(workspaceId)}`, INTERNAL_API_URL);
   const incoming = new URL(req.url);
   incoming.searchParams.forEach((value, key) => target.searchParams.append(key, value));
 
@@ -192,15 +192,15 @@ async function forward(
 }
 
 interface RouteContext {
-  params: Promise<{ teamId: string }>;
+  params: Promise<{ workspaceId: string }>;
 }
 
 export async function GET(req: Request, ctx: RouteContext): Promise<Response> {
-  const { teamId } = await ctx.params;
-  return forward(req, teamId, "GET");
+  const { workspaceId } = await ctx.params;
+  return forward(req, workspaceId, "GET");
 }
 
 export async function POST(req: Request, ctx: RouteContext): Promise<Response> {
-  const { teamId } = await ctx.params;
-  return forward(req, teamId, "POST");
+  const { workspaceId } = await ctx.params;
+  return forward(req, workspaceId, "POST");
 }

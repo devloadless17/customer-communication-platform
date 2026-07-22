@@ -100,11 +100,14 @@ export function buildSharedAuthOptions(p: SharedAuthOptionsParams): BetterAuthOp
 
     user: {
       // Surface our domain fields on session.user so handlers can read
-      // `session.user.teamId` directly without a separate DB hit.
-      additionalFields: {
-        teamId: { type: "string", required: true, input: false },
-        role: { type: "string", required: true, input: false },
-      },
+      // `session.user.workspaceId` directly without a separate DB hit.
+      // NOTE: `workspaceId` + `role` used to be mirrored here as
+      // additionalFields so the session payload carried tenant scope. Both are
+      // gone from the User row: a user belongs to an Organization and joins
+      // many workspaces (WorkspaceMember), so there is no single role, and the
+      // ACTIVE workspace is resolved per-request from the membership-validated
+      // `ccp.ws` cookie. Re-adding them here would reintroduce a stale copy
+      // that survives a workspace switch.
       // Map Better Auth's standard `image` field to our existing avatarUrl
       // column. Lets the framework think it's writing to `image` while the
       // DB keeps its domain-meaningful name.

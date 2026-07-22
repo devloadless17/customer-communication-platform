@@ -25,6 +25,8 @@ import type {
   MediaAttachment,
   MessageFlag,
   MessageStatus,
+  Ticket,
+  TicketStatus,
   User,
 } from "../types";
 import type { TeamChannelMessageDto } from "../socket/events";
@@ -69,7 +71,7 @@ export function sessionKindFromFlags(
 // ---------------------------------------------------------------------------
 
 export interface MessageReceivedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   /** Full domain message used by the socket fanout's `message:new` payload. */
   message: import("../types").Message;
@@ -104,7 +106,7 @@ export interface MessageReceivedEvent {
 }
 
 export interface MessageSentEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   /** Carried so outbound webhook envelopes can include contact_id without
    *  a DB roundtrip in the framework-agnostic event mapper. */
@@ -141,7 +143,7 @@ export interface MessageSentEvent {
 }
 
 export interface MessageStatusChangedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   /** Carried so outbound webhook envelopes can include contact_id without
    *  a DB roundtrip in the framework-agnostic event mapper. */
@@ -193,7 +195,7 @@ export interface MessageStatusChangedEvent {
  * carries just enough to patch the live thread.
  */
 export interface MessageReactionChangedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   messageId: string;
   /** Which side reacted — customer (inbound) or our team (outbound). */
@@ -211,7 +213,7 @@ export interface MessageReactionChangedEvent {
  * message isn't a business state change to automate on).
  */
 export interface MessageUpdatedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   messageId: string;
   /** ISO time when deleted, else null. */
@@ -263,7 +265,7 @@ export interface MessageUpdatedEvent {
  * shouldn't trigger any `message_sent` workflows.
  */
 export interface MessageSendFailedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   /** null on system-initiated sends. */
   senderUserId: string | null;
@@ -273,7 +275,7 @@ export interface MessageSendFailedEvent {
 }
 
 export interface ConversationAssignedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   /** Hydrated assignedUser for socket payload. null = unassigned. */
   assignedUser: User | null;
@@ -327,7 +329,7 @@ export interface ConversationAssignedEvent {
 }
 
 export interface ConversationStatusChangedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   previousStatus: ConversationStatus;
   newStatus: ConversationStatus;
@@ -375,7 +377,7 @@ export interface ConversationStatusChangedEvent {
  * — toggling AI is an operational signal, not a customer-journey event.
  */
 export interface ConversationAiChangedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   previousAiEnabled: boolean;
   newAiEnabled: boolean;
@@ -397,13 +399,13 @@ export interface ConversationAiChangedEvent {
 }
 
 export interface ConversationDeletedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   deletedByUserId: string;
 }
 
 export interface ContactUpdatedEvent {
-  teamId: string;
+  workspaceId: string;
   contact: Contact;
   /** Pre-update stage id, for stage-change detection downstream. */
   previousStageId: string | null;
@@ -472,7 +474,7 @@ export interface ContactUpdatedEvent {
  * export progress is not something every open tab needs a frame for.
  */
 export interface ContactTransferUpdatedEvent {
-  teamId: string;
+  workspaceId: string;
   /** The user who started the job — the only socket recipient. */
   userId: string;
   job: {
@@ -497,7 +499,7 @@ export interface ContactTransferUpdatedEvent {
 }
 
 export interface ContactBulkUpdatedEvent {
-  teamId: string;
+  workspaceId: string;
   contactIds: string[];
   /** What changed — frontend uses this to decide which caches to invalidate. */
   changeKind: "tags" | "stage" | "fields" | "mixed";
@@ -514,7 +516,7 @@ export interface ContactFieldChange {
 }
 
 export interface ContactDeletedEvent {
-  teamId: string;
+  workspaceId: string;
   contactId: string;
   /** Cascaded conversation ids — fanout emits `conversation:deleted` for each. */
   conversationIds: string[];
@@ -540,7 +542,7 @@ export interface ContactDeletedEvent {
  *   - "import"  — CSV/bulk import flow
  */
 export interface ContactCreatedEvent {
-  teamId: string;
+  workspaceId: string;
   contact: Contact;
   source: "inbound" | "api" | "manual" | "import";
   /** null when the source is "inbound" (no acting human) or "api". */
@@ -570,7 +572,7 @@ export interface ContactCreatedEvent {
  * `contact.bulk_updated` for socket fanout coalescing.
  */
 export interface ContactTagChangedEvent {
-  teamId: string;
+  workspaceId: string;
   contactId: string;
   before: { tagIds: string[] };
   after: { tagIds: string[] };
@@ -606,7 +608,7 @@ export interface ContactTagChangedEvent {
  * coming over recognize the trigger.
  */
 export interface ContactLifecycleChangedEvent {
-  teamId: string;
+  workspaceId: string;
   contactId: string;
   before: { stageId: string | null };
   after: { stageId: string | null };
@@ -622,7 +624,7 @@ export interface ContactLifecycleChangedEvent {
 }
 
 export interface NoteCreatedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   note: InternalNote;
   /** Skip workflow chain-trigger dispatch. See ContactTagChangedEvent.silent. */
@@ -643,7 +645,7 @@ export interface NoteCreatedEvent {
  * outbound webhooks — reacts without a DB re-read.
  */
 export interface MessageFlagChangedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   messageId: string;
   /**
@@ -682,8 +684,67 @@ export interface MessageFlagChangedEvent {
   skipOutboundWebhook?: boolean;
 }
 
+/**
+ * A ticket was created or changed.
+ *
+ * ONE event with an `action` discriminator rather than ten near-identical
+ * `ticket.created` / `ticket.assigned` / … events, for the same reason
+ * `message.flag_changed` is one event: every subscriber (fanout, audit,
+ * workflow dispatch, outbound webhooks) needs the same payload and branches on
+ * the transition. Ten names would be ten fanout rules and ten webhook
+ * subscriptions describing one thing.
+ *
+ * The payload inlines the whole ticket plus the conversation's post-change
+ * `openTicketCount`, so nothing re-reads the DB to react.
+ */
+export interface TicketChangedEvent {
+  workspaceId: string;
+  ticketId: string;
+  conversationId: string;
+  contactId: string;
+  /**
+   * The TRANSITION, never merely the post-state — the same rule that
+   * `message.flag_changed` learned the hard way. `updated` means metadata moved
+   * (subject, tags, custom fields) and the lifecycle did NOT, so a partner
+   * automation can't mistake an edit for a resolution.
+   */
+  action:
+    | "created"
+    | "assigned"
+    | "status_changed"
+    | "priority_changed"
+    | "reopened"
+    | "solved"
+    | "closed"
+    | "sla_breached"
+    | "updated";
+  /** The ticket AFTER the change. */
+  ticket: Ticket;
+  /** The status it moved FROM. Null when `action` is `created`. */
+  previousStatus: TicketStatus | null;
+  /**
+   * Which SLA leg breached. Only set when `action` is `sla_breached` — the
+   * outbound webhook and the board's red badge both need to say WHICH promise
+   * was missed, not just that one was.
+   */
+  breachedLeg?: "first_response" | "resolution";
+  /**
+   * The conversation's `openTicketCount` AFTER the change, read inside the same
+   * transaction — the inbox row badge keys off it.
+   */
+  openTicketCount: number;
+  /** Who made the change. null for automation / SLA sweeper actions. */
+  changedByUserId: string | null;
+  /** Set on /v1 mutations for audit attribution. */
+  changedByApiKeyId?: string | null;
+  /** Skip workflow chain-trigger dispatch. See ContactTagChangedEvent.silent. */
+  silent?: boolean;
+  /** Gate outbound-webhook delivery independently of `silent`. */
+  skipOutboundWebhook?: boolean;
+}
+
 export interface NoteDeletedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   noteId: string;
   /** Who deleted the note. null for system/automation deletions. The audit
@@ -703,7 +764,7 @@ export interface NoteDeletedEvent {
  * (which fires the "absent media" form when clearing restart-orphan rows).
  */
 export interface MessageMediaReadyEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   messageId: string;
   media?: MediaAttachment;
@@ -720,7 +781,7 @@ export interface MessageMediaReadyEvent {
  * Emitted by the broadcast runner at each phase transition.
  */
 export interface BroadcastStatusChangedEvent {
-  teamId: string;
+  workspaceId: string;
   broadcastId: string;
   /**
    * `scheduled` is emitted ONLY by the create path for delayed broadcasts —
@@ -754,7 +815,7 @@ export interface BroadcastStatusChangedEvent {
  * the detail page can advance the progress bar without polling.
  */
 export interface BroadcastProgressEvent {
-  teamId: string;
+  workspaceId: string;
   broadcastId: string;
   sentCount: number;
   failedCount: number;
@@ -778,7 +839,7 @@ export interface BroadcastProgressEvent {
  * Emitted by the broadcast runner once per successful Meta send.
  */
 export interface BroadcastRecipientMessageSentEvent {
-  teamId: string;
+  workspaceId: string;
   broadcastId: string;
   conversationId: string;
   message: import("../types").Message;
@@ -801,7 +862,7 @@ export interface BroadcastRecipientMessageSentEvent {
  * would otherwise write a "reopened" timeline row per broadcast recipient.
  */
 export interface BroadcastConversationReopenedEvent {
-  teamId: string;
+  workspaceId: string;
   broadcastId: string;
   conversationId: string;
 }
@@ -815,7 +876,7 @@ export interface BroadcastConversationReopenedEvent {
  * reset happens elsewhere. This event is the cross-tab nudge only.
  */
 export interface ConversationReadEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   readByUserId: string;
 }
@@ -850,7 +911,7 @@ export interface ConversationReadEvent {
  * payload can include it. Top-level emits leave it at 0.
  */
 export interface TeamChannelMessageCreatedEvent {
-  teamId: string;
+  workspaceId: string;
   channelId: string;
   message: TeamChannelMessageDto;
   /** Truncated body/media preview. Null for thread replies. */
@@ -871,7 +932,7 @@ export interface TeamChannelMessageCreatedEvent {
 }
 
 export interface TeamChannelMessageEditedEvent {
-  teamId: string;
+  workspaceId: string;
   channelId: string;
   messageId: string;
   body: string;
@@ -891,7 +952,7 @@ export interface TeamChannelMessageEditedEvent {
 }
 
 export interface TeamChannelMessageDeletedEvent {
-  teamId: string;
+  workspaceId: string;
   channelId: string;
   messageId: string;
   /** When the deleted message was a reply, the root's id. Null for top-level. */
@@ -899,7 +960,7 @@ export interface TeamChannelMessageDeletedEvent {
 }
 
 export interface TeamChannelReactionChangedEvent {
-  teamId: string;
+  workspaceId: string;
   channelId: string;
   messageId: string;
   emoji: string;
@@ -916,7 +977,7 @@ export interface TeamChannelReactionChangedEvent {
 }
 
 export interface TeamChannelPinChangedEvent {
-  teamId: string;
+  workspaceId: string;
   channelId: string;
   messageId: string;
   pinned: boolean;
@@ -928,7 +989,7 @@ export interface TeamChannelPinChangedEvent {
 }
 
 export interface TeamChannelReadEvent {
-  teamId: string;
+  workspaceId: string;
   channelId: string;
   readByUserId: string;
   lastReadAt: string;
@@ -944,7 +1005,7 @@ export interface TeamChannelReadEvent {
  * via the picker produces ONE event with all 8 ids, not 8 events.
  */
 export interface TeamChannelMembersChangedEvent {
-  teamId: string;
+  workspaceId: string;
   channelId: string;
   action: "added" | "removed";
   userIds: string[];
@@ -961,7 +1022,7 @@ export interface TeamChannelMembersChangedEvent {
  * existence of a DM between two people is itself private.
  */
 export interface TeamChannelDmCreatedEvent {
-  teamId: string;
+  workspaceId: string;
   channelId: string;
   memberUserIds: string[];
   /**
@@ -982,7 +1043,7 @@ export interface TeamChannelDmCreatedEvent {
  * other client. Fired alongside `message.deleted` for reply-row deletions.
  */
 export interface TeamChannelThreadReplyCountChangedEvent {
-  teamId: string;
+  workspaceId: string;
   channelId: string;
   rootMessageId: string;
   replyCount: number;
@@ -999,7 +1060,7 @@ export interface TeamChannelThreadReplyCountChangedEvent {
  * avatarUrl since name is required).
  */
 export interface UserProfileUpdatedEvent {
-  teamId: string;
+  workspaceId: string;
   userId: string;
   name?: string;
   avatarUrl?: string | null;
@@ -1017,7 +1078,7 @@ export interface UserProfileUpdatedEvent {
  * online-dot list updates in the same frame.
  */
 export interface UserAvailabilityChangedEvent {
-  teamId: string;
+  workspaceId: string;
   userId: string;
   /** Plain string here so the domain-event type doesn't pull the
    *  UserAvailabilityStatus union from the wider types module. */
@@ -1051,7 +1112,7 @@ export interface UserAvailabilityChangedEvent {
  * frame to the team room.
  */
 export interface WebhookSubscriptionDisabledEvent {
-  teamId: string;
+  workspaceId: string;
   webhookId: string;
   reason: string;
 }
@@ -1064,7 +1125,7 @@ export interface WebhookSubscriptionDisabledEvent {
  * "webhook unhealthy" badge.
  */
 export interface WebhookSubscriptionRecoveredEvent {
-  teamId: string;
+  workspaceId: string;
   webhookId: string;
 }
 
@@ -1082,7 +1143,7 @@ export interface WebhookSubscriptionRecoveredEvent {
  * publishes it, the Next.js subscriber still fires via Redis pub/sub.
  */
 export interface TeamCatalogChangedEvent {
-  teamId: string;
+  workspaceId: string;
   scope:
     | "stages"
     | "tags"
@@ -1111,7 +1172,7 @@ export interface TeamCatalogChangedEvent {
  * shape as the `team:renamed` socket frame in `socket/events.ts`.
  */
 export interface TeamRenamedEvent {
-  teamId: string;
+  workspaceId: string;
   name: string;
   renamedByUserId: string;
 }
@@ -1138,7 +1199,7 @@ export interface TeamRenamedEvent {
 /** Inbound call ringing. Toasts every connected agent (team-room fanout) so
  *  whoever picks up first wins via the CAS on Call.answeredByUserId. */
 export interface CallIncomingEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   callId: string;
   externalCallId: string;
@@ -1158,7 +1219,7 @@ export interface CallIncomingEvent {
  *  paints the ringing-out indicator, but the team-wide Calls badge must also
  *  see the outbound ring phase, so the frame can't be conversation-scoped. */
 export interface CallRingingOutEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   callId: string;
   externalCallId: string;
@@ -1169,7 +1230,7 @@ export interface CallRingingOutEvent {
 /** First agent successfully accepted (CAS-won). Team room — dismisses the
  *  incoming-call toast on every OTHER agent's browser. */
 export interface CallAnsweredByAgentEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   callId: string;
   answeredByUserId: string;
@@ -1178,7 +1239,7 @@ export interface CallAnsweredByAgentEvent {
 
 /** Call hung up cleanly. Carries durationSeconds for the timeline pill. */
 export interface CallEndedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   callId: string;
   direction: "in" | "out";
@@ -1190,7 +1251,7 @@ export interface CallEndedEvent {
 
 /** Incoming call expired without an agent answering. */
 export interface CallMissedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   callId: string;
   ringingAt: string;
@@ -1198,7 +1259,7 @@ export interface CallMissedEvent {
 
 /** Agent explicitly declined an incoming call (vs missed). */
 export interface CallRejectedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   callId: string;
   rejectedByUserId: string | null;
@@ -1209,7 +1270,7 @@ export interface CallRejectedEvent {
 
 /** Signaling / media error. */
 export interface CallFailedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   callId: string;
   reason: string;
@@ -1233,7 +1294,7 @@ export interface CallFailedEvent {
  * negligible benefit.
  */
 export interface CallSdpOfferEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   callId: string;
   sdp: { type: "offer" | "answer"; sdp: string };
@@ -1242,29 +1303,29 @@ export interface CallSdpOfferEvent {
 // Native AI Assistant realtime events (panel/suggestion-level). Payloads are
 // thin signals — the inbox AI surfaces refetch the authoritative row on receipt.
 export interface AiSuggestionChangedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   suggestionId: string | null;
   // pending (created/updated) | accepted | edited | rejected | superseded | expired
   state: string;
 }
 export interface AiSummaryChangedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
 }
 export interface AiMemoryChangedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   customerId: string;
 }
 export interface AiStateChangedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   // ai_active | human_active | ai_paused | disabled
   state: string;
 }
 export interface AiTranscriptionChangedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   messageId: string;
   // ready | failed
@@ -1272,7 +1333,7 @@ export interface AiTranscriptionChangedEvent {
 }
 /** A just-sent AI reply scored at/above the hallucination flag threshold — see lib/ai/hallucination.ts. */
 export interface AiMessageFlaggedEvent {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   messageId: string;
   /** 0..1 model self-reported risk. */
@@ -1294,6 +1355,7 @@ export interface DomainEventMap {
   "message.updated": MessageUpdatedEvent;
   "message.media_ready": MessageMediaReadyEvent;
   "message.flag_changed": MessageFlagChangedEvent;
+  "ticket.changed": TicketChangedEvent;
   "conversation.assigned": ConversationAssignedEvent;
   "conversation.status_changed": ConversationStatusChangedEvent;
   "conversation.ai_changed": ConversationAiChangedEvent;

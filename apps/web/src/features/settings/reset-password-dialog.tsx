@@ -18,7 +18,7 @@ import { MIN_PASSWORD_LENGTH } from "@ccp/shared/auth/password-policy";
  *
  * Reusable across the team-settings members list (`/api/users/:id/reset-password`)
  * and the platform org detail roster
- * (`/api/admin/teams/:teamId/members/:userId/reset-password`) — the caller
+ * (`/api/admin/teams/:workspaceId/members/:userId/reset-password`) — the caller
  * passes the endpoint. The server hashes with the same bcrypt path Better
  * Auth verifies against and signs the target out of every device.
  *

@@ -19,7 +19,7 @@ import { db, superadminTeam, wipeTestData } from "../_helpers/db";
  */
 
 const PHONE = "+15550009999";
-let teamId: string;
+let workspaceId: string;
 let conversationId: string;
 
 async function openThread(page: Page): Promise<void> {
@@ -32,13 +32,13 @@ async function openThread(page: Page): Promise<void> {
 
 test.beforeAll(async () => {
   const su = await superadminTeam();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
   await wipeTestData();
 
   const now = Date.now();
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       phoneNumber: PHONE,
       identityChannel: "whatsapp",
       name: "Audit Fix Contact",
@@ -48,7 +48,7 @@ test.beforeAll(async () => {
   });
   const conv = await db().conversation.create({
     data: {
-      teamId,
+      workspaceId,
       contactId: contact.id,
       channel: "whatsapp",
       status: "open",
@@ -61,7 +61,7 @@ test.beforeAll(async () => {
   // (J) one normal text + one failed-media inbound (empty body, no media cols).
   await db().message.create({
     data: {
-      teamId,
+      workspaceId,
       conversationId,
       externalId: `audit-normal-${now}`,
       direction: "in",
@@ -74,7 +74,7 @@ test.beforeAll(async () => {
   });
   await db().message.create({
     data: {
-      teamId,
+      workspaceId,
       conversationId,
       externalId: `audit-failedmedia-${now}`,
       direction: "in",
@@ -89,7 +89,7 @@ test.beforeAll(async () => {
   // (K) 110 inbound messages containing "needle" — past the old 100 cap.
   await db().message.createMany({
     data: Array.from({ length: 110 }, (_, i) => ({
-      teamId,
+      workspaceId,
       conversationId,
       externalId: `audit-needle-${now}-${i}`,
       direction: "in" as const,

@@ -15,7 +15,7 @@ import { Queue } from "bullmq";
 import { connectionOptions } from "@/lib/workflows/queue";
 
 export interface HistoryJobData {
-  teamId: string;
+  workspaceId: string;
   /** The raw Meta `history` webhook body — re-parsed by the worker. */
   payload: unknown;
 }
@@ -57,10 +57,10 @@ export function getHistoryQueue(): Queue<HistoryJobData> {
  * legitimately-distinct chunks).
  */
 export async function enqueueHistoryChunk(
-  teamId: string,
+  workspaceId: string,
   payload: unknown,
 ): Promise<string> {
-  const job = await getHistoryQueue().add("chunk", { teamId, payload });
+  const job = await getHistoryQueue().add("chunk", { workspaceId, payload });
   return job.id as string;
 }
 

@@ -103,10 +103,9 @@ export function mapReplySnapshot(row: ReplyToRow | null | undefined): ReplySnaps
  * `findUniqueOrThrow` row is structurally assignable to `MappableUser`, so
  * existing full-row callers of `mapUser` still type-check.
  */
-export const ASSIGNED_USER_SELECT = {
+const USER_COLUMNS = {
   id: true,
-  teamId: true,
-  role: true,
+  isSuperAdmin: true,
   name: true,
   email: true,
   avatarUrl: true,
@@ -119,9 +118,34 @@ export const ASSIGNED_USER_SELECT = {
   workHoursMode: true,
 } as const;
 
-type MappableUser = Pick<PrismaUser, keyof typeof ASSIGNED_USER_SELECT>;
+/**
+ * Select for an `assignedUser` include. Now a FUNCTION of the workspace because
+ * `role` no longer lives on the User row — it is per-workspace, on
+ * WorkspaceMember. The membership is pulled with a filtered nested select
+ * (`take: 1`, scoped to this workspace) so a user who belongs to several
+ * workspaces still reports the role that is correct for THIS query's scope,
+ * rather than whichever membership happened to sort first.
+ */
+export function assignedUserSelect(workspaceId: string) {
+  return {
+    ...USER_COLUMNS,
+    workspaceMemberships: {
+      where: { workspaceId },
+      select: { role: true },
+      take: 1,
+    },
+  } as const;
+}
 
-export function mapUser(u: MappableUser): User {
+type MappableUser = Pick<PrismaUser, keyof typeof USER_COLUMNS> & {
+  workspaceMemberships: { role: Role }[];
+};
+
+/**
+ * `workspaceId` is passed explicitly rather than read off the row: it IS the
+ * scope the caller queried in, and the User row no longer carries it.
+ */
+export function mapUser(u: MappableUser, workspaceId: string): User {
   // Availability comes off the same row when present (every inbox query that
   // includes `assignedUser` brings these columns along by default). Only
   // emit them when set so the wire shape stays terse for clients that
@@ -131,8 +155,13 @@ export function mapUser(u: MappableUser): User {
   // not another" drift can't happen.
   return {
     id: u.id,
-    teamId: u.teamId,
-    role: u.role as Role,
+    workspaceId,
+    isSuperAdmin: u.isSuperAdmin,
+    // No membership row for this workspace means the user is reachable here
+    // only via an org-admin/superAdmin override; "agent" is the safe floor for
+    // a DISPLAY dto — it never grants anything (every real gate reads the
+    // session, not this field).
+    role: (u.workspaceMemberships[0]?.role ?? "agent") as Role,
     name: u.name,
     email: u.email,
     avatarUrl: u.avatarUrl ?? undefined,
@@ -207,7 +236,7 @@ export function mapContact(c: PrismaContact): Contact {
   const display = contactDisplayIdentity(c);
   return {
     id: c.id,
-    teamId: c.teamId,
+    workspaceId: c.workspaceId,
     phoneNumber: c.phoneNumber,
     identityChannel: c.identityChannel as Channel | null,
     externalContactId: c.externalContactId,
@@ -308,7 +337,7 @@ export function mapContactListItem(c: PrismaContactListItem): Contact {
   const display = contactDisplayIdentity(c);
   return {
     id: c.id,
-    teamId: c.teamId,
+    workspaceId: c.workspaceId,
     phoneNumber: c.phoneNumber,
     identityChannel: c.identityChannel as Channel | null,
     externalContactId: c.externalContactId,
@@ -339,7 +368,7 @@ export function mapConversation(
 ): Conversation {
   return {
     id: c.id,
-    teamId: c.teamId,
+    workspaceId: c.workspaceId,
     contactId: c.contactId,
     assignedUserId: c.assignedUserId,
     status: c.status as ConversationStatus,
@@ -380,7 +409,7 @@ export type PrismaMessageWithReply = Omit<PrismaMessage, "rawPayload"> & {
 export function mapMessage(m: PrismaMessageWithReply): Message {
   return {
     id: m.id,
-    teamId: m.teamId,
+    workspaceId: m.workspaceId,
     conversationId: m.conversationId,
     externalId: m.externalId,
     senderUserId: m.senderUserId,
@@ -580,20 +609,20 @@ export type SiblingChannel = {
  * Roll up every non-deleted contact under each `customerId` into its list of
  * channels (the "linked channels" of a unified person). Single source for the
  * cross-channel sibling fetch used by both the contacts list and global search
- * — keeps the query shape (and the tenant `teamId` scope) identical in both.
+ * — keeps the query shape (and the tenant `workspaceId` scope) identical in both.
  * Returns an empty map for an empty `customerIds` (no query issued).
  *
  * Pass `withConversation` when the caller lets the user jump straight into a
  * sibling's thread (global search does; the contacts list doesn't).
  */
 export async function siblingChannelsByCustomer(
-  teamId: string,
+  workspaceId: string,
   customerIds: string[],
   opts?: { withConversation?: boolean },
 ): Promise<Map<string, SiblingChannel[]>> {
   const byCustomer = new Map<string, SiblingChannel[]>();
   if (customerIds.length === 0) return byCustomer;
-  const where = { teamId, deletedAt: null, customerId: { in: customerIds } };
+  const where = { workspaceId, deletedAt: null, customerId: { in: customerIds } };
   const siblings = opts?.withConversation
     ? await db.contact.findMany({
         where,

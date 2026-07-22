@@ -7,7 +7,7 @@ import { db } from "@/lib/db";
  * reads. The Prisma row is structurally assignable to this.
  */
 export interface AiConfigRow {
-  teamId: string;
+  workspaceId: string;
   enabled: boolean;
   configVersion: number;
 
@@ -71,8 +71,8 @@ export interface AiConfigRow {
 }
 
 /** Load the team's config, or null when unconfigured. */
-export async function loadAiConfig(teamId: string): Promise<AiConfigRow | null> {
-  const row = await db.aiAssistantConfig.findUnique({ where: { teamId } });
+export async function loadAiConfig(workspaceId: string): Promise<AiConfigRow | null> {
+  const row = await db.aiAssistantConfig.findUnique({ where: { workspaceId } });
   return (row as AiConfigRow | null) ?? null;
 }
 

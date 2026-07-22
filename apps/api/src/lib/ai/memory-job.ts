@@ -102,7 +102,7 @@ export async function runMemoryExtraction(
     .slice(0, 20);
   if (!items.length) return;
 
-  const total = await db.aiCustomerMemory.count({ where: { teamId: meta.teamId, customerId } });
+  const total = await db.aiCustomerMemory.count({ where: { workspaceId: meta.workspaceId, customerId } });
   let room = Math.max(0, MAX_MEMORY_PER_CUSTOMER - total);
 
   for (const it of items) {
@@ -110,10 +110,10 @@ export async function runMemoryExtraction(
     const value = it.value.trim().slice(0, 500);
     const status = it.confidence >= CONFIRM_CONFIDENCE ? "confirmed" : "candidate";
 
-    // Dedup on (teamId, customerId, kind, value) — the DB unique. Never
+    // Dedup on (workspaceId, customerId, kind, value) — the DB unique. Never
     // resurrect a human-rejected item.
     const existing = await db.aiCustomerMemory.findUnique({
-      where: { teamId_customerId_kind_value: { teamId: meta.teamId, customerId, kind, value } },
+      where: { workspaceId_customerId_kind_value: { workspaceId: meta.workspaceId, customerId, kind, value } },
     });
     if (existing?.status === "rejected") continue;
 
@@ -135,7 +135,7 @@ export async function runMemoryExtraction(
       if (room <= 0) continue;
       saved = await db.aiCustomerMemory.create({
         data: {
-          teamId: meta.teamId,
+          workspaceId: meta.workspaceId,
           customerId,
           kind,
           value,
@@ -156,7 +156,7 @@ export async function runMemoryExtraction(
     if (SINGLETON_KINDS.has(kind)) {
       await db.aiCustomerMemory.updateMany({
         where: {
-          teamId: meta.teamId,
+          workspaceId: meta.workspaceId,
           customerId,
           kind,
           id: { not: saved.id },
@@ -169,7 +169,7 @@ export async function runMemoryExtraction(
 
   void publish({
     type: "ai.memory_changed",
-    teamId: meta.teamId,
+    workspaceId: meta.workspaceId,
     conversationId,
     customerId,
   }).catch(() => {});

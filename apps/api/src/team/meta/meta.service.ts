@@ -64,9 +64,9 @@ export class MetaService {
    * error never blocks the others or the save. Returns the channels that
    * re-synced, so the UI can confirm ("Updated WhatsApp, Messenger").
    */
-  private async resyncChannels(teamId: string): Promise<string[]> {
+  private async resyncChannels(workspaceId: string): Promise<string[]> {
     const conns = await this.db.channelConnection.findMany({
-      where: { teamId, isActive: true },
+      where: { workspaceId, isActive: true },
       select: { channel: true, config: true },
     });
     const resynced: string[] = [];
@@ -74,11 +74,11 @@ export class MetaService {
       const config = (conn.config ?? {}) as { phoneNumberId?: string; pageId?: string };
       try {
         if (conn.channel === "whatsapp" && config.phoneNumberId) {
-          await this.whatsapp.updateConfig(teamId, { phoneNumberId: config.phoneNumberId });
+          await this.whatsapp.updateConfig(workspaceId, { phoneNumberId: config.phoneNumberId });
         } else if (conn.channel === "messenger" && config.pageId) {
-          await this.messenger.updateConfig(teamId, { pageId: config.pageId });
+          await this.messenger.updateConfig(workspaceId, { pageId: config.pageId });
         } else if (conn.channel === "instagram" && config.pageId) {
-          await this.instagram.updateConfig(teamId, { pageId: config.pageId });
+          await this.instagram.updateConfig(workspaceId, { pageId: config.pageId });
         } else {
           continue;
         }
@@ -106,9 +106,9 @@ export class MetaService {
     }
   }
 
-  async getConfig(teamId: string): Promise<MetaConnectionView> {
+  async getConfig(workspaceId: string): Promise<MetaConnectionView> {
     const row = await this.db.metaConnection.findUnique({
-      where: { teamId },
+      where: { workspaceId },
       select: { config: true, secrets: true },
     });
     const config = (row?.config ?? {}) as MetaConnConfig;
@@ -128,13 +128,13 @@ export class MetaService {
       try {
         const mergedConfig = pruneUndefined({ ...config, verifyToken: minted });
         await this.db.metaConnection.upsert({
-          where: { teamId },
-          create: { teamId, config: mergedConfig as Prisma.InputJsonValue, secrets: {} },
+          where: { workspaceId },
+          create: { workspaceId, config: mergedConfig as Prisma.InputJsonValue, secrets: {} },
           update: { config: mergedConfig as Prisma.InputJsonValue },
         });
         // Drop the cached snapshot so the shared loader picks up the newly minted
         // verify token immediately (its 60s TTL would otherwise serve stale null).
-        invalidateMetaConnection(teamId);
+        invalidateMetaConnection(workspaceId);
         verifyToken = minted;
       } catch (err) {
         this.logger.warn(
@@ -147,7 +147,7 @@ export class MetaService {
   }
 
   async updateConfig(
-    teamId: string,
+    workspaceId: string,
     input: UpdateMetaConnectionInput,
   ): Promise<{ verifyToken: string; resynced: string[] }> {
     const { appId, appSecret, systemUserToken } = input;
@@ -175,7 +175,7 @@ export class MetaService {
     }
 
     const existing = await this.db.metaConnection.findUnique({
-      where: { teamId },
+      where: { workspaceId },
       select: { config: true },
     });
     const existingConfig = (existing?.config ?? {}) as MetaConnConfig;
@@ -194,9 +194,9 @@ export class MetaService {
     };
 
     await this.db.metaConnection.upsert({
-      where: { teamId },
+      where: { workspaceId },
       create: {
-        teamId,
+        workspaceId,
         config: newConfig as Prisma.InputJsonValue,
         secrets: newSecrets as Prisma.InputJsonValue,
       },
@@ -206,16 +206,16 @@ export class MetaService {
       },
     });
 
-    invalidateMetaConnection(teamId);
+    invalidateMetaConnection(workspaceId);
 
     // Re-apply the new shared creds to every connected channel so a token
     // rotation takes effect everywhere immediately (no per-channel reconnect).
-    const resynced = await this.resyncChannels(teamId);
+    const resynced = await this.resyncChannels(workspaceId);
     return { verifyToken, resynced };
   }
 
-  async disconnect(teamId: string): Promise<void> {
-    await this.db.metaConnection.deleteMany({ where: { teamId } });
-    invalidateMetaConnection(teamId);
+  async disconnect(workspaceId: string): Promise<void> {
+    await this.db.metaConnection.deleteMany({ where: { workspaceId } });
+    invalidateMetaConnection(workspaceId);
   }
 }

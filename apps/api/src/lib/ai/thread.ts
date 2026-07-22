@@ -47,7 +47,7 @@ export async function loadRecentMessages(
 
 export interface ConversationMeta {
   id: string;
-  teamId: string;
+  workspaceId: string;
   status: string;
   contactId: string;
   channel: string;
@@ -59,7 +59,7 @@ export async function loadConversationMeta(
 ): Promise<ConversationMeta | null> {
   const conv = await db.conversation.findUnique({
     where: { id: conversationId },
-    select: { id: true, teamId: true, status: true, contactId: true, channel: true },
+    select: { id: true, workspaceId: true, status: true, contactId: true, channel: true },
   });
   if (!conv) return null;
   const contact = await db.contact.findUnique({
@@ -68,7 +68,7 @@ export async function loadConversationMeta(
   });
   return {
     id: conv.id,
-    teamId: conv.teamId,
+    workspaceId: conv.workspaceId,
     status: conv.status as string,
     contactId: conv.contactId,
     channel: conv.channel as string,

@@ -56,7 +56,7 @@ async function runTagMutation(
 ): Promise<StepResult> {
   let resolved;
   try {
-    resolved = await resolveStepTarget(cfg.target, envelope, ctx.teamId, {
+    resolved = await resolveStepTarget(cfg.target, envelope, ctx.workspaceId, {
       createConversation: false,
     });
   } catch (err) {
@@ -68,11 +68,11 @@ async function runTagMutation(
 
   const [contact, tag] = await Promise.all([
     db.contact.findFirst({
-      where: { id: contactId, teamId: ctx.teamId },
+      where: { id: contactId, workspaceId: ctx.workspaceId },
       include: { tags: { select: { id: true } } },
     }),
     db.tag.findFirst({
-      where: { id: tagId, teamId: ctx.teamId },
+      where: { id: tagId, workspaceId: ctx.workspaceId },
       select: { id: true },
     }),
   ]);
@@ -88,7 +88,7 @@ async function runTagMutation(
   let updated;
   try {
     updated = await db.contact.update({
-      where: { id: contactId, teamId: ctx.teamId, version: contact.version },
+      where: { id: contactId, workspaceId: ctx.workspaceId, version: contact.version },
       data: {
         tags: kind === "add" ? { connect: { id: tag.id } } : { disconnect: { id: tag.id } },
         version: { increment: 1 },
@@ -116,7 +116,7 @@ async function runTagMutation(
   // audit, and analytics still run normally.
   await publish({
     type: "contact.updated",
-    teamId: ctx.teamId,
+    workspaceId: ctx.workspaceId,
     contact: payload,
     previousStageId: updated.stageId, // stage didn't change here
     fieldChanges: [],
@@ -130,7 +130,7 @@ async function runTagMutation(
   // "On Contact Tag updated" want to see step-driven changes too.
   await publish({
     type: "contact.tag_changed",
-    teamId: ctx.teamId,
+    workspaceId: ctx.workspaceId,
     contactId: updated.id,
     before: { tagIds: previousTagIds },
     after: { tagIds: newTagIds },

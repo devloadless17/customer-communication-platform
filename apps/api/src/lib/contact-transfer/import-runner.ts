@@ -133,7 +133,7 @@ interface PendingRow {
 }
 
 export async function runContactImport(opts: {
-  teamId: string;
+  workspaceId: string;
   userId: string | null;
   jobId: string;
   format: TransferFormat;
@@ -146,7 +146,7 @@ export async function runContactImport(opts: {
   onProgress?: (counters: ImportCounters) => Promise<void>;
   isCanceled?: () => Promise<boolean>;
 }): Promise<ImportResult> {
-  const { teamId, userId, jobId, format, sourceKey, options } = opts;
+  const { workspaceId, userId, jobId, format, sourceKey, options } = opts;
 
   // Pull the source out of R2 to a temp file. The parsers want a path (ExcelJS
   // in particular reads the zip central directory, which needs random access),
@@ -155,7 +155,7 @@ export async function runContactImport(opts: {
   await downloadToFile(sourceKey, localPath);
 
   const fieldDefs: TeamFieldDef[] = await db.contactFieldDefinition.findMany({
-    where: { teamId },
+    where: { workspaceId },
     select: { key: true, label: true },
   });
 
@@ -202,10 +202,10 @@ export async function runContactImport(opts: {
       );
     }
 
-    const defaultStageId = await ensureDefaultStage(teamId);
+    const defaultStageId = await ensureDefaultStage(workspaceId);
     const stageIdByName = new Map(
       (
-        await db.contactStage.findMany({ where: { teamId }, select: { id: true, name: true } })
+        await db.contactStage.findMany({ where: { workspaceId }, select: { id: true, name: true } })
       ).map((s) => [s.name.toLowerCase(), s.id]),
     );
     const resolveStage = (name: string): string => {
@@ -240,7 +240,7 @@ export async function runContactImport(opts: {
 
       const fireEvents = options.fireAutomations && !automationsSkipped;
       const outcome = await applyBatch({
-        teamId,
+        workspaceId,
         userId,
         rows: batch,
         options,
@@ -328,7 +328,7 @@ export async function runContactImport(opts: {
 
     const errorArtifactKey =
       errorRows.length > 0
-        ? await writeErrorReport({ teamId, jobId, format, headers, errorRows })
+        ? await writeErrorReport({ workspaceId, jobId, format, headers, errorRows })
         : null;
 
     return {
@@ -495,14 +495,14 @@ interface BatchOutcome {
 }
 
 async function applyBatch(args: {
-  teamId: string;
+  workspaceId: string;
   userId: string | null;
   rows: PendingRow[];
   options: ImportOptions;
   resolveStage: (name: string) => string;
   fireEvents: boolean;
 }): Promise<BatchOutcome> {
-  const { teamId, userId, rows, options, resolveStage, fireEvents } = args;
+  const { workspaceId, userId, rows, options, resolveStage, fireEvents } = args;
   const outcome: BatchOutcome = {
     created: 0,
     updated: 0,
@@ -522,7 +522,7 @@ async function applyBatch(args: {
   const [activeRows, tombstonedRows] = await Promise.all([
     db.contact.findMany({
       where: {
-        teamId,
+        workspaceId,
         identityChannel: TRANSFER_IDENTITY_CHANNEL,
         phoneNumber: { in: phones },
         deletedAt: null,
@@ -531,7 +531,7 @@ async function applyBatch(args: {
     }),
     db.contact.findMany({
       where: {
-        teamId,
+        workspaceId,
         identityChannel: TRANSFER_IDENTITY_CHANNEL,
         phoneNumber: { in: phones },
         deletedAt: { not: null },
@@ -568,7 +568,7 @@ async function applyBatch(args: {
   if (toCreate.length > 0) {
     const res = await db.contact.createMany({
       data: toCreate.map((p) => ({
-        teamId,
+        workspaceId,
         identityChannel: TRANSFER_IDENTITY_CHANNEL,
         phoneNumber: p.phoneNumber,
         name: p.name,
@@ -582,7 +582,7 @@ async function applyBatch(args: {
         stageId: resolveStage(p.stageName),
         source: "manual" as const,
       })),
-      // Guards the (teamId, phone) partial unique against a concurrent inbound
+      // Guards the (workspaceId, phone) partial unique against a concurrent inbound
       // message creating the same contact mid-import.
       skipDuplicates: true,
     });
@@ -604,7 +604,7 @@ async function applyBatch(args: {
       // updateMany (not update) because Prisma's `update` only accepts unique
       // fields in the where.
       const flip = await db.contact.updateMany({
-        where: { id, teamId, deletedAt: { not: null } },
+        where: { id, workspaceId, deletedAt: { not: null } },
         data: {
           name: p.name,
           firstName: p.firstName,
@@ -634,7 +634,7 @@ async function applyBatch(args: {
   if (toUpdate.length > 0 && fireEvents) {
     const before = await db.contact.findMany({
       where: {
-        teamId,
+        workspaceId,
         identityChannel: TRANSFER_IDENTITY_CHANNEL,
         phoneNumber: { in: toUpdate.map((r) => r.phoneNumber) },
         deletedAt: null,
@@ -654,12 +654,12 @@ async function applyBatch(args: {
     for (const b of before) previousById.set(b.id, b);
   }
   if (toUpdate.length > 0) {
-    outcome.updated += await applyUpdates({ teamId, rows: toUpdate, resolveStage });
+    outcome.updated += await applyUpdates({ workspaceId, rows: toUpdate, resolveStage });
   }
 
   // ---- tags --------------------------------------------------------------
   const touched = [...toCreate, ...toRevive, ...toUpdate];
-  const idByPhone = await linkTags({ teamId, rows: touched, options });
+  const idByPhone = await linkTags({ workspaceId, rows: touched, options });
   for (const r of touched) {
     const id = idByPhone.get(r.phoneNumber);
     if (id) outcome.touchedIds.push(id);
@@ -668,7 +668,7 @@ async function applyBatch(args: {
   // ---- events ------------------------------------------------------------
   if (fireEvents && touched.length > 0) {
     await publishRowEvents({
-      teamId,
+      workspaceId,
       userId,
       created: toCreate,
       changed: [...toRevive, ...toUpdate],
@@ -695,11 +695,11 @@ async function applyBatch(args: {
  * as the bulk tag-add path).
  */
 async function applyUpdates(args: {
-  teamId: string;
+  workspaceId: string;
   rows: PendingRow[];
   resolveStage: (name: string) => string;
 }): Promise<number> {
-  const { teamId, rows, resolveStage } = args;
+  const { workspaceId, rows, resolveStage } = args;
 
   const phones = rows.map((r) => r.phoneNumber);
   const names = rows.map((r) => r.name);
@@ -749,7 +749,7 @@ async function applyUpdates(args: {
       ) AS t(phone, name, first_name, last_name, email, location, language,
              country, stage_id, custom_fields)
     ) v
-    WHERE c."teamId" = ${teamId}
+    WHERE c."workspaceId" = ${workspaceId}
       AND c."identityChannel" = ${TRANSFER_IDENTITY_CHANNEL}::"Channel"
       AND c."phoneNumber" = v.phone
       AND c."deletedAt" IS NULL
@@ -762,17 +762,17 @@ async function applyUpdates(args: {
  * publisher reuses so it doesn't need its own lookup.
  */
 async function linkTags(args: {
-  teamId: string;
+  workspaceId: string;
   rows: PendingRow[];
   options: ImportOptions;
 }): Promise<Map<string, string>> {
-  const { teamId, rows, options } = args;
+  const { workspaceId, rows, options } = args;
   if (rows.length === 0) return new Map();
 
   // One lookup for the whole batch, needed for events regardless of tags.
   const contactRows = await db.contact.findMany({
     where: {
-      teamId,
+      workspaceId,
       identityChannel: TRANSFER_IDENTITY_CHANNEL,
       phoneNumber: { in: rows.map((r) => r.phoneNumber) },
       deletedAt: null,
@@ -790,7 +790,7 @@ async function linkTags(args: {
   if (rowsWithTags.length === 0 && rowsToClear.length === 0) return idByPhone;
 
   const tagIdByNameKey = await resolveTagIds(
-    teamId,
+    workspaceId,
     dedupeNames(rowsWithTags),
     options.canManageTags,
   );
@@ -851,7 +851,7 @@ function dedupeNames(rows: PendingRow[]): string[] {
  * endpoints require); otherwise they're skipped and the link is dropped.
  */
 async function resolveTagIds(
-  teamId: string,
+  workspaceId: string,
   names: string[],
   canManageTags: boolean,
 ): Promise<Map<string, string>> {
@@ -859,7 +859,7 @@ async function resolveTagIds(
   if (names.length === 0) return byKey;
 
   const existing = await db.tag.findMany({
-    where: { teamId, name: { in: names, mode: "insensitive" } },
+    where: { workspaceId, name: { in: names, mode: "insensitive" } },
     select: { id: true, name: true },
   });
   for (const t of existing) byKey.set(t.name.toLowerCase(), t.id);
@@ -876,11 +876,11 @@ async function resolveTagIds(
   }
 
   await db.tag.createMany({
-    data: missing.map((name) => ({ teamId, name, color: "slate" })),
+    data: missing.map((name) => ({ workspaceId, name, color: "slate" })),
     skipDuplicates: true,
   });
   const created = await db.tag.findMany({
-    where: { teamId, name: { in: missing, mode: "insensitive" } },
+    where: { workspaceId, name: { in: missing, mode: "insensitive" } },
     select: { id: true, name: true },
   });
   for (const t of created) byKey.set(t.name.toLowerCase(), t.id);
@@ -899,21 +899,21 @@ async function resolveTagIds(
  * Above IMPORT_EVENT_FANOUT_CAP the caller never calls this at all.
  */
 async function publishRowEvents(args: {
-  teamId: string;
+  workspaceId: string;
   userId: string | null;
   created: PendingRow[];
   changed: PendingRow[];
   idByPhone: Map<string, string>;
   previousById: Map<string, PreviousContact>;
 }): Promise<void> {
-  const { teamId, userId, created, changed, idByPhone, previousById } = args;
+  const { workspaceId, userId, created, changed, idByPhone, previousById } = args;
   const ids = [...created, ...changed]
     .map((r) => idByPhone.get(r.phoneNumber))
     .filter((id): id is string => Boolean(id));
   if (ids.length === 0) return;
 
   const hydrated = await db.contact.findMany({
-    where: { teamId, id: { in: ids } },
+    where: { workspaceId, id: { in: ids } },
     include: { tags: { select: { id: true } } },
   });
   const createdIds = new Set(
@@ -933,7 +933,7 @@ async function publishRowEvents(args: {
     if (createdIds.has(row.id)) {
       await publish({
         type: "contact.created",
-        teamId,
+        workspaceId,
         contact: wire,
         source: "import",
         createdByUserId: userId,
@@ -952,7 +952,7 @@ async function publishRowEvents(args: {
     }
     await publish({
       type: "contact.updated",
-      teamId,
+      workspaceId,
       contact: wire,
       previousStageId: prev?.stageId ?? null,
       fieldChanges,
@@ -1002,13 +1002,13 @@ const BUILT_IN_DIFF_KEYS = [
  * to work out which of 100,000 rows was rejected.
  */
 async function writeErrorReport(args: {
-  teamId: string;
+  workspaceId: string;
   jobId: string;
   format: TransferFormat;
   headers: string[];
   errorRows: Array<{ rowNumber: number; reason: string; raw: Row }>;
 }): Promise<string> {
-  const { teamId, jobId, format, headers, errorRows } = args;
+  const { workspaceId, jobId, format, headers, errorRows } = args;
   const path = join(tmpdir(), `ccp-import-errors-${jobId}-${randomUUID()}.${format}`);
   const sink = createSink(format, path, "Errors");
   // Prefix the diagnostic columns so they're the first thing visible, and
@@ -1026,7 +1026,7 @@ async function writeErrorReport(args: {
       );
     }
     await sink.finish();
-    const key = `contact-imports/${teamId}/${jobId}-errors.${format}`;
+    const key = `contact-imports/${workspaceId}/${jobId}-errors.${format}`;
     await blobStorage.putObjectFromFile({
       key,
       path,

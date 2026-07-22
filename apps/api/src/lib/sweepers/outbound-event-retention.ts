@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Retention sweeper for the `OutboundEvent` (event-bus outbox) table.
@@ -48,6 +48,12 @@ async function runTick(label: string): Promise<void> {
     // Mutex serializes batched-DELETE retention against other heavy sweepers.
     await withSweeperMutex("outbound-event-retention", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopOutboundEventRetentionSweeper();
+      return;
+    }
     console.error(`[sweeper.outbound-event-retention] ${label} failed`, err);
   } finally {
     inFlight = false;

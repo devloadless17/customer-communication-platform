@@ -889,7 +889,7 @@ export function useCall(): {
         // call this agent never won. The IncomingCallToast already self-dismisses
         // its own card on click, so the toast doesn't linger during the POST.
         dispatchLocalSocketEvent("call:answered", {
-          teamId: "",
+          workspaceId: "",
           conversationId,
           callId,
           answeredByUserId: "",

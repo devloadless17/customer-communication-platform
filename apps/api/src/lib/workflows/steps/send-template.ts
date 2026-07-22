@@ -105,7 +105,7 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
   async run(envelope, config, ctx): Promise<StepResult> {
     let resolved;
     try {
-      resolved = await resolveStepTarget(config.target, envelope, ctx.teamId, {
+      resolved = await resolveStepTarget(config.target, envelope, ctx.workspaceId, {
         createConversation: true,
       });
     } catch (err) {
@@ -121,7 +121,7 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
     const { contact, extras } = await buildTokenContext(
       envelope,
       ctx,
-      ctx.teamId,
+      ctx.workspaceId,
       resolved.contactId,
     );
     const variables = {
@@ -139,9 +139,9 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
       // Per-conversation send ceiling — same loop backstop as send_message.
       // Templates are billed cold-outbound, so a runaway template loop is the
       // most expensive variant; cap it per thread before reaching Meta.
-      consumeConversationSendBudget(ctx.teamId, conversationId);
+      consumeConversationSendBudget(ctx.workspaceId, conversationId);
       const result = await sendTemplateInternal({
-        teamId: ctx.teamId,
+        workspaceId: ctx.workspaceId,
         conversationId,
         templateId: config.templateId,
         variables,

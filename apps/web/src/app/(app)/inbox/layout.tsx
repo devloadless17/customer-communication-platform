@@ -15,8 +15,11 @@ import { getSession } from "@/lib/auth/current-user";
 import {
   listContactStages,
   listConversations,
+  listInboxViews,
+  listTags,
   listTeamMembers,
 } from "@/lib/api/queries";
+import { InboxViewsProvider } from "@/features/inbox/contexts/inbox-views-context";
 
 /**
  * Inbox shell. The sub-sidebar (presets / stages / teammates) is rendered HERE
@@ -41,14 +44,23 @@ export default async function InboxLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const [{ user }, stages, teamMembers, conversationsPage, cookieStore] =
-    await Promise.all([
-      getSession(),
-      listContactStages(),
-      listTeamMembers(),
-      listConversations(),
-      cookies(),
-    ]);
+  const [
+    { user, permissions },
+    stages,
+    teamMembers,
+    conversationsPage,
+    savedViews,
+    tags,
+    cookieStore,
+  ] = await Promise.all([
+    getSession(),
+    listContactStages(),
+    listTeamMembers(),
+    listConversations(),
+    listInboxViews(),
+    listTags(),
+    cookies(),
+  ]);
 
   // Active members only for the sidebar roster — deactivated users still ride
   // along in `teamMembers` for historical message attribution in the thread,
@@ -69,6 +81,13 @@ export default async function InboxLayout({
     if (persistedFilter.kind === "stage") {
       const stageExists = stages.some((s) => s.id === persistedFilter.stageId);
       if (stageExists) initialFilter = persistedFilter;
+    } else if (persistedFilter.kind === "view") {
+      // Same defensive check as a stage id, and it matters MORE here: a shared
+      // view can be deleted, or un-shared, by someone else. A stale id would
+      // make every conversation-list request 404 with no way for the agent to
+      // recover except clearing cookies.
+      const viewExists = savedViews.some((v) => v.id === persistedFilter.viewId);
+      if (viewExists) initialFilter = persistedFilter;
     } else {
       initialFilter = persistedFilter;
     }
@@ -76,19 +95,23 @@ export default async function InboxLayout({
 
   return (
     <InboxFilterProvider initialFilter={initialFilter}>
-      <SectionShell
-        mainClassName="min-w-0 overflow-hidden"
-        subSidebar={
-          <InboxSubSidebarLive
-            currentUser={user}
-            stages={stages}
-            teammates={teammates}
-            initialConversations={conversationsPage.items}
-          />
-        }
-      >
-        {children}
-      </SectionShell>
+      <InboxViewsProvider initialViews={savedViews}>
+        <SectionShell
+          mainClassName="min-w-0 overflow-hidden"
+          subSidebar={
+            <InboxSubSidebarLive
+              currentUser={user}
+              stages={stages}
+              tags={tags}
+              teammates={teammates}
+              initialConversations={conversationsPage.items}
+              canManageSharedViews={permissions["inboxViews:manageShared"]}
+            />
+          }
+        >
+          {children}
+        </SectionShell>
+      </InboxViewsProvider>
     </InboxFilterProvider>
   );
 }

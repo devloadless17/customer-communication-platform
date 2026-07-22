@@ -299,7 +299,7 @@ export function MobileShellChrome({
             </div>
             <div className="mt-1 flex flex-col gap-0.5 border-t border-border pt-1">
               <Link
-                href="/settings/account"
+                href="/account"
                 className="flex h-8 items-center gap-2 rounded-md px-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               >
                 <UserCircle2 className="size-4" />

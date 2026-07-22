@@ -24,7 +24,7 @@ export class InstagramController {
 
   @Get()
   async get(@CurrentSession() session: ApiSession) {
-    const config = await this.instagram.getConfig(session.teamId);
+    const config = await this.instagram.getConfig(session.workspaceId);
     return { config };
   }
 
@@ -33,13 +33,13 @@ export class InstagramController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(UpdateInstagramConfigSchema)) body: UpdateInstagramConfigInput,
   ) {
-    const out = await this.instagram.updateConfig(session.teamId, body);
+    const out = await this.instagram.updateConfig(session.workspaceId, body);
     return { ok: true, ...out };
   }
 
   @Delete()
   async disconnect(@CurrentSession() session: ApiSession) {
-    await this.instagram.disconnect(session.teamId);
+    await this.instagram.disconnect(session.workspaceId);
     return { ok: true };
   }
 }

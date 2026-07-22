@@ -37,6 +37,7 @@ const VALID_PRESETS: ReadonlySet<PresetFilterId> = new Set([
 export function serializeInboxFilter(filter: Filter): string {
   if (filter.kind === "preset") return `p:${filter.id}`;
   if (filter.kind === "stage") return `s:${filter.stageId}`;
+  if (filter.kind === "view") return `v:${filter.viewId}`;
   return "c"; // calls view
 }
 
@@ -59,6 +60,15 @@ export function parseInboxFilter(raw: string | undefined): Filter | null {
   if (raw.startsWith("s:")) {
     const stageId = raw.slice(2);
     if (stageId.length > 0) return { kind: "stage", stageId };
+    return null;
+  }
+  if (raw.startsWith("v:")) {
+    const viewId = raw.slice(2);
+    // Same defensive contract as a stage id: the layout re-validates this
+    // against the views it actually loaded, so a view that was deleted (or
+    // un-shared out from under this agent) falls back to the default instead
+    // of hitting the list endpoint with an id that 404s on every request.
+    if (viewId.length > 0) return { kind: "view", viewId };
     return null;
   }
   return null;

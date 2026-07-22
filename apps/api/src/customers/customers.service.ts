@@ -104,19 +104,19 @@ export class CustomersService {
    * Best-effort: a publish failure must never undo a committed merge.
    */
   private async publishContactUpdated(
-    teamId: string,
+    workspaceId: string,
     contactId: string,
     actorUserId: string | null,
   ): Promise<void> {
     try {
       const fresh = await this.db.contact.findFirst({
-        where: { id: contactId, teamId },
+        where: { id: contactId, workspaceId },
         include: { tags: { select: { id: true } } },
       });
       if (!fresh) return;
       await this.bus.publish({
         type: "contact.updated",
-        teamId,
+        workspaceId,
         contact: toContactWire(fresh, { tagIds: fresh.tags.map((t) => t.id) }),
         previousStageId: fresh.stageId,
         fieldChanges: [],
@@ -125,15 +125,15 @@ export class CustomersService {
       });
     } catch (err) {
       this.logger.error(
-        `publish(contact.updated) failed for contact ${contactId} (team ${teamId})`,
+        `publish(contact.updated) failed for contact ${contactId} (team ${workspaceId})`,
         err instanceof Error ? err.stack : String(err),
       );
     }
   }
 
-  private async loadProfile(teamId: string, customerId: string): Promise<CustomerProfile> {
+  private async loadProfile(workspaceId: string, customerId: string): Promise<CustomerProfile> {
     const customer = await this.db.customer.findFirst({
-      where: { id: customerId, teamId },
+      where: { id: customerId, workspaceId },
       select: {
         id: true,
         name: true,
@@ -260,21 +260,21 @@ export class CustomersService {
    * P2025 filter (no such customer). Returns the refreshed profile.
    */
   async rename(
-    teamId: string,
+    workspaceId: string,
     customerId: string,
     name: string,
   ): Promise<CustomerProfile> {
     const trimmed = name.trim();
     const res = await this.db.customer.updateMany({
-      where: { id: customerId, teamId },
+      where: { id: customerId, workspaceId },
       data: { name: trimmed.length > 0 ? trimmed : null },
     });
     if (res.count === 0) throw new NotFoundException({ error: "customer_not_found" });
-    return this.loadProfile(teamId, customerId);
+    return this.loadProfile(workspaceId, customerId);
   }
 
-  getProfile(teamId: string, customerId: string): Promise<CustomerProfile> {
-    return this.loadProfile(teamId, customerId);
+  getProfile(workspaceId: string, customerId: string): Promise<CustomerProfile> {
+    return this.loadProfile(workspaceId, customerId);
   }
 
   /**
@@ -284,16 +284,16 @@ export class CustomersService {
    * the customer-link sweeper links it, moments later).
    */
   async getProfileByContact(
-    teamId: string,
+    workspaceId: string,
     contactId: string,
   ): Promise<CustomerProfile | null> {
     const contact = await this.db.contact.findFirst({
-      where: { id: contactId, teamId, deletedAt: null },
+      where: { id: contactId, workspaceId, deletedAt: null },
       select: { customerId: true },
     });
     if (!contact) throw new NotFoundException({ error: "contact_not_found" });
     if (!contact.customerId) return null;
-    return this.loadProfile(teamId, contact.customerId);
+    return this.loadProfile(workspaceId, contact.customerId);
   }
 
   /**
@@ -319,9 +319,9 @@ export class CustomersService {
    * `findExistingCustomerIdByStrongKey` candidate filter both exist to prevent.
    * Confirming calls the ordinary, reversible `linkContact`.
    */
-  async suggestLinks(teamId: string, contactId: string): Promise<LinkSuggestion[]> {
+  async suggestLinks(workspaceId: string, contactId: string): Promise<LinkSuggestion[]> {
     const me = await this.db.contact.findFirst({
-      where: { id: contactId, teamId, deletedAt: null },
+      where: { id: contactId, workspaceId, deletedAt: null },
       select: { id: true, phoneNumber: true, email: true, customerId: true, identityChannel: true },
     });
     if (!me) return [];
@@ -332,7 +332,7 @@ export class CustomersService {
 
     const others = await this.db.contact.findMany({
       where: {
-        teamId,
+        workspaceId,
         deletedAt: null,
         id: { not: me.id },
         // Already the same person — nothing to suggest.
@@ -371,16 +371,16 @@ export class CustomersService {
   }
 
   async linkContact(
-    teamId: string,
+    workspaceId: string,
     customerId: string,
     contactId: string,
     actorUserId: string | null = null,
   ): Promise<CustomerProfile> {
     const moved = await this.db.$transaction(async (tx) => {
       const [customer, contact] = await Promise.all([
-        tx.customer.findFirst({ where: { id: customerId, teamId }, select: { id: true } }),
+        tx.customer.findFirst({ where: { id: customerId, workspaceId }, select: { id: true } }),
         tx.contact.findFirst({
-          where: { id: contactId, teamId, deletedAt: null },
+          where: { id: contactId, workspaceId, deletedAt: null },
           select: { id: true, customerId: true },
         }),
       ]);
@@ -394,7 +394,7 @@ export class CustomersService {
       // survives in the audit trail) and lets `unlink` restore it.
       const previousCustomer = previousCustomerId
         ? await tx.customer.findFirst({
-            where: { id: previousCustomerId, teamId },
+            where: { id: previousCustomerId, workspaceId },
             select: { name: true },
           })
         : null;
@@ -404,7 +404,7 @@ export class CustomersService {
       // from where. Co-committed so it can't drift from the actual re-point.
       await tx.customerIdentityEvent.create({
         data: {
-          teamId,
+          workspaceId,
           contactId,
           action: "link",
           fromCustomerId: previousCustomerId,
@@ -421,16 +421,16 @@ export class CustomersService {
           where: { customerId: previousCustomerId },
         });
         if (remaining === 0) {
-          await tx.customer.deleteMany({ where: { id: previousCustomerId, teamId } });
+          await tx.customer.deleteMany({ where: { id: previousCustomerId, workspaceId } });
         }
       }
       return true;
     });
-    this.logger.log(`link contact ${contactId} → customer ${customerId} (team ${teamId})`);
+    this.logger.log(`link contact ${contactId} → customer ${customerId} (team ${workspaceId})`);
     // Only after the re-point commits, and only when it actually moved (never a
     // speculative/unchanged frame for a no-op re-link).
-    if (moved) await this.publishContactUpdated(teamId, contactId, actorUserId);
-    return this.loadProfile(teamId, customerId);
+    if (moved) await this.publishContactUpdated(workspaceId, contactId, actorUserId);
+    return this.loadProfile(workspaceId, customerId);
   }
 
   /**
@@ -439,14 +439,14 @@ export class CustomersService {
    * the new customer's profile. Reversible via `link`.
    */
   async unlinkContact(
-    teamId: string,
+    workspaceId: string,
     fromCustomerId: string,
     contactId: string,
     actorUserId: string | null = null,
   ): Promise<{ customerId: string }> {
     const newCustomerId = await this.db.$transaction(async (tx) => {
       const contact = await tx.contact.findFirst({
-        where: { id: contactId, teamId, deletedAt: null },
+        where: { id: contactId, workspaceId, deletedAt: null },
         select: { id: true, name: true, customerId: true },
       });
       if (!contact) throw new NotFoundException({ error: "contact_not_found" });
@@ -461,14 +461,14 @@ export class CustomersService {
       // prefer it over the channel-contact name so a deliberate rename survives a
       // merge→unlink round-trip. Falls back to the contact's own name otherwise.
       const lastLink = await tx.customerIdentityEvent.findFirst({
-        where: { teamId, contactId, action: "link", toCustomerId: previousCustomerId ?? undefined },
+        where: { workspaceId, contactId, action: "link", toCustomerId: previousCustomerId ?? undefined },
         orderBy: { createdAt: "desc" },
         select: { fromCustomerName: true },
       });
       const restoredName = lastLink?.fromCustomerName?.trim() || contact.name;
 
       const fresh = await tx.customer.create({
-        data: { teamId, name: restoredName },
+        data: { workspaceId, name: restoredName },
         select: { id: true },
       });
       await tx.contact.update({ where: { id: contactId }, data: { customerId: fresh.id } });
@@ -476,7 +476,7 @@ export class CustomersService {
       // Persisted audit (§6): the split back to a distinct person.
       await tx.customerIdentityEvent.create({
         data: {
-          teamId,
+          workspaceId,
           contactId,
           action: "unlink",
           fromCustomerId: previousCustomerId,
@@ -488,15 +488,15 @@ export class CustomersService {
       if (previousCustomerId && previousCustomerId !== fresh.id) {
         const remaining = await tx.contact.count({ where: { customerId: previousCustomerId } });
         if (remaining === 0) {
-          await tx.customer.deleteMany({ where: { id: previousCustomerId, teamId } });
+          await tx.customer.deleteMany({ where: { id: previousCustomerId, workspaceId } });
         }
       }
       return fresh.id;
     });
-    this.logger.log(`unlink contact ${contactId} → new customer ${newCustomerId} (team ${teamId})`);
+    this.logger.log(`unlink contact ${contactId} → new customer ${newCustomerId} (team ${workspaceId})`);
     // The split re-pointed the contact to a fresh customer — announce it so
     // panels/rollup/webhooks converge (see publishContactUpdated).
-    await this.publishContactUpdated(teamId, contactId, actorUserId);
+    await this.publishContactUpdated(workspaceId, contactId, actorUserId);
     return { customerId: newCustomerId };
   }
 }

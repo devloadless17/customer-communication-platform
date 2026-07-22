@@ -116,7 +116,7 @@ export interface ResolvedTarget {
  *     only needs to mutate the Contact (update_lifecycle / tags / fields).
  *
  * The find-or-create is single-trip Prisma upserts under a unique key
- * (teamId, phoneNumber), so concurrent workflow runs for the same target
+ * (workspaceId, phoneNumber), so concurrent workflow runs for the same target
  * phone collapse to one Contact row. Race-safe.
  */
 /**
@@ -127,7 +127,7 @@ export interface ResolvedTarget {
  * config error the run records and advances past.
  */
 async function resolveCustomerBestChannel(
-  teamId: string,
+  workspaceId: string,
   customerId: string,
   opts: { createConversation: boolean },
 ): Promise<ResolvedTarget> {
@@ -135,8 +135,8 @@ async function resolveCustomerBestChannel(
   // person reachable on a connected channel could be picked onto an unconnected
   // one (deleted connection / expired token) and then dropped at send, reaching
   // nobody. Mirrors the broadcast customer-mode path.
-  const connected = await teamConnectedChannels(teamId);
-  const best = await bestChannelForCustomer(teamId, customerId, Date.now(), connected);
+  const connected = await teamConnectedChannels(workspaceId);
+  const best = await bestChannelForCustomer(workspaceId, customerId, Date.now(), connected);
   if (!best) {
     throw new StepConfigError(
       "target customer has no reachable channel (no live contact to message)",
@@ -154,7 +154,7 @@ async function resolveCustomerBestChannel(
     };
   }
   const existingConv = await db.conversation.findFirst({
-    where: { teamId, contactId },
+    where: { workspaceId, contactId },
     orderBy: { lastMessageAt: "desc" },
     select: { id: true },
   });
@@ -169,17 +169,17 @@ async function resolveCustomerBestChannel(
   }
   // Create ON THE BEST CHANNEL — Conversation.channel defaults to whatsapp, so
   // a social best-channel MUST set it explicitly or the thread would be
-  // mis-stamped. Race-safe on the (teamId, contactId) unique.
+  // mis-stamped. Race-safe on the (workspaceId, contactId) unique.
   let conv: { id: string };
   try {
     conv = await db.conversation.create({
-      data: { teamId, contactId, channel: best.channel, status: "open" },
+      data: { workspaceId, contactId, channel: best.channel, status: "open" },
       select: { id: true },
     });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       conv = await db.conversation.findFirstOrThrow({
-        where: { teamId, contactId },
+        where: { workspaceId, contactId },
         orderBy: { lastMessageAt: "desc" },
         select: { id: true },
       });
@@ -197,7 +197,7 @@ async function resolveCustomerBestChannel(
 export async function resolveStepTarget(
   target: StepTarget | undefined,
   envelope: WorkflowEventEnvelope,
-  teamId: string,
+  workspaceId: string,
   opts: { createConversation: boolean },
 ): Promise<ResolvedTarget> {
   // Default: trigger contact + conversation from the envelope (existing
@@ -223,7 +223,7 @@ export async function resolveStepTarget(
 
   // Customer target — the person's BEST live channel (static id).
   if (target.kind === "customer") {
-    return resolveCustomerBestChannel(teamId, target.customerId, opts);
+    return resolveCustomerBestChannel(workspaceId, target.customerId, opts);
   }
 
   // trigger_customer — the DYNAMIC omnichannel target: reach the PERSON behind
@@ -238,11 +238,11 @@ export async function resolveStepTarget(
       );
     }
     const row = await db.contact.findFirst({
-      where: { teamId, id: c.id },
+      where: { workspaceId, id: c.id },
       select: { customerId: true },
     });
     if (row?.customerId) {
-      return resolveCustomerBestChannel(teamId, row.customerId, opts);
+      return resolveCustomerBestChannel(workspaceId, row.customerId, opts);
     }
     // Solo person → their single channel (the trigger's own contact/conversation).
     const conv = envelopeConversation(envelope);
@@ -259,10 +259,10 @@ export async function resolveStepTarget(
   const phone = target.phoneNumber; // already normalized in parseStepTarget
   // `deletedAt: null` so we never target a SOFT-DELETED ghost (the user removed
   // them on purpose) — identity-model-added-1. A soft-deleted contact still
-  // holds the (teamId, phoneNumber) unique slot, so the create below will P2002
+  // holds the (workspaceId, phoneNumber) unique slot, so the create below will P2002
   // and the revive branch handles it.
   const existingContact = await db.contact.findFirst({
-    where: { teamId, phoneNumber: phone, deletedAt: null },
+    where: { workspaceId, phoneNumber: phone, deletedAt: null },
     select: { id: true },
   });
   let contactId: string;
@@ -273,7 +273,7 @@ export async function resolveStepTarget(
     try {
       const created = await db.contact.create({
         data: {
-          teamId,
+          workspaceId,
           // Workflow target with a phone number = WhatsApp by definition
           // today. Stamped explicitly because identityChannel is NOT NULL.
           identityChannel: "whatsapp",
@@ -290,13 +290,13 @@ export async function resolveStepTarget(
       contactId = created.id;
       contactCreated = true;
     } catch (err) {
-      // Lost the (teamId, phoneNumber) unique — either a CONCURRENT workflow
+      // Lost the (workspaceId, phoneNumber) unique — either a CONCURRENT workflow
       // run created the contact, or the slot is held by a SOFT-DELETED ghost.
       // Re-find including deleted; revive a ghost (mirrors inbound ingest) so
       // the workflow targets a live contact instead of throwing (CTI-1).
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
         const slotHolder = await db.contact.findFirstOrThrow({
-          where: { teamId, phoneNumber: phone },
+          where: { workspaceId, phoneNumber: phone },
           select: { id: true, deletedAt: true },
         });
         if (slotHolder.deletedAt) {
@@ -325,10 +325,10 @@ export async function resolveStepTarget(
   // Find the most recent conversation (open OR closed) and reopen it if
   // closed — mirrors what the inbound webhook ingest does. Multiple
   // workflows hitting the same phone in parallel collapse onto the same
-  // row because `(teamId, contactId)` reads return the same id.
+  // row because `(workspaceId, contactId)` reads return the same id.
   const existingConv = await db.conversation.findFirst({
-    where: { teamId, contactId },
-    // One conversation per (teamId, contactId), so this returns the single row;
+    where: { workspaceId, contactId },
+    // One conversation per (workspaceId, contactId), so this returns the single row;
     // order by lastMessageAt to match the codebase convention (ingest, list,
     // /v1) rather than createdAt (CTI-4).
     orderBy: { lastMessageAt: "desc" },
@@ -346,15 +346,15 @@ export async function resolveStepTarget(
   let newConv: { id: string };
   try {
     newConv = await db.conversation.create({
-      data: { teamId, contactId, status: "open" },
+      data: { workspaceId, contactId, status: "open" },
       select: { id: true },
     });
   } catch (err) {
     // Lost the race for this contact's single conversation (unique
-    // [teamId, contactId]) to a concurrent path — reuse the winner.
+    // [workspaceId, contactId]) to a concurrent path — reuse the winner.
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       newConv = await db.conversation.findFirstOrThrow({
-        where: { teamId, contactId },
+        where: { workspaceId, contactId },
         orderBy: { lastMessageAt: "desc" },
         select: { id: true },
       });

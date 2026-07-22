@@ -8,14 +8,14 @@ import { loadConversationMeta, loadRecentMessages } from "./thread";
  * a regenerated draft is grounded in exactly the same context the original was.
  */
 export async function loadReplyContext(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
 ): Promise<{ memory: MemoryItem[]; recentMessages: RecentMessage[] }> {
   const meta = await loadConversationMeta(conversationId);
   const memory = meta?.customerId
     ? (
         await db.aiCustomerMemory.findMany({
-          where: { teamId, customerId: meta.customerId, status: "confirmed" },
+          where: { workspaceId, customerId: meta.customerId, status: "confirmed" },
           orderBy: { updatedAt: "desc" },
           take: 40,
           select: { kind: true, value: true },

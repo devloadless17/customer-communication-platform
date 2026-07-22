@@ -21,6 +21,7 @@ import { getProviderBinding } from "@/lib/providers";
 import { resolveContactChannel } from "@/lib/providers/channel";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
+import type { InboxViewFilters } from "@ccp/shared/inbox-views/types";
 import type { Channel } from "@ccp/shared/types";
 import { ContactsService } from "../contacts/contacts.service";
 import {
@@ -81,7 +82,7 @@ export class ConversationsService {
   // ---- Reads ----------------------------------------------------------
 
   list(
-    teamId: string,
+    workspaceId: string,
     viewerUserId: string,
     opts: {
       /** The signed-in viewer, for the agent-visibility boundary. Optional so
@@ -93,17 +94,25 @@ export class ConversationsService {
       /** Preset (`active`/`all`/`mine`/`unassigned`/`closed`/`flagged`) or `stage:<id>`. */
       filter?: "active" | "all" | "mine" | "unassigned" | "closed" | "flagged";
       stageId?: string;
+      /** A saved inbox view, already resolved to its filter document by the
+       *  controller (which owns the membership check). Never the raw id — this
+       *  layer must not be able to read the InboxView table. */
+      viewFilters?: InboxViewFilters;
     },
   ) {
     // Translate the flat query-string surface into the typed filter union
-    // the query layer expects. `stageId` wins over the preset filter when
-    // both are sent (the inbox sub-sidebar only sends one at a time).
-    const filter = opts.stageId
-      ? { kind: "stage" as const, stageId: opts.stageId }
-      : opts.filter
-        ? { kind: "preset" as const, id: opts.filter }
-        : undefined;
-    return listConversations(teamId, {
+    // the query layer expects. Precedence: a saved view wins over a stage,
+    // which wins over a preset. The sub-sidebar only ever sends one, so the
+    // order only matters for hand-built /v1 calls — where "most specific
+    // wins" is the least surprising rule.
+    const filter = opts.viewFilters
+      ? { kind: "view" as const, filters: opts.viewFilters }
+      : opts.stageId
+        ? { kind: "stage" as const, stageId: opts.stageId }
+        : opts.filter
+          ? { kind: "preset" as const, id: opts.filter }
+          : undefined;
+    return listConversations(workspaceId, {
       take: opts.take,
       cursor: opts.cursor,
       search: opts.search,
@@ -127,10 +136,10 @@ export class ConversationsService {
    *
    * Eleven queries fan out in parallel: 5 status/preset totals, 5 unread-filtered
    * (`unreadCount > 0`) variants, and 1 per-stage groupBy. The total/preset counts
-   * hit the (teamId, status, lastMessageAt) + (teamId, assignedUserId) indexes;
+   * hit the (workspaceId, status, lastMessageAt) + (workspaceId, assignedUserId) indexes;
    * the 5 unread counts narrow on those same indexes and are served by the
    * hand-written PARTIAL index `Conversation_teamId_unread_idx`
-   * (`Conversation(teamId) WHERE unreadCount > 0`, migration
+   * (`Conversation(workspaceId) WHERE unreadCount > 0`, migration
    * 20260615130000) — tiny, because zero-unread rows dominate. (This comment
    * used to say no index covered `unreadCount`; that was true when written and
    * stale from the moment the partial index shipped. It has since sent at
@@ -140,15 +149,15 @@ export class ConversationsService {
    * still the wrong answer: it would bloat every markRead write.
    * The per-stage count is a server-side GROUP BY through Contact (NOT a
    * full-table walk into JS): one conversation per contact is DB-enforced
-   * (@@unique([teamId, contactId])), so counting contacts that have a
+   * (@@unique([workspaceId, contactId])), so counting contacts that have a
    * conversation, grouped by stageId, equals counting conversations by
-   * their contact's stage. The aggregate runs on the (teamId, stageId)
+   * their contact's stage. The aggregate runs on the (workspaceId, stageId)
    * index and returns one row per stage instead of every conversation row.
    * This endpoint re-fires on every count-changing socket event, so the
    * walk it replaced was on a genuinely hot path.
    */
   async counts(
-    teamId: string,
+    workspaceId: string,
     viewerUserId: string,
     viewer?: ConversationViewer,
   ): Promise<{
@@ -171,7 +180,7 @@ export class ConversationsService {
     // Per-bucket UNREAD = conversations with unreadCount>0 in that bucket. Same
     // bucket predicates as the totals, AND unreadCount>0. Drives the green
     // unread pills on the sub-sidebar filters. Coalesced client-side so the
-    // extra counts don't fire on every inbound; indexed on (teamId,status).
+    // extra counts don't fire on every inbound; indexed on (workspaceId,status).
     const unreadWhere: Prisma.ConversationWhereInput = { unreadCount: { gt: 0 } };
 
     // NINE of the eleven queries are TEAM-WIDE — identical for every agent on
@@ -191,14 +200,14 @@ export class ConversationsService {
     // instinct and it is wrong here: the sidebar count must move the moment
     // YOU close or assign a thread, and CLAUDE.md holds the inbox to
     // "everything feels instant". `mine` is never memoized at all.
-    const team = await this.teamCounts(teamId, unreadWhere, viewer);
+    const team = await this.teamCounts(workspaceId, unreadWhere, viewer);
     const [mine, uMine] = await Promise.all([
       this.db.conversation.count({
-        where: { teamId, status: { not: "closed" }, assignedUserId: viewerUserId },
+        where: { workspaceId, status: { not: "closed" }, assignedUserId: viewerUserId },
       }),
       this.db.conversation.count({
         where: {
-          teamId,
+          workspaceId,
           status: { not: "closed" },
           assignedUserId: viewerUserId,
           ...unreadWhere,
@@ -224,16 +233,16 @@ export class ConversationsService {
   private readonly teamCountsInFlight = new Map<string, Promise<TeamCountsBlock>>();
 
   private async teamCounts(
-    teamId: string,
+    workspaceId: string,
     unreadWhere: Prisma.ConversationWhereInput,
     viewer?: ConversationViewer,
   ): Promise<TeamCountsBlock> {
     const scope = viewer ? visibilityWhere(viewer) : {};
-    // The memo key MUST include the scope. Keyed by teamId alone, a restricted
+    // The memo key MUST include the scope. Keyed by workspaceId alone, a restricted
     // agent would read another agent's cached totals — a leak no WHERE clause
     // could catch, because the query never runs. Unrestricted viewers all share
     // the "team" key, so the cache stays exactly as effective as before.
-    const key = `${teamId}::${viewer ? visibilityScopeKey(viewer) : "team"}`;
+    const key = `${workspaceId}::${viewer ? visibilityScopeKey(viewer) : "team"}`;
     const hit = this.teamCountsCache.get(key);
     if (hit && Date.now() - hit.at < ConversationsService.COUNTS_TTL_MS) return hit.value;
     const inFlight = this.teamCountsInFlight.get(key);
@@ -242,7 +251,7 @@ export class ConversationsService {
     // queries instead of N.
     if (inFlight) return inFlight;
 
-    const p = this.loadTeamCounts(teamId, unreadWhere, scope)
+    const p = this.loadTeamCounts(workspaceId, unreadWhere, scope)
       .then((value) => {
         this.teamCountsCache.set(key, { at: Date.now(), value });
         return value;
@@ -255,7 +264,7 @@ export class ConversationsService {
   }
 
   private async loadTeamCounts(
-    teamId: string,
+    workspaceId: string,
     unreadWhere: Prisma.ConversationWhereInput,
     scope: { assignedUserId?: string } = {},
   ): Promise<TeamCountsBlock> {
@@ -273,10 +282,10 @@ export class ConversationsService {
       uFlagged,
     ] = await Promise.all([
       this.db.conversation.count({
-        where: { teamId, ...scope, status: { not: "closed" } },
+        where: { workspaceId, ...scope, status: { not: "closed" } },
       }),
       this.db.conversation.count({
-        where: { teamId, ...scope },
+        where: { workspaceId, ...scope },
       }),
       this.db.conversation.count({
         // AND, not a sibling spread: `assignedUserId: null` would otherwise
@@ -285,12 +294,12 @@ export class ConversationsService {
         // are contradictory, which is the correct answer — a restricted agent
         // has no unassigned conversations by definition.
         where: {
-          teamId,
+          workspaceId,
           AND: [scope, { status: { not: "closed" }, assignedUserId: null }],
         },
       }),
       this.db.conversation.count({
-        where: { teamId, ...scope, status: "closed" },
+        where: { workspaceId, ...scope, status: "closed" },
       }),
       // Threads with at least one unresolved triage flag. Rides the partial
       // index Conversation_teamId_openFlag_idx, which spans only flagged rows —
@@ -298,7 +307,7 @@ export class ConversationsService {
       // partition. Deliberately NOT status-narrowed: an unresolved complaint on
       // a closed thread still needs triage (matches the list filter).
       this.db.conversation.count({
-        where: { teamId, ...scope, openFlagCount: { gt: 0 } },
+        where: { workspaceId, ...scope, openFlagCount: { gt: 0 } },
       }),
       this.db.contact.groupBy({
         by: ["stageId"],
@@ -310,7 +319,7 @@ export class ConversationsService {
         // Stage badge: a restricted agent counts only stages of contacts whose
         // conversation is theirs, so the badge agrees with the list they see.
         where: {
-          teamId,
+          workspaceId,
           stageId: { not: null },
           deletedAt: null,
           conversations: { some: scope },
@@ -318,14 +327,14 @@ export class ConversationsService {
         _count: true,
       }),
       this.db.conversation.count({
-        where: { teamId, ...scope, status: { not: "closed" }, ...unreadWhere },
+        where: { workspaceId, ...scope, status: { not: "closed" }, ...unreadWhere },
       }),
       this.db.conversation.count({
-        where: { teamId, ...scope, ...unreadWhere },
+        where: { workspaceId, ...scope, ...unreadWhere },
       }),
       this.db.conversation.count({
         where: {
-          teamId,
+          workspaceId,
           AND: [
             scope,
             { status: { not: "closed" }, assignedUserId: null, ...unreadWhere },
@@ -333,10 +342,10 @@ export class ConversationsService {
         },
       }),
       this.db.conversation.count({
-        where: { teamId, ...scope, status: "closed", ...unreadWhere },
+        where: { workspaceId, ...scope, status: "closed", ...unreadWhere },
       }),
       this.db.conversation.count({
-        where: { teamId, ...scope, openFlagCount: { gt: 0 }, ...unreadWhere },
+        where: { workspaceId, ...scope, openFlagCount: { gt: 0 }, ...unreadWhere },
       }),
     ]);
     return {
@@ -394,7 +403,7 @@ export class ConversationsService {
    * message:new / conversation:read / conversation:status.
    */
   async unreadTotal(
-    teamId: string,
+    workspaceId: string,
     viewer?: ConversationViewer,
   ): Promise<{ unread: number }> {
     const agg = await this.db.conversation.aggregate({
@@ -402,7 +411,7 @@ export class ConversationsService {
       // Scoped: the AppRail badge must count what this viewer can actually
       // open, or a restricted agent sees a number they can never clear.
       where: {
-        teamId,
+        workspaceId,
         ...(viewer ? visibilityWhere(viewer) : {}),
         status: { not: "closed" },
       },
@@ -418,21 +427,21 @@ export class ConversationsService {
    * null if the conversation isn't in the team's scope.
    */
   getInboxConversation(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     viewer?: ConversationViewer,
   ) {
     // A restricted agent gets null → the controller's 404. This is the single
     // richest payload in the product (full thread, notes, activity, contact
     // PII), so it is scoped at the query rather than after the fact.
-    return getConversationWithRefs(teamId, conversationId, {
+    return getConversationWithRefs(workspaceId, conversationId, {
       ...(viewer ? { visibility: visibilityWhere(viewer) } : {}),
     });
   }
 
   /** Older or newer page. Exactly one of `before` / `after` must be set. */
   async listMessages(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     opts: {
       before?: string | null;
@@ -443,7 +452,7 @@ export class ConversationsService {
     },
   ) {
     if (opts.after) {
-      return listNewerMessages(teamId, conversationId, {
+      return listNewerMessages(workspaceId, conversationId, {
         after: opts.after,
         afterId: opts.afterId ?? undefined,
         take: opts.take,
@@ -452,7 +461,7 @@ export class ConversationsService {
     if (!opts.before) {
       throw new BadRequestException({ error: "before or after cursor required" });
     }
-    return listOlderMessages(teamId, conversationId, {
+    return listOlderMessages(workspaceId, conversationId, {
       take: opts.take,
       before: opts.before,
     });
@@ -460,11 +469,11 @@ export class ConversationsService {
 
   /** Centered slice of messages for "jump to search hit" UX. */
   async messageContext(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     opts: { messageId: string; before?: number; after?: number },
   ) {
-    const window = await loadMessageContextWindow(teamId, conversationId, {
+    const window = await loadMessageContextWindow(workspaceId, conversationId, {
       targetMessageId: opts.messageId,
       before: opts.before,
       after: opts.after,
@@ -474,26 +483,26 @@ export class ConversationsService {
   }
 
   searchMessages(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     opts: { query: string; take?: number; cursor?: string },
   ) {
-    return searchConversationMessages(teamId, conversationId, opts);
+    return searchConversationMessages(workspaceId, conversationId, opts);
   }
 
   /** Recent activity-log events for one thread — the events-only refetch the
    *  live thread fires after an audit-implying frame lands. */
-  listEvents(teamId: string, conversationId: string) {
-    return listConversationEvents(teamId, conversationId);
+  listEvents(workspaceId: string, conversationId: string) {
+    return listConversationEvents(workspaceId, conversationId);
   }
 
   /** "Files" tab in the contact panel — keyset-paginated, kind-filtered. */
   listAttachments(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     opts: { cursor?: string; take?: number; kind?: string },
   ) {
-    return listConversationAttachments(teamId, conversationId, opts);
+    return listConversationAttachments(workspaceId, conversationId, opts);
   }
 
   // ---- Global (team-wide) search — the tabbed inbox search bar -----------
@@ -504,33 +513,33 @@ export class ConversationsService {
   // query, not by filtering results afterwards.
 
   globalSearchContacts(
-    teamId: string,
+    workspaceId: string,
     opts: { query: string; take?: number; cursor?: string },
     viewer?: ConversationViewer,
   ) {
-    return searchContacts(teamId, {
+    return searchContacts(workspaceId, {
       ...opts,
       ...(viewer ? { visibility: visibilityWhere(viewer) } : {}),
     });
   }
 
   globalSearchMessages(
-    teamId: string,
+    workspaceId: string,
     opts: { query: string; take?: number; cursor?: string },
     viewer?: ConversationViewer,
   ) {
-    return searchAllMessages(teamId, {
+    return searchAllMessages(workspaceId, {
       ...opts,
       ...(viewer ? { visibility: visibilityWhere(viewer) } : {}),
     });
   }
 
   globalSearchNotes(
-    teamId: string,
+    workspaceId: string,
     opts: { query: string; take?: number; cursor?: string },
     viewer?: ConversationViewer,
   ) {
-    return searchAllNotes(teamId, {
+    return searchAllNotes(workspaceId, {
       ...opts,
       ...(viewer ? { visibility: visibilityWhere(viewer) } : {}),
     });
@@ -560,7 +569,7 @@ export class ConversationsService {
    * peak memory no longer scales with a tenant's history.
    */
   private async collectMediaKeys(
-    teamId: string,
+    workspaceId: string,
     conversationIds: string[],
   ): Promise<string[]> {
     const keys: string[] = [];
@@ -569,7 +578,7 @@ export class ConversationsService {
     for (;;) {
       const page = await this.db.message.findMany({
         where: {
-          teamId,
+          workspaceId,
           conversationId: { in: conversationIds },
           OR: [{ mediaKey: { not: null } }, { mediaThumbnailKey: { not: null } }],
         },
@@ -590,12 +599,12 @@ export class ConversationsService {
   }
 
   async bulkDelete(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: BulkDeleteConversationsInput,
   ): Promise<{ count: number }> {
     const owned = await this.db.conversation.findMany({
-      where: { teamId, id: { in: input.conversationIds } },
+      where: { workspaceId, id: { in: input.conversationIds } },
       select: { id: true },
     });
     if (owned.length === 0) {
@@ -603,10 +612,10 @@ export class ConversationsService {
     }
     const ownedIds = owned.map((c) => c.id);
 
-    const mediaKeys = await this.collectMediaKeys(teamId, ownedIds);
+    const mediaKeys = await this.collectMediaKeys(workspaceId, ownedIds);
 
     await this.db.conversation.deleteMany({
-      where: { teamId, id: { in: ownedIds } },
+      where: { workspaceId, id: { in: ownedIds } },
     });
 
     if (mediaKeys.length > 0) {
@@ -621,7 +630,7 @@ export class ConversationsService {
     await runWithConcurrency(ownedIds, 16, async (cid) => {
       await this.bus.publish({
         type: "conversation.deleted",
-        teamId,
+        workspaceId,
         conversationId: cid,
         deletedByUserId: userId,
       });
@@ -662,7 +671,7 @@ export class ConversationsService {
    * should decide deliberately whether to carry this per-row side-effect.)
    */
   async assign(
-    teamId: string,
+    workspaceId: string,
     actorUserId: string,
     conversationId: string,
     input: AssignConversationInput,
@@ -684,7 +693,7 @@ export class ConversationsService {
       }
       if (target === null) {
         const current = await this.db.conversation.findFirst({
-          where: { id: conversationId, teamId },
+          where: { id: conversationId, workspaceId },
           select: { assignedUserId: true },
         });
         if (current?.assignedUserId && current.assignedUserId !== actorUserId) {
@@ -700,7 +709,7 @@ export class ConversationsService {
     const result = await assignConversation({
       db: this.db,
       publish: (e) => this.bus.publish(e),
-      teamId,
+      workspaceId,
       conversationId,
       targetUserId: input.assignedUserId,
       changedByUserId: actorUserId,
@@ -733,7 +742,7 @@ export class ConversationsService {
    * See ConversationAssignedEvent.silent.
    */
   async setStatus(
-    teamId: string,
+    workspaceId: string,
     actorUserId: string,
     conversationId: string,
     input: SetConversationStatusInput,
@@ -745,7 +754,7 @@ export class ConversationsService {
     const result = await setConversationStatus({
       db: this.db,
       publish: (e) => this.bus.publish(e),
-      teamId,
+      workspaceId,
       conversationId,
       status: input.status,
       changedByUserId: actorUserId,
@@ -767,7 +776,7 @@ export class ConversationsService {
    * and the auto-pause-on-human-reply run identically.
    */
   async setAiEnabled(
-    teamId: string,
+    workspaceId: string,
     actorUserId: string,
     conversationId: string,
     input: SetConversationAiEnabledInput,
@@ -775,7 +784,7 @@ export class ConversationsService {
     const result = await setConversationAiEnabled({
       db: this.db,
       publish: (e) => this.bus.publish(e),
-      teamId,
+      workspaceId,
       conversationId,
       aiEnabled: input.aiEnabled,
       changedByUserId: actorUserId,
@@ -802,7 +811,7 @@ export class ConversationsService {
    * entry point: a hard-deleted conversation leaves the Contact intact but with
    * no thread, so without this there's no way back into a chat with them.
    *
-   * Honors the one-conversation-per-contact invariant (@@unique[teamId,
+   * Honors the one-conversation-per-contact invariant (@@unique[workspaceId,
    * contactId]):
    *   - existing OPEN/PENDING thread → returned as-is (created:false).
    *   - existing CLOSED thread → reopened to pending via setStatus (so the
@@ -822,7 +831,7 @@ export class ConversationsService {
    * existing composer.
    */
   async startConversation(
-    teamId: string,
+    workspaceId: string,
     actorUserId: string,
     input: StartConversationInput,
   ): Promise<{ conversationId: string; created: boolean; reopened: boolean }> {
@@ -840,7 +849,7 @@ export class ConversationsService {
         });
       }
       const active = await this.db.contact.findFirst({
-        where: { teamId, phoneNumber: phone, deletedAt: null },
+        where: { workspaceId, phoneNumber: phone, deletedAt: null },
         select: { id: true },
       });
       if (active) {
@@ -848,7 +857,7 @@ export class ConversationsService {
       } else {
         try {
           contactId = (
-            await this.contacts.create(teamId, actorUserId, {
+            await this.contacts.create(workspaceId, actorUserId, {
               phoneNumber: phone,
               ...(input.name ? { name: input.name } : {}),
             })
@@ -862,7 +871,7 @@ export class ConversationsService {
             (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002");
           if (!isDuplicate) throw err;
           const winner = await this.db.contact.findFirst({
-            where: { teamId, phoneNumber: phone, deletedAt: null },
+            where: { workspaceId, phoneNumber: phone, deletedAt: null },
             select: { id: true },
           });
           if (!winner) throw err;
@@ -879,13 +888,13 @@ export class ConversationsService {
     // tombstoned rows on purpose so threads remain intact, but starting a
     // NEW thread to a deleted contact has no defensible UX.
     const contact = await this.db.contact.findFirst({
-      where: { id: contactId, teamId, deletedAt: null },
+      where: { id: contactId, workspaceId, deletedAt: null },
       select: { id: true, phoneNumber: true, identityChannel: true, externalContactId: true },
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });
 
     const existing = await this.db.conversation.findFirst({
-      where: { teamId, contactId: contact.id },
+      where: { workspaceId, contactId: contact.id },
       orderBy: { lastMessageAt: "desc" },
       select: { id: true, status: true },
     });
@@ -894,7 +903,7 @@ export class ConversationsService {
       if (existing.status === "closed") {
         // Reopen through setStatus so the reopen is audited + fans out exactly
         // like any other status change (and clears nothing it shouldn't).
-        await this.setStatus(teamId, actorUserId, existing.id, { status: "pending" });
+        await this.setStatus(workspaceId, actorUserId, existing.id, { status: "pending" });
         return { conversationId: existing.id, created: false, reopened: true };
       }
       return { conversationId: existing.id, created: false, reopened: false };
@@ -914,7 +923,7 @@ export class ConversationsService {
     try {
       const created = await this.db.conversation.create({
         data: {
-          teamId,
+          workspaceId,
           contactId: contact.id,
           channel,
           status: "pending",
@@ -928,7 +937,7 @@ export class ConversationsService {
       // inbound/forward — reuse the winner (just created `pending`, no reopen).
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
         const winner = await this.db.conversation.findFirstOrThrow({
-          where: { teamId, contactId: contact.id },
+          where: { workspaceId, contactId: contact.id },
           orderBy: { lastMessageAt: "desc" },
           select: { id: true },
         });
@@ -938,25 +947,25 @@ export class ConversationsService {
     }
   }
 
-  async remove(teamId: string, actorUserId: string, conversationId: string): Promise<void> {
+  async remove(workspaceId: string, actorUserId: string, conversationId: string): Promise<void> {
     const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
+      where: { id: conversationId, workspaceId },
       select: { id: true },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
-    const mediaKeys = await this.collectMediaKeys(teamId, [conversationId]);
+    const mediaKeys = await this.collectMediaKeys(workspaceId, [conversationId]);
 
-    // Compound where (id + teamId) via deleteMany — Prisma's single `delete`
+    // Compound where (id + workspaceId) via deleteMany — Prisma's single `delete`
     // accepts only unique constraints, and Conversation.id alone is the
     // unique key, so a bare delete would honor any id matching the just-
     // gated findFirst. The gate ABOVE already enforces tenant ownership,
     // but defense-in-depth: a future refactor that drops the gate (or
     // races a transaction across it) shouldn't be one line away from a
-    // cross-tenant delete. deleteMany on (id, teamId) is no-op if either
+    // cross-tenant delete. deleteMany on (id, workspaceId) is no-op if either
     // doesn't match.
     const { count } = await this.db.conversation.deleteMany({
-      where: { id: conversationId, teamId },
+      where: { id: conversationId, workspaceId },
     });
     if (count === 0) {
       // Row vanished between findFirst and deleteMany — concurrent delete
@@ -970,7 +979,7 @@ export class ConversationsService {
 
     await this.bus.publish({
       type: "conversation.deleted",
-      teamId,
+      workspaceId,
       conversationId,
       deletedByUserId: actorUserId,
     });
@@ -983,7 +992,7 @@ export class ConversationsService {
    * The CAS protects against the read-vs-incoming-bump race; loser skips the
    * publish and the next message:received re-syncs the badge.
    */
-  async markRead(teamId: string, userId: string, conversationId: string): Promise<void> {
+  async markRead(workspaceId: string, userId: string, conversationId: string): Promise<void> {
     // Single-round-trip CAS. The client calls markRead on EVERY visible
     // thread mount (not just when its cached snapshot claims unread>0) so
     // the team-wide counter converges to server truth even when that
@@ -999,14 +1008,14 @@ export class ConversationsService {
     // (the 2026-05-26 P1 batch's markRead-1-RTT fix); was previously
     // applied there but missed this call site.
     const result = await this.db.conversation.updateMany({
-      where: { id: conversationId, teamId, unreadCount: { gt: 0 } },
+      where: { id: conversationId, workspaceId, unreadCount: { gt: 0 } },
       data: { unreadCount: 0 },
     });
     if (result.count === 0) {
       // Either already-read OR missing. Probe to distinguish so callers
       // still see 404 when the conversation truly vanished.
       const exists = await this.db.conversation.findFirst({
-        where: { id: conversationId, teamId },
+        where: { id: conversationId, workspaceId },
         select: { id: true },
       });
       if (!exists) throw new NotFoundException({ error: "conversation not found" });
@@ -1014,7 +1023,7 @@ export class ConversationsService {
     }
     await this.bus.publish({
       type: "conversation.read",
-      teamId,
+      workspaceId,
       conversationId,
       readByUserId: userId,
     });
@@ -1044,7 +1053,7 @@ export class ConversationsService {
         latestInbound.conversation.contact.phoneNumber ??
         undefined;
       void this.markIncomingReadBestEffort(
-        teamId,
+        workspaceId,
         latestInbound.externalId,
         latestInbound.channel,
         recipientId,
@@ -1059,12 +1068,12 @@ export class ConversationsService {
    * Silent no-op when there's no inbound to anchor on.
    */
   async sendTyping(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     active: boolean = true,
   ): Promise<{ ok: true; skipped?: string }> {
     const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
+      where: { id: conversationId, workspaceId },
       select: {
         id: true,
         // Recipient identity for the social typing sender_action (PSID / IGSID);
@@ -1087,7 +1096,7 @@ export class ConversationsService {
       // Route by the inbound's own channel; a provider without typing support
       // no-ops via the optional `?.`.
       const binding = getProviderBinding(latestInbound.channel);
-      const config = await binding.getSendConfig(teamId);
+      const config = await binding.getSendConfig(workspaceId);
       const recipientId =
         conversation.contact.externalContactId ??
         conversation.contact.phoneNumber ??
@@ -1108,14 +1117,14 @@ export class ConversationsService {
   }
 
   private async markIncomingReadBestEffort(
-    teamId: string,
+    workspaceId: string,
     externalId: string,
     channel: Channel,
     recipientId?: string,
   ): Promise<void> {
     try {
       const binding = getProviderBinding(channel);
-      const config = await binding.getSendConfig(teamId);
+      const config = await binding.getSendConfig(workspaceId);
       await binding.provider.markIncomingRead?.(externalId, config, recipientId);
     } catch (err) {
       if (err instanceof ProviderNotConfiguredError) return;

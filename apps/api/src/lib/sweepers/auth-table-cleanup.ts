@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Nightly cleanup of EXPIRED Better Auth rows: `Session` and `Verification`.
@@ -35,6 +35,12 @@ async function runTick(label: string): Promise<void> {
     // Mutex serializes auth DELETEs against other heavy sweepers.
     await withSweeperMutex("auth-cleanup", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopAuthTableCleanupSweeper();
+      return;
+    }
     console.error(`[sweeper.auth-cleanup] ${label} failed`, err);
   } finally {
     inFlight = false;

@@ -26,7 +26,7 @@ import { SendTextValidationError } from "./send-text-internal";
  * No new Message row — a reaction mutates its target.
  */
 export interface SendReactionInternalArgs {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   /** Our Message.id of the message being reacted to. */
   messageId: string;
@@ -37,9 +37,11 @@ export interface SendReactionInternalArgs {
 
 export async function sendReactionInternal(args: SendReactionInternalArgs): Promise<void> {
   const conversation = await db.conversation.findFirst({
-    where: { id: args.conversationId, teamId: args.teamId },
+    where: { id: args.conversationId, workspaceId: args.workspaceId },
     select: {
       id: true,
+      // The account this thread belongs to — sends must go out from it.
+      channelConnectionId: true,
       channel: true,
       contact: {
         select: {
@@ -56,7 +58,7 @@ export async function sendReactionInternal(args: SendReactionInternalArgs): Prom
   }
 
   const target = await db.message.findFirst({
-    where: { id: args.messageId, teamId: args.teamId, conversationId: args.conversationId },
+    where: { id: args.messageId, workspaceId: args.workspaceId, conversationId: args.conversationId },
     select: { id: true, externalId: true, agentReaction: true },
   });
   if (!target || !target.externalId) {
@@ -99,7 +101,7 @@ export async function sendReactionInternal(args: SendReactionInternalArgs): Prom
 
   let sendConfig;
   try {
-    sendConfig = await binding.getSendConfig(args.teamId);
+    sendConfig = await binding.getSendConfig(args.workspaceId, conversation.channelConnectionId);
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) {
       throw new SendTextValidationError("provider_not_configured", "channel_not_connected", err.message);
@@ -139,7 +141,7 @@ export async function sendReactionInternal(args: SendReactionInternalArgs): Prom
   await db.message.update({ where: { id: target.id }, data: { agentReaction: emoji } });
   await publish({
     type: "message.reaction_changed",
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     conversationId: conversation.id,
     messageId: target.id,
     actor: "agent",

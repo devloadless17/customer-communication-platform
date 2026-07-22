@@ -28,7 +28,7 @@ export const dynamic = "force-dynamic";
 export default async function MessageFlagsSettingsPage() {
   const { permissions } = await getSession();
   if (!permissions["messageFlags:manage"]) {
-    redirect("/settings/account");
+    redirect("/account");
   }
 
   const definitions = await listMessageFlagDefinitionsWithUsage();

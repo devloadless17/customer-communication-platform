@@ -35,6 +35,15 @@ export const ListConversationsQuerySchema = z.object({
    */
   filter: PresetFilterIdSchema.optional(),
   stageId: z.string().min(1).optional(),
+  /**
+   * A saved inbox view. Resolved server-side to its stored filter document —
+   * the client sends only the id, never the filters, so a view can never be
+   * used to run a filter the author didn't save (and a personal view can never
+   * be read by someone else, because the id lookup is membership-scoped).
+   *
+   * Precedence, applied in the service: `viewId` > `stageId` > `filter`.
+   */
+  viewId: z.string().min(1).optional(),
 });
 export type ListConversationsQuery = z.infer<typeof ListConversationsQuerySchema>;
 

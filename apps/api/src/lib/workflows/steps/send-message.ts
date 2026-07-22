@@ -70,7 +70,7 @@ export const sendMessageStepHandler: StepHandler<SendMessageStepConfig> = {
   async run(envelope, config, ctx): Promise<StepResult> {
     let resolved;
     try {
-      resolved = await resolveStepTarget(config.target, envelope, ctx.teamId, {
+      resolved = await resolveStepTarget(config.target, envelope, ctx.workspaceId, {
         createConversation: true,
       });
     } catch (err) {
@@ -91,7 +91,7 @@ export const sendMessageStepHandler: StepHandler<SendMessageStepConfig> = {
     const { contact, extras } = await buildTokenContext(
       envelope,
       ctx,
-      ctx.teamId,
+      ctx.workspaceId,
       resolved.contactId,
     );
     const body = resolveFieldTokens(config.body, contact, extras);
@@ -101,9 +101,9 @@ export const sendMessageStepHandler: StepHandler<SendMessageStepConfig> = {
       // replies (the unmetered leg flagged in the 2026-05-22 audit). A runaway
       // automation hammering one thread records a clean 429 and advances
       // instead of spending unbounded customer-facing Meta sends.
-      consumeConversationSendBudget(ctx.teamId, conversationId);
+      consumeConversationSendBudget(ctx.workspaceId, conversationId);
       const result = await sendTextInternal({
-        teamId: ctx.teamId,
+        workspaceId: ctx.workspaceId,
         conversationId,
         body,
         sentVia: `workflow/${ctx.workflowId}`,

@@ -21,11 +21,11 @@ export interface WebhookDeliverJobData {
   chainDepth?: number;
   /** Owning team, carried from the publishing event so the worker's per-team
    *  concurrency gate reads it off the job instead of a per-pickup DB
-   *  findUnique (join webhook.teamId) — which, under a single-team burst that
+   *  findUnique (join webhook.workspaceId) — which, under a single-team burst that
    *  keeps deferring, became a DB/Redis busy-spin. Optional for backward-compat
    *  with jobs enqueued before this field existed (worker falls back to the
    *  delivery row for those). */
-  teamId?: string;
+  workspaceId?: string;
 }
 
 export const WEBHOOK_DELIVER_QUEUE_NAME = "webhook-deliver";
@@ -127,7 +127,7 @@ export function getWebhookDeliverQueue(): Queue<WebhookDeliverJobData> {
 export async function enqueueWebhookDelivery(
   deliveryId: string,
   chainDepth?: number,
-  teamId?: string,
+  workspaceId?: string,
 ): Promise<string> {
   const q = getWebhookDeliverQueue();
   const job = await q.add(
@@ -135,7 +135,7 @@ export async function enqueueWebhookDelivery(
     {
       deliveryId,
       ...(chainDepth ? { chainDepth } : {}),
-      ...(teamId ? { teamId } : {}),
+      ...(workspaceId ? { workspaceId } : {}),
     },
     { jobId: `deliver-${deliveryId}` },
   );

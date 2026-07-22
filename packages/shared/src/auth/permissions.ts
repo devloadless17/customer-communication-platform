@@ -5,11 +5,18 @@ import type { Role } from "../types";
  * server-side guards in API routes AND client-side conditional rendering —
  * goes through these predicates so changing the matrix is a one-file edit.
  *
- * Matrix:
- *   superAdmin  every action; only role that can grant/revoke superAdmin
- *   admin       full team management within their org; cannot touch superAdmins
+ * Matrix (per-WORKSPACE roles):
+ *   admin       full workspace management; cannot touch a platform superAdmin
  *   manager     same conversation powers as agent
  *   agent       reply, assign, mark read, change status, add notes
+ *
+ * `superAdmin` is NOT a role here any more — it is the platform-level
+ * `User.isSuperAdmin` flag, orthogonal to any workspace. `resolveSession`
+ * already resolves a superAdmin (and an org owner/admin) to an EFFECTIVE
+ * workspace role of "admin", so these predicates only ever see the three
+ * workspace roles. The one place the flag still matters is protecting a
+ * superAdmin from being modified by a mere workspace admin — see
+ * `canModifyUser`, which takes the flag explicitly rather than inferring it.
  *
  * Note: every signed-in user can view /settings/team — it's the team
  * directory. Only `canManageUsers` controls who can edit it.
@@ -17,7 +24,7 @@ import type { Role } from "../types";
 
 /** Invite a new user, change roles, and deactivate. */
 export function canManageUsers(role: Role): boolean {
-  return role === "superAdmin" || role === "admin";
+  return role === "admin";
 }
 
 /**
@@ -41,33 +48,47 @@ export function canManageStages(role: Role): boolean {
   return DEFAULT_CAPABILITIES[role]["stages:manage"];
 }
 
+/** An actor/target for the user-management checks below. `isSuperAdmin` is the
+ *  platform flag; `role` is the effective role in the workspace being acted in. */
+export interface UserActor {
+  role: Role;
+  isSuperAdmin: boolean;
+}
+
 /**
  * Whether `actor` is allowed to mutate `target`'s role / activation.
- * - superAdmin can modify anyone (incl. other superAdmins).
- * - admin can modify anyone EXCEPT a superAdmin.
+ * - a platform superAdmin can modify anyone (incl. other superAdmins).
+ * - a workspace admin can modify anyone EXCEPT a platform superAdmin.
  * - everyone else: never.
+ *
+ * SECURITY: the "admin cannot touch a superAdmin" rule keys on the target's
+ * `isSuperAdmin` FLAG. It used to key on the target's role, which no longer
+ * carries that information — inferring it from the role would silently drop the
+ * protection and let any workspace admin demote a platform operator.
  *
  * Self-edit guards (don't demote yourself, don't deactivate yourself) live
  * in the route handler since they apply equally regardless of role.
  */
-export function canModifyUser(actor: Role, target: Role): boolean {
-  if (actor === "superAdmin") return true;
-  if (actor === "admin") return target !== "superAdmin";
+export function canModifyUser(actor: UserActor, target: UserActor): boolean {
+  if (actor.isSuperAdmin) return true;
+  if (actor.role === "admin") return !target.isSuperAdmin;
   return false;
 }
 
-/** Set of roles `actor` is allowed to assign to a target. */
-export function assignableRoles(actor: Role): Role[] {
-  if (actor === "superAdmin") return ["superAdmin", "admin", "manager", "agent"];
-  if (actor === "admin") return ["admin", "manager", "agent"];
+/**
+ * Set of WORKSPACE roles `actor` is allowed to assign to a target. Granting or
+ * revoking the platform `isSuperAdmin` flag is deliberately NOT expressible
+ * here — it is a platform-level action on its own admin surface, not a
+ * workspace role assignment.
+ */
+export function assignableRoles(actor: UserActor): Role[] {
+  if (actor.isSuperAdmin || actor.role === "admin") return ["admin", "manager", "agent"];
   return [];
 }
 
 /** Pretty label for UI. */
 export function roleLabel(role: Role): string {
   switch (role) {
-    case "superAdmin":
-      return "Super admin";
     case "admin":
       return "Admin";
     case "manager":
@@ -102,6 +123,7 @@ export type Capability =
   | "contactFields:manage"
   | "tags:manage"
   | "messageFlags:manage"
+  | "inboxViews:manageShared"
   | "snippets:manage"
   | "availability:manage"
   | "availability:manageOthers"
@@ -123,6 +145,7 @@ export const ALL_CAPABILITIES: Capability[] = [
   "contactFields:manage",
   "tags:manage",
   "messageFlags:manage",
+  "inboxViews:manageShared",
   "snippets:manage",
   "availability:manage",
   "availability:manageOthers",
@@ -150,6 +173,8 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   "contactFields:manage": "Manage contact fields",
   "tags:manage": "Create & manage tags",
   "messageFlags:manage": "Create & manage message flags",
+  "inboxViews:manageShared":
+    "Create & manage shared inbox views (everyone can always save their own)",
   "snippets:manage": "Create & manage snippets",
   "availability:manage": "Set own availability (busy / away / offline)",
   "availability:manageOthers": "Set teammates' availability & working hours",
@@ -172,7 +197,6 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
  *    contactFields false (agents never had those manage powers).
  */
 export const DEFAULT_CAPABILITIES: Record<Role, Record<Capability, boolean>> = {
-  superAdmin: allCapabilities(true),
   admin: allCapabilities(true),
   manager: allCapabilities(true),
   agent: {
@@ -202,6 +226,13 @@ export const DEFAULT_CAPABILITIES: Record<Role, Record<Capability, boolean>> = {
     // RESOLVING a flag is triage every agent must be able to do and is
     // deliberately ungated, like sending a message or leaving a note.
     "messageFlags:manage": true,
+    // SHARED inbox views only. Saving a PERSONAL view is never gated — it is
+    // the agent organising their own work, like a bookmark. This flag is
+    // `false` for agents (unlike tags/flags) because it is a NEW surface with
+    // no pre-existing ungated behaviour to preserve, and a shared view appears
+    // in every teammate's sidebar: the conservative default is the one an
+    // admin can loosen, not one they discover after the rail fills up.
+    "inboxViews:manageShared": false,
     "snippets:manage": true,
     // Agents can manage THEIR OWN availability by default. An admin can flip
     // this off for teams that want fixed online presence (e.g. a call center
@@ -267,7 +298,9 @@ export function resolvePermissions(
   role: Role,
   teamConfig: unknown,
 ): Record<Capability, boolean> {
-  if (role === "superAdmin" || role === "admin") {
+  // A platform superAdmin and an org owner/admin both arrive here as "admin"
+  // (resolveSession collapses them), so this single arm covers all three.
+  if (role === "admin") {
     return allCapabilities(true);
   }
 

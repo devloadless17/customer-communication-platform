@@ -91,10 +91,10 @@ async function sweepOnce(): Promise<void> {
     },
     // minor#8: pull the persisted chainDepth so the re-enqueue preserves the
     // cross-system loop-guard counter instead of resetting it to 1 on recovery.
-    // Also pull the owning teamId so the re-enqueued job carries it (worker's
+    // Also pull the owning workspaceId so the re-enqueued job carries it (worker's
     // per-team gate then needs no DB lookup) — cheap here, we're already
     // reading the row.
-    select: { id: true, chainDepth: true, webhook: { select: { teamId: true } } },
+    select: { id: true, chainDepth: true, webhook: { select: { workspaceId: true } } },
     take: MAX_PER_SWEEP,
     orderBy: { createdAt: "asc" },
   });
@@ -122,7 +122,7 @@ async function sweepOnce(): Promise<void> {
           await existing.remove().catch(() => {});
         }
       }
-      return enqueueWebhookDelivery(o.id, o.chainDepth, o.webhook.teamId);
+      return enqueueWebhookDelivery(o.id, o.chainDepth, o.webhook.workspaceId);
     }),
   );
   const recovered = results.filter((r) => r.status === "fulfilled").length;

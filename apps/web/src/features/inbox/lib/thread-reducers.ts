@@ -111,7 +111,7 @@ export function applyContactUpdate(
 
 export function applyConversationRead(
   prev: ConversationWithRefs,
-  _payload: { conversationId: string; readByUserId: string; teamId: string },
+  _payload: { conversationId: string; readByUserId: string; workspaceId: string },
 ): ConversationWithRefs {
   // Unread is team-wide only — any member marking read zeroes the counter
   // and it clears for everyone. There is no per-agent read state.

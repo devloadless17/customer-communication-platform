@@ -30,15 +30,15 @@ let broadcastId: string;
 test.beforeAll(async () => {
   // Seed only if absent — seedMetaTestTeam() rotates the team's API keys, which
   // invalidates tokens other specs hold (see broadcast-delivery-truth.spec.ts).
-  const connected = await db().channelConnection.findUnique({
-    where: { teamId_channel: { teamId: META_TEST_TEAM_ID, channel: "whatsapp" } },
+  const connected = await db().channelConnection.findFirst({
+    where: { workspaceId: META_TEST_TEAM_ID, channel: "whatsapp", isDefault: true },
     select: { id: true },
   });
   if (!connected) await seedMetaTestTeam();
 
   const b = await db().broadcast.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       status: "completed",
       kind: "template",
       targetMode: "contact",
@@ -66,19 +66,19 @@ test.afterAll(async () => {
     await db().broadcast.deleteMany({ where: { id: { in: ids } } });
   }
   await db().contact.deleteMany({
-    where: { teamId: META_TEST_TEAM_ID, name: { startsWith: PREFIX } },
+    where: { workspaceId: META_TEST_TEAM_ID, name: { startsWith: PREFIX } },
   });
   // The inbound webhook creates its own contact rows named from the WhatsApp
   // profile ("Tester"), so the prefix purge above misses them — clean by the
   // run-unique phone prefix too, or the next run collides on the phone unique.
   await db().contact.deleteMany({
-    where: { teamId: META_TEST_TEAM_ID, phoneNumber: { startsWith: PHONE_BASE } },
+    where: { workspaceId: META_TEST_TEAM_ID, phoneNumber: { startsWith: PHONE_BASE } },
   });
 });
 
 // Phones are unique PER RUN: the inbound webhook creates its own contact row
 // (named by the WhatsApp profile, not our prefix), so a fixed number would
-// collide with the previous run's leftover on the (teamId, phoneNumber) unique.
+// collide with the previous run's leftover on the (workspaceId, phoneNumber) unique.
 const PHONE_BASE = `1555${String(Date.now()).slice(-6)}`;
 let phoneSeq = 0;
 /** A recipient in the state the runner leaves after a successful send. */
@@ -87,7 +87,7 @@ async function seedRecipient(tag: string) {
   const wamid = `wamid.${PREFIX}${tag}.${Date.now()}`;
   const contact = await db().contact.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       name: `${PREFIX}${tag}`,
       // Digits-only, NO leading "+": that is how ingest normalizes and stores a
       // WhatsApp number, so seeding "+1555..." creates a contact the inbound
@@ -101,7 +101,7 @@ async function seedRecipient(tag: string) {
   });
   const conversation = await db().conversation.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       contactId: contact.id,
       channel: "whatsapp",
       status: "pending",
@@ -111,7 +111,7 @@ async function seedRecipient(tag: string) {
   });
   const msg = await db().message.create({
     data: {
-      teamId: META_TEST_TEAM_ID,
+      workspaceId: META_TEST_TEAM_ID,
       conversationId: conversation.id,
       externalId: wamid,
       body: "campaign",

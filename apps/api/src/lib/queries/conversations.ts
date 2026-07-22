@@ -1,6 +1,8 @@
 import { type ConversationEventKind, Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { inboxViewWhereClauses } from "@/lib/inbox-views/where";
+import type { InboxViewFilters } from "@ccp/shared/inbox-views/types";
 import type {
   ConversationWithRefs,
   CursorPage,
@@ -13,7 +15,7 @@ import {
   mapContact,
   mapContactListItem,
   mapConversation,
-  ASSIGNED_USER_SELECT,
+  assignedUserSelect,
   mapMessage,
   mapNote,
   mapUser,
@@ -83,10 +85,14 @@ export type ListConversationsFilter =
       kind: "preset";
       id: "active" | "all" | "mine" | "unassigned" | "closed" | "flagged";
     }
-  | { kind: "stage"; stageId: string };
+  | { kind: "stage"; stageId: string }
+  // A saved inbox view. The caller resolves the id to its stored filter
+  // document (and drops dangling tag/stage/user ids) before getting here, so
+  // this layer never touches the InboxView table.
+  | { kind: "view"; filters: InboxViewFilters };
 
 export async function listConversations(
-  teamId: string,
+  workspaceId: string,
   opts: {
     take?: number;
     cursor?: string | null;
@@ -147,9 +153,9 @@ export async function listConversations(
     : null;
 
   // Preset / stage narrowing. Index coverage:
-  //   - status filters use `(teamId, status, lastMessageAt DESC)` index
-  //   - assignedUserId filters use `(teamId, assignedUserId)` index
-  //   - stage filter joins through Contact, which has `(teamId, stageId)`
+  //   - status filters use `(workspaceId, status, lastMessageAt DESC)` index
+  //   - assignedUserId filters use `(workspaceId, assignedUserId)` index
+  //   - stage filter joins through Contact, which has `(workspaceId, stageId)`
   //
   // Preset semantics:
   //   - `active`      → open + pending (the everyday working view).
@@ -164,6 +170,7 @@ export async function listConversations(
   // hiding them under the stage view caused the badge count to disagree
   // with what appeared after clicking.
   let filterClause: Prisma.ConversationWhereInput | null = null;
+  let viewClauses: Prisma.ConversationWhereInput[] = [];
   if (opts.filter?.kind === "preset") {
     switch (opts.filter.id) {
       case "active":
@@ -202,6 +209,12 @@ export async function listConversations(
         filterClause = { openFlagCount: { gt: 0 } };
         break;
     }
+  } else if (opts.filter?.kind === "view") {
+    // A saved view can contribute SEVERAL independent predicates (notably
+    // tagMatch:"all", one per tag), so it joins the composed list as its own
+    // AND array rather than collapsing to a single clause. `filterClause` stays
+    // null; `viewClauses` is spliced in below.
+    viewClauses = inboxViewWhereClauses(opts.filter.filters, opts.viewerUserId);
   } else if (opts.filter?.kind === "stage") {
     // deletedAt:null so the stage-filtered list matches the stage badge count
     // (ConversationsService.counts byStage) and the settings/stages directory
@@ -211,9 +224,12 @@ export async function listConversations(
     };
   }
 
-  const composedClauses = [keysetClause, searchClause, filterClause].filter(
-    (c): c is Prisma.ConversationWhereInput => c !== null,
-  );
+  const composedClauses = [
+    ...[keysetClause, searchClause, filterClause].filter(
+      (c): c is Prisma.ConversationWhereInput => c !== null,
+    ),
+    ...viewClauses,
+  ];
   // The visibility fragment joins the AND array — it must NOT be a top-level
   // sibling spread.
   //
@@ -231,7 +247,7 @@ export async function listConversations(
       ? [...composedClauses, visibilityClause as Prisma.ConversationWhereInput]
       : composedClauses;
   const where: Prisma.ConversationWhereInput = {
-    teamId,
+    workspaceId,
     ...(allClauses.length > 1
       ? { AND: allClauses }
       : allClauses[0] ?? {}),
@@ -257,7 +273,7 @@ export async function listConversations(
         // query when an agent opens a thread.
         select: {
           id: true,
-          teamId: true,
+          workspaceId: true,
           name: true,
           firstName: true,
           lastName: true,
@@ -279,7 +295,7 @@ export async function listConversations(
           tags: { select: { id: true } },
         },
       },
-      assignedUser: { select: ASSIGNED_USER_SELECT },
+      assignedUser: { select: assignedUserSelect(workspaceId) },
     },
   });
 
@@ -311,7 +327,7 @@ export async function listConversations(
       ...mapContactListItem(row.contact),
       tagIds: row.contact.tags.map((t) => t.id),
     },
-    assignedUser: row.assignedUser ? mapUser(row.assignedUser) : null,
+    assignedUser: row.assignedUser ? mapUser(row.assignedUser, workspaceId) : null,
     messages: [],
     notes: [],
     lastInboundAt: inboundMap.get(row.contact.id) ?? null,
@@ -328,7 +344,7 @@ export async function listConversations(
  * Notes aren't paginated for now — there are typically <10 per thread.
  */
 export async function getConversationWithRefs(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   opts: { messageLimit?: number; visibility?: { assignedUserId?: string } } = {},
 ): Promise<{ data: ConversationWithRefs; nextOlderCursor: string | null } | null> {
@@ -338,11 +354,11 @@ export async function getConversationWithRefs(
     // A restricted agent gets `null` here — which the caller maps to 404, the
     // same as a genuinely missing thread. Never a 403: that would confirm the
     // conversation exists to someone who isn't allowed to know it does.
-    where: { id: conversationId, teamId, ...(opts.visibility ?? {}) },
+    where: { id: conversationId, workspaceId, ...(opts.visibility ?? {}) },
     include: {
       webchatWidget: { select: { name: true } },
       contact: { include: { tags: { select: { id: true } } } },
-      assignedUser: { select: ASSIGNED_USER_SELECT },
+      assignedUser: { select: assignedUserSelect(workspaceId) },
       // +1 to detect "more older exists" without a count query.
       messages: {
         orderBy: [{ timestamp: "desc" }, { id: "desc" }],
@@ -472,7 +488,7 @@ export async function getConversationWithRefs(
         ...mapContact(row.contact),
         tagIds: row.contact.tags.map((t) => t.id),
       },
-      assignedUser: row.assignedUser ? mapUser(row.assignedUser) : null,
+      assignedUser: row.assignedUser ? mapUser(row.assignedUser, workspaceId) : null,
       messages: messagesAsc.map(mapMessage),
       notes: row.notes.map(mapNote),
       events,
@@ -547,11 +563,11 @@ async function mapActivityEventRows(
  * no-op. Same ACTIVITY_WINDOW bound as the hydration.
  */
 export async function listConversationEvents(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
 ): Promise<ConversationWithRefs["events"]> {
   const owns = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
+    where: { id: conversationId, workspaceId },
     select: { id: true },
   });
   if (!owns) return [];
@@ -559,7 +575,7 @@ export async function listConversationEvents(
   const rows = await db.conversationEvent.findMany({
     // Mirror the hydration's exclusion so the events-only refetch never
     // surfaces a call_* row the timeline can't render (CallBubble owns calls).
-    where: { conversationId, teamId, kind: { notIn: NON_PILL_EVENT_KINDS } },
+    where: { conversationId, workspaceId, kind: { notIn: NON_PILL_EVENT_KINDS } },
     // Deterministic same-`at` tiebreak — must match the hydration orderBy above
     // so the optimistic→authoritative reconcile sees a stable order (see there).
     orderBy: [{ at: "desc" }, { id: "desc" }],
@@ -588,7 +604,7 @@ export async function listConversationEvents(
  * (oldest-first) within the page so the UI can prepend.
  */
 export async function listOlderMessages(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   opts: { take?: number; before: string },
 ): Promise<CursorPage<Message>> {
@@ -599,7 +615,7 @@ export async function listOlderMessages(
   // Confirm the conversation belongs to the team — a malicious client
   // shouldn't be able to enumerate other tenants' messages by guessing IDs.
   const owns = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
+    where: { id: conversationId, workspaceId },
     select: { id: true },
   });
   if (!owns) return { items: [], nextCursor: null };
@@ -660,7 +676,7 @@ export async function listOlderMessages(
  * thread re-fetch.
  */
 export async function listNewerMessages(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   opts: { after: string; afterId?: string; take?: number },
 ): Promise<{
@@ -702,9 +718,9 @@ export async function listNewerMessages(
   // fields the reconnect-resync needs in the same round-trip; selected
   // fields are cheap and avoid a second query.
   const owns = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
+    where: { id: conversationId, workspaceId },
     include: {
-      assignedUser: { select: ASSIGNED_USER_SELECT },
+      assignedUser: { select: assignedUserSelect(workspaceId) },
       contact: { select: { lastInboundAt: true } },
     },
   });
@@ -756,7 +772,7 @@ export async function listNewerMessages(
     state: {
       status: owns.status,
       assignedUserId: owns.assignedUserId,
-      assignedUser: owns.assignedUser ? mapUser(owns.assignedUser) : null,
+      assignedUser: owns.assignedUser ? mapUser(owns.assignedUser, workspaceId) : null,
       unreadCount: owns.unreadCount,
       aiEnabled: owns.aiEnabled,
       lastInboundAt: owns.contact.lastInboundAt
@@ -802,7 +818,7 @@ function mediaKindFilter(kind: string | undefined): Prisma.MessageWhereInput | n
  * the next page load once `completePendingMedia` fills them in.
  */
 export async function listConversationAttachments(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   opts: { cursor?: string; take?: number; kind?: string },
 ): Promise<CursorPage<Message>> {
@@ -811,7 +827,7 @@ export async function listConversationAttachments(
   // Tenant gate — silent empty page so we don't leak which conversation IDs
   // exist in other teams (same posture as listOlderMessages).
   const owns = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
+    where: { id: conversationId, workspaceId },
     select: { id: true },
   });
   if (!owns) return { items: [], nextCursor: null };

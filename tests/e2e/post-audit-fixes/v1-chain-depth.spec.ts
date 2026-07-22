@@ -29,7 +29,7 @@ import { test, expect } from "@playwright/test";
 import { generateApiKey } from "../../../apps/api/src/auth/api-key";
 import { db, superadminTeam, wipeTestData } from "../_helpers/db";
 
-let teamId: string;
+let workspaceId: string;
 let userId: string;
 let apiToken: string;
 let conversationId: string;
@@ -37,16 +37,16 @@ let conversationId: string;
 test.beforeAll(async () => {
   await wipeTestData();
   const su = await superadminTeam();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
   userId = su.userId;
 
   // Provision a real API key — same shape the settings UI creates. Store
   // hash + prefix; the plaintext lives only in this test for the duration
   // of the suite.
   const key = generateApiKey();
-  await db().teamApiKey.create({
+  await db().workspaceApiKey.create({
     data: {
-      teamId,
+      workspaceId,
       name: "E2E /v1 chain-depth key",
       tokenHash: key.tokenHash,
       tokenPrefix: key.tokenPrefix,
@@ -62,7 +62,7 @@ test.beforeAll(async () => {
   // would pass — but using a real one keeps the negative cases honest.
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       phoneNumber: "+15551112222",
       identityChannel: "whatsapp",
       name: "Chain Depth Test",
@@ -71,7 +71,7 @@ test.beforeAll(async () => {
   });
   const conv = await db().conversation.create({
     data: {
-      teamId,
+      workspaceId,
       contactId: contact.id,
       channel: "whatsapp",
       status: "open",

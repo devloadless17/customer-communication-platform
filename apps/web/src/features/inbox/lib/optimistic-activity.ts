@@ -78,12 +78,12 @@ function base(
 
 /** Roll back one stub (failed PATCH) so the pill doesn't linger as a lie. */
 export function rollbackOptimisticActivity(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   optimisticId: string,
 ): void {
   dispatchLocalSocketEvent("conversation:activity", {
-    teamId,
+    workspaceId,
     conversationId,
     event: null,
     removeId: optimisticId,
@@ -102,7 +102,7 @@ export function rollbackOptimisticActivity(
 
 type ActivityDispatch = [
   "conversation:activity",
-  { teamId: string; conversationId: string; event: ConversationActivityEvent },
+  { workspaceId: string; conversationId: string; event: ConversationActivityEvent },
 ];
 
 export interface OptimisticActivityBuild {
@@ -113,18 +113,18 @@ export interface OptimisticActivityBuild {
 }
 
 function build(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   event: ConversationActivityEvent,
 ): OptimisticActivityBuild {
   return {
     id: event.id,
-    frame: ["conversation:activity", { teamId, conversationId, event }],
+    frame: ["conversation:activity", { workspaceId, conversationId, event }],
   };
 }
 
 export function buildOptimisticStatusChange(args: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   actorName: string;
   status: ConversationStatus;
@@ -133,11 +133,11 @@ export function buildOptimisticStatusChange(args: {
 }): OptimisticActivityBuild {
   const e = base(args.conversationId, args.actorName, "status_changed", args.sendGroupId);
   e.after = { status: args.status };
-  return build(args.teamId, args.conversationId, e);
+  return build(args.workspaceId, args.conversationId, e);
 }
 
 export function buildOptimisticAiChange(args: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   actorName: string;
   aiEnabled: boolean;
@@ -151,11 +151,11 @@ export function buildOptimisticAiChange(args: {
     args.sendGroupId,
   );
   e.after = { aiEnabled: args.aiEnabled };
-  return build(args.teamId, args.conversationId, e);
+  return build(args.workspaceId, args.conversationId, e);
 }
 
 export function buildOptimisticAssignment(args: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   actorName: string;
   assignedToName: string | null;
@@ -164,11 +164,11 @@ export function buildOptimisticAssignment(args: {
 }): OptimisticActivityBuild {
   const e = base(args.conversationId, args.actorName, "assigned", args.sendGroupId);
   e.assignedToName = args.assignedToName;
-  return build(args.teamId, args.conversationId, e);
+  return build(args.workspaceId, args.conversationId, e);
 }
 
 export function buildOptimisticStageChange(args: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   actorName: string;
   fromStageName: string | null;
@@ -177,28 +177,28 @@ export function buildOptimisticStageChange(args: {
   const e = base(args.conversationId, args.actorName, "stage_changed");
   e.before = { stageName: args.fromStageName };
   e.after = { stageName: args.toStageName };
-  return build(args.teamId, args.conversationId, e);
+  return build(args.workspaceId, args.conversationId, e);
 }
 
 export function buildOptimisticTagAdded(args: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   actorName: string;
   tagName: string;
 }): OptimisticActivityBuild {
   const e = base(args.conversationId, args.actorName, "tag_added");
   e.after = { tagName: args.tagName };
-  return build(args.teamId, args.conversationId, e);
+  return build(args.workspaceId, args.conversationId, e);
 }
 
 export function buildOptimisticTagRemoved(args: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   actorName: string;
   tagName: string;
 }): OptimisticActivityBuild {
   const e = base(args.conversationId, args.actorName, "tag_removed");
   e.before = { tagName: args.tagName };
-  return build(args.teamId, args.conversationId, e);
+  return build(args.workspaceId, args.conversationId, e);
 }
 

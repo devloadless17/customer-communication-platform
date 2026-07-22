@@ -1,0 +1,126 @@
+import { z } from "zod";
+
+import {
+  TICKET_PRIORITIES,
+  TICKET_STATUSES,
+  type TicketPriority,
+  type TicketStatus,
+} from "@ccp/shared/tickets/types";
+
+const StatusSchema = z.enum(TICKET_STATUSES as unknown as [TicketStatus, ...TicketStatus[]]);
+const PrioritySchema = z.enum(
+  TICKET_PRIORITIES as unknown as [TicketPriority, ...TicketPriority[]],
+);
+
+/** `a,b,c` → `["a","b","c"]`. Query strings can't carry arrays natively and
+ *  repeated `?status=` keys are ambiguous across clients, so one comma list. */
+const csv = <T extends z.ZodTypeAny>(item: T) =>
+  z
+    .string()
+    .optional()
+    .transform((v, ctx): z.infer<T>[] | undefined => {
+      if (!v) return undefined;
+      const parsed = z.array(item).safeParse(v.split(",").filter(Boolean));
+      if (!parsed.success) {
+        // Name the offending values rather than emitting a bare "invalid
+        // string" — an integration that sends `?status=don` should be told
+        // which value we rejected, not just that its query failed.
+        ctx.addIssue({
+          code: "custom",
+          message: `invalid values: ${parsed.error.issues
+            .map((i) => i.path.join("."))
+            .join(", ")}`,
+        });
+        return undefined;
+      }
+      return parsed.data as z.infer<T>[];
+    });
+
+export const ListTicketsQuerySchema = z.object({
+  status: csv(StatusSchema),
+  priority: csv(PrioritySchema),
+  /**
+   * `me` resolves server-side to the caller; `none` means UNASSIGNED (a real
+   * filter, distinct from omitting the param), and a raw id filters to that
+   * teammate.
+   */
+  assignee: z.string().optional(),
+  contactId: z.string().optional(),
+  conversationId: z.string().optional(),
+  channel: z.string().optional(),
+  tagIds: csv(z.string()),
+  breached: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => v === "true"),
+  cursorCreatedAt: z.string().datetime().optional(),
+  cursorId: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(50).optional(),
+});
+export type ListTicketsQuery = z.infer<typeof ListTicketsQuerySchema>;
+
+export const CreateTicketSchema = z.object({
+  conversationId: z.string().min(1),
+  subject: z.string().trim().max(200).nullable().optional(),
+  priority: PrioritySchema.optional(),
+  assignedUserId: z.string().nullable().optional(),
+  tagIds: z.array(z.string()).max(50).optional(),
+  customFields: z.record(z.string(), z.string().max(2000)).optional(),
+});
+export type CreateTicketInput = z.infer<typeof CreateTicketSchema>;
+
+export const UpdateTicketSchema = z
+  .object({
+    // Sent back from the read so a board drag built on a stale card is
+    // rejected rather than silently overwriting a colleague's move.
+    expectedVersion: z.number().int().nonnegative().optional(),
+    status: StatusSchema.optional(),
+    priority: PrioritySchema.optional(),
+    assignedUserId: z.string().nullable().optional(),
+    subject: z.string().trim().max(200).nullable().optional(),
+    resolutionCode: z.string().trim().max(80).nullable().optional(),
+    resolutionNote: z.string().trim().max(2000).nullable().optional(),
+    tagIds: z.array(z.string()).max(50).optional(),
+    customFields: z.record(z.string(), z.string().max(2000)).optional(),
+  })
+  // An empty PATCH would still bump `version` and fan a realtime frame for a
+  // change that changed nothing — the same no-op-publish trap message flags hit.
+  .refine((v) => Object.keys(v).some((k) => k !== "expectedVersion"), {
+    message: "at least one field must be provided",
+  });
+export type UpdateTicketInput = z.infer<typeof UpdateTicketSchema>;
+
+export const UpsertSlaPolicySchema = z.object({
+  priority: PrioritySchema,
+  // `null` is meaningful: no commitment on that leg, which is NOT the same as
+  // zero minutes. The domain treats null as "nothing is due".
+  firstResponseMins: z.number().int().min(1).max(100_000).nullable(),
+  resolutionMins: z.number().int().min(1).max(100_000).nullable(),
+  pauseOnHold: z.boolean().optional(),
+  pauseWhenPending: z.boolean().optional(),
+  businessHoursOnly: z.boolean().optional(),
+  isActive: z.boolean().optional(),
+});
+export type UpsertSlaPolicyInput = z.infer<typeof UpsertSlaPolicySchema>;
+
+export const CreateTicketFieldSchema = z.object({
+  label: z.string().trim().min(1).max(80),
+  order: z.number().int().min(0).max(1000).optional(),
+});
+export type CreateTicketFieldInput = z.infer<typeof CreateTicketFieldSchema>;
+
+export const UpdateTicketFieldSchema = z.object({
+  label: z.string().trim().min(1).max(80).optional(),
+  order: z.number().int().min(0).max(1000).optional(),
+  isVisible: z.boolean().optional(),
+});
+export type UpdateTicketFieldInput = z.infer<typeof UpdateTicketFieldSchema>;
+
+export const TicketSettingsSchema = z.object({
+  ticketAutoOpen: z.boolean().optional(),
+  // 0 disables reopening entirely. Capped at 30 days — beyond that a follow-up
+  // is a new question, not the same one.
+  ticketReopenWindowHours: z.number().int().min(0).max(720).optional(),
+  ticketCloseConversationOnLastSolved: z.boolean().optional(),
+});
+export type TicketSettingsInput = z.infer<typeof TicketSettingsSchema>;

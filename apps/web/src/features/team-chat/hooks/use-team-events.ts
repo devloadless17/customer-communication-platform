@@ -10,6 +10,10 @@ import {
 } from "@/features/inbox/lib/optimistic-list-bump";
 import type { Contact, ConversationWithRefs, CursorPage } from "@ccp/shared/types";
 import type { Filter } from "@/features/inbox/components/inbox-controls";
+import {
+  matchesInboxViewFilters,
+  type InboxViewFilters,
+} from "@ccp/shared/inbox-views/types";
 
 // Runs the effect BEFORE the browser paints (client), plain effect on the
 // server (avoids the "useLayoutEffect does nothing on the server" warning
@@ -46,6 +50,10 @@ function filterParams(filter: Filter | undefined): URLSearchParams {
     p.set("filter", filter.id);
   } else if (filter.kind === "stage") {
     p.set("stageId", filter.stageId);
+  } else if (filter.kind === "view") {
+    // Only the id — the server owns the filter document. Sending the criteria
+    // would let a tampered client run a query the view's author never saved.
+    p.set("viewId", filter.viewId);
   }
   // calls view: no conversation-list filter params (the list is hidden).
   return p;
@@ -66,8 +74,32 @@ export function rowMatchesFilterFor(
   filter: Filter | undefined,
   currentUserId: string,
   row: ConversationWithRefs,
+  /**
+   * Filter documents of the views this agent can see, keyed by id. Needed
+   * because a saved view carries its criteria on the VIEW, not on the filter
+   * object the list holds — and without them a live row could never be
+   * evaluated against the active view.
+   *
+   * Absent (or missing the active id) is treated as "cannot decide", and the
+   * row is EXCLUDED rather than admitted: a wrongly-admitted row is visible
+   * wrongness that survives until the next page load, while a wrongly-excluded
+   * one is corrected by the very next server refetch.
+   */
+  viewFiltersById?: Record<string, InboxViewFilters>,
 ): boolean {
   if (!filter) return true; // no filter == "active" — matches "all" minus closed
+  if (filter.kind === "view") {
+    const filters = viewFiltersById?.[filter.viewId];
+    if (!filters) return false;
+    return matchesInboxViewFilters(filters, currentUserId, {
+      status: row.conversation.status,
+      channel: row.conversation.channel,
+      assignedUserId: row.conversation.assignedUserId,
+      unreadCount: row.conversation.unreadCount,
+      openFlagCount: row.conversation.openFlagCount,
+      contact: { stageId: row.contact.stageId, tagIds: row.contact.tagIds },
+    });
+  }
   if (filter.kind === "stage") {
     // Stage is contact-lifecycle, orthogonal to chat status (closed included).
     return row.contact.stageId === filter.stageId;
@@ -108,6 +140,10 @@ const MAX_LOADED_CONVERSATIONS = 3_000;
  *  enough that a day-long tab can't accumulate a tenant's contact book. */
 const LATEST_CONTACT_CAP = 2_000;
 
+/** Frozen module-scope default: a fresh `{}` per render would change identity
+ *  on every render and re-fire every effect that depends on it. */
+const EMPTY_VIEW_FILTERS: Record<string, InboxViewFilters> = Object.freeze({});
+
 /**
  * Holds the list of conversations and folds in incremental Socket.io events
  * so the inbox updates without a refetch.
@@ -124,7 +160,7 @@ const LATEST_CONTACT_CAP = 2_000;
  * it to skip the unread bump on inbound messages for that thread.
  */
 export function useTeamEvents(
-  teamId: string,
+  workspaceId: string,
   initialConversations: ConversationWithRefs[],
   initialNextCursor: string | null,
   activeConversationId: string | null = null,
@@ -173,6 +209,15 @@ export function useTeamEvents(
    * fallback resync path still works, just at the slower cadence.
    */
   activeThread: ConversationWithRefs | null = null,
+  /**
+   * Filter documents of every view this agent can see, keyed by id.
+   *
+   * A saved view's criteria live on the VIEW, not on the `Filter` object the
+   * list holds (which carries only an id, so the client can never widen a
+   * view). The predicate therefore needs this map to evaluate a live row
+   * against the active view — see `rowMatchesFilterFor`.
+   */
+  viewFiltersById: Record<string, InboxViewFilters> = EMPTY_VIEW_FILTERS,
 ): TeamEventsState {
   // SSR ships the team-wide unfiltered feed (the sub-sidebar's first-paint
   // preset counts depend on having closed rows in the seed too). The LIST
@@ -181,8 +226,17 @@ export function useTeamEvents(
   // the filter-change effect uses, applied on first paint. Lazy initializer
   // keeps it synchronous: zero flicker, no closed row ever renders under
   // "Active" on a hard refresh.
+  // Sync-assigned during render, same reasoning as filterRef below: a socket
+  // handler firing immediately after a view edit must see the NEW criteria,
+  // and a post-commit effect would still be holding the old ones.
+  const viewFiltersRef = useRef(viewFiltersById);
+  viewFiltersRef.current = viewFiltersById;
+
   const [conversations, setConversations] = useState<ConversationWithRefs[]>(
-    () => initialConversations.filter((row) => rowMatchesFilterFor(filter, currentUserId, row)),
+    () =>
+      initialConversations.filter((row) =>
+        rowMatchesFilterFor(filter, currentUserId, row, viewFiltersById),
+      ),
   );
   const [nextCursor, setNextCursor] = useState<string | null>(initialNextCursor);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -202,7 +256,7 @@ export function useTeamEvents(
   // Stable ref mirror of the current conversation list. Read by socket
   // handlers that must decide a side effect (e.g. "is this conversation in the
   // loaded slice?" for off-slice recovery) BEFORE entering the pure
-  // setConversations updater — the handler closure is bound on [teamId,
+  // setConversations updater — the handler closure is bound on [workspaceId,
   // currentUserId] and would otherwise read a stale `conversations` snapshot.
   // Synced during render (not useEffect) so a synchronous local dispatch sees
   // the latest list, same reasoning as activeThreadRef below.
@@ -274,7 +328,7 @@ export function useTeamEvents(
   // initial useState lazy initializer above guards against.
   const lastSeedKeyRef = useRef<string>("");
   useEffect(() => {
-    const key = `${teamId}|${initialConversations.map((c) => c.conversation.id).join(",")}|${initialNextCursor ?? ""}`;
+    const key = `${workspaceId}|${initialConversations.map((c) => c.conversation.id).join(",")}|${initialNextCursor ?? ""}`;
     if (key === lastSeedKeyRef.current) return;
     lastSeedKeyRef.current = key;
 
@@ -297,7 +351,7 @@ export function useTeamEvents(
     if (isDefaultView) {
       setConversations(
         initialConversations.filter((row) =>
-          rowMatchesFilterFor(f, currentUserId, row),
+          rowMatchesFilterFor(f, currentUserId, row, viewFiltersRef.current),
         ),
       );
       setNextCursor(initialNextCursor);
@@ -309,7 +363,7 @@ export function useTeamEvents(
     // doesn't apply to it.
     setConversations((prev) => {
       const seedMatching = initialConversations.filter((row) =>
-        rowMatchesFilterFor(f, currentUserId, row),
+        rowMatchesFilterFor(f, currentUserId, row, viewFiltersRef.current),
       );
       if (seedMatching.length === 0) return prev;
       const seedById = new Map(seedMatching.map((c) => [c.conversation.id, c]));
@@ -329,7 +383,7 @@ export function useTeamEvents(
       );
       return merged;
     });
-  }, [teamId, initialConversations, initialNextCursor, currentUserId]);
+  }, [workspaceId, initialConversations, initialNextCursor, currentUserId]);
 
   // Optimistic LIST bump for the sender's OWN send. Every send site (reply
   // box text/media/voice, template, interactive) fires this so the row jumps
@@ -504,12 +558,19 @@ export function useTeamEvents(
   // Closed / a stage row, refetch with the matching server-side filter so
   // the loaded slice is the FULL team's matching threads. Skip the very
   // first run — that's the SSR seed.
+  //
+  // A SAVED VIEW folds its criteria into the key, not just its id. Editing the
+  // active view (adding a tag, flipping a status) leaves the id unchanged, so
+  // an id-only key would keep the old slice on screen until something else
+  // forced a refetch — the view would silently not do what it now says.
   const filterKey = filter
     ? filter.kind === "preset"
       ? `p:${filter.id}`
       : filter.kind === "stage"
         ? `s:${filter.stageId}`
-        : "calls"
+        : filter.kind === "view"
+          ? `v:${filter.viewId}:${JSON.stringify(viewFiltersById[filter.viewId] ?? null)}`
+          : "calls"
     : "p:all";
   const lastFilterKeyRef = useRef<string | null>(null);
   // LAYOUT effect (not useEffect): the instant re-derive below must run BEFORE
@@ -539,7 +600,9 @@ export function useTeamEvents(
     // fresh rows immediately; the fetch below only ADDS matching rows that
     // weren't in the loaded slice yet and prunes any that no longer match.
     setConversations((prev) =>
-      prev.filter((row) => rowMatchesFilterFor(filter, currentUserId, row)),
+      prev.filter((row) =>
+        rowMatchesFilterFor(filter, currentUserId, row, viewFiltersRef.current),
+      ),
     );
 
     // Signal "loading" so the list shows a skeleton instead of the empty state
@@ -815,6 +878,22 @@ export function useTeamEvents(
       }, 50);
     }
 
+    /**
+     * Splice-OUT gate: after a local change, does the row still belong here?
+     *
+     * Differs from the splice-IN predicate in exactly one case — the CALLS
+     * view, where the conversation list is hidden entirely. Returning `true`
+     * there means "leave the loaded slice alone while nobody is looking at
+     * it", so switching back doesn't reveal a list we quietly emptied. Every
+     * other filter (presets, stages, saved views) delegates to the one shared
+     * predicate.
+     */
+    function stillMatchesAfterChange(nextRow: ConversationWithRefs): boolean {
+      const f = filterRef.current;
+      if (f?.kind === "calls") return true;
+      return rowMatchesFilterFor(f, currentUserId, nextRow, viewFiltersRef.current);
+    }
+
     // Shared filter-match check used by all three splice-IN branches below.
     // Centralized so the rules stay in one place — adding a new filter kind
     // or preset means updating this function, not three call sites.
@@ -825,7 +904,12 @@ export function useTeamEvents(
     function rowMatchesFilter(nextRow: ConversationWithRefs): boolean {
       // Delegates to the module-scope predicate so the splice-in gating here
       // and the instant filter-switch re-derive can't drift apart.
-      return rowMatchesFilterFor(filterRef.current, currentUserId, nextRow);
+      return rowMatchesFilterFor(
+        filterRef.current,
+        currentUserId,
+        nextRow,
+        viewFiltersRef.current,
+      );
     }
 
     // Inserts `row` into the recency-sorted list at the position its
@@ -993,24 +1077,18 @@ export function useTeamEvents(
           // queries/conversations.ts. "all" preset includes closed; "active"
           // (and mine/unassigned) hide closed; "closed" preset shows only
           // closed.
-          const matches =
-            !f
-              ? true
-              : f.kind === "stage"
-                ? newConversation.contact.stageId === f.stageId
-                : f.kind === "calls"
-                  ? false
-                  : f.id === "all"
-                  ? true
-                  : f.id === "closed"
-                    ? newConversation.conversation.status === "closed"
-                    : f.id === "mine"
-                      ? newConversation.conversation.status !== "closed" &&
-                        newConversation.conversation.assignedUserId === currentUserId
-                      : f.id === "unassigned"
-                        ? newConversation.conversation.status !== "closed" &&
-                          newConversation.conversation.assignedUserId === null
-                        : newConversation.conversation.status !== "closed"; // "active"
+          // Delegates to the module-scope predicate instead of re-deriving the
+          // rules inline. The inline copy this replaced had drifted: it never
+          // grew a `flagged` branch, so it fell through to the "active" arm and
+          // spliced EVERY new non-closed conversation into the Flagged view —
+          // the exact bug the shared predicate already fixed for the other
+          // splice paths. Saved views make a third copy untenable anyway.
+          const matches = rowMatchesFilterFor(
+            f,
+            currentUserId,
+            newConversation,
+            viewFiltersRef.current,
+          );
           if (!matches) return prev;
           // Suppress the unread badge for a thread the agent is actively viewing
           // (e.g. a closed thread that reopens via inbound while it's open) —
@@ -1143,15 +1221,14 @@ export function useTeamEvents(
         // row out of the current view (e.g. filter is "mine" and a teammate
         // took the thread). Splice OUT when the new assignment no longer
         // matches the filter.
-        const f = filterRef.current;
-        const stillMatches =
-          !f || f.kind === "stage" || f.kind === "calls"
-            ? true
-            : f.id === "mine"
-              ? nextAssignedUserId === currentUserId
-              : f.id === "unassigned"
-                ? nextAssignedUserId === null
-                : true; // "active" / "all" / "closed" don't filter on assignment
+        // Evaluate the POST-change row against the active filter. A saved view
+        // can filter on assignment in ways no preset can (a named set of
+        // teammates), so this can no longer be a hand-rolled `mine` /
+        // `unassigned` check.
+        const stillMatches = stillMatchesAfterChange({
+          ...existing,
+          conversation: { ...existing.conversation, assignedUserId: nextAssignedUserId },
+        });
         if (!stillMatches) {
           const next = prev.slice();
           next.splice(idx, 1);
@@ -1258,17 +1335,10 @@ export function useTeamEvents(
         // preset "closed" + status=open|pending). "all" keeps closed rows
         // in place; stage filter also keeps closed on purpose — stage is
         // contact-lifecycle, not chat status.
-        const f = filterRef.current;
-        const stillMatches =
-          !f
-            ? true
-            : f.kind === "stage" || f.kind === "calls"
-              ? true
-              : f.id === "all"
-                ? true
-                : f.id === "closed"
-                  ? status === "closed"
-                  : status !== "closed";
+        const stillMatches = stillMatchesAfterChange({
+          ...existing,
+          conversation: { ...existing.conversation, status },
+        });
         if (!stillMatches) {
           const next = prev.slice();
           next.splice(idx, 1);
@@ -1545,13 +1615,13 @@ export function useTeamEvents(
       socket.off("call:incoming", onCallIncoming);
       socket.off("call:ended", onCallEnded);
     };
-    // INVARIANT: this effect re-binds handlers ONLY on [teamId, currentUserId].
+    // INVARIANT: this effect re-binds handlers ONLY on [workspaceId, currentUserId].
     // Every other value the handlers read (filter, activeThread, activeId, …) is
     // mirrored via a ref SYNCED DURING RENDER (filterRef/activeThreadRef/activeIdRef
     // above) — never in a useEffect — so the first event right after a chat-switch
     // already sees the fresh value. If you add a new handler dependency, mirror it
     // the SAME way; a useEffect-synced ref reintroduces the stale-first-event bug.
-  }, [teamId, currentUserId]);
+  }, [workspaceId, currentUserId]);
 
   return { conversations, hasMore: nextCursor !== null, loadingMore, loadMore, refetching };
 }

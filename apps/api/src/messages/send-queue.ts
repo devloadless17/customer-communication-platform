@@ -57,7 +57,7 @@ export const MESSAGE_SEND_QUEUE_NAME = "message-sends";
  * API stay sync — both need the wamid in the response.
  */
 interface BaseSendJob {
-  teamId: string;
+  workspaceId: string;
   userId: string;
   conversationId: string;
   /** Pre-resolved at preflight — the worker uses this directly to call Meta

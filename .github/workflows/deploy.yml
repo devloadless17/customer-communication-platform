@@ -68,6 +68,12 @@ jobs:
       - run: pnpm exec prisma generate
       - run: pnpm run typecheck
       - run: pnpm run lint
+      # Prisma select/include/_count keys are NOT typechecked — the generated
+      # XOR unions defeat excess-property checking, so a field that does not
+      # exist on the model compiles clean and only fails when a request runs
+      # it (400 invalid_request / P2022). Three outages traced to exactly this
+      # (see scripts/check-prisma-fields.mjs). One second, catches them all.
+      - run: pnpm run check:prisma-fields
 
   changes:
     # The deploy pipeline (this job + everything that chains off it: build-web,

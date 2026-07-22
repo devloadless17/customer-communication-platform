@@ -36,7 +36,7 @@ const STATUS_DOT_CLS: Record<ConversationStatus, string> = {
 };
 
 export function StatusDropdown({
-  teamId,
+  workspaceId,
   conversationId,
   current,
   assignedUserId,
@@ -44,7 +44,7 @@ export function StatusDropdown({
   currentUserName,
   onAlert,
 }: {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   current: ConversationStatus;
   /** Current assignee — needed to optimistically clear it when closing, since
@@ -91,7 +91,7 @@ export function StatusDropdown({
     // overwrite the optimistic count badge with stale numbers. The
     // authoritative server frame (optimistic absent) drives convergence.
     const statusActivity = buildOptimisticStatusChange({
-      teamId,
+      workspaceId,
       conversationId,
       actorName: currentUserName,
       status,
@@ -101,13 +101,13 @@ export function StatusDropdown({
     const frames: Parameters<typeof dispatchLocalSocketEvents>[0] = [
       [
         "conversation:status",
-        { teamId, conversationId, status, optimistic: true },
+        { workspaceId, conversationId, status, optimistic: true },
       ],
       statusActivity.frame,
     ];
     if (willUnassign) {
       const unassignActivity = buildOptimisticAssignment({
-        teamId,
+        workspaceId,
         conversationId,
         actorName: currentUserName,
         assignedToName: null,
@@ -115,15 +115,15 @@ export function StatusDropdown({
       unassignActivityId = unassignActivity.id;
       frames.push([
         "conversation:assigned",
-        { teamId, conversationId, assignedUser: null, optimistic: true },
+        { workspaceId, conversationId, assignedUser: null, optimistic: true },
       ]);
       frames.push(unassignActivity.frame);
     }
     dispatchLocalSocketEvents(frames);
     const rollbackActivity = () => {
-      rollbackOptimisticActivity(teamId, conversationId, statusActivityId);
+      rollbackOptimisticActivity(workspaceId, conversationId, statusActivityId);
       if (unassignActivityId) {
-        rollbackOptimisticActivity(teamId, conversationId, unassignActivityId);
+        rollbackOptimisticActivity(workspaceId, conversationId, unassignActivityId);
       }
     };
     try {
@@ -135,13 +135,13 @@ export function StatusDropdown({
       if (!res.ok) {
         // Roll back BOTH frames so the pill + chip reflect truth.
         dispatchLocalSocketEvent("conversation:status", {
-          teamId,
+          workspaceId,
           conversationId,
           status: current,
         });
         if (willUnassign) {
           dispatchLocalSocketEvent("conversation:assigned", {
-            teamId,
+            workspaceId,
             conversationId,
             assignedUser: prevUser,
           });
@@ -151,13 +151,13 @@ export function StatusDropdown({
       }
     } catch (err) {
       dispatchLocalSocketEvent("conversation:status", {
-        teamId,
+        workspaceId,
         conversationId,
         status: current,
       });
       if (willUnassign) {
         dispatchLocalSocketEvent("conversation:assigned", {
-          teamId,
+          workspaceId,
           conversationId,
           assignedUser: prevUser,
         });

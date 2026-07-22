@@ -49,7 +49,7 @@ export function AiSuggestionBar({ conversationId }: { conversationId: string }) 
   useEffect(() => {
     const socket = getClientSocket();
     const onSuggestion = (p: {
-      teamId: string;
+      workspaceId: string;
       conversationId: string;
       suggestionId: string | null;
       state: string;

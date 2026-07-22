@@ -22,12 +22,12 @@ export interface MetaCurrent {
 export function MetaSettings({
   current,
   webhookBaseUrl,
-  teamId,
+  workspaceId,
   canManage,
 }: {
   current: MetaCurrent;
   webhookBaseUrl: string;
-  teamId: string;
+  workspaceId: string;
   canManage: boolean;
 }) {
   const softRefresh = useSoftRefresh();
@@ -44,7 +44,7 @@ export function MetaSettings({
   const setField = (k: keyof typeof form) => (v: string) =>
     setForm((f) => ({ ...f, [k]: v }));
 
-  const webhookUrl = `${webhookBaseUrl}/webhooks/meta/${teamId}`;
+  const webhookUrl = `${webhookBaseUrl}/webhooks/meta/${workspaceId}`;
 
   function copy(value: string, key: string) {
     void navigator.clipboard.writeText(value).then(() => {

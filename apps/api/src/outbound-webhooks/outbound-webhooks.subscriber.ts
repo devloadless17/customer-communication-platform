@@ -33,7 +33,7 @@ import {
  * Bus subscriber that fans each allowlisted DomainEvent out to every
  * matching `OutboundWebhook` row for the event's team.
  *
- *   1. Filter: SQL-side lookup by `teamId` + `eventTypes` array contains.
+ *   1. Filter: SQL-side lookup by `workspaceId` + `eventTypes` array contains.
  *   2. Stamp:  resolve the team's Meta config once into a `ChannelInfo`
  *              and inject it (+ a fresh event_id matching the delivery
  *              row id) into each envelope before persisting. This keeps
@@ -107,12 +107,12 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       subscribe(
         "team.catalog_changed",
         (event) => {
-          // Cache keys are `${teamId}:${channel|_primary}` (resolveChannel),
+          // Cache keys are `${workspaceId}:${channel|_primary}` (resolveChannel),
           // NOT the bare team id — so we must drop every key PREFIXED with this
-          // team's id, not look up `event.teamId` directly (which never hits).
+          // team's id, not look up `event.workspaceId` directly (which never hits).
           // Otherwise a team that disconnects/reconnects WhatsApp keeps stamping
           // the stale ChannelConnection id until the process restarts.
-          const prefix = `${event.teamId}:`;
+          const prefix = `${event.workspaceId}:`;
           for (const key of this.channelCache.keys()) {
             if (key.startsWith(prefix)) this.channelCache.delete(key);
           }
@@ -140,7 +140,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
   }
 
   private async handle(event: {
-    teamId: string;
+    workspaceId: string;
     type: string;
     silent?: boolean;
     skipOutboundWebhook?: boolean;
@@ -183,7 +183,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     const publicTypes = Array.from(new Set(envelopes.map((e) => e.type)));
     const webhooks = await this.db.outboundWebhook.findMany({
       where: {
-        teamId: event.teamId,
+        workspaceId: event.workspaceId,
         enabled: true,
         eventTypes: { hasSome: publicTypes },
       },
@@ -204,28 +204,28 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     //      it matches message.received's context
     //   3. assignee + sender display names / emails wherever they're id-only
     try {
-      await this.enrichMessages(event.teamId, envelopes);
+      await this.enrichMessages(event.workspaceId, envelopes);
     } catch (err) {
       this.logger.warn(
         `enrichMessages failed, delivering un-enriched: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {
-      await this.enrichSentMessageContext(event.teamId, envelopes);
+      await this.enrichSentMessageContext(event.workspaceId, envelopes);
     } catch (err) {
       this.logger.warn(
         `enrichSentMessageContext failed, delivering un-enriched: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {
-      await this.hydrateUsers(event.teamId, envelopes);
+      await this.hydrateUsers(event.workspaceId, envelopes);
     } catch (err) {
       this.logger.warn(
         `hydrateUsers failed, delivering un-enriched: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {
-      await this.enrichLeanContacts(event.teamId, envelopes);
+      await this.enrichLeanContacts(event.workspaceId, envelopes);
     } catch (err) {
       this.logger.warn(
         `enrichLeanContacts failed, delivering without contact: ${err instanceof Error ? err.message : err}`,
@@ -238,7 +238,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     let channelBase: Awaited<ReturnType<typeof this.resolveChannel>> | null = null;
     try {
       channelBase = await this.resolveChannel(
-        event.teamId,
+        event.workspaceId,
         deriveEventChannel(event as unknown as Record<string, unknown>),
       );
     } catch (err) {
@@ -259,8 +259,8 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     let teamAiAutopilotEnabled = false;
     let firstTouchGreeter: "ai" | "workflow" = "ai";
     try {
-      const t = await this.db.team.findUnique({
-        where: { id: event.teamId },
+      const t = await this.db.workspace.findUnique({
+        where: { id: event.workspaceId },
         select: { aiAutopilotEnabled: true, firstTouchGreeter: true },
       });
       teamAiAutopilotEnabled = t?.aiAutopilotEnabled ?? false;
@@ -293,7 +293,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
         // X-CCP-Webhook-Version header) so body-only consumers (n8n/Zapier)
         // can branch on it. A future v2 envelope bumps this; v1 is frozen.
         v: WEBHOOK_WIRE_VERSION,
-        team_id: event.teamId,
+        team_id: event.workspaceId,
         timestamp: Number.isNaN(occurredAtMs) ? null : occurredAtMs,
         ...toWirePayload(type, (envelope as { data: unknown }).data, {
           channelBase,
@@ -352,10 +352,10 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
             return;
           }
           try {
-            // Carry teamId so the worker's per-team gate reads it off the job
+            // Carry workspaceId so the worker's per-team gate reads it off the job
             // (no per-pickup DB findUnique). All webhooks here belong to
-            // event.teamId (queried by it above).
-            await enqueueWebhookDelivery(deliveryId, chainDepth, event.teamId);
+            // event.workspaceId (queried by it above).
+            await enqueueWebhookDelivery(deliveryId, chainDepth, event.workspaceId);
           } catch (err) {
             this.logger.error(
               `enqueue failed for delivery ${deliveryId}: ${err instanceof Error ? err.message : err}`,
@@ -385,7 +385,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
    * the documented nulls in place.
    */
   private async enrichMessages(
-    teamId: string,
+    workspaceId: string,
     envelopes: Array<{ envelope: { data: unknown } }>,
   ): Promise<void> {
     type MediaShape = { url: string | null; thumbnail_url: string | null };
@@ -412,7 +412,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     if (messagesById.size === 0) return;
 
     const rows = await this.db.message.findMany({
-      where: { teamId, id: { in: [...messagesById.keys()] } },
+      where: { workspaceId, id: { in: [...messagesById.keys()] } },
       select: {
         id: true,
         externalId: true,
@@ -448,7 +448,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     // One batched load of the quoted rows. Mirrors the read-side reply snapshot:
     // body, direction, the authoring teammate's name (outbound only), mediaKind.
     const quotedRows = await this.db.message.findMany({
-      where: { teamId, id: { in: [...quotedIdToTargets.keys()] } },
+      where: { workspaceId, id: { in: [...quotedIdToTargets.keys()] } },
       select: {
         id: true,
         body: true,
@@ -482,7 +482,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
    * conversation in the batch (≤1 in practice).
    */
   private async enrichSentMessageContext(
-    teamId: string,
+    workspaceId: string,
     envelopes: Array<{ type: PublicEventType; envelope: { data: unknown } }>,
   ): Promise<void> {
     type SentConversation = {
@@ -510,7 +510,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     if (byConversation.size === 0) return;
 
     const rows = await this.db.conversation.findMany({
-      where: { teamId, id: { in: [...byConversation.keys()] } },
+      where: { workspaceId, id: { in: [...byConversation.keys()] } },
       include: EXTERNAL_CONVERSATION_INCLUDE,
     });
     for (const row of rows) {
@@ -549,7 +549,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
    * which `enrichSentMessageContext` filled with name+email from the include).
    */
   private async hydrateUsers(
-    teamId: string,
+    workspaceId: string,
     envelopes: Array<{ envelope: { data: unknown } }>,
   ): Promise<void> {
     type UserRef = {
@@ -603,8 +603,14 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       ]),
     );
     const users = await this.db.user.findMany({
-      where: { teamId, id: { in: ids } },
-      select: { id: true, name: true, email: true, role: true, createdAt: true },
+      where: { workspaceMemberships: { some: { workspaceId } }, id: { in: ids } },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        createdAt: true,
+        workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 },
+      },
     });
     const byId = new Map(users.map((u) => [u.id, u]));
     for (const { ref, withEmail } of refs) {
@@ -614,7 +620,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       if (withEmail) {
         ref.email = u.email;
         // Powers the wire `assignee` block (role + created_at).
-        ref.role = u.role;
+        ref.role = u.workspaceMemberships[0]?.role ?? "agent";
         ref.created_at = u.createdAt.toISOString();
       }
     }
@@ -646,7 +652,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
    * contact lookup. Best-effort — a missing row just leaves `contact` absent.
    */
   private async enrichLeanContacts(
-    teamId: string,
+    workspaceId: string,
     envelopes: Array<{ type: PublicEventType; envelope: { data: unknown } }>,
   ): Promise<void> {
     type LeanContact = { id: string; phoneNumber: string | null; name: string };
@@ -696,6 +702,13 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
           if (data.conversation_id) pushConversation(data.conversation_id, data);
           break;
         }
+        case "ticket.changed": {
+          // Same enrichment reason as the flag event below: without the
+          // contact block a receiver has to call back just to learn WHO the
+          // work is for — the exact round-trip this removes.
+          if (data.conversation_id) pushConversation(data.conversation_id, data);
+          break;
+        }
         case "message.flag_changed": {
           // Without this the flag webhook ships `contact: null`, forcing every
           // receiver into a callback just to learn WHO complained — the exact
@@ -711,7 +724,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
 
     if (targetsByConversationId.size > 0) {
       const convs = await this.db.conversation.findMany({
-        where: { teamId, id: { in: [...targetsByConversationId.keys()] } },
+        where: { workspaceId, id: { in: [...targetsByConversationId.keys()] } },
         select: { id: true, contactId: true },
       });
       for (const c of convs) {
@@ -723,7 +736,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
 
     if (targetsByContactId.size === 0) return;
     const contacts = await this.db.contact.findMany({
-      where: { teamId, id: { in: [...targetsByContactId.keys()] } },
+      where: { workspaceId, id: { in: [...targetsByContactId.keys()] } },
       select: { id: true, phoneNumber: true, name: true },
     });
     for (const row of contacts) {
@@ -743,7 +756,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
    * EVENT's channel (not hardcoded). The channel medium is derived per-event
    * from the data already in the payload (`deriveEventChannel`), so a Telegram
    * message's webhook stamps the Telegram connection, not WhatsApp's. Cached
-   * per `(teamId, channel)` for the process lifetime — connections rarely
+   * per `(workspaceId, channel)` for the process lifetime — connections rarely
    * change; cache is invalidated wholesale on `team.catalog_changed`.
    *
    * `channel = null` (the event carried no derivable channel — e.g. a future
@@ -752,20 +765,20 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
    * disappearing. Today that's WhatsApp; it's no longer assumed.
    */
   private async resolveChannel(
-    teamId: string,
+    workspaceId: string,
     channel: ChannelMedium | null,
   ): Promise<WireChannelBase | null> {
-    const key = `${teamId}:${channel ?? "_primary"}`;
+    const key = `${workspaceId}:${channel ?? "_primary"}`;
     const cached = this.channelCache.get(key);
     if (cached) return cached;
 
     const conn = channel
-      ? await this.db.channelConnection.findUnique({
-          where: { teamId_channel: { teamId, channel } },
+      ? await this.db.channelConnection.findFirst({
+          where: { workspaceId, channel, isDefault: true },
           select: { id: true, channel: true, createdAt: true },
         })
       : await this.db.channelConnection.findFirst({
-          where: { teamId, isActive: true },
+          where: { workspaceId, isActive: true },
           orderBy: { createdAt: "asc" },
           select: { id: true, channel: true, createdAt: true },
         });

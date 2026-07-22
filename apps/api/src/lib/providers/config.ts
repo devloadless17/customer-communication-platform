@@ -8,7 +8,7 @@ import { getCountryFromPhone } from "@ccp/shared/utils";
 /**
  * Per-team provider configuration. CLAUDE.md rule #6: secrets live in the DB,
  * not in env vars, so each customer can plug in their own Meta app without us
- * redeploying. They live on a `ChannelConnection` row keyed by (teamId,
+ * redeploying. They live on a `ChannelConnection` row keyed by (workspaceId,
  * provider) — `config` holds non-secret fields, `secrets` holds the
  * envelope-encrypted ciphertext per field. Adding a channel = a new row, not
  * a new column-set on Team.
@@ -70,7 +70,7 @@ export interface MetaWebhookConfig {
   /** Optional — when set, every webhook's `entry[].changes[].value.metadata.phone_number_id`
    *  must match. Caching this here lets the controller's mismatch check
    *  reuse the same cached lookup as the appSecret read instead of paying
-   *  a separate `db.team.findUnique` per webhook. */
+   *  a separate `db.workspace.findUnique` per webhook. */
   phoneNumberId: string | null;
 }
 
@@ -85,16 +85,16 @@ const CHANNEL_DISPLAY_NAME: Partial<Record<Channel, string>> = {
 };
 
 export class ProviderNotConfiguredError extends Error {
-  readonly teamId: string;
+  readonly workspaceId: string;
   readonly channel: Channel;
-  constructor(teamId: string, missing: string[], channel: Channel = "whatsapp") {
+  constructor(workspaceId: string, missing: string[], channel: Channel = "whatsapp") {
     const label = CHANNEL_DISPLAY_NAME[channel] ?? channel;
     super(
-      `Team ${teamId} is missing ${label} config: ${missing.join(", ")}. ` +
+      `Team ${workspaceId} is missing ${label} config: ${missing.join(", ")}. ` +
         `Reconnect it in /settings/${channel}.`,
     );
     this.name = "ProviderNotConfiguredError";
-    this.teamId = teamId;
+    this.workspaceId = workspaceId;
     this.channel = channel;
   }
 }
@@ -150,15 +150,33 @@ type CachedSend =
 const sendCache = new TtlCache<CachedSend>();
 const webhookCache = new TtlCache<WebhookConfigCipher | null>();
 
-/** Drop cached credentials for a team. Call after the settings page writes. */
-export function invalidateProviderConfig(teamId: string): void {
-  sendCache.delete(teamId);
-  webhookCache.delete(teamId);
+/**
+ * Cache key for a send config. A workspace may hold SEVERAL accounts on a
+ * channel, so credentials are cached per ACCOUNT; `default` is the workspace's
+ * default account. Caching per workspace alone would hand one number's token to
+ * a send meant for another.
+ */
+function sendKey(workspaceId: string, accountId?: string | null): string {
+  return `${workspaceId}::${accountId ?? "default"}`;
 }
 
-async function loadSendCipher(teamId: string): Promise<CachedSend> {
-  const conn = await db.channelConnection.findUnique({
-    where: { teamId_channel: { teamId, channel: "whatsapp" } },
+/** Drop cached credentials for a workspace (every account). Call after writes. */
+export function invalidateProviderConfig(workspaceId: string): void {
+  sendCache.deletePrefix(`${workspaceId}::`);
+  webhookCache.delete(workspaceId);
+}
+
+async function loadSendCipher(
+  workspaceId: string,
+  accountId?: string | null,
+): Promise<CachedSend> {
+  // SECURITY: `workspaceId` stays in the WHERE even when an explicit account is
+  // named. `accountId` can originate from a stored row, so scoping by it alone
+  // would let a mis-stamped/foreign id load ANOTHER tenant's credentials.
+  const conn = await db.channelConnection.findFirst({
+    where: accountId
+      ? { id: accountId, workspaceId, channel: "whatsapp" }
+      : { workspaceId, channel: "whatsapp", isDefault: true },
     select: { config: true, secrets: true, isActive: true },
   });
   if (!conn || !conn.isActive) return { kind: "err", missing: ["not-connected"] };
@@ -186,7 +204,7 @@ async function loadSendCipher(teamId: string): Promise<CachedSend> {
 }
 
 function materializeSendConfig(
-  teamId: string,
+  workspaceId: string,
   cipher: SendConfigCipher,
 ): MetaSendConfig {
   let accessToken: string;
@@ -198,14 +216,14 @@ function materializeSendConfig(
     accessToken = decryptSecret(cipher.accessTokenCipher);
   } catch (err) {
     console.error(
-      `[provider-config] failed to decrypt send secrets for team=${teamId}: ${
+      `[provider-config] failed to decrypt send secrets for team=${workspaceId}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
     // Surface as ProviderNotConfigured so callers (reply box, broadcast
     // runner) render the "reconnect WhatsApp" prompt instead of a 500.
     // ENCRYPTION_KEY rotation or ciphertext corruption land here.
-    throw new ProviderNotConfiguredError(teamId, ["accessToken (decrypt failed)"]);
+    throw new ProviderNotConfiguredError(workspaceId, ["accessToken (decrypt failed)"]);
   }
   return {
     phoneNumberId: cipher.phoneNumberId,
@@ -229,20 +247,24 @@ function materializeSendConfig(
  * The decrypted access token is produced fresh from the cached ciphertext
  * on every call — see the cache header comment for the security rationale.
  */
-export async function getMetaSendConfig(teamId: string): Promise<MetaSendConfig> {
-  const hit = sendCache.get(teamId);
+export async function getMetaSendConfig(
+  workspaceId: string,
+  accountId?: string | null,
+): Promise<MetaSendConfig> {
+  const key = sendKey(workspaceId, accountId);
+  const hit = sendCache.get(key);
   if (hit) {
     if (hit.kind === "err") {
-      throw new ProviderNotConfiguredError(teamId, [...hit.missing]);
+      throw new ProviderNotConfiguredError(workspaceId, [...hit.missing]);
     }
-    return materializeSendConfig(teamId, hit.cipher);
+    return materializeSendConfig(workspaceId, hit.cipher);
   }
-  const entry = await loadSendCipher(teamId);
-  sendCache.set(teamId, entry);
+  const entry = await loadSendCipher(workspaceId, accountId);
+  sendCache.set(key, entry);
   if (entry.kind === "err") {
-    throw new ProviderNotConfiguredError(teamId, [...entry.missing]);
+    throw new ProviderNotConfiguredError(workspaceId, [...entry.missing]);
   }
-  return materializeSendConfig(teamId, entry.cipher);
+  return materializeSendConfig(workspaceId, entry.cipher);
 }
 
 /**
@@ -259,10 +281,10 @@ export async function getMetaSendConfig(teamId: string): Promise<MetaSendConfig>
  * the Call button stay wrong for a minute with nothing to explain it.
  */
 export async function getBusinessNumberCountry(
-  teamId: string,
+  workspaceId: string,
 ): Promise<string | null> {
-  const conn = await db.channelConnection.findUnique({
-    where: { teamId_channel: { teamId, channel: "whatsapp" } },
+  const conn = await db.channelConnection.findFirst({
+    where: { workspaceId, channel: "whatsapp", isDefault: true },
     select: { config: true },
   });
   const config = (conn?.config ?? {}) as MetaChannelConfig;
@@ -272,7 +294,7 @@ export async function getBusinessNumberCountry(
 }
 
 /**
- * Loads the webhook-side config. Used by /api/webhooks/meta/[teamId] for
+ * Loads the webhook-side config. Used by /api/webhooks/meta/[workspaceId] for
  * both the GET verify dance and POST HMAC verification.
  *
  * Returns null on missing-config OR on decrypt failure (corrupted ciphertext,
@@ -296,10 +318,10 @@ export async function getBusinessNumberCountry(
  * pre-minted verify token) grants NO message access: the POST path still
  * independently requires the per-channel app secret to accept any payload.
  */
-export async function getTeamVerifyTokens(teamId: string): Promise<string[]> {
+export async function getTeamVerifyTokens(workspaceId: string): Promise<string[]> {
   const [conns, meta] = await Promise.all([
-    db.channelConnection.findMany({ where: { teamId }, select: { config: true } }),
-    getMetaConnection(teamId),
+    db.channelConnection.findMany({ where: { workspaceId }, select: { config: true } }),
+    getMetaConnection(workspaceId),
   ]);
   const tokens = conns
     .map((c) => (c.config as { verifyToken?: unknown } | null)?.verifyToken)
@@ -311,15 +333,15 @@ export async function getTeamVerifyTokens(teamId: string): Promise<string[]> {
 }
 
 export async function getMetaWebhookConfig(
-  teamId: string,
+  workspaceId: string,
 ): Promise<MetaWebhookConfig | null> {
-  const hit = webhookCache.get(teamId);
+  const hit = webhookCache.get(workspaceId);
   let cipher: WebhookConfigCipher | null;
   if (hit !== undefined) {
     cipher = hit;
   } else {
-    const conn = await db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId, channel: "whatsapp" } },
+    const conn = await db.channelConnection.findFirst({
+      where: { workspaceId, channel: "whatsapp", isDefault: true },
       select: { config: true, secrets: true, isActive: true },
     });
     const config = (conn?.config ?? {}) as MetaChannelConfig;
@@ -332,7 +354,7 @@ export async function getMetaWebhookConfig(
             phoneNumberId: config.phoneNumberId ?? null,
           }
         : null;
-    webhookCache.set(teamId, cipher);
+    webhookCache.set(workspaceId, cipher);
   }
   if (!cipher) return null;
   try {
@@ -340,7 +362,7 @@ export async function getMetaWebhookConfig(
     // Meta App connection (the single source — an app-secret rotation there
     // takes effect on every channel immediately, no per-channel resync), and
     // fall back to the per-channel cipher for legacy / pre-Meta-App rows.
-    const meta = await getMetaConnection(teamId);
+    const meta = await getMetaConnection(workspaceId);
     return {
       ...resolveWebhookSecrets(meta?.appSecret, decryptSecret(cipher.appSecretCipher)),
       verifyToken: cipher.verifyToken,
@@ -348,7 +370,7 @@ export async function getMetaWebhookConfig(
     };
   } catch (err) {
     console.error(
-      `[provider-config] failed to decrypt webhook secrets for team=${teamId}: ${
+      `[provider-config] failed to decrypt webhook secrets for team=${workspaceId}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );

@@ -78,7 +78,7 @@ export class AutoAssignSubscriber implements OnModuleInit, OnModuleDestroy {
     // that already have an owner.
     if (e.conversation?.assignedUserId) return;
 
-    const settings = await loadAssignmentSettings(db, e.teamId);
+    const settings = await loadAssignmentSettings(db, e.workspaceId);
     const wanted = e.isNewConversation
       ? settings.autoAssignOnNewConversation
       : settings.autoAssignOnReopen;
@@ -96,7 +96,7 @@ export class AutoAssignSubscriber implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    if (settings.skipWhenAiHandling && (await this.aiWillHandle(e.teamId, e.conversationId))) {
+    if (settings.skipWhenAiHandling && (await this.aiWillHandle(e.workspaceId, e.conversationId))) {
       this.logger.debug(
         `auto-assign deferred to the AI: conversation=${e.conversationId}`,
       );
@@ -106,7 +106,7 @@ export class AutoAssignSubscriber implements OnModuleInit, OnModuleDestroy {
     const outcome = await assignByPolicy({
       db,
       publish,
-      teamId: e.teamId,
+      workspaceId: e.workspaceId,
       conversationId: e.conversationId,
       source: e.isNewConversation ? "inbound" : "reopen",
       context: {
@@ -147,13 +147,13 @@ export class AutoAssignSubscriber implements OnModuleInit, OnModuleDestroy {
    * opposite error (assigning a thread the AI then handles end-to-end) is the
    * one that wastes an agent's capacity, so the check is biased toward skipping.
    */
-  private async aiWillHandle(teamId: string, conversationId: string): Promise<boolean> {
+  private async aiWillHandle(workspaceId: string, conversationId: string): Promise<boolean> {
     // The legacy n8n autopilot stands the native assistant down entirely for the
     // team, and answers the conversation itself — so it counts as "AI handling"
     // even though none of the native gates below would fire.
-    if (await legacyAutopilotOwnsTeam(teamId)) return true;
+    if (await legacyAutopilotOwnsTeam(workspaceId)) return true;
     if (!aiGloballyEnabled() || !openaiConfigured()) return false;
-    const config = await loadAiConfig(teamId);
+    const config = await loadAiConfig(workspaceId);
     if (!configEnabled(config)) return false;
     const state = await getState(conversationId);
     // No row yet = a brand-new thread the assistant hasn't touched → it will.

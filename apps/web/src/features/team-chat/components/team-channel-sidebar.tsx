@@ -73,7 +73,7 @@ export function TeamChannelSidebar({ currentUser }: { currentUser: User }) {
   }, [routeChannelId]);
   const activeChannelId = pendingChannelId ?? routeChannelId;
   const { onlineUserIds, availabilityByUserId } = usePresence(
-    currentUser.teamId,
+    currentUser.workspaceId,
     currentUser.id,
   );
 

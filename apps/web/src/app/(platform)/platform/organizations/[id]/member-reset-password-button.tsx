@@ -17,11 +17,11 @@ import {
  * TeamStatusControls).
  */
 export function MemberResetPasswordButton({
-  teamId,
+  workspaceId,
   userId,
   name,
 }: {
-  teamId: string;
+  workspaceId: string;
   userId: string;
   name: string;
 }) {
@@ -37,7 +37,7 @@ export function MemberResetPasswordButton({
         onClick={() =>
           setTarget({
             name,
-            endpoint: `/api/admin/teams/${teamId}/members/${userId}/reset-password`,
+            endpoint: `/api/admin/teams/${workspaceId}/members/${userId}/reset-password`,
           })
         }
       >

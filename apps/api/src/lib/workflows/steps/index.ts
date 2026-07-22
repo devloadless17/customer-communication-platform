@@ -17,6 +17,12 @@ import {
 import { sendMessageStepHandler } from "./send-message";
 import { sendTemplateStepHandler } from "./send-template";
 import { setStatusStepHandler } from "./set-status";
+import {
+  assignTicketStepHandler,
+  createTicketStepHandler,
+  setTicketPriorityStepHandler,
+  setTicketStatusStepHandler,
+} from "./ticket";
 import { addTagStepHandler, removeTagStepHandler } from "./tag";
 import { triggerWorkflowStepHandler } from "./trigger-workflow";
 import { updateFieldStepHandler } from "./update-field";
@@ -44,6 +50,10 @@ const REGISTRY: Record<WorkflowStepType, StepHandler<unknown>> = {
   set_status: setStatusStepHandler as StepHandler<unknown>,
   open_conversation: openConversationStepHandler as StepHandler<unknown>,
   close_conversation: closeConversationStepHandler as StepHandler<unknown>,
+  create_ticket: createTicketStepHandler as StepHandler<unknown>,
+  set_ticket_status: setTicketStatusStepHandler as StepHandler<unknown>,
+  set_ticket_priority: setTicketPriorityStepHandler as StepHandler<unknown>,
+  assign_ticket: assignTicketStepHandler as StepHandler<unknown>,
   add_tag: addTagStepHandler as StepHandler<unknown>,
   remove_tag: removeTagStepHandler as StepHandler<unknown>,
   update_field: updateFieldStepHandler as StepHandler<unknown>,

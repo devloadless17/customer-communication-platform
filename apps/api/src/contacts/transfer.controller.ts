@@ -77,7 +77,7 @@ export class ContactTransferController {
     @CurrentSession() session: ApiSession,
     @UploadedFile() file: Express.Multer.File | undefined,
   ) {
-    return this.transfers.preview(session.teamId, file);
+    return this.transfers.preview(session.workspaceId, file);
   }
 
   @Post("import")
@@ -100,7 +100,7 @@ export class ContactTransferController {
     ];
 
     return this.transfers.startImport({
-      teamId: session.teamId,
+      workspaceId: session.workspaceId,
       userId: session.userId,
       uploadKey,
       filename,
@@ -119,7 +119,7 @@ export class ContactTransferController {
     @Body(zBody(CreateExportSchema)) body: CreateExportInput,
   ) {
     return this.transfers.startExport({
-      teamId: session.teamId,
+      workspaceId: session.workspaceId,
       userId: session.userId,
       input: body,
     });
@@ -130,12 +130,12 @@ export class ContactTransferController {
     @CurrentSession() session: ApiSession,
     @Query(zQuery(ListTransfersQuerySchema)) query: ListTransfersQueryInput,
   ) {
-    return this.transfers.list(session.teamId, query);
+    return this.transfers.list(session.workspaceId, query);
   }
 
   @Get("transfers/:id")
   async get(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    return this.transfers.get(session.teamId, id);
+    return this.transfers.get(session.workspaceId, id);
   }
 
   /**
@@ -151,7 +151,7 @@ export class ContactTransferController {
     @Param("id") id: string,
     @Res() res: Response,
   ): Promise<void> {
-    const url = await this.transfers.downloadUrl(session.teamId, id, "result");
+    const url = await this.transfers.downloadUrl(session.workspaceId, id, "result");
     res.redirect(302, url);
   }
 
@@ -162,13 +162,13 @@ export class ContactTransferController {
     @Param("id") id: string,
     @Res() res: Response,
   ): Promise<void> {
-    const url = await this.transfers.downloadUrl(session.teamId, id, "errors");
+    const url = await this.transfers.downloadUrl(session.workspaceId, id, "errors");
     res.redirect(302, url);
   }
 
   @Post("transfers/:id/cancel")
   async cancel(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    return this.transfers.cancel(session.teamId, id);
+    return this.transfers.cancel(session.workspaceId, id);
   }
 
   /** Blank import template in either format. */
@@ -179,7 +179,7 @@ export class ContactTransferController {
     @Res() res: Response,
   ): Promise<void> {
     const format: TransferFormat = formatRaw === "xlsx" ? "xlsx" : "csv";
-    const { path, filename, cleanup } = await this.transfers.template(session.teamId, format);
+    const { path, filename, cleanup } = await this.transfers.template(session.workspaceId, format);
     res
       .status(200)
       .set("content-type", TRANSFER_FORMAT_MIME[format])
@@ -194,7 +194,7 @@ export class ContactTransferController {
   @Get("export-columns")
   @RequireCapability("contacts:export")
   async exportColumns(@CurrentSession() session: ApiSession) {
-    return this.transfers.exportColumns(session.teamId);
+    return this.transfers.exportColumns(session.workspaceId);
   }
 
   /**
@@ -222,7 +222,7 @@ export class ContactTransferController {
     let jobId: string;
     try {
       ({ jobId } = await this.transfers.startExport({
-        teamId: session.teamId,
+        workspaceId: session.workspaceId,
         userId: session.userId,
         input: { format, filters: {} },
       }));
@@ -245,9 +245,9 @@ export class ContactTransferController {
       }
       throw e;
     }
-    const done = await this.transfers.waitForTerminal(session.teamId, jobId, LEGACY_WAIT_MS);
+    const done = await this.transfers.waitForTerminal(session.workspaceId, jobId, LEGACY_WAIT_MS);
     if (done?.status === "completed") {
-      res.redirect(302, await this.transfers.downloadUrl(session.teamId, jobId, "result"));
+      res.redirect(302, await this.transfers.downloadUrl(session.workspaceId, jobId, "result"));
       return;
     }
     if (done?.status === "failed") {

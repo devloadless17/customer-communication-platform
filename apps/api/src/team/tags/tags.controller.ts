@@ -43,7 +43,7 @@ export class TagsController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    const tags = await this.tags.list(session.teamId);
+    const tags = await this.tags.list(session.workspaceId);
     return { tags };
   }
 
@@ -51,7 +51,7 @@ export class TagsController {
   // Static segment must come before :id routes.
   @Get("usage")
   async usage(@CurrentSession() session: ApiSession) {
-    const usage = await this.tags.usage(session.teamId);
+    const usage = await this.tags.usage(session.workspaceId);
     return { usage };
   }
 
@@ -61,7 +61,7 @@ export class TagsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateTagSchema)) body: CreateTagInput,
   ) {
-    const tag = await this.tags.create(session.teamId, body);
+    const tag = await this.tags.create(session.workspaceId, body);
     return { tag };
   }
 
@@ -72,7 +72,7 @@ export class TagsController {
     @Param("id") id: string,
     @Body(zBody(UpdateTagSchema)) body: UpdateTagInput,
   ) {
-    const tag = await this.tags.update(session.teamId, id, body);
+    const tag = await this.tags.update(session.workspaceId, id, body);
     return { tag };
   }
 
@@ -82,7 +82,7 @@ export class TagsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.tags.remove(session.teamId, id);
+    await this.tags.remove(session.workspaceId, id);
     return { ok: true };
   }
 }

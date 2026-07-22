@@ -10,7 +10,7 @@ import { TtlCache } from "@/lib/providers/config-cache";
  * is safe-in-HTML and abuse is bounded by its allowed-origins list + rate limits.
  *
  * Two read paths:
- *   - `getWebchatwidgetSendConfig(teamId)` — the registry's send-config loader.
+ *   - `getWebchatwidgetSendConfig(workspaceId)` — the registry's send-config loader.
  *     Its only job is to gate sends: it throws `ProviderNotConfiguredError` when
  *     the team has NO active widget, so the outbound preflight returns
  *     `channel_not_connected`. Sends do no vendor I/O (delivery is realtime).
@@ -126,7 +126,7 @@ export type WebchatwidgetSendConfig = Record<string, never>;
 
 /** What a resolved site key yields to the public surfaces (never secrets). */
 export interface WebchatwidgetResolved {
-  teamId: string;
+  workspaceId: string;
   widgetId: string;
   name: string;
   allowedOrigins: string[];
@@ -139,8 +139,8 @@ const connectedCache = new TtlCache<boolean>();
 const byKeyCache = new TtlCache<WebchatwidgetResolved | null>();
 
 /** Drop the "is this team connected?" cache. Call after a widget CRUD change. */
-export function invalidateWebchatwidgetTeam(teamId: string): void {
-  connectedCache.delete(teamId);
+export function invalidateWebchatwidgetTeam(workspaceId: string): void {
+  connectedCache.delete(workspaceId);
 }
 
 /** Drop a resolved-by-key cache entry. Call after editing/deleting that widget. */
@@ -155,21 +155,21 @@ export function invalidateWebchatwidgetKey(publicKey: string): void {
  * provider ignores it; delivery is realtime).
  */
 export async function getWebchatwidgetSendConfig(
-  teamId: string,
+  workspaceId: string,
 ): Promise<WebchatwidgetSendConfig> {
-  const cached = connectedCache.get(teamId);
+  const cached = connectedCache.get(workspaceId);
   const connected =
     cached !== undefined
       ? cached
       : await (async () => {
           const count = await db.webchatWidget.count({
-            where: { teamId, isActive: true },
+            where: { workspaceId, isActive: true },
           });
           const ok = count > 0;
-          connectedCache.set(teamId, ok);
+          connectedCache.set(workspaceId, ok);
           return ok;
         })();
-  if (!connected) throw new ProviderNotConfiguredError(teamId, ["no-active-widget"], "webchatwidget");
+  if (!connected) throw new ProviderNotConfiguredError(workspaceId, ["no-active-widget"], "webchatwidget");
   return {};
 }
 
@@ -188,12 +188,12 @@ export async function resolveWebchatwidgetByPublicKey(
   if (cached !== undefined) return cached;
   const widget = await db.webchatWidget.findUnique({
     where: { publicKey },
-    select: { id: true, teamId: true, name: true, allowedOrigins: true, config: true, isActive: true, firstSeenOrigin: true },
+    select: { id: true, workspaceId: true, name: true, allowedOrigins: true, config: true, isActive: true, firstSeenOrigin: true },
   });
   const resolved: WebchatwidgetResolved | null =
     widget && widget.isActive
       ? {
-          teamId: widget.teamId,
+          workspaceId: widget.workspaceId,
           widgetId: widget.id,
           name: widget.name,
           allowedOrigins: widget.allowedOrigins,

@@ -113,7 +113,7 @@ export function pickBestChannel(
 }
 
 export async function bestChannelForCustomer(
-  teamId: string,
+  workspaceId: string,
   customerId: string,
   now: number = Date.now(),
   /**
@@ -128,7 +128,7 @@ export async function bestChannelForCustomer(
   allowedChannels?: ReadonlySet<Channel>,
 ): Promise<BestChannelResult | null> {
   const contacts = await db.contact.findMany({
-    where: { teamId, customerId, deletedAt: null },
+    where: { workspaceId, customerId, deletedAt: null },
     select: {
       id: true,
       identityChannel: true,

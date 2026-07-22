@@ -23,7 +23,7 @@ export type TxClient = Pick<
 
 interface OutboxRow {
   id: string;
-  teamId: string;
+  workspaceId: string;
   type: string;
   payload: Prisma.JsonValue;
   createdAt: Date;
@@ -73,10 +73,10 @@ export async function publishInTx<K extends DomainEventType>(
   tx: TxClient,
   event: DomainEventOf<K>,
 ): Promise<void> {
-  const { type, teamId, ...rest } = event as DomainEventOf<K> & { teamId: string };
+  const { type, workspaceId, ...rest } = event as DomainEventOf<K> & { workspaceId: string };
   await tx.outboundEvent.create({
     data: {
-      teamId,
+      workspaceId,
       type,
       payload: rest as unknown as Prisma.InputJsonValue,
       // Capture the request-scoped loop counter + correlation id NOW, while we
@@ -115,13 +115,13 @@ export async function persistDispatchedRow<K extends DomainEventType>(
   event: DomainEventOf<K>,
   error: string | null,
 ): Promise<string> {
-  const { type, teamId, ...rest } = event as DomainEventOf<K> & { teamId: string };
+  const { type, workspaceId, ...rest } = event as DomainEventOf<K> & { workspaceId: string };
   const now = new Date();
   const truncatedError =
     error && error.length > 1000 ? error.slice(0, 1000) + "…" : error;
   const row = await db.outboundEvent.create({
     data: {
-      teamId,
+      workspaceId,
       type,
       payload: rest as unknown as Prisma.InputJsonValue,
       publishedAt: now,
@@ -263,7 +263,7 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
   const rows = await db.$queryRaw<
     Array<{
       id: string;
-      teamId: string;
+      workspaceId: string;
       type: string;
       payload: Prisma.JsonValue;
       createdAt: Date;
@@ -274,10 +274,10 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
   >`
     WITH teams AS (
       -- Distinct teamIds present in the OLDEST pending window, NOT over the
-      -- whole backlog. A plain DISTINCT teamId over every unpublished row is
+      -- whole backlog. A plain DISTINCT workspaceId over every unpublished row is
       -- O(backlog) each tick (the only pending index,
       -- OutboundEvent_drainer_pending_idx, is a partial btree on createdAt
-      -- with no teamId, and Postgres has no DISTINCT skip-scan), so it degraded
+      -- with no workspaceId, and Postgres has no DISTINCT skip-scan), so it degraded
       -- exactly during the broadcast/fanout backlog the drainer exists to clear.
       -- Bounding to the oldest limit*8 rows keeps the scan O(limit) while
       -- preserving fairness: the claim can pull at most limit rows anyway, so
@@ -287,9 +287,9 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
       -- whose oldest row sits beyond the window simply isn't claimable yet and
       -- surfaces on a later tick as the window drains, which is the correct
       -- round-robin-among-the-oldest-backlog behavior fairness wants.
-      SELECT DISTINCT "teamId"
+      SELECT DISTINCT "workspaceId"
       FROM   (
-        SELECT "teamId"
+        SELECT "workspaceId"
         FROM   "OutboundEvent"
         WHERE  "publishedAt" IS NULL
           AND  "failedAt"    IS NULL
@@ -298,14 +298,14 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
       ) oldest_window
     ),
     candidates AS (
-      SELECT c."id", c."teamId", c."createdAt"
+      SELECT c."id", c."workspaceId", c."createdAt"
       FROM   teams t
       CROSS JOIN LATERAL (
-        SELECT "id", "teamId", "createdAt"
+        SELECT "id", "workspaceId", "createdAt"
         FROM   "OutboundEvent" o
         WHERE  o."publishedAt" IS NULL
           AND  o."failedAt"    IS NULL
-          AND  o."teamId"      = t."teamId"
+          AND  o."workspaceId"      = t."workspaceId"
         ORDER BY o."createdAt" ASC
         LIMIT  ${PER_TEAM_BATCH_CAP}
         FOR UPDATE SKIP LOCKED
@@ -313,9 +313,9 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
     ),
     ranked AS (
       SELECT "id",
-             "teamId",
+             "workspaceId",
              "createdAt",
-             ROW_NUMBER() OVER (PARTITION BY "teamId" ORDER BY "createdAt") AS team_rn
+             ROW_NUMBER() OVER (PARTITION BY "workspaceId" ORDER BY "createdAt") AS team_rn
       FROM   candidates
     )
     UPDATE "OutboundEvent"
@@ -332,7 +332,7 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
       ORDER BY team_rn, "createdAt"
       LIMIT ${limit}
     )
-    RETURNING "id", "teamId", "type", "payload", "createdAt", "attempts", "chainDepth", "correlationId";
+    RETURNING "id", "workspaceId", "type", "payload", "createdAt", "attempts", "chainDepth", "correlationId";
   `;
   return rows;
 }

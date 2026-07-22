@@ -50,7 +50,7 @@ export class StagesController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    const stages = await this.stages.list(session.teamId);
+    const stages = await this.stages.list(session.workspaceId);
     return { stages };
   }
 
@@ -58,7 +58,7 @@ export class StagesController {
   // as a stage id.
   @Get("counts")
   async counts(@CurrentSession() session: ApiSession) {
-    return this.stages.counts(session.teamId);
+    return this.stages.counts(session.workspaceId);
   }
 
   @Post()
@@ -67,7 +67,7 @@ export class StagesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateStageSchema)) body: CreateStageInput,
   ) {
-    const stage = await this.stages.create(session.teamId, this.canManage(session), body);
+    const stage = await this.stages.create(session.workspaceId, this.canManage(session), body);
     return { stage };
   }
 
@@ -77,7 +77,7 @@ export class StagesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(ReorderStagesSchema)) body: ReorderStagesInput,
   ) {
-    await this.stages.reorder(session.teamId, this.canManage(session), body);
+    await this.stages.reorder(session.workspaceId, this.canManage(session), body);
     return { ok: true };
   }
 
@@ -87,7 +87,7 @@ export class StagesController {
     @Param("id") id: string,
     @Body(zBody(UpdateStageSchema)) body: UpdateStageInput,
   ) {
-    const stage = await this.stages.update(session.teamId, this.canManage(session), id, body);
+    const stage = await this.stages.update(session.workspaceId, this.canManage(session), id, body);
     return { stage };
   }
 
@@ -96,7 +96,7 @@ export class StagesController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.stages.remove(session.teamId, this.canManage(session), id);
+    await this.stages.remove(session.workspaceId, this.canManage(session), id);
     return { ok: true };
   }
 }

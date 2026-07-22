@@ -96,14 +96,14 @@ async function main() {
 
     await db.message.upsert({
       where: {
-        teamId_channel_externalId: {
-          teamId: conversation.teamId,
+        workspaceId_channel_externalId: {
+          workspaceId: conversation.workspaceId,
           channel: "whatsapp",
           externalId,
         },
       },
       create: {
-        teamId: conversation.teamId,
+        workspaceId: conversation.workspaceId,
         conversationId: conversation.id,
         externalId,
         senderUserId: null, // outbound dev messages keep null sender to keep the script simple

@@ -2,7 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from "@playwright/tes
 
 import { Prisma } from "@prisma/client";
 
-import { APP_ADMIN_EMAIL, appAdmin, db } from "./_helpers/db";
+import { createTestUser, APP_ADMIN_EMAIL, appAdmin, db } from "./_helpers/db";
 import { DAY_KEYS, type WorkHours } from "../../packages/shared/src/work-hours";
 
 /**
@@ -82,16 +82,16 @@ let adminUserId: string;
 let adminTeamId: string;
 
 test.beforeAll(async () => {
-  const { teamId, userId } = await appAdmin();
-  adminTeamId = teamId;
+  const { workspaceId, userId } = await appAdmin();
+  adminTeamId = workspaceId;
   adminUserId = userId;
 });
 
 test.afterAll(async () => {
   // Restore: no org schedule, a clean manual availability row.
-  await db().team.update({ where: { id: adminTeamId }, data: { workHours: Prisma.DbNull } });
+  await db().workspace.update({ where: { id: adminTeamId }, data: { workHours: Prisma.DbNull } });
   await db().user.updateMany({
-    where: { teamId: adminTeamId },
+    where: { workspaceMemberships: { some: { workspaceId: adminTeamId } } },
     data: {
       availabilityStatus: "available",
       availabilityMessage: null,
@@ -282,15 +282,7 @@ test.describe("admin acting for a teammate", () => {
   let mateId: string;
 
   test.beforeAll(async () => {
-    const mate = await db().user.create({
-      data: {
-        teamId: adminTeamId,
-        name: "Shift Mate",
-        email: `wh-mate-${Date.now()}@loadless.test`,
-        role: "agent",
-      },
-      select: { id: true },
-    });
+    const mate = await createTestUser({ workspaceId: adminTeamId, name: "Shift Mate", email: `wh-mate-${Date.now()}@loadless.test`, role: "agent" });
     mateId = mate.id;
   });
 
@@ -412,7 +404,7 @@ test.describe("admin acting for a teammate", () => {
     request,
   }) => {
     const foreign = await db().user.findFirst({
-      where: { teamId: { not: adminTeamId } },
+      where: { workspaceMemberships: { none: { workspaceId: adminTeamId } } },
       select: { id: true, availabilityStatus: true },
     });
     test.skip(!foreign, "no second team in this dev DB");
@@ -494,7 +486,7 @@ test.describe("Settings → Team UI", () => {
     await expect(page.getByRole("button", { name: /Copy Monday to Tue–Fri/ })).toBeVisible();
 
     // Nothing persisted on the toggle alone.
-    const beforeSave = await db().team.findUniqueOrThrow({
+    const beforeSave = await db().workspace.findUniqueOrThrow({
       where: { id: adminTeamId },
       select: { workHours: true },
     });
@@ -504,7 +496,7 @@ test.describe("Settings → Team UI", () => {
     await page.getByRole("button", { name: /Save working hours/ }).click();
     await expect(page.getByText(/Working hours saved/)).toBeVisible({ timeout: 15_000 });
 
-    const saved = await db().team.findUniqueOrThrow({
+    const saved = await db().workspace.findUniqueOrThrow({
       where: { id: adminTeamId },
       select: { workHours: true },
     });
@@ -581,17 +573,10 @@ test.describe("Settings → Team UI", () => {
     // correctly showed them grey. Two surfaces, same person, opposite answers.
     guard(page);
     await setTeamWorkHours(request, null);
-    const ghost = await db().user.create({
-      data: {
-        teamId: adminTeamId,
-        name: `Ghost ${Date.now()}`,
+    const ghost = await createTestUser({ workspaceId: adminTeamId, role: "agent", name: `Ghost ${Date.now()}`,
         email: `wh-ghost-${Date.now()}@loadless.test`,
-        role: "agent",
         availabilityStatus: "available",
-        availabilityManualStatus: "available",
-      },
-      select: { id: true, name: true },
-    });
+        availabilityManualStatus: "available" });
     try {
       await request.patch("/api/users/me/availability", { data: { status: "available" } });
       await page.goto("/settings/team");

@@ -19,17 +19,34 @@ The whole thing runs on **one Hostinger KVM2 VPS (8 GB)** serving ~30 organizati
 ## 2. Product model
 
 ```
-Organization (Team) → Users → Connected Channels → Customers/Contacts → Conversations → Messages
+Organization → Workspaces → Channels → Accounts
+                    ↓
+              Users (per-workspace roles) · Contacts/Customers · Conversations → Messages · Tickets
 ```
 
-- **Team** — the tenant. Every row in the database belongs to one (`teamId` everywhere).
-- **User** — a team member (roles: superAdmin / admin / manager / agent).
-- **Channel connection** — a team's credentials for one channel (`ChannelConnection`, one per `(team, channel)`).
+- **Organization** — the tenant/billing root. Holds the user directory, the plan, the
+  org-approval gate, and `maxWorkspaces` (super-admin controlled, **default 2**). Nothing
+  operational lives here.
+- **Workspace** — **the data-isolation boundary**. Every row in the database belongs to one
+  (`workspaceId` everywhere, in the `where` of every query). This is the renamed `Team`: a
+  fully separate inbox with its own channels, contacts, conversations, tags, stages, tickets
+  and team chat. Nothing is shared between workspaces except the people you put in both.
+- **User** — belongs to ONE organization (`orgRole`: owner / admin / member) and joins many of
+  its workspaces via `WorkspaceMember`, holding a **separate role per workspace**
+  (admin / manager / agent). Platform operators are `User.isSuperAdmin` — a flag orthogonal to
+  every workspace, NOT a role value.
+- **Channel connection** — one **account** on one channel (`ChannelConnection`, unique on
+  `(workspace, channel, externalAccountId)`). A workspace can hold several WhatsApp numbers or
+  Pages; a reply always goes out the account the customer messaged.
 - **Contact** — a *channel identity* (a WhatsApp number, an Instagram handle). Adopted target: many contacts roll up to one **Customer** (a person) for a unified profile — see §6.
 - **Conversation** — one thread per contact per channel. Closed threads **reopen**, they never fragment.
 - **Message** — one inbound/outbound message on a conversation.
+- **Ticket** — the unit of *work* on a conversation, **many per thread over time**. See §2 note
+  below and [docs/ticketing.md](docs/ticketing.md).
 
-Collaboration primitives on a conversation: **assignment** (manual, or routed by admin-configured policies — see [docs/assignment.md](docs/assignment.md)), **status** (open/pending/closed), **stage** (pipeline), **tags**, **custom fields**, **internal notes**. Around them: **triggers → workflows → actions** (automation), **outbound webhooks** (notify external systems), **broadcasts** (bulk templated outbound), the external **`/v1` API** (n8n/Zapier/partners), and **calling** (WhatsApp Business Calling over WebRTC).
+A conversation is the long-lived thread. A **ticket** is one piece of *work* on it, and there are many over time — the refund in March and the delivery question in June are two tickets on one unbroken thread, each with its own assignee, priority, SLA clock and outcome. Tickets open by themselves on an inbound; the inbox is untouched (the board is a parallel lens joined by `Message.ticketId`). See [docs/ticketing.md](docs/ticketing.md).
+
+Collaboration primitives on a conversation: **assignment** (manual, or routed by admin-configured policies — see [docs/assignment.md](docs/assignment.md)), **status** (open/pending/closed), **stage** (pipeline), **tags**, **custom fields**, **internal notes**, and **saved views** (a named, reusable filter over the list — personal or shared with the workspace). Around them: **triggers → workflows → actions** (automation), **outbound webhooks** (notify external systems), **broadcasts** (bulk templated outbound), the external **`/v1` API** (n8n/Zapier/partners), and **calling** (WhatsApp Business Calling over WebRTC).
 
 Everything in the app revolves around the conversation. The inbox is the heart of the product and must always be the highest-quality, most realtime surface.
 
@@ -82,7 +99,7 @@ Full recipe + per-channel constraint table: **[docs/adding-a-channel.md](docs/ad
 
 - One discriminator: the `Channel` enum. **Live today**: `whatsapp`, `messenger`, `instagram`, `webchatwidget` (each has a registered provider + onboarding; `webchatwidget` is first-party, no vendor). **Designed-for / disabled**: `telegram`, `email`, `sms` — the enum value + capability/identity/label maps exist so the architecture is ready, but there's no provider/webhook/onboarding yet, so no row can carry them. `@ccp/shared/providers/capabilities` exposes `LIVE_CHANNELS` + `isChannelLive()`; shipping a designed-for channel = add its provider/webhook/onboarding **and** add it to `LIVE_CHANNELS`. **No `provider`/`vendor` column anywhere** — which vendor implements a channel is an impl detail, never stored. Meta Cloud serves WhatsApp/Messenger/Instagram; they are distinct *channels* because the channel is the medium, not the vendor.
 - `MessagingProvider<C>` interface (`packages/shared/src/providers/types.ts`): declarative `capabilities`, a pure `parseWebhook(payload) → NormalizedEvent[]`, `sendText`, and optional media/template/calling methods. The only impl today is the `metaProvider` object in `apps/api/src/lib/providers/meta.ts`.
-- Registry `getProviderBinding(channel)` (`apps/api/src/lib/providers/index.ts`) → `{ provider, getSendConfig(teamId) }`. Per-(team,channel) credentials live on `ChannelConnection` (`config` + envelope-encrypted `secrets`), loaded/cached by `apps/api/src/lib/providers/config.ts`.
+- Registry `getProviderBinding(channel)` (`apps/api/src/lib/providers/index.ts`) → `{ provider, getSendConfig(workspaceId, accountId?) }`. Per-(workspace, channel, account) credentials live on `ChannelConnection` (`config` + envelope-encrypted `secrets`), loaded/cached by `apps/api/src/lib/providers/config.ts`.
 
 **Adding a channel** = new `Channel` value + a `MessagingProvider` impl + a registry entry + a `ChannelConnection` row (+ a fanout rule only if it introduces new event types). Ingest, dedup, realtime, workflows, and the `/v1` API are untouched because they operate on `NormalizedEvent` + `Channel`, never a vendor shape.
 
@@ -110,12 +127,12 @@ Discipline that keeps this simple and safe:
 
 Real entities (`prisma/schema.prisma`; ERD in [docs/schema-erd.md](docs/schema-erd.md)):
 
-`Team → User → ChannelConnection`; `Contact → Conversation → Message`; plus `ContactStage`, `ContactFieldDefinition`, `Tag`, `AudienceGroup`, `Broadcast`/`BroadcastRecipient`, `InternalNote`, `Workflow`/`WorkflowRun`/`WorkflowContactState`, `TeamApiKey`, `OutboundWebhook`/`OutboundWebhookDelivery`, `OutboundEvent` (outbox), `ConversationEvent` (audit timeline), `ContactTransferJob` (contact import/export runs), the team-chat models (a deliberately separate message graph — channels **and** 1:1 DMs share `TeamChannel` via a `kind` discriminator; see [docs/team-chat.md](docs/team-chat.md)), `Call`/`CallPermissionRequest`, `OutboundSendAttempt` (send-idempotency ledger).
+`Team → User → ChannelConnection`; `Contact → Conversation → Message`; plus `ContactStage`, `ContactFieldDefinition`, `Tag`, `InboxView` (saved inbox filters — shared or personal; the criteria are one validated JSON document turned into SQL in exactly one place, `lib/inbox-views/where.ts`), `AudienceGroup`, `Broadcast`/`BroadcastRecipient`, `InternalNote`, `Workflow`/`WorkflowRun`/`WorkflowContactState`, `TeamApiKey`, `OutboundWebhook`/`OutboundWebhookDelivery`, `OutboundEvent` (outbox), `ConversationEvent` (audit timeline), `ContactTransferJob` (contact import/export runs), `Ticket`/`TicketEvent`/`TicketSlaPolicy`/`TicketFieldDefinition`/`TicketNumberCounter` (the work items on a conversation — many per thread; see [docs/ticketing.md](docs/ticketing.md)), the team-chat models (a deliberately separate message graph — channels **and** 1:1 DMs share `TeamChannel` via a `kind` discriminator; see [docs/team-chat.md](docs/team-chat.md)), `Call`/`CallPermissionRequest`, `OutboundSendAttempt` (send-idempotency ledger).
 
 **Non-negotiable data invariants:**
-- **`teamId` on every table**, and in the `where` of every query — sourced from `req.session.teamId` or `req.apiKey.teamId`, **never** from client input. There is no Prisma middleware / RLS; tenant isolation is manual and load-bearing.
-- **One conversation per contact**: `@@unique([teamId, contactId])` on `Conversation`. Closed threads reopen; they never fragment.
-- **Dedup**: `@@unique([teamId, channel, externalId])` on `Message` and on `Call`. Meta delivers at-least-once — always `upsert` / `findUnique`-gate, never a bare `create` on inbound.
+- **`workspaceId` on every table**, and in the `where` of every query — sourced from `req.session.workspaceId` (resolved server-side from the membership-validated `ccp.ws` cookie / `Session.activeWorkspaceId`) or `req.apiKey.workspaceId`, **never** from client input. There is no Prisma middleware / RLS; tenant isolation is manual and load-bearing.
+- **One conversation per contact**: `@@unique([workspaceId, contactId])` on `Conversation`. Closed threads reopen; they never fragment.
+- **Dedup**: `@@unique([workspaceId, channel, externalId])` on `Message` and on `Call`. Meta delivers at-least-once — always `upsert` / `findUnique`-gate, never a bare `create` on inbound.
 - **`Contact` is channel-scoped** (`identityChannel`, phone *or* `externalContactId`), carries a `version` CAS token and a soft-delete tombstone.
 - **Keep raw payloads**: `Message.rawPayload` holds the original webhook body — critical for debugging every channel.
 - Credentials: `ChannelConnection.secrets` is **envelope-encrypted** (AES-256-GCM, `ENCRYPTION_KEY`); `TeamApiKey` tokens are **SHA-256 hashed** (irreversible). Never store a secret in plaintext.
@@ -129,7 +146,7 @@ Database philosophy: normalize by default; denormalize only for a measured perfo
 **Inbound** (one clear owner per step):
 ```
 Meta → Caddy → NestJS webhook controller → HMAC verify (raw body)
-  → provider.parseWebhook → NormalizedEvent[] → dedupe (teamId+channel+externalId)
+  → provider.parseWebhook → NormalizedEvent[] → dedupe (workspaceId+channel+externalId)
   → Prisma upsert → publish DomainEvent
   → [realtime fanout] · [audit] · [analytics] · [workflow dispatch] · [outbound webhooks]
 ```
@@ -153,7 +170,7 @@ Full detail: **[docs/events.md](docs/events.md)**.
 - Every event has **one owner** (the publisher) and **one purpose**. A subscriber reacts; it never owns the mutation.
 - **No recursive event chains.** A subscriber must not emit an event that re-triggers itself. Workflow-driven events carry `silent`/`skipOutboundWebhook` for exactly this loop safety.
 - **Naming**: `<entity>.<past_tense_change>` (e.g. `message.received`, `conversation.status_changed`). Additive only — a name is a contract.
-- **Payloads** carry `teamId` + enough context for subscribers to react **without a DB re-read**.
+- **Payloads** carry `workspaceId` + enough context for subscribers to react **without a DB re-read**.
 - **Idempotency & ordering**: consumers tolerate at-least-once redelivery; assume ordering only within a single publish's priority tiers, never across events.
 
 The bus (`apps/api/src/lib/events/bus.ts`) is a **two-tier priority dispatch**: the realtime frame goes out first (CRITICAL tier), then background subscribers run detached from the HTTP response in a fixed order (`AUDIT 10 → ANALYTICS 20 → WORKFLOW_DISPATCH 30 → OUTBOUND_WEBHOOKS 50`) — the order is load-bearing because dispatch/webhooks re-read state analytics writes. A durable transactional **outbox** + drainer covers crash-safety. **Invariant: never subscribe audit or workflow to `broadcast.*`** (a 1k-recipient broadcast must not write 1k audit rows or fire 1k workflows).
@@ -180,7 +197,7 @@ Engine internals: [apps/api/src/lib/workflows/README.md](apps/api/src/lib/workfl
 ```
 Trigger (domain event) → Conditions → Step actions → Completion
 ```
-- Engine in `apps/api/src/lib/workflows/` (DAG runner, dispatcher, conditions, ~18 step types incl. `send_message`, `assign_to`, `set_status`, `add_tag`, `branch`, `wait`, `ask_question`, `http_request`, `trigger_workflow`); NestJS seam in `apps/api/src/workflows/`.
+- Engine in `apps/api/src/lib/workflows/` (DAG runner, dispatcher, conditions, ~22 step types incl. `send_message`, `assign_to`, `set_status`, `add_tag`, `branch`, `wait`, `ask_question`, `http_request`, `trigger_workflow`, and the ticket family (`create_ticket`, `set_ticket_status`, `set_ticket_priority`, `assign_ticket`)); NestJS seam in `apps/api/src/workflows/`.
 - **Deterministic and loop-safe.** Guards: `MAX_STEPS_PER_RUN = 200` (= the `MAX_WORKFLOW_NODES` publish-time node cap) + dual pickup ceilings, `jump_to_step` caps, cross-system chain depth (`X-CCP-Depth`), `trigger_workflow` chain depth, and an immutable trigger-time snapshot pinned on the run. `triggerOncePerContact` uses a race-safe ledger.
 - Runs on the `workflows` BullMQ queue with a per-team concurrency cap and `lockDuration = 90s` (boot-asserted to exceed the max step timeout, so a slow `http_request` can't outlive its lock and double-fire).
 
@@ -245,7 +262,7 @@ Avoid duplicated state, unnecessary global stores, unnecessary fetching, and unn
 - 50–200 tenants → add eviction to the grow-only caches.
 Don't pre-build any of it.
 
-**Security**: authentication (Better Auth), authorization (roles + scopes), **tenant isolation** (`teamId` in every query), input validation (Zod on every route), secrets (envelope-encrypted channel creds; hashed API keys), webhook signatures (HMAC in + out), rate limiting, an audit timeline (`ConversationEvent`), least privilege. Posture summary and controls that must not regress: see the security memory/audit docs. CSRF via `sameSite: lax`; SSRF-safe fetch for provider/webhook calls; prod env gates.
+**Security**: authentication (Better Auth), authorization (roles + scopes), **tenant isolation** (`workspaceId` in every query), input validation (Zod on every route), secrets (envelope-encrypted channel creds; hashed API keys), webhook signatures (HMAC in + out), rate limiting, an audit timeline (`ConversationEvent`), least privilege. Posture summary and controls that must not regress: see the security memory/audit docs. CSRF via `sameSite: lax`; SSRF-safe fetch for provider/webhook calls; prod env gates.
 
 ---
 
@@ -271,13 +288,15 @@ When a task hits friction, do not reach for a deferred shortcut (a second channe
 ## 18. Non-negotiable invariants (don't regress)
 
 Each links to the reasoning:
-- **`teamId` in every query**; secrets encrypted (channel creds) / hashed (API keys). — §7
+- **`workspaceId` in every query**; secrets encrypted (channel creds) / hashed (API keys). — §7
 - **Dedup unique keys** on `Message`/`Call`; `upsert`, never bare `create` on inbound. — §7
-- **One conversation per contact** (`@@unique([teamId, contactId])`); reopen, don't fragment. — §7
+- **One conversation per contact** (`@@unique([workspaceId, contactId])`); reopen, don't fragment. — §7
 - **No persisted `provider`/`vendor`** — the `Channel` enum is the only discriminator. — §5
 - **Providers hold no business logic**; app code only sees `NormalizedEvent`. — §5, §12
 - **Event tier order** (realtime → audit → analytics → workflow → webhooks); **never subscribe audit/workflow to `broadcast.*`**. — [docs/events.md](docs/events.md)
 - **Automated assignment never overrides a human**: every automated caller passes `onlyIfUnassigned`, and every automated assignment writes through `assignConversation` so it is indistinguishable downstream from a manual one. — [docs/assignment.md](docs/assignment.md)
+- **Broadcasts never open tickets** (the runner bypasses `commitOutboundSend`); a customer's REPLY does. Same reasoning as the audit/workflow rule above. — [docs/ticketing.md](docs/ticketing.md)
+- **A saved view's filter never merges by spread** — `inboxViewWhereClauses` returns independent predicates that callers AND in, so an `Unassigned` view can't clobber an agent's visibility restriction. — [docs/inbox-views.md](docs/inbox-views.md)
 - **Realtime read-state convergence** (mark-read only when viewing; all recovery paths converge; local `conversation:read` drives the badge); **team-wide unread only**. — [docs/realtime.md](docs/realtime.md)
 - **Graceful shutdown**: `server.close()` before `app.close()`; keep the manual SIGTERM handler; `stop_grace_period ≥ ~100s` on api. — [docs/operations.md](docs/operations.md)
 - **Heap ≤ ~75% of the service's `mem_limit`** (api 2048/3g, web 1536/2g). — [docs/operations.md](docs/operations.md)
@@ -302,9 +321,12 @@ Each links to the reasoning:
 |---|---|
 | Operations, deploy, heap, shutdown, queues, sweepers, Caddy | [docs/operations.md](docs/operations.md) |
 | Realtime: rooms, fanout scoping, reducers, read-state convergence | [docs/realtime.md](docs/realtime.md) |
+| Saved inbox views: the filter document, visibility boundary, counts cadence | [docs/inbox-views.md](docs/inbox-views.md) |
 | Event bus: tiers, taxonomy, subscribers, outbox | [docs/events.md](docs/events.md) |
 | Assignment routing: policies, rules, capacity, campaign splits, rebalance | [docs/assignment.md](docs/assignment.md) |
 | Customer identity: unified model, auto-merge rules, migration | [docs/identity.md](docs/identity.md) |
+| Org → Workspaces: tenancy, membership, the three settings areas | [docs/workspaces.md](docs/workspaces.md) |
+| Ticketing: the work item on a conversation, routing, SLA, reopen window | [docs/ticketing.md](docs/ticketing.md) |
 | Team chat: channels, 1:1 DMs, public/private visibility, invariants | [docs/team-chat.md](docs/team-chat.md) |
 | Website chat widget: embed modes, transport, media, identity | [docs/webchatwidget.md](docs/webchatwidget.md) |
 | Website chat widget: **developer** guide — file map, local run, tests, invariants, debugging | [docs/webchatwidget-dev-guide.md](docs/webchatwidget-dev-guide.md) |

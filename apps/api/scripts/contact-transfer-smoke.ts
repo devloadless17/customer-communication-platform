@@ -71,23 +71,23 @@ function eq(name: string, actual: unknown, expected: unknown): void {
 
 async function main(): Promise<void> {
   const suffix = randomUUID().slice(0, 8);
-  const team = await db.team.create({
+  const team = await db.workspace.create({
     data: { name: `transfer-smoke-${suffix}` },
     select: { id: true },
   });
-  const teamId = team.id;
-  console.log(`\nteam ${teamId}\n`);
+  const workspaceId = team.id;
+  console.log(`\nteam ${workspaceId}\n`);
 
   try {
     await testFormats();
-    await testExportImportRoundTrip(teamId);
-    await testUpsertSemantics(teamId);
-    await testIdentityInvariant(teamId);
-    await testCollidingCustomField(teamId);
-    await testErrorReportAndCaps(teamId);
-    await testTenantIsolation(teamId);
+    await testExportImportRoundTrip(workspaceId);
+    await testUpsertSemantics(workspaceId);
+    await testIdentityInvariant(workspaceId);
+    await testCollidingCustomField(workspaceId);
+    await testErrorReportAndCaps(workspaceId);
+    await testTenantIsolation(workspaceId);
   } finally {
-    await db.team.delete({ where: { id: teamId } }).catch((e) => {
+    await db.workspace.delete({ where: { id: workspaceId } }).catch((e) => {
       console.error("cleanup failed", e);
     });
   }
@@ -159,21 +159,21 @@ async function testFormats(): Promise<void> {
 
 // ---------------------------------------------------------------------------
 
-async function testExportImportRoundTrip(teamId: string): Promise<void> {
+async function testExportImportRoundTrip(workspaceId: string): Promise<void> {
   console.log("\nexport → import round trip");
 
   const stage = await db.contactStage.create({
-    data: { teamId, name: "Qualified", position: 0, isDefault: true },
+    data: { workspaceId, name: "Qualified", position: 0, isDefault: true },
     select: { id: true, name: true },
   });
   await db.contactFieldDefinition.create({
-    data: { teamId, key: "company", label: "Company", order: 0 },
+    data: { workspaceId, key: "company", label: "Company", order: 0 },
   });
-  const tag = await db.tag.create({ data: { teamId, name: "VIP" }, select: { id: true } });
+  const tag = await db.tag.create({ data: { workspaceId, name: "VIP" }, select: { id: true } });
 
   await db.contact.create({
     data: {
-      teamId,
+      workspaceId,
       identityChannel: "whatsapp",
       phoneNumber: "15551110001",
       name: "Round Trip",
@@ -187,7 +187,7 @@ async function testExportImportRoundTrip(teamId: string): Promise<void> {
 
   for (const format of ["csv", "xlsx"] as const) {
     const jobId = `smoke-export-${format}-${randomUUID().slice(0, 8)}`;
-    const res = await runContactExport({ teamId, jobId, format, scope: { filters: {} } });
+    const res = await runContactExport({ workspaceId, jobId, format, scope: { filters: {} } });
     eq(`${format}: exported 1 row`, res.rowCount, 1);
 
     // Pull the artifact back and re-read it.
@@ -207,14 +207,14 @@ async function testExportImportRoundTrip(teamId: string): Promise<void> {
 
     // Re-import the exact artifact into the same team: everything already
     // exists, so create_only must be a pure no-op.
-    const sourceKey = `contact-imports/${teamId}/smoke-${format}-${randomUUID().slice(0, 8)}.${format}`;
+    const sourceKey = `contact-imports/${workspaceId}/smoke-${format}-${randomUUID().slice(0, 8)}.${format}`;
     await blobStorage.putObjectFromFile({
       key: sourceKey,
       path: localPath,
       contentType: "application/octet-stream",
     });
     const imported = await runContactImport({
-      teamId,
+      workspaceId,
       userId: null,
       jobId: `smoke-import-${format}`,
       format,
@@ -238,12 +238,12 @@ async function testExportImportRoundTrip(teamId: string): Promise<void> {
 
 // ---------------------------------------------------------------------------
 
-async function testUpsertSemantics(teamId: string): Promise<void> {
+async function testUpsertSemantics(workspaceId: string): Promise<void> {
   console.log("\nwrite modes");
 
   await db.contact.create({
     data: {
-      teamId,
+      workspaceId,
       identityChannel: "whatsapp",
       phoneNumber: "15552220002",
       name: "Original Name",
@@ -269,35 +269,35 @@ async function testUpsertSemantics(teamId: string): Promise<void> {
     },
   ]);
   await sink.finish();
-  const sourceKey = `contact-imports/${teamId}/upsert-${randomUUID().slice(0, 8)}.csv`;
+  const sourceKey = `contact-imports/${workspaceId}/upsert-${randomUUID().slice(0, 8)}.csv`;
   await blobStorage.putObjectFromFile({ key: sourceKey, path, contentType: "text/csv" });
 
   // create_only must NOT touch it.
   const skipRun = await runContactImport({
-    teamId, userId: null, jobId: `smoke-skip-${randomUUID().slice(0, 8)}`, format: "csv",
+    workspaceId, userId: null, jobId: `smoke-skip-${randomUUID().slice(0, 8)}`, format: "csv",
     sourceKey, resumeFrom: 0,
     options: { mode: "create_only", tagMode: "merge", fireAutomations: false, canManageTags: true },
   });
   eq("create_only skips an existing contact", skipRun.skipped, 1);
   eq("create_only updated nothing", skipRun.updated, 0);
-  const afterSkip = await getContact(teamId, "15552220002");
+  const afterSkip = await getContact(workspaceId, "15552220002");
   eq("create_only left email untouched", afterSkip?.email, "original@example.com");
 
   // create_and_update applies non-empty cells only.
   const upsertRun = await runContactImport({
-    teamId, userId: null, jobId: `smoke-upsert-${randomUUID().slice(0, 8)}`, format: "csv",
+    workspaceId, userId: null, jobId: `smoke-upsert-${randomUUID().slice(0, 8)}`, format: "csv",
     sourceKey, resumeFrom: 0,
     options: { mode: "create_and_update", tagMode: "merge", fireAutomations: false, canManageTags: true },
   });
   eq("create_and_update updated 1", upsertRun.updated, 1);
-  const after = await getContact(teamId, "15552220002");
+  const after = await getContact(workspaceId, "15552220002");
   eq("non-empty cell overwrote email", after?.email, "updated@example.com");
   eq("BLANK cell did NOT wipe name", after?.name, "Original Name");
   eq("BLANK cell did NOT wipe location", after?.location, "Beirut");
   eq("custom field merged", (after?.customFields as Record<string, string>)?.company, "NewCo");
   check("version bumped (CAS)", (after?.version ?? 0) > 0, after?.version);
   const tags = await db.contact.findFirst({
-    where: { teamId, phoneNumber: "15552220002" },
+    where: { workspaceId, phoneNumber: "15552220002" },
     select: { tags: { select: { name: true } } },
   });
   check("tag linked on update", tags?.tags.some((t) => t.name === "Imported") ?? false, tags?.tags);
@@ -308,10 +308,10 @@ async function testUpsertSemantics(teamId: string): Promise<void> {
   await sink2.writeHeader(["phone_number", "name"]);
   await sink2.writeRows([{ phone_number: "15559990009", name: "Should Not Exist" }]);
   await sink2.finish();
-  const key2 = `contact-imports/${teamId}/updateonly-${randomUUID().slice(0, 8)}.csv`;
+  const key2 = `contact-imports/${workspaceId}/updateonly-${randomUUID().slice(0, 8)}.csv`;
   await blobStorage.putObjectFromFile({ key: key2, path: path2, contentType: "text/csv" });
   const updateOnly = await runContactImport({
-    teamId, userId: null, jobId: `smoke-uo-${randomUUID().slice(0, 8)}`, format: "csv",
+    workspaceId, userId: null, jobId: `smoke-uo-${randomUUID().slice(0, 8)}`, format: "csv",
     sourceKey: key2, resumeFrom: 0,
     options: { mode: "update_only", tagMode: "merge", fireAutomations: false, canManageTags: true },
   });
@@ -319,7 +319,7 @@ async function testUpsertSemantics(teamId: string): Promise<void> {
   eq("update_only skipped the absent row", updateOnly.skipped, 1);
   eq(
     "update_only really did not insert",
-    await db.contact.count({ where: { teamId, phoneNumber: "15559990009" } }),
+    await db.contact.count({ where: { workspaceId, phoneNumber: "15559990009" } }),
     0,
   );
 
@@ -329,14 +329,14 @@ async function testUpsertSemantics(teamId: string): Promise<void> {
 
 // ---------------------------------------------------------------------------
 
-async function testIdentityInvariant(teamId: string): Promise<void> {
+async function testIdentityInvariant(workspaceId: string): Promise<void> {
   console.log("\nidentity invariant (docs/identity.md)");
 
   // A contact on a DIFFERENT channel that already owns an email + a Customer.
-  const customer = await db.customer.create({ data: { teamId, name: "Existing Person" } });
+  const customer = await db.customer.create({ data: { workspaceId, name: "Existing Person" } });
   await db.contact.create({
     data: {
-      teamId,
+      workspaceId,
       identityChannel: "instagram",
       externalContactId: `ig-${randomUUID().slice(0, 8)}`,
       name: "Existing Person",
@@ -344,7 +344,7 @@ async function testIdentityInvariant(teamId: string): Promise<void> {
       customerId: customer.id,
     },
   });
-  const customersBefore = await db.customer.count({ where: { teamId } });
+  const customersBefore = await db.customer.count({ where: { workspaceId } });
 
   // Import a WhatsApp row carrying the SAME email. It must NOT fold the two
   // people together — a hand-typed spreadsheet address is not a verified
@@ -357,17 +357,17 @@ async function testIdentityInvariant(teamId: string): Promise<void> {
     { phone_number: "15553330003", name: "Someone Else", email: "shared@example.com" },
   ]);
   await sink.finish();
-  const key = `contact-imports/${teamId}/identity-${randomUUID().slice(0, 8)}.csv`;
+  const key = `contact-imports/${workspaceId}/identity-${randomUUID().slice(0, 8)}.csv`;
   await blobStorage.putObjectFromFile({ key, path, contentType: "text/csv" });
 
   const run = await runContactImport({
-    teamId, userId: null, jobId: `smoke-identity-${randomUUID().slice(0, 8)}`, format: "csv",
+    workspaceId, userId: null, jobId: `smoke-identity-${randomUUID().slice(0, 8)}`, format: "csv",
     sourceKey: key, resumeFrom: 0,
     options: { mode: "create_and_update", tagMode: "merge", fireAutomations: false, canManageTags: true },
   });
   eq("imported the new whatsapp contact", run.created, 1);
 
-  const created = await getContact(teamId, "15553330003");
+  const created = await getContact(workspaceId, "15553330003");
   eq("imported email stored", created?.email, "shared@example.com");
   check(
     "imported contact was NOT auto-merged into the existing customer",
@@ -376,7 +376,7 @@ async function testIdentityInvariant(teamId: string): Promise<void> {
   );
   eq(
     "no customers were merged away",
-    await db.customer.count({ where: { teamId } }),
+    await db.customer.count({ where: { workspaceId } }),
     customersBefore,
   );
 
@@ -395,16 +395,16 @@ async function testIdentityInvariant(teamId: string): Promise<void> {
  * columns that both resolve to the built-in on re-import, the last one wins,
  * and the custom field's value is silently replaced by the built-in's.
  */
-async function testCollidingCustomField(teamId: string): Promise<void> {
+async function testCollidingCustomField(workspaceId: string): Promise<void> {
   console.log("\ncustom field colliding with a built-in column");
 
   // Insert directly — the API guard (correctly) refuses to create this.
   await db.contactFieldDefinition.create({
-    data: { teamId, key: "language", label: "Language", order: 5 },
+    data: { workspaceId, key: "language", label: "Language", order: 5 },
   });
   await db.contact.create({
     data: {
-      teamId,
+      workspaceId,
       identityChannel: "whatsapp",
       phoneNumber: "15556660006",
       name: "Collide Case",
@@ -414,7 +414,7 @@ async function testCollidingCustomField(teamId: string): Promise<void> {
   });
 
   const res = await runContactExport({
-    teamId,
+    workspaceId,
     jobId: `smoke-collide-${randomUUID().slice(0, 8)}`,
     format: "csv",
     scope: { filters: { search: "15556660006" } },
@@ -441,18 +441,18 @@ async function testCollidingCustomField(teamId: string): Promise<void> {
   eq("custom field kept its own value", row["custom:language"], "Klingon");
 
   // Round-trip into a clean team: both values must survive, still separated.
-  const other = await db.team.create({
+  const other = await db.workspace.create({
     data: { name: `collide-${randomUUID().slice(0, 8)}` },
     select: { id: true },
   });
   try {
     await db.contactFieldDefinition.create({
-      data: { teamId: other.id, key: "language", label: "Language", order: 0 },
+      data: { workspaceId: other.id, key: "language", label: "Language", order: 0 },
     });
     const key = `contact-imports/${other.id}/collide-${randomUUID().slice(0, 8)}.csv`;
     await blobStorage.putObjectFromFile({ key, path, contentType: "text/csv" });
     const run = await runContactImport({
-      teamId: other.id,
+      workspaceId: other.id,
       userId: null,
       jobId: `smoke-collide-imp-${randomUUID().slice(0, 8)}`,
       format: "csv",
@@ -475,7 +475,7 @@ async function testCollidingCustomField(teamId: string): Promise<void> {
     );
 
     const landed = await db.contact.findFirst({
-      where: { teamId: other.id, phoneNumber: "15556660006" },
+      where: { workspaceId: other.id, phoneNumber: "15556660006" },
       select: { language: true, customFields: true },
     });
     eq("built-in language round-tripped", landed?.language, "en");
@@ -485,14 +485,14 @@ async function testCollidingCustomField(teamId: string): Promise<void> {
       "Klingon",
     );
   } finally {
-    await db.team.delete({ where: { id: other.id } }).catch(() => {});
+    await db.workspace.delete({ where: { id: other.id } }).catch(() => {});
     await unlink(path).catch(() => {});
   }
 }
 
 // ---------------------------------------------------------------------------
 
-async function testErrorReportAndCaps(teamId: string): Promise<void> {
+async function testErrorReportAndCaps(workspaceId: string): Promise<void> {
   console.log("\nrow errors + error report");
 
   const path = join(tmpdir(), `smoke-errors-${randomUUID()}.csv`);
@@ -505,11 +505,11 @@ async function testErrorReportAndCaps(teamId: string): Promise<void> {
     { phone_number: "15554440004", name: "Dup In File", mystery_column: "x" },
   ]);
   await sink.finish();
-  const key = `contact-imports/${teamId}/errors-${randomUUID().slice(0, 8)}.csv`;
+  const key = `contact-imports/${workspaceId}/errors-${randomUUID().slice(0, 8)}.csv`;
   await blobStorage.putObjectFromFile({ key, path, contentType: "text/csv" });
 
   const run = await runContactImport({
-    teamId, userId: null, jobId: `smoke-errors-${randomUUID().slice(0, 8)}`, format: "csv",
+    workspaceId, userId: null, jobId: `smoke-errors-${randomUUID().slice(0, 8)}`, format: "csv",
     sourceKey: key, resumeFrom: 0,
     options: { mode: "create_only", tagMode: "merge", fireAutomations: false, canManageTags: true },
   });
@@ -566,17 +566,17 @@ async function testErrorReportAndCaps(teamId: string): Promise<void> {
 
 // ---------------------------------------------------------------------------
 
-async function testTenantIsolation(teamId: string): Promise<void> {
+async function testTenantIsolation(workspaceId: string): Promise<void> {
   console.log("\ntenant isolation");
 
-  const other = await db.team.create({
+  const other = await db.workspace.create({
     data: { name: `other-${randomUUID().slice(0, 8)}` },
     select: { id: true },
   });
   try {
     await db.contact.create({
       data: {
-        teamId: other.id,
+        workspaceId: other.id,
         identityChannel: "whatsapp",
         phoneNumber: "15558880008",
         name: "Other Team Contact",
@@ -584,7 +584,7 @@ async function testTenantIsolation(teamId: string): Promise<void> {
     });
 
     const jobId = `smoke-iso-${randomUUID().slice(0, 8)}`;
-    const res = await runContactExport({ teamId, jobId, format: "csv", scope: { filters: {} } });
+    const res = await runContactExport({ workspaceId, jobId, format: "csv", scope: { filters: {} } });
     const path = join(tmpdir(), `smoke-iso-${randomUUID()}.csv`);
     await downloadArtifact(res.artifactKey, path);
     const src = createSource("csv", path);
@@ -601,26 +601,26 @@ async function testTenantIsolation(teamId: string): Promise<void> {
 
     // Explicit-id export with a FOREIGN id must yield nothing, not that row.
     const foreign = await db.contact.findFirst({
-      where: { teamId: other.id },
+      where: { workspaceId: other.id },
       select: { id: true },
     });
     const idRes = await runContactExport({
-      teamId,
+      workspaceId,
       jobId: `smoke-iso2-${randomUUID().slice(0, 8)}`,
       format: "csv",
       scope: { ids: [foreign!.id] },
     });
     eq("foreign id in an explicit selection exports 0 rows", idRes.rowCount, 0);
   } finally {
-    await db.team.delete({ where: { id: other.id } }).catch(() => {});
+    await db.workspace.delete({ where: { id: other.id } }).catch(() => {});
   }
 }
 
 // ---------------------------------------------------------------------------
 
-async function getContact(teamId: string, phoneNumber: string) {
+async function getContact(workspaceId: string, phoneNumber: string) {
   return db.contact.findFirst({
-    where: { teamId, phoneNumber, identityChannel: "whatsapp" },
+    where: { workspaceId, phoneNumber, identityChannel: "whatsapp" },
     select: {
       name: true,
       email: true,

@@ -75,7 +75,7 @@ export class ContactsController {
     @CurrentSession() session: ApiSession,
     @Query(zQuery(ListContactsQuerySchema)) query: ListContactsQueryInput,
   ) {
-    return this.contacts.list(session.teamId, query);
+    return this.contacts.list(session.workspaceId, query);
   }
 
   @Post()
@@ -84,7 +84,7 @@ export class ContactsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateContactSchema)) body: CreateContactInput,
   ) {
-    const contact = await this.contacts.create(session.teamId, session.userId, body);
+    const contact = await this.contacts.create(session.workspaceId, session.userId, body);
     return { contact };
   }
 
@@ -102,7 +102,7 @@ export class ContactsController {
       const perms = resolvePermissions(session.role, session.rolePermissions);
       if (!perms["contacts:delete"]) throw new ForbiddenException({ error: "forbidden" });
     }
-    return this.contacts.bulk(session.teamId, session.userId, body);
+    return this.contacts.bulk(session.workspaceId, session.userId, body);
   }
 
   @Get("lookup")
@@ -114,13 +114,13 @@ export class ContactsController {
       .split(",")
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
-    const contacts = await this.contacts.lookup(session.teamId, ids);
+    const contacts = await this.contacts.lookup(session.workspaceId, ids);
     return { contacts };
   }
 
   @Get("count-all")
   async countAll(@CurrentSession() session: ApiSession) {
-    const count = await this.contacts.countAll(session.teamId);
+    const count = await this.contacts.countAll(session.workspaceId);
     return { count };
   }
 
@@ -139,7 +139,7 @@ export class ContactsController {
     @Param("contactId") contactId: string,
     @Res() res: Response,
   ): Promise<void> {
-    const ok = await this.contacts.hasCapturedAvatar(session.teamId, contactId);
+    const ok = await this.contacts.hasCapturedAvatar(session.workspaceId, contactId);
     if (!ok) throw new NotFoundException({ error: "not_found" });
     await streamBlob(res, contactAvatarObjectKey(contactId), undefined);
   }
@@ -157,7 +157,7 @@ export class ContactsController {
     @CurrentSession() session: ApiSession,
     @Param("contactId") contactId: string,
   ) {
-    const contact = await this.contacts.syncSocialProfile(session.teamId, contactId);
+    const contact = await this.contacts.syncSocialProfile(session.workspaceId, contactId);
     return { contact };
   }
 
@@ -166,7 +166,7 @@ export class ContactsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(AudienceCountSchema)) body: AudienceCountInput,
   ) {
-    const count = await this.contacts.countAudience(session.teamId, body);
+    const count = await this.contacts.countAudience(session.workspaceId, body);
     return { count };
   }
 
@@ -175,7 +175,7 @@ export class ContactsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(AudiencePreviewSchema)) body: AudiencePreviewInput,
   ) {
-    return this.contacts.previewAudience(session.teamId, body);
+    return this.contacts.previewAudience(session.workspaceId, body);
   }
 
   // ---- :id routes ---------------------------------------------------------
@@ -209,7 +209,7 @@ export class ContactsController {
       });
     }
     const contact = await this.contacts.update(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       id,
       parsed.data,
@@ -223,7 +223,7 @@ export class ContactsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.contacts.remove(session.teamId, session.userId, id);
+    await this.contacts.remove(session.workspaceId, session.userId, id);
     return { ok: true };
   }
 
@@ -234,7 +234,7 @@ export class ContactsController {
     @Body(zBody(SetContactTagsSchema)) body: SetContactTagsInput,
   ) {
     const out = await this.contacts.setTags(
-      session.teamId,
+      session.workspaceId,
       session.userId,
       id,
       body,

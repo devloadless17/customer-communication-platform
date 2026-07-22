@@ -67,7 +67,7 @@ function pruneUndefined<T extends object>(o: T): T {
 
 /**
  * Facebook Messenger connection settings — admin-only. Same credential model as
- * WhatsApp (a `ChannelConnection` row keyed (teamId, "messenger"); `config`
+ * WhatsApp (a `ChannelConnection` row keyed (workspaceId, "messenger"); `config`
  * non-secret, `secrets` envelope-encrypted) but with Page fields instead of
  * phone/WABA. Kept as its own module so the stable WhatsApp onboarding is
  * untouched.
@@ -92,9 +92,9 @@ export class MessengerService {
     }
   }
 
-  async getConfig(teamId: string): Promise<MessengerConfigView> {
-    const conn = await this.db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId, channel: CHANNEL } },
+  async getConfig(workspaceId: string): Promise<MessengerConfigView> {
+    const conn = await this.db.channelConnection.findFirst({
+      where: { workspaceId, channel: CHANNEL, isDefault: true },
       select: { config: true, secrets: true, needsReconnect: true },
     });
     const config = (conn?.config ?? {}) as MessengerChannelConfig;
@@ -115,10 +115,18 @@ export class MessengerService {
       try {
         const mergedConfig = pruneUndefined({ ...config, verifyToken: minted });
         await this.db.channelConnection.upsert({
-          where: { teamId_channel: { teamId, channel: CHANNEL } },
+          where: {
+            workspaceId_channel_externalAccountId: {
+              workspaceId,
+              channel: CHANNEL,
+              externalAccountId: config.pageId ?? "",
+            },
+          },
           create: {
-            teamId,
+            workspaceId,
             channel: CHANNEL,
+            externalAccountId: config.pageId ?? "",
+            isDefault: true,
             config: mergedConfig as Prisma.InputJsonValue,
             secrets: {},
             isActive: false,
@@ -149,7 +157,7 @@ export class MessengerService {
         };
       } catch (err) {
         this.logger.warn(
-          `[${teamId}] could not read messenger page subscription: ${err instanceof Error ? err.message : String(err)}`,
+          `[${workspaceId}] could not read messenger page subscription: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
@@ -168,7 +176,7 @@ export class MessengerService {
   }
 
   async updateConfig(
-    teamId: string,
+    workspaceId: string,
     input: UpdateMessengerConfigInput,
   ): Promise<{ config: { pageId: string; pageName: string | null; verifyToken: string } }> {
     const { pageId } = input;
@@ -176,7 +184,7 @@ export class MessengerService {
     // Source the app-level credentials from the shared Meta App connection,
     // unless the admin overrode them on this form. The Page access token is
     // derived below from whichever token we resolve here.
-    const meta = await getMetaConnection(teamId);
+    const meta = await getMetaConnection(workspaceId);
     const appSecret = input.appSecret?.trim() || meta?.appSecret || null;
     const sourceToken = input.pageAccessToken?.trim() || meta?.systemUserToken || null;
     const appId = input.appId?.trim() || meta?.appId || undefined;
@@ -241,8 +249,8 @@ export class MessengerService {
 
     // Verify token: prefer the shared Meta App token (one callback for all
     // channels), then the channel's existing one, else mint.
-    const existing = await this.db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId, channel: CHANNEL } },
+    const existing = await this.db.channelConnection.findFirst({
+      where: { workspaceId, channel: CHANNEL, isDefault: true },
       select: { config: true },
     });
     const existingConfig = (existing?.config ?? {}) as MessengerChannelConfig;
@@ -263,11 +271,23 @@ export class MessengerService {
       appSecret: encryptSecret(appSecret),
     };
 
+    // Account-keyed: a workspace may hold several accounts on this channel, so
+    // re-pasting one account's credentials must not overwrite a sibling.
     await this.db.channelConnection.upsert({
-      where: { teamId_channel: { teamId, channel: CHANNEL } },
+      where: {
+        workspaceId_channel_externalAccountId: {
+          workspaceId,
+          channel: CHANNEL,
+          externalAccountId: pageId ?? "",
+        },
+      },
       create: {
-        teamId,
+        workspaceId,
         channel: CHANNEL,
+        externalAccountId: pageId ?? "",
+        isDefault: !(await this.db.channelConnection.count({
+          where: { workspaceId, channel: CHANNEL },
+        })),
         config: newConfig as Prisma.InputJsonValue,
         secrets: newSecrets as Prisma.InputJsonValue,
         isActive: true,
@@ -282,7 +302,7 @@ export class MessengerService {
       },
     });
 
-    invalidateMessengerConfig(teamId);
+    invalidateMessengerConfig(workspaceId);
 
     // Subscribe the Page to the messaging webhook fields. Without this Meta never
     // sends a single `object:"page"` event — the silent "connected but no inbound"
@@ -292,7 +312,7 @@ export class MessengerService {
     const sub = await ensurePageSubscribedToMessaging(pageId, tokenToStore, GRAPH_VERSION);
     if (!sub.ok) {
       this.logger.warn(
-        `[${teamId}] messenger connected but page subscription failed for page=${pageId}: ${sub.error}`,
+        `[${workspaceId}] messenger connected but page subscription failed for page=${pageId}: ${sub.error}`,
       );
     }
 
@@ -302,14 +322,14 @@ export class MessengerService {
     // on the Page. Re-add the `enableSocialCalling` step here when calling is
     // turned back on.
 
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "channels" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "channels" });
 
     return { config: { pageId, pageName: pageName ?? null, verifyToken } };
   }
 
-  async disconnect(teamId: string): Promise<void> {
-    await this.db.channelConnection.deleteMany({ where: { teamId, channel: CHANNEL } });
-    invalidateMessengerConfig(teamId);
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "channels" });
+  async disconnect(workspaceId: string): Promise<void> {
+    await this.db.channelConnection.deleteMany({ where: { workspaceId, channel: CHANNEL } });
+    invalidateMessengerConfig(workspaceId);
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "channels" });
   }
 }

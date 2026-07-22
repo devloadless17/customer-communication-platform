@@ -30,16 +30,16 @@ import {
 } from "../_helpers/api";
 import { db, superadminTeam, wipeTestData, pollUntil } from "../_helpers/db";
 
-let teamId: string;
+let workspaceId: string;
 let contactId: string;
 
 test.beforeAll(async () => {
   await wipeTestData();
   const su = await superadminTeam();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       phoneNumber: "+15559876543",
       identityChannel: "whatsapp",
       name: "Chain Depth Contact",

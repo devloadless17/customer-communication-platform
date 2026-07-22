@@ -29,11 +29,11 @@ export interface ConversationHallucinationSummary {
 }
 
 export async function getConversationHallucinationSummary(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
 ): Promise<ConversationHallucinationSummary> {
   const messages = await db.message.findMany({
-    where: { teamId, conversationId },
+    where: { workspaceId, conversationId },
     select: { id: true },
   });
   if (!messages.length) return { ratePercent: null, scoredCount: 0, flagged: [] };

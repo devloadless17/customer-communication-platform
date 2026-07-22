@@ -28,7 +28,7 @@ import { appAdmin, db, wipeTestData } from "../_helpers/db";
  * sibling ordering spec uses.
  */
 
-let teamId: string;
+let workspaceId: string;
 let userId: string;
 // Set per-test by freshConversation() — each test gets an isolated thread so the
 // heavy inject/drain load of one test can't slow another's initial render.
@@ -132,7 +132,7 @@ async function injectOutboundSent(opts: {
   const ts = new Date(opts.atMs);
   const msg = await db().message.create({
     data: {
-      teamId,
+      workspaceId,
       conversationId,
       externalId,
       direction: "out",
@@ -146,15 +146,15 @@ async function injectOutboundSent(opts: {
   });
   await db().outboundEvent.create({
     data: {
-      teamId,
+      workspaceId,
       type: "message.sent",
       payload: {
-        teamId,
+        workspaceId,
         conversationId,
         contactId,
         message: {
           id: msg.id,
-          teamId,
+          workspaceId,
           conversationId,
           externalId,
           direction: "out",
@@ -201,10 +201,10 @@ async function injectConversationEvent(
 ): Promise<void> {
   await db().outboundEvent.create({
     data: {
-      teamId,
+      workspaceId,
       type,
       payload: {
-        teamId,
+        workspaceId,
         conversationId,
         changedByUserId: userId,
         silent: true,
@@ -247,7 +247,7 @@ async function injectAutoClaimTrio(): Promise<void> {
     newAssignedUserId: userId,
     assignedUser: {
       id: userId,
-      teamId,
+      workspaceId,
       name: "E2E Admin",
       email: "e2e@example.io",
       role: "admin",
@@ -269,7 +269,7 @@ async function seedConversationEvent(
   after: Prisma.InputJsonObject,
 ): Promise<void> {
   await db().conversationEvent.create({
-    data: { teamId, conversationId, userId, kind, after, at: new Date(atMs) },
+    data: { workspaceId, conversationId, userId, kind, after, at: new Date(atMs) },
   });
 }
 
@@ -312,7 +312,7 @@ async function freshConversation(): Promise<void> {
   const now = Date.now();
   const contact = await db().contact.create({
     data: {
-      teamId,
+      workspaceId,
       phoneNumber: `+1555765${String(1000 + convSeq).slice(-4)}`,
       identityChannel: "whatsapp",
       name: `Optimistic Order Contact ${convSeq}`,
@@ -324,7 +324,7 @@ async function freshConversation(): Promise<void> {
 
   const conv = await db().conversation.create({
     data: {
-      teamId,
+      workspaceId,
       contactId: contact.id,
       channel: "whatsapp",
       status: "open",
@@ -337,7 +337,7 @@ async function freshConversation(): Promise<void> {
 
   await db().message.create({
     data: {
-      teamId,
+      workspaceId,
       conversationId,
       externalId: `seed-${now}-${convSeq}`,
       direction: "in",
@@ -355,17 +355,17 @@ test.beforeAll(async () => {
   // the app-admin — not the platform super-admin. Optimistic own-action pills
   // are authored as `currentUser` (the app-admin), so any reconcile that pairs a
   // stub to a server audit row (symptom 4) needs the injected actor to match.
-  // appAdmin().teamId === superadminTeam().teamId (same seeded team), so this
+  // appAdmin().workspaceId === superadminTeam().workspaceId (same seeded team), so this
   // doesn't move the team the fixtures live in.
   const admin = await appAdmin();
-  teamId = admin.teamId;
+  workspaceId = admin.workspaceId;
   userId = admin.userId;
   await wipeTestData();
 });
 
 test.afterAll(async () => {
   // Leave AI autopilot off for other suites sharing this team.
-  await db().team.update({ where: { id: teamId }, data: { aiAutopilotEnabled: false } });
+  await db().workspace.update({ where: { id: workspaceId }, data: { aiAutopilotEnabled: false } });
   await wipeTestData();
   await db().$disconnect();
 });
@@ -376,8 +376,8 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     page,
   }) => {
     await freshConversation();
-    await db().team.update({
-      where: { id: teamId },
+    await db().workspace.update({
+      where: { id: workspaceId },
       data: { aiAutopilotEnabled: false }, // no pause pills — isolate the message ordering
     });
     // Pre-assign so the send doesn't trigger the optimistic auto-assign pill
@@ -448,8 +448,8 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     page,
   }) => {
     await freshConversation();
-    await db().team.update({
-      where: { id: teamId },
+    await db().workspace.update({
+      where: { id: workspaceId },
       data: { aiAutopilotEnabled: true }, // enables the optimistic auto-pause pill
     });
     const byBody = await interceptSends(page);
@@ -508,8 +508,8 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
   }) => {
     await freshConversation();
     // Unassigned + closed + AI on → the send triggers all three takeover logs.
-    await db().team.update({
-      where: { id: teamId },
+    await db().workspace.update({
+      where: { id: workspaceId },
       data: { aiAutopilotEnabled: true },
     });
     await db().conversation.update({
@@ -582,8 +582,8 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     page,
   }) => {
     await freshConversation();
-    await db().team.update({
-      where: { id: teamId },
+    await db().workspace.update({
+      where: { id: workspaceId },
       data: { aiAutopilotEnabled: false }, // isolate assign↔reopen (no AI pill)
     });
     // The exact reported trigger: unassigned + pending (non-open) → a human reply
@@ -634,7 +634,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       newAssignedUserId: userId,
       assignedUser: {
         id: userId,
-        teamId,
+        workspaceId,
         name: "E2E Admin",
         email: "e2e@example.io",
         role: "admin",
@@ -691,8 +691,8 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     page,
   }) => {
     await freshConversation();
-    await db().team.update({
-      where: { id: teamId },
+    await db().workspace.update({
+      where: { id: workspaceId },
       data: { aiAutopilotEnabled: true },
     });
     await db().conversation.update({
@@ -772,8 +772,8 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     page,
   }) => {
     await freshConversation();
-    await db().team.update({
-      where: { id: teamId },
+    await db().workspace.update({
+      where: { id: workspaceId },
       data: { aiAutopilotEnabled: true },
     });
     const resetPendingUnassigned = () =>
@@ -915,7 +915,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     // what the fixed autoAssignOnAgentSend persists.
     await db().message.create({
       data: {
-        teamId,
+        workspaceId,
         conversationId,
         externalId: `e2e-refresh-${T}`,
         direction: "out",
@@ -980,8 +980,8 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     page,
   }) => {
     await freshConversation();
-    await db().team.update({
-      where: { id: teamId },
+    await db().workspace.update({
+      where: { id: workspaceId },
       data: { aiAutopilotEnabled: true },
     });
     const T = Date.now();
@@ -991,7 +991,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     const OLD = T - 5_000;
     await db().message.create({
       data: {
-        teamId,
+        workspaceId,
         conversationId,
         externalId: `e2e-old-${OLD}`,
         direction: "out",
@@ -1052,7 +1052,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       newAssignedUserId: userId,
       assignedUser: {
         id: userId,
-        teamId,
+        workspaceId,
         name: "E2E Admin",
         email: "e2e@example.io",
         role: "admin",
@@ -1107,8 +1107,8 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     page,
   }) => {
     await freshConversation();
-    await db().team.update({
-      where: { id: teamId },
+    await db().workspace.update({
+      where: { id: workspaceId },
       data: { aiAutopilotEnabled: true },
     });
     const reset = () =>
@@ -1235,15 +1235,15 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     page,
   }) => {
     await freshConversation();
-    await db().team.update({
-      where: { id: teamId },
+    await db().workspace.update({
+      where: { id: workspaceId },
       data: { aiAutopilotEnabled: false },
     });
     const T = Date.now();
     const OLD = T - 5_000; // a prior claim cycle, only 5s ago (inside the window)
     await db().message.create({
       data: {
-        teamId,
+        workspaceId,
         conversationId,
         externalId: `e2e-old10-${OLD}`,
         direction: "out",
@@ -1315,7 +1315,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       newAssignedUserId: userId,
       assignedUser: {
         id: userId,
-        teamId,
+        workspaceId,
         name: "E2E Admin",
         email: "e2e@example.io",
         role: "admin",

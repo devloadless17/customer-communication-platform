@@ -210,12 +210,12 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * indexed but there's one per person).
    */
   private async resolveCustomerRecipients(
-    teamId: string,
+    workspaceId: string,
     contactIds: string[],
   ): Promise<Array<{ contactId: string; customerId: string | null }>> {
     if (contactIds.length === 0) return [];
     const contacts = await this.db.contact.findMany({
-      where: { teamId, deletedAt: null, id: { in: contactIds } },
+      where: { workspaceId, deletedAt: null, id: { in: contactIds } },
       // Same columns as the sibling load below: a singleton is ranked through
       // `pickBestChannel` too (over a one-contact pool), so it needs to satisfy
       // `RankableContact`.
@@ -234,7 +234,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // "best" for a person and then dropped at send — reaching nobody. Also gate
     // on `isBroadcastable` so a person whose only live channel is the website
     // widget (no durable push address) is never picked as a broadcast recipient.
-    const connectedAll = await teamConnectedChannels(teamId);
+    const connectedAll = await teamConnectedChannels(workspaceId);
     const connected = new Set([...connectedAll].filter(isBroadcastable));
 
     // One entry per person: keyed by customerId, or the contact id for singletons.
@@ -263,7 +263,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     const siblingsByCustomer = new Map<string, RankableContact[]>();
     if (linkedCustomerIds.length > 0) {
       const siblings = await this.db.contact.findMany({
-        where: { teamId, deletedAt: null, customerId: { in: linkedCustomerIds } },
+        where: { workspaceId, deletedAt: null, customerId: { in: linkedCustomerIds } },
         select: {
           id: true,
           customerId: true,
@@ -307,7 +307,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async create(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     input: CreateBroadcastInput,
   ): Promise<{ broadcastId: string; totalCount: number; scheduled: boolean }> {
@@ -340,7 +340,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           : null;
     const template =
       effectiveKind === "template"
-        ? await this.db.messageTemplate.findFirst({ where: { id: templateId, teamId } })
+        ? await this.db.messageTemplate.findFirst({ where: { id: templateId, workspaceId } })
         : null;
     if (effectiveKind === "template" && !template) {
       throw new NotFoundException({ error: "template not found" });
@@ -490,7 +490,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // (gained a phone/email → promoted into the directory) still counts. Safe
       // scalar AND — directoryContactWhere's OR has no sibling OR here.
       const allModeWhere: Prisma.ContactWhereInput = {
-        teamId,
+        workspaceId,
         deletedAt: null,
         ...directoryContactWhere,
       };
@@ -514,7 +514,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // Validate tag ownership before the contact lookup — a foreign-team
       // id would silently yield zero recipients otherwise.
       const tagRows = await this.db.tag.findMany({
-        where: { teamId, id: { in: audience.tagIds } },
+        where: { workspaceId, id: { in: audience.tagIds } },
         select: { id: true },
       });
       validatedTagIds = tagRows.map((t) => t.id);
@@ -527,7 +527,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // Same count-before-fetch guard as `mode: "all"` — a broadly-applied tag
       // reaches the same size and the same OOM shape.
       const tagWhere = {
-        teamId,
+        workspaceId,
         deletedAt: null,
         tags: { some: { id: { in: validatedTagIds } } },
       };
@@ -546,7 +546,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         });
       }
       const group = await this.db.audienceGroup.findFirst({
-        where: { id: audience.groupId, teamId },
+        where: { id: audience.groupId, workspaceId },
         include: {
           tags: { select: { id: true } },
           contacts: { select: { id: true } },
@@ -561,7 +561,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // Snapshot the group's tag + manual membership into a concrete id set
       // at THIS moment. New contacts matching the tag criteria after this
       // point won't join the in-flight broadcast.
-      recipientIds = await resolveAudienceGroupMembers(teamId, {
+      recipientIds = await resolveAudienceGroupMembers(workspaceId, {
         tagIds: group.tags.map((t) => t.id),
         manualContactIds: group.contacts.map((c) => c.id),
         // +1 so the over-cap check below still sees "more than the limit".
@@ -573,15 +573,15 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // One-off audience built inline — same UNION semantics as a saved group
       // (contacts carrying ANY chosen tag, OR hand-picked by id), resolved and
       // snapshotted now. Tags are validated for the stored audit set; foreign
-      // contact ids drop out automatically (the resolver scopes by teamId).
+      // contact ids drop out automatically (the resolver scopes by workspaceId).
       const tagRows = audience.tagIds.length
         ? await this.db.tag.findMany({
-            where: { teamId, id: { in: audience.tagIds } },
+            where: { workspaceId, id: { in: audience.tagIds } },
             select: { id: true },
           })
         : [];
       validatedTagIds = tagRows.map((t) => t.id);
-      recipientIds = await resolveAudienceGroupMembers(teamId, {
+      recipientIds = await resolveAudienceGroupMembers(workspaceId, {
         tagIds: validatedTagIds,
         manualContactIds: audience.contactIds,
         limit: MAX_RECIPIENTS_IN_PROCESS + 1,
@@ -592,7 +592,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         new Set(
           (
             await this.db.contact.findMany({
-              where: { teamId, deletedAt: null, id: { in: audience.contactIds } },
+              where: { workspaceId, deletedAt: null, id: { in: audience.contactIds } },
               select: { id: true },
             })
           ).map((c) => c.id),
@@ -638,12 +638,12 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
 
     let recipientRows: Array<{ contactId: string; customerId: string | null }>;
     if (isCustomerMode) {
-      recipientRows = await this.resolveCustomerRecipients(teamId, recipientIds);
+      recipientRows = await this.resolveCustomerRecipients(workspaceId, recipientIds);
     } else {
       if (hadAnyBeforeFilter) {
         const rows = await this.db.contact.findMany({
           where: {
-            teamId,
+            workspaceId,
             id: { in: recipientIds },
             identityChannel: filterChannel,
             deletedAt: null,
@@ -687,7 +687,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // Opt-outs are a small fraction of a contact book, so this is both
       // parameter-safe and cheaper than ~100 chunked round-trips.
       const optedOut = await this.db.contact.findMany({
-        where: { teamId, marketingOptOutAt: { not: null } },
+        where: { workspaceId, marketingOptOutAt: { not: null } },
         select: { id: true },
       });
       if (optedOut.length > 0) {
@@ -727,7 +727,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // the gate assumes all of them are new and refuses legitimate re-sends.
       const audienceContactIds = recipientRows.map((r) => r.contactId);
       let gate = await checkBroadcastEligibility(
-        teamId,
+        workspaceId,
         recipientRows.length,
         audienceContactIds,
       );
@@ -736,9 +736,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         // already upgraded) — hard-blocking on it would refuse a send Meta would
         // accept. Re-poll Graph ONCE (only on the block path, so it's rare) and
         // re-check before failing. A poll failure falls back to the stale block.
-        await fetchWhatsappHealthFromGraph(teamId).catch(() => undefined);
+        await fetchWhatsappHealthFromGraph(workspaceId).catch(() => undefined);
         gate = await checkBroadcastEligibility(
-          teamId,
+          workspaceId,
           recipientRows.length,
           audienceContactIds,
         );
@@ -753,7 +753,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
 
     // Fields shared by both the synchronous and asynchronous create paths.
     const commonData = {
-      teamId,
+      workspaceId,
       createdById: userId,
       name,
       scheduledAt: scheduledAtDate,
@@ -822,7 +822,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       }
       await this.bus.publish({
         type: "broadcast.status_changed",
-        teamId,
+        workspaceId,
         broadcastId: created.id,
         status: "materializing",
       });
@@ -843,7 +843,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // avoidable round-trips to a tx that already has a tight budget (P2028).
     const assignmentPlan = await buildBroadcastAssignmentPlan({
       db: this.db,
-      teamId,
+      workspaceId,
       total: recipientRows.length,
       config: {
         mode: commonData.assignmentMode,
@@ -918,7 +918,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // `broadcasts-browser.tsx` to refetch and surface the new row live.
     await this.bus.publish({
       type: "broadcast.status_changed",
-      teamId,
+      workspaceId,
       broadcastId: broadcast.id,
       status: isFutureSchedule ? "scheduled" : "queued",
     });
@@ -940,7 +940,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * agent builds the campaign.
    */
   async previewMissingFields(
-    teamId: string,
+    workspaceId: string,
     input: PreviewMissingFieldsInput,
   ): Promise<{
     total: number;
@@ -960,7 +960,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     const { templateId, audience, variables } = input;
 
     const template = await this.db.messageTemplate.findFirst({
-      where: { id: templateId, teamId },
+      where: { id: templateId, workspaceId },
       select: { variableBindings: true },
     });
     if (!template) return empty;
@@ -969,13 +969,13 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // Bounded to keep the composer snappy even on a huge audience. The count is
     // exact up to the cap; past it we flag `sampled` so the UI says "at least".
     const SCAN_CAP = 3000;
-    const scanIds = await this.previewRecipientIds(teamId, audience, SCAN_CAP + 1);
+    const scanIds = await this.previewRecipientIds(workspaceId, audience, SCAN_CAP + 1);
     if (scanIds.length === 0) return empty;
     const sampled = scanIds.length > SCAN_CAP;
     const ids = sampled ? scanIds.slice(0, SCAN_CAP) : scanIds;
 
     const contacts = await this.db.contact.findMany({
-      where: { teamId, id: { in: ids } },
+      where: { workspaceId, id: { in: ids } },
       select: {
         name: true,
         phoneNumber: true,
@@ -1046,7 +1046,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * -radius send path stays untouched.
    */
   private async previewRecipientIds(
-    teamId: string,
+    workspaceId: string,
     audience: AudienceInput,
     limit: number,
   ): Promise<string[]> {
@@ -1054,10 +1054,10 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // contacts — matching what `create` actually sends (it drops social
     // contacts). Over-scan the raw resolver so the filter doesn't under-sample
     // the cap, then keep the first `limit` WhatsApp ids.
-    const raw = await this.previewRecipientIdsRaw(teamId, audience, limit * 2);
+    const raw = await this.previewRecipientIdsRaw(workspaceId, audience, limit * 2);
     if (raw.length === 0) return [];
     const wa = await this.db.contact.findMany({
-      where: { teamId, id: { in: raw }, identityChannel: "whatsapp", deletedAt: null },
+      where: { workspaceId, id: { in: raw }, identityChannel: "whatsapp", deletedAt: null },
       select: { id: true },
       take: limit,
     });
@@ -1065,7 +1065,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async previewRecipientIdsRaw(
-    teamId: string,
+    workspaceId: string,
     audience: AudienceInput,
     limit: number,
   ): Promise<string[]> {
@@ -1073,7 +1073,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       if (audience.mode === "all") {
         return (
           await this.db.contact.findMany({
-            where: { teamId, deletedAt: null },
+            where: { workspaceId, deletedAt: null },
             select: { id: true },
             take: limit,
           })
@@ -1082,14 +1082,14 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       if (audience.mode === "by_tag") {
         if (!audience.tagIds?.length) return [];
         const tagRows = await this.db.tag.findMany({
-          where: { teamId, id: { in: audience.tagIds } },
+          where: { workspaceId, id: { in: audience.tagIds } },
           select: { id: true },
         });
         const validTagIds = tagRows.map((t) => t.id);
         if (validTagIds.length === 0) return [];
         return (
           await this.db.contact.findMany({
-            where: { teamId, deletedAt: null, tags: { some: { id: { in: validTagIds } } } },
+            where: { workspaceId, deletedAt: null, tags: { some: { id: { in: validTagIds } } } },
             select: { id: true },
             take: limit,
           })
@@ -1098,11 +1098,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       if (audience.mode === "group") {
         if (!audience.groupId) return [];
         const group = await this.db.audienceGroup.findFirst({
-          where: { id: audience.groupId, teamId },
+          where: { id: audience.groupId, workspaceId },
           include: { tags: { select: { id: true } }, contacts: { select: { id: true } } },
         });
         if (!group) return [];
-        const ids = await resolveAudienceGroupMembers(teamId, {
+        const ids = await resolveAudienceGroupMembers(workspaceId, {
           tagIds: group.tags.map((t) => t.id),
           manualContactIds: group.contacts.map((c) => c.id),
           limit,
@@ -1112,11 +1112,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       if (audience.mode === "custom") {
         const tagRows = audience.tagIds?.length
           ? await this.db.tag.findMany({
-              where: { teamId, id: { in: audience.tagIds } },
+              where: { workspaceId, id: { in: audience.tagIds } },
               select: { id: true },
             })
           : [];
-        const ids = await resolveAudienceGroupMembers(teamId, {
+        const ids = await resolveAudienceGroupMembers(workspaceId, {
           tagIds: tagRows.map((t) => t.id),
           manualContactIds: audience.contactIds ?? [],
           limit,
@@ -1128,7 +1128,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         new Set(
           (
             await this.db.contact.findMany({
-              where: { teamId, deletedAt: null, id: { in: audience.contactIds ?? [] } },
+              where: { workspaceId, deletedAt: null, id: { in: audience.contactIds ?? [] } },
               select: { id: true },
               take: limit,
             })
@@ -1157,7 +1157,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * `hasSnapshot` is false when we've never polled the number's tier
    * (advisory-only, ungated).
    */
-  async getMessagingHealth(teamId: string): Promise<{
+  async getMessagingHealth(workspaceId: string): Promise<{
     messagingTier: string | null;
     messagingDailyCap: number | null;
     qualityRating: string | null;
@@ -1165,11 +1165,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     recentUniqueRecipients: number | null;
     remainingDailyBudget: number | null;
   }> {
-    const health = await getWhatsappHealth(teamId);
+    const health = await getWhatsappHealth(workspaceId);
     const cap = health?.messagingDailyCap ?? null;
     // Only pay for the usage count when there's a cap to measure against —
     // mirrors checkBroadcastEligibility so the two never disagree.
-    const used = cap === null ? null : await countRecentUniqueRecipients(teamId);
+    const used = cap === null ? null : await countRecentUniqueRecipients(workspaceId);
     return {
       messagingTier: health?.messagingTier ?? null,
       messagingDailyCap: cap,
@@ -1180,8 +1180,8 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async list(teamId: string, query?: BroadcastListQuery) {
-    const where: Prisma.BroadcastWhereInput = { teamId };
+  async list(workspaceId: string, query?: BroadcastListQuery) {
+    const where: Prisma.BroadcastWhereInput = { workspaceId };
     if (query?.status && query.status !== "all") {
       where.status = query.status;
     }
@@ -1257,8 +1257,8 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * Thin passthrough: the computation lives in the domain layer so the UI, the
    * CSV export, and the /v1 endpoint all derive identical numbers.
    */
-  async getReport(teamId: string, id: string) {
-    const report = await getBroadcastReport(teamId, id);
+  async getReport(workspaceId: string, id: string) {
+    const report = await getBroadcastReport(workspaceId, id);
     if (!report) throw new NotFoundException({ error: "not found" });
     return report;
   }
@@ -1278,7 +1278,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * better — the /v1 recipients endpoint pages with no cap.
    */
   async exportRecipientsCsv(
-    teamId: string,
+    workspaceId: string,
     id: string,
     filter: { outcome?: string; errorCode?: string },
     res: {
@@ -1288,7 +1288,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     },
   ): Promise<void> {
     const broadcast = await this.db.broadcast.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true, templateName: true, name: true },
     });
     if (!broadcast) throw new NotFoundException({ error: "not found" });
@@ -1387,7 +1387,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     res.end();
   }
 
-  async get(teamId: string, id: string) {
+  async get(workspaceId: string, id: string) {
     // Hard cap on inlined recipients. A 10k-recipient broadcast detail page
     // was returning multi-MB of JSON + rendering 10k <tr> rows, freezing
     // the browser tab for 10-30s. Cap to the first 500 (status grouped:
@@ -1396,7 +1396,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // succeed). Caller paginates the rest via /recipients?status=&cursor=.
     const RECIPIENTS_INLINE_CAP = 500;
     const row = await this.db.broadcast.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       include: {
         createdBy: { select: { id: true, name: true } },
         recipients: {
@@ -1488,13 +1488,13 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * "Load more" works without offset's "rows shift under you" problem.
    */
   async listRecipients(
-    teamId: string,
+    workspaceId: string,
     broadcastId: string,
     opts: { cursor?: string; status?: string; take?: number },
   ) {
     const take = Math.min(Math.max(opts.take ?? 200, 1), 500);
     const broadcast = await this.db.broadcast.findFirst({
-      where: { id: broadcastId, teamId },
+      where: { id: broadcastId, workspaceId },
       select: { id: true },
     });
     if (!broadcast) throw new NotFoundException({ error: "not found" });
@@ -1546,11 +1546,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * MAX_RECIPIENTS_IN_PROCESS (10k), so a single query is fine.
    */
   async listRecipientContactIds(
-    teamId: string,
+    workspaceId: string,
     broadcastId: string,
   ): Promise<{ contactIds: string[] }> {
     const broadcast = await this.db.broadcast.findFirst({
-      where: { id: broadcastId, teamId },
+      where: { id: broadcastId, workspaceId },
       select: { id: true },
     });
     if (!broadcast) throw new NotFoundException({ error: "not found" });
@@ -1586,9 +1586,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * Compare-and-set on the previous status so two operators clicking
    * cancel at once (or cancel-while-already-canceled) don't double-emit.
    */
-  async cancel(teamId: string, id: string): Promise<void> {
+  async cancel(workspaceId: string, id: string): Promise<void> {
     const row = await this.db.broadcast.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true, status: true },
     });
     if (!row) throw new NotFoundException({ error: "not found" });
@@ -1694,7 +1694,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // refresh. Mirrors the create-path status emit.
     await this.bus.publish({
       type: "broadcast.status_changed",
-      teamId,
+      workspaceId,
       broadcastId: id,
       status: "canceled",
     });
@@ -1717,12 +1717,12 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * big campaign, waste real throughput against the number's quality rating).
    */
   async retryFailed(
-    teamId: string,
+    workspaceId: string,
     id: string,
     opts?: { errorCodes?: string[] },
   ): Promise<{ requeued: number }> {
     const row = await this.db.broadcast.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true, status: true, failedCount: true },
     });
     if (!row) throw new NotFoundException({ error: "not found" });
@@ -1854,9 +1854,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * the runner reads recipient rows by parent id and would error on a
    * missing parent. Real WhatsApp messages already sent stay in the inbox.
    */
-  async remove(teamId: string, id: string): Promise<void> {
+  async remove(workspaceId: string, id: string): Promise<void> {
     const row = await this.db.broadcast.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true, status: true },
     });
     if (!row) throw new NotFoundException({ error: "not found" });
@@ -1884,7 +1884,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // non-ok responses), keeping its stale terminal view instead of erroring.
     await this.bus.publish({
       type: "broadcast.status_changed",
-      teamId,
+      workspaceId,
       broadcastId: id,
       status: row.status,
     });

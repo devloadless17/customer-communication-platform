@@ -29,7 +29,7 @@ import { test, expect } from "@playwright/test";
 
 import { setSharedDb } from "../../../apps/api/src/lib/db";
 import { checkBroadcastEligibility } from "../../../apps/api/src/lib/providers/meta-health";
-import { db } from "../_helpers/db";
+import { createTestWorkspace, db } from "../_helpers/db";
 
 test.describe.configure({ mode: "serial" });
 
@@ -58,7 +58,7 @@ let contactIds: string[] = [];
 async function seedSend(sentAt: Date, contacts: string[]): Promise<void> {
   const b = await db().broadcast.create({
     data: {
-      teamId: TEAM_ID,
+      workspaceId: TEAM_ID,
       name: `seeded-${sentAt.toISOString()}`,
       channel: "whatsapp",
       status: "completed",
@@ -85,7 +85,7 @@ async function seedSend(sentAt: Date, contacts: string[]): Promise<void> {
 
 /** Remove seeded send history so each test starts from a known budget. */
 async function clearSends(): Promise<void> {
-  await db().broadcast.deleteMany({ where: { teamId: TEAM_ID } });
+  await db().broadcast.deleteMany({ where: { workspaceId: TEAM_ID } });
 }
 
 test.beforeAll(async () => {
@@ -96,26 +96,33 @@ test.beforeAll(async () => {
   // the test client. Requires --conditions=react-server, which the
   // `test:e2e:meta` script sets so `server-only` is inert here.
   setSharedDb(db());
-  await db().team.create({
-    data: { id: TEAM_ID, name: "E2E Rolling Budget Team", status: "active" },
-  });
+  await createTestWorkspace({ id: TEAM_ID, name: "E2E Rolling Budget Team", status: "active" });
   // A TIER_250 WhatsApp connection. `messagingHealthUpdatedAt` must be set or
   // the gate treats the tier as unknown and stays advisory-only.
   await db().channelConnection.create({
     data: {
-      teamId: TEAM_ID,
       channel: "whatsapp",
       config: {},
       secrets: {},
-      messagingTier: "TIER_250",
-      messagingDailyCap: CAP,
+      // The 24h limit is PORTFOLIO-scoped now, so the tier/cap live there.
+      portfolio: {
+        create: {
+          workspace: { connect: { id: TEAM_ID } },
+          messagingTier: "TIER_250",
+          messagingDailyCap: CAP,
+          messagingHealthUpdatedAt: new Date(),
+        },
+      },
+      workspace: { connect: { id: TEAM_ID } },
+      externalAccountId: "e2e_budget_wa",
+      isDefault: true,
       qualityRating: "GREEN",
       messagingHealthUpdatedAt: new Date(),
     },
   });
   await db().contact.createMany({
     data: Array.from({ length: 300 }, (_, i) => ({
-      teamId: TEAM_ID,
+      workspaceId: TEAM_ID,
       name: `budget-contact-${i}`,
       phoneNumber: `17775${String(i).padStart(6, "0")}`,
       identityChannel: "whatsapp" as const,
@@ -123,17 +130,19 @@ test.beforeAll(async () => {
     })),
   });
   contactIds = (
-    await db().contact.findMany({ where: { teamId: TEAM_ID }, select: { id: true } })
+    await db().contact.findMany({ where: { workspaceId: TEAM_ID }, select: { id: true } })
   ).map((c) => c.id);
   expect(contactIds.length).toBe(300);
 });
 
 test.afterAll(async () => {
   test.setTimeout(120_000);
-  await db().broadcast.deleteMany({ where: { teamId: TEAM_ID } });
-  await db().contact.deleteMany({ where: { teamId: TEAM_ID } });
-  await db().channelConnection.deleteMany({ where: { teamId: TEAM_ID } });
-  await db().team.delete({ where: { id: TEAM_ID } });
+  await db().broadcast.deleteMany({ where: { workspaceId: TEAM_ID } });
+  await db().contact.deleteMany({ where: { workspaceId: TEAM_ID } });
+  await db().channelConnection.deleteMany({ where: { workspaceId: TEAM_ID } });
+  // Delete the ORG — it cascades to the workspace. Deleting only the workspace
+  // leaves an orphan Organization behind on every run.
+  await db().organization.deleteMany({ where: { workspaces: { some: { id: TEAM_ID } } } });
 });
 
 test("fresh window: an audience inside the cap is allowed, budget reported", async () => {
@@ -249,7 +258,7 @@ test("customer-mode broadcasts do not consume the WhatsApp number's budget", asy
   // charge Messenger/Instagram deliveries against this number and falsely block.
   const b = await db().broadcast.create({
     data: {
-      teamId: TEAM_ID,
+      workspaceId: TEAM_ID,
       name: "customer-mode",
       channel: "whatsapp",
       targetMode: "customer",

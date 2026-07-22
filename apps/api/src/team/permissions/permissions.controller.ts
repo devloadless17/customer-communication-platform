@@ -40,7 +40,7 @@ export class PermissionsController {
 
   @Get()
   async get(@CurrentSession() session: ApiSession) {
-    const config = await this.load(session.teamId);
+    const config = await this.load(session.workspaceId);
     return {
       capabilities: ALL_CAPABILITIES,
       // Effective resolved map per editable role (defaults + overrides).
@@ -57,8 +57,8 @@ export class PermissionsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(zRolePermissions)) body: RolePermissionsConfig,
   ) {
-    await this.db.team.update({
-      where: { id: session.teamId },
+    await this.db.workspace.update({
+      where: { id: session.workspaceId },
       data: { rolePermissions: body },
     });
 
@@ -67,7 +67,7 @@ export class PermissionsController {
     // users, not thousands, so this loop is cheap. (Mirrors the deactivation
     // invalidation pattern in session.guard.ts.)
     const members = await this.db.user.findMany({
-      where: { teamId: session.teamId },
+      where: { workspaceMemberships: { some: { workspaceId: session.workspaceId } } },
       select: { id: true },
     });
     for (const m of members) invalidateSessionCache(m.id);
@@ -79,7 +79,7 @@ export class PermissionsController {
     // they navigate.
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId: session.teamId,
+      workspaceId: session.workspaceId,
       scope: "members",
     });
 
@@ -92,9 +92,9 @@ export class PermissionsController {
     };
   }
 
-  private async load(teamId: string): Promise<RolePermissionsConfig> {
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
+  private async load(workspaceId: string): Promise<RolePermissionsConfig> {
+    const team = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { rolePermissions: true },
     });
     return (team?.rolePermissions ?? {}) as RolePermissionsConfig;

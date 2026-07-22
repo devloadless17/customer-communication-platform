@@ -40,7 +40,7 @@ export interface BlobObjectStream {
 /** Pieces of context used to build a human-readable filename in the provider's dashboard. */
 export interface MediaNameContext {
   /** Always set — multi-tenancy is on every row. */
-  teamId: string;
+  workspaceId: string;
   /** Optional friendly slug (team name normalized). Helps when scanning the dashboard. */
   teamSlug?: string;
   /** "in" for inbound (customer → us), "out" for outbound (us → customer). */
@@ -89,7 +89,7 @@ export interface BlobStorageProvider {
    * media magic-byte sniff `upload` applies. For first-party artifacts whose
    * type is validated by the caller (AI knowledge documents, generated TTS
    * audio) rather than sniffed from an untrusted sender. The key namespace is
-   * the caller's responsibility — always prefix with the tenant (`<area>/<teamId>/…`)
+   * the caller's responsibility — always prefix with the tenant (`<area>/<workspaceId>/…`)
    * so listing/cleanup stays tenant-scoped. Lifecycle (`getObject`/`fetch`/
    * `delete`/`presignGetUrl`) works on the returned key like any other object.
    */

@@ -2,7 +2,7 @@ import { db } from "@/lib/db";
 
 /**
  * Atomic mutual-exclusion arbiter (correction #3). A ConversationAutomationClaim
- * row with a unique (teamId, inboundMessageId) means exactly one owner may
+ * row with a unique (workspaceId, inboundMessageId) means exactly one owner may
  * answer a given inbound message. The INSERT is the gate: the first writer wins,
  * every other writer hits P2002 and must stand down.
  *
@@ -15,14 +15,14 @@ export type AutomationOwner = "native_ai" | "autopilot" | "workflow";
 
 /** Try to claim the inbound message. Returns true iff THIS call won the claim. */
 export async function claimInbound(
-  teamId: string,
+  workspaceId: string,
   conversationId: string,
   inboundMessageId: string,
   owner: AutomationOwner = "native_ai",
 ): Promise<boolean> {
   try {
     await db.conversationAutomationClaim.create({
-      data: { teamId, conversationId, inboundMessageId, owner },
+      data: { workspaceId, conversationId, inboundMessageId, owner },
     });
     return true;
   } catch (err) {
@@ -31,9 +31,9 @@ export async function claimInbound(
   }
 }
 
-export async function getClaim(teamId: string, inboundMessageId: string) {
+export async function getClaim(workspaceId: string, inboundMessageId: string) {
   return db.conversationAutomationClaim.findUnique({
-    where: { teamId_inboundMessageId: { teamId, inboundMessageId } },
+    where: { workspaceId_inboundMessageId: { workspaceId, inboundMessageId } },
   });
 }
 
@@ -43,9 +43,9 @@ export async function getClaim(teamId: string, inboundMessageId: string) {
  * down entirely for the team (belt-and-suspenders on top of the claim row) so
  * the two systems can never both answer.
  */
-export async function legacyAutopilotOwnsTeam(teamId: string): Promise<boolean> {
-  const team = await db.team.findUnique({
-    where: { id: teamId },
+export async function legacyAutopilotOwnsTeam(workspaceId: string): Promise<boolean> {
+  const team = await db.workspace.findUnique({
+    where: { id: workspaceId },
     select: { aiAutopilotEnabled: true },
   });
   return team?.aiAutopilotEnabled === true;

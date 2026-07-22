@@ -56,8 +56,8 @@ export class ContactFieldsController {
   @Get()
   async list(@CurrentSession() session: ApiSession) {
     const [definitions, builtins] = await Promise.all([
-      this.fields.list(session.teamId),
-      this.fields.getBuiltins(session.teamId),
+      this.fields.list(session.workspaceId),
+      this.fields.getBuiltins(session.workspaceId),
     ]);
     return { definitions, builtins };
   }
@@ -67,7 +67,7 @@ export class ContactFieldsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(ContactPanelBuiltinSchema)) body: ContactPanelBuiltins,
   ) {
-    const builtins = await this.fields.updateBuiltins(session.teamId, this.canManage(session), body);
+    const builtins = await this.fields.updateBuiltins(session.workspaceId, this.canManage(session), body);
     return { builtins };
   }
 
@@ -77,7 +77,7 @@ export class ContactFieldsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateContactFieldSchema)) body: CreateContactFieldInput,
   ) {
-    const definition = await this.fields.create(session.teamId, this.canManage(session), body);
+    const definition = await this.fields.create(session.workspaceId, this.canManage(session), body);
     return { definition };
   }
 
@@ -87,7 +87,7 @@ export class ContactFieldsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(ReorderContactFieldsSchema)) body: ReorderContactFieldsInput,
   ) {
-    await this.fields.reorder(session.teamId, this.canManage(session), body);
+    await this.fields.reorder(session.workspaceId, this.canManage(session), body);
     return { ok: true };
   }
 
@@ -97,7 +97,7 @@ export class ContactFieldsController {
     @Param("id") id: string,
     @Body(zBody(UpdateContactFieldSchema)) body: UpdateContactFieldInput,
   ) {
-    const definition = await this.fields.update(session.teamId, this.canManage(session), id, body);
+    const definition = await this.fields.update(session.workspaceId, this.canManage(session), id, body);
     return { definition };
   }
 
@@ -106,7 +106,7 @@ export class ContactFieldsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.fields.remove(session.teamId, this.canManage(session), id);
+    await this.fields.remove(session.workspaceId, this.canManage(session), id);
     return { ok: true };
   }
 }

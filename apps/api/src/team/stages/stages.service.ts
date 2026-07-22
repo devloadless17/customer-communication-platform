@@ -28,9 +28,9 @@ export class StagesService {
   ) {}
 
   /** Any signed-in user can read the catalog (contact panel + table need it). */
-  async list(teamId: string): Promise<ContactStage[]> {
+  async list(workspaceId: string): Promise<ContactStage[]> {
     const rows = await this.db.contactStage.findMany({
-      where: { teamId },
+      where: { workspaceId },
       orderBy: [{ position: "asc" }, { createdAt: "asc" }],
     });
     return rows.map(toDto);
@@ -42,13 +42,13 @@ export class StagesService {
    * 50 stages don't fan out into 50 SELECTs.
    */
   async counts(
-    teamId: string,
+    workspaceId: string,
   ): Promise<{ countsByStageId: Record<string, number>; unassignedCount: number }> {
     const rows = await this.db.contact.groupBy({
       by: ["stageId"],
       // Soft-deleted contacts are out of the directory, so they must not
       // inflate the per-stage badge counts.
-      where: { teamId, deletedAt: null },
+      where: { workspaceId, deletedAt: null },
       _count: { _all: true },
     });
     const countsByStageId: Record<string, number> = {};
@@ -62,7 +62,7 @@ export class StagesService {
 
   /** Gated by the caller's resolved `stages:manage` capability. */
   async create(
-    teamId: string,
+    workspaceId: string,
     canManage: boolean,
     input: CreateStageInput,
   ): Promise<ContactStage> {
@@ -70,7 +70,7 @@ export class StagesService {
 
     // Single read to learn count + next position + whether a default exists.
     const existing = await this.db.contactStage.findMany({
-      where: { teamId },
+      where: { workspaceId },
       select: { id: true, position: true, isDefault: true, color: true },
       orderBy: { position: "desc" },
     });
@@ -92,9 +92,9 @@ export class StagesService {
 
     try {
       const created = await this.db.contactStage.create({
-        data: { teamId, name: input.name, color, position: nextPosition, isDefault },
+        data: { workspaceId, name: input.name, color, position: nextPosition, isDefault },
       });
-      await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "stages" });
+      await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "stages" });
       return toDto(created);
     } catch (err) {
       throwIfUniqueViolation(err, "a stage with this name already exists");
@@ -103,7 +103,7 @@ export class StagesService {
   }
 
   async update(
-    teamId: string,
+    workspaceId: string,
     canManage: boolean,
     id: string,
     input: UpdateStageInput,
@@ -111,7 +111,7 @@ export class StagesService {
     requireManage(canManage);
 
     const existing = await this.db.contactStage.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true, isDefault: true },
     });
     if (!existing) throw new NotFoundException({ error: "not found" });
@@ -132,7 +132,7 @@ export class StagesService {
       const updated = await this.db.$transaction(async (tx) => {
         if (input.isDefault === true && !existing.isDefault) {
           await tx.contactStage.updateMany({
-            where: { teamId, isDefault: true },
+            where: { workspaceId, isDefault: true },
             data: { isDefault: false },
           });
         }
@@ -141,8 +141,8 @@ export class StagesService {
       // The default-stage memo in lib/queries/stages.ts holds a 5-min copy
       // for the webhook hot path; bust on every stage mutation so a flipped
       // default propagates immediately to inbound-message ingest.
-      if (input.isDefault !== undefined) invalidateDefaultStageCache(teamId);
-      await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "stages" });
+      if (input.isDefault !== undefined) invalidateDefaultStageCache(workspaceId);
+      await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "stages" });
       return toDto(updated);
     } catch (err) {
       throwIfUniqueViolation(err, "a stage with this name already exists");
@@ -150,11 +150,11 @@ export class StagesService {
     }
   }
 
-  async remove(teamId: string, canManage: boolean, id: string): Promise<void> {
+  async remove(workspaceId: string, canManage: boolean, id: string): Promise<void> {
     requireManage(canManage);
 
     const stage = await this.db.contactStage.findFirst({
-      where: { id, teamId },
+      where: { id, workspaceId },
       select: { id: true, isDefault: true },
     });
     if (!stage) throw new NotFoundException({ error: "not found" });
@@ -165,7 +165,7 @@ export class StagesService {
     const contactCount = await this.db.contact.count({
       // Only live contacts block stage deletion — a tombstoned contact that
       // still carries this stageId shouldn't keep the stage un-deletable.
-      where: { teamId, stageId: id, deletedAt: null },
+      where: { workspaceId, stageId: id, deletedAt: null },
     });
     if (contactCount > 0) {
       throw new ConflictException({
@@ -185,7 +185,7 @@ export class StagesService {
     await this.db.$transaction(
       async (tx) => {
         const liveInStage = await tx.contact.count({
-          where: { teamId, stageId: id, deletedAt: null },
+          where: { workspaceId, stageId: id, deletedAt: null },
         });
         if (liveInStage > 0) {
           throw new ConflictException({
@@ -199,7 +199,7 @@ export class StagesService {
         // (ensureDefaultStage re-creates one on next contact create).
         if (stage.isDefault) {
           const otherCount = await tx.contactStage.count({
-            where: { teamId, NOT: { id } },
+            where: { workspaceId, NOT: { id } },
           });
           if (otherCount > 0) {
             throw new ConflictException({
@@ -215,8 +215,8 @@ export class StagesService {
     );
     // Bust the default-stage memo so a cached pointer to the just-deleted
     // stage can't hand a deleted id to the webhook hot path.
-    if (stage.isDefault) invalidateDefaultStageCache(teamId);
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "stages" });
+    if (stage.isDefault) invalidateDefaultStageCache(workspaceId);
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "stages" });
   }
 
   /**
@@ -225,7 +225,7 @@ export class StagesService {
    * transaction stays tiny.
    */
   async reorder(
-    teamId: string,
+    workspaceId: string,
     canManage: boolean,
     input: ReorderStagesInput,
   ): Promise<void> {
@@ -237,7 +237,7 @@ export class StagesService {
     // request rejects. Without this a malicious client could rewrite
     // positions on another tenant's stages.
     const owned = await this.db.contactStage.findMany({
-      where: { teamId, id: { in: ids } },
+      where: { workspaceId, id: { in: ids } },
       select: { id: true },
     });
     if (owned.length !== ids.length) {
@@ -249,13 +249,13 @@ export class StagesService {
         this.db.contactStage.update({ where: { id }, data: { position: index } }),
       ),
     );
-    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "stages" });
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "stages" });
   }
 }
 
 function toDto(r: {
   id: string;
-  teamId: string;
+  workspaceId: string;
   name: string;
   color: string;
   position: number;
@@ -263,7 +263,7 @@ function toDto(r: {
 }): ContactStage {
   return {
     id: r.id,
-    teamId: r.teamId,
+    workspaceId: r.workspaceId,
     name: r.name,
     color: r.color as TagColor,
     position: r.position,

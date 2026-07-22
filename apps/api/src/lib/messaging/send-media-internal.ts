@@ -25,7 +25,7 @@ import {
 } from "@ccp/shared/utils/window";
 
 export interface SendMediaInternalArgs {
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   bytes: Uint8Array;
   mimeType: string; // e.g. "audio/mpeg"
@@ -49,10 +49,12 @@ export async function sendMediaInternal(
   const receivedAt = new Date();
 
   const conversation = await db.conversation.findFirst({
-    where: { id: args.conversationId, teamId: args.teamId },
+    where: { id: args.conversationId, workspaceId: args.workspaceId },
     select: {
       id: true,
       contactId: true,
+      // The account this thread belongs to — sends must go out from it.
+      channelConnectionId: true,
       channel: true,
       lastMessageAt: true,
       contact: {
@@ -92,7 +94,7 @@ export async function sendMediaInternal(
 
   let sendConfig;
   try {
-    sendConfig = await binding.getSendConfig(args.teamId);
+    sendConfig = await binding.getSendConfig(args.workspaceId, conversation.channelConnectionId);
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) throw new Error("provider_not_configured");
     throw err;
@@ -165,7 +167,7 @@ export async function sendMediaInternal(
     lastTs && lastTs >= receivedAt ? new Date(lastTs.getTime() + 1) : receivedAt;
 
   const created = await createOutboundMessageIdempotent({
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     conversationId: args.conversationId,
     externalId: send.externalId,
     senderUserId: null,
@@ -188,7 +190,7 @@ export async function sendMediaInternal(
   const preview = args.caption?.slice(0, 200) || "Voice message";
   const message: Message = {
     id: created.id,
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     conversationId: args.conversationId,
     externalId: send.externalId,
     senderUserId: null,
@@ -215,7 +217,7 @@ export async function sendMediaInternal(
     preview,
     event: {
       type: "message.sent",
-      teamId: args.teamId,
+      workspaceId: args.workspaceId,
       conversationId: args.conversationId,
       contactId: conversation.contactId,
       message,

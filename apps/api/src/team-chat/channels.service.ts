@@ -78,23 +78,23 @@ export class ChannelsService {
 
   // ---- Channels ---------------------------------------------------------
 
-  list(teamId: string, userId: string) {
-    return listChannelsForUser(teamId, userId);
+  list(workspaceId: string, userId: string) {
+    return listChannelsForUser(workspaceId, userId);
   }
 
   /** The viewer's 1:1 DMs, most-recently-active first. */
-  listDirectMessages(teamId: string, userId: string) {
-    return listDirectMessagesForUser(teamId, userId);
+  listDirectMessages(workspaceId: string, userId: string) {
+    return listDirectMessagesForUser(workspaceId, userId);
   }
 
   /** Public channels for the "Browse channels" dialog. Metadata only. */
   browse(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     q: string | null,
     opts: { before?: string | null; take?: number },
   ) {
-    return browsePublicChannels(teamId, userId, q, opts);
+    return browsePublicChannels(workspaceId, userId, q, opts);
   }
 
   /**
@@ -102,8 +102,8 @@ export class ChannelsService {
    * "join to see this channel" card. Null for private channels and DMs,
    * indistinguishable from "doesn't exist".
    */
-  getPreview(teamId: string, channelId: string) {
-    return getPublicChannelPreview(teamId, channelId);
+  getPreview(workspaceId: string, channelId: string) {
+    return getPublicChannelPreview(workspaceId, channelId);
   }
 
   /**
@@ -112,7 +112,7 @@ export class ChannelsService {
    * count derived purely from socket frames has no seed on page load and no
    * way to converge after an offline gap.
    */
-  async unreadMentionCount(teamId: string, userId: string): Promise<number> {
+  async unreadMentionCount(workspaceId: string, userId: string): Promise<number> {
     const rows = await this.db.$queryRaw<{ count: bigint }[]>`
       SELECT COUNT(*) AS "count"
       FROM "TeamChannelMention" mn
@@ -129,7 +129,7 @@ export class ChannelsService {
       LEFT JOIN "TeamChannelReadReceipt" r
         ON r."channelId" = m."channelId" AND r."userId" = ${userId}
       WHERE mn."mentionedUserId" = ${userId}
-        AND m."teamId" = ${teamId}
+        AND m."workspaceId" = ${workspaceId}
         AND (mem."userId" IS NOT NULL OR c."isDefault" = TRUE)
         -- COALESCE(editedAt, createdAt), not createdAt alone. An edit can ADD a
         -- mention, and the message's original createdAt is by definition older
@@ -151,30 +151,30 @@ export class ChannelsService {
    * first load. Falls back to alphabetically-first if no `isDefault` row
    * exists (defensive — see getDefaultChannel in queries.ts).
    */
-  getDefault(teamId: string, userId: string) {
-    return getDefaultChannel(teamId, userId);
+  getDefault(workspaceId: string, userId: string) {
+    return getDefaultChannel(workspaceId, userId);
   }
 
   /**
    * Fetch a single channel by id (scoped to team). Returns null when the
    * id is foreign — controller turns that into 404.
    */
-  async getById(teamId: string, userId: string, channelId: string) {
-    await this.requireChannelMembership(teamId, userId, channelId);
-    return getChannelById(channelId, teamId, userId);
+  async getById(workspaceId: string, userId: string, channelId: string) {
+    await this.requireChannelMembership(workspaceId, userId, channelId);
+    return getChannelById(channelId, workspaceId, userId);
   }
 
   /**
    * Pinned messages for a channel, newest-pin first. Each entry carries
    * the full message DTO so the pins panel renders without extra fetches.
    */
-  async listPins(teamId: string, userId: string, channelId: string) {
-    await this.requireChannelMembership(teamId, userId, channelId);
-    return listChannelPins(channelId, teamId);
+  async listPins(workspaceId: string, userId: string, channelId: string) {
+    await this.requireChannelMembership(workspaceId, userId, channelId);
+    return listChannelPins(channelId, workspaceId);
   }
 
   async create(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     role: Role,
     input: CreateChannelInput,
@@ -217,7 +217,7 @@ export class ChannelsService {
     const memberIds = [...requestedMemberIds];
     if (memberIds.length > 1) {
       const validCount = await this.db.user.count({
-        where: { id: { in: memberIds }, teamId, deactivatedAt: null },
+        where: { id: { in: memberIds }, workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
       });
       if (validCount !== memberIds.length) {
         throw new BadRequestException({
@@ -230,7 +230,7 @@ export class ChannelsService {
     try {
       const created = await this.db.$transaction(async (tx) => {
         const channel = await tx.teamChannel.create({
-          data: { teamId, name, description, visibility, createdById: userId },
+          data: { workspaceId, name, description, visibility, createdById: userId },
         });
         await tx.teamChannelMember.createMany({
           data: memberIds.map((id) => ({
@@ -243,7 +243,7 @@ export class ChannelsService {
       });
       await this.bus.publish({
         type: "team.catalog_changed",
-        teamId,
+        workspaceId,
         scope: "team-channels",
       });
       // Members joining a brand-new channel doesn't need a separate
@@ -273,13 +273,26 @@ export class ChannelsService {
    * membership join for `isDefault` channels (every team member is implicitly a
    * member). Returns rows ordered by addedAt desc (most-recently-added first).
    */
-  async listMembers(teamId: string, viewerUserId: string, channelId: string) {
-    await this.requireChannelMembership(teamId, viewerUserId, channelId);
+  async listMembers(workspaceId: string, viewerUserId: string, channelId: string) {
+    await this.requireChannelMembership(workspaceId, viewerUserId, channelId);
     const rows = await this.db.teamChannelMember.findMany({
       where: { channelId },
       include: {
         user: {
-          select: { id: true, name: true, email: true, role: true, avatarUrl: true },
+          // `User.role` is gone — org-level role is `orgRole`, and the role that
+          // matters here is per-WORKSPACE, on the membership row. Selecting
+          // `role` off User compiled clean and would have 400'd at runtime.
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            avatarUrl: true,
+            workspaceMemberships: {
+              where: { workspaceId },
+              select: { role: true },
+              take: 1,
+            },
+          },
         },
       },
       orderBy: [{ addedAt: "desc" }, { userId: "asc" }],
@@ -289,7 +302,7 @@ export class ChannelsService {
       userId: r.userId,
       name: r.user.name,
       email: r.user.email,
-      role: r.user.role,
+      role: r.user.workspaceMemberships[0]?.role ?? "agent",
       avatarUrl: r.user.avatarUrl ?? null,
       addedAt: r.addedAt.toISOString(),
       addedById: r.addedById,
@@ -305,7 +318,7 @@ export class ChannelsService {
    * "added 0 people."
    */
   async addMembers(
-    teamId: string,
+    workspaceId: string,
     actorUserId: string,
     role: Role,
     channelId: string,
@@ -314,13 +327,13 @@ export class ChannelsService {
     if (!canManageChannel(role)) throw new ForbiddenException({ error: "forbidden" });
     // A DM is 1:1 by construction — nobody, admin included, may add a third
     // party to someone else's private conversation.
-    this.assertNotDm(await this.requireChannelInTeam(teamId, channelId));
+    this.assertNotDm(await this.requireChannelInTeam(workspaceId, channelId));
 
     const ids = [...new Set(userIds)];
     if (ids.length === 0) return { added: [] };
 
     const validUsers = await this.db.user.findMany({
-      where: { id: { in: ids }, teamId, deactivatedAt: null },
+      where: { id: { in: ids }, workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
       select: { id: true },
     });
     if (validUsers.length !== ids.length) {
@@ -344,7 +357,7 @@ export class ChannelsService {
       });
       await this.bus.publish({
         type: "team_channel.members_changed",
-        teamId,
+        workspaceId,
         channelId,
         action: "added",
         userIds: toAdd,
@@ -364,13 +377,13 @@ export class ChannelsService {
    * team member; demoting it requires deleting/renaming the row.
    */
   async removeMember(
-    teamId: string,
+    workspaceId: string,
     actorUserId: string,
     role: Role,
     channelId: string,
     targetUserId: string,
   ): Promise<void> {
-    const channel = await this.requireChannelInTeam(teamId, channelId);
+    const channel = await this.requireChannelInTeam(workspaceId, channelId);
     // You don't "leave" a DM — it's the conversation itself, and leaving
     // would strand the other party in a one-sided room. Hiding/archiving a
     // DM is a separate feature if anyone asks for it.
@@ -401,7 +414,7 @@ export class ChannelsService {
     });
     await this.bus.publish({
       type: "team_channel.members_changed",
-      teamId,
+      workspaceId,
       channelId,
       action: "removed",
       userIds: [targetUserId],
@@ -413,9 +426,9 @@ export class ChannelsService {
     this.realtime.evictUserFromChannelRoom(targetUserId, channelId);
   }
 
-  private async requireChannelInTeam(teamId: string, channelId: string) {
+  private async requireChannelInTeam(workspaceId: string, channelId: string) {
     const channel = await this.db.teamChannel.findFirst({
-      where: { id: channelId, teamId },
+      where: { id: channelId, workspaceId },
       select: { id: true, isDefault: true, kind: true, visibility: true },
     });
     if (!channel) throw new NotFoundException({ error: "channel not found" });
@@ -441,7 +454,7 @@ export class ChannelsService {
   }
 
   async update(
-    teamId: string,
+    workspaceId: string,
     role: Role,
     channelId: string,
     input: UpdateChannelInput,
@@ -451,7 +464,7 @@ export class ChannelsService {
     }
 
     const existing = await this.db.teamChannel.findFirst({
-      where: { id: channelId, teamId },
+      where: { id: channelId, workspaceId },
     });
     if (!existing) throw new NotFoundException({ error: "channel not found" });
     // A DM has no name, description, or visibility to edit.
@@ -502,15 +515,15 @@ export class ChannelsService {
 
     let updated;
     try {
-      // updateMany (not update) so `teamId` can appear in the WHERE — `id` is
-      // the only unique, and §18 wants teamId in every query's where clause.
+      // updateMany (not update) so `workspaceId` can appear in the WHERE — `id` is
+      // the only unique, and §18 wants workspaceId in every query's where clause.
       const res = await this.db.teamChannel.updateMany({
-        where: { id: channelId, teamId },
+        where: { id: channelId, workspaceId },
         data,
       });
       if (res.count === 0) throw new NotFoundException({ error: "channel not found" });
       updated = await this.db.teamChannel.findFirstOrThrow({
-        where: { id: channelId, teamId },
+        where: { id: channelId, workspaceId },
       });
     } catch (err) {
       if (isP2002(err)) throw new ConflictException({ error: "name_taken" });
@@ -519,17 +532,17 @@ export class ChannelsService {
 
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "team-channels",
     });
     return mapChannel(updated);
   }
 
-  async remove(teamId: string, role: Role, channelId: string): Promise<void> {
+  async remove(workspaceId: string, role: Role, channelId: string): Promise<void> {
     if (!canDeleteChannel(role)) throw new ForbiddenException({ error: "forbidden" });
 
     const existing = await this.db.teamChannel.findFirst({
-      where: { id: channelId, teamId },
+      where: { id: channelId, workspaceId },
     });
     if (!existing) throw new NotFoundException({ error: "channel not found" });
     // A DM isn't an administrable channel — deleting one would destroy the
@@ -547,7 +560,7 @@ export class ChannelsService {
     await this.db.teamChannel.delete({ where: { id: channelId } });
     await this.bus.publish({
       type: "team.catalog_changed",
-      teamId,
+      workspaceId,
       scope: "team-channels",
     });
   }
@@ -564,8 +577,8 @@ export class ChannelsService {
    * requireChannelMembership / emitChannelScoped / member counts all tolerate
    * a one-member channel unchanged.
    */
-  async createOrGetDm(teamId: string, actorUserId: string, targetUserId: string) {
-    // TENANT ISOLATION: the teamId predicate here is load-bearing. Without
+  async createOrGetDm(workspaceId: string, actorUserId: string, targetUserId: string) {
+    // TENANT ISOLATION: the workspaceId predicate here is load-bearing. Without
     // it, a client-supplied userId from ANOTHER team would create a DM row
     // inside this team carrying a foreign user's membership — and that user's
     // DM list (which filters on membership alone) would surface it.
@@ -573,7 +586,7 @@ export class ChannelsService {
     // you can keep reading an existing DM with someone who was deactivated,
     // but you can't start a new one.
     const target = await this.db.user.findFirst({
-      where: { id: targetUserId, teamId, deactivatedAt: null },
+      where: { id: targetUserId, workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
       select: { id: true },
     });
     if (!target) {
@@ -590,7 +603,7 @@ export class ChannelsService {
     const memberIds = [...new Set([actorUserId, target.id])];
 
     const existing = await this.db.teamChannel.findUnique({
-      where: { teamId_dmKey: { teamId, dmKey } },
+      where: { workspaceId_dmKey: { workspaceId, dmKey } },
       include: { _count: { select: { members: true } } },
     });
     if (existing) return mapChannel(existing, existing._count.members);
@@ -599,7 +612,7 @@ export class ChannelsService {
       const created = await this.db.$transaction(async (tx) => {
         const channel = await tx.teamChannel.create({
           data: {
-            teamId,
+            workspaceId,
             name: null,
             kind: "dm",
             // Belt and braces — a DM is private by definition and must never
@@ -625,7 +638,7 @@ export class ChannelsService {
       // not re-emit, or every open would re-surface it in the peer's sidebar.
       await this.bus.publish({
         type: "team_channel.dm_created",
-        teamId,
+        workspaceId,
         channelId: created.id,
         memberUserIds: memberIds,
         createdByUserId: actorUserId,
@@ -633,11 +646,11 @@ export class ChannelsService {
       return mapChannel(created, memberIds.length);
     } catch (err) {
       // Lost the race against a concurrent open (the other party clicked at
-      // the same moment). The unique on (teamId, dmKey) is what makes this
+      // the same moment). The unique on (workspaceId, dmKey) is what makes this
       // safe — re-read and return the winner rather than creating a twin.
       if (isP2002(err)) {
         const raced = await this.db.teamChannel.findUnique({
-          where: { teamId_dmKey: { teamId, dmKey } },
+          where: { workspaceId_dmKey: { workspaceId, dmKey } },
           include: { _count: { select: { members: true } } },
         });
         if (raced) return mapChannel(raced, raced._count.members);
@@ -655,11 +668,11 @@ export class ChannelsService {
    * what requireChannelMembership's 404-not-403 posture avoids elsewhere.
    */
   async joinPublicChannel(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     channelId: string,
   ): Promise<{ joined: boolean }> {
-    const channel = await this.requireChannelInTeam(teamId, channelId);
+    const channel = await this.requireChannelInTeam(workspaceId, channelId);
     this.assertNotDm(channel);
     if (channel.visibility === "private") {
       throw new NotFoundException({ error: "channel not found" });
@@ -676,7 +689,7 @@ export class ChannelsService {
       // client handler, no new realtime code for the join path.
       await this.bus.publish({
         type: "team_channel.members_changed",
-        teamId,
+        workspaceId,
         channelId,
         action: "added",
         userIds: [userId],
@@ -689,12 +702,12 @@ export class ChannelsService {
   // ---- Messages ---------------------------------------------------------
 
   async listMessages(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     channelId: string,
     opts: { after?: string; before?: string; take?: number },
   ) {
-    await this.requireChannelMembership(teamId, userId, channelId);
+    await this.requireChannelMembership(workspaceId, userId, channelId);
 
     if (opts.after) {
       // The `?after=` value is EITHER an opaque encoded cursor (from
@@ -715,14 +728,14 @@ export class ChannelsService {
       // Now returns { items, nextCursor } symmetrically with the
       // ?before= path — client doesn't have to infer pagination state
       // from `items.length >= PAGE_SIZE` anymore.
-      return listChannelMessagesAfter(channelId, teamId, after);
+      return listChannelMessagesAfter(channelId, workspaceId, after);
     }
 
     const before = opts.before ? decodeCursor(opts.before) : null;
     if (opts.before && !before) {
       throw new BadRequestException({ error: "invalid cursor" });
     }
-    return listChannelMessages(channelId, teamId, {
+    return listChannelMessages(channelId, workspaceId, {
       take: opts.take,
       before,
     });
@@ -740,7 +753,7 @@ export class ChannelsService {
    * somehow isn't found (caller then rethrows the original P2002).
    */
   private async dedupCommittedSend(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     channelId: string,
     clientTempId: string,
@@ -762,7 +775,7 @@ export class ChannelsService {
       },
     });
     if (!existing) return null;
-    const dto = await loadMessageForEmit(existing.id, teamId);
+    const dto = await loadMessageForEmit(existing.id, workspaceId);
     if (!dto) return null;
     const isReply = existing.threadRootId !== null;
     let threadReplyCount = 0;
@@ -775,7 +788,7 @@ export class ChannelsService {
     }
     await this.bus.publish({
       type: "team_channel.message_created",
-      teamId,
+      workspaceId,
       channelId,
       message: dto,
       preview: isReply
@@ -807,13 +820,13 @@ export class ChannelsService {
     channelId: string,
     input: PostChannelMessageInput,
   ) {
-    const { teamId, userId } = session;
+    const { workspaceId, userId } = session;
     const receivedAt = new Date();
 
     const [, , validMentionIds] = await Promise.all([
-      this.requireChannelMembership(teamId, userId, channelId),
-      this.assertChannelWritable(teamId, userId, channelId),
-      this.validateMentions(teamId, channelId, input.body),
+      this.requireChannelMembership(workspaceId, userId, channelId),
+      this.assertChannelWritable(workspaceId, userId, channelId),
+      this.validateMentions(workspaceId, channelId, input.body),
     ]);
 
     const preview = buildMessagePreview(input.body, false);
@@ -823,7 +836,7 @@ export class ChannelsService {
         const msg = await tx.teamChannelMessage.create({
           data: {
             channelId,
-            teamId,
+            workspaceId,
             authorUserId: userId,
             body: input.body,
             createdAt: receivedAt,
@@ -869,7 +882,7 @@ export class ChannelsService {
       // unique rejected the insert with P2002, rolling the whole tx back).
       const dedup =
         input.clientTempId && isP2002(err)
-          ? await this.dedupCommittedSend(teamId, userId, channelId, input.clientTempId)
+          ? await this.dedupCommittedSend(workspaceId, userId, channelId, input.clientTempId)
           : null;
       if (dedup) return dedup;
       throw err;
@@ -878,7 +891,7 @@ export class ChannelsService {
     const dto = buildFreshMessageDto({
       id: created.id,
       channelId,
-      teamId,
+      workspaceId,
       session,
       body: input.body,
       mentionedUserIds: validMentionIds,
@@ -887,7 +900,7 @@ export class ChannelsService {
 
     await this.bus.publish({
       type: "team_channel.message_created",
-      teamId,
+      workspaceId,
       channelId,
       message: dto,
       preview,
@@ -900,7 +913,7 @@ export class ChannelsService {
   }
 
   async editMessage(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     channelId: string,
     messageId: string,
@@ -911,10 +924,10 @@ export class ChannelsService {
     // codes, whether a message in a private channel they were removed from
     // still exists or whether its edit window is open. requireChannelMembership
     // 404s a non-member before any message lookup leaks that signal.
-    await this.requireChannelMembership(teamId, userId, channelId);
+    await this.requireChannelMembership(workspaceId, userId, channelId);
 
     const existing = await this.db.teamChannelMessage.findFirst({
-      where: { id: messageId, channelId, teamId },
+      where: { id: messageId, channelId, workspaceId },
       select: {
         id: true,
         authorUserId: true,
@@ -937,7 +950,7 @@ export class ChannelsService {
 
     // The mentions validator is also channel-scoped so an editor can't @ users
     // who aren't in this channel.
-    const validMentionIds = await this.validateMentions(teamId, channelId, input.body);
+    const validMentionIds = await this.validateMentions(workspaceId, channelId, input.body);
     // Who this edit newly @-mentions. Read BEFORE the transaction replaces the
     // rows: an edit is the one way to be mentioned without a new message, and
     // it used to notify nobody. Only the ADDED ids are alerted — re-badging
@@ -952,17 +965,17 @@ export class ChannelsService {
     );
     const editedAt = new Date();
 
-    // Defense-in-depth: teamId is added to every mutate WHERE even though
+    // Defense-in-depth: workspaceId is added to every mutate WHERE even though
     // the `findFirst` above already verified ownership. updateMany/deleteMany
     // because `id` alone is the unique key; compound predicates on
     // .update/.delete need a compound unique.
     await this.db.$transaction([
       this.db.teamChannelMessage.updateMany({
-        where: { id: messageId, teamId },
+        where: { id: messageId, workspaceId },
         data: { body: input.body, editedAt },
       }),
       this.db.teamChannelMention.deleteMany({
-        where: { messageId, message: { teamId } },
+        where: { messageId, message: { workspaceId } },
       }),
       ...(validMentionIds.length > 0
         ? [
@@ -997,7 +1010,7 @@ export class ChannelsService {
 
     await this.bus.publish({
       type: "team_channel.message_edited",
-      teamId,
+      workspaceId,
       channelId,
       messageId,
       body: input.body,
@@ -1005,20 +1018,20 @@ export class ChannelsService {
       authorUserId: existing.authorUserId,
       newlyMentionedUserIds,
     });
-    const dto = await loadMessageForEmit(messageId, teamId);
+    const dto = await loadMessageForEmit(messageId, workspaceId);
     return { message: dto };
   }
 
   async deleteMessage(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     role: Role,
     channelId: string,
     messageId: string,
   ): Promise<void> {
-    await this.requireChannelMembership(teamId, userId, channelId);
+    await this.requireChannelMembership(workspaceId, userId, channelId);
     const existing = await this.db.teamChannelMessage.findFirst({
-      where: { id: messageId, channelId, teamId },
+      where: { id: messageId, channelId, workspaceId },
       select: { id: true, authorUserId: true, threadRootId: true },
     });
     if (!existing) throw new NotFoundException({ error: "message not found" });
@@ -1027,7 +1040,7 @@ export class ChannelsService {
       throw new ForbiddenException({ error: "forbidden" });
     }
 
-    // Defense-in-depth: teamId in every mutate WHERE even though the findFirst
+    // Defense-in-depth: workspaceId in every mutate WHERE even though the findFirst
     // above already verified ownership. deleteMany/updateMany because id alone
     // is the unique key.
     let threadReplyUpdate: {
@@ -1046,7 +1059,7 @@ export class ChannelsService {
       const rootId = existing.threadRootId;
       threadReplyUpdate = await this.db.$transaction(async (tx) => {
         const del = await tx.teamChannelMessage.deleteMany({
-          where: { id: messageId, teamId },
+          where: { id: messageId, workspaceId },
         });
         // Lost a concurrent-delete race: we blocked on the row lock, then the
         // committing tx had already removed it, so deleteMany matched 0. Bail
@@ -1063,12 +1076,12 @@ export class ChannelsService {
         // Refresh threadLastReplyAt to the new latest sibling (or null if this
         // was the last reply).
         const latestSibling = await tx.teamChannelMessage.findFirst({
-          where: { threadRootId: rootId, teamId },
+          where: { threadRootId: rootId, workspaceId },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           select: { createdAt: true },
         });
         await tx.teamChannelMessage.updateMany({
-          where: { id: rootId, teamId },
+          where: { id: rootId, workspaceId },
           data: { threadLastReplyAt: latestSibling?.createdAt ?? null },
         });
         return {
@@ -1082,21 +1095,21 @@ export class ChannelsService {
       // whatever's now latest (sidebar UX, not load-bearing — kept best-effort
       // and out of the delete's critical path).
       await this.db.teamChannelMessage.deleteMany({
-        where: { id: messageId, teamId },
+        where: { id: messageId, workspaceId },
       });
       const [latest, channelRow] = await Promise.all([
         this.db.teamChannelMessage.findFirst({
-          where: { channelId, teamId, threadRootId: null },
+          where: { channelId, workspaceId, threadRootId: null },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           select: { body: true, mediaKind: true, createdAt: true },
         }),
         this.db.teamChannel.findFirst({
-          where: { id: channelId, teamId },
+          where: { id: channelId, workspaceId },
           select: { createdAt: true },
         }),
       ]);
       await this.db.teamChannel.updateMany({
-        where: { id: channelId, teamId },
+        where: { id: channelId, workspaceId },
         data: latest
           ? {
               lastMessageAt: latest.createdAt,
@@ -1117,7 +1130,7 @@ export class ChannelsService {
 
     await this.bus.publish({
       type: "team_channel.message_deleted",
-      teamId,
+      workspaceId,
       channelId,
       messageId,
       threadRootId: existing.threadRootId,
@@ -1129,7 +1142,7 @@ export class ChannelsService {
     if (threadReplyUpdate) {
       await this.bus.publish({
         type: "team_channel.thread_reply_count_changed",
-        teamId,
+        workspaceId,
         channelId,
         rootMessageId: threadReplyUpdate.rootMessageId,
         replyCount: threadReplyUpdate.replyCount,
@@ -1141,23 +1154,23 @@ export class ChannelsService {
   // ---- Pins -------------------------------------------------------------
 
   async pinMessage(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     role: Role,
     channelId: string,
     messageId: string,
   ): Promise<void> {
-    await this.requireChannelMembership(teamId, userId, channelId);
+    await this.requireChannelMembership(workspaceId, userId, channelId);
     // Role-gate pinning in channels only. In a DM both participants may pin:
     // an admin who isn't in the DM can't reach it anyway, and a non-admin
     // shouldn't need permission to pin something in their own conversation.
-    const channel = await this.requireChannelInTeam(teamId, channelId);
+    const channel = await this.requireChannelInTeam(workspaceId, channelId);
     if (!canPinInChannel(role, channel.kind)) {
       throw new ForbiddenException({ error: "forbidden" });
     }
 
     const msg = await this.db.teamChannelMessage.findFirst({
-      where: { id: messageId, channelId, teamId },
+      where: { id: messageId, channelId, workspaceId },
       select: { id: true, threadRootId: true },
     });
     if (!msg) throw new NotFoundException({ error: "message not found" });
@@ -1191,7 +1204,7 @@ export class ChannelsService {
     });
     await this.bus.publish({
       type: "team_channel.pin_changed",
-      teamId,
+      workspaceId,
       channelId,
       messageId,
       pinned: true,
@@ -1202,14 +1215,14 @@ export class ChannelsService {
   }
 
   async unpinMessage(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     role: Role,
     channelId: string,
     messageId: string,
   ): Promise<void> {
-    await this.requireChannelMembership(teamId, userId, channelId);
-    const channel = await this.requireChannelInTeam(teamId, channelId);
+    await this.requireChannelMembership(workspaceId, userId, channelId);
+    const channel = await this.requireChannelInTeam(workspaceId, channelId);
     if (!canPinInChannel(role, channel.kind)) {
       throw new ForbiddenException({ error: "forbidden" });
     }
@@ -1217,7 +1230,7 @@ export class ChannelsService {
     // Tenant guard via the message — keeps unpin from teaching the caller
     // about another team's message ids.
     const msg = await this.db.teamChannelMessage.findFirst({
-      where: { id: messageId, channelId, teamId },
+      where: { id: messageId, channelId, workspaceId },
       select: { id: true },
     });
     if (!msg) throw new NotFoundException({ error: "message not found" });
@@ -1225,7 +1238,7 @@ export class ChannelsService {
     await this.db.teamChannelPin.deleteMany({ where: { messageId } });
     await this.bus.publish({
       type: "team_channel.pin_changed",
-      teamId,
+      workspaceId,
       channelId,
       messageId,
       pinned: false,
@@ -1238,15 +1251,15 @@ export class ChannelsService {
   // ---- Reactions --------------------------------------------------------
 
   async toggleReaction(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     channelId: string,
     messageId: string,
     input: ToggleReactionInput,
   ): Promise<{ emoji: string; userIds: string[] }> {
-    await this.requireChannelMembership(teamId, userId, channelId);
+    await this.requireChannelMembership(workspaceId, userId, channelId);
     const message = await this.db.teamChannelMessage.findFirst({
-      where: { id: messageId, channelId, teamId },
+      where: { id: messageId, channelId, workspaceId },
       select: { id: true },
     });
     if (!message) throw new NotFoundException({ error: "message not found" });
@@ -1312,7 +1325,7 @@ export class ChannelsService {
 
     await this.bus.publish({
       type: "team_channel.reaction_changed",
-      teamId,
+      workspaceId,
       channelId,
       messageId,
       emoji,
@@ -1330,8 +1343,8 @@ export class ChannelsService {
    * rule emits `team:channel:read` to the team room so every other tab of
    * the same user clears its sidebar badge in lock-step.
    */
-  async markRead(teamId: string, userId: string, channelId: string) {
-    await this.requireChannelMembership(teamId, userId, channelId);
+  async markRead(workspaceId: string, userId: string, channelId: string) {
+    await this.requireChannelMembership(workspaceId, userId, channelId);
     const now = new Date();
 
     // Already-read short-circuit: if the receipt is already at-or-after the
@@ -1371,7 +1384,7 @@ export class ChannelsService {
       const unreadMention = await this.db.teamChannelMention.findFirst({
         where: {
           mentionedUserId: userId,
-          message: { channelId, teamId, createdAt: { gt: receipt.lastReadAt } },
+          message: { channelId, workspaceId, createdAt: { gt: receipt.lastReadAt } },
         },
         select: { id: true },
       });
@@ -1387,7 +1400,7 @@ export class ChannelsService {
     });
     await this.bus.publish({
       type: "team_channel.read",
-      teamId,
+      workspaceId,
       channelId,
       readByUserId: userId,
       lastReadAt: now.toISOString(),
@@ -1404,14 +1417,14 @@ export class ChannelsService {
    * nested threads.
    */
   async listThreadReplies(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     channelId: string,
     rootMessageId: string,
     opts: { after?: string; take?: number } = {},
   ) {
-    await this.requireChannelMembership(teamId, userId, channelId);
-    const root = await this.requireThreadRoot(teamId, channelId, rootMessageId);
+    await this.requireChannelMembership(workspaceId, userId, channelId);
+    const root = await this.requireThreadRoot(workspaceId, channelId, rootMessageId);
     if (root.threadRootId !== null) {
       throw new BadRequestException({
         error: "not_a_thread_root",
@@ -1419,7 +1432,7 @@ export class ChannelsService {
       });
     }
     const after = opts.after ? this.decodeCursorOrThrow(opts.after) : null;
-    return queryListThreadReplies(rootMessageId, teamId, {
+    return queryListThreadReplies(rootMessageId, workspaceId, {
       take: opts.take,
       after,
     });
@@ -1432,7 +1445,7 @@ export class ChannelsService {
    * frontend reuses the message DTO + cursor handling.
    */
   async searchMessages(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     channelId: string,
     q: string,
@@ -1445,9 +1458,9 @@ export class ChannelsService {
         detail: "Search needs at least 2 characters.",
       });
     }
-    await this.requireChannelMembership(teamId, userId, channelId);
+    await this.requireChannelMembership(workspaceId, userId, channelId);
     const before = opts.before ? this.decodeCursorOrThrow(opts.before) : null;
-    return searchChannelMessages(channelId, teamId, query, {
+    return searchChannelMessages(channelId, workspaceId, query, {
       take: opts.take,
       before,
     });
@@ -1461,7 +1474,7 @@ export class ChannelsService {
    * pull message bodies from private channels they were never in.
    */
   async searchAllMessages(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     q: string,
     opts: { before?: string; take?: number } = {},
@@ -1474,7 +1487,7 @@ export class ChannelsService {
       });
     }
     const before = opts.before ? this.decodeCursorOrThrow(opts.before) : null;
-    return searchAllChannels(teamId, userId, query, { take: opts.take, before });
+    return searchAllChannels(workspaceId, userId, query, { take: opts.take, before });
   }
 
   /**
@@ -1484,16 +1497,16 @@ export class ChannelsService {
    * either direction from here.
    */
   async getMessagesAround(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     channelId: string,
     messageId: string,
     opts: { take?: number } = {},
   ) {
-    await this.requireChannelMembership(teamId, userId, channelId);
+    await this.requireChannelMembership(workspaceId, userId, channelId);
     const result = await listChannelMessagesAround(
       channelId,
-      teamId,
+      workspaceId,
       messageId,
       opts.take,
     );
@@ -1530,15 +1543,15 @@ export class ChannelsService {
     rootMessageId: string,
     input: PostChannelMessageInput,
   ) {
-    const { teamId, userId } = session;
+    const { workspaceId, userId } = session;
     const receivedAt = new Date();
 
     // Membership gate + root validation + mention check in parallel.
     const [, , root, validMentionIds] = await Promise.all([
-      this.requireChannelMembership(teamId, userId, channelId),
-      this.assertChannelWritable(teamId, userId, channelId),
-      this.requireThreadRoot(teamId, channelId, rootMessageId),
-      this.validateMentions(teamId, channelId, input.body),
+      this.requireChannelMembership(workspaceId, userId, channelId),
+      this.assertChannelWritable(workspaceId, userId, channelId),
+      this.requireThreadRoot(workspaceId, channelId, rootMessageId),
+      this.validateMentions(workspaceId, channelId, input.body),
     ]);
     if (root.threadRootId !== null) {
       throw new BadRequestException({
@@ -1553,7 +1566,7 @@ export class ChannelsService {
         const msg = await tx.teamChannelMessage.create({
           data: {
             channelId,
-            teamId,
+            workspaceId,
             authorUserId: userId,
             body: input.body,
             threadRootId: rootMessageId,
@@ -1592,7 +1605,7 @@ export class ChannelsService {
       // threadReplyCount increment never committed — no double-bump.
       const dedup =
         input.clientTempId && isP2002(err)
-          ? await this.dedupCommittedSend(teamId, userId, channelId, input.clientTempId)
+          ? await this.dedupCommittedSend(workspaceId, userId, channelId, input.clientTempId)
           : null;
       if (dedup) return dedup;
       throw err;
@@ -1601,7 +1614,7 @@ export class ChannelsService {
     const dto = buildFreshMessageDto({
       id: created.id,
       channelId,
-      teamId,
+      workspaceId,
       session,
       body: input.body,
       mentionedUserIds: validMentionIds,
@@ -1611,7 +1624,7 @@ export class ChannelsService {
 
     await this.bus.publish({
       type: "team_channel.message_created",
-      teamId,
+      workspaceId,
       channelId,
       message: dto,
       preview: null,
@@ -1632,7 +1645,7 @@ export class ChannelsService {
    * same path as a customer media message.
    */
   async uploadMedia(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     channelId: string,
     args: {
@@ -1642,15 +1655,15 @@ export class ChannelsService {
       threadRootId: string | null;
     },
   ) {
-    await this.requireChannelMembership(teamId, userId, channelId);
-    await this.assertChannelWritable(teamId, userId, channelId);
+    await this.requireChannelMembership(workspaceId, userId, channelId);
+    await this.assertChannelWritable(workspaceId, userId, channelId);
 
     if (args.threadRootId) {
       const root = await this.db.teamChannelMessage.findFirst({
         where: {
           id: args.threadRootId,
           channelId,
-          teamId,
+          workspaceId,
           threadRootId: null,
         },
         select: { id: true },
@@ -1669,8 +1682,8 @@ export class ChannelsService {
       });
     }
 
-    const teamRow = await this.db.team.findUnique({
-      where: { id: teamId },
+    const teamRow = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
       select: { name: true },
     });
 
@@ -1679,7 +1692,7 @@ export class ChannelsService {
       mimeType: args.file.mimeType,
       kind,
       context: {
-        teamId,
+        workspaceId,
         teamSlug: teamRow?.name,
         // Team chat is internal — "out" isn't meaningful. Keep "out" so the
         // dashboard name stays "<team>/out/<channel>/<file>" alongside customer
@@ -1691,7 +1704,7 @@ export class ChannelsService {
       },
     });
 
-    const validMentionIds = await this.validateMentions(teamId, channelId, args.body);
+    const validMentionIds = await this.validateMentions(workspaceId, channelId, args.body);
     const preview = buildMessagePreview(args.body, true);
     // Stamp AFTER the (potentially slow) blob upload so createdAt / lastMessageAt
     // reflect commit time, not upload start. A method-entry stamp backdates the
@@ -1704,7 +1717,7 @@ export class ChannelsService {
         const msg = await tx.teamChannelMessage.create({
           data: {
             channelId,
-            teamId,
+            workspaceId,
             authorUserId: userId,
             body: args.body,
             mediaKind: kind,
@@ -1771,13 +1784,13 @@ export class ChannelsService {
       // media). Just return the original instead of inserting a duplicate.
       const dedup =
         args.clientTempId && isP2002(err)
-          ? await this.dedupCommittedSend(teamId, userId, channelId, args.clientTempId)
+          ? await this.dedupCommittedSend(workspaceId, userId, channelId, args.clientTempId)
           : null;
       if (dedup) return dedup;
       throw err;
     }
 
-    const dto = await loadMessageForEmit(created.id, teamId);
+    const dto = await loadMessageForEmit(created.id, workspaceId);
     if (!dto) {
       this.logger.error("post-write media reload returned null");
       return { messageId: created.id };
@@ -1785,7 +1798,7 @@ export class ChannelsService {
 
     await this.bus.publish({
       type: "team_channel.message_created",
-      teamId,
+      workspaceId,
       channelId,
       message: dto,
       preview: args.threadRootId ? null : preview,
@@ -1806,14 +1819,14 @@ export class ChannelsService {
    * raw CDN URL is never embedded in the message DTO (M4).
    */
   async getMessageMediaKey(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     channelId: string,
     messageId: string,
   ): Promise<string> {
-    await this.requireChannelMembership(teamId, userId, channelId);
+    await this.requireChannelMembership(workspaceId, userId, channelId);
     const message = await this.db.teamChannelMessage.findFirst({
-      where: { id: messageId, channelId, teamId },
+      where: { id: messageId, channelId, workspaceId },
       select: { mediaKey: true },
     });
     // Indistinguishable from "no such message" on the missing path so we don't
@@ -1833,12 +1846,12 @@ export class ChannelsService {
    * separately so they can return the more specific 400 with `not_a_thread_root`.
    */
   private async requireThreadRoot(
-    teamId: string,
+    workspaceId: string,
     channelId: string,
     rootMessageId: string,
   ) {
     const root = await this.db.teamChannelMessage.findFirst({
-      where: { id: rootMessageId, channelId, teamId },
+      where: { id: rootMessageId, channelId, workspaceId },
       select: { id: true, threadRootId: true, threadReplyCount: true },
     });
     if (!root) throw new NotFoundException({ error: "thread not found" });
@@ -1860,12 +1873,12 @@ export class ChannelsService {
    * doesn't teach a non-member that the channel exists.
    */
   private async requireChannelMembership(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     channelId: string,
   ): Promise<void> {
     const channel = await this.db.teamChannel.findFirst({
-      where: { id: channelId, teamId },
+      where: { id: channelId, workspaceId },
       select: { id: true, isDefault: true },
     });
     if (!channel) throw new NotFoundException({ error: "channel not found" });
@@ -1894,12 +1907,12 @@ export class ChannelsService {
    * check passes — that conversation must keep working.
    */
   private async assertChannelWritable(
-    teamId: string,
+    workspaceId: string,
     userId: string,
     channelId: string,
   ): Promise<void> {
     const channel = await this.db.teamChannel.findFirst({
-      where: { id: channelId, teamId },
+      where: { id: channelId, workspaceId },
       select: { kind: true },
     });
     if (channel?.kind !== "dm") return;
@@ -1927,7 +1940,7 @@ export class ChannelsService {
    * side-effect mention rows are filtered.
    */
   private async validateMentions(
-    teamId: string,
+    workspaceId: string,
     channelId: string,
     body: string,
   ): Promise<string[]> {
@@ -1940,11 +1953,11 @@ export class ChannelsService {
     });
     const isDefault = channel?.isDefault ?? false;
     const where: {
-      teamId: string;
+      workspaceId: string;
       id: { in: string[] };
       deactivatedAt: null;
       channelMemberships?: { some: { channelId: string } };
-    } = { teamId, id: { in: ids }, deactivatedAt: null };
+    } = { workspaceId, id: { in: ids }, deactivatedAt: null };
     if (!isDefault) {
       where.channelMemberships = { some: { channelId } };
     }
@@ -1971,7 +1984,7 @@ function isP2002(err: unknown): boolean {
  * one fewer DB roundtrip = recipients see the message sooner.
  *
  * Safe because every field is known at write time:
- *   - id / channelId / teamId / authorUserId / body / createdAt / threadRootId
+ *   - id / channelId / workspaceId / authorUserId / body / createdAt / threadRootId
  *     come from the inputs of the INSERT we just did.
  *   - authorName / authorAvatarUrl come from the SessionGuard's User row
  *     (already loaded for the deactivation recheck — see session.guard.ts).
@@ -1984,7 +1997,7 @@ function isP2002(err: unknown): boolean {
 function buildFreshMessageDto(args: {
   id: string;
   channelId: string;
-  teamId: string;
+  workspaceId: string;
   session: ApiSession;
   body: string;
   mentionedUserIds: string[];
@@ -1994,7 +2007,7 @@ function buildFreshMessageDto(args: {
   return {
     id: args.id,
     channelId: args.channelId,
-    teamId: args.teamId,
+    workspaceId: args.workspaceId,
     authorUserId: args.session.userId,
     authorName: args.session.name,
     authorAvatarUrl: args.session.avatarUrl,

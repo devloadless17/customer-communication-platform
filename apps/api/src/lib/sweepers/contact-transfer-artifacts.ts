@@ -1,6 +1,6 @@
 import { blobStorage } from "@/lib/blob-storage";
 import { db } from "@/lib/db";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Housekeeping for contact import/export jobs. Two independent duties:
@@ -58,7 +58,7 @@ async function sweepOnce(): Promise<void> {
  * Reclaim staged import files whose wizard was abandoned.
  *
  * `POST /contacts/import/preview` uploads the file to
- * `contact-imports/<teamId>/staged-<uuid>.<ext>` so the RUN call doesn't have
+ * `contact-imports/<workspaceId>/staged-<uuid>.<ext>` so the RUN call doesn't have
  * to re-upload it. If the user closes the dialog at the mapping step, no
  * ContactTransferJob row is ever created — so `reapExpired` (which walks job
  * rows) never sees it, and the generic blob-orphan sweeper deliberately skips
@@ -153,6 +153,12 @@ async function runTick(label: string): Promise<void> {
   try {
     await withSweeperMutex("contact-transfer-artifacts", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopContactTransferSweeper();
+      return;
+    }
     console.error(`[sweeper.contact-transfer] ${label} failed`, err);
   } finally {
     inFlight = false;

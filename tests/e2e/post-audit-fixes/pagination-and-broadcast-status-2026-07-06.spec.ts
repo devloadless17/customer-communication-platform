@@ -14,11 +14,11 @@ import { db, appAdmin, wipeTestData } from "../_helpers/db";
 
 test.describe.configure({ mode: "serial" });
 
-let teamId: string;
+let workspaceId: string;
 
 test.beforeAll(async () => {
   const su = await appAdmin();
-  teamId = su.teamId;
+  workspaceId = su.workspaceId;
 });
 
 test.afterAll(async () => {
@@ -42,7 +42,7 @@ test.describe("A. Contacts numbered pagination", () => {
     await wipeTestData();
     await db().contact.createMany({
       data: Array.from({ length: 30 }, (_, i) => ({
-        teamId,
+        workspaceId,
         phoneNumber: `+1555010${String(1000 + i)}`,
         identityChannel: "whatsapp" as const,
         name: `Pageus Contact ${String(i).padStart(2, "0")}`,
@@ -76,7 +76,7 @@ test.describe("B. Calls numbered pagination", () => {
     await wipeTestData();
     const contact = await db().contact.create({
       data: {
-        teamId,
+        workspaceId,
         phoneNumber: "+15559990000",
         identityChannel: "whatsapp",
         name: "Calls Pager",
@@ -85,13 +85,13 @@ test.describe("B. Calls numbered pagination", () => {
       select: { id: true },
     });
     const conv = await db().conversation.create({
-      data: { teamId, contactId: contact.id, channel: "whatsapp", status: "open" },
+      data: { workspaceId, contactId: contact.id, channel: "whatsapp", status: "open" },
       select: { id: true },
     });
     const base = Date.parse("2026-06-01T12:00:00Z");
     await db().call.createMany({
       data: Array.from({ length: 30 }, (_, i) => ({
-        teamId,
+        workspaceId,
         conversationId: conv.id,
         externalCallId: `e2e-page-call-${i}`,
         direction: "in" as const,
@@ -136,7 +136,7 @@ test.describe("C. Broadcast Failed filter + status", () => {
     ) =>
       db().broadcast.create({
         data: {
-          teamId,
+          workspaceId,
           templateName: name,
           templateId: `tpl_${name}`,
           templateLanguage: "en_US",
@@ -197,7 +197,7 @@ test.describe("D. Broadcasts numbered pagination", () => {
     const base = Date.parse("2026-06-01T12:00:00Z");
     await db().broadcast.createMany({
       data: Array.from({ length: 30 }, (_, i) => ({
-        teamId,
+        workspaceId,
         templateName: `e2e_page_bcast_${String(i).padStart(2, "0")}`,
         templateId: `tpl_page_${i}`,
         templateLanguage: "en_US",

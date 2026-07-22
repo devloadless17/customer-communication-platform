@@ -15,7 +15,7 @@ import { toast } from "@/lib/toast";
 interface ProfileFormProps {
   user: {
     id: string;
-    teamId: string;
+    workspaceId: string;
     name: string;
     email: string;
     avatarUrl: string | null;
@@ -23,7 +23,7 @@ interface ProfileFormProps {
 }
 
 /**
- * Self-profile editor: name + avatar. Sits inline on /settings/account; the
+ * Self-profile editor: name + avatar. Sits inline on /account; the
  * password form is a sibling section. Saves go through PATCH /api/users/me
  * (name) and POST /api/users/me/avatar (image upload) — both publish
  * `user.profile_updated` server-side. We also dispatch a local socket frame

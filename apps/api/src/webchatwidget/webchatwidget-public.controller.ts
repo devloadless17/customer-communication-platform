@@ -138,7 +138,7 @@ export class WebchatwidgetPublicController {
         mimeType,
         kind,
         context: {
-          teamId: resolved.teamId,
+          workspaceId: resolved.workspaceId,
           direction: "in",
           externalId: `webchatwidget-${randomUUID()}`,
           ...(originalFilename ? { originalFilename } : {}),
@@ -188,7 +188,7 @@ export class WebchatwidgetPublicController {
     const message = await this.db.message.findFirst({
       where: {
         id: messageId,
-        teamId: resolved.teamId,
+        workspaceId: resolved.workspaceId,
         channel: CHANNEL,
         conversation: { contact: { identityChannel: CHANNEL, externalContactId } },
       },

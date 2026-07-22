@@ -2,7 +2,7 @@ import { CallStatus } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Backstop for Call rows that never reach a terminal state. A live call
@@ -56,6 +56,12 @@ async function runTick(label: string): Promise<void> {
   try {
     await withSweeperMutex("stale-calls", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / shutdown) — the work is
+    // over, so stop instead of logging a stack trace every tick.
+    if (isPoolClosedError(err)) {
+      stopStaleCallsSweeper();
+      return;
+    }
     console.error(`[sweeper.stale-calls] ${label} failed`, err);
   } finally {
     inFlight = false;
@@ -84,14 +90,14 @@ async function sweepOnce(): Promise<void> {
   const ringingCutoff = new Date(now - RINGING_STALE_MS);
   const inProgressCutoff = new Date(now - INPROGRESS_MAX_MS);
 
-  // Stale RINGING rows → missed. Keyed off ringingAt; the (teamId,status,
+  // Stale RINGING rows → missed. Keyed off ringingAt; the (workspaceId,status,
   // ringingAt) index serves this filter.
   const stuckRinging = await db.call.findMany({
     where: {
       status: CallStatus.ringing,
       ringingAt: { lt: ringingCutoff },
     },
-    select: { id: true, teamId: true, conversationId: true, ringingAt: true },
+    select: { id: true, workspaceId: true, conversationId: true, ringingAt: true },
     take: BATCH,
   });
 
@@ -108,7 +114,7 @@ async function sweepOnce(): Promise<void> {
     try {
       await publish({
         type: "call.missed",
-        teamId: row.teamId,
+        workspaceId: row.workspaceId,
         conversationId: row.conversationId,
         callId: row.id,
         ringingAt: row.ringingAt.toISOString(),
@@ -129,7 +135,7 @@ async function sweepOnce(): Promise<void> {
       status: CallStatus.in_progress,
       ringingAt: { lt: inProgressCutoff },
     },
-    select: { id: true, teamId: true, conversationId: true },
+    select: { id: true, workspaceId: true, conversationId: true },
     take: BATCH,
   });
 
@@ -143,7 +149,7 @@ async function sweepOnce(): Promise<void> {
     try {
       await publish({
         type: "call.failed",
-        teamId: row.teamId,
+        workspaceId: row.workspaceId,
         conversationId: row.conversationId,
         callId: row.id,
         reason: "no_terminate_webhook",

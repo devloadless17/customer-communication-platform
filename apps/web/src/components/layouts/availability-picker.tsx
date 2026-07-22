@@ -155,7 +155,7 @@ export function AvailabilityPicker({
         // reopen's seed) stays stale until a refresh. Optimistic: the PATCH is
         // fire-and-forget here because the component is unmounting.
         dispatchLocalSocketEvent("user:availability:updated", {
-          teamId: currentUser.teamId,
+          workspaceId: currentUser.workspaceId,
           userId: currentUser.id,
           status: statusRef.current,
           message: latest === "" ? null : latest,
@@ -167,9 +167,9 @@ export function AvailabilityPicker({
         }).catch(() => {});
       }
     };
-    // currentUser.id / .teamId are stable for the session, so this effectively
+    // currentUser.id / .workspaceId are stable for the session, so this effectively
     // runs the flush only on unmount; listing them keeps exhaustive-deps honest.
-  }, [currentUser.id, currentUser.teamId]);
+  }, [currentUser.id, currentUser.workspaceId]);
 
   // Set the live input + committed baseline + their refs together. Used by the
   // "going available clears the note" path so the displayed value, the dirty
@@ -204,7 +204,7 @@ export function AvailabilityPicker({
       setNoteValue("");
     }
     dispatchLocalSocketEvent("user:availability:updated", {
-      teamId: currentUser.teamId,
+      workspaceId: currentUser.workspaceId,
       userId: currentUser.id,
       status: next,
       // null = "cleared" (drop the note everywhere); undefined = "unchanged".
@@ -214,7 +214,7 @@ export function AvailabilityPicker({
       setStatus(prev);
       if (clearsNote) setNoteValue(prevNote);
       dispatchLocalSocketEvent("user:availability:updated", {
-        teamId: currentUser.teamId,
+        workspaceId: currentUser.workspaceId,
         userId: currentUser.id,
         status: prev,
         message: clearsNote ? (prevNote === "" ? null : prevNote) : undefined,
@@ -264,7 +264,7 @@ export function AvailabilityPicker({
       setCommittedMessage(target);
       committedRef.current = target;
       dispatchLocalSocketEvent("user:availability:updated", {
-        teamId: currentUser.teamId,
+        workspaceId: currentUser.workspaceId,
         userId: currentUser.id,
         status,
         message: target === "" ? null : target,

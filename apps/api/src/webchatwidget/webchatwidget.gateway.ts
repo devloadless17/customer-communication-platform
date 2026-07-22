@@ -92,7 +92,7 @@ const receiptBucket = createTokenBucket({ perMin: 120 });
 
 /** What we stash on each visitor socket after a successful handshake. */
 interface WidgetSocketData {
-  teamId: string;
+  workspaceId: string;
   widgetId: string;
   visitorId: string;
   /** externalContactId = `${widgetId}:${visitorId}` — unique per widget. */
@@ -174,11 +174,11 @@ export class WebchatwidgetGateway
     // Agent availability → every visitor socket of that team, so the widget's dot
     // means "an agent is reachable" rather than "my own socket is up". Fired when
     // the team's presence flips (realtime broadcastPresence).
-    this.realtime.bindWidgetAvailabilityRelay((teamId, online) => {
+    this.realtime.bindWidgetAvailabilityRelay((workspaceId, online) => {
       if (!this.server) return;
       for (const sock of this.server.sockets.values()) {
         const d = sock.data as WidgetSocketData | undefined;
-        if (d?.teamId === teamId) sock.emit("agents", { online });
+        if (d?.workspaceId === workspaceId) sock.emit("agents", { online });
       }
     });
     // Handshake auth runs as namespace middleware so a rejection delivers a typed
@@ -223,7 +223,7 @@ export class WebchatwidgetGateway
             // domain that isn't in its allow-list. Log the actual origin so support
             // can tell them exactly what to add.
             this.logger.warn(
-              `widget handshake rejected: origin_not_allowed origin=${origin ?? "<none>"} widget=${resolved.widgetId} team=${resolved.teamId}`,
+              `widget handshake rejected: origin_not_allowed origin=${origin ?? "<none>"} widget=${resolved.widgetId} team=${resolved.workspaceId}`,
             );
             next(new Error("origin_not_allowed"));
             return;
@@ -236,7 +236,7 @@ export class WebchatwidgetGateway
             this.logger.warn(`first-seen-origin record failed: ${err}`),
           );
           const data: WidgetSocketData = {
-            teamId: resolved.teamId,
+            workspaceId: resolved.workspaceId,
             widgetId: resolved.widgetId,
             visitorId,
             externalContactId: `${resolved.widgetId}:${visitorId}`,
@@ -258,7 +258,7 @@ export class WebchatwidgetGateway
 
   async handleConnection(client: Socket): Promise<void> {
     const data = client.data as WidgetSocketData | undefined;
-    if (!data?.teamId) {
+    if (!data?.workspaceId) {
       client.disconnect(true);
       return;
     }
@@ -274,20 +274,20 @@ export class WebchatwidgetGateway
     // "online" here means an agent is connected AND available — not merely that
     // someone has a tab open; see `teamHasAvailableAgent`.
     client.emit("agents", {
-      online: await this.realtime.teamHasAvailableAgent(data.teamId),
+      online: await this.realtime.teamHasAvailableAgent(data.workspaceId),
     });
     // Resume an existing conversation for this (widget, visitor): join its room
     // and replay recent history so replies sent while the widget was closed show
     // on reopen. Room is derived server-side from the resolved contact — a visitor
     // can NEVER join an arbitrary conversation id.
     try {
-      const conversationId = await this.findConversationId(data.teamId, data.externalContactId);
+      const conversationId = await this.findConversationId(data.workspaceId, data.externalContactId);
       if (conversationId) {
         data.conversationId = conversationId;
         await client.join(widgetRoom(conversationId));
         // Tell agents viewing this thread the visitor is back on the page.
         this.realtime.notifyVisitorPresence(conversationId, true);
-        client.emit("history", await this.history(data.teamId, conversationId));
+        client.emit("history", await this.history(data.workspaceId, conversationId));
       } else {
         client.emit("history", { messages: [], hasMore: false });
       }
@@ -303,7 +303,7 @@ export class WebchatwidgetGateway
     @MessageBody() body: VisitorMessageBody,
   ): Promise<{ ok: boolean; conversationId?: string; error?: string }> {
     const data = client.data as WidgetSocketData | undefined;
-    if (!data?.teamId) return { ok: false, error: "not_authenticated" };
+    if (!data?.workspaceId) return { ok: false, error: "not_authenticated" };
     if (!body || typeof body !== "object" || typeof body.clientMsgId !== "string") {
       return { ok: false, error: "bad_message" };
     }
@@ -326,7 +326,7 @@ export class WebchatwidgetGateway
     // (e.g. `media/<other-team>/…`), have it persisted on their OWN conversation,
     // and then stream another tenant's private object back through
     // GET /api/widget/media/:id (whose ownership check validates the MESSAGE, not
-    // the key). Keys are minted as `media/{teamId}/{yyyy}/{mm}/…` by the R2 key
+    // the key). Keys are minted as `media/{workspaceId}/{yyyy}/{mm}/…` by the R2 key
     // builder, so requiring the handshake team's prefix binds the blob to the
     // team that uploaded it. Belt-and-braces: reject traversal segments too.
     if (hasMedia) {
@@ -336,13 +336,13 @@ export class WebchatwidgetGateway
       // paths hand to `fetch()`, so it gets the provider's own SSRF/open-redirect
       // gate rather than being trusted because the key passed.
       if (
-        !key.startsWith(`media/${data.teamId}/`) ||
+        !key.startsWith(`media/${data.workspaceId}/`) ||
         key.includes("..") ||
         typeof url !== "string" ||
         !blobStorage.isOwnUrl(url)
       ) {
         this.logger.warn(
-          `[webchatwidget] rejected foreign media key/url on team=${data.teamId} widget=${data.widgetId}`,
+          `[webchatwidget] rejected foreign media key/url on team=${data.workspaceId} widget=${data.widgetId}`,
         );
         return { ok: false, error: "bad_media" };
       }
@@ -355,13 +355,13 @@ export class WebchatwidgetGateway
     const isNewConversation = data.conversationId === null;
     if (isNewConversation && !newConversationBucket.consume(data.ip).ok) {
       this.logger.warn(
-        `widget new-conversation throttled ip=${data.ip} widget=${data.widgetId} team=${data.teamId}`,
+        `widget new-conversation throttled ip=${data.ip} widget=${data.widgetId} team=${data.workspaceId}`,
       );
       return { ok: false, error: "rate_limited" };
     }
 
     // Dedupe key is stable per (widget, visitor, clientMsgId) so a reconnect
-    // resend can't double-insert (the (teamId, channel, externalId) unique gate).
+    // resend can't double-insert (the (workspaceId, channel, externalId) unique gate).
     const evt: NormalizedInboundMessage = {
       kind: "message",
       externalId: `${data.externalContactId}:${body.clientMsgId}`,
@@ -392,7 +392,7 @@ export class WebchatwidgetGateway
     };
 
     try {
-      await ingestEvents(data.teamId, CHANNEL, [evt]);
+      await ingestEvents(data.workspaceId, CHANNEL, [evt]);
     } catch (err) {
       this.logger.error(`widget ingest failed: ${err instanceof Error ? err.message : err}`);
       return { ok: false, error: "ingest_failed" };
@@ -400,7 +400,7 @@ export class WebchatwidgetGateway
 
     // Resolve the (now-created) conversation, stamp its source widget on first
     // sight, join the room, and best-effort apply the pre-chat identity.
-    const conversationId = await this.findConversationId(data.teamId, data.externalContactId);
+    const conversationId = await this.findConversationId(data.workspaceId, data.externalContactId);
     if (!conversationId) return { ok: false, error: "no_conversation" };
     data.conversationId = conversationId;
     await client.join(widgetRoom(conversationId));
@@ -412,7 +412,7 @@ export class WebchatwidgetGateway
     // matches only while it's still null).
     await this.db.conversation
       .updateMany({
-        where: { id: conversationId, teamId: data.teamId, webchatWidgetId: null },
+        where: { id: conversationId, workspaceId: data.workspaceId, webchatWidgetId: null },
         data: { webchatWidgetId: data.widgetId },
       })
       .catch((err) => this.logger.error(`stamp widgetId failed: ${err}`));
@@ -423,16 +423,16 @@ export class WebchatwidgetGateway
     if (isNewConversation && body.startedNew === true) {
       await recordConversationEvent({
         conversationId,
-        teamId: data.teamId,
+        workspaceId: data.workspaceId,
         userId: null,
         kind: "visitor_started_conversation",
       });
     }
 
     if (body.preChat) {
-      const contactId = await this.contactIdFor(data.teamId, data.externalContactId);
+      const contactId = await this.contactIdFor(data.workspaceId, data.externalContactId);
       if (contactId) {
-        await applyWebchatPreChatIdentity(data.teamId, CHANNEL, contactId, body.preChat).catch(
+        await applyWebchatPreChatIdentity(data.workspaceId, CHANNEL, contactId, body.preChat).catch(
           (err) => this.logger.error(`prechat identity failed: ${err}`),
         );
       }
@@ -448,7 +448,7 @@ export class WebchatwidgetGateway
     // clientMsgId match retires the optimistic bubble).
     if (isNewConversation) {
       try {
-        client.emit("history", await this.history(data.teamId, conversationId));
+        client.emit("history", await this.history(data.workspaceId, conversationId));
       } catch (err) {
         this.logger.error(`widget first-message history replay failed: ${err}`);
       }
@@ -512,7 +512,7 @@ export class WebchatwidgetGateway
   async onReceived(@ConnectedSocket() client: Socket): Promise<void> {
     const data = client.data as WidgetSocketData | undefined;
     if (!data?.conversationId || !this.allowCheapFrame(data)) return;
-    await this.markOutbound(data.teamId, data.conversationId, "delivered");
+    await this.markOutbound(data.workspaceId, data.conversationId, "delivered");
   }
 
   // The panel is open + tab visible → mark outbound `read` (agent sees "Seen").
@@ -520,7 +520,7 @@ export class WebchatwidgetGateway
   async onRead(@ConnectedSocket() client: Socket): Promise<void> {
     const data = client.data as WidgetSocketData | undefined;
     if (!data?.conversationId || !this.allowCheapFrame(data)) return;
-    await this.markOutbound(data.teamId, data.conversationId, "read");
+    await this.markOutbound(data.workspaceId, data.conversationId, "read");
   }
 
   /**
@@ -551,13 +551,13 @@ export class WebchatwidgetGateway
    * transition forward-only + idempotent (a re-fire matches 0 rows).
    */
   private async markOutbound(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     status: "delivered" | "read",
   ): Promise<void> {
     const from: MessageStatus[] = status === "read" ? ["sent", "delivered"] : ["sent"];
     const msgs = await this.db.message.findMany({
-      where: { teamId, conversationId, channel: CHANNEL, direction: "out", status: { in: from } },
+      where: { workspaceId, conversationId, channel: CHANNEL, direction: "out", status: { in: from } },
       select: { id: true },
       // Bounded: each row below costs a publish() (outbox write + full subscriber
       // chain), so a visitor returning to a long-unread thread could otherwise turn
@@ -580,7 +580,7 @@ export class WebchatwidgetGateway
     for (const m of msgs) {
       await publish({
         type: "message.status_changed",
-        teamId,
+        workspaceId,
         channel: CHANNEL,
         conversationId,
         contactId: conv.contactId,
@@ -592,24 +592,24 @@ export class WebchatwidgetGateway
   }
 
   private async findConversationId(
-    teamId: string,
+    workspaceId: string,
     externalContactId: string,
   ): Promise<string | null> {
     const contact = await this.db.contact.findFirst({
-      where: { teamId, identityChannel: CHANNEL, externalContactId, deletedAt: null },
+      where: { workspaceId, identityChannel: CHANNEL, externalContactId, deletedAt: null },
       select: { id: true },
     });
     if (!contact) return null;
     const conv = await this.db.conversation.findFirst({
-      where: { teamId, contactId: contact.id },
+      where: { workspaceId, contactId: contact.id },
       select: { id: true },
     });
     return conv?.id ?? null;
   }
 
-  private async contactIdFor(teamId: string, externalContactId: string): Promise<string | null> {
+  private async contactIdFor(workspaceId: string, externalContactId: string): Promise<string | null> {
     const contact = await this.db.contact.findFirst({
-      where: { teamId, identityChannel: CHANNEL, externalContactId, deletedAt: null },
+      where: { workspaceId, identityChannel: CHANNEL, externalContactId, deletedAt: null },
       select: { id: true },
     });
     return contact?.id ?? null;
@@ -621,7 +621,7 @@ export class WebchatwidgetGateway
    * keep offering "load earlier". Fetches LIMIT+1 to detect more without a count.
    */
   private async history(
-    teamId: string,
+    workspaceId: string,
     conversationId: string,
     before?: { ts: Date; id: string },
   ): Promise<{ messages: WidgetMessageFrame[]; hasMore: boolean }> {
@@ -629,7 +629,7 @@ export class WebchatwidgetGateway
       omit: { rawPayload: true },
       include: { replyTo: REPLY_TO_INCLUDE },
       where: {
-        teamId,
+        workspaceId,
         conversationId,
         ...(before
           ? { OR: [{ timestamp: { lt: before.ts } }, { timestamp: before.ts, id: { lt: before.id } }] }
@@ -697,6 +697,6 @@ export class WebchatwidgetGateway
     // "Loading…" for the rest of the session. Fail closed with an empty page.
     const ts = new Date(cur.ts);
     if (Number.isNaN(ts.getTime())) return { messages: [], hasMore: false };
-    return this.history(data.teamId, data.conversationId, { ts, id: cur.id });
+    return this.history(data.workspaceId, data.conversationId, { ts, id: cur.id });
   }
 }

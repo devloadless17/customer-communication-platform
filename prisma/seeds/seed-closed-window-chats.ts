@@ -8,7 +8,7 @@
  *   npm run db:seed:closed -- <team-id>     # seed into a specific team by id
  *   npm run db:seed:closed -- "Acme Inc"    # …or by exact / case-insensitive name
  *
- * Idempotent: every row uses team-scoped IDs (`dev_closed_<teamId>_*`) so
+ * Idempotent: every row uses team-scoped IDs (`dev_closed_<workspaceId>_*`) so
  * running it for two different teams creates two separate sets, and re-running
  * for the same team just refreshes timestamps.
  */
@@ -89,7 +89,7 @@ const FAKE_CHATS: FakeChat[] = [
  * caused a footgun where data landed in the wrong tenant.
  */
 async function resolveTeam(arg: string | undefined) {
-  const teams = await db.team.findMany({
+  const teams = await db.workspace.findMany({
     select: { id: true, name: true },
     orderBy: { createdAt: "asc" },
   });
@@ -149,7 +149,7 @@ async function main() {
       where: { id: contactId },
       create: {
         id: contactId,
-        teamId: team.id,
+        workspaceId: team.id,
         identityChannel: "whatsapp",
         phoneNumber: chat.phone,
         name: chat.name,
@@ -165,7 +165,7 @@ async function main() {
       where: { id: conversationId },
       create: {
         id: conversationId,
-        teamId: team.id,
+        workspaceId: team.id,
         contactId,
         status: "open",
         unreadCount: 0,
@@ -185,14 +185,14 @@ async function main() {
       const externalId = `${conversationId}_msg_${String(i).padStart(3, "0")}`;
       await db.message.upsert({
         where: {
-          teamId_channel_externalId: {
-            teamId: team.id,
+          workspaceId_channel_externalId: {
+            workspaceId: team.id,
             channel: "whatsapp",
             externalId,
           },
         },
         create: {
-          teamId: team.id,
+          workspaceId: team.id,
           conversationId,
           externalId,
           senderUserId: null,

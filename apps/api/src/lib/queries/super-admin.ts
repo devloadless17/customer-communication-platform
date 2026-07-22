@@ -3,8 +3,9 @@ import type {
   PlatformAnalytics,
   SuperAdminTeamDetail,
   SuperAdminTeamRow,
+  SuperAdminOrgRow,
 } from "@ccp/shared/dtos";
-import type { TeamStatus } from "@ccp/shared/types";
+import type { OrgStatus } from "@ccp/shared/types";
 
 // superAdmin: cross-team browsing. These queries are the ONLY ones that
 // legitimately ignore the team scope — all callers must be gated through
@@ -85,7 +86,7 @@ export async function listAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> 
 }
 
 async function loadAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> {
-  const teams = await db.team.findMany({
+  const teams = await db.workspace.findMany({
     // createdAt-asc here; the platform page re-groups status-first (pending
     // queue on top) using this as the stable within-group order.
     orderBy: [{ createdAt: "asc" }],
@@ -93,17 +94,30 @@ async function loadAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> {
       id: true,
       name: true,
       createdAt: true,
-      status: true,
-      statusReason: true,
-      statusUpdatedAt: true,
+      organizationId: true,
+      // Seat cap is per-WORKSPACE; the workspace cap is per-ORGANISATION.
       maxMembers: true,
+      organization: {
+        select: {
+          status: true,
+          statusReason: true,
+          statusUpdatedAt: true,
+          maxWorkspaces: true,
+          // Sibling count, so the platform page can render "N / max workspaces"
+          // next to the cap it is editing.
+          _count: { select: { workspaces: true } },
+        },
+      },
       channelConnections: {
         where: { channel: "whatsapp" },
         select: { config: true },
       },
       _count: {
         select: {
-          users: true,
+          // `Workspace.users` became `members` in the workspace rename. Prisma
+          // select/_count fields are NOT typechecked, so this compiled clean and
+          // only failed at request time with a 400 invalid_request.
+          members: true,
           contacts: true,
           conversations: true,
           messages: true,
@@ -121,13 +135,15 @@ async function loadAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> {
     id: t.id,
     name: t.name,
     createdAt: t.createdAt.toISOString(),
-    status: t.status as TeamStatus,
-    statusReason: t.statusReason,
-    statusUpdatedAt: t.statusUpdatedAt?.toISOString() ?? null,
+    organizationId: t.organizationId,
+    status: t.organization.status as OrgStatus,
+    statusReason: t.organization.statusReason,
+    statusUpdatedAt: t.organization.statusUpdatedAt?.toISOString() ?? null,
     whatsappConnected: Boolean(cfg.phoneNumberId),
     whatsappDisplayNumber: cfg.displayPhoneNumber ?? null,
-    userCount: t._count.users,
+    userCount: t._count.members,
     maxMembers: t.maxMembers,
+    maxWorkspaces: t.organization.maxWorkspaces,
     contactCount: t._count.contacts,
     conversationCount: t._count.conversations,
     messageCount: t._count.messages,
@@ -136,26 +152,114 @@ async function loadAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> {
   });
 }
 
+/**
+ * Every ORGANISATION on the platform, each with the workspaces it owns.
+ *
+ * Org-first, because that is the unit the platform administers: approval
+ * status, the workspace cap and the commercial relationship all sit on the
+ * organisation. The previous version listed WORKSPACES under an
+ * "Organizations" heading — it showed workspace ids and made one customer with
+ * two workspaces look like two customers.
+ *
+ * Member counts are DISTINCT PEOPLE across the org's workspaces: someone who
+ * belongs to two workspaces is one human being, and summing per-workspace
+ * counts would double-count them.
+ */
+export async function listAllOrgsForSuperAdmin(): Promise<SuperAdminOrgRow[]> {
+  return memoAggregate("org-roster", () => loadAllOrgsForSuperAdmin());
+}
+
+async function loadAllOrgsForSuperAdmin(): Promise<SuperAdminOrgRow[]> {
+  const [orgs, workspaces] = await Promise.all([
+    db.organization.findMany({
+      orderBy: [{ createdAt: "asc" }],
+      select: {
+        id: true,
+        name: true,
+        createdAt: true,
+        status: true,
+        statusReason: true,
+        statusUpdatedAt: true,
+        maxWorkspaces: true,
+      },
+    }),
+    loadAllTeamsForSuperAdmin(),
+  ]);
+
+  // Distinct people per org, EXCLUDING platform operators and deactivated
+  // accounts. Deliberately a groupBy rather than `_count: { users: true }`:
+  // `_count` cannot take a filter, so it would silently include super admins
+  // and disabled users — inflating "how big is this customer" with people who
+  // hold no seat. One grouped query, not one per org.
+  const seatRows = await db.user.groupBy({
+    by: ["organizationId"],
+    where: { isSuperAdmin: false, deactivatedAt: null },
+    _count: { _all: true },
+  });
+  const seatsByOrg = new Map(
+    seatRows.map((r) => [r.organizationId, r._count._all]),
+  );
+
+  const byOrg = new Map<string, SuperAdminTeamRow[]>();
+  for (const ws of workspaces) {
+    const list = byOrg.get(ws.organizationId) ?? [];
+    list.push(ws);
+    byOrg.set(ws.organizationId, list);
+  }
+
+  return orgs.map((o) => {
+    const own = byOrg.get(o.id) ?? [];
+    const sum = (pick: (w: SuperAdminTeamRow) => number) =>
+      own.reduce((acc, w) => acc + pick(w), 0);
+    return {
+      id: o.id,
+      name: o.name,
+      createdAt: o.createdAt.toISOString(),
+      status: o.status as OrgStatus,
+      statusReason: o.statusReason,
+      statusUpdatedAt: o.statusUpdatedAt?.toISOString() ?? null,
+      maxWorkspaces: o.maxWorkspaces,
+      memberCount: seatsByOrg.get(o.id) ?? 0,
+      contactCount: sum((w) => w.contactCount),
+      conversationCount: sum((w) => w.conversationCount),
+      messageCount: sum((w) => w.messageCount),
+      workspaces: own,
+    };
+  });
+}
+
 export async function getTeamDetailForSuperAdmin(
-  teamId: string,
+  workspaceId: string,
 ): Promise<SuperAdminTeamDetail | null> {
-  const team = await db.team.findUnique({
-    where: { id: teamId },
+  const team = await db.workspace.findUnique({
+    where: { id: workspaceId },
     select: {
       id: true,
       name: true,
       createdAt: true,
-      status: true,
-      statusReason: true,
-      statusUpdatedAt: true,
+      organizationId: true,
+      // Seat cap is per-WORKSPACE; the workspace cap is per-ORGANISATION.
       maxMembers: true,
+      organization: {
+        select: {
+          status: true,
+          statusReason: true,
+          statusUpdatedAt: true,
+          maxWorkspaces: true,
+          // Sibling count so the page can show "N / max workspaces".
+          _count: { select: { workspaces: true } },
+        },
+      },
       channelConnections: {
         where: { channel: "whatsapp" },
         select: { config: true },
       },
       _count: {
         select: {
-          users: true,
+          // `Workspace.users` became `members` in the workspace rename. Prisma
+          // select/_count fields are NOT typechecked, so this compiled clean and
+          // only failed at request time with a 400 invalid_request.
+          members: true,
           contacts: true,
           conversations: true,
           messages: true,
@@ -175,13 +279,14 @@ export async function getTeamDetailForSuperAdmin(
   // never at message bodies or contact names. Customer chats stay private
   // to each team.
   const members = await db.user.findMany({
-    where: { teamId },
-    orderBy: [{ role: "asc" }, { name: "asc" }],
+    where: { workspaceMemberships: { some: { workspaceId } } },
+    orderBy: [{ name: "asc" }],
     select: {
       id: true,
       name: true,
       email: true,
-      role: true,
+      isSuperAdmin: true,
+      workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 },
       deactivatedAt: true,
       createdAt: true,
     },
@@ -192,13 +297,16 @@ export async function getTeamDetailForSuperAdmin(
       id: team.id,
       name: team.name,
       createdAt: team.createdAt.toISOString(),
-      status: team.status as TeamStatus,
-      statusReason: team.statusReason,
-      statusUpdatedAt: team.statusUpdatedAt?.toISOString() ?? null,
+      organizationId: team.organizationId,
+      status: team.organization.status as OrgStatus,
+      statusReason: team.organization.statusReason,
+      statusUpdatedAt: team.organization.statusUpdatedAt?.toISOString() ?? null,
       maxMembers: team.maxMembers,
+      maxWorkspaces: team.organization.maxWorkspaces,
+      workspaceCount: team.organization._count.workspaces,
       whatsappConnected: Boolean(waCfg.phoneNumberId),
       whatsappDisplayNumber: waCfg.displayPhoneNumber ?? null,
-      userCount: team._count.users,
+      userCount: team._count.members,
       contactCount: team._count.contacts,
       conversationCount: team._count.conversations,
       messageCount: team._count.messages,
@@ -208,7 +316,8 @@ export async function getTeamDetailForSuperAdmin(
       id: m.id,
       name: m.name,
       email: m.email,
-      role: m.role,
+      role: m.workspaceMemberships[0]?.role ?? "agent",
+      isSuperAdmin: m.isSuperAdmin,
       deactivatedAt: m.deactivatedAt?.toISOString() ?? null,
       createdAt: m.createdAt.toISOString(),
     })),
@@ -229,14 +338,14 @@ async function loadPlatformAnalytics(): Promise<PlatformAnalytics> {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const [byStatus, users, contacts, conversations, messages, broadcasts, newOrgsLast30d, pendingOrgs] =
     await Promise.all([
-      db.team.groupBy({ by: ["status"], _count: { _all: true } }),
+      db.organization.groupBy({ by: ["status"], _count: { _all: true } }),
       db.user.count(),
       db.contact.count(),
       db.conversation.count(),
       db.message.count(),
       db.broadcast.count(),
-      db.team.count({ where: { createdAt: { gte: since } } }),
-      db.team.findMany({
+      db.organization.count({ where: { createdAt: { gte: since } } }),
+      db.organization.findMany({
         where: { status: "pending" },
         orderBy: { createdAt: "desc" },
         take: 8,
@@ -244,7 +353,7 @@ async function loadPlatformAnalytics(): Promise<PlatformAnalytics> {
       }),
     ]);
 
-  const countFor = (s: TeamStatus) =>
+  const countFor = (s: OrgStatus) =>
     byStatus.find((b) => b.status === s)?._count._all ?? 0;
   const pending = countFor("pending");
   const active = countFor("active");

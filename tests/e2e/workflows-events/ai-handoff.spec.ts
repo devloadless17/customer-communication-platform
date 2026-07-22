@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 
 import { test, expect, type APIRequestContext } from "@playwright/test";
 
-import { db, superadminTeam, pollUntil } from "../_helpers/db";
+import { createTestUser, db, superadminTeam, pollUntil } from "../_helpers/db";
 
 /**
  * AI customer-handoff policy — edge cases.
@@ -19,7 +19,7 @@ import { db, superadminTeam, pollUntil } from "../_helpers/db";
  */
 
 // ── fixtures shared across the describe ─────────────────────────────────────
-let teamId: string;
+let workspaceId: string;
 let apiToken: string;
 let agentA: string;
 let agentB: string;
@@ -37,10 +37,7 @@ function newApiKey() {
 
 async function makeAgent(label: string): Promise<string> {
   const email = `e2e-handoff-${label}-${Date.now()}@loadless.test`;
-  const u = await db().user.create({
-    data: { teamId, role: "agent", name: `Handoff ${label}`, email, availabilityStatus: "available" },
-    select: { id: true },
-  });
+  const u = await createTestUser({ workspaceId: workspaceId, role: "agent", name: `Handoff ${label}`, email, availabilityStatus: "available" });
   createdUserIds.push(u.id);
   return u.id;
 }
@@ -57,13 +54,13 @@ async function makeConversation(opts: {
   convoSeq += 1;
   const phone = `+1555${Date.now().toString().slice(-7)}${String(convoSeq).padStart(2, "0")}`;
   const contact = await db().contact.create({
-    data: { teamId, identityChannel: "whatsapp", phoneNumber: phone, name: `Handoff Contact ${convoSeq}` },
+    data: { workspaceId, identityChannel: "whatsapp", phoneNumber: phone, name: `Handoff Contact ${convoSeq}` },
     select: { id: true },
   });
   createdContactIds.push(contact.id);
   const convo = await db().conversation.create({
     data: {
-      teamId,
+      workspaceId,
       contactId: contact.id,
       channel: "whatsapp",
       status: opts.status ?? "pending",
@@ -79,8 +76,8 @@ async function makeConversation(opts: {
 }
 
 async function setHandoff(action: "none" | "unassign" | "assign_fixed" | "round_robin", assigneeId?: string | null) {
-  await db().team.update({
-    where: { id: teamId },
+  await db().workspace.update({
+    where: { id: workspaceId },
     data: {
       aiHandoffAction: action,
       ...(assigneeId !== undefined ? { aiHandoffAssigneeId: assigneeId } : {}),
@@ -111,11 +108,11 @@ async function readConvo(id: string) {
 test.describe("AI customer-handoff policy", () => {
   test.beforeAll(async () => {
     const sa = await superadminTeam();
-    teamId = sa.teamId;
+    workspaceId = sa.workspaceId;
     const key = newApiKey();
-    const row = await db().teamApiKey.create({
+    const row = await db().workspaceApiKey.create({
       data: {
-        teamId,
+        workspaceId,
         name: `e2e-handoff-${Date.now()}`,
         tokenHash: key.tokenHash,
         tokenPrefix: key.tokenPrefix,
@@ -132,11 +129,11 @@ test.describe("AI customer-handoff policy", () => {
 
   test.afterAll(async () => {
     // Reset team AI settings + clean up the rows we created.
-    await db().team.update({
-      where: { id: teamId },
+    await db().workspace.update({
+      where: { id: workspaceId },
       data: { aiHandoffAction: "none", aiHandoffAssigneeId: null, aiRoundRobinCursorUserId: null },
     });
-    await db().teamApiKey.deleteMany({ where: { id: apiKeyId } });
+    await db().workspaceApiKey.deleteMany({ where: { id: apiKeyId } });
     // Remove the conversations + contacts + agents this spec created so the
     // team is restored to its pre-test row set (children before parents).
     await db().conversation.deleteMany({ where: { id: { in: createdConvoIds } } });
@@ -204,7 +201,7 @@ test.describe("AI customer-handoff policy", () => {
   test("action=round_robin → rotates across active agents", async ({ request }) => {
     await setHandoff("round_robin", null);
     // Reset the cursor so the rotation is deterministic within this test.
-    await db().team.update({ where: { id: teamId }, data: { aiRoundRobinCursorUserId: null } });
+    await db().workspace.update({ where: { id: workspaceId }, data: { aiRoundRobinCursorUserId: null } });
 
     const id1 = await makeConversation({ aiEnabled: true });
     const r1 = await aiToggle(request, id1, { aiEnabled: false, silent: true });
@@ -224,7 +221,7 @@ test.describe("AI customer-handoff policy", () => {
 
     // Both picks are real active members…
     const active = await db().user.findMany({
-      where: { teamId, deactivatedAt: null },
+      where: { workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
       select: { id: true },
     });
     const activeIds = active.map((u) => u.id);

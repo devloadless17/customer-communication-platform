@@ -9,7 +9,7 @@
  * SAFE / self-cleaning: seeds one DM under the admin team, removes it after.
  */
 import { test, expect } from "@playwright/test";
-import { db, appAdmin } from "../_helpers/db";
+import { createTestUser, db, appAdmin } from "../_helpers/db";
 
 test.describe.configure({ mode: "serial" });
 
@@ -20,29 +20,21 @@ const PREFIX = "e2e_tcui_";
  * stored (and rendered, and cleaned up) as dashes.
  */
 const CHAN_PREFIX = "e2e-tcui-";
-let teamId: string;
+let workspaceId: string;
 let peerUserId: string;
 
 test.beforeAll(async () => {
-  teamId = (await appAdmin()).teamId;
-  const peer = await db().user.create({
-    data: {
-      teamId,
-      email: `${PREFIX}peer@example.test`,
-      name: `${PREFIX}Peer Person`,
-      role: "agent",
-    },
-    select: { id: true },
-  });
+  workspaceId = (await appAdmin()).workspaceId;
+  const peer = await createTestUser({ workspaceId: workspaceId, role: "agent", email: `${PREFIX}peer@example.test`, name: `${PREFIX}Peer Person` });
   peerUserId = peer.id;
 });
 
 test.afterAll(async () => {
-  await db().teamChannel.deleteMany({ where: { teamId, kind: "dm" } });
+  await db().teamChannel.deleteMany({ where: { workspaceId, kind: "dm" } });
   await db().teamChannel.deleteMany({
-    where: { teamId, name: { startsWith: CHAN_PREFIX } },
+    where: { workspaceId, name: { startsWith: CHAN_PREFIX } },
   });
-  await db().user.deleteMany({ where: { teamId, email: { startsWith: PREFIX } } });
+  await db().user.deleteMany({ where: { workspaceMemberships: { some: { workspaceId } }, email: { startsWith: PREFIX } } });
 });
 
 test("the sidebar renders a Direct messages section and a Browse entry point", async ({

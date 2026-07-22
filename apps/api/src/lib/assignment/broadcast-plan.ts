@@ -156,11 +156,11 @@ export interface BroadcastAssignmentPlan {
  */
 export async function buildBroadcastAssignmentPlan(args: {
   db: Db;
-  teamId: string;
+  workspaceId: string;
   total: number;
   config: BroadcastAssignmentConfig;
 }): Promise<BroadcastAssignmentPlan> {
-  const { db, teamId, total, config } = args;
+  const { db, workspaceId, total, config } = args;
   const empty: BroadcastAssignmentPlan = {
     perRecipient: new Array<string | null>(Math.max(0, total)).fill(null),
     totals: [],
@@ -170,7 +170,7 @@ export async function buildBroadcastAssignmentPlan(args: {
   const activeIds = new Set(
     (
       await db.user.findMany({
-        where: { teamId, deactivatedAt: null },
+        where: { workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null },
         select: { id: true },
       })
     ).map((u) => u.id),
@@ -195,7 +195,7 @@ export async function buildBroadcastAssignmentPlan(args: {
   if (config.mode === "policy") {
     const pool = await buildPolicyPool({
       db,
-      teamId,
+      workspaceId,
       policyId: config.assignmentPolicyId,
     });
     if (pool.length === 0) return empty;
@@ -237,7 +237,7 @@ export async function buildBroadcastAssignmentPlan(args: {
   // whose split under-covers the audience.
   const leftover = config.assignmentLeftover as BroadcastAssignmentLeftover;
   if (remaining > 0 && leftover === "policy") {
-    const pool = await buildPolicyPool({ db, teamId, policyId: config.assignmentPolicyId });
+    const pool = await buildPolicyPool({ db, workspaceId, policyId: config.assignmentPolicyId });
     if (pool.length > 0) {
       const weights = pool.map((m) => (m.weighted ? Math.max(0, m.weight) : 1));
       const extra = apportion(remaining, weights).map((count, i) => ({

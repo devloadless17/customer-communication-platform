@@ -34,6 +34,13 @@ export const ListConversationsQuerySchema = z.object({
   status: z.enum(["open", "pending", "closed"]).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   cursor: z.string().optional(),
+  /**
+   * A saved inbox view (`GET /v1/inbox-views`) to filter by. Its stored
+   * criteria are ANDed with `status` / `phone` rather than replacing them, so
+   * the two compose predictably; a key only sees SHARED views, and an unknown
+   * id is a 404.
+   */
+  viewId: z.string().min(1).optional(),
 });
 export type ListConversationsQueryInput = z.infer<typeof ListConversationsQuerySchema>;
 
@@ -325,7 +332,7 @@ export type ExternalCreateContactInput = z.infer<typeof ExternalCreateContactSch
 // Default Zod `.strip()` — unknown keys silently dropped. The service layer
 // also destructures to a known allowlist (external-v1.service.ts:556-566),
 // so even if someone refactored to `data: input` directly, the schema would
-// still strip `teamId`/FK columns at the door. Don't add `.passthrough()`.
+// still strip `workspaceId`/FK columns at the door. Don't add `.passthrough()`.
 export const ExternalUpdateContactSchema = z.object({
     name: z.string().trim().min(1).max(MAX_TEXT).optional(),
     firstName: z
@@ -662,6 +669,8 @@ export const ExternalListFlagsQuerySchema = z.object({
   conversationId: z.string().min(1).optional(),
   cursor: z.string().min(1).optional(),
   take: z.coerce.number().int().min(1).max(50).optional(),
+  /** Free-text over the message body/caption, the contact, and the flag notes. */
+  q: z.string().trim().min(1).max(200).optional(),
 });
 export type ExternalListFlagsQueryInput = z.infer<typeof ExternalListFlagsQuerySchema>;
 

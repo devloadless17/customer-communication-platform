@@ -1798,3 +1798,189 @@ export function TriggerWorkflowEditor({
     </Field>
   );
 }
+
+
+// Tickets --------------------------------------------------------------------
+//
+// All four ticket steps act on the conversation's ACTIVE ticket. None offers a
+// ticket picker, deliberately: a workflow runs in the context of one
+// conversation, and naming an arbitrary ticket would let it reach into work on
+// a different thread.
+
+export function CreateTicketEditor({
+  config,
+  onChange,
+}: {
+  config: { subject?: string; priority?: string; onlyIfNoActiveTicket?: boolean };
+  onChange: (c: Record<string, unknown>) => void;
+}) {
+  return (
+    <>
+      <Field label="Subject" hint="Optional. Leave empty to fall back to the contact's name.">
+        <Input
+          value={config.subject ?? ""}
+          maxLength={200}
+          placeholder="e.g. Refund request"
+          onChange={(e) => onChange({ ...config, subject: e.target.value })}
+        />
+      </Field>
+      <Field label="Priority">
+        <Select
+          value={config.priority ?? "normal"}
+          onChange={(e) => onChange({ ...config, priority: e.target.value })}
+        >
+          <option value="low">Low</option>
+          <option value="normal">Normal</option>
+          <option value="high">High</option>
+          <option value="urgent">Urgent</option>
+        </Select>
+      </Field>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={config.onlyIfNoActiveTicket !== false}
+          onChange={(e) => onChange({ ...config, onlyIfNoActiveTicket: e.target.checked })}
+        />
+        <span>
+          Skip if the conversation already has an open ticket
+          <span className="block text-xs text-muted-foreground">
+            On by default. Without it, a workflow that runs on every inbound message
+            mints a new ticket each time the customer writes.
+          </span>
+        </span>
+      </label>
+    </>
+  );
+}
+
+export function SetTicketStatusEditor({
+  config,
+  onChange,
+}: {
+  config: { status?: string; resolutionCode?: string };
+  onChange: (c: Record<string, unknown>) => void;
+}) {
+  const status = config.status ?? "solved";
+  return (
+    <>
+      <Field
+        label="Target status"
+        hint="Applies to the conversation's active ticket. If there is none, the step is skipped and the workflow continues."
+      >
+        <Select value={status} onChange={(e) => onChange({ ...config, status: e.target.value })}>
+          <option value="new">New</option>
+          <option value="open">Open</option>
+          <option value="pending">Waiting on customer</option>
+          <option value="on_hold">On hold</option>
+          <option value="solved">Solved</option>
+          <option value="closed">Closed</option>
+        </Select>
+      </Field>
+      {(status === "solved" || status === "closed") && (
+        <Field label="Resolution code" hint="Optional. A short, reportable outcome — “refunded”, “duplicate”.">
+          <Input
+            value={config.resolutionCode ?? ""}
+            maxLength={80}
+            placeholder="e.g. auto_resolved"
+            onChange={(e) => onChange({ ...config, resolutionCode: e.target.value })}
+          />
+        </Field>
+      )}
+    </>
+  );
+}
+
+export function SetTicketPriorityEditor({
+  config,
+  onChange,
+}: {
+  config: { priority?: string };
+  onChange: (c: Record<string, unknown>) => void;
+}) {
+  return (
+    <Field
+      label="Priority"
+      hint="Changing priority restarts the SLA clock from now under the new priority's promise — that is what escalating means."
+    >
+      <Select
+        value={config.priority ?? "high"}
+        onChange={(e) => onChange({ priority: e.target.value })}
+      >
+        <option value="low">Low</option>
+        <option value="normal">Normal</option>
+        <option value="high">High</option>
+        <option value="urgent">Urgent</option>
+      </Select>
+    </Field>
+  );
+}
+
+export function AssignTicketEditor({
+  config,
+  onChange,
+  users,
+}: {
+  config: { mode?: "user" | "unassign"; userId?: string; overwrite?: boolean };
+  onChange: (c: Record<string, unknown>) => void;
+  users: BuilderCatalogs["users"];
+}) {
+  return (
+    <Field label="Mode">
+      <div className="flex flex-col gap-2">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="radio"
+            name="assign-ticket-mode"
+            checked={config.mode === "user"}
+            onChange={() =>
+              onChange({ mode: "user", userId: config.userId ?? users[0]?.id ?? "" })
+            }
+          />
+          Assign to a teammate
+        </label>
+        {config.mode === "user" && (
+          <>
+            <Select
+              value={config.userId ?? ""}
+              onChange={(e) => onChange({ ...config, mode: "user", userId: e.target.value })}
+              className="h-8 px-2 pr-7"
+              wrapperClassName="ml-6"
+            >
+              <option value="">Select a user…</option>
+              {users.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.name}
+                </option>
+              ))}
+            </Select>
+            <label className="ml-6 flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={config.overwrite === true}
+                onChange={(e) => onChange({ ...config, overwrite: e.target.checked })}
+              />
+              <span>
+                Reassign even if someone already owns it
+                <span className="block text-xs text-muted-foreground">
+                  Off by default: automation fills an empty slot, it never takes work
+                  away from the person doing it.
+                </span>
+              </span>
+            </label>
+          </>
+        )}
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="radio"
+            name="assign-ticket-mode"
+            checked={config.mode === "unassign"}
+            onChange={() => onChange({ mode: "unassign" })}
+          />
+          Unassign
+        </label>
+      </div>
+    </Field>
+  );
+}

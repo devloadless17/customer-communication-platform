@@ -41,7 +41,7 @@ export class InboxConversationController {
     @Param("id") id: string,
   ) {
     const page = await this.conversations.getInboxConversation(
-      session.teamId,
+      session.workspaceId,
       id,
       session,
     );

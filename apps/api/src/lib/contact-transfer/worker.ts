@@ -130,7 +130,7 @@ async function handleTransfer(jobId: string): Promise<void> {
   try {
     if (row.kind === "export") {
       const result = await runContactExport({
-        teamId: row.teamId,
+        workspaceId: row.workspaceId,
         jobId,
         format: row.format,
         scope: options.scopeIds ? { ids: options.scopeIds } : { filters: options.filters ?? {} },
@@ -154,7 +154,7 @@ async function handleTransfer(jobId: string): Promise<void> {
     } else {
       if (!row.sourceKey) throw new ImportRejected("no_source", "The uploaded file is missing.");
       const result = await runContactImport({
-        teamId: row.teamId,
+        workspaceId: row.workspaceId,
         userId: row.createdByUserId,
         jobId,
         format: row.format,
@@ -219,7 +219,7 @@ async function handleTransfer(jobId: string): Promise<void> {
       if (result.created + result.updated + result.revived > 0) {
         await publish({
           type: "contact.bulk_updated",
-          teamId: row.teamId,
+          workspaceId: row.workspaceId,
           // Bounded — empty above the cap. The inbox's conversation-list
           // patcher uses these to refresh contact names in place; see
           // ImportResult.touchedIds.
@@ -270,7 +270,7 @@ async function emitProgress(jobId: string): Promise<void> {
   if (!row || !row.createdByUserId) return;
   await publish({
     type: "contact.transfer_updated",
-    teamId: row.teamId,
+    workspaceId: row.workspaceId,
     userId: row.createdByUserId,
     job: {
       id: row.id,

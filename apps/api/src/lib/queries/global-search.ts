@@ -61,7 +61,7 @@ function snippet(text: string): string {
  * null when the contact has never been chatted to.
  */
 export async function searchContacts(
-  teamId: string,
+  workspaceId: string,
   opts: {
     query: string;
     take?: number;
@@ -105,7 +105,7 @@ export async function searchContacts(
       // paid for once — see docs/identity.md).
       where: from
         ? {
-            teamId,
+            workspaceId,
             deletedAt: null,
             AND: [
               directoryContactWhere,
@@ -120,7 +120,7 @@ export async function searchContacts(
             ],
           }
         : {
-            teamId,
+            workspaceId,
             deletedAt: null,
             AND: [directoryContactWhere, visibilityClause, { OR: matchOr }],
           },
@@ -160,7 +160,7 @@ export async function searchContacts(
     const ids = [...new Set(rows.map((r) => r.customerId).filter((v): v is string => !!v))];
     if (ids.length === 0) return byCustomer;
     const newest = await db.contact.findMany({
-      where: { teamId, deletedAt: null, customerId: { in: ids }, OR: matchOr },
+      where: { workspaceId, deletedAt: null, customerId: { in: ids }, OR: matchOr },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       distinct: ["customerId"],
       select: { customerId: true, id: true },
@@ -233,7 +233,7 @@ export async function searchContacts(
   const customerIds = [
     ...new Set(pageReps.map((c) => c.customerId).filter((v): v is string => !!v)),
   ];
-  const siblingsByCustomer = await siblingChannelsByCustomer(teamId, customerIds, {
+  const siblingsByCustomer = await siblingChannelsByCustomer(workspaceId, customerIds, {
     withConversation: true,
   });
 
@@ -292,7 +292,7 @@ export async function searchContacts(
  * (search.ts) ORs both. The caption is always copied into `body` at every
  * write site (inbound ingest, outbound media send, forward — verified), so a
  * caption-only match is impossible and the arm is provably redundant. Dropping
- * it lets Postgres BitmapAnd the `teamId` filter with Message_body_trgm_idx;
+ * it lets Postgres BitmapAnd the `workspaceId` filter with Message_body_trgm_idx;
  * an OR over un-indexed `mediaCaption` would force a BitmapOr that needs an
  * index on every arm, defeating the trgm GIN and degrading to a team-wide
  * seq-scan. (The in-thread search keeps the OR because that query is already
@@ -300,7 +300,7 @@ export async function searchContacts(
  * never relies on a trgm index there.)
  */
 export async function searchAllMessages(
-  teamId: string,
+  workspaceId: string,
   opts: {
     query: string;
     take?: number;
@@ -331,7 +331,7 @@ export async function searchAllMessages(
   const rows = await db.message.findMany({
     where: cursor
       ? {
-          teamId,
+          workspaceId,
           ...matchBody,
           AND: [
             {
@@ -342,7 +342,7 @@ export async function searchAllMessages(
             },
           ],
         }
-      : { teamId, ...matchBody },
+      : { workspaceId, ...matchBody },
     orderBy: [{ timestamp: "desc" }, { id: "desc" }],
     take: take + 1,
     select: {
@@ -392,11 +392,11 @@ export async function searchAllMessages(
 /**
  * Internal notes whose body matches `query`, across every conversation in the
  * team, newest-first. Joins the conversation's contact + the note author.
- * Rides InternalNote_body_trgm_idx. The note's own `teamId` denorm scopes the
+ * Rides InternalNote_body_trgm_idx. The note's own `workspaceId` denorm scopes the
  * query directly (no conversation join needed for the WHERE).
  */
 export async function searchAllNotes(
-  teamId: string,
+  workspaceId: string,
   opts: {
     query: string;
     take?: number;
@@ -416,14 +416,14 @@ export async function searchAllNotes(
   const query = opts.query.trim();
   if (query.length === 0) return { items: [], nextCursor: null };
 
-  // InternalNote_teamId_timestamp_id_idx (teamId, timestamp desc, id desc)
+  // InternalNote_teamId_timestamp_id_idx (workspaceId, timestamp desc, id desc)
   // backs this team-wide (timestamp desc, id desc) keyset ORDER BY — added in
   // migration 20260530140000, same shape as the Message search path. The result
   // set per query is small (notes are sparse vs messages) and the trgm GIN on
   // body filters first. Reuse the message cursor codec — same (timestamp, id) shape.
   const cursor = parseMessageCursor(opts.cursor ?? null);
   const matchWhere = {
-    teamId,
+    workspaceId,
     body: { contains: query, mode: "insensitive" as const },
     ...(opts.visibility?.assignedUserId
       ? { conversation: { assignedUserId: opts.visibility.assignedUserId } }

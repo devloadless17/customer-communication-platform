@@ -37,6 +37,9 @@ import type {
 } from "@ccp/shared/providers/types";
 import type { VariableBindings } from "@ccp/shared/template-bindings";
 import { cn } from "@ccp/shared/utils";
+// Meta's real field limits, shared with the server-side validator so the
+// counter under the textarea and the API's rejection can never disagree.
+import { TEMPLATE_LIMITS } from "@ccp/shared/template-render";
 
 /**
  * Two-pane template wizard.
@@ -482,7 +485,7 @@ export function TemplateForm({
                     value={headerText}
                     onChange={(e) => setHeaderText(e.target.value)}
                     placeholder="Order #{{1}} update"
-                    maxLength={80}
+                    maxLength={TEMPLATE_LIMITS.headerMaxLength}
                   />
                 </Field>
               </div>
@@ -557,7 +560,15 @@ export function TemplateForm({
           <Section index={3} title="Body" done={bodyValid}>
             <div className="flex items-center justify-between gap-2">
               <span className="text-2xs text-muted-foreground">
-                Up to 1024 chars · {body.length}/1024 · {bodyVarCount} variable{bodyVarCount === 1 ? "" : "s"}
+                Up to {TEMPLATE_LIMITS.bodyMaxLength} chars ·{" "}
+                <span
+                  className={cn(
+                    body.length > TEMPLATE_LIMITS.bodyMaxLength && "font-medium text-destructive",
+                  )}
+                >
+                  {body.length}/{TEMPLATE_LIMITS.bodyMaxLength}
+                </span>{" "}
+                · {bodyVarCount} variable{bodyVarCount === 1 ? "" : "s"}
               </span>
               <Button type="button" variant="outline" size="sm" onClick={insertVar} className="h-7 gap-1.5 text-2xs">
                 <Plus className="size-3" />
@@ -569,11 +580,13 @@ export function TemplateForm({
               value={body}
               onChange={(e) => setBody(e.target.value)}
               placeholder="Hi {{1}}, your order {{2}} is on its way."
-              maxLength={1500}
+              maxLength={TEMPLATE_LIMITS.bodyMaxLength}
               className="mt-2 min-h-35 font-mono text-[13px]"
             />
             {body.length > 0 && !bodyValid && (
-              <p className="mt-1 text-2xs text-destructive">Body is required and must be 1024 chars or fewer.</p>
+              <p className="mt-1 text-2xs text-destructive">
+                Body is required and must be {TEMPLATE_LIMITS.bodyMaxLength} chars or fewer.
+              </p>
             )}
           </Section>
 
@@ -583,13 +596,17 @@ export function TemplateForm({
               value={footer}
               onChange={(e) => setFooter(e.target.value)}
               placeholder="Reply STOP to opt out"
-              maxLength={70}
+              maxLength={TEMPLATE_LIMITS.footerMaxLength}
             />
             <p className="mt-1 text-2xs text-muted-foreground">
-              Up to 60 chars. No variables.
-              {footer.length > 60 && (
-                <span className="ml-2 text-destructive">{footer.length}/60</span>
-              )}
+              Up to {TEMPLATE_LIMITS.footerMaxLength} chars. No variables.{" "}
+              <span
+                className={cn(
+                  footer.length > TEMPLATE_LIMITS.footerMaxLength && "text-destructive",
+                )}
+              >
+                {footer.length}/{TEMPLATE_LIMITS.footerMaxLength}
+              </span>
             </p>
           </Section>
 

@@ -7,7 +7,7 @@ import { loadActiveUser } from "@/lib/auth/active-user";
 import { getCurrentSession } from "@/lib/auth";
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
 import type { Capability } from "@ccp/shared/auth/permissions";
-import type { TeamStatus, User, UserAvailabilityStatus } from "@ccp/shared/types";
+import type { OrgStatus, Role, User, UserAvailabilityStatus } from "@ccp/shared/types";
 import type { AvailabilitySource } from "@ccp/shared/work-hours";
 
 /**
@@ -31,14 +31,14 @@ import type { AvailabilitySource } from "@ccp/shared/work-hours";
 
 export interface Session {
   user: User;
-  teamId: string;
+  workspaceId: string;
   /**
    * Org-approval status of the user's team. The (app) layout reads this to
    * gate pending/suspended orgs to /pending. Carried on the session (loaded in
    * the same `loadActiveUser` query) so the gate never depends on the org-gated
    * /api/team call. superAdmins are exempt from the gate regardless.
    */
-  teamStatus: TeamStatus;
+  orgStatus: OrgStatus;
   /**
    * Effective per-capability map for this user's role, with the team admin's
    * overrides already applied. Pass the relevant boolean down to client
@@ -46,6 +46,14 @@ export interface Session {
    * NestJS guards are the real enforcement.
    */
   permissions: Record<Capability, boolean>;
+  /**
+   * Every workspace this user may act in, for the rail switcher. Comes off the
+   * same `loadActiveUser` query, so rendering the switcher costs no extra read.
+   */
+  workspaces: Array<{ id: string; name: string; role: Role }>;
+  /** The organization above those workspaces — the switcher's header, and the
+   *  thing Organization settings is about. */
+  organizationName: string;
 }
 
 export const getSession = cache(async (): Promise<Session> => {
@@ -63,11 +71,23 @@ export const getSession = cache(async (): Promise<Session> => {
     redirect("/logout");
   }
 
+  // Mirrors the API's resolveSession: an org owner/admin (and a platform
+  // superAdmin) is implicitly admin in every workspace; otherwise the role
+  // comes from the membership row for the active workspace. RSC has no request
+  // cookie access here, so it falls back to the first membership — the API is
+  // the authority for a switched workspace.
+  const isOrgAdmin = row.orgRole === "owner" || row.orgRole === "admin";
+  const activeMembership = row.workspaceMemberships[0];
+  const activeWorkspaceId = activeMembership?.workspace.id ?? "";
+  const effectiveRole: Role =
+    row.isSuperAdmin || isOrgAdmin ? "admin" : ((activeMembership?.role ?? "agent") as Role);
+
   return {
     user: {
       id: row.id,
-      teamId: row.teamId,
-      role: row.role,
+      workspaceId: activeWorkspaceId,
+      role: effectiveRole,
+      isSuperAdmin: row.isSuperAdmin,
       name: row.name,
       email: row.email,
       avatarUrl: row.avatarUrl ?? undefined,
@@ -91,8 +111,14 @@ export const getSession = cache(async (): Promise<Session> => {
         ? { availabilityUntil: row.availabilityOverrideUntil.toISOString() }
         : {}),
     },
-    teamId: row.teamId,
-    teamStatus: (row.team?.status ?? "active") as TeamStatus,
-    permissions: resolvePermissions(row.role, row.team?.rolePermissions ?? {}),
+    workspaceId: activeWorkspaceId,
+    orgStatus: (row.organization?.status ?? "active") as OrgStatus,
+    permissions: resolvePermissions(effectiveRole, activeMembership?.workspace.rolePermissions ?? {}),
+    organizationName: row.organization?.name ?? "",
+    workspaces: row.workspaceMemberships.map((m) => ({
+      id: m.workspace.id,
+      name: m.workspace.name,
+      role: m.role as Role,
+    })),
   };
 });

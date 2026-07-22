@@ -25,7 +25,7 @@ import { setConversationStatus, createWorkflow, publishWorkflow, createOutboundW
 
 const WEB_ORIGIN = process.env.E2E_BASE_URL ?? "http://localhost:3000";
 const API_ORIGIN = process.env.E2E_WIDGET_API ?? "http://localhost:4000";
-const CHANNEL = "webchatwidget";
+const CHANNEL = "webchatwidget" as const;
 
 // Unique per run so parallel/repeated runs don't collide, and cleanup is scoped.
 const RUN = `e2e${Date.now().toString(36)}`;
@@ -35,19 +35,19 @@ const VISITOR_MSG = `hello from a visitor ${RUN}`;
 const VISITOR_EMAIL = `${RUN}@visitor.test`;
 const AGENT_REPLY = `agent reply ${RUN}`;
 
-let teamId = "";
+let workspaceId = "";
 let widgetId = "";
 const createdContactIds = new Set<string>();
 const createdWidgetIds = new Set<string>();
 
 test.beforeAll(async () => {
-  ({ teamId } = await appAdmin());
+  ({ workspaceId } = await appAdmin());
   // Seed the primary widget directly (deterministic key + pre-chat email field
   // so the visitor flow is reproducible). The admin API + settings UI are
   // exercised separately in the "settings UI" test below.
   const widget = await db().webchatWidget.create({
     data: {
-      teamId,
+      workspaceId,
       name: WIDGET_NAME,
       publicKey: PUBLIC_KEY,
       allowedOrigins: [],
@@ -66,19 +66,19 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   // Workflows + outbound webhooks created by the automation-wiring tests.
-  await db().workflow.deleteMany({ where: { teamId, name: { contains: RUN } } });
-  await db().outboundWebhook.deleteMany({ where: { teamId, name: { contains: RUN } } });
+  await db().workflow.deleteMany({ where: { workspaceId, name: { contains: RUN } } });
+  await db().outboundWebhook.deleteMany({ where: { workspaceId, name: { contains: RUN } } });
   // Contacts cascade to their conversations + messages; widgets SetNull.
   for (const id of createdContactIds) {
-    await db().contact.deleteMany({ where: { id, teamId } });
+    await db().contact.deleteMany({ where: { id, workspaceId } });
   }
   await db().contact.deleteMany({
-    where: { teamId, identityChannel: CHANNEL, externalContactId: { startsWith: widgetId } },
+    where: { workspaceId, identityChannel: CHANNEL, externalContactId: { startsWith: widgetId } },
   });
   for (const id of createdWidgetIds) {
-    await db().webchatWidget.deleteMany({ where: { id, teamId } });
+    await db().webchatWidget.deleteMany({ where: { id, workspaceId } });
   }
-  await db().webchatWidget.deleteMany({ where: { teamId, name: { contains: RUN } } });
+  await db().webchatWidget.deleteMany({ where: { workspaceId, name: { contains: RUN } } });
 });
 
 /** Inject the real widget into a fresh visitor page, pointed at the api. */
@@ -138,7 +138,7 @@ test("settings UI: create, list, and show the embed snippet", async ({ page }) =
 
   // Track the UI-created widget for cleanup (find the newest for this team).
   const newest = await db().webchatWidget.findFirst({
-    where: { teamId, id: { not: widgetId } },
+    where: { workspaceId, id: { not: widgetId } },
     orderBy: { createdAt: "desc" },
     select: { id: true },
   });
@@ -149,7 +149,7 @@ test("settings: AI auto-reply defaults OFF and the toggle persists to config", a
   const name = `AI Toggle ${RUN}`;
   const w = await db().webchatWidget.create({
     data: {
-      teamId, name, publicKey: `wc_pk_ai${RUN}${"0".repeat(16)}`.slice(0, 40),
+      workspaceId, name, publicKey: `wc_pk_ai${RUN}${"0".repeat(16)}`.slice(0, 40),
       allowedOrigins: [], config: {},
     },
     select: { id: true, config: true },
@@ -206,7 +206,7 @@ test("visitor → inbox → agent reply, with pre-chat identity + widget attribu
     const msg = await pollUntil(
       async () =>
         db().message.findFirst({
-          where: { teamId, channel: CHANNEL, direction: "in", body: VISITOR_MSG },
+          where: { workspaceId, channel: CHANNEL, direction: "in", body: VISITOR_MSG },
           select: { id: true, conversationId: true },
         }),
       { timeoutMs: 20_000, label: "inbound webchatwidget message" },
@@ -285,7 +285,7 @@ test("visitor can send an image (media round-trip)", async ({ browser }) => {
     const media = await pollUntil(
       async () =>
         db().message.findFirst({
-          where: { teamId, channel: CHANNEL, direction: "in", mediaKind: "image" },
+          where: { workspaceId, channel: CHANNEL, direction: "in", mediaKind: "image" },
           orderBy: { timestamp: "desc" },
           select: { id: true, mediaKey: true, conversationId: true },
         }),
@@ -315,7 +315,7 @@ test("refresh mid-chat restores the thread and reopens the panel", async ({ brow
     const landed = await pollUntil(
       async () =>
         db().message.findFirst({
-          where: { teamId, channel: CHANNEL, direction: "in", body: msg },
+          where: { workspaceId, channel: CHANNEL, direction: "in", body: msg },
           select: { conversationId: true },
         }),
       { timeoutMs: 20_000, label: "message before refresh" },
@@ -347,7 +347,7 @@ test("agent reply shows the agent's name and is marked read", async ({ browser, 
     const landed = await pollUntil(
       async () =>
         db().message.findFirst({
-          where: { teamId, channel: CHANNEL, direction: "in", body: msg },
+          where: { workspaceId, channel: CHANNEL, direction: "in", body: msg },
           select: { conversationId: true },
         }),
       { timeoutMs: 20_000, label: "receipts inbound" },
@@ -399,7 +399,7 @@ test("AI disclosure: an AI-authored reply is labelled 'AI' in the widget", async
     const landed = await pollUntil(
       async () =>
         db().message.findFirst({
-          where: { teamId, channel: CHANNEL, direction: "in", body: msg },
+          where: { workspaceId, channel: CHANNEL, direction: "in", body: msg },
           select: { conversationId: true },
         }),
       { timeoutMs: 20_000, label: "ai-disclosure inbound" },
@@ -416,7 +416,7 @@ test("AI disclosure: an AI-authored reply is labelled 'AI' in the widget", async
     const aiReply = `I can help with that — ${RUN}`;
     const aiMsg = await db().message.create({
       data: {
-        teamId, conversationId: landed.conversationId, channel: CHANNEL,
+        workspaceId, conversationId: landed.conversationId, channel: CHANNEL,
         externalId: `ai_${RUN}_${Math.random().toString(36).slice(2)}`,
         body: aiReply, direction: "out", status: "sent",
         rawPayload: { sentVia: "ai-assistant/reply" },
@@ -424,7 +424,7 @@ test("AI disclosure: an AI-authored reply is labelled 'AI' in the widget", async
       select: { id: true },
     });
     await db().aiMessageMetadata.create({
-      data: { teamId, messageId: aiMsg.id, aiGenerated: true },
+      data: { workspaceId, messageId: aiMsg.id, aiGenerated: true },
     });
 
     // Re-mount → the widget resumes from server history, which must carry the AI
@@ -451,7 +451,7 @@ test("closing shows a notice; a new message reopens the thread", async ({ browse
     const landed = await pollUntil(
       async () =>
         db().message.findFirst({
-          where: { teamId, channel: CHANNEL, direction: "in", body: msg },
+          where: { workspaceId, channel: CHANNEL, direction: "in", body: msg },
           select: { conversationId: true },
         }),
       { timeoutMs: 20_000, label: "closing inbound" },
@@ -567,7 +567,7 @@ test("presence: agent sees the visitor Online while connected, then Left on disc
     const landed = await pollUntil(
       async () =>
         db().message.findFirst({
-          where: { teamId, channel: CHANNEL, direction: "in", body: msg },
+          where: { workspaceId, channel: CHANNEL, direction: "in", body: msg },
           select: { conversationId: true },
         }),
       { timeoutMs: 20_000, label: "presence inbound" },
@@ -605,7 +605,7 @@ test("visitor 'Start a new conversation' records a timeline note on the fresh th
     const convA = await pollUntil(
       () =>
         db().message.findFirst({
-          where: { teamId, channel: CHANNEL, direction: "in", body: msg1 },
+          where: { workspaceId, channel: CHANNEL, direction: "in", body: msg1 },
           select: { conversationId: true },
         }),
       { timeoutMs: 20_000, label: "restart first message" },
@@ -629,7 +629,7 @@ test("visitor 'Start a new conversation' records a timeline note on the fresh th
     const convB = await pollUntil(
       () =>
         db().message.findFirst({
-          where: { teamId, channel: CHANNEL, direction: "in", body: msg2 },
+          where: { workspaceId, channel: CHANNEL, direction: "in", body: msg2 },
           select: { conversationId: true },
         }),
       { timeoutMs: 20_000, label: "restart second message" },
@@ -659,7 +659,7 @@ test("visitor 'Start a new conversation' records a timeline note on the fresh th
 test("inline embed can hide the header for a bare 'just chat' surface (showHeader:false)", async ({ browser }) => {
   const w = await db().webchatWidget.create({
     data: {
-      teamId, name: `NoHeader ${RUN}`, publicKey: `wc_pk_nh${RUN}${"0".repeat(16)}`.slice(0, 40),
+      workspaceId, name: `NoHeader ${RUN}`, publicKey: `wc_pk_nh${RUN}${"0".repeat(16)}`.slice(0, 40),
       allowedOrigins: [], config: { showHeader: false },
     },
     select: { id: true, publicKey: true },
@@ -723,7 +723,7 @@ test("the sample demo page auto-loads the widget and connects (bubble + full-pag
     const landed = await pollUntil(
       async () =>
         db().message.findFirst({
-          where: { teamId, channel: CHANNEL, direction: "in", body: msg },
+          where: { workspaceId, channel: CHANNEL, direction: "in", body: msg },
           select: { conversationId: true },
         }),
       { timeoutMs: 20_000, label: "demo-page bubble message" },
@@ -785,7 +785,7 @@ test("automation: a workflow triggers on a webchatwidget message and auto-replie
     const m = await pollUntil(
       async () =>
         db().message.findFirst({
-          where: { teamId, channel: CHANNEL, direction: "out", body: reply },
+          where: { workspaceId, channel: CHANNEL, direction: "out", body: reply },
           select: { conversationId: true, senderUserId: true },
         }),
       { timeoutMs: 25_000, label: "workflow auto-reply message" },
@@ -831,7 +831,7 @@ test("automation: outbound webhook fires for a webchatwidget message with the ch
     expect(json).toContain(body); // and it's our message
 
     const inbound = await db().message.findFirst({
-      where: { teamId, channel: CHANNEL, direction: "in", body },
+      where: { workspaceId, channel: CHANNEL, direction: "in", body },
       select: { conversationId: true },
     });
     const conv = inbound && (await db().conversation.findUnique({ where: { id: inbound.conversationId }, select: { contactId: true } }));
@@ -854,7 +854,7 @@ test("history pagination: >50 messages replays the latest page + 'Load earlier' 
     const landed = await pollUntil(
       async () =>
         db().message.findFirst({
-          where: { teamId, channel: CHANNEL, direction: "in", body: seed },
+          where: { workspaceId, channel: CHANNEL, direction: "in", body: seed },
           select: { conversationId: true },
         }),
       { timeoutMs: 20_000, label: "pagination seed message" },
@@ -871,7 +871,7 @@ test("history pagination: >50 messages replays the latest page + 'Load earlier' 
     const base = Date.now() - 3_600_000;
     await db().message.createMany({
       data: Array.from({ length: 60 }, (_, i) => ({
-        teamId,
+        workspaceId,
         conversationId,
         channel: CHANNEL as never,
         direction: "out" as never,
@@ -955,7 +955,7 @@ test("regression: .webp sends as an IMAGE, not a blocked 'sticker'", async ({ br
     await v.locator("button.sbtn").click();
 
     const msg = await pollUntil(
-      () => db().message.findFirst({ where: { teamId, body: caption }, select: { mediaKind: true, mediaMimeType: true } }),
+      () => db().message.findFirst({ where: { workspaceId, body: caption }, select: { mediaKind: true, mediaMimeType: true } }),
       { timeoutMs: 25_000, label: "webp media message" },
     );
     expect(msg?.mediaMimeType).toBe("image/webp");
@@ -1108,7 +1108,7 @@ test("regression: transport falls back when WebSockets are unavailable", async (
     await v.locator(".composer textarea").fill(msg);
     await v.locator("button.sbtn").click();
     const row = await pollUntil(
-      () => db().message.findFirst({ where: { teamId, body: msg }, select: { id: true } }),
+      () => db().message.findFirst({ where: { workspaceId, body: msg }, select: { id: true } }),
       { timeoutMs: 25_000, label: "message sent over polling" },
     );
     expect(row).toBeTruthy();
@@ -1132,12 +1132,12 @@ test("regression: anonymous visitors stay OUT of the contacts directory, identif
     await v.locator(".composer textarea").fill(msg);
     await v.locator("button.sbtn").click();
     await pollUntil(
-      () => db().message.findFirst({ where: { teamId, body: msg }, select: { id: true } }),
+      () => db().message.findFirst({ where: { workspaceId, body: msg }, select: { id: true } }),
       { timeoutMs: 25_000, label: "anonymous visitor message" },
     );
 
     const directoryWhere = {
-      teamId,
+      workspaceId,
       identityChannel: CHANNEL,
       deletedAt: null,
       OR: [{ phoneNumber: { not: null } }, { email: { not: null } }],
@@ -1146,7 +1146,7 @@ test("regression: anonymous visitors stay OUT of the contacts directory, identif
       where: { ...directoryWhere, externalContactId: { startsWith: widgetId } },
     });
     const anonTotal = await db().contact.count({
-      where: { teamId, identityChannel: CHANNEL, deletedAt: null, externalContactId: { startsWith: widgetId } },
+      where: { workspaceId, identityChannel: CHANNEL, deletedAt: null, externalContactId: { startsWith: widgetId } },
     });
     expect(anonTotal).toBeGreaterThan(anonInDirectory); // at least one hidden
   } finally {
@@ -1161,7 +1161,7 @@ test("security: trust-on-first-use records the embed domain write-once", async (
   // a one-click lock. Must be write-once: otherwise an attacker origin could
   // overwrite the suggestion and launder its own domain in.
   const w = await db().webchatWidget.create({
-    data: { teamId, name: `TOFU ${RUN}`, publicKey: `wc_pk_tofu${RUN}${"0".repeat(16)}`.slice(0, 40), allowedOrigins: [], config: {} },
+    data: { workspaceId, name: `TOFU ${RUN}`, publicKey: `wc_pk_tofu${RUN}${"0".repeat(16)}`.slice(0, 40), allowedOrigins: [], config: {} },
     select: { id: true, publicKey: true },
   });
   createdWidgetIds.add(w.id);
@@ -1233,7 +1233,7 @@ test("regression: the pre-chat form is NOT re-shown to a returning visitor", asy
   // UX failure, and it happened on every page load.
   const w = await db().webchatWidget.create({
     data: {
-      teamId, name: `Reask ${RUN}`, publicKey: `wc_pk_reask${RUN}${"0".repeat(16)}`.slice(0, 40),
+      workspaceId, name: `Reask ${RUN}`, publicKey: `wc_pk_reask${RUN}${"0".repeat(16)}`.slice(0, 40),
       allowedOrigins: [],
       config: { preChatFields: [{ id: "f_e", label: "Email", type: "email", required: false }] },
     },
@@ -1251,7 +1251,7 @@ test("regression: the pre-chat form is NOT re-shown to a returning visitor", asy
     await v.locator(".composer textarea").fill(msg);
     await v.locator("button.sbtn").click();
     await pollUntil(
-      () => db().message.findFirst({ where: { teamId, body: msg }, select: { id: true } }),
+      () => db().message.findFirst({ where: { workspaceId, body: msg }, select: { id: true } }),
       { timeoutMs: 25_000, label: "first message" },
     );
 
@@ -1267,7 +1267,7 @@ test("regression: the pre-chat form is NOT re-shown to a returning visitor", asy
 test("pre-chat form asks one field at a time with a step counter", async ({ browser }) => {
   const w = await db().webchatWidget.create({
     data: {
-      teamId, name: `Stepped ${RUN}`, publicKey: `wc_pk_step${RUN}${"0".repeat(16)}`.slice(0, 40),
+      workspaceId, name: `Stepped ${RUN}`, publicKey: `wc_pk_step${RUN}${"0".repeat(16)}`.slice(0, 40),
       allowedOrigins: [],
       config: {
         preChatFields: [
@@ -1313,7 +1313,7 @@ test("pre-chat form asks one field at a time with a step counter", async ({ brow
     await v.locator(".composer textarea").fill(msg);
     await v.locator("button.sbtn").click();
     const row = await pollUntil(
-      () => db().message.findFirst({ where: { teamId, body: msg }, select: { conversationId: true } }),
+      () => db().message.findFirst({ where: { workspaceId, body: msg }, select: { conversationId: true } }),
       { timeoutMs: 25_000, label: "stepped-form message" },
     );
     const conv = await db().conversation.findUnique({
@@ -1336,7 +1336,7 @@ test("pre-chat: a custom (non identity) field lands on the contact's customField
   // The old code mapped every non-email/phone field onto `name`, silently dropping it.
   const w = await db().webchatWidget.create({
     data: {
-      teamId, name: `Custom ${RUN}`, publicKey: `wc_pk_cf${RUN}${"0".repeat(16)}`.slice(0, 40),
+      workspaceId, name: `Custom ${RUN}`, publicKey: `wc_pk_cf${RUN}${"0".repeat(16)}`.slice(0, 40),
       allowedOrigins: [],
       config: {
         preChatFields: [
@@ -1372,7 +1372,7 @@ test("pre-chat: a custom (non identity) field lands on the contact's customField
     await v.locator(".composer textarea").fill(msg);
     await v.locator("button.sbtn").click();
     const row = await pollUntil(
-      () => db().message.findFirst({ where: { teamId, body: msg }, select: { conversationId: true } }),
+      () => db().message.findFirst({ where: { workspaceId, body: msg }, select: { conversationId: true } }),
       { timeoutMs: 25_000, label: "custom-field message" },
     );
     // The unknown field lands under its slug key; the known field ("Language") sets
@@ -1396,7 +1396,7 @@ test("pre-chat: a custom (non identity) field lands on the contact's customField
     expect(conv?.contact.language).toBe("French");
     // The unknown field became a custom field with a definition (renders in panel)…
     const def = await db().contactFieldDefinition.findFirst({
-      where: { teamId, key: "company" },
+      where: { workspaceId, key: "company" },
       select: { label: true },
     });
     expect(def?.label).toBe("Company");
@@ -1413,7 +1413,7 @@ test("attachment policy is enforced by the SERVER, not just the widget", async (
   // so the policy has to hold against a client that ignores it entirely.
   const w = await db().webchatWidget.create({
     data: {
-      teamId, name: `Policy ${RUN}`, publicKey: `wc_pk_pol${RUN}${"0".repeat(16)}`.slice(0, 40),
+      workspaceId, name: `Policy ${RUN}`, publicKey: `wc_pk_pol${RUN}${"0".repeat(16)}`.slice(0, 40),
       allowedOrigins: [], config: { allowedMediaKinds: ["image"] },
     },
     select: { id: true, publicKey: true },
@@ -1482,9 +1482,9 @@ test("identity: duplicate phone surfaces a link SUGGESTION (unverified), not an 
   // hole the identity layer prevents.
   const PHONE = `9617${Date.now().toString().slice(-7)}`;
   const mk = async (name: string, channel: "whatsapp" | "webchatwidget", extra: Record<string, unknown>) => {
-    const cust = await db().customer.create({ data: { teamId, name } });
+    const cust = await db().customer.create({ data: { workspaceId, name } });
     const c = await db().contact.create({
-      data: { teamId, name, identityChannel: channel, customerId: cust.id, ...extra },
+      data: { workspaceId, name, identityChannel: channel, customerId: cust.id, ...extra },
       select: { id: true },
     });
     createdContactIds.add(c.id);

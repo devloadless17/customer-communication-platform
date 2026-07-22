@@ -4,7 +4,7 @@ import { memo, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { useNow } from "@/hooks/use-now";
-import { AtSign, BadgeCheck, ChevronLeft, Mail, Paperclip, Phone, PhoneOff, MapPin, Clock, FileText, Heart, Loader2, MessageSquare, PanelRightClose, RefreshCw, Sparkles, User as UserIcon, Globe, Flag, Users } from "lucide-react";
+import { AtSign, BadgeCheck, ChevronLeft, Mail, Paperclip, Phone, PhoneOff, MapPin, Clock, FileText, Heart, Loader2, MessageSquare, PanelRightClose, RefreshCw, Sparkles, StickyNote, User as UserIcon, Globe, Flag, Users } from "lucide-react";
 
 import {
   AddFieldRow,
@@ -51,6 +51,8 @@ import type {
 } from "@ccp/shared/types";
 
 import { AttachmentGallery } from "./attachments/attachment-gallery";
+import { FlagsPanel } from "./panel/flags-panel";
+import { NotesPanel } from "./panel/notes-panel";
 import { EditableField } from "./contact-panel/editable-field";
 import { EditableHeading } from "./contact-panel/editable-heading";
 import { ReadOnlyRow } from "./contact-panel/read-only-row";
@@ -185,6 +187,21 @@ function ContactLocalTime({ offsetHours }: { offsetHours: number }) {
  * editable field fails at the type checker if any one of those sync points is
  * missed. See the comment over `editableRef` for the full sync-point list.
  */
+type PanelView = "details" | "files" | "notes" | "flags";
+
+/** One tab per record type. Order is by how often it's opened, not by how
+ *  recently it shipped. Details has no icon — its label always fits. */
+const PANEL_TABS: Array<{
+  id: PanelView;
+  label: string;
+  icon?: typeof Paperclip;
+}> = [
+  { id: "details", label: "Details" },
+  { id: "files", label: "Files", icon: Paperclip },
+  { id: "notes", label: "Notes", icon: StickyNote },
+  { id: "flags", label: "Flags", icon: Flag },
+];
+
 type EditableState = {
   name: string;
   firstName: string;
@@ -291,7 +308,7 @@ function ContactPanelImpl({
   // vs the per-conversation media gallery. State is local — switching chats
   // remounts the panel via the key={conversationId} on ThreadWorkspace, so
   // each chat starts on Details.
-  const [view, setView] = useState<"details" | "files">("details");
+  const [view, setView] = useState<PanelView>("details");
   useEffect(() => {
     const fromCookie = document.cookie
       .split("; ")
@@ -391,6 +408,14 @@ function ContactPanelImpl({
   // on conversation switch (below) so they don't grow across threads.
   const seenNoteAddRef = useRef<Set<string>>(new Set());
   const seenNoteDelRef = useRef<Set<string>>(new Set());
+  // Unresolved-flag tally for the Flags tab badge. Same direct-subscription
+  // reason as liveNoteCount: `data` is the shell's LRU snapshot, whose patches
+  // are deliberately cacheTick-silent, so the panel would otherwise show a
+  // stale badge until a chat-switch. No seen-set needed — the frame carries the
+  // ABSOLUTE post-change count rather than a delta, so a replay is idempotent.
+  const [liveOpenFlagCount, setLiveOpenFlagCount] = useState<number>(
+    conversation.openFlagCount ?? 0,
+  );
 
   // Reset whenever the user switches to a different conversation OR the
   // server snapshot changes (router.refresh after a mutation). Without
@@ -398,10 +423,11 @@ function ContactPanelImpl({
   // the prop changes.
   useEffect(() => {
     setLiveNoteCount(data.noteCount ?? notes.length);
+    setLiveOpenFlagCount(conversation.openFlagCount ?? 0);
     seenNoteAddRef.current = new Set();
     seenNoteDelRef.current = new Set();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversation.id, data.noteCount]);
+  }, [conversation.id, data.noteCount, conversation.openFlagCount]);
 
   // Re-seed the live notes array from the authoritative prop whenever it
   // changes identity (conversation switch or a refetch/router.refresh) — the
@@ -422,7 +448,12 @@ function ContactPanelImpl({
     // thread is displayed), not MessageThread's live hook. Asserting coverage
     // here means a future field derived from an un-covered event fails loudly in
     // dev instead of silently diverging. All 4 are covered today (no-op).
-    assertReducerCoverage(["note:new", "note:deleted"]);
+    assertReducerCoverage(["note:new", "note:deleted", "message:flag"]);
+
+    const onFlag: Parameters<typeof socket.on<"message:flag">>[1] = (payload) => {
+      if (payload.conversationId !== conversationId) return;
+      setLiveOpenFlagCount(payload.openFlagCount);
+    };
 
     const onNoteNew: Parameters<typeof socket.on<"note:new">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
@@ -445,10 +476,12 @@ function ContactPanelImpl({
       setLiveNotes((prev) => prev.filter((n) => n.id !== payload.noteId));
     };
 
+    socket.on("message:flag", onFlag);
     socket.on("note:new", onNoteNew);
     socket.on("note:deleted", onNoteDeleted);
 
     return () => {
+      socket.off("message:flag", onFlag);
       socket.off("note:new", onNoteNew);
       socket.off("note:deleted", onNoteDeleted);
     };
@@ -832,7 +865,7 @@ function ContactPanelImpl({
     // `optimistic: true` skips inbox-list resync + counts refetch during the
     // in-flight PATCH window — see status-dropdown.tsx for the full rationale.
     dispatchLocalSocketEvent("contact:updated", {
-      teamId: contact.teamId,
+      workspaceId: contact.workspaceId,
       contact: optimistic,
       optimistic: true,
     });
@@ -877,7 +910,7 @@ function ContactPanelImpl({
         tagIds,
       };
       dispatchLocalSocketEvent("contact:updated", {
-        teamId: contact.teamId,
+        workspaceId: contact.workspaceId,
         contact: rollback,
       });
       return false;
@@ -909,7 +942,7 @@ function ContactPanelImpl({
       [
         "contact:updated",
         {
-          teamId: contact.teamId,
+          workspaceId: contact.workspaceId,
           contact: { ...contact, tagIds: nextIds },
           optimistic: true,
         },
@@ -924,7 +957,7 @@ function ContactPanelImpl({
         const name = nameOf(id);
         if (name == null) continue;
         const built = buildOptimisticTagAdded({
-          teamId: contact.teamId,
+          workspaceId: contact.workspaceId,
           conversationId,
           actorName: currentUserName,
           tagName: name,
@@ -937,7 +970,7 @@ function ContactPanelImpl({
         const name = nameOf(id);
         if (name == null) continue;
         const built = buildOptimisticTagRemoved({
-          teamId: contact.teamId,
+          workspaceId: contact.workspaceId,
           conversationId,
           actorName: currentUserName,
           tagName: name,
@@ -958,11 +991,11 @@ function ContactPanelImpl({
       // a glitch when the chip silently reverts). Consistent with field/stage.
       toast.error("Couldn't save tags", { description: "Please try again." });
       dispatchLocalSocketEvent("contact:updated", {
-        teamId: contact.teamId,
+        workspaceId: contact.workspaceId,
         contact: { ...contact, tagIds: prevIds },
       });
       for (const id of tagActivityIds) {
-        rollbackOptimisticActivity(contact.teamId, conversationId, id);
+        rollbackOptimisticActivity(contact.workspaceId, conversationId, id);
       }
       return;
     }
@@ -1034,42 +1067,59 @@ function ContactPanelImpl({
         </Tooltip>
       </div>
       )}
-      {/* View tabs (Details / Files). Sits between the header strip and the
-          panel body. Tiny segmented control to match the panel's density. */}
+      {/* Panel tabs. One tab per RECORD TYPE — details, attachments, notes,
+          flags. Notes used to be a chip inside the Files gallery, which filed
+          a non-file under "Files" and buried it two clicks deep; flags would
+          have compounded that. Counts render only when non-zero so the bar
+          answers "is there anything in here?" without a click, and stays quiet
+          on the common empty conversation. */}
       <div
         role="tablist"
         aria-label="Contact panel view"
-        className="flex shrink-0 items-center gap-1 border-b border-border px-3 py-2"
+        // @container so each tab drops its label for icon-only when the user
+        // drags the panel narrow — four labels stop fitting well before the
+        // rail hits its minimum width. Same pattern as the reply-box toolbar.
+        className="@container flex shrink-0 items-center gap-0.5 border-b border-border px-2 py-2"
       >
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "details"}
-          onClick={() => setView("details")}
-          className={cn(
-            "flex-1 rounded-md px-2 py-1 text-xs font-medium transition-colors",
-            view === "details"
-              ? "bg-primary text-primary-foreground"
-              : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
-          )}
-        >
-          Details
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "files"}
-          onClick={() => setView("files")}
-          className={cn(
-            "flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors",
-            view === "files"
-              ? "bg-primary text-primary-foreground"
-              : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
-          )}
-        >
-          <Paperclip className="size-3.5" />
-          Files
-        </button>
+        {PANEL_TABS.map(({ id, label, icon: Icon }) => {
+          const count =
+            id === "notes" ? liveNoteCount : id === "flags" ? liveOpenFlagCount : 0;
+          const active = view === id;
+          return (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setView(id)}
+              title={label}
+              className={cn(
+                "flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium transition-colors",
+                active
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+              )}
+            >
+              {Icon && <Icon className="size-3.5 shrink-0" />}
+              {/* The label collapses to icon-only on a narrow rail — four
+                  labels don't fit once the user drags the panel down. Details
+                  has no icon, so it keeps its (short) label always. */}
+              <span className={cn("truncate", Icon && "hidden @[15rem]:inline")}>
+                {label}
+              </span>
+              {count > 0 && (
+                <span
+                  className={cn(
+                    "shrink-0 rounded-full px-1 text-[10px] leading-4 tabular-nums",
+                    active ? "bg-primary-foreground/20" : "bg-muted-foreground/15",
+                  )}
+                >
+                  {count > 99 ? "99+" : count}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
       {pendingRemote && view === "details" ? (
         <div className="flex items-start gap-2 border-b border-warning-border bg-warning-bg px-4 py-2 text-xs text-warning-fg">
@@ -1104,8 +1154,21 @@ function ContactPanelImpl({
           <AttachmentGallery
             conversationId={conversation.id}
             onGoToMessage={onGoToMessage}
+          />
+        </ScrollArea>
+      ) : view === "notes" ? (
+        <ScrollArea className="flex-1">
+          <NotesPanel
             notes={liveNotes}
             teamMembers={teamMembers}
+            conversationId={conversation.id}
+          />
+        </ScrollArea>
+      ) : view === "flags" ? (
+        <ScrollArea className="flex-1">
+          <FlagsPanel
+            conversationId={conversation.id}
+            onGoToMessage={onGoToMessage}
           />
         </ScrollArea>
       ) : (

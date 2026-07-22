@@ -41,7 +41,7 @@ export function ChannelMembersDialog({
   allTeamMembers,
   onClose,
   onChanged,
-  teamId,
+  workspaceId,
 }: {
   channel: TeamChannelDto;
   currentUser: { id: string };
@@ -52,7 +52,7 @@ export function ChannelMembersDialog({
    *  header pill stays in sync without waiting for a refetch. */
   onChanged: (memberCount: number) => void;
   /** Team id for the presence subscription (dots on each roster row). */
-  teamId: string;
+  workspaceId: string;
 }) {
   const [members, setMembers] = useState<ChannelMemberDto[] | null>(null);
   const [memberFilter, setMemberFilter] = useState("");
@@ -67,7 +67,7 @@ export function ChannelMembersDialog({
   // usePresence is refcount-safe across mounts, so subscribing here (rather
   // than threading the Set down from the sidebar) costs nothing and keeps the
   // dialog self-contained.
-  const { onlineUserIds, availabilityByUserId } = usePresence(teamId, currentUser.id);
+  const { onlineUserIds, availabilityByUserId } = usePresence(workspaceId, currentUser.id);
 
   // Initial fetch.
   useEffect(() => {
@@ -134,7 +134,7 @@ export function ChannelMembersDialog({
       setMembers(next);
       onChanged(next.length);
       dispatchLocalSocketEvent("team:channel:members:changed", {
-        teamId: channel.teamId,
+        workspaceId: channel.workspaceId,
         channelId: channel.id,
         action: "removed",
         userIds: [userId],
@@ -198,7 +198,7 @@ export function ChannelMembersDialog({
           : `Added ${json.added?.length ?? ids.length} people to the channel`,
       );
       dispatchLocalSocketEvent("team:channel:members:changed", {
-        teamId: channel.teamId,
+        workspaceId: channel.workspaceId,
         channelId: channel.id,
         action: "added",
         userIds: json.added ?? ids,

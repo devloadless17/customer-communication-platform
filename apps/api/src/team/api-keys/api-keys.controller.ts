@@ -26,7 +26,7 @@ export class ApiKeysController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    const keys = await this.keys.list(session.teamId);
+    const keys = await this.keys.list(session.workspaceId);
     return { keys };
   }
 
@@ -35,7 +35,7 @@ export class ApiKeysController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateApiKeySchema)) body: CreateApiKeyInput,
   ) {
-    return this.keys.create(session.teamId, session.userId, body);
+    return this.keys.create(session.workspaceId, session.userId, body);
   }
 
   @Post(":id/rotate")
@@ -50,7 +50,7 @@ export class ApiKeysController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    return this.keys.rotate(session.teamId, session.userId, id);
+    return this.keys.rotate(session.workspaceId, session.userId, id);
   }
 
   @Delete(":id")
@@ -58,7 +58,7 @@ export class ApiKeysController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.keys.revoke(session.teamId, id);
+    await this.keys.revoke(session.workspaceId, id);
     return { ok: true };
   }
 }

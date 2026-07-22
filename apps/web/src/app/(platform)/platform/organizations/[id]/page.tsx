@@ -12,7 +12,7 @@ import { roleLabel } from "@ccp/shared/auth/permissions";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 
 import { DeleteTeamButton } from "./delete-team-button";
-import { MaxMembersControl } from "./max-members-control";
+import { LimitControl } from "./limit-control";
 import { MemberResetPasswordButton } from "./member-reset-password-button";
 
 export const metadata = { title: "Organization · Platform" };
@@ -37,13 +37,13 @@ export default async function PlatformOrganizationDetailPage({
   if (!detail) notFound();
 
   const { team, members } = detail;
-  const isOwnTeam = team.id === session.teamId;
+  const isOwnTeam = team.id === session.workspaceId;
   const activeMembers = members.filter((m) => !m.deactivatedAt);
   const deactivatedMembers = members.filter((m) => m.deactivatedAt);
   // Member-cap seats = active, non-superAdmin users (a platform operator
   // co-located into an org doesn't consume a seat — mirrors the API count).
   const memberSeatCount = activeMembers.filter(
-    (m) => m.role !== "superAdmin",
+    (m) => !m.isSuperAdmin,
   ).length;
 
   return (
@@ -57,7 +57,7 @@ export default async function PlatformOrganizationDetailPage({
           All organizations
         </Link>
         <DeleteTeamButton
-          teamId={team.id}
+          workspaceId={team.id}
           teamName={team.name}
           isOwnTeam={isOwnTeam}
         />
@@ -74,6 +74,19 @@ export default async function PlatformOrganizationDetailPage({
           <span>
             Created <LocalTime iso={team.createdAt} format="listTime" />
           </span>
+          <span>·</span>
+          {/* ORGANISATION-level cap: how many workspaces it may create. The
+              seat cap next to the member list is per-WORKSPACE. */}
+          <LimitControl
+            workspaceId={team.id}
+            max={team.maxWorkspaces}
+            used={team.workspaceCount ?? 0}
+            endpoint="max-workspaces"
+            bodyKey="maxWorkspaces"
+            noun="workspace"
+            label="Workspaces"
+            hardMax={100}
+          />
           <span>·</span>
           {team.whatsappConnected ? (
             <span className="inline-flex items-center gap-1 text-success-fg">
@@ -116,7 +129,7 @@ export default async function PlatformOrganizationDetailPage({
           )}
         </div>
         <TeamStatusControls
-          teamId={team.id}
+          workspaceId={team.id}
           status={team.status}
           isOwnTeam={isOwnTeam}
         />
@@ -140,10 +153,16 @@ export default async function PlatformOrganizationDetailPage({
               </span>
             )}
           </div>
-          <MaxMembersControl
-            teamId={team.id}
-            maxMembers={team.maxMembers}
-            activeMembers={memberSeatCount}
+          {/* Seat cap is per WORKSPACE; the workspace cap is per ORGANISATION.
+              Both are super-admin controlled and both default to 2. */}
+          <LimitControl
+            workspaceId={team.id}
+            max={team.maxMembers}
+            used={memberSeatCount}
+            endpoint="max-members"
+            bodyKey="maxMembers"
+            noun="member"
+            label="Limit"
           />
         </header>
         {members.length === 0 ? (
@@ -188,7 +207,7 @@ export default async function PlatformOrganizationDetailPage({
                   </span>
                   {m.id !== session.user.id && (
                     <MemberResetPasswordButton
-                      teamId={team.id}
+                      workspaceId={team.id}
                       userId={m.id}
                       name={m.name}
                     />

@@ -41,7 +41,7 @@ import { assignConversation } from "./mutations";
 
 type Db = Pick<
   PrismaClient,
-  | "team"
+  | "workspace"
   | "conversation"
   | "user"
   | "$transaction"
@@ -55,23 +55,23 @@ type Publish = <K extends DomainEventType>(event: DomainEventOf<K>) => Promise<v
 export async function runHandoffPolicy(args: {
   db: Db;
   publish: Publish;
-  teamId: string;
+  workspaceId: string;
   conversationId: string;
   /** Attributes the assignment to the calling API key (n8n); null for native. */
   changedByApiKeyId?: string | null;
   /** Optional log sink for the non-fatal degradations below. */
   onError?: (message: string) => void;
 }): Promise<void> {
-  const { db, publish, teamId, conversationId, changedByApiKeyId = null, onError } = args;
+  const { db, publish, workspaceId, conversationId, changedByApiKeyId = null, onError } = args;
 
-  const team = await db.team.findUnique({
-    where: { id: teamId },
+  const team = await db.workspace.findUnique({
+    where: { id: workspaceId },
     select: { aiHandoffAction: true, aiHandoffAssigneeId: true },
   });
   if (!team || team.aiHandoffAction === "none") return;
 
   if (team.aiHandoffAction === "round_robin") {
-    const settings = await loadAssignmentSettings(db, teamId);
+    const settings = await loadAssignmentSettings(db, workspaceId);
     // `onlyIfUnassigned: false` — an escalation deliberately RE-routes: the
     // thread may still carry the assignee from an earlier session, and the
     // whole point of handing off now is to put it in front of someone
@@ -80,7 +80,7 @@ export async function runHandoffPolicy(args: {
     const outcome = await assignByPolicy({
       db,
       publish,
-      teamId,
+      workspaceId,
       conversationId,
       source: "ai_handoff",
       policyId: settings.aiHandoffPolicyId,
@@ -93,7 +93,7 @@ export async function runHandoffPolicy(args: {
       // overflow said leave-unassigned. Correct outcome: the customer sits in
       // the visible triage queue, not on an agent who's gone home.
       onError?.(
-        `handoff found no eligible agent for team ${teamId} (policy ${outcome.decision?.policyName ?? "?"}); leaving unassigned`,
+        `handoff found no eligible agent for team ${workspaceId} (policy ${outcome.decision?.policyName ?? "?"}); leaving unassigned`,
       );
     }
     return;
@@ -109,7 +109,7 @@ export async function runHandoffPolicy(args: {
   const assigned = await assignConversation({
     db,
     publish,
-    teamId,
+    workspaceId,
     conversationId,
     targetUserId,
     changedByUserId: null,
@@ -120,12 +120,12 @@ export async function runHandoffPolicy(args: {
   // handoff; fall back to leaving the thread unassigned for triage.
   if (!assigned.ok && "reason" in assigned && assigned.reason === "invalid_user") {
     onError?.(
-      `handoff assign_fixed target ${targetUserId} invalid for team ${teamId}; leaving unassigned`,
+      `handoff assign_fixed target ${targetUserId} invalid for team ${workspaceId}; leaving unassigned`,
     );
     await assignConversation({
       db,
       publish,
-      teamId,
+      workspaceId,
       conversationId,
       targetUserId: null,
       changedByUserId: null,

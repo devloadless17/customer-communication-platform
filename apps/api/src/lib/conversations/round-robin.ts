@@ -76,16 +76,16 @@ export function chooseRoundRobin(args: {
  */
 export async function pickRoundRobinAssignee(args: {
   db: Parameters<typeof resolveAssignee>[0]["db"];
-  teamId: string;
+  workspaceId: string;
   /** Rule-matching source; defaults to the AI handoff path this shim served. */
   source?: AssignmentSource;
   policyId?: string | null;
 }): Promise<string | null> {
-  const { db, teamId, source = "ai_handoff", policyId } = args;
-  const decision = await resolveAssignee({ db, teamId, ctx: { source }, policyId });
+  const { db, workspaceId, source = "ai_handoff", policyId } = args;
+  const decision = await resolveAssignee({ db, workspaceId, ctx: { source }, policyId });
   return decision.userId;
 }
 
 /** Narrow Prisma surface the legacy signature advertised. Retained so callers
  *  typed against it keep compiling. */
-export type RoundRobinDb = Pick<PrismaClient, "user" | "team" | "conversation">;
+export type RoundRobinDb = Pick<PrismaClient, "user" | "workspace" | "conversation">;

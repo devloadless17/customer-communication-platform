@@ -52,7 +52,7 @@ export type { ChannelFilter, FieldFilter, SourceFilter, StageFilter, WindowFilte
  *                         but shares the filter bar and the hook.
  *
  * Identity note: rows key on the contact id, which is itself anchored to the
- * phone number server-side (`@@unique([teamId, phoneNumber])`). Name is just a
+ * phone number server-side (`@@unique([workspaceId, phoneNumber])`). Name is just a
  * label — every row shows the phone number, and falls back to it when there's
  * no name.
  */

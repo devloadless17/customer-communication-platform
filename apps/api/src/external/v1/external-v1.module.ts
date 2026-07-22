@@ -10,7 +10,10 @@ import { ExternalV1FlagsService } from "./external-v1-flags.service";
 import { CallsModule } from "@/calls/calls.module";
 import { AssignmentModule } from "@/assignment/assignment.module";
 import { UsersModule } from "@/users/users.module";
+import { ChannelAccountsModule } from "@/team/channel-accounts/channel-accounts.module";
+import { TicketsModule } from "@/tickets/tickets.module";
 import { MessageFlagsCatalogModule } from "@/team/message-flags/message-flags-catalog.module";
+import { InboxViewsModule } from "@/inbox-views/inbox-views.module";
 
 @Module({
   // ContactsModule exports ContactTransferService — /v1 import/export runs the
@@ -35,6 +38,16 @@ import { MessageFlagsCatalogModule } from "@/team/message-flags/message-flags-ca
     AssignmentModule,
     UsersModule,
     MessageFlagsCatalogModule,
+    // Same service the in-app settings page uses, so /v1 and the UI can never
+    // disagree about which accounts exist or which one is the default.
+    ChannelAccountsModule,
+    // Same service the in-app board uses — /v1 and the UI can never disagree
+    // about a ticket rule.
+    TicketsModule,
+    // Same service the inbox rail uses. Views become a WHERE clause, so a
+    // second implementation here would mean a view could select different
+    // conversations through the API than it shows in the product.
+    InboxViewsModule,
   ],
   controllers: [ExternalV1Controller],
   providers: [
