@@ -5,6 +5,23 @@
 
 ---
 
+## Pre-launch security audit (2026-07-23)
+
+A full audit of the Team→Workspace tenancy restructure found and fixed **8
+defects** before launch — 2 CRITICAL, 1 HIGH, 5 MED/LOW. The two that would have
+bitten on day one:
+
+- **Cross-org access via the `ccp.ws` cookie** — any org owner could set the
+  cookie to another tenant's workspace and act as its admin. Fixed: the
+  workspace is now verified to belong to the caller's org.
+- **Fresh Meta onboarding left a placeholder as the default account** — inbound
+  webhooks 403'd and default sends failed. Fixed: `normalizeDefaultAccount`
+  cleans the placeholder and promotes the real number on connect.
+
+Plus a HIGH that 500'd every directory role change (`User.role` was removed in
+the restructure). All fixed, regression-tested, and covered by the battery
+below. Detail in `restructure-security-audit` (memory).
+
 ## 0. Before you push
 
 - [ ] **Commit the working tree.** Everything below assumes the code is on

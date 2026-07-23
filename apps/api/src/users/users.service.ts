@@ -556,33 +556,40 @@ export class UsersService {
       throw new ForbiddenException({ error: "cannot modify this user" });
     }
 
-    const data: { role?: Role; deactivatedAt?: Date | null } = {};
+    // Role now lives on `WorkspaceMember`, not `User` — the tenancy
+    // restructure removed `User.role`. Writing `role` into a `user.update`
+    // `data` throws PrismaClientValidationError at runtime (a `data` write, so
+    // the field checker's where/select coverage never saw it). So the two
+    // changes go to two tables: the per-workspace ROLE to WorkspaceMember, and
+    // DEACTIVATION (a user-global fact) to User.
     const allowed = assignableRoles(actor);
+    const currentRole = (target.workspaceMemberships[0]?.role ?? "agent") as Role;
 
+    let nextRole: Role | undefined;
     if (typeof input.role === "string") {
       if (!(allowed as string[]).includes(input.role)) {
         throw new ForbiddenException({ error: "role not assignable by you" });
       }
-      data.role = input.role as Role;
+      nextRole = input.role as Role;
     }
+    const userData: { deactivatedAt?: Date | null } = {};
     if (typeof input.deactivated === "boolean") {
-      data.deactivatedAt = input.deactivated ? new Date() : null;
+      userData.deactivatedAt = input.deactivated ? new Date() : null;
     }
 
     // Self-edit safeguards.
     if (targetId === actorUserId) {
-      if (data.role && data.role !== actor.role) {
+      if (nextRole && nextRole !== actor.role) {
         throw new BadRequestException({ error: "cannot change your own role" });
       }
-      if (data.deactivatedAt) {
+      if (userData.deactivatedAt) {
         throw new BadRequestException({ error: "cannot deactivate yourself" });
       }
     }
 
     // Last-active-manager guard.
     const willLoseManagerPowers =
-      (data.role && data.role !== "admin") ||
-      data.deactivatedAt;
+      (nextRole && nextRole !== "admin") || Boolean(userData.deactivatedAt);
     const targetCurrentlyManages =
       (target.workspaceMemberships[0]?.role === "admin" || target.isSuperAdmin) &&
       !target.deactivatedAt;
@@ -595,6 +602,19 @@ export class UsersService {
       deactivatedAt: true,
       createdAt: true,
     } satisfies Prisma.UserSelect;
+
+    // Apply both writes on one client: the membership role FIRST, so the
+    // `user.update`'s `userSelect` re-reads the fresh role. Wrapped in a
+    // transaction whenever a role changes so the pair is atomic.
+    const applyWrites = async (client: Prisma.TransactionClient | DbService) => {
+      if (nextRole !== undefined && nextRole !== currentRole) {
+        await client.workspaceMember.update({
+          where: { userId_workspaceId: { userId: targetId, workspaceId } },
+          data: { role: nextRole },
+        });
+      }
+      return client.user.update({ where: { id: targetId }, data: userData, select: userSelect });
+    };
 
     // When the write could strip the last manager, the re-count + update must
     // be serialized per team — otherwise two concurrent demote/deactivate
@@ -621,9 +641,11 @@ export class UsersService {
             if (otherManagers === 0) {
               throw new BadRequestException({ error: "cannot remove the last active admin" });
             }
-            return tx.user.update({ where: { id: targetId }, data, select: userSelect });
+            return applyWrites(tx);
           })
-        : await this.db.user.update({ where: { id: targetId }, data, select: userSelect });
+        : nextRole !== undefined && nextRole !== currentRole
+          ? await this.db.$transaction((tx) => applyWrites(tx))
+          : await this.db.user.update({ where: { id: targetId }, data: userData, select: userSelect });
 
     // Privilege-altering changes — delete every Session row + revoke so
     // the user has to re-authenticate on every device with the new role
@@ -638,8 +660,8 @@ export class UsersService {
     // bust the cache so the next render shows the new value without a 15s
     // lag — sockets stay alive so the user isn't logged out on a profile
     // edit.
-    const roleChanged = data.role !== undefined && data.role !== ((target.workspaceMemberships[0]?.role ?? "agent") as Role);
-    const deactivated = Boolean(data.deactivatedAt);
+    const roleChanged = nextRole !== undefined && nextRole !== currentRole;
+    const deactivated = Boolean(userData.deactivatedAt);
     if (roleChanged || deactivated) {
       await this.db.session.deleteMany({ where: { userId: targetId } });
       this.sessionInvalidator.revoke(

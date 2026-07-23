@@ -602,9 +602,28 @@ export class ConversationsService {
     workspaceId: string,
     userId: string,
     input: BulkDeleteConversationsInput,
+    /**
+     * The signed-in viewer, for the agent-visibility boundary. Load-bearing on
+     * a DESTRUCTIVE path: the class-level `@ScopedByConversation("id")` guard
+     * keys on `req.params.id` / `req.body.id`, but this route's body key is
+     * `conversationIds` (an array), so the guard no-ops here. Without ANDing the
+     * restriction in below, a restricted agent — who holds `conversations:delete`
+     * by default — could bulk-delete threads the single-delete path would 404.
+     * Optional so server-to-server callers (never restricted) can omit it.
+     */
+    viewer?: ConversationViewer,
   ): Promise<{ count: number }> {
+    // AND the restriction as an independent clause, never a sibling spread —
+    // `visibilityWhere` sets `assignedUserId`, and a spread next to
+    // `id: { in }` would be fine, but the AND form is what keeps this immune to
+    // a future field collision and matches every other read path here.
+    const restriction = viewer ? visibilityWhere(viewer) : {};
     const owned = await this.db.conversation.findMany({
-      where: { workspaceId, id: { in: input.conversationIds } },
+      where: {
+        workspaceId,
+        id: { in: input.conversationIds },
+        ...(Object.keys(restriction).length ? { AND: [restriction] } : {}),
+      },
       select: { id: true },
     });
     if (owned.length === 0) {

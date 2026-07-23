@@ -34,6 +34,7 @@ type Db = Pick<
   | "conversation"
   | "workspace"
   | "user"
+  | "tag"
   | "$transaction"
 >;
 
@@ -151,6 +152,11 @@ async function createTicketInTx(
   const due = computeDueDates(now, policy, schedule);
   const number = await allocateNumber(tx, args.workspaceId);
 
+  // Drop any tag id that isn't this workspace's — connect-by-id doesn't filter.
+  const safeTagIds = args.tagIds?.length
+    ? await workspaceScopedTagIds(tx, args.workspaceId, args.tagIds)
+    : [];
+
   const row = await tx.ticket.create({
     data: {
       workspaceId: args.workspaceId,
@@ -173,7 +179,7 @@ async function createTicketInTx(
       createdById: args.actor.userId ?? null,
       createdByApiKeyId: args.actor.apiKeyId ?? null,
       customFields: (args.customFields ?? {}) as Prisma.InputJsonValue,
-      ...(args.tagIds?.length ? { tags: { connect: args.tagIds.map((id) => ({ id })) } } : {}),
+      ...(safeTagIds.length ? { tags: { connect: safeTagIds.map((id) => ({ id })) } } : {}),
     },
     select: { id: true },
   });
@@ -506,9 +512,13 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
     }
 
     if (args.tagIds !== undefined) {
+      // Scope to this workspace's tags — `set` by id doesn't filter, so a
+      // foreign id would attach another workspace's tag. Empty stays empty
+      // (clears all tags), which is the intended meaning of `tagIds: []`.
+      const safeTagIds = await workspaceScopedTagIds(tx, args.workspaceId, args.tagIds);
       await tx.ticket.update({
         where: { id: existing.id },
-        data: { tags: { set: args.tagIds.map((id) => ({ id })) } },
+        data: { tags: { set: safeTagIds.map((id) => ({ id })) } },
       });
     }
 
@@ -946,6 +956,30 @@ async function assertWorkspaceMember(
     select: { id: true },
   });
   return Boolean(user);
+}
+
+/**
+ * Narrow a caller-supplied set of tag ids to the ones that actually belong to
+ * this workspace.
+ *
+ * Prisma's `tags: { connect: [{ id }] }` / `{ set: [{ id }] }` connect by id
+ * with NO workspace filter, so an id from another workspace would attach that
+ * workspace's tag (its name/color then renders on this ticket — a cross-tenant
+ * leak, and a dangling cross-workspace reference). Foreign ids are dropped
+ * rather than erroring, matching how saved-view / workflow tag handling treats
+ * ids that don't resolve.
+ */
+async function workspaceScopedTagIds(
+  db: Db,
+  workspaceId: string,
+  tagIds: string[],
+): Promise<string[]> {
+  if (tagIds.length === 0) return [];
+  const rows = await db.tag.findMany({
+    where: { id: { in: tagIds }, workspaceId },
+    select: { id: true },
+  });
+  return rows.map((t) => t.id);
 }
 
 async function withUniqueRetry<T>(fn: () => Promise<T>): Promise<T> {

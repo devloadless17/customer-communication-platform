@@ -5,6 +5,7 @@ import { BadGatewayException, BadRequestException, Injectable, Logger } from "@n
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
 import { invalidateMessengerConfig } from "@/lib/providers/messenger-config";
+import { normalizeDefaultAccount } from "@/lib/providers/normalize-default-account";
 import {
   ensurePageSubscribedToMessaging,
   getPageSubscription,
@@ -301,6 +302,8 @@ export class MessengerService {
         lastAuthErrorAt: null,
       },
     });
+
+    await normalizeDefaultAccount(workspaceId, CHANNEL, pageId);
 
     invalidateMessengerConfig(workspaceId);
 

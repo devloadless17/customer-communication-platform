@@ -7,6 +7,7 @@ import type { Role, OrgStatus } from "@ccp/shared/types";
 import { DbService } from "../db/db.service";
 import {
   readActiveWorkspaceCookie,
+  snapshotMatchesActiveWorkspace,
   sessionCacheGet,
   sessionCacheGetByCookie,
   sessionCacheSet,
@@ -120,7 +121,12 @@ export class SocketAuthService {
     // already maintains a 15s per-userId snapshot; reuse it so socket
     // handshakes get the same single-DB-hit-per-window economics.
     const cached = sessionCacheGet(userId);
-    if (cached) {
+    // Only serve the cache when it is scoped to the workspace THIS handshake's
+    // `ccp.ws` cookie names — the per-userId snapshot is shared across a
+    // multi-workspace user's cookies/devices, so a stale one would join the
+    // wrong `ws:` room. Mismatch falls through to a full resolve. Mirrors the
+    // HTTP guard in session.guard.ts.
+    if (cached && snapshotMatchesActiveWorkspace(cookieHeader, cached)) {
       // I-10: same org-approval re-check on this fast path (see the cookie-cache
       // branch above) so a warm per-userId cache can't bypass the gate.
       if (!cached.isSuperAdmin && cached.orgStatus !== "active") {
@@ -189,17 +195,35 @@ export class SocketAuthService {
       return { kind: "unauthenticated" };
     }
 
-    // Same resolution order as resolveSession: membership-validated cookie →
-    // first membership. The cookie can only SELECT among workspaces this user
-    // belongs to, so a forged value cannot join another tenant's room.
+    // Same resolution — and the same security-critical org scope — as
+    // resolveSession. The `ccp.ws` cookie can only SELECT a workspace this user
+    // may act in: a membership (fast path), any workspace for a superAdmin, or
+    // a workspace IN THEIR OWN ORG for an org admin/owner. The org scope is
+    // verified against the DB; trusting `isOrgAdmin` unscoped let any org owner
+    // join another tenant's `ws:` room and stream its realtime frames. Mirrors
+    // the fix in session.guard.ts — keep the two in lockstep.
     const memberships = dbUser.workspaceMemberships;
     const isOrgAdmin = dbUser.orgRole === "owner" || dbUser.orgRole === "admin";
+    const memberWorkspaceIds = new Set(memberships.map((m) => m.workspace.id));
     const cookieCandidate = readActiveWorkspaceCookie(cookieHeader);
+
+    const canAccess = async (wsId: string): Promise<boolean> => {
+      if (memberWorkspaceIds.has(wsId)) return true;
+      if (dbUser.isSuperAdmin) {
+        return (await this.db.workspace.count({ where: { id: wsId } })) > 0;
+      }
+      if (isOrgAdmin) {
+        return (
+          (await this.db.workspace.count({
+            where: { id: wsId, organizationId: dbUser.organizationId },
+          })) > 0
+        );
+      }
+      return false;
+    };
+
     const activeWorkspaceId =
-      cookieCandidate &&
-      (memberships.some((m) => m.workspace.id === cookieCandidate) ||
-        isOrgAdmin ||
-        dbUser.isSuperAdmin)
+      cookieCandidate && (await canAccess(cookieCandidate))
         ? cookieCandidate
         : (memberships[0]?.workspace.id ?? null);
     if (!activeWorkspaceId) return { kind: "unauthenticated" };

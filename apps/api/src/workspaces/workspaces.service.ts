@@ -8,6 +8,7 @@ import {
 import { provisionWorkspace } from "@/lib/workspaces/provision";
 
 import { invalidateSessionCache, type ApiSession } from "../auth/session.guard";
+import { Prisma } from "@prisma/client";
 import { DbService } from "../db/db.service";
 
 export interface WorkspaceSummary {
@@ -239,29 +240,41 @@ export class WorkspacesService {
       select: { role: true },
     });
 
-    // Losing the last admin: block whether it happens by removal or by a
-    // demotion to manager/agent.
-    if (existing?.role === "admin" && role !== "admin") {
-      const admins = await this.db.workspaceMember.count({
-        where: { workspaceId, role: "admin" },
-      });
-      if (admins <= 1) {
-        throw new BadRequestException({
-          error: "last_admin",
-          detail:
-            "This is the workspace's only admin. Promote someone else first — a workspace with no admin can't be configured or repaired.",
+    const applyWrite = async (client: Prisma.TransactionClient | DbService) => {
+      if (role === null) {
+        await client.workspaceMember.deleteMany({ where: { userId, workspaceId } });
+      } else {
+        await client.workspaceMember.upsert({
+          where: { userId_workspaceId: { userId, workspaceId } },
+          create: { userId, workspaceId, role },
+          update: { role },
         });
       }
-    }
+    };
 
-    if (role === null) {
-      await this.db.workspaceMember.deleteMany({ where: { userId, workspaceId } });
-    } else {
-      await this.db.workspaceMember.upsert({
-        where: { userId_workspaceId: { userId, workspaceId } },
-        create: { userId, workspaceId, role },
-        update: { role },
+    // Losing the last admin: block whether it happens by removal or by a
+    // demotion to manager/agent. Serialize the re-count + write under a
+    // `SELECT … FOR UPDATE` on the workspace row — otherwise two concurrent
+    // demotions each see `admins = 2 (> 1)` and both commit, leaving the
+    // workspace with ZERO admins (its own comment calls that unrecoverable).
+    // Same TOCTOU pattern the create-cap and UsersService guards already use.
+    if (existing?.role === "admin" && role !== "admin") {
+      await this.db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
+        const admins = await tx.workspaceMember.count({
+          where: { workspaceId, role: "admin" },
+        });
+        if (admins <= 1) {
+          throw new BadRequestException({
+            error: "last_admin",
+            detail:
+              "This is the workspace's only admin. Promote someone else first — a workspace with no admin can't be configured or repaired.",
+          });
+        }
+        await applyWrite(tx);
       });
+    } else {
+      await applyWrite(this.db);
     }
     // The TARGET's session carries their membership set + effective role, so
     // theirs is the cache that must drop — not the actor's.
@@ -289,35 +302,39 @@ export class WorkspacesService {
     this.assertCanManage(session);
     await this.assertInOrg(session, workspaceId);
 
-    const remaining = await this.db.workspace.count({
-      where: { organizationId: session.organizationId },
-    });
-    if (remaining <= 1) {
-      throw new BadRequestException({
-        error: "last_workspace",
-        detail:
-          "An organization must keep at least one workspace — every screen in the app is scoped to one, so deleting the last leaves nothing to open.",
+    // Serialize the count + delete under a `SELECT … FOR UPDATE` on the ORG
+    // row (the invariant is org-level: "keep ≥1 workspace"). Without it, two
+    // concurrent deletes of the last two workspaces each see `remaining = 2
+    // (> 1)` and both commit, leaving the org with ZERO workspaces — nothing to
+    // open. Members are collected inside the tx BEFORE the cascade removes
+    // their WorkspaceMember rows, so we still know whose session went stale.
+    const members = await this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Organization" WHERE id = ${session.organizationId} FOR UPDATE`;
+      const remaining = await tx.workspace.count({
+        where: { organizationId: session.organizationId },
       });
-    }
-
-    // Collect the members BEFORE the delete — the cascade removes their
-    // WorkspaceMember rows, so afterwards there is no way to learn whose
-    // session snapshot just went stale.
-    const members = await this.db.workspaceMember.findMany({
-      where: { workspaceId },
-      select: { userId: true },
-    });
-
-    await this.db.workspace.delete({ where: { id: workspaceId } });
-
-    // Anyone whose active workspace was this one now points at a row that no
-    // longer exists. `Session.activeWorkspaceId` has no FK (it is a per-device
-    // preference, not a relation), so clear it explicitly — otherwise their
-    // next request resolves a dead id and falls through to an error instead of
-    // their first remaining membership.
-    await this.db.session.updateMany({
-      where: { activeWorkspaceId: workspaceId },
-      data: { activeWorkspaceId: null },
+      if (remaining <= 1) {
+        throw new BadRequestException({
+          error: "last_workspace",
+          detail:
+            "An organization must keep at least one workspace — every screen in the app is scoped to one, so deleting the last leaves nothing to open.",
+        });
+      }
+      const m = await tx.workspaceMember.findMany({
+        where: { workspaceId },
+        select: { userId: true },
+      });
+      await tx.workspace.delete({ where: { id: workspaceId } });
+      // Anyone whose active workspace was this one now points at a row that no
+      // longer exists. `Session.activeWorkspaceId` has no FK (a per-device
+      // preference, not a relation), so clear it explicitly — otherwise their
+      // next request resolves a dead id and errors instead of falling through
+      // to their first remaining membership.
+      await tx.session.updateMany({
+        where: { activeWorkspaceId: workspaceId },
+        data: { activeWorkspaceId: null },
+      });
+      return m;
     });
     // Every member of the deleted workspace holds a stale membership list.
     for (const m of members) invalidateSessionCache(m.userId);

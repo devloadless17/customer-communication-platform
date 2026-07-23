@@ -24,6 +24,7 @@ import {
 } from "@/lib/providers/config";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 import { fetchWhatsappHealthFromGraph, getWhatsappHealth } from "@/lib/providers/meta-health";
+import { normalizeDefaultAccount } from "@/lib/providers/normalize-default-account";
 import {
   readTemplateAnalytics,
   refreshTemplateAnalytics,
@@ -379,6 +380,12 @@ export class WhatsappService {
         lastAuthErrorAt: null,
       },
     });
+
+    // Clean up the verify-token placeholder getConfig pre-minted (keyed on
+    // "") and guarantee THIS real account is the sole active default — otherwise
+    // webhook + default-send config resolve to the dead placeholder and drop all
+    // inbound. See normalizeDefaultAccount.
+    await normalizeDefaultAccount(workspaceId, META_PROVIDER, phoneNumberId);
 
     invalidateProviderConfig(workspaceId);
 

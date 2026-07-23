@@ -5,6 +5,7 @@ import { BadGatewayException, BadRequestException, Injectable, Logger } from "@n
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
 import { invalidateInstagramConfig } from "@/lib/providers/instagram-config";
+import { normalizeDefaultAccount } from "@/lib/providers/normalize-default-account";
 import {
   ensurePageSubscribedToMessaging,
   getPageSubscription,
@@ -316,6 +317,8 @@ export class InstagramService {
         lastAuthErrorAt: null,
       },
     });
+
+    await normalizeDefaultAccount(workspaceId, CHANNEL, igId);
 
     invalidateInstagramConfig(workspaceId);
 

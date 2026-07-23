@@ -14,6 +14,7 @@ import { validatePasswordStructure } from "@ccp/shared/auth/password-policy";
 import type { Role } from "@ccp/shared/types";
 
 import { EventBus } from "../events/event-bus.module";
+import type { ApiSession } from "../auth/session.guard";
 import { DbService } from "../db/db.service";
 import type { AcceptInviteInput, CreateInviteInput } from "./invites.schemas";
 
@@ -47,22 +48,44 @@ export class InvitesService {
    * one only when it belongs to their own organization — otherwise a crafted id
    * would let an admin of org A mint a working invite into org B.
    *
-   * Note there is no extra role gate here: the controller is already
-   * `@RequireRole("admin")`, and an org owner/admin resolves to `admin` in
-   * every workspace of their org, so anyone who reaches this method is entitled
-   * to staff any workspace it can return.
+   * Role gate: `@RequireRole("admin")` on the controller only proves the caller
+   * administers their ACTIVE workspace — it passes for a plain member
+   * (`orgRole: member`) who holds `WorkspaceMember.role = admin` in ONE
+   * workspace. Such a caller is NOT entitled to staff a sibling workspace they
+   * don't administer, so targeting a different workspace requires either being
+   * an org manager (owner/admin/superAdmin — admin everywhere in the org) or
+   * being an admin member of the TARGET itself. Without this, a single-workspace
+   * admin could mint an admin invite into any sibling workspace in the org.
    */
   async resolveTargetWorkspace(
-    session: { workspaceId: string; organizationId: string },
+    session: Pick<
+      ApiSession,
+      "workspaceId" | "organizationId" | "orgRole" | "isSuperAdmin" | "userId"
+    >,
     requested: string | undefined,
   ): Promise<string> {
     if (!requested || requested === session.workspaceId) return session.workspaceId;
+
     const inOrg = await this.db.workspace.count({
       where: { id: requested, organizationId: session.organizationId },
     });
     // 404, not 403 — a 403 would confirm the workspace exists to someone
     // outside the org that owns it.
     if (!inOrg) throw new NotFoundException({ error: "workspace_not_found" });
+
+    const isOrgManager =
+      session.isSuperAdmin ||
+      session.orgRole === "owner" ||
+      session.orgRole === "admin";
+    if (!isOrgManager) {
+      // Plain workspace admin — must actually administer the TARGET. This is a
+      // sibling workspace in their own org, so a 403 (it exists, you can't
+      // staff it) is correct; the existence isn't a secret from an org member.
+      const adminHere = await this.db.workspaceMember.count({
+        where: { userId: session.userId, workspaceId: requested, role: "admin" },
+      });
+      if (!adminHere) throw new ForbiddenException({ error: "workspace_forbidden" });
+    }
     return requested;
   }
 

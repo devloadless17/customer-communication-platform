@@ -153,7 +153,15 @@ export class ConversationsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(BulkDeleteConversationsSchema)) body: BulkDeleteConversationsInput,
   ) {
-    const out = await this.conversations.bulkDelete(session.workspaceId, session.userId, body);
+    // Pass the session as the viewer so the agent-visibility boundary applies
+    // to bulk-delete too — the class-level guard can't see this route's
+    // array-shaped body, so the scoping has to happen in the service.
+    const out = await this.conversations.bulkDelete(
+      session.workspaceId,
+      session.userId,
+      body,
+      session,
+    );
     return { ok: true, count: out.count };
   }
 

@@ -526,3 +526,55 @@ describe("assignee inheritance", () => {
     expect(ticket.assignedUserId).toBe(other.id);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Isolation: a tag from ANOTHER workspace must never attach to a ticket.
+// `tags: { connect/set }` is by id with no workspace filter, so the mutation
+// layer has to scope the ids itself. (Pre-launch audit finding.)
+// ---------------------------------------------------------------------------
+
+describe("ticket tag workspace scoping", () => {
+  it("drops a foreign-workspace tag id on create and on update", async () => {
+    // A tag in THIS workspace, and a tag in a sibling workspace of the same org.
+    const ownTag = await prisma.tag.create({
+      data: { workspaceId, name: `own-${S}`, color: "sky" },
+    });
+    const otherWs = await prisma.workspace.create({
+      data: { name: `TK other ${S}`, organizationId: orgId },
+    });
+    const foreignTag = await prisma.tag.create({
+      data: { workspaceId: otherWs.id, name: `foreign-${S}`, color: "rose" },
+    });
+
+    const conversationId = await makeConversation();
+    const created = await createTicket(db, {
+      workspaceId,
+      conversationId,
+      actor: { userId },
+      tagIds: [ownTag.id, foreignTag.id],
+    });
+    const ticketId = created.ok ? created.ticket.id : "";
+    expect(ticketId).not.toBe("");
+
+    const afterCreate = await prisma.ticket.findUniqueOrThrow({
+      where: { id: ticketId },
+      select: { tags: { select: { id: true } } },
+    });
+    // Only the own-workspace tag attached; the foreign one was dropped.
+    expect(afterCreate.tags.map((t) => t.id).sort()).toEqual([ownTag.id]);
+
+    // Same on update: a foreign id in `set` must not reattach it.
+    await updateTicket(db, {
+      workspaceId,
+      ticketId,
+      actor: { userId },
+      tagIds: [foreignTag.id],
+    });
+    const afterUpdate = await prisma.ticket.findUniqueOrThrow({
+      where: { id: ticketId },
+      select: { tags: { select: { id: true } } },
+    });
+    // Foreign id dropped → the set resolves to empty, clearing tags.
+    expect(afterUpdate.tags).toHaveLength(0);
+  });
+});

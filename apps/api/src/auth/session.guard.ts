@@ -40,6 +40,31 @@ export function readActiveWorkspaceCookie(cookieHeader: string | undefined): str
 }
 
 /**
+ * Does a cached session snapshot match the active workspace THIS request wants?
+ *
+ * The `sessionCache` snapshot carries workspace-scoped fields (`workspaceId`,
+ * `role`, `rolePermissions`, `agentConversationVisibility`) for ONE workspace,
+ * but the cache is keyed by userId — so a multi-workspace user (or the same
+ * user on a second device, or right after a switch) can land on a snapshot
+ * scoped to a DIFFERENT workspace than their `ccp.ws` cookie names. Serving it
+ * would silently run the request against the wrong workspace for the cache
+ * window — the exact isolation the restructure's multi-workspace membership
+ * depends on.
+ *
+ * If the cookie names a workspace it must equal the snapshot's; if it names
+ * none, the snapshot's deterministic fallback (stored choice / first
+ * membership) is correct and we accept it. A mismatch returns false, so the
+ * caller falls through to a full re-resolve — a cache miss, never wrong data.
+ */
+export function snapshotMatchesActiveWorkspace(
+  cookieHeader: string | undefined,
+  snapshot: ApiSession,
+): boolean {
+  const want = readActiveWorkspaceCookie(cookieHeader);
+  return want === null || want === snapshot.workspaceId;
+}
+
+/**
  * Shape attached to req.session on success. Same fields the pre-migration
  * Next.js `requireSession()` helper returned, so controllers feel identical
  * to the route handlers they're replacing.
@@ -325,7 +350,10 @@ export async function resolveSession(
   const cookieHeader = req.headers["cookie"];
   if (typeof cookieHeader === "string" && cookieHeader.length > 0) {
     const cached = sessionCacheGetByCookie(cookieHeader);
-    if (cached) return cached;
+    // The cookie-hash entry stores (userId, sessionId) and reads the LIVE
+    // per-user snapshot, which a different-workspace request may have
+    // overwritten since — so still confirm it matches this cookie's workspace.
+    if (cached && snapshotMatchesActiveWorkspace(cookieHeader, cached)) return cached;
   }
 
   let result: Awaited<ReturnType<typeof auth.api.getSession>> | null = null;
@@ -353,7 +381,7 @@ export async function resolveSession(
   // userId, not by session — a user with two browsers has two session
   // rows, and `session.sessionId` must reflect THIS request's row.
   const cached = cacheGet(result.user.id);
-  if (cached) {
+  if (cached && snapshotMatchesActiveWorkspace(cookieHeader, cached)) {
     // Repopulate the cookie-hash cache so the NEXT request on THIS cookie hits
     // the fast-path at the top and short-circuits `auth.api.getSession`
     // entirely — matching the full path below and the socket handshake
@@ -403,11 +431,36 @@ export async function resolveSession(
   if (!user || user.deactivatedAt) return null;
 
   const memberships = user.workspaceMemberships;
-  // An org admin/owner is implicitly admin in EVERY workspace of their org, so
-  // they may act in workspaces they hold no explicit membership row for.
+  // An org admin/owner is implicitly admin in EVERY workspace of THEIR OWN org,
+  // so they may act in workspaces they hold no explicit membership row for.
   const isOrgAdmin = user.orgRole === "owner" || user.orgRole === "admin";
-  const canAccess = (wsId: string): boolean =>
-    memberships.some((m) => m.workspace.id === wsId) || isOrgAdmin || user.isSuperAdmin;
+  const memberWorkspaceIds = new Set(memberships.map((m) => m.workspace.id));
+
+  // Whether the user may select `wsId` as their active workspace.
+  //
+  // SECURITY-CRITICAL, and async ON PURPOSE. The `ccp.ws` cookie is client
+  // input; this is the gate that stops it being a cross-org key. Membership is
+  // the fast path (no query). BEYOND membership, the org-admin / superAdmin
+  // short-circuit MUST be verified against the DB — an org owner (every
+  // self-signup is `orgRole: "owner"`) is admin only within their OWN org, so
+  // the workspace has to be confirmed to belong to `user.organizationId`.
+  // Trusting `isOrgAdmin` unscoped let any org owner set `ccp.ws` to any
+  // workspace on the platform and act as its admin (mirrors the check
+  // `workspaces.service.canAccess` already does for the switch endpoint).
+  const canAccess = async (wsId: string): Promise<boolean> => {
+    if (memberWorkspaceIds.has(wsId)) return true;
+    if (user.isSuperAdmin) {
+      return (await prisma.workspace.count({ where: { id: wsId } })) > 0;
+    }
+    if (isOrgAdmin) {
+      return (
+        (await prisma.workspace.count({
+          where: { id: wsId, organizationId: user.organizationId },
+        })) > 0
+      );
+    }
+    return false;
+  };
 
   // Active-workspace resolution. The `ccp.ws` cookie is CLIENT INPUT and is
   // never trusted raw — it only selects among workspaces the user provably may
@@ -416,13 +469,13 @@ export async function resolveSession(
   // treats that as unauthenticated rather than silently picking someone else's.
   const cookieCandidate = readActiveWorkspaceCookie(cookieHeader);
   let activeWorkspaceId: string | null =
-    cookieCandidate && canAccess(cookieCandidate) ? cookieCandidate : null;
+    cookieCandidate && (await canAccess(cookieCandidate)) ? cookieCandidate : null;
   if (!activeWorkspaceId) {
     const stored = await prisma.session.findUnique({
       where: { id: sessionId },
       select: { activeWorkspaceId: true },
     });
-    if (stored?.activeWorkspaceId && canAccess(stored.activeWorkspaceId)) {
+    if (stored?.activeWorkspaceId && (await canAccess(stored.activeWorkspaceId))) {
       activeWorkspaceId = stored.activeWorkspaceId;
     }
   }
