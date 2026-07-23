@@ -25,6 +25,7 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import type { ContactFieldDefinition, TemplateDto } from "@ccp/shared/types";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import { parseVariableBindings, type VariableBindings } from "@ccp/shared/template-bindings";
+import { TemplateInsights } from "@/features/broadcasts/charts/template-insights";
 import { cn } from "@ccp/shared/utils";
 
 /**
@@ -636,6 +637,24 @@ function DetailDrawer({
                     />
                   </div>
                 </section>
+
+                {/* Meta's own figures for this template. Placed under the
+                    preview because "is this template working" is the question
+                    someone has while looking at it — a separate page would mean
+                    navigating away from the thing being asked about. */}
+                {template.externalId && (
+                  <section>
+                    <SectionLabel>Performance</SectionLabel>
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                      Meta&apos;s own daily figures. Read counts are only reported
+                      for about a week, so older days show what was captured at
+                      the time.
+                    </p>
+                    <div className="mt-3">
+                      <TemplateInsights templateId={template.id} />
+                    </div>
+                  </section>
+                )}
 
                 <section>
                   <SectionLabel>Variable bindings</SectionLabel>

@@ -22,6 +22,11 @@ import type { Channel } from "@ccp/shared/types";
 import { CHANNEL_CAPABILITIES, LIVE_CHANNELS, isPhoneChannel } from "@ccp/shared/providers/capabilities";
 import { flagChannelNeedsReconnect } from "@/lib/providers/channel-health";
 import { enqueueBroadcastMaterialize } from "@/lib/broadcasts/materialize-queue";
+import {
+  acquireSendToken,
+  resolveSendRate,
+  sendRateLimiterEnabled,
+} from "@/lib/broadcasts/send-rate-limiter";
 import { getWhatsappHealth } from "@/lib/providers/meta-health";
 
 /** Resolved send binding for one channel — the provider + its per-team config. */
@@ -1044,6 +1049,23 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   const pacing = resolveSendPacing(broadcast.channel, throughputLevel);
   const lanes = Math.min(pacing.lanes, queue.length);
 
+  // Per-NUMBER send-rate ceiling (dark unless BROADCAST_RATE_LIMITER_ENABLED=1).
+  // Keyed on the account, not the run: the ceiling belongs to the phone number,
+  // so two campaigns on one number must share it — which a per-lane sleep can
+  // never express. `rateKey` falls back to the workspace for channels with no
+  // per-number concept, so the bucket is still a single shared ceiling there.
+  // The resolved send config already names the account this run sends from
+  // (`phoneNumberId` for WhatsApp). Falling back to a workspace+channel key
+  // keeps the bucket a single shared ceiling for channels with no per-number
+  // concept, rather than silently degrading to per-run.
+  const sendConfig = bindingByChannel.get(broadcast.channel)?.config as
+    | { phoneNumberId?: string }
+    | undefined;
+  const rateKey =
+    sendConfig?.phoneNumberId || `ws:${broadcast.workspaceId}:${broadcast.channel}`;
+  const sendRate = resolveSendRate(throughputLevel);
+  const rateLimited = sendRateLimiterEnabled() && !isCustomerMode;
+
   // Cooperative cancel — operators flip the broadcast row to `canceled`
   // via POST /api/broadcasts/:id/cancel; the lanes check this flag at the
   // top of every iteration. Recipients already sent stay sent (Meta can't
@@ -1123,6 +1145,10 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         // pin every Meta call slot while others starve. Slot is released in a
         // `finally` so a thrown recipient (shouldn't happen — processOneRecipient
         // swallows its errors — but defensive) doesn't leak the slot.
+        // Rate gate BEFORE the Meta call, and before taking a team slot, so a
+        // lane waiting on tokens isn't also holding a slot another team could
+        // be using.
+        if (rateLimited) await acquireSendToken(rateKey, sendRate);
         await acquireTeamRecipientSlot(broadcast.workspaceId);
         try {
           await processOneRecipient(
@@ -1139,7 +1165,10 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         } finally {
           releaseTeamRecipientSlot(broadcast.workspaceId);
         }
-        if (pacing.gapMs > 0) await sleep(pacing.gapMs);
+        // The bucket, when on, IS the rate — the fixed gap on top of it would
+        // only push the achieved rate below the target. When off, today's
+        // pacing is byte-identical.
+        if (!rateLimited && pacing.gapMs > 0) await sleep(pacing.gapMs);
       }
     }),
   );

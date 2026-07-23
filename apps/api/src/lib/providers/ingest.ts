@@ -197,7 +197,11 @@ export async function ingestEvents(
           ...(evt.throughputLevel !== undefined
             ? { throughputLevel: evt.throughputLevel }
             : {}),
-        });
+        },
+        // Attribute the signal to the account whose webhook delivered it.
+        // Quality / throughput / calling restrictions are per-NUMBER, so a
+        // workspace-wide write would mark every sibling number degraded.
+        channelConnectionId ?? null);
       } else if (evt.kind === "call") {
         // Kill-switch: calling (WhatsApp + Messenger) reaches browsers via
         // realtime WebRTC signaling. DISABLE_CALLING=1 (wired in docker-compose

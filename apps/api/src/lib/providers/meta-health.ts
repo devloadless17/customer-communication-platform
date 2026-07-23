@@ -79,6 +79,12 @@ export interface WhatsappHealthSnapshot {
   messagingHealthUpdatedAt: Date | null;
   /** The portfolio the cap belongs to — the scope its 24h budget is shared over. */
   portfolioId: string | null;
+  /** Meta's own portfolio id, once resolved. Null until a token with
+   *  `business_management` has read `owner_business_info`. */
+  externalPortfolioId: string | null;
+  /** How many WhatsApp accounts share this portfolio's 24h budget. The number
+   *  that makes "7,850 of 10,000 remaining" legible when it isn't just yours. */
+  portfolioAccountCount: number;
 }
 
 /** A partial update — a webhook carries only the field(s) that changed. */
@@ -176,6 +182,20 @@ export function normalizeThroughputLevel(raw: unknown): string | null {
 export async function persistWhatsappHealth(
   workspaceId: string,
   update: WhatsappHealthUpdate,
+  /**
+   * The ACCOUNT this health signal is about.
+   *
+   * Load-bearing since a workspace may hold several WhatsApp numbers: quality
+   * rating, throughput and calling restrictions are all genuinely PER-NUMBER,
+   * so writing them workspace-wide would let a quality drop on the US Sales
+   * line mark UK Sales and Support degraded too — and, worse, let a calling
+   * restriction on one number silently block calls on the others.
+   *
+   * Omitted (the pre-multi-account shape) still writes workspace-wide, which
+   * is correct for the single-number case and for a signal we genuinely can't
+   * attribute to one account.
+   */
+  channelConnectionId?: string | null,
 ): Promise<void> {
   const data: {
     messagingTier?: string | null;
@@ -232,7 +252,18 @@ export async function persistWhatsappHealth(
       messagingHealthUpdatedAt: new Date(),
     };
     const updated = await db.whatsappPortfolio.updateMany({
-      where: { connections: { some: { workspaceId, channel: "whatsapp" } } },
+      // The portfolio owning THIS account. Unscoped, a tier update for one
+      // portfolio would overwrite every other portfolio in the workspace —
+      // each of which has its own independent 24h budget.
+      where: {
+        connections: {
+          some: {
+            workspaceId,
+            channel: "whatsapp",
+            ...(channelConnectionId ? { id: channelConnectionId } : {}),
+          },
+        },
+      },
       data: portfolioData,
     });
     // Self-healing: a workspace whose WhatsApp account predates the portfolio
@@ -252,7 +283,12 @@ export async function persistWhatsappHealth(
   }
 
   const res = await db.channelConnection.updateMany({
-    where: { workspaceId, channel: "whatsapp" },
+    // Narrow to the one account when we know which it is — see the param doc.
+    where: {
+      workspaceId,
+      channel: "whatsapp",
+      ...(channelConnectionId ? { id: channelConnectionId } : {}),
+    },
     data,
   });
   if (res.count > 0) {
@@ -521,7 +557,14 @@ export async function getWhatsappHealth(
       // The 24h messaging limit is PORTFOLIO-scoped since 2025-10-07 (shared by
       // every number in the portfolio), so tier + cap come off the portfolio,
       // not this number. Quality + throughput above stay per-number.
-      portfolio: { select: { messagingTier: true, messagingDailyCap: true } },
+      portfolio: {
+        select: {
+          messagingTier: true,
+          messagingDailyCap: true,
+          externalPortfolioId: true,
+          _count: { select: { connections: true } },
+        },
+      },
     },
   });
   if (!row) return null;
@@ -532,7 +575,102 @@ export async function getWhatsappHealth(
     throughputLevel: row.throughputLevel,
     messagingHealthUpdatedAt: row.messagingHealthUpdatedAt,
     portfolioId: row.portfolioId,
+    externalPortfolioId: row.portfolio?.externalPortfolioId ?? null,
+    portfolioAccountCount: row.portfolio?._count.connections ?? 0,
   };
+}
+
+/**
+ * Discover and link the BUSINESS PORTFOLIO that owns a WABA.
+ *
+ * Meta moved the 24h messaging limit from the phone NUMBER to the business
+ * PORTFOLIO on 2025-10-07, so the budget is shared by every number under one
+ * portfolio. `WhatsappPortfolio` models that, but nothing populated its
+ * `externalPortfolioId` — the row was only ever minted as a local container by
+ * the self-healing path in `persistWhatsappHealth`. That works while a
+ * workspace has ONE portfolio and breaks the moment it has two: both numbers'
+ * accounts would share a single local row and appear to share a budget they
+ * don't actually share.
+ *
+ * Two reads, both cheap and idempotent:
+ *   1. `/{wabaId}?fields=owner_business_info` → the portfolio's real id.
+ *   2. `/{portfolioId}?fields=whatsapp_business_manager_messaging_limit`
+ *      → the portfolio-scoped tier.
+ *
+ * Best-effort by design: a token without `business_management` cannot read the
+ * portfolio node, and that must degrade to "no portfolio id yet" rather than
+ * failing the connect flow. The caller keeps whatever tier it already had.
+ */
+export async function linkWhatsappPortfolio(
+  workspaceId: string,
+  channelConnectionId: string,
+  wabaId: string,
+  accessToken: string,
+  graphVersion: string,
+): Promise<{ portfolioId: string; externalPortfolioId: string } | null> {
+  let externalPortfolioId: string | null = null;
+  try {
+    const owner = await graphGetJson(
+      `${GRAPH_BASE}/${graphVersion}/${encodeURIComponent(wabaId)}?fields=owner_business_info`,
+      accessToken,
+      { retry: true },
+    );
+    const info = owner.owner_business_info;
+    if (info && typeof info === "object") {
+      const id = (info as { id?: unknown }).id;
+      if (typeof id === "string" && id.length > 0) externalPortfolioId = id;
+    }
+  } catch {
+    // No `business_management` scope, or Meta is having a moment. Not fatal —
+    // the connection keeps working, it just isn't portfolio-attributed yet and
+    // the next health sweep retries.
+    return null;
+  }
+  if (!externalPortfolioId) return null;
+
+  // The portfolio-scoped tier. Separate try: knowing WHICH portfolio a number
+  // belongs to is valuable on its own, so a failure to read the limit must not
+  // discard the id we just resolved.
+  let tier: string | null = null;
+  try {
+    const node = await graphGetJson(
+      `${GRAPH_BASE}/${graphVersion}/${encodeURIComponent(externalPortfolioId)}` +
+        `?fields=whatsapp_business_manager_messaging_limit`,
+      accessToken,
+      { retry: true },
+    );
+    tier = normalizeMessagingTier(node.whatsapp_business_manager_messaging_limit);
+  } catch {
+    tier = null;
+  }
+
+  // Upsert on the real Meta id, so two numbers in the same portfolio converge
+  // on ONE row (and correctly share a budget) while numbers in different
+  // portfolios stay independent.
+  const portfolio = await db.whatsappPortfolio.upsert({
+    where: { workspaceId_externalPortfolioId: { workspaceId, externalPortfolioId } },
+    create: {
+      workspaceId,
+      externalPortfolioId,
+      ...(tier ? { messagingTier: tier, messagingDailyCap: tierDailyCap(tier) } : {}),
+      messagingHealthUpdatedAt: new Date(),
+    },
+    // A null tier must NOT clobber a good stored one — a scope-less token would
+    // otherwise wipe the cap on every sweep and leave the gate permanently open.
+    update: {
+      ...(tier ? { messagingTier: tier, messagingDailyCap: tierDailyCap(tier) } : {}),
+      messagingHealthUpdatedAt: new Date(),
+    },
+    select: { id: true },
+  });
+
+  await db.channelConnection.updateMany({
+    where: { id: channelConnectionId, workspaceId },
+    data: { portfolioId: portfolio.id },
+  });
+  invalidateProviderConfig(workspaceId);
+
+  return { portfolioId: portfolio.id, externalPortfolioId };
 }
 
 /**
@@ -563,9 +701,81 @@ export async function fetchWhatsappHealthFromGraph(workspaceId: string): Promise
       ? (throughput as { level?: unknown }).level
       : undefined;
 
-  await persistWhatsappHealth(workspaceId, {
-    messagingTier: (node.messaging_limit_tier as string | undefined) ?? null,
-    qualityRating: (node.quality_rating as string | undefined) ?? null,
-    throughputLevel: (throughputLevel as string | undefined) ?? null,
+  // Resolve the owning portfolio FIRST, so the tier written just below lands on
+  // the right portfolio row rather than on whatever local container the
+  // self-healing path last minted. Best-effort: a token without
+  // `business_management` returns null and we fall through to the old
+  // behaviour, which is correct for a single-portfolio workspace.
+  const connection = await db.channelConnection.findFirst({
+    where: { workspaceId, channel: "whatsapp", externalAccountId: config.phoneNumberId },
+    select: { id: true },
   });
+  if (connection && config.wabaId) {
+    await linkWhatsappPortfolio(
+      workspaceId,
+      connection.id,
+      config.wabaId,
+      config.accessToken,
+      config.graphVersion,
+    );
+  }
+
+  await persistWhatsappHealth(
+    workspaceId,
+    {
+      messagingTier: (node.messaging_limit_tier as string | undefined) ?? null,
+      qualityRating: (node.quality_rating as string | undefined) ?? null,
+      throughputLevel: (throughputLevel as string | undefined) ?? null,
+    },
+    // Scope to the polled number — see the param doc on persistWhatsappHealth.
+    connection?.id ?? null,
+  );
+}
+
+/**
+ * The secret-free messaging-health summary the broadcast composer, the settings
+ * panel and the `/v1` API all render.
+ *
+ * Lives here rather than in `BroadcastsService` because THREE surfaces read it
+ * and the §12 parity rule is only real if they share one implementation — a
+ * `/v1` copy would be the thing that quietly disagrees about the remaining
+ * budget after the next tier change.
+ *
+ * Carries no credentials, so it is safe for any signed-in user and for a
+ * `read:catalog` key.
+ */
+export interface MessagingHealthSummary {
+  messagingTier: string | null;
+  messagingDailyCap: number | null;
+  qualityRating: string | null;
+  hasSnapshot: boolean;
+  recentUniqueRecipients: number | null;
+  remainingDailyBudget: number | null;
+  throughputLevel: string | null;
+  externalPortfolioId: string | null;
+  portfolioAccountCount: number;
+  messagingHealthUpdatedAt: string | null;
+}
+
+export async function getMessagingHealthSummary(
+  workspaceId: string,
+): Promise<MessagingHealthSummary> {
+  const health = await getWhatsappHealth(workspaceId);
+  const cap = health?.messagingDailyCap ?? null;
+  // Only pay for the usage count when there's a cap to measure against —
+  // mirrors checkBroadcastEligibility so the two never disagree.
+  const used =
+    cap === null ? null : await countRecentUniqueRecipients(workspaceId, health?.portfolioId);
+  return {
+    messagingTier: health?.messagingTier ?? null,
+    messagingDailyCap: cap,
+    qualityRating: health?.qualityRating ?? null,
+    hasSnapshot: !!health && health.messagingHealthUpdatedAt !== null,
+    recentUniqueRecipients: used,
+    remainingDailyBudget: used === null || cap === null ? null : Math.max(0, cap - used),
+    throughputLevel: health?.throughputLevel ?? null,
+    externalPortfolioId: health?.externalPortfolioId ?? null,
+    portfolioAccountCount: health?.portfolioAccountCount ?? 0,
+    messagingHealthUpdatedAt: health?.messagingHealthUpdatedAt?.toISOString() ?? null,
+  };
 }

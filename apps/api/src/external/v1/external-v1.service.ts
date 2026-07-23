@@ -193,6 +193,25 @@ export class ExternalV1Service {
   // Delegations to ExternalV1MessagingService — pass-through, no behavior here.
   // ===========================================================================
 
+  /**
+   * Resolve one of our template ids to Meta's, workspace-scoped.
+   *
+   * The analytics rollup is keyed on META's id, so a caller passing our row id
+   * (which is what every other `/v1` template route takes) has to be translated
+   * — otherwise the lookup silently returns an empty series that reads as "this
+   * template has no data".
+   */
+  async getTemplateExternalId(
+    workspaceId: string,
+    templateId: string,
+  ): Promise<string | null> {
+    const row = await this.db.messageTemplate.findFirst({
+      where: { id: templateId, workspaceId },
+      select: { externalId: true },
+    });
+    return row?.externalId ?? null;
+  }
+
   listConversations(
     workspaceId: string,
     q: ListConversationsQueryInput,

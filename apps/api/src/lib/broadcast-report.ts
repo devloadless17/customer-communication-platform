@@ -17,6 +17,7 @@
  */
 
 import { db } from "@/lib/db";
+import { readTemplateAnalytics } from "@/lib/analytics/template-analytics";
 import { TtlCache } from "@/lib/providers/config-cache";
 import { failureBucket } from "@/lib/providers/meta-send-error";
 
@@ -102,6 +103,33 @@ export interface BroadcastReport {
   diagnostics: ReportDiagnostic[];
   /** Wall-clock + throughput of the send itself. */
   throughput: { startedAt: string | null; completedAt: string | null; durationSec: number | null; perMinute: number | null };
+  /**
+   * Meta's OWN aggregate figures for this campaign's template over the days it
+   * sent, read from the stored daily rollup — never a live Graph call, so this
+   * stays safe on the report's poll path.
+   *
+   * Deliberately a SEPARATE block, not folded into `funnel`. The funnel is
+   * per-recipient truth from status webhooks and owns `replied` and opt-outs;
+   * Meta owns currency COST and unique URL-button clicks. They are measured
+   * differently and will not agree exactly — averaging them would produce a
+   * number that matches neither and quietly changes meaning as Meta's 7-day
+   * read/click window expires.
+   *
+   * `null` when analytics were never enabled or nothing has been fetched yet;
+   * `costWithheld` distinguishes "free campaign" from "Meta won't tell us"
+   * (Solution-Partner-billed WABAs).
+   */
+  metaAnalytics: {
+    sent: number;
+    delivered: number;
+    read: number | null;
+    clicked: number | null;
+    costAmountSpent: number | null;
+    costPerDelivered: number | null;
+    currency: string | null;
+    days: number;
+    costWithheld: boolean;
+  } | null;
   generatedAt: string;
 }
 
@@ -162,6 +190,10 @@ export async function getBroadcastReport(
       startedAt: true,
       completedAt: true,
       createdAt: true,
+      // Needed to look up Meta's aggregate figures for this campaign's
+      // template over the days it actually sent on.
+      templateName: true,
+      templateLanguage: true,
     },
   });
   if (!broadcast) return null;
@@ -267,6 +299,21 @@ export async function getBroadcastReport(
   }
 
   const startedAt = broadcast.startedAt ?? broadcast.createdAt;
+
+  // Meta's aggregate block. Resolved from the template NAME + LANGUAGE rather
+  // than a stored id, because a campaign records what it sent, not a foreign
+  // key — and a re-synced template can change ids under us.
+  //
+  // Scoped to the days the campaign actually ran (UTC, inclusive on both ends),
+  // so a template used by several campaigns doesn't attribute all of its
+  // history to whichever report you happen to open.
+  const metaAnalytics = await loadMetaAnalytics(
+    workspaceId,
+    broadcast.templateName,
+    broadcast.templateLanguage,
+    startedAt,
+    broadcast.completedAt ?? new Date(),
+  );
   const endedAt = broadcast.completedAt;
   const durationSec = endedAt ? Math.max(1, Math.round((endedAt.getTime() - startedAt.getTime()) / 1000)) : null;
   const attempted = accepted + failedAtSend;
@@ -285,6 +332,7 @@ export async function getBroadcastReport(
       durationSec,
       perMinute: durationSec ? Math.round((attempted / durationSec) * 60) : null,
     },
+    metaAnalytics,
     generatedAt: new Date().toISOString(),
   };
 
@@ -456,4 +504,61 @@ export function recipientOutcomeWhere(filter: {
       break; // "all" / unset
   }
   return where;
+}
+
+/**
+ * Read Meta's stored per-day analytics for a campaign's template, summed over
+ * the campaign's own send window.
+ *
+ * Returns null rather than zeros when there is nothing stored: "we have never
+ * fetched this" and "this campaign cost nothing" must render differently, and
+ * a zeroed block would assert the second while meaning the first.
+ */
+async function loadMetaAnalytics(
+  workspaceId: string,
+  templateName: string | null,
+  templateLanguage: string | null,
+  start: Date,
+  end: Date,
+): Promise<BroadcastReport["metaAnalytics"]> {
+  if (!templateName) return null;
+  // Name+language can match more than one row on a multi-WABA workspace (the
+  // uniqueness key includes wabaId). Prefer the most recently updated so a
+  // stale duplicate from an old catalog doesn't win — and the READ below is by
+  // externalId anyway, so at worst this picks the wrong sibling's rollup rather
+  // than inventing data.
+  const template = await db.messageTemplate.findFirst({
+    where: {
+      workspaceId,
+      name: templateName,
+      ...(templateLanguage ? { language: templateLanguage } : {}),
+      externalId: { not: null },
+    },
+    orderBy: { syncedAt: "desc" },
+    select: { externalId: true },
+  });
+  if (!template?.externalId) return null;
+
+  const { summary } = await readTemplateAnalytics(
+    workspaceId,
+    template.externalId,
+    start,
+    end,
+  );
+  if (summary.days === 0) return null;
+
+  return {
+    sent: summary.sent,
+    delivered: summary.delivered,
+    read: summary.read,
+    clicked: summary.clicked,
+    costAmountSpent: summary.costAmountSpent,
+    costPerDelivered: summary.costPerDelivered,
+    currency: summary.currency,
+    days: summary.days,
+    // We have rows but no money on any of them — Meta withheld pricing, which
+    // happens on Solution-Partner-billed WABAs. Distinguished so the UI can say
+    // WHY the cost is blank instead of showing an unexplained dash.
+    costWithheld: summary.costAmountSpent === null,
+  };
 }

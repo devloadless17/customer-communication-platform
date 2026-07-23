@@ -29,12 +29,13 @@ import {
 } from "@/lib/broadcasts/materialize-queue";
 import {
   checkBroadcastEligibility,
-  countRecentUniqueRecipients,
   fetchWhatsappHealthFromGraph,
-  getWhatsappHealth,
+  getMessagingHealthSummary,
+  type MessagingHealthSummary,
 } from "@/lib/providers/meta-health";
 import { buildBroadcastAssignmentPlan } from "@/lib/assignment/broadcast-plan";
 import { getBroadcastReport, recipientOutcomeWhere } from "@/lib/broadcast-report";
+import { refreshTemplateAnalytics } from "@/lib/analytics/template-analytics";
 import { csvHeader, csvRows } from "@/lib/csv";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
 import { teamConnectedChannels } from "@/lib/providers";
@@ -1157,27 +1158,68 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * `hasSnapshot` is false when we've never polled the number's tier
    * (advisory-only, ungated).
    */
-  async getMessagingHealth(workspaceId: string): Promise<{
-    messagingTier: string | null;
-    messagingDailyCap: number | null;
-    qualityRating: string | null;
-    hasSnapshot: boolean;
-    recentUniqueRecipients: number | null;
-    remainingDailyBudget: number | null;
-  }> {
-    const health = await getWhatsappHealth(workspaceId);
-    const cap = health?.messagingDailyCap ?? null;
-    // Only pay for the usage count when there's a cap to measure against —
-    // mirrors checkBroadcastEligibility so the two never disagree.
-    const used = cap === null ? null : await countRecentUniqueRecipients(workspaceId);
-    return {
-      messagingTier: health?.messagingTier ?? null,
-      messagingDailyCap: cap,
-      qualityRating: health?.qualityRating ?? null,
-      hasSnapshot: !!health && health.messagingHealthUpdatedAt !== null,
-      recentUniqueRecipients: used,
-      remainingDailyBudget: used === null || cap === null ? null : Math.max(0, cap - used),
-    };
+  /**
+   * Secret-free messaging-health snapshot for the composer's pre-send hint.
+   *
+   * Delegates to the domain function so the composer, the WhatsApp settings
+   * panel and `/v1` all read ONE implementation. The local copy this replaced
+   * counted recent recipients WITHOUT the portfolio scope, so on a workspace
+   * with more than one portfolio it disagreed with the gate that actually
+   * refuses the send — the composer said there was budget and the runner said
+   * there wasn't.
+   */
+  async getMessagingHealth(workspaceId: string): Promise<MessagingHealthSummary> {
+    return getMessagingHealthSummary(workspaceId);
+  }
+
+  /**
+   * Re-pull this campaign's template analytics from Meta.
+   *
+   * Scoped to the campaign's OWN send window rather than a fixed lookback: the
+   * whole point is the numbers for this campaign, and a wider window would
+   * re-fetch (and re-store) days belonging to other campaigns on the same
+   * template for no reason.
+   */
+  async refreshAnalytics(
+    workspaceId: string,
+    broadcastId: string,
+  ): Promise<{ rows: number; costWithheld: boolean }> {
+    const broadcast = await this.db.broadcast.findFirst({
+      where: { id: broadcastId, workspaceId },
+      select: {
+        templateName: true,
+        templateLanguage: true,
+        startedAt: true,
+        createdAt: true,
+        completedAt: true,
+      },
+    });
+    if (!broadcast) throw new NotFoundException({ error: "broadcast_not_found" });
+    if (!broadcast.templateName) {
+      // A freeform (non-template) campaign has nothing Meta reports on.
+      throw new BadRequestException({ error: "broadcast_has_no_template" });
+    }
+
+    const template = await this.db.messageTemplate.findFirst({
+      where: {
+        workspaceId,
+        name: broadcast.templateName,
+        ...(broadcast.templateLanguage ? { language: broadcast.templateLanguage } : {}),
+        externalId: { not: null },
+      },
+      select: { externalId: true, wabaId: true },
+    });
+    if (!template?.externalId) {
+      throw new BadRequestException({ error: "template_not_synced" });
+    }
+
+    return refreshTemplateAnalytics(workspaceId, {
+      templateExternalIds: [template.externalId],
+      start: broadcast.startedAt ?? broadcast.createdAt,
+      end: broadcast.completedAt ?? new Date(),
+      // Scope to the template's own WABA — see refreshTemplateAnalytics.
+      wabaId: template.wabaId || null,
+    });
   }
 
   async list(workspaceId: string, query?: BroadcastListQuery) {

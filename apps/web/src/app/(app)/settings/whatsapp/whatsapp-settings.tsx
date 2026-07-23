@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { CallingSettings } from "./calling-settings";
+import { MessagingHealthPanel } from "./messaging-health-panel";
 import { formatPhone } from "@ccp/shared/utils";
 
 export interface WhatsappCurrent {
@@ -209,6 +210,10 @@ export function WhatsappSettings({
     <div className="flex flex-col gap-8">
       {header}
       <ConnectionStatus current={current} showFinalStepHint />
+
+      {/* Only meaningful once connected — an unconnected number has no tier,
+          no quality rating and no budget to report. */}
+      <MessagingHealthPanel canManage={canManage} />
 
       {canManage && !showForm && (
         <div className="flex gap-2">

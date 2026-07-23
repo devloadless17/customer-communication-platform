@@ -1258,6 +1258,37 @@ export interface ProviderCapabilities {
   contactShareChips?: boolean;
 }
 
+/** Window + subject for a template-analytics read. */
+export interface TemplateAnalyticsArgs {
+  /** Provider template ids. Meta caps a single request at 10. */
+  templateExternalIds: string[];
+  /** Inclusive UTC day bounds. Meta's lookback is 90 days. */
+  start: Date;
+  end: Date;
+}
+
+/**
+ * One template-day of provider analytics.
+ *
+ * `read` / `clicked` / cost are all NULLABLE and mean "not reported", never
+ * zero: Meta returns read+click only for the last 7 days, and withholds cost
+ * entirely when the WABA is billed through a Solution Partner. Collapsing those
+ * to 0 would silently turn "unknown" into "nobody read it".
+ */
+export interface ProviderTemplateAnalyticsRow {
+  templateExternalId: string;
+  /** UTC day. */
+  date: Date;
+  sent: number;
+  delivered: number;
+  read: number | null;
+  clicked: number | null;
+  costAmountSpent: number | null;
+  costPerDelivered: number | null;
+  costPerUrlClick: number | null;
+  currency: string | null;
+}
+
 export interface MessagingProvider<SendConfig = unknown> {
   name: Channel;
   /** Feature flags channel-agnostic code branches on. */
@@ -1330,6 +1361,24 @@ export interface MessagingProvider<SendConfig = unknown> {
   createTemplate?(args: CreateTemplateArgs, config: SendConfig): Promise<CreateTemplateResult>;
   /** Remove a template from the provider catalog. */
   deleteTemplate?(args: DeleteTemplateArgs, config: SendConfig): Promise<void>;
+  /**
+   * Switch on the provider's own template analytics for this account.
+   *
+   * IRREVERSIBLE at Meta and one-time, which is why it is a distinct method
+   * rather than something `fetchTemplateAnalytics` does implicitly on its first
+   * empty response: an implicit trigger would make an unrecoverable account
+   * change a side effect of opening a chart.
+   */
+  enableTemplateInsights?(config: SendConfig): Promise<void>;
+  /**
+   * Provider-side aggregate performance per template per day — the only source
+   * of currency COST and of unique URL-button clicks, neither of which the
+   * per-recipient status webhooks carry.
+   */
+  fetchTemplateAnalytics?(
+    args: TemplateAnalyticsArgs,
+    config: SendConfig,
+  ): Promise<ProviderTemplateAnalyticsRow[]>;
   /**
    * Upload a media file (image/video/document) for use as a template header.
    * Returns an opaque handle to embed in `example.header_handle`. Distinct

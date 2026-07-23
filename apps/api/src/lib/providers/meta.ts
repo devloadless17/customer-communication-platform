@@ -50,6 +50,8 @@ import type {
   TemplateCategory,
   TemplateComponent,
   TemplateStatus,
+  ProviderTemplateAnalyticsRow,
+  TemplateAnalyticsArgs,
   UploadHeaderMediaArgs,
   UploadHeaderMediaResult,
   UploadMediaArgs,
@@ -2765,6 +2767,89 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     }
   },
 
+  /**
+   * Switch on WABA-level template analytics.
+   *
+   * IRREVERSIBLE at Meta — there is no `false`. Free to enable and free to
+   * query; the only cost is that it cannot be undone, which is why the domain
+   * layer gates it behind an explicit admin confirmation and never fires it
+   * from a read path.
+   */
+  async enableTemplateInsights(config: MetaSendConfig): Promise<void> {
+    if (!config.wabaId) throw new MissingWabaIdError();
+    const url = new URL(
+      `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}`,
+    );
+    url.searchParams.set("is_enabled_for_insights", "true");
+    // No retry: a POST that flips an irreversible flag must not be replayed on
+    // an ambiguous timeout. The caller re-checks state instead.
+    const res = await metaFetch(url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta enableTemplateInsights failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+  },
+
+  /**
+   * Read Meta's own per-template daily analytics.
+   *
+   * Wire shape (nested field expansion on the WABA node):
+   *   /{WABA}?fields=template_analytics.start(..).end(..).granularity(DAILY)
+   *           .metric_types([SENT,DELIVERED,READ,CLICKED,COST])
+   *           .template_ids([..])
+   *
+   * Two Meta constraints the caller must respect and this method enforces:
+   * at most 10 template ids per request, and a 90-day lookback. Timestamps are
+   * UNIX SECONDS, not milliseconds — passing ms silently returns an empty set
+   * rather than an error, which reads as "no data" forever.
+   */
+  async fetchTemplateAnalytics(
+    args: TemplateAnalyticsArgs,
+    config: MetaSendConfig,
+  ): Promise<ProviderTemplateAnalyticsRow[]> {
+    if (!config.wabaId) throw new MissingWabaIdError();
+    const ids = args.templateExternalIds.slice(0, 10);
+    if (ids.length === 0) return [];
+
+    const startSec = Math.floor(args.start.getTime() / 1000);
+    const endSec = Math.floor(args.end.getTime() / 1000);
+    const field =
+      `template_analytics.start(${startSec}).end(${endSec}).granularity(DAILY)` +
+      `.metric_types(["SENT","DELIVERED","READ","CLICKED","COST"])` +
+      `.template_ids([${ids.map((id: string) => JSON.stringify(id)).join(",")}])`;
+
+    const url = new URL(
+      `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}`,
+    );
+    url.searchParams.set("fields", field);
+
+    // Idempotent read — the transient-blip retry is safe here.
+    const res = await metaFetch(url, {
+      method: "GET",
+      retry: true,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta fetchTemplateAnalytics failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+    const json = (await res.json()) as {
+      template_analytics?: { data?: unknown } | Array<{ data_points?: unknown }>;
+    };
+    return parseTemplateAnalytics(json);
+  },
+
   async uploadHeaderMedia(
     args: UploadHeaderMediaArgs,
     config: MetaSendConfig,
@@ -3645,3 +3730,87 @@ export {
   renderTemplateBody,
 } from "@ccp/shared/template-render";
 
+/**
+ * Parse Meta's `template_analytics` response into flat template-day rows.
+ *
+ * The shape is awkward and has moved: the payload is sometimes
+ * `{ template_analytics: { data: [ { data_points: [...] } ] } }` and sometimes
+ * `{ template_analytics: [ { data_points: [...] } ] }`. Both are handled rather
+ * than picking one, because guessing wrong yields an empty array that is
+ * indistinguishable from "this template genuinely sent nothing".
+ *
+ * NULL DISCIPLINE is the load-bearing part. Meta returns READ and CLICKED only
+ * for the last ~7 days, and omits COST entirely for Solution-Partner-billed
+ * WABAs. An absent metric becomes `null` — never 0 — so the storage layer can
+ * COALESCE-merge and never overwrite a captured number with a later blank.
+ */
+export function parseTemplateAnalytics(json: {
+  template_analytics?: unknown;
+}): ProviderTemplateAnalyticsRow[] {
+  const ta = json.template_analytics;
+  const groups: unknown[] = Array.isArray(ta)
+    ? ta
+    : ta && typeof ta === "object" && Array.isArray((ta as { data?: unknown }).data)
+      ? ((ta as { data: unknown[] }).data)
+      : [];
+
+  const out: ProviderTemplateAnalyticsRow[] = [];
+  for (const group of groups) {
+    const points = (group as { data_points?: unknown }).data_points;
+    if (!Array.isArray(points)) continue;
+    for (const raw of points) {
+      const pt = raw as Record<string, unknown>;
+      const templateExternalId = str(pt.template_id);
+      const startSec = num(pt.start);
+      if (!templateExternalId || startSec === null) continue;
+
+      const cost = pt.cost;
+      let amountSpent: number | null = null;
+      let perDelivered: number | null = null;
+      let perUrlClick: number | null = null;
+      let currency: string | null = null;
+      // `cost` is an ARRAY of typed entries, and it is absent (not zero) when
+      // Meta withholds pricing.
+      if (Array.isArray(cost)) {
+        for (const entry of cost) {
+          const e = entry as Record<string, unknown>;
+          const type = str(e.type);
+          const value = num(e.value);
+          currency = str(e.currency) ?? currency;
+          if (type === "AMOUNT_SPENT") amountSpent = value;
+          else if (type === "COST_PER_DELIVERED") perDelivered = value;
+          else if (type === "COST_PER_URL_BUTTON_CLICK") perUrlClick = value;
+        }
+      }
+
+      out.push({
+        templateExternalId,
+        // Meta reports UNIX SECONDS; the day boundary is the window start.
+        date: new Date(startSec * 1000),
+        sent: num(pt.sent) ?? 0,
+        delivered: num(pt.delivered) ?? 0,
+        // Absent = not reported (outside the 7-day window), NOT zero.
+        read: num(pt.read),
+        clicked: num(pt.clicked),
+        costAmountSpent: amountSpent,
+        costPerDelivered: perDelivered,
+        costPerUrlClick: perUrlClick,
+        currency,
+      });
+    }
+  }
+  return out;
+}
+
+function num(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function str(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 ? v : null;
+}

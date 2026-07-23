@@ -278,6 +278,9 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
   // finishes — delivery and read receipts keep arriving for hours after the last
   // send, so the final numbers are not known at completion time.
   const [report, setReport] = useState<BroadcastReportDto | null>(null);
+  // Bumped after a Meta analytics fetch so the delivery curve refetches in step
+  // with the report rather than holding a snapshot from before it.
+  const [reportRefreshKey, setReportRefreshKey] = useState(0);
   const reportRef = useRef<() => Promise<void>>(async () => {});
   reportRef.current = async () => {
     try {
@@ -591,6 +594,16 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
         <section className="rounded-xl border border-border bg-card p-4">
           <BroadcastReport
             report={report}
+            // Without these the Meta panel fetched successfully and then went on
+            // showing "Nothing fetched yet" until a manual page reload — the
+            // button appeared broken while working perfectly. A completed
+            // campaign stops polling (see the effect above), so nothing else
+            // would have re-pulled the report.
+            refreshKey={reportRefreshKey}
+            onRefreshed={() => {
+              void reportRef.current();
+              setReportRefreshKey((k) => k + 1);
+            }}
             onFilter={(filter) => {
               // Deep-link a funnel stage / failure bucket into the recipient
               // table below. Today the table filters by send-side status; the

@@ -20,6 +20,11 @@ import { motion } from "framer-motion";
 import { AlertTriangle, ArrowRight, Info } from "lucide-react";
 
 import { cn } from "@ccp/shared/utils";
+import { DeliveryCurve } from "@/features/broadcasts/charts/delivery-curve";
+import {
+  MetaAnalyticsPanel,
+  type MetaAnalytics,
+} from "@/features/broadcasts/charts/meta-analytics-panel";
 
 export interface BroadcastReportDto {
   broadcastId: string;
@@ -68,6 +73,9 @@ export interface BroadcastReportDto {
     durationSec: number | null;
     perMinute: number | null;
   };
+  /** Meta's own aggregate figures — see MetaAnalyticsPanel for why these are
+   *  rendered beside the funnel rather than folded into it. */
+  metaAnalytics: MetaAnalytics | null;
   generatedAt: string;
 }
 
@@ -91,9 +99,15 @@ const BUCKET_COPY: Record<string, { label: string; tone: string }> = {
 
 export function BroadcastReport({
   report,
+  refreshKey,
+  onRefreshed,
   onFilter,
 }: {
   report: BroadcastReportDto;
+  /** Bumped by the parent after a Meta fetch, so the curve refetches in step. */
+  refreshKey?: number;
+  /** Ask the parent to re-pull the report after a Meta analytics fetch. */
+  onRefreshed?: () => void;
   /** Deep-link the recipient table to a segment — the funnel's whole point. */
   onFilter?: (filter: string) => void;
 }) {
@@ -317,6 +331,18 @@ export function BroadcastReport({
           </div>
         </div>
       )}
+
+      {/* WHEN the campaign landed, not just where it ended up — the funnel
+          can't show a carrier that throttled the last third of a send. */}
+      <DeliveryCurve broadcastId={report.broadcastId} refreshKey={refreshKey} />
+
+      {/* Meta's aggregate figures, deliberately side by side with the funnel
+          above rather than blended into it. */}
+      <MetaAnalyticsPanel
+        broadcastId={report.broadcastId}
+        analytics={report.metaAnalytics}
+        onRefreshed={onRefreshed}
+      />
     </div>
   );
 }

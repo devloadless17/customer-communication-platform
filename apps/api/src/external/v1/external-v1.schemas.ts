@@ -705,3 +705,18 @@ export const ExternalUpdateFlagDefinitionSchema = z
 export type ExternalUpdateFlagDefinitionInput = z.infer<
   typeof ExternalUpdateFlagDefinitionSchema
 >;
+
+/**
+ * Window for a template-analytics read. Both bounds optional — the default is
+ * the last 30 days, which is the span anyone comparing "how did this template
+ * do" actually wants, and is well inside Meta's 90-day lookback.
+ */
+export const ExternalTemplateAnalyticsQuerySchema = z
+  .object({
+    start: z.string().datetime().optional(),
+    end: z.string().datetime().optional(),
+  })
+  .strict();
+export type ExternalTemplateAnalyticsQueryInput = z.infer<
+  typeof ExternalTemplateAnalyticsQuerySchema
+>;

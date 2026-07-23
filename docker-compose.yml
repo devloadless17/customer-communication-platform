@@ -356,6 +356,19 @@ services:
       # broadcast cap above. Default 5 (matches the global SEND_CONCURRENCY).
       # Passed through so it's actually tunable in prod, not just in code.
       BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY: ${BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY:-5}
+      # Per-NUMBER send-rate ceiling (Redis token bucket). OFF by default: the
+      # runner's existing per-lane pacing is untouched until this is flipped, so
+      # deploying it changes nothing. Passed through so enabling it after a
+      # measured campaign is an env change, not a redeploy of new code.
+      #
+      # Turn on only AFTER watching one real broadcast's achieved msg/s — the
+      # targets below sit deliberately under Meta's ceilings (80 / ~1000)
+      # because that ceiling counts INBOUND too, and saturating it starves the
+      # inbox exactly when customers are replying to the campaign.
+      BROADCAST_RATE_LIMITER_ENABLED: ${BROADCAST_RATE_LIMITER_ENABLED:-0}
+      BROADCAST_RATE_STANDARD: ${BROADCAST_RATE_STANDARD:-75}
+      BROADCAST_RATE_HIGH: ${BROADCAST_RATE_HIGH:-900}
+      BROADCAST_RATE_BASELINE: ${BROADCAST_RATE_BASELINE:-40}
       # Per-team max concurrent outbound-webhook deliveries (in-process
       # worker). Tuned higher than workflows since each delivery is mostly
       # network-bound on the partner.

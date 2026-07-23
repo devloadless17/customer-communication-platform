@@ -8,14 +8,17 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
   Param,
   Patch,
   Post,
+  Query,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
+import { RateLimit } from "../../common/rate-limit.interceptor";
 import { diskStorage } from "multer";
 
 import { RequireCapability } from "../../auth/capability.guard";
@@ -38,6 +41,8 @@ import { WhatsappService } from "./whatsapp.service";
  *   POST   /api/team/whatsapp/templates/upload-media   — resumable header upload
  *   DELETE /api/team/whatsapp/templates/:id            — remove (Meta first, then local)
  *   PATCH  /api/team/whatsapp/templates/:id            — update variableBindings only
+ *   GET    /api/team/whatsapp/templates/:id/analytics   — stored daily rollup
+ *   POST   /api/team/whatsapp/templates/:id/analytics/refresh — pull from Meta
  *
  * Read routes (list / sync from Meta) are open to any team member. Mutations
  * (create / upload-media / update bindings / delete) require the
@@ -117,6 +122,36 @@ export class WhatsappTemplatesController {
     } finally {
       await unlink(file.path).catch(() => undefined);
     }
+  }
+
+  /**
+   * Meta's own daily analytics for one template.
+   *
+   * A READ of the stored rollup — no Graph call — so opening a template's
+   * drawer costs one indexed range scan. `?days=` bounds the window; Meta's
+   * lookback ceiling is 90, and asking beyond it returns an EMPTY set rather
+   * than an error, which would read as "this template has no data".
+   *
+   * `POST :id/analytics/refresh` is what actually pulls from Meta.
+   */
+  @Get(":id/analytics")
+  async analytics(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Query("days") daysRaw?: string,
+  ) {
+    return this.whatsapp.templateAnalytics(session.workspaceId, id, daysRaw);
+  }
+
+  @Post(":id/analytics/refresh")
+  @HttpCode(200)
+  @RateLimit({ perMinute: 10 })
+  async refreshAnalytics(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Query("days") daysRaw?: string,
+  ) {
+    return this.whatsapp.refreshTemplateAnalytics(session.workspaceId, id, daysRaw);
   }
 
   @Delete(":id")

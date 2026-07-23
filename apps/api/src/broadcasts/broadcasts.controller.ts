@@ -3,6 +3,8 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
+  NotFoundException,
   Param,
   Post,
   Query,
@@ -15,6 +17,8 @@ import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { zBody, zQuery } from "../common/zod-validation.pipe";
+import { RateLimit } from "../common/rate-limit.interceptor";
+import { getBroadcastTimeseries } from "@/lib/broadcast-timeseries";
 import type { Response } from "express";
 
 import {
@@ -122,6 +126,44 @@ export class BroadcastsController {
   ) {
     const report = await this.broadcasts.getReport(session.workspaceId, id);
     return { report };
+  }
+
+  /**
+   * The delivery curve — cumulative sent/delivered/read/replied over the send.
+   *
+   * A SEPARATE route from `:id/report` for the same reason the report is
+   * separate from `:id`: this is an aggregate scan, and the detail page polls
+   * while a campaign runs. Bounded output (a few hundred buckets) regardless of
+   * audience size, so a 100k campaign costs the same as a 100-recipient one.
+   */
+  @Get(":id/timeseries")
+  async timeseries(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    const series = await getBroadcastTimeseries(session.workspaceId, id);
+    if (!series) throw new NotFoundException({ error: "broadcast_not_found" });
+    return series;
+  }
+
+  /**
+   * Pull this campaign's template analytics from Meta and re-store the rollup.
+   *
+   * MANUAL ONLY, deliberately. The report is polled every few seconds while a
+   * campaign sends; a Graph call on that path would mean thousands of requests
+   * per campaign and would exhaust Meta's rate limit for no benefit — the
+   * aggregate barely moves minute to minute. Pressing this is the explicit "go
+   * get the latest from Meta" action, and the report then reads the stored
+   * rollup like it always does.
+   */
+  @Post(":id/analytics/refresh")
+  @HttpCode(200)
+  @RateLimit({ perMinute: 10 })
+  async refreshAnalytics(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    return this.broadcasts.refreshAnalytics(session.workspaceId, id);
   }
 
   /**

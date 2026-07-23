@@ -568,6 +568,56 @@ export default function ApiDocsPage() {
         </Endpoint>
       </Section>
 
+      <Section title="Campaign analytics & WhatsApp health">
+        <p className="text-sm text-muted-foreground">
+          Two sources, reported <strong>side by side and never merged</strong>.
+          The delivery funnel on <code>/broadcasts/:id/report</code> is
+          per-recipient truth from status webhooks and the only source of{" "}
+          <code>replied</code> and opt-outs. <code>metaAnalytics</code> on the
+          same response is Meta&apos;s aggregate and the only source of real
+          currency <strong>cost</strong> and unique <strong>URL-button clicks</strong>.
+          They measure different things and will not agree exactly.
+        </p>
+        <Endpoint method="GET" path="/api/external/v1/broadcasts/:id/timeseries">
+          The delivery curve — cumulative sent / delivered / read / replied,
+          bucketed by a width the server picks from the send&apos;s span
+          (<code>bucketSeconds</code>). Bounded output: a 100k campaign returns
+          the same few hundred points a 100-recipient one does.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/broadcasts/:id/analytics/refresh">
+          Pull fresh figures from Meta for this campaign&apos;s template.
+          Manual on purpose — the report is polled while a campaign sends, and a
+          Graph call on that path would exhaust Meta&apos;s rate limit for an
+          aggregate that barely moves minute to minute.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/templates/:id/analytics">
+          Per-template daily trend. <code>?start=</code> / <code>?end=</code>{" "}
+          ISO; defaults to the last 30 days, and Meta&apos;s lookback ceiling is
+          90. Returns <code>days[]</code> plus a <code>summary</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/whatsapp/insights/status">
+          Whether Meta&apos;s template analytics are switched on. Enabling is a{" "}
+          <strong>one-time, irreversible</strong> opt-in per WABA, so there is no
+          API to do it — it&apos;s an in-app admin action (Settings → WhatsApp).
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/whatsapp/health">
+          Messaging tier + 24h unique-recipient cap, spend so far, quality rating
+          and throughput ceiling. Secret-free. Plan against{" "}
+          <code>remainingDailyBudget</code> — without it you discover the cap by
+          having a large send refused, and the refusal is correct so there is
+          nothing to retry. <code>portfolioAccountCount &gt; 1</code> means the
+          budget is <strong>shared</strong> with other numbers in the portfolio.
+        </Endpoint>
+        <p className="text-sm text-muted-foreground">
+          <strong>Reading the nulls.</strong> <code>read</code> and{" "}
+          <code>clicked</code> are null outside Meta&apos;s ~7-day window, and
+          cost is null when the account is billed through a partner
+          (<code>costWithheld: true</code> says which). A null is{" "}
+          <strong>never</strong> the same as zero — the stored rollup preserves
+          whatever was captured while it was still being reported.
+        </p>
+      </Section>
+
       <Section title="Saved inbox views">
         <p className="text-sm text-muted-foreground">
           A <strong>view</strong> is a named, reusable filter over the

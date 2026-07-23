@@ -1,0 +1,157 @@
+import { getRedisConnection } from "@/lib/workflows/queue";
+
+/**
+ * Per-number send-rate ceiling — a Redis token bucket.
+ *
+ * WHY THIS EXISTS. The runner paces sends with a fixed `gapMs` sleep per lane.
+ * That approximates a rate, but it cannot ENFORCE one: the real period is
+ * `work + gapMs`, so the actual rate drifts with Meta's latency, and — the part
+ * that matters — the sleep is per-process and per-run. Two broadcasts on the
+ * same WhatsApp number, or a second app instance, each pace themselves to the
+ * target and together sail past it. Meta's throughput ceiling is per NUMBER and
+ * counts inbound too, so overshooting risks the number's quality rating, which
+ * is expensive and slow to recover.
+ *
+ * A bucket keyed on the phone-number id is the one place that can be true
+ * regardless of how many runs, lanes or processes exist.
+ *
+ * WHY LUA. Refill-then-take must be atomic; done as GET/SET from Node, two
+ * lanes read the same token count and both take it. The script also reads
+ * `redis.TIME` rather than accepting a client timestamp, so the api process and
+ * a future worker container can't disagree about "now" — clock skew between
+ * them would otherwise let one side over-refill.
+ *
+ * DARK BY DEFAULT. `BROADCAST_RATE_LIMITER_ENABLED` is off, so today's pacing
+ * is untouched and rollback is an env flip. Turn it on only after watching the
+ * measured rate under a real campaign.
+ */
+
+/**
+ * Refill and take one token.
+ *
+ * KEYS[1] bucket, ARGV[1] rate/sec, ARGV[2] capacity.
+ * Returns milliseconds to wait: 0 = a token was taken, >0 = try again after.
+ *
+ * State is two fields — token count and the last-refill timestamp in
+ * microseconds — with a TTL so an idle number's key evaporates instead of
+ * accumulating one row per number forever.
+ *
+ * Exported so the spec runs THIS script rather than a copy of it. Every
+ * property worth testing (atomicity, refill, the clock-skew guard) lives in
+ * here, and a duplicated copy in the test would drift silently — passing while
+ * the shipped script rots.
+ */
+export const ACQUIRE_LUA = `
+local key = KEYS[1]
+local rate = tonumber(ARGV[1])
+local capacity = tonumber(ARGV[2])
+
+local t = redis.call('TIME')
+local now_us = (tonumber(t[1]) * 1000000) + tonumber(t[2])
+
+local data = redis.call('HMGET', key, 'tokens', 'ts')
+local tokens = tonumber(data[1])
+local ts = tonumber(data[2])
+
+if tokens == nil or ts == nil then
+  -- First caller for this number: start full, so a campaign opening on an idle
+  -- number is not throttled for a second before it can send anything.
+  tokens = capacity
+  ts = now_us
+end
+
+-- Refill for the elapsed time, clamped to capacity. Elapsed can be negative if
+-- Redis time went backwards (NTP step); treat that as zero rather than
+-- draining the bucket.
+local elapsed_us = now_us - ts
+if elapsed_us < 0 then elapsed_us = 0 end
+tokens = math.min(capacity, tokens + (elapsed_us / 1000000) * rate)
+
+local wait_ms = 0
+if tokens >= 1 then
+  tokens = tokens - 1
+else
+  -- Time until one whole token exists, rounded up so the caller never wakes a
+  -- hair early and spins.
+  wait_ms = math.ceil(((1 - tokens) / rate) * 1000)
+end
+
+redis.call('HSET', key, 'tokens', tokens, 'ts', now_us)
+-- Generous relative to any refill window; purely so idle keys expire.
+redis.call('PEXPIRE', key, 60000)
+return wait_ms
+`;
+
+/** Is the bucket switched on? Off by default — see the header. */
+export function sendRateLimiterEnabled(): boolean {
+  return process.env.BROADCAST_RATE_LIMITER_ENABLED === "1";
+}
+
+function envInt(name: string, def: number, min: number, max: number): number {
+  const raw = Number.parseInt(process.env[name] ?? "", 10);
+  if (!Number.isFinite(raw) || raw < min || raw > max) return def;
+  return raw;
+}
+
+/**
+ * Target messages/second for a number, from its Meta throughput level.
+ *
+ * Deliberately BELOW Meta's published ceilings (80 / 1000). The ceiling counts
+ * inbound as well as outbound, so a campaign that saturates it starves the
+ * inbox — replies queue behind a blast, which is precisely when a customer is
+ * most likely to be answering one. The gap is reserved headroom, not caution.
+ */
+export function resolveSendRate(throughputLevel: string | null | undefined): number {
+  if (throughputLevel === "HIGH") return envInt("BROADCAST_RATE_HIGH", 900, 1, 5_000);
+  if (throughputLevel === "STANDARD") return envInt("BROADCAST_RATE_STANDARD", 75, 1, 5_000);
+  // Unknown throughput — Meta hasn't told us yet. Assume the slower tier: being
+  // wrong in this direction sends more slowly than necessary, while the other
+  // direction risks the number's quality rating.
+  return envInt("BROADCAST_RATE_BASELINE", 40, 1, 5_000);
+}
+
+/**
+ * Take one send token for `accountKey`, waiting if the bucket is empty.
+ *
+ * `accountKey` is the provider's own account id (WhatsApp `phoneNumberId`) —
+ * NOT the workspace and not the broadcast, because Meta's ceiling belongs to
+ * the number. Two campaigns on one number correctly share a budget; two numbers
+ * in one workspace correctly do not.
+ *
+ * Bounded by `maxWaitMs` so a misconfigured rate can never park a lane
+ * indefinitely: on timeout it returns and lets the send proceed. Meta's own 429
+ * handling (already in the runner) remains the backstop — this is a smoother,
+ * not the only defence.
+ */
+export async function acquireSendToken(
+  accountKey: string,
+  ratePerSec: number,
+  opts: { capacity?: number; maxWaitMs?: number } = {},
+): Promise<void> {
+  if (!sendRateLimiterEnabled()) return;
+
+  // One second of burst. Enough to absorb the jitter of N lanes finishing
+  // together; small enough that a burst can't meaningfully exceed the rate when
+  // averaged over the window Meta measures.
+  const capacity = opts.capacity ?? Math.max(1, Math.ceil(ratePerSec));
+  const maxWaitMs = opts.maxWaitMs ?? 5_000;
+  const key = `wa-send-rate:${accountKey}`;
+  const redis = getRedisConnection();
+
+  const deadline = Date.now() + maxWaitMs;
+  for (;;) {
+    let waitMs: number;
+    try {
+      const res = await redis.eval(ACQUIRE_LUA, 1, key, String(ratePerSec), String(capacity));
+      waitMs = Number(res) || 0;
+    } catch {
+      // Redis is unreachable. Fail OPEN: a rate limiter that stops the sending
+      // of an already-paid-for campaign because a cache is down has done more
+      // damage than the overshoot it was preventing.
+      return;
+    }
+    if (waitMs <= 0) return;
+    if (Date.now() + waitMs > deadline) return;
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+}

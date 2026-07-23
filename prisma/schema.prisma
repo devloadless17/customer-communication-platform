@@ -628,6 +628,7 @@ model Workspace {
   messageFlagDefinitions  MessageFlagDefinition[]
   messageFlags            MessageFlag[]
   inboxViews              InboxView[]
+  templateAnalytics       TemplateAnalyticsDaily[]
   tickets                 Ticket[]
   ticketEvents            TicketEvent[]
   ticketSlaPolicies       TicketSlaPolicy[]
@@ -731,6 +732,13 @@ model ChannelConnection {
   config            Json      @default("{}")
   secrets           Json      @default("{}")
   isActive          Boolean   @default(true)
+  // When template analytics were switched on for this account's WABA.
+  //
+  // IRREVERSIBLE and one-time: Meta's `is_enabled_for_insights=true` cannot be
+  // undone, so it is never fired implicitly by a fetch attempt — an admin
+  // confirms it explicitly. Stamped so the UI can offer the action exactly once
+  // and every later "why is there no data" question has a dated answer.
+  insightsEnabledAt DateTime?
   // Set when a send fails with Graph error 190 (access token expired/revoked) so
   // Settings can surface a "reconnect" banner and admins are prompted to re-issue
   // the token — per Meta's access-token best practice. Cleared on reconnect.
@@ -2499,6 +2507,18 @@ model BroadcastRecipient {
   // leftmost prefix and pure write overhead on a table taking 100k inserts +
   // ~200k webhook updates per campaign.
   @@index([broadcastId, deliveryState, id])
+  // The delivery-curve query buckets on `deliveredAt` and `readAt`, so each
+  // needs its own (broadcastId, <ts>) index — the existing status/state indexes
+  // don't carry those columns and the scan would read every recipient row of
+  // the campaign twice.
+  //
+  // Scoped to exactly the two curves that need it, deliberately: this table
+  // takes a write on every status webhook, and each extra index is paid on
+  // every one of those. `sentAt` is already covered for this purpose by the
+  // (contactId, sentAt) index's leading scan, and `repliedAt` is rare enough
+  // that the sequential portion is negligible.
+  @@index([broadcastId, deliveredAt])
+  @@index([broadcastId, readAt])
 }
 
 model InternalNote {
@@ -2559,6 +2579,46 @@ model InternalNote {
 // reopens forever (one conversation per contact). "This customer complained" is
 // not useful; "THIS message is a complaint" points at the exact thing to act on
 // and is what an agent — or later the AI, mid-chat — actually observes.
+
+// One day of Meta's own template analytics, per template.
+//
+// A DAILY ROLLUP rather than a per-broadcast snapshot, because Meta reports at
+// template+day granularity and two campaigns using one template on one day
+// genuinely share those numbers. Storing per-broadcast would either duplicate
+// the same figures under both or force an arbitrary split of them.
+//
+// This is the ONLY place currency cost is available: the delivery funnel we
+// build from status webhooks knows a pricing CATEGORY but never a price. It is
+// also the only source of unique URL-button clicks.
+model TemplateAnalyticsDaily {
+  id                 String   @id @default(cuid())
+  workspaceId        String
+  /// Meta's template id (`MessageTemplate.externalId`), not our row id — the
+  /// analytics API speaks in Meta ids, and a template can be re-synced.
+  templateExternalId String
+  date               DateTime @db.Date
+  sent               Int      @default(0)
+  delivered          Int      @default(0)
+  /// Nullable, NOT zero-defaulted: Meta only returns read/click for the last 7
+  /// days, so "we don't know" and "nobody read it" must stay distinguishable.
+  /// The upsert COALESCE-merges these so re-fetching an aged campaign can never
+  /// overwrite a captured number with a later null.
+  read               Int?
+  clicked            Int?
+  /// Withheld by Meta when the WABA is billed through a Solution Partner.
+  costAmountSpent    Decimal? @db.Decimal(14, 6)
+  costPerDelivered   Decimal? @db.Decimal(14, 6)
+  costPerUrlClick    Decimal? @db.Decimal(14, 6)
+  currency           String?
+  fetchedAt          DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, templateExternalId, date])
+  // The per-template trend and the per-broadcast merge are both a date RANGE
+  // for one template, which this index serves directly.
+  @@index([workspaceId, templateExternalId, date])
+}
 
 enum InboxViewVisibility {
   personal

@@ -23,7 +23,11 @@ import {
   ProviderNotConfiguredError,
 } from "@/lib/providers/config";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
-import { fetchWhatsappHealthFromGraph } from "@/lib/providers/meta-health";
+import { fetchWhatsappHealthFromGraph, getWhatsappHealth } from "@/lib/providers/meta-health";
+import {
+  readTemplateAnalytics,
+  refreshTemplateAnalytics,
+} from "@/lib/analytics/template-analytics";
 import {
   MetaSendError,
   MissingAppIdError,
@@ -436,6 +440,99 @@ export class WhatsappService {
    * sync + send-time errors surface a genuinely bad wabaId without stranding
    * the whole connection form on a permission quirk.
    */
+  /**
+   * Re-poll Meta for this workspace's WhatsApp health and return the fresh
+   * snapshot.
+   *
+   * Awaits the fetch (unlike the fire-and-forget call on connect) because the
+   * admin pressed a button and is watching: returning a stale snapshot with an
+   * old "as of" timestamp would read as "the button doesn't work". A Graph
+   * failure surfaces as `refreshed: false` with the LAST GOOD snapshot rather
+   * than an error page — the stored numbers are still the truth we have, and
+   * blanking them would be a worse answer than an honest "couldn't refresh".
+   */
+  async refreshHealth(workspaceId: string): Promise<{
+    refreshed: boolean;
+    messagingHealthUpdatedAt: string | null;
+  }> {
+    let refreshed = true;
+    try {
+      await fetchWhatsappHealthFromGraph(workspaceId);
+    } catch (err) {
+      this.logger.warn(`whatsapp health refresh failed for ${workspaceId}: ${err}`);
+      refreshed = false;
+    }
+    const health = await getWhatsappHealth(workspaceId);
+    return {
+      refreshed,
+      messagingHealthUpdatedAt: health?.messagingHealthUpdatedAt?.toISOString() ?? null,
+    };
+  }
+
+  /**
+   * Window bounds for a template-analytics read.
+   *
+   * Clamped to Meta's 90-day lookback rather than passed through: an
+   * out-of-range start returns an EMPTY set, not an error, so an unclamped
+   * request would report "no data" for a template that has plenty.
+   */
+  private analyticsWindow(daysRaw: string | undefined): { start: Date; end: Date } {
+    const parsed = Number.parseInt(daysRaw ?? "", 10);
+    const days = Number.isFinite(parsed) ? Math.min(90, Math.max(1, parsed)) : 30;
+    const end = new Date();
+    return { start: new Date(end.getTime() - days * 86_400_000), end };
+  }
+
+  /**
+   * Resolve one of OUR template ids to Meta's, plus the WABA it lives under.
+   *
+   * The WABA matters on a multi-account workspace: `template_analytics` is a
+   * field on the WABA node, so a fetch made with the DEFAULT account's WABA
+   * returns nothing for a template belonging to a second one.
+   */
+  private async templateRef(
+    workspaceId: string,
+    templateId: string,
+  ): Promise<{ externalId: string; wabaId: string | null }> {
+    const row = await this.db.messageTemplate.findFirst({
+      where: { id: templateId, workspaceId },
+      select: { externalId: true, wabaId: true },
+    });
+    if (!row) throw new NotFoundException({ error: "template_not_found" });
+    if (!row.externalId) {
+      // A locally-created template awaiting Meta approval has no id there yet,
+      // so there is nothing to look up — say that rather than returning an
+      // empty series that reads as "nobody engaged".
+      throw new BadRequestException({ error: "template_not_synced" });
+    }
+    // `""` is the legacy/unknown-WABA sentinel; treat it as "no opinion" so the
+    // default account is used, which is right for a single-account workspace.
+    return { externalId: row.externalId, wabaId: row.wabaId || null };
+  }
+
+  /** Stored daily rollup for one template. No Graph call. */
+  async templateAnalytics(workspaceId: string, templateId: string, daysRaw?: string) {
+    const { externalId } = await this.templateRef(workspaceId, templateId);
+    const { start, end } = this.analyticsWindow(daysRaw);
+    return readTemplateAnalytics(workspaceId, externalId, start, end);
+  }
+
+  /** Pull fresh figures from Meta for one template, then store them. */
+  async refreshTemplateAnalytics(
+    workspaceId: string,
+    templateId: string,
+    daysRaw?: string,
+  ) {
+    const { externalId, wabaId } = await this.templateRef(workspaceId, templateId);
+    const { start, end } = this.analyticsWindow(daysRaw);
+    return refreshTemplateAnalytics(workspaceId, {
+      templateExternalIds: [externalId],
+      start,
+      end,
+      wabaId,
+    });
+  }
+
   private async assertWabaOwnsNumber(
     wabaId: string,
     phoneNumberId: string,

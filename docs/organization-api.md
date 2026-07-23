@@ -775,6 +775,51 @@ A missed deadline flips `firstResponseBreached` / `resolutionBreached` and fires
 
 ---
 
+### Campaign analytics
+
+Two sources, deliberately reported **side by side and never merged**:
+
+| | What it is | Only source of |
+|---|---|---|
+| **Delivery funnel** (`/report`) | per-recipient truth from status webhooks | `replied`, opt-outs, per-recipient failure reasons |
+| **Meta analytics** (`metaAnalytics`) | Meta's own aggregate, per template per day | real currency **cost**, unique **URL-button clicks** |
+
+They measure different things and will not agree exactly — a template used by
+two campaigns on the same day reports both campaigns' volume in Meta's figures,
+while the funnel is scoped strictly to one campaign. Averaging them would give a
+number matching neither.
+
+**Delivery curve** — `GET /broadcasts/:id/timeseries` · `read:broadcasts`
+Cumulative sent / delivered / read / replied, bucketed by a width the server
+picks from the send's span (`bucketSeconds` in the response). Bounded output —
+a 100k campaign returns the same few hundred points a 100-recipient one does.
+```bash
+curl -s "$CCP_BASE_URL/api/external/v1/broadcasts/BROADCAST_ID/timeseries" \
+  -H "Authorization: Bearer $CCP_API_KEY"
+```
+
+**Pull fresh figures from Meta** — `POST /broadcasts/:id/analytics/refresh` ·
+`read:broadcasts`. Manual on purpose: the report is polled while a campaign
+sends, and a Graph call on that path would exhaust Meta's rate limit for an
+aggregate that barely moves minute to minute. After this, `metaAnalytics` on the
+report reads the refreshed rollup.
+
+**Per-template trend** — `GET /templates/:id/analytics?start=&end=` ·
+`read:broadcasts`. Defaults to the last 30 days; Meta's lookback ceiling is 90.
+Returns `days[]` plus a `summary`.
+
+**Is it switched on?** — `GET /whatsapp/insights/status` · `read:catalog`.
+Meta requires a **one-time, irreversible** opt-in per WABA before it reports any
+template analytics. There is no API to enable it — that is deliberately an
+in-app admin action (Settings → WhatsApp), because it cannot be undone.
+
+> **Reading the nulls.** `read` and `clicked` are null outside Meta's ~7-day
+> window, and cost is null when the WABA is billed through a Solution Partner
+> (`costWithheld: true` says which). A null is **never** the same as zero — the
+> stored rollup preserves whatever was captured while it was still reported.
+
+---
+
 ## 6. Catalog (tags, fields, stages, channels, users)
 
 Reference data for the routes above. Scopes: `read:catalog`, `write:catalog`.
@@ -795,6 +840,22 @@ Reference data for the routes above. Scopes: `read:catalog`, `write:catalog`.
 | Get a teammate (by id or email) | `GET /users/:idOrEmail` |
 
 Tag `color` must be one of: `slate`, `rose`, `amber`, `emerald`, `sky`, `violet`, `pink`, `lime`, `orange`.
+
+### WhatsApp messaging health
+
+`GET /whatsapp/health` · `read:catalog` — the tier and 24h unique-recipient cap
+Meta currently allows, how much is already spent, the quality rating and the
+throughput ceiling. Secret-free (no tokens).
+
+The one number to plan against is `remainingDailyBudget`: without it an
+integration discovers the cap by having a large send refused, and the refusal is
+correct so there is nothing to retry. `portfolioAccountCount > 1` means the
+budget is **shared** across several numbers in the same business portfolio.
+
+```bash
+curl -s "$CCP_BASE_URL/api/external/v1/whatsapp/health" \
+  -H "Authorization: Bearer $CCP_API_KEY"
+```
 
 ### Channel accounts
 

@@ -37,6 +37,10 @@ import {
   stopWhatsappHealthRefreshSweeper,
 } from "@/lib/sweepers/whatsapp-health-refresh";
 import {
+  startTemplateAnalyticsCaptureSweeper,
+  stopTemplateAnalyticsCaptureSweeper,
+} from "@/lib/sweepers/template-analytics-capture";
+import {
   startWorkHoursSweeper,
   stopWorkHoursSweeper,
 } from "@/lib/sweepers/work-hours";
@@ -170,6 +174,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private broadcastMaterializeWorkerStarted = false;
   private broadcastMaterializeDriftSweeperStarted = false;
   private whatsappHealthRefreshSweeperStarted = false;
+  private templateAnalyticsCaptureStarted = false;
   private workHoursSweeperStarted = false;
 
   onModuleInit(): void {
@@ -441,6 +446,19 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start whatsapp-health-refresh sweeper", err);
     }
+    // Its OWN try, like every sibling. Sharing one with the health sweeper
+    // above meant a throw in either left the OTHER's stop-flag unset — so it
+    // would be running but never stopped on shutdown, and the graceful-drain
+    // guarantee would be quietly untrue for it.
+    try {
+      // Captures Meta's read/click figures before their ~7-day window closes.
+      // Unlike every other sweeper here, missing a tick loses data PERMANENTLY.
+      startTemplateAnalyticsCaptureSweeper();
+      this.templateAnalyticsCaptureStarted = true;
+      this.logger.log("Template-analytics capture sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start template-analytics-capture sweeper", err);
+    }
     try {
       // Moves members across their working-hours boundaries (and expires manual
       // overrides at shift end). The ONLY thing that notices a schedule flip —
@@ -483,6 +501,14 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(
         `stopWhatsappHealthRefreshSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.templateAnalyticsCaptureStarted)
+        stopTemplateAnalyticsCaptureSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopTemplateAnalyticsCaptureSweeper threw: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {

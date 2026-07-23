@@ -75,6 +75,15 @@ export default async function globalSetup(): Promise<void> {
           API_PORT: String(API_PORT),
           META_GRAPH_BASE_URL: `http://127.0.0.1:${MOCK_PORT}`,
           META_FETCH_TIMEOUT_MS: "3000",
+          // The root .env carries META_WEBHOOK_INSECURE_SKIP_VERIFY=1 — a
+          // legitimate local-dev crutch for tunnelled webhooks. Inheriting it
+          // here silently disarms the HMAC gate, so "a bad signature is
+          // rejected" passed by accident for as long as the flag was off and
+          // failed confusingly once it went on. Either way the suite was not
+          // testing what it claims. Forced OFF so the signature specs exercise
+          // the real gate; the harness signs its own payloads correctly, so
+          // nothing else is affected.
+          META_WEBHOOK_INSECURE_SKIP_VERIFY: "0",
           REDIS_URL: `${process.env.REDIS_URL ?? "redis://localhost:6380"}/5`,
           RUN_WORKER_INLINE: "1",
           SWC_NODE_PROJECT: "./tsconfig.json",

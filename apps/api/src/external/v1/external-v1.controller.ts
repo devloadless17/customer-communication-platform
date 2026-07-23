@@ -6,6 +6,7 @@ import {
   Get,
   Headers,
   HttpException,
+  NotFoundException,
   Param,
   Patch,
   Post,
@@ -80,6 +81,16 @@ import { ExternalV1Service } from "./external-v1.service";
 import { ExternalV1FlagsService } from "./external-v1-flags.service";
 import { InboxViewsService, type InboxViewActor } from "@/inbox-views/inbox-views.service";
 import { inboxViewWhereClauses } from "@/lib/inbox-views/where";
+import { getMessagingHealthSummary } from "@/lib/providers/meta-health";
+import {
+  getInsightsStatus,
+  readTemplateAnalytics,
+} from "@/lib/analytics/template-analytics";
+import { getBroadcastTimeseries } from "@/lib/broadcast-timeseries";
+import {
+  ExternalTemplateAnalyticsQuerySchema,
+  type ExternalTemplateAnalyticsQueryInput,
+} from "./external-v1.schemas";
 import {
   CreateInboxViewSchema,
   UpdateInboxViewSchema,
@@ -1535,6 +1546,70 @@ export class ExternalV1Controller {
   async deleteInboxView(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
     await this.inboxViews.remove(apiKeyViewActor(auth), id);
     return { ok: true };
+  }
+
+  // ---- WhatsApp messaging health --------------------------------------
+  //
+  // What Meta currently allows the workspace's WhatsApp number to send: the
+  // messaging tier and its 24h unique-recipient cap, how much of that budget is
+  // already spent, the quality rating, and the throughput ceiling.
+  //
+  // Worth exposing because it is the ONLY way an integration can size a
+  // campaign before submitting it. Without it a partner discovers the cap by
+  // having a 10k send refused — and the refusal is correct, so there is nothing
+  // to retry. `remainingDailyBudget` is the number to plan against.
+  //
+  // Read-only, and secret-free (no tokens, no App secret), so it sits under
+  // `read:catalog` rather than requiring a credential-bearing scope.
+
+  @Get("whatsapp/health")
+  @RequireScope("read:catalog")
+  async whatsappHealth(@CurrentApiKey() auth: ApiKeyContext) {
+    return getMessagingHealthSummary(auth.workspaceId);
+  }
+
+  // ---- Template analytics ----------------------------------------------
+  //
+  // Meta's own aggregate performance per template per day — the only source of
+  // real currency COST and of unique URL-button clicks. Read from the stored
+  // rollup; `POST /broadcasts/:id/analytics/refresh` is what pulls fresh data
+  // from Meta (deliberately manual — see the note on that route).
+  //
+  // These sit BESIDE the per-recipient funnel in `/broadcasts/:id/report`,
+  // never merged into it: the two measure different things and will not agree.
+
+  @Get("templates/:id/analytics")
+  @RequireScope("read:broadcasts")
+  async templateAnalytics(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Query(zQuery(ExternalTemplateAnalyticsQuerySchema))
+    query: ExternalTemplateAnalyticsQueryInput,
+  ) {
+    const template = await this.api.getTemplateExternalId(auth.workspaceId, id);
+    if (!template) throw new NotFoundException({ error: "template_not_found" });
+    const end = query.end ? new Date(query.end) : new Date();
+    const start = query.start
+      ? new Date(query.start)
+      : new Date(end.getTime() - 30 * 86_400_000);
+    return readTemplateAnalytics(auth.workspaceId, template, start, end);
+  }
+
+  @Get("whatsapp/insights/status")
+  @RequireScope("read:catalog")
+  async insightsStatus(@CurrentApiKey() auth: ApiKeyContext) {
+    return getInsightsStatus(auth.workspaceId);
+  }
+
+  @Get("broadcasts/:id/timeseries")
+  @RequireScope("read:broadcasts")
+  async broadcastTimeseries(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    const series = await getBroadcastTimeseries(auth.workspaceId, id);
+    if (!series) throw new NotFoundException({ error: "broadcast_not_found" });
+    return series;
   }
 
   @Post("messages/:messageId/flags")

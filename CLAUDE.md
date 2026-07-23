@@ -127,7 +127,7 @@ Discipline that keeps this simple and safe:
 
 Real entities (`prisma/schema.prisma`; ERD in [docs/schema-erd.md](docs/schema-erd.md)):
 
-`Team → User → ChannelConnection`; `Contact → Conversation → Message`; plus `ContactStage`, `ContactFieldDefinition`, `Tag`, `InboxView` (saved inbox filters — shared or personal; the criteria are one validated JSON document turned into SQL in exactly one place, `lib/inbox-views/where.ts`), `AudienceGroup`, `Broadcast`/`BroadcastRecipient`, `InternalNote`, `Workflow`/`WorkflowRun`/`WorkflowContactState`, `TeamApiKey`, `OutboundWebhook`/`OutboundWebhookDelivery`, `OutboundEvent` (outbox), `ConversationEvent` (audit timeline), `ContactTransferJob` (contact import/export runs), `Ticket`/`TicketEvent`/`TicketSlaPolicy`/`TicketFieldDefinition`/`TicketNumberCounter` (the work items on a conversation — many per thread; see [docs/ticketing.md](docs/ticketing.md)), the team-chat models (a deliberately separate message graph — channels **and** 1:1 DMs share `TeamChannel` via a `kind` discriminator; see [docs/team-chat.md](docs/team-chat.md)), `Call`/`CallPermissionRequest`, `OutboundSendAttempt` (send-idempotency ledger).
+`Team → User → ChannelConnection`; `Contact → Conversation → Message`; plus `ContactStage`, `ContactFieldDefinition`, `Tag`, `InboxView` (saved inbox filters — shared or personal; the criteria are one validated JSON document turned into SQL in exactly one place, `lib/inbox-views/where.ts`), `AudienceGroup`, `Broadcast`/`BroadcastRecipient`, `WhatsappPortfolio` (the business portfolio a WhatsApp number belongs to — since 2025-10-07 the 24h messaging cap is PORTFOLIO-scoped, shared by every number in it), `TemplateAnalyticsDaily` (Meta's own per-template daily rollup — the only source of currency cost + unique link clicks), `InternalNote`, `Workflow`/`WorkflowRun`/`WorkflowContactState`, `TeamApiKey`, `OutboundWebhook`/`OutboundWebhookDelivery`, `OutboundEvent` (outbox), `ConversationEvent` (audit timeline), `ContactTransferJob` (contact import/export runs), `Ticket`/`TicketEvent`/`TicketSlaPolicy`/`TicketFieldDefinition`/`TicketNumberCounter` (the work items on a conversation — many per thread; see [docs/ticketing.md](docs/ticketing.md)), the team-chat models (a deliberately separate message graph — channels **and** 1:1 DMs share `TeamChannel` via a `kind` discriminator; see [docs/team-chat.md](docs/team-chat.md)), `Call`/`CallPermissionRequest`, `OutboundSendAttempt` (send-idempotency ledger).
 
 **Non-negotiable data invariants:**
 - **`workspaceId` on every table**, and in the `where` of every query — sourced from `req.session.workspaceId` (resolved server-side from the membership-validated `ccp.ws` cookie / `Session.activeWorkspaceId`) or `req.apiKey.workspaceId`, **never** from client input. There is no Prisma middleware / RLS; tenant isolation is manual and load-bearing.
@@ -319,6 +319,7 @@ Each links to the reasoning:
 
 | Topic | File |
 |---|---|
+| **Launch checklist**: env gates, deploy order, first-traffic checks | [docs/launch-checklist.md](docs/launch-checklist.md) |
 | Operations, deploy, heap, shutdown, queues, sweepers, Caddy | [docs/operations.md](docs/operations.md) |
 | Realtime: rooms, fanout scoping, reducers, read-state convergence | [docs/realtime.md](docs/realtime.md) |
 | Saved inbox views: the filter document, visibility boundary, counts cadence | [docs/inbox-views.md](docs/inbox-views.md) |
@@ -334,6 +335,7 @@ Each links to the reasoning:
 | Adding a channel: recipe + per-channel constraints | [docs/adding-a-channel.md](docs/adding-a-channel.md) |
 | Meta channels capability & gap matrix (WhatsApp/Messenger/Instagram) | [docs/meta-channels-capabilities.md](docs/meta-channels-capabilities.md) |
 | WhatsApp Calling: wire shapes, permission, region, accept handshake, recording/transcription | [docs/whatsapp-calling.md](docs/whatsapp-calling.md) |
+| Campaign analytics: the two sources, the null rules, the send-rate bucket | [docs/campaign-analytics.md](docs/campaign-analytics.md) |
 | Contact import/export: CSV + Excel, streaming, at 100k | [docs/contact-import-export.md](docs/contact-import-export.md) |
 | Data model ERD | [docs/schema-erd.md](docs/schema-erd.md) |
 | External API reference | [docs/organization-api.md](docs/organization-api.md) |

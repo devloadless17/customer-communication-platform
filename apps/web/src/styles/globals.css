@@ -83,6 +83,26 @@
   --info-fg: oklch(0.50 0.118 240);
   --info-border: oklch(0.88 0.045 235);
 
+  /* --- Chart series -------------------------------------------------------
+     A CATEGORICAL palette: four fixed hues assigned in order and never cycled.
+     Series identity follows the entity, not its rank, so filtering a series out
+     must never repaint the survivors.
+
+     These are NOT the status tokens above. Reusing success/warning for "series 2"
+     is what makes a chart say "this line is bad" when it only means "this line
+     is delivered".
+
+     Both modes were VALIDATED, not eyeballed — lightness band, chroma floor,
+     colour-vision-deficiency separation (worst adjacent pair ΔE 20.7 deutan in
+     light, 16.0 in dark), and ≥3:1 against the card surface. Dark is its own
+     set of steps, not an automatic flip: the light hues sit outside the darker
+     band and lose separation against a dark card. Re-validate with the dataviz
+     validator before changing any value here. */
+  --chart-1: #0d9488;
+  --chart-2: #2563eb;
+  --chart-3: #d97706;
+  --chart-4: #9333ea;
+
   /* Search-match highlight — a soft, low-chroma amber wash that stands out
      behind a search hit without shouting like a raw highlighter yellow.
      Tuned so dark body text on top still clears WCAG AA. */
@@ -163,6 +183,14 @@
   --info-bg: oklch(0.30 0.035 235);
   --info-fg: oklch(0.746 0.13 233);
   --info-border: oklch(0.44 0.05 235);
+
+  /* Dark-mode chart series — independently stepped into the tighter dark
+     lightness band (L 0.48–0.67) and validated against the dark card surface.
+     Same hue ORDER as light, so a series keeps its identity across themes. */
+  --chart-1: #0fa79a;
+  --chart-2: #4b84e8;
+  --chart-3: #c0850c;
+  --chart-4: #a855f7;
 
   /* Search-match highlight (dark) — a muted amber wash with enough chroma to
      register against the cool-slate surfaces while light foreground text on
