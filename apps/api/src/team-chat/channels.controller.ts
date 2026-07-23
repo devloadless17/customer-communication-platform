@@ -79,7 +79,7 @@ import {
  *   GET    /api/workspace/channels/:id/preview                  — public channel metadata (non-members)
  *   GET    /api/workspace/channels/unread-count                 — unread @mention count (rail badge)
  */
-@Controller("api/workspace/channels")
+@Controller("api/team-chat/channels")
 @UseGuards(SessionGuard)
 export class ChannelsController {
   constructor(private readonly channels: ChannelsService) {}

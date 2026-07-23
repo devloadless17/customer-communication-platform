@@ -61,7 +61,7 @@ export function NewDmDialog({
   const start = async (userId: string) => {
     setBusyUserId(userId);
     try {
-      const res = await fetchWithSessionGuard("/api/workspace/channels/dm", {
+      const res = await fetchWithSessionGuard("/api/team-chat/channels/dm", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ userId }),

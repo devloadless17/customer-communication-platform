@@ -265,7 +265,7 @@ Avoid duplicated state, unnecessary global stores, unnecessary fetching, and unn
 
 **Scale**: assume many orgs, users, conversations, messages, sockets, workflows, webhook deliveries. The current single-VPS, in-process design is correct for today; grow only at a **named cliff** (full list in [docs/operations.md](docs/operations.md)):
 - second app instance → Redis Socket.io adapter + sticky sessions + move in-memory buckets/caches to Redis;
-- 10k+ recipient broadcasts → move the runner to a dedicated worker;
+- 10k+ recipient broadcasts → **already handled in-process**: lanes are derived from the number's Meta tier (Little's Law), a process-wide in-flight ceiling bounds total send work, and recipients are keyset-paged so a 100k audience never loads whole. See [docs/campaign-analytics.md](docs/campaign-analytics.md) §6b. A dedicated worker container is NOT the plan — revisit only if a measured campaign shows interactive latency suffering;
 - 50–200 tenants → add eviction to the grow-only caches.
 Don't pre-build any of it.
 

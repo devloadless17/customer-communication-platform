@@ -93,21 +93,26 @@ These are correct, not bugs — but they look like gaps if you don't expect them
 - **Business portfolio: "Not resolved".** The connected token lacks
   `business_management`. Everything works; only the portfolio *id* is unknown,
   and the 24h cap falls back to the number's own tier.
-- **`BROADCAST_RATE_LIMITER_ENABLED=0`.** The per-number send-rate bucket ships
-  **dark**. Today's per-lane pacing is unchanged. See §5.
+- **The send-rate bucket is ON** (`BROADCAST_RATE_LIMITER_ENABLED=1`, the
+  default). It is the rate authority the lane sizing depends on — see
+  `docs/campaign-analytics.md` §6b. It can only slow sending, never break it: a
+  Redis outage fails open.
 
 ## 5. After launch — in this order
 
 1. **Run one small template broadcast** and read the campaign report's
-   *Delivery over time* curve. That is the measurement everything else waits on.
-2. **Then** flip `BROADCAST_RATE_LIMITER_ENABLED=1` and run another. Compare
-   achieved msg/s against the target for your throughput level (75 STANDARD /
-   900 HIGH), and check the inbox stayed responsive during the send.
-3. **Only then** consider the dedicated broadcast worker container (Part 2
-   Phase 3). Its trigger is *10k+ recipient campaigns*; at TIER_250 the
-   in-process runner is not close to stressed, and shipping a second container
-   before the measurement would be adding a failure mode to solve a problem you
-   have not yet observed. See `docs/campaign-analytics.md` §9.
+   *Delivery over time* curve. Confirm the achieved msg/s sits just under the
+   target for your throughput level (75 STANDARD / 900 HIGH) and that the inbox
+   stayed responsive during the send.
+2. **As Meta scales you 250 → 2K → 10K → 100K**, nothing needs changing: the
+   throughput level flips STANDARD → HIGH and the lane count follows
+   automatically (`docs/campaign-analytics.md` §6b). Re-check the curve once at
+   HIGH to confirm the box is comfortable.
+3. **A dedicated worker container is NOT part of this design.** One process
+   serves every tier: ~225 concurrent sends at 900 msg/s are I/O waits, and the
+   global in-flight ceiling bounds total work so broadcasts can't starve the
+   inbox. Revisit only if a measured campaign shows interactive latency
+   suffering — not before.
 
 ## 6. If something breaks
 

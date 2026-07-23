@@ -43,7 +43,7 @@ import type { TeamChannelListItemDto } from "@ccp/shared/team-chat/types";
  * eventually disagreed about what "unread" means.
  *
  * @param refetchUrl the endpoint that returns `{ items }` for THIS surface
- *                   (`/api/workspace/channels` or `/api/workspace/channels/dms`).
+ *                   (`/api/team-chat/channels` or `/api/team-chat/channels/dms`).
  * @param extraRefetchEvents socket events that should trigger a refetch on top
  *                   of the shared ones — the DM list passes `team:dm:created`.
  */
@@ -59,7 +59,7 @@ export function useTeamChannelsList<T extends TeamChannelListItemDto>(
   initial: T[],
   currentUserId: string,
   activeChannelId: string | null,
-  refetchUrl = "/api/workspace/channels",
+  refetchUrl = "/api/team-chat/channels",
   extraRefetchEvents: readonly "team:dm:created"[] = NO_EXTRA_EVENTS,
 ): T[] {
   const [channels, setChannels] = useState(initial);

@@ -117,7 +117,7 @@ function useTeamMentions(userId: string): number {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const refetch = async () => {
       try {
-        const res = await apiFetch("/api/workspace/channels/unread-count");
+        const res = await apiFetch("/api/team-chat/channels/unread-count");
         if (!res.ok) return;
         const json = (await res.json()) as { mentions?: unknown };
         if (alive && typeof json.mentions === "number") setMentions(json.mentions);

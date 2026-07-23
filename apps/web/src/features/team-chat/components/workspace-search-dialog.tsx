@@ -66,7 +66,7 @@ export function WorkspaceSearchDialog({
     const t = window.setTimeout(async () => {
       try {
         const res = await fetchWithSessionGuard(
-          `/api/workspace/channels/search?q=${encodeURIComponent(q)}`,
+          `/api/team-chat/channels/search?q=${encodeURIComponent(q)}`,
         );
         if (cancelled) return;
         if (!res.ok) {

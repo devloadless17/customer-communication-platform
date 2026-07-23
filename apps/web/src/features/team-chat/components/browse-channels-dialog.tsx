@@ -32,7 +32,7 @@ export function BrowseChannelsDialog({ onClose }: { onClose: () => void }) {
     const timer = setTimeout(() => {
       setLoading(true);
       const qs = query.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
-      void fetchWithSessionGuard(`/api/workspace/channels/browse${qs}`)
+      void fetchWithSessionGuard(`/api/team-chat/channels/browse${qs}`)
         .then((r) => (r.ok ? r.json() : null))
         .then((res) => {
           if (cancelled) return;
@@ -54,7 +54,7 @@ export function BrowseChannelsDialog({ onClose }: { onClose: () => void }) {
       setJoiningId(channelId);
       try {
         const res = await fetchWithSessionGuard(
-          `/api/workspace/channels/${channelId}/join`,
+          `/api/team-chat/channels/${channelId}/join`,
           { method: "POST" },
         );
         if (!res.ok) {

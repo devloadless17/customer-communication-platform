@@ -173,16 +173,53 @@ interface SendPacing {
  * `throughputLevel` is null for social channels and for a WhatsApp number we've
  * never polled — both fall to the conservative baseline.
  */
+/**
+ * Lanes needed to SUSTAIN a target rate, from Little's Law:
+ * `concurrency = rate × latency`.
+ *
+ * This is what lets one process serve every Meta tier without a second
+ * container. Meta auto-scales a healthy number 250 → 2K → 10K → 100K, and the
+ * matching throughput level moves STANDARD → HIGH, so the lane count has to
+ * move with it — a fixed 16 lanes tops out around 60 msg/s no matter what tier
+ * the number reaches (16 lanes ÷ ~260ms per send).
+ *
+ * Deriving it instead: at 900 msg/s and ~250ms round-trip that is ~225 in-flight
+ * requests. These are I/O waits, not CPU — Node carries them comfortably, and
+ * each send touches the DB for only a few ms of its ~250ms life, so the 50-slot
+ * Prisma pool sees a handful in use, not 225.
+ *
+ * Two independent things keep this safe: the per-NUMBER token bucket is the
+ * rate authority (concurrency can never push past Meta's ceiling), and the
+ * process-wide in-flight ceiling below bounds total work regardless of how many
+ * broadcasts run at once.
+ */
+export function lanesForRate(ratePerSec: number): number {
+  const latencyMs = envInt("BROADCAST_ASSUMED_SEND_LATENCY_MS", 250, 50, 5_000);
+  const needed = Math.ceil(ratePerSec * (latencyMs / 1_000));
+  return Math.max(1, Math.min(needed, MAX_LANES_PER_RUN));
+}
+
+/** Hard ceiling on lanes for a single run — a config typo can't uncap it. */
+const MAX_LANES_PER_RUN = 256;
+
 function resolveSendPacing(channel: Channel, throughputLevel: string | null): SendPacing {
+  // When the token bucket is enforcing the rate, IT is the authority: lanes are
+  // sized to sustain that rate and the fixed inter-send gap goes to zero (the
+  // send loop already skips the gap in this mode). With the bucket off we keep
+  // the historical static pacing byte-for-byte, so enabling the bucket is the
+  // single switch that changes send behaviour.
+  if (sendRateLimiterEnabled() && channel === "whatsapp") {
+    return { lanes: lanesForRate(resolveSendRate(throughputLevel)), gapMs: 0 };
+  }
   if (channel === "whatsapp" && throughputLevel === "HIGH") {
     return {
-      lanes: envInt("BROADCAST_SEND_CONCURRENCY_HIGH", 16, 1, 64),
+      lanes: envInt("BROADCAST_SEND_CONCURRENCY_HIGH", 16, 1, MAX_LANES_PER_RUN),
       gapMs: envInt("BROADCAST_SEND_GAP_MS_HIGH", 60, 0, 5_000),
     };
   }
   if (channel === "whatsapp" && throughputLevel === "STANDARD") {
     return {
-      lanes: envInt("BROADCAST_SEND_CONCURRENCY_STANDARD", 8, 1, 64),
+      lanes: envInt("BROADCAST_SEND_CONCURRENCY_STANDARD", 8, 1, MAX_LANES_PER_RUN),
       gapMs: envInt("BROADCAST_SEND_GAP_MS_STANDARD", 125, 0, 5_000),
     };
   }
@@ -458,14 +495,63 @@ function releaseGlobalBroadcastSlot(): void {
  * Keyed by workspaceId. Entry is dropped when the team has zero active + zero
  * waiters so the Map stays bounded with one entry per actively-sending team.
  */
-function perTeamRecipientConcurrency(): number {
+export function perTeamRecipientConcurrency(): number {
   const raw = Number.parseInt(
-    process.env.BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY ?? "16",
+    process.env.BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY ?? "",
     10,
   );
-  // Upper clamp matches resolveSendPacing's lane clamp (64) so an operator who
-  // raises BROADCAST_SEND_CONCURRENCY_HIGH above 50 isn't silently throttled here.
-  return Number.isFinite(raw) && raw > 0 && raw <= 64 ? raw : 16;
+  if (Number.isFinite(raw) && raw > 0 && raw <= MAX_LANES_PER_RUN) return raw;
+  // DEFAULT SCALES WITH THE TIER. The effective per-run rate is
+  // `min(pacing.lanes, this cap)`, so a fixed 16 here would silently pin a
+  // HIGH-throughput number to ~16 in-flight sends however many lanes it
+  // resolved — exactly the "raise one knob, forget its twin" trap the old
+  // hardcoded pair had. Sized to the largest lane count the rate limiter can
+  // ask for so a single big broadcast is never throttled below its number's
+  // allowance; the PROCESS-wide ceiling below is what actually bounds total
+  // work when several teams send at once.
+  return sendRateLimiterEnabled()
+    ? lanesForRate(resolveSendRate("HIGH"))
+    : 16;
+}
+
+/**
+ * PROCESS-WIDE in-flight send ceiling — the missing half of the per-team cap.
+ *
+ * `MAX_RUNNING_BROADCASTS` bounds how many broadcasts run, and the per-team cap
+ * bounds one tenant's share, but neither bounds the SUM: 6 concurrent
+ * broadcasts × 225 lanes is ~1,350 simultaneous Meta calls in the same process
+ * that serves the inbox. A per-tenant cap with no global ceiling is a bug class
+ * this codebase has shipped before, so the global gate is explicit here.
+ *
+ * The token bucket limits the rate PER NUMBER; this limits total concurrent
+ * work in THIS process, which is what protects inbox latency and the Prisma
+ * pool. Default is one tier's worth of lanes plus headroom.
+ */
+export function globalSendConcurrency(): number {
+  const raw = Number.parseInt(process.env.BROADCAST_GLOBAL_SEND_CONCURRENCY ?? "", 10);
+  if (Number.isFinite(raw) && raw > 0 && raw <= 1_000) return raw;
+  return sendRateLimiterEnabled() ? 300 : 64;
+}
+
+let globalSendActive = 0;
+const globalSendWaiters: Array<() => void> = [];
+
+async function acquireGlobalSendSlot(): Promise<void> {
+  const cap = globalSendConcurrency();
+  if (globalSendActive < cap) {
+    globalSendActive += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => globalSendWaiters.push(resolve));
+}
+
+function releaseGlobalSendSlot(): void {
+  const next = globalSendWaiters.shift();
+  // Hand the slot straight to the waiter — `globalSendActive` never dips, so a
+  // concurrent arrival can't observe a phantom free slot (same ownership-
+  // transfer invariant as the per-team gate).
+  if (next) next();
+  else globalSendActive = Math.max(0, globalSendActive - 1);
 }
 
 /** Wait queue depth that triggers a structured warn log ("this team is starving"). */
@@ -860,7 +946,17 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // their promises in `pendingBumps` so we can drain them before flipping
   // the broadcast to `completed` — otherwise a UI watching for the status
   // change can briefly observe sentCount + failedCount < totalCount.
-  const PAGE_SIZE = 100;
+  // Recipient page size. A 100k broadcast is NEVER loaded whole — lanes pull
+  // from this queue while it refills from a keyset cursor, so memory is bounded
+  // by the page, not the audience.
+  //
+  // It must stay comfortably ABOVE the lane count or lanes idle waiting on a
+  // refill: at ~225 lanes a 100-row page drains in a fraction of a second and
+  // every lane blocks on the same DB round-trip. 500 gives roughly two pages of
+  // runway at the highest tier while staying small enough that the rows (and
+  // their contact JSON) are a trivial slice of heap. Unchanged at 100 when the
+  // rate limiter is off, so low-throughput behaviour is byte-identical.
+  const PAGE_SIZE = sendRateLimiterEnabled() ? 500 : 100;
   const broadcastId_ = broadcast.id; // capture for the refill closure (TS can't
   // narrow `broadcast` through the closure boundary).
   // L7: customFields is JSONB and can hold arbitrarily large blobs per
@@ -1149,6 +1245,10 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         // lane waiting on tokens isn't also holding a slot another team could
         // be using.
         if (rateLimited) await acquireSendToken(rateKey, sendRate);
+        // Global gate BEFORE the per-team one: the process-wide ceiling is the
+        // one protecting inbox latency, so it must bound every lane of every
+        // running broadcast, not just one tenant's share.
+        await acquireGlobalSendSlot();
         await acquireTeamRecipientSlot(broadcast.workspaceId);
         try {
           await processOneRecipient(
@@ -1163,7 +1263,11 @@ async function runBroadcast(broadcastId: string): Promise<void> {
             conversationCache,
           );
         } finally {
+          // Release in reverse acquire order. Both are in the SAME finally so a
+          // thrown recipient can never leak either slot — a leaked global slot
+          // would permanently shrink the process's send capacity.
           releaseTeamRecipientSlot(broadcast.workspaceId);
+          releaseGlobalSendSlot();
         }
         // The bucket, when on, IS the rate — the fixed gap on top of it would
         // only push the achieved rate below the target. When off, today's

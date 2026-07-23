@@ -51,6 +51,11 @@ for (const route of ROUTES) {
       // favicon, and React's own hydration-mismatch *warning* text is already
       // covered by the overlay check below.
       if (/favicon|ERR_BLOCKED|Failed to load resource/i.test(t)) return;
+      // Next's hot-reload socket. It only exists in dev, and it drops whenever
+      // the dev server recompiles or restarts — so it reports on the harness,
+      // never on the page. Asserting against it makes this suite flaky for a
+      // reason that cannot occur in production.
+      if (/webpack-hmr|_next\/webpack|HMR/i.test(t)) return;
       errors.push(t.slice(0, 300));
     });
     page.on("pageerror", (e) => errors.push(`pageerror: ${String(e).slice(0, 300)}`));

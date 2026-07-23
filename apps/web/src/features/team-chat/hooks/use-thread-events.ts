@@ -87,7 +87,7 @@ export function useThreadEvents(
     setReplies([]);
     setNextCursor(null);
     void fetchWithSessionGuard(
-      `/api/workspace/channels/${channelId}/messages/${rootMessageId}/thread`,
+      `/api/team-chat/channels/${channelId}/messages/${rootMessageId}/thread`,
     )
       .then((r) =>
         r.ok
@@ -116,7 +116,7 @@ export function useThreadEvents(
     setLoadingMore(true);
     try {
       const res = await fetchWithSessionGuard(
-        `/api/workspace/channels/${channelId}/messages/${rootMessageId}/thread?after=${encodeURIComponent(nextCursor)}`,
+        `/api/team-chat/channels/${channelId}/messages/${rootMessageId}/thread?after=${encodeURIComponent(nextCursor)}`,
       );
       if (!res.ok) return 0;
       const page = (await res.json()) as {
@@ -168,7 +168,7 @@ export function useThreadEvents(
         return;
       }
       void fetchWithSessionGuard(
-        `/api/workspace/channels/${channelId}/messages/${rootMessageId}/thread`,
+        `/api/team-chat/channels/${channelId}/messages/${rootMessageId}/thread`,
       )
         .then((r) =>
           r.ok
@@ -361,7 +361,7 @@ export function useThreadEvents(
         ),
       );
       void fetchWithSessionGuard(
-        `/api/workspace/channels/${channelId}/messages/${rootMessageId}/thread`,
+        `/api/team-chat/channels/${channelId}/messages/${rootMessageId}/thread`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },

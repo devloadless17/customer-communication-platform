@@ -122,6 +122,53 @@ the bucket, and it **fails open** if Redis is unreachable — a limiter that hal
 an already-paid-for campaign because a cache is down has done more damage than
 the overshoot it prevented.
 
+## 6b. Serving every Meta tier in ONE process
+
+Meta auto-scales a healthy number **250 → 2K → 10K → 100K** within weeks, and the
+throughput level moves STANDARD → HIGH with it. The send path follows that
+automatically — no second container, no redeploy.
+
+**Lanes are derived, not hardcoded.** Little's Law: `concurrency = rate × latency`.
+
+| Tier / throughput | Target rate | Lanes (at ~250ms RTT) |
+|---|---|---|
+| HIGH (10K/100K) | 900 msg/s | ~225 |
+| STANDARD (250/2K) | 75 msg/s | ~19 |
+| unknown | 40 msg/s | ~10 |
+
+The old fixed **16 lanes** topped out near 60 msg/s *whatever tier the number
+reached* — a number Meta had scaled to 100K would never have used its allowance.
+
+**Why ~225 concurrent is safe in the API process:** these are I/O waits, not CPU.
+Each send spends ~250ms in a Meta round-trip and only a few ms touching the DB,
+so the 50-slot Prisma pool sees a handful in use, never 225.
+
+**Three independent limits, each with one job:**
+
+1. **Token bucket** (per NUMBER) — the *rate* authority. Targets sit deliberately
+   under Meta's published ceilings (75 vs 80, 900 vs 1000) because those ceilings
+   count **inbound too**; saturating one starves the inbox exactly when customers
+   are replying to the campaign.
+2. **Global in-flight ceiling** (per PROCESS, default 300) — bounds total
+   concurrent sends across every running broadcast. `MAX_RUNNING_BROADCASTS` caps
+   how many campaigns run and the per-team cap caps one tenant's share, but
+   neither bounds the *sum*: 6 broadcasts × 225 lanes would be ~1,350 simultaneous
+   calls in the process that also serves the inbox. This is what protects
+   interactive latency.
+3. **Per-team cap** — fairness, so one tenant can't monopolise the global pool. It
+   now **scales with the tier**; a fixed 16 would have silently pinned a HIGH
+   number back to the old ceiling (`effective = min(lanes, cap)`).
+
+**A 100k broadcast is never loaded whole.** Recipients are keyset-paged
+(`PAGE_SIZE`, refilled continuously as lanes drain it), so memory is bounded by
+the page, not the audience. The page scales with the lane count — at 225 lanes a
+100-row page would drain instantly and leave every lane blocked on the same DB
+round-trip.
+
+**The rate limiter is ON by default** (`BROADCAST_RATE_LIMITER_ENABLED=0` to opt
+out). It is the authority the lane sizing depends on, and it can only slow
+sending, never break it — a Redis outage fails open and every wait is bounded.
+
 ## 7. Messaging health
 
 `GET /api/broadcasts/messaging-health` (and `/v1/whatsapp/health`) is one shared

@@ -365,7 +365,7 @@ services:
       # targets below sit deliberately under Meta's ceilings (80 / ~1000)
       # because that ceiling counts INBOUND too, and saturating it starves the
       # inbox exactly when customers are replying to the campaign.
-      BROADCAST_RATE_LIMITER_ENABLED: ${BROADCAST_RATE_LIMITER_ENABLED:-0}
+      BROADCAST_RATE_LIMITER_ENABLED: ${BROADCAST_RATE_LIMITER_ENABLED:-1}
       BROADCAST_RATE_STANDARD: ${BROADCAST_RATE_STANDARD:-75}
       BROADCAST_RATE_HIGH: ${BROADCAST_RATE_HIGH:-900}
       BROADCAST_RATE_BASELINE: ${BROADCAST_RATE_BASELINE:-40}

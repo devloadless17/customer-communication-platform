@@ -144,14 +144,19 @@ describe("clock safety", () => {
 });
 
 describe("rollout safety", () => {
-  it("is OFF unless explicitly enabled", () => {
+  it("is ON by default and opt-OUT, since lane sizing depends on it", () => {
+    // The bucket is the rate AUTHORITY: `lanesForRate` sizes concurrency to a
+    // target rate, which is only safe because the bucket caps the actual rate.
+    // Defaulting it off would silently pin every number to fixed-gap pacing
+    // (~60 msg/s) no matter what tier Meta had scaled it to.
     const prev = process.env.BROADCAST_RATE_LIMITER_ENABLED;
     delete process.env.BROADCAST_RATE_LIMITER_ENABLED;
-    expect(sendRateLimiterEnabled()).toBe(false);
-    process.env.BROADCAST_RATE_LIMITER_ENABLED = "0";
-    expect(sendRateLimiterEnabled()).toBe(false);
+    expect(sendRateLimiterEnabled()).toBe(true);
     process.env.BROADCAST_RATE_LIMITER_ENABLED = "1";
     expect(sendRateLimiterEnabled()).toBe(true);
+    // Explicit opt-out is the only way off.
+    process.env.BROADCAST_RATE_LIMITER_ENABLED = "0";
+    expect(sendRateLimiterEnabled()).toBe(false);
     if (prev === undefined) delete process.env.BROADCAST_RATE_LIMITER_ENABLED;
     else process.env.BROADCAST_RATE_LIMITER_ENABLED = prev;
   });
@@ -167,5 +172,66 @@ describe("rollout safety", () => {
     expect(resolveSendRate(null)).toBe(40);
     expect(resolveSendRate(undefined)).toBe(40);
     expect(resolveSendRate("SOMETHING_NEW")).toBe(40);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tier scaling — how the in-process runner serves 250 → 2K → 10K → 100K without
+// a second container. Meta auto-scales a healthy number through those tiers, so
+// the send path has to follow it while never crossing Meta's msg/s ceiling.
+// ---------------------------------------------------------------------------
+
+describe("tier scaling", () => {
+  it("sizes lanes by Little's Law so each tier can actually reach its rate", async () => {
+    const { lanesForRate } = await import("@/lib/broadcast-runner");
+    // concurrency = rate × latency. At the default 250ms assumed round-trip:
+    expect(lanesForRate(900)).toBe(225); // HIGH  — 900/s
+    expect(lanesForRate(75)).toBe(19); //  STANDARD — 75/s
+    expect(lanesForRate(40)).toBe(10); //  unknown tier — conservative baseline
+    // A fixed 16 lanes (the old behaviour) tops out ~60 msg/s regardless of
+    // tier — which is the bug this replaces.
+    expect(lanesForRate(900)).toBeGreaterThan(16);
+  });
+
+  it("clamps lanes so a config typo cannot uncap concurrency", async () => {
+    const { lanesForRate } = await import("@/lib/broadcast-runner");
+    // Even an absurd rate stays inside the hard ceiling.
+    expect(lanesForRate(100_000)).toBe(256);
+    expect(lanesForRate(0)).toBe(1);
+  });
+
+  it("keeps the per-team cap at or above the lane count", async () => {
+    const { lanesForRate, perTeamRecipientConcurrency } = await import(
+      "@/lib/broadcast-runner"
+    );
+    const prev = process.env.BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY;
+    delete process.env.BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY;
+    // Effective rate is min(lanes, thisCap) — a cap below the lane count would
+    // silently throttle a HIGH-tier number back to the old ceiling.
+    expect(perTeamRecipientConcurrency()).toBeGreaterThanOrEqual(lanesForRate(900));
+    if (prev === undefined) delete process.env.BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY;
+    else process.env.BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY = prev;
+  });
+
+  it("bounds TOTAL in-flight sends process-wide, not just per team", async () => {
+    const { globalSendConcurrency, lanesForRate } = await import(
+      "@/lib/broadcast-runner"
+    );
+    const cap = globalSendConcurrency();
+    // The per-team cap alone would allow (teams × lanes) concurrent Meta calls
+    // in the process that also serves the inbox. The global ceiling is what
+    // actually protects interactive latency.
+    expect(cap).toBeGreaterThan(0);
+    expect(cap).toBeLessThanOrEqual(1_000);
+    // Big enough that one full-rate broadcast is never starved by it.
+    expect(cap).toBeGreaterThanOrEqual(lanesForRate(900));
+  });
+
+  it("never targets Meta's actual ceiling — headroom is deliberate", () => {
+    // Meta publishes 80 msg/s STANDARD and ~1000 HIGH, and BOTH count inbound.
+    // Saturating either starves the inbox exactly when customers reply to the
+    // campaign, so the targets sit under them on purpose.
+    expect(resolveSendRate("STANDARD")).toBeLessThan(80);
+    expect(resolveSendRate("HIGH")).toBeLessThan(1000);
   });
 });

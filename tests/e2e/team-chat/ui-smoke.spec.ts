@@ -42,7 +42,7 @@ test("the sidebar renders a Direct messages section and a Browse entry point", a
   request,
 }) => {
   // Seed a DM so the section has a row to render.
-  const res = await request.post("/api/workspace/channels/dm", {
+  const res = await request.post("/api/team-chat/channels/dm", {
     data: { userId: peerUserId },
   });
   expect(res.ok()).toBeTruthy();
@@ -72,7 +72,7 @@ test("the Browse channels dialog opens and lists public channels", async ({
   page,
   request,
 }) => {
-  await request.post("/api/workspace/channels", {
+  await request.post("/api/team-chat/channels", {
     data: { name: `${CHAN_PREFIX}browsable`, visibility: "public" },
   });
 
@@ -94,7 +94,7 @@ test("opening a DM shows the peer in the header, with no channel-admin controls"
   request,
 }) => {
   const dm = (
-    await (await request.post("/api/workspace/channels/dm", { data: { userId: peerUserId } })).json()
+    await (await request.post("/api/team-chat/channels/dm", { data: { userId: peerUserId } })).json()
   ).channel;
 
   await page.goto(`/team/${dm.id}`);

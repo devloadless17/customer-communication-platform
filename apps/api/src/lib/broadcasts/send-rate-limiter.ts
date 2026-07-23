@@ -21,9 +21,9 @@ import { getRedisConnection } from "@/lib/workflows/queue";
  * a future worker container can't disagree about "now" — clock skew between
  * them would otherwise let one side over-refill.
  *
- * DARK BY DEFAULT. `BROADCAST_RATE_LIMITER_ENABLED` is off, so today's pacing
- * is untouched and rollback is an env flip. Turn it on only after watching the
- * measured rate under a real campaign.
+ * ON BY DEFAULT (opt out with `BROADCAST_RATE_LIMITER_ENABLED=0`). It is the
+ * rate authority the lane sizing depends on, and it can only slow sending —
+ * never break it, since a Redis outage fails open. Rollback is an env flip.
  */
 
 /**
@@ -82,9 +82,22 @@ redis.call('PEXPIRE', key, 60000)
 return wait_ms
 `;
 
-/** Is the bucket switched on? Off by default — see the header. */
+/**
+ * Is the bucket switched on? **On by default** — opt OUT with
+ * `BROADCAST_RATE_LIMITER_ENABLED=0`.
+ *
+ * It shipped dark, but it is now the mechanism the whole send path depends on:
+ * lane counts are derived from the target rate (see `lanesForRate`), and that
+ * is only safe because the bucket — not the lane count — decides how fast we
+ * actually talk to Meta. With it off, the runner falls back to fixed-gap pacing
+ * that tops out around 60 msg/s regardless of the number's tier, so a number
+ * Meta has scaled to 10K/100K would never use its allowance.
+ *
+ * Safe as a default because it can only ever SLOW sending, never break it: a
+ * Redis outage fails open (see `acquireSendToken`), and every wait is bounded.
+ */
 export function sendRateLimiterEnabled(): boolean {
-  return process.env.BROADCAST_RATE_LIMITER_ENABLED === "1";
+  return process.env.BROADCAST_RATE_LIMITER_ENABLED !== "0";
 }
 
 function envInt(name: string, def: number, min: number, max: number): number {

@@ -106,13 +106,13 @@ test.afterAll(async () => {
 // ═════════════════════════════════════════════════════════════════════════
 test.describe("Channel membership gate (per-channel reads)", () => {
   test("non-member GET /channels/:id → 404", async ({ request }) => {
-    const resp = await request.get(`/api/workspace/channels/${privateChannelId}`);
+    const resp = await request.get(`/api/team-chat/channels/${privateChannelId}`);
     expect(resp.status()).toBe(404);
   });
 
   test("non-member GET /channels/:id/messages → 404", async ({ request }) => {
     const resp = await request.get(
-      `/api/workspace/channels/${privateChannelId}/messages`,
+      `/api/team-chat/channels/${privateChannelId}/messages`,
     );
     expect(resp.status()).toBe(404);
   });
@@ -121,7 +121,7 @@ test.describe("Channel membership gate (per-channel reads)", () => {
     request,
   }) => {
     const resp = await request.post(
-      `/api/workspace/channels/${privateChannelId}/messages`,
+      `/api/team-chat/channels/${privateChannelId}/messages`,
       { data: { body: "should be refused" } },
     );
     expect(resp.status()).toBe(404);
@@ -129,14 +129,14 @@ test.describe("Channel membership gate (per-channel reads)", () => {
 
   test("non-member POST /channels/:id/read → 404", async ({ request }) => {
     const resp = await request.post(
-      `/api/workspace/channels/${privateChannelId}/read`,
+      `/api/team-chat/channels/${privateChannelId}/read`,
     );
     expect(resp.status()).toBe(404);
   });
 
   test("non-member GET /channels/:id/pins → 404", async ({ request }) => {
     const resp = await request.get(
-      `/api/workspace/channels/${privateChannelId}/pins`,
+      `/api/team-chat/channels/${privateChannelId}/pins`,
     );
     expect(resp.status()).toBe(404);
   });
@@ -145,7 +145,7 @@ test.describe("Channel membership gate (per-channel reads)", () => {
     request,
   }) => {
     const resp = await request.get(
-      `/api/workspace/channels/${privateChannelId}/messages/search?q=salary`,
+      `/api/team-chat/channels/${privateChannelId}/messages/search?q=salary`,
     );
     expect(resp.status()).toBe(404);
   });
@@ -154,7 +154,7 @@ test.describe("Channel membership gate (per-channel reads)", () => {
     request,
   }) => {
     const resp = await request.post(
-      `/api/workspace/channels/${privateChannelId}/messages/${publicMessageId}/reactions`,
+      `/api/team-chat/channels/${privateChannelId}/messages/${publicMessageId}/reactions`,
       { data: { emoji: "👀" } },
     );
     expect(resp.status()).toBe(404);
@@ -164,7 +164,7 @@ test.describe("Channel membership gate (per-channel reads)", () => {
     request,
   }) => {
     const resp = await request.delete(
-      `/api/workspace/channels/${privateChannelId}/messages/${publicMessageId}`,
+      `/api/team-chat/channels/${privateChannelId}/messages/${publicMessageId}`,
     );
     expect(resp.status()).toBe(404);
   });
@@ -190,7 +190,7 @@ test.describe("Default channel implicit membership", () => {
       });
     }
     try {
-      const resp = await request.get(`/api/workspace/channels/${defaultChannelId}`);
+      const resp = await request.get(`/api/team-chat/channels/${defaultChannelId}`);
       expect(resp.status()).toBe(200);
     } finally {
       // Restore if we removed.
@@ -210,7 +210,7 @@ test.describe("Default channel implicit membership", () => {
     request,
   }) => {
     const resp = await request.get(
-      `/api/workspace/channels/${defaultChannelId}/messages`,
+      `/api/team-chat/channels/${defaultChannelId}/messages`,
     );
     expect(resp.status()).toBe(200);
   });
@@ -227,7 +227,7 @@ test.describe("Workspace-wide channel search membership filter", () => {
     // it lives in `private-leadership`, and the viewer (the e2e app-admin) is
     // NOT a member of that channel. Workspace search must NOT surface it.
     const resp = await request.get(
-      `/api/workspace/channels/search?q=salary`,
+      `/api/team-chat/channels/search?q=salary`,
     );
     expect(resp.status()).toBe(200);
     const json = await resp.json();
@@ -252,7 +252,7 @@ test.describe("Workspace-wide channel search membership filter", () => {
     });
     try {
       const resp = await request.get(
-        `/api/workspace/channels/search?q=salary`,
+        `/api/team-chat/channels/search?q=salary`,
       );
       expect(resp.status()).toBe(200);
       const json = await resp.json();

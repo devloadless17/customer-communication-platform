@@ -58,7 +58,7 @@ test.describe("Security: MIME magic-byte sniff on team-chat media upload", () =>
     // application/pdf; image/png as image — kinds disagree → reject.
 
     // First find the default channel id for the superadmin's team.
-    const channelsResp = await request.get("/api/workspace/channels/default");
+    const channelsResp = await request.get("/api/team-chat/channels/default");
     expect(channelsResp.ok()).toBe(true);
     const defaultChannel = await channelsResp.json();
     // Response shape: { channel: { id, ... } }
@@ -77,7 +77,7 @@ test.describe("Security: MIME magic-byte sniff on team-chat media upload", () =>
     );
 
     const resp = await request.post(
-      `/api/workspace/channels/${channelId}/media`,
+      `/api/team-chat/channels/${channelId}/media`,
       { multipart: { file: { name: "fake.png", mimeType: "image/png", buffer: pdfBytes } } },
     );
     // Service maps the throw to 500 (uncaught) OR 400 — either is fine
@@ -99,12 +99,12 @@ test.describe("Security: MIME magic-byte sniff on team-chat media upload", () =>
       "base64",
     );
 
-    const channelsResp = await request.get("/api/workspace/channels/default");
+    const channelsResp = await request.get("/api/team-chat/channels/default");
     const defaultChannel = await channelsResp.json();
     const channelId = defaultChannel.channel.id;
 
     const resp = await request.post(
-      `/api/workspace/channels/${channelId}/media`,
+      `/api/team-chat/channels/${channelId}/media`,
       {
         multipart: {
           file: { name: "tiny.png", mimeType: "image/png", buffer: realPng },

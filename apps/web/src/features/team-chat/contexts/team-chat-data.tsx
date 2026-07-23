@@ -78,7 +78,7 @@ export function TeamChatLayoutDataProvider({
     initialDms,
     currentUserId,
     activeChannelId,
-    "/api/workspace/channels/dms",
+    "/api/team-chat/channels/dms",
     DM_REFETCH_EVENTS,
   );
 

@@ -111,7 +111,7 @@ export function TeamChatWorkspace({
     const refetchPins = async () => {
       try {
         const res = await fetchWithSessionGuard(
-          `/api/workspace/channels/${channelId}/pins`,
+          `/api/team-chat/channels/${channelId}/pins`,
         );
         if (!res.ok) return;
         const data = (await res.json()) as { pins: ChannelPinDto[] };
@@ -189,7 +189,7 @@ export function TeamChatWorkspace({
       setPins((prev) => prev.filter((p) => p.messageId !== messageId));
       try {
         const res = await fetchWithSessionGuard(
-          `/api/workspace/channels/${initialChannel.id}/messages/${messageId}/pin`,
+          `/api/team-chat/channels/${initialChannel.id}/messages/${messageId}/pin`,
           { method: "DELETE" },
         );
         if (!res.ok) {
@@ -387,7 +387,7 @@ export function TeamChatWorkspace({
   const leaveChannel = useCallback(async () => {
     try {
       const res = await fetchWithSessionGuard(
-        `/api/workspace/channels/${initialChannel.id}/members/${currentUser.id}`,
+        `/api/team-chat/channels/${initialChannel.id}/members/${currentUser.id}`,
         { method: "DELETE" },
       );
       if (!res.ok) {

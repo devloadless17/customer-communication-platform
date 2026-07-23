@@ -128,6 +128,36 @@ async function bootstrap(): Promise<void> {
   // middleware runs in registration order; this needs to be first.
   app.use(correlationMiddleware());
 
+  // LEGACY ROUTE ALIAS — `/api/team/*` → `/api/workspace/*`.
+  //
+  // The workspace settings controllers moved from `/api/team/*` to
+  // `/api/workspace/*` when the tenancy restructure finished. A browser holding
+  // a JS bundle from BEFORE that deploy would keep calling the old paths and get
+  // a 404 on every settings action until the user hard-refreshes — silent,
+  // confusing breakage for anyone mid-session across the deploy.
+  //
+  // Rewriting here (rather than registering 25 duplicate controllers) keeps it
+  // to one place, costs a string compare per request, and leaves exactly one
+  // thing to delete later. Internal routes only: `/api/external/v1/*` never had
+  // this prefix, so partner integrations are untouched either way.
+  //
+  // REMOVE once no bundle predating the rename can still be in a browser —
+  // roughly one release after deploy.
+  // `/api/team/channels` is special-cased FIRST: team CHAT moved to its own
+  // prefix rather than to `/api/workspace/channels`, which now means messaging
+  // channel accounts. Without this case an old bundle's team-chat calls would
+  // rewrite onto the accounts path and 404.
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    if (req.url.startsWith("/api/team/channels")) {
+      req.url = `/api/team-chat/channels${req.url.slice("/api/team/channels".length)}`;
+    } else if (req.url.startsWith("/api/team/")) {
+      req.url = `/api/workspace/${req.url.slice("/api/team/".length)}`;
+    } else if (req.url === "/api/team") {
+      req.url = "/api/workspace";
+    }
+    next();
+  });
+
   // Cookie parsing for the Better Auth session cookie (read by SessionGuard).
   // The cookie itself is set by Next.js on signin; we only need to read it.
   app.use(cookieParser());

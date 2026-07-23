@@ -481,13 +481,13 @@ export async function lookupContacts(ids: string[]): Promise<Contact[]> {
 // ---------------------------------------------------------------------------
 
 export async function listChannelsForUser(): Promise<TeamChannelListItemDto[]> {
-  const { items } = await api<{ items: TeamChannelListItemDto[] }>("/api/workspace/channels");
+  const { items } = await api<{ items: TeamChannelListItemDto[] }>("/api/team-chat/channels");
   return items;
 }
 
 /** The viewer's 1:1 DMs, most-recently-active first. */
 export async function listDirectMessagesForUser(): Promise<TeamDmListItemDto[]> {
-  const { items } = await api<{ items: TeamDmListItemDto[] }>("/api/workspace/channels/dms");
+  const { items } = await api<{ items: TeamDmListItemDto[] }>("/api/team-chat/channels/dms");
   return items;
 }
 
@@ -500,21 +500,21 @@ export async function getPublicChannelPreview(
   channelId: string,
 ): Promise<TeamChannelBrowseItemDto | null> {
   const { channel } = await api<{ channel: TeamChannelBrowseItemDto | null }>(
-    `/api/workspace/channels/${channelId}/preview`,
+    `/api/team-chat/channels/${channelId}/preview`,
   );
   return channel;
 }
 
 export async function getDefaultChannel(): Promise<TeamChannelDto | null> {
   const { channel } = await api<{ channel: TeamChannelDto | null }>(
-    "/api/workspace/channels/default",
+    "/api/team-chat/channels/default",
   );
   return channel;
 }
 
 export async function getChannelById(channelId: string): Promise<TeamChannelDto | null> {
   const { channel } = await api<{ channel: TeamChannelDto | null }>(
-    `/api/workspace/channels/${channelId}`,
+    `/api/team-chat/channels/${channelId}`,
   );
   return channel;
 }
@@ -523,14 +523,14 @@ export async function listChannelMessages(
   channelId: string,
   opts: { take?: number; before?: string } = {},
 ): Promise<ChannelMessagesPage> {
-  return api<ChannelMessagesPage>(`/api/workspace/channels/${channelId}/messages`, {
+  return api<ChannelMessagesPage>(`/api/team-chat/channels/${channelId}/messages`, {
     query: { take: opts.take, before: opts.before },
   });
 }
 
 export async function listChannelPins(channelId: string): Promise<ChannelPinDto[]> {
   const { pins } = await api<{ pins: ChannelPinDto[] }>(
-    `/api/workspace/channels/${channelId}/pins`,
+    `/api/team-chat/channels/${channelId}/pins`,
   );
   return pins;
 }
