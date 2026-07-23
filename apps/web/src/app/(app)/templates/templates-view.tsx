@@ -36,7 +36,7 @@ import { cn } from "@ccp/shared/utils";
  *   3. Slide-in detail drawer with the rendered WhatsApp bubble, raw
  *      components, and the variable-bindings editor.
  *
- * Most operations stay client-side and post to /api/team/whatsapp/templates*.
+ * Most operations stay client-side and post to /api/workspace/whatsapp/templates*.
  * After mutations we refetch the GET list so server-rendered state matches.
  */
 
@@ -138,7 +138,7 @@ export function TemplatesView({
     setReloadError(null);
     setReloading(true);
     try {
-      const res = await apiFetch("/api/team/whatsapp/templates");
+      const res = await apiFetch("/api/workspace/whatsapp/templates");
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as
           | { error?: string; detail?: string }
@@ -161,7 +161,7 @@ export function TemplatesView({
     setSyncError(null);
     setSyncing(true);
     try {
-      const res = await apiFetch("/api/team/whatsapp/templates", { method: "POST" });
+      const res = await apiFetch("/api/workspace/whatsapp/templates", { method: "POST" });
       const data = (await res.json()) as {
         templates?: TemplateDto[];
         error?: string;
@@ -190,7 +190,7 @@ export function TemplatesView({
       setDeleteError(null);
       setDeleting(true);
       try {
-        const res = await apiFetch(`/api/team/whatsapp/templates/${target.id}`, {
+        const res = await apiFetch(`/api/workspace/whatsapp/templates/${target.id}`, {
           method: "DELETE",
         });
         if (!res.ok) {

@@ -20,7 +20,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { NotFoundException } from "@nestjs/common";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { ChannelAccountsService } from "@/team/channel-accounts/channel-accounts.service";
+import { ChannelAccountsService } from "@/workspace-settings/channel-accounts/channel-accounts.service";
 import type { DbService } from "@/db/db.service";
 
 if (existsSync(".env")) process.loadEnvFile(".env");

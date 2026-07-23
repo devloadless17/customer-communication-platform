@@ -6,7 +6,7 @@ import { TicketSettingsClient } from "./ticket-settings-client";
  * Ticketing configuration: when tickets open by themselves, how long a solved
  * one stays reopenable, and what each priority promises.
  *
- * Admin-gated at the API (`/api/team/tickets/*` is `@RequireRole("admin")`), so
+ * Admin-gated at the API (`/api/workspace/tickets/*` is `@RequireRole("admin")`), so
  * a non-admin who reaches this URL gets the error boundary rather than a
  * half-rendered form — the same posture as the other admin settings pages.
  */

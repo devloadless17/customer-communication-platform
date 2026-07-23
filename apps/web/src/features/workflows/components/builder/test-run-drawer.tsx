@@ -20,7 +20,7 @@ import { type WorkflowGraph, STEP_OPTIONS } from "./types";
 
 /**
  * Test-run result drawer. Opens after "Test" enqueues a run; polls
- * `GET /api/team/workflows/:id/runs/:runId` until the run reaches a terminal
+ * `GET /api/workspace/workflows/:id/runs/:runId` until the run reaches a terminal
  * state, then shows the overall outcome + a per-step PASS/FAIL log with each
  * step's output (responseStatus/body) or error inline.
  *
@@ -87,7 +87,7 @@ export function TestRunDrawer({ workflowId, runId, graph, onClose }: Props) {
       if (cancelledRef.current) return;
       try {
         const res = await apiFetch(
-          `/api/team/workflows/${workflowId}/runs/${runId}`,
+          `/api/workspace/workflows/${workflowId}/runs/${runId}`,
         );
         if (cancelledRef.current) return;
         if (!res.ok) {

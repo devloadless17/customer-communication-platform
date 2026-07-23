@@ -53,33 +53,33 @@ import {
 /**
  * Team-chat channels: channels CRUD + messages CRUD + pins + reactions.
  *
- *   GET    /api/team/channels                              — list
- *   POST   /api/team/channels                              — create (admin/manager)
- *   PATCH  /api/team/channels/:id                          — rename / edit
- *   DELETE /api/team/channels/:id                          — admin only
- *   GET    /api/team/channels/:id/messages                 — list (?before / ?after / ?take)
- *   POST   /api/team/channels/:id/messages                 — post top-level
- *   PATCH  /api/team/channels/:id/messages/:mid            — edit (author-only, time-limited)
- *   DELETE /api/team/channels/:id/messages/:mid            — author or admin
- *   POST   /api/team/channels/:id/messages/:mid/pin        — pin (admin/manager)
- *   DELETE /api/team/channels/:id/messages/:mid/pin        — unpin
- *   POST   /api/team/channels/:id/messages/:mid/reactions  — toggle reaction
- *   POST   /api/team/channels/:id/read                     — stamp read receipt
- *   GET    /api/team/channels/:id/messages/:mid/thread     — list thread replies (keyset asc, ?after / ?take)
- *   POST   /api/team/channels/:id/messages/:mid/thread     — post a thread reply
- *   GET    /api/team/channels/:id/messages/search          — ?q substring search (keyset desc, ?before / ?take)
- *   GET    /api/team/channels/:id/messages/around          — ?messageId context window (jump-to-message)
- *   GET    /api/team/channels/:id/messages/:mid/media      — auth-gated redirect to attachment CDN URL
- *   GET    /api/team/channels/search                       — ?q workspace-wide substring search
- *   POST   /api/team/channels/:id/media                    — upload file (multipart)
- *   GET    /api/team/channels/dms                          — the viewer's 1:1 DMs
- *   POST   /api/team/channels/dm                           — open/create a 1:1 DM
- *   GET    /api/team/channels/browse                       — ?q public channels (metadata only)
- *   POST   /api/team/channels/:id/join                     — self-serve join a public channel
- *   GET    /api/team/channels/:id/preview                  — public channel metadata (non-members)
- *   GET    /api/team/channels/unread-count                 — unread @mention count (rail badge)
+ *   GET    /api/workspace/channels                              — list
+ *   POST   /api/workspace/channels                              — create (admin/manager)
+ *   PATCH  /api/workspace/channels/:id                          — rename / edit
+ *   DELETE /api/workspace/channels/:id                          — admin only
+ *   GET    /api/workspace/channels/:id/messages                 — list (?before / ?after / ?take)
+ *   POST   /api/workspace/channels/:id/messages                 — post top-level
+ *   PATCH  /api/workspace/channels/:id/messages/:mid            — edit (author-only, time-limited)
+ *   DELETE /api/workspace/channels/:id/messages/:mid            — author or admin
+ *   POST   /api/workspace/channels/:id/messages/:mid/pin        — pin (admin/manager)
+ *   DELETE /api/workspace/channels/:id/messages/:mid/pin        — unpin
+ *   POST   /api/workspace/channels/:id/messages/:mid/reactions  — toggle reaction
+ *   POST   /api/workspace/channels/:id/read                     — stamp read receipt
+ *   GET    /api/workspace/channels/:id/messages/:mid/thread     — list thread replies (keyset asc, ?after / ?take)
+ *   POST   /api/workspace/channels/:id/messages/:mid/thread     — post a thread reply
+ *   GET    /api/workspace/channels/:id/messages/search          — ?q substring search (keyset desc, ?before / ?take)
+ *   GET    /api/workspace/channels/:id/messages/around          — ?messageId context window (jump-to-message)
+ *   GET    /api/workspace/channels/:id/messages/:mid/media      — auth-gated redirect to attachment CDN URL
+ *   GET    /api/workspace/channels/search                       — ?q workspace-wide substring search
+ *   POST   /api/workspace/channels/:id/media                    — upload file (multipart)
+ *   GET    /api/workspace/channels/dms                          — the viewer's 1:1 DMs
+ *   POST   /api/workspace/channels/dm                           — open/create a 1:1 DM
+ *   GET    /api/workspace/channels/browse                       — ?q public channels (metadata only)
+ *   POST   /api/workspace/channels/:id/join                     — self-serve join a public channel
+ *   GET    /api/workspace/channels/:id/preview                  — public channel metadata (non-members)
+ *   GET    /api/workspace/channels/unread-count                 — unread @mention count (rail badge)
  */
-@Controller("api/team/channels")
+@Controller("api/workspace/channels")
 @UseGuards(SessionGuard)
 export class ChannelsController {
   constructor(private readonly channels: ChannelsService) {}

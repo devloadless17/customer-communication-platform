@@ -84,7 +84,7 @@ export function WhatsappSettings({
       // Pass through wabaId even when empty so the server can clear a stale id.
       wabaId: form.get("wabaId") ?? "",
     };
-    const res = await apiFetch("/api/team/whatsapp", {
+    const res = await apiFetch("/api/workspace/whatsapp", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -113,7 +113,7 @@ export function WhatsappSettings({
       destructive: true,
     });
     if (!ok) return;
-    const res = await apiFetch("/api/team/whatsapp", { method: "DELETE" });
+    const res = await apiFetch("/api/workspace/whatsapp", { method: "DELETE" });
     if (!res.ok) {
       setError("Failed to disconnect");
       return;

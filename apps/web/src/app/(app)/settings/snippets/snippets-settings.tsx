@@ -108,7 +108,7 @@ export function SnippetsSettings({
   const editorSnippet = editing ?? lastEditingRef.current;
 
   const reload = useCallback(async () => {
-    const res = await apiFetch("/api/team/snippets");
+    const res = await apiFetch("/api/workspace/snippets");
     if (!res.ok) return;
     const data = (await res.json()) as { snippets?: SnippetDto[] };
     if (data.snippets) setSnippets(data.snippets);
@@ -149,7 +149,7 @@ export function SnippetsSettings({
         destructive: true,
       });
       if (!ok) return;
-      const res = await apiFetch(`/api/team/snippets/${target.id}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/workspace/snippets/${target.id}`, { method: "DELETE" });
       if (!res.ok) {
         setError(`Delete failed (HTTP ${res.status})`);
         return;
@@ -399,7 +399,7 @@ function SnippetEditor({
     setErr(null);
     setSaving(true);
     try {
-      const path = isNew ? "/api/team/snippets" : `/api/team/snippets/${snippet.id}`;
+      const path = isNew ? "/api/workspace/snippets" : `/api/workspace/snippets/${snippet.id}`;
       const method = isNew ? "POST" : "PATCH";
       const res = await apiFetch(path, {
         method,

@@ -214,8 +214,8 @@ test("channel rows and DM rows share the same inset — the active row never tou
   page,
   request,
 }) => {
-  await request.post("/api/team/channels/dm", { data: { userId: peerUserId } });
-  await request.post("/api/team/channels", {
+  await request.post("/api/workspace/channels/dm", { data: { userId: peerUserId } });
+  await request.post("/api/workspace/channels", {
     data: { name: `${CHAN_PREFIX}inset`, visibility: "public" },
   });
 
@@ -242,12 +242,12 @@ test("a search-result highlight is dismissible and does not survive a reload", a
   await send(page, `${tag} in a haystack`);
 
   const list = await (
-    await request.get("/api/team/channels?take=50")
+    await request.get("/api/workspace/channels?take=50")
   ).json();
   const channelId: string = (list.items ?? list.channels ?? list)[0].id;
 
   const msgs = await (
-    await request.get(`/api/team/channels/${channelId}/messages?take=50`)
+    await request.get(`/api/workspace/channels/${channelId}/messages?take=50`)
   ).json();
   const hit = (msgs.items ?? []).find((m: { body: string }) => m.body?.includes(tag));
   expect(hit, "seeded message should be findable").toBeTruthy();
@@ -272,7 +272,7 @@ test("a staged attachment does not follow you into another channel", async ({
   request,
 }) => {
   const other = await (
-    await request.post("/api/team/channels", {
+    await request.post("/api/workspace/channels", {
       data: { name: `${CHAN_PREFIX}staged`, visibility: "public" },
     })
   ).json();
@@ -297,7 +297,7 @@ test("a staged attachment does not follow you into another channel", async ({
 
 test("per-channel chrome resets on a channel switch", async ({ page, request }) => {
   const other = await (
-    await request.post("/api/team/channels", {
+    await request.post("/api/workspace/channels", {
       data: { name: `${CHAN_PREFIX}reset`, visibility: "public" },
     })
   ).json();
@@ -326,20 +326,20 @@ test("the reaction endpoint refuses a non-emoji", async ({ page, request }) => {
 
   const channelId = new URL(page.url()).pathname.split("/").pop()!;
   const msgs = await (
-    await request.get(`/api/team/channels/${channelId}/messages?take=50`)
+    await request.get(`/api/workspace/channels/${channelId}/messages?take=50`)
   ).json();
   const hit = (msgs.items ?? []).find((m: { body: string }) => m.body === tag);
   expect(hit).toBeTruthy();
 
   // A byte cap alone let arbitrary text become a permanent reaction chip.
   const bad = await request.post(
-    `/api/team/channels/${channelId}/messages/${hit.id}/reactions`,
+    `/api/workspace/channels/${channelId}/messages/${hit.id}/reactions`,
     { data: { emoji: "PAY ME BITCOIN" } },
   );
   expect(bad.status()).toBe(400);
 
   const good = await request.post(
-    `/api/team/channels/${channelId}/messages/${hit.id}/reactions`,
+    `/api/workspace/channels/${channelId}/messages/${hit.id}/reactions`,
     { data: { emoji: "👍" } },
   );
   expect(good.ok()).toBeTruthy();
@@ -352,9 +352,9 @@ test("a garbage ?take returns a 400, not a 500", async ({ page, request }) => {
   // `take ? parseInt(take) : undefined` produced NaN → Prisma `take: NaN` →
   // PrismaClientValidationError, which the exception filter does not map.
   for (const path of [
-    `/api/team/channels/${channelId}/messages?take=abc`,
-    `/api/team/channels/${channelId}/messages/search?q=hello&take=abc`,
-    `/api/team/channels/search?q=hello&take=abc`,
+    `/api/workspace/channels/${channelId}/messages?take=abc`,
+    `/api/workspace/channels/${channelId}/messages/search?q=hello&take=abc`,
+    `/api/workspace/channels/search?q=hello&take=abc`,
   ]) {
     const res = await request.get(path);
     expect(res.status(), path).toBe(400);
@@ -362,7 +362,7 @@ test("a garbage ?take returns a 400, not a 500", async ({ page, request }) => {
 
   // And a negative take can't silently truncate the page to zero rows.
   const neg = await request.get(
-    `/api/team/channels/${channelId}/messages?take=-1`,
+    `/api/workspace/channels/${channelId}/messages?take=-1`,
   );
   expect(neg.status()).toBe(400);
 });
@@ -372,7 +372,7 @@ test("a DM with a departed teammate is read-only, in the UI AND on the server", 
   request,
 }) => {
   const dm = (
-    await (await request.post("/api/team/channels/dm", { data: { userId: peerUserId } })).json()
+    await (await request.post("/api/workspace/channels/dm", { data: { userId: peerUserId } })).json()
   ).channel;
 
   // The peer leaves the team.
@@ -392,7 +392,7 @@ test("a DM with a departed teammate is read-only, in the UI AND on the server", 
 
     // And the rule is the server's, not just an affordance a direct POST
     // could walk around.
-    const res = await request.post(`/api/team/channels/${dm.id}/messages`, {
+    const res = await request.post(`/api/workspace/channels/${dm.id}/messages`, {
       data: { body: "handover note nobody will read" },
     });
     expect(res.status()).toBe(422);
@@ -408,10 +408,10 @@ test("a DM with a departed teammate is read-only, in the UI AND on the server", 
 test("a self-DM stays writable — it has no peer to deactivate", async ({ request }) => {
   const dm = (
     await (
-      await request.post("/api/team/channels/dm", { data: { userId: adminUserId } })
+      await request.post("/api/workspace/channels/dm", { data: { userId: adminUserId } })
     ).json()
   ).channel;
-  const res = await request.post(`/api/team/channels/${dm.id}/messages`, {
+  const res = await request.post(`/api/workspace/channels/${dm.id}/messages`, {
     data: { body: `note-to-self-${Date.now()}` },
   });
   expect(res.ok()).toBeTruthy();
@@ -422,7 +422,7 @@ test("a brand-new DM renders the peer on first paint, before the layout refetche
   request,
 }) => {
   const dm = (
-    await (await request.post("/api/team/channels/dm", { data: { userId: peerUserId } })).json()
+    await (await request.post("/api/workspace/channels/dm", { data: { userId: peerUserId } })).json()
   ).channel;
 
   // Land directly on the DM with a COLD client: the layout's DM list is the

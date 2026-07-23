@@ -88,7 +88,7 @@ export function StagesSettings({
     setBusyId("__new__");
     setError(null);
     try {
-      const res = await apiFetch("/api/team/stages", {
+      const res = await apiFetch("/api/workspace/stages", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name, color: newColor }),
@@ -126,7 +126,7 @@ export function StagesSettings({
         }),
       );
       try {
-        const res = await apiFetch(`/api/team/stages/${id}`, {
+        const res = await apiFetch(`/api/workspace/stages/${id}`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(patch),
@@ -164,7 +164,7 @@ export function StagesSettings({
       setStages(renumbered);
       setBusyId(id);
       try {
-        const res = await apiFetch("/api/team/stages/reorder", {
+        const res = await apiFetch("/api/workspace/stages/reorder", {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ orderedIds: renumbered.map((s) => s.id) }),
@@ -214,7 +214,7 @@ export function StagesSettings({
       setBusyId(stage.id);
       setError(null);
       try {
-        const res = await apiFetch(`/api/team/stages/${stage.id}`, { method: "DELETE" });
+        const res = await apiFetch(`/api/workspace/stages/${stage.id}`, { method: "DELETE" });
         if (!res.ok) {
           const body = (await res.json().catch(() => ({}))) as {
             error?: string;

@@ -74,7 +74,7 @@ export function ChannelMembersDialog({
     let cancelled = false;
     void (async () => {
       const res = await fetchWithSessionGuard(
-        `/api/team/channels/${channel.id}/members`,
+        `/api/workspace/channels/${channel.id}/members`,
       );
       if (cancelled) return;
       const json = (await res.json().catch(() => ({}))) as {
@@ -119,7 +119,7 @@ export function ChannelMembersDialog({
     setError(null);
     try {
       const res = await fetchWithSessionGuard(
-        `/api/team/channels/${channel.id}/members/${userId}`,
+        `/api/workspace/channels/${channel.id}/members/${userId}`,
         { method: "DELETE" },
       );
       if (!res.ok) {
@@ -152,7 +152,7 @@ export function ChannelMembersDialog({
     setError(null);
     try {
       const res = await fetchWithSessionGuard(
-        `/api/team/channels/${channel.id}/members`,
+        `/api/workspace/channels/${channel.id}/members`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },

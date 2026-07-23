@@ -19,7 +19,7 @@ import {
   type FlagMutationOutcome,
 } from "@/lib/message-flags/mutations";
 import { flagCounts, listFlagDefinitions, listFlags } from "@/lib/message-flags/queries";
-import { MessageFlagsCatalogService } from "@/team/message-flags/message-flags-catalog.service";
+import { MessageFlagsCatalogService } from "@/workspace-settings/message-flags/message-flags-catalog.service";
 import type {
   ExternalCreateFlagDefinitionInput,
   ExternalListFlagsQueryInput,

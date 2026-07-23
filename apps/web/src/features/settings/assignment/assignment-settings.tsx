@@ -46,7 +46,7 @@ export function AssignmentSettings() {
 
   const load = useCallback(async () => {
     try {
-      const res = await apiFetch("/api/team/assignment");
+      const res = await apiFetch("/api/workspace/assignment");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setData((await res.json()) as AssignmentOverview);
       setLoadError(null);
@@ -62,7 +62,7 @@ export function AssignmentSettings() {
   const createPolicy = useCallback(async () => {
     setCreating(true);
     try {
-      const res = await apiFetch("/api/team/assignment/policies", {
+      const res = await apiFetch("/api/workspace/assignment/policies", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: "New policy" }),

@@ -88,7 +88,7 @@ export interface SnippetDto {
 /**
  * Wrapped in `React.cache` so the (app) route-group layout and each
  * section's SectionShell share one HTTP round-trip per render. Without
- * this, every authenticated page paid 2x the /api/team latency on every
+ * this, every authenticated page paid 2x the /api/workspace latency on every
  * nav (parent layout + SectionShell each calling independently).
  */
 export interface CurrentTeam {
@@ -103,7 +103,7 @@ export interface CurrentTeam {
 }
 
 export const getCurrentTeam = cache(async (): Promise<CurrentTeam> => {
-  const { team } = await api<{ team: CurrentTeam }>("/api/team");
+  const { team } = await api<{ team: CurrentTeam }>("/api/workspace");
   return team;
 });
 
@@ -119,11 +119,11 @@ export const listTeamMembers = cache(async (): Promise<User[]> => {
 /**
  * The org's default working-hours schedule (null = none configured, which is
  * the default and keeps availability purely manual). Read on its own rather
- * than folded into `/api/team` because only the Team settings page needs the
+ * than folded into `/api/workspace` because only the Team settings page needs the
  * JSON grid.
  */
 export const getTeamWorkHours = cache(async (): Promise<unknown> => {
-  const { workHours } = await api<{ workHours: unknown }>("/api/team/work-hours");
+  const { workHours } = await api<{ workHours: unknown }>("/api/workspace/work-hours");
   return workHours ?? null;
 });
 
@@ -243,9 +243,9 @@ export async function getTicketSettings(): Promise<{
   fields: TicketFieldDefinition[];
 }> {
   const [settings, sla, fieldsRes] = await Promise.all([
-    api<TicketSettingsView>("/api/team/tickets/settings"),
-    api<{ policies: TicketSlaPolicy[] }>("/api/team/tickets/sla"),
-    api<{ fields: TicketFieldDefinition[] }>("/api/team/tickets/fields"),
+    api<TicketSettingsView>("/api/workspace/tickets/settings"),
+    api<{ policies: TicketSlaPolicy[] }>("/api/workspace/tickets/sla"),
+    api<{ fields: TicketFieldDefinition[] }>("/api/workspace/tickets/fields"),
   ]);
   return { settings, policies: sla.policies, fields: fieldsRes.fields };
 }
@@ -257,7 +257,7 @@ export interface TicketSettingsView {
 }
 
 export async function listTags(): Promise<Tag[]> {
-  const { tags } = await api<{ tags: Tag[] }>("/api/team/tags");
+  const { tags } = await api<{ tags: Tag[] }>("/api/workspace/tags");
   return tags;
 }
 
@@ -269,7 +269,7 @@ export async function listAssignmentPolicies(): Promise<
 > {
   const { policies } = await api<{
     policies: Array<{ id: string; name: string; isDefault: boolean }>;
-  }>("/api/team/assignment-policies");
+  }>("/api/workspace/assignment-policies");
   return policies;
 }
 
@@ -279,7 +279,7 @@ export async function listAssignmentPolicies(): Promise<
  */
 export async function listMessageFlagDefinitions(): Promise<MessageFlagDefinition[]> {
   const { definitions } = await api<{ definitions: MessageFlagDefinition[] }>(
-    "/api/team/message-flags",
+    "/api/workspace/message-flags",
   );
   return definitions;
 }
@@ -289,29 +289,29 @@ export async function listMessageFlagDefinitionsWithUsage(): Promise<
   MessageFlagDefinitionWithUsage[]
 > {
   const { definitions } = await api<{ definitions: MessageFlagDefinitionWithUsage[] }>(
-    "/api/team/message-flags/usage",
+    "/api/workspace/message-flags/usage",
   );
   return definitions;
 }
 
 export async function getTagUsage(): Promise<Record<string, number>> {
-  const { usage } = await api<{ usage: Record<string, number> }>("/api/team/tags/usage");
+  const { usage } = await api<{ usage: Record<string, number> }>("/api/workspace/tags/usage");
   return usage;
 }
 
 export async function listSnippets(): Promise<SnippetDto[]> {
-  const { snippets } = await api<{ snippets: SnippetDto[] }>("/api/team/snippets");
+  const { snippets } = await api<{ snippets: SnippetDto[] }>("/api/workspace/snippets");
   return snippets;
 }
 
 // Wrapped in `React.cache` so the contacts layout (for the sub-sidebar's
 // stage chips) and the contacts page (for the table's stage column) share
 // one fetch per render — without this, navigating into /contacts paid 2x
-// the `/api/team/stages` RTT every click. Per-render dedupe only; fresh
+// the `/api/workspace/stages` RTT every click. Per-render dedupe only; fresh
 // fetch on each new navigation, which preserves the "always-fresh catalog"
 // behaviour the rest of this file aims for.
 export const listContactStages = cache(async (): Promise<ContactStage[]> => {
-  const { stages } = await api<{ stages: ContactStage[] }>("/api/team/stages");
+  const { stages } = await api<{ stages: ContactStage[] }>("/api/workspace/stages");
   return stages;
 });
 
@@ -334,12 +334,12 @@ export async function getStageContactCounts(): Promise<{
   return api<{
     countsByStageId: Record<string, number>;
     unassignedCount: number;
-  }>("/api/team/stages/counts");
+  }>("/api/workspace/stages/counts");
 }
 
 export async function listContactFieldDefinitions(): Promise<ContactFieldDefinition[]> {
   const { definitions } = await api<{ definitions: ContactFieldDefinition[] }>(
-    "/api/team/contact-fields",
+    "/api/workspace/contact-fields",
   );
   return definitions;
 }
@@ -349,18 +349,18 @@ export async function listContactFieldsWithBuiltins(): Promise<{
   builtins: ContactPanelBuiltins;
 }> {
   return api<{ definitions: ContactFieldDefinition[]; builtins: ContactPanelBuiltins }>(
-    "/api/team/contact-fields",
+    "/api/workspace/contact-fields",
   );
 }
 
 export async function listAudienceGroups(): Promise<AudienceGroupDto[]> {
-  const { groups } = await api<{ groups: AudienceGroupDto[] }>("/api/team/audience-groups");
+  const { groups } = await api<{ groups: AudienceGroupDto[] }>("/api/workspace/audience-groups");
   return groups;
 }
 
 export async function getAudienceGroup(id: string): Promise<AudienceGroupDto | null> {
   try {
-    const { group } = await api<{ group: AudienceGroupDto }>(`/api/team/audience-groups/${id}`);
+    const { group } = await api<{ group: AudienceGroupDto }>(`/api/workspace/audience-groups/${id}`);
     return group;
   } catch (err) {
     if (isApiNotFound(err)) return null;
@@ -481,13 +481,13 @@ export async function lookupContacts(ids: string[]): Promise<Contact[]> {
 // ---------------------------------------------------------------------------
 
 export async function listChannelsForUser(): Promise<TeamChannelListItemDto[]> {
-  const { items } = await api<{ items: TeamChannelListItemDto[] }>("/api/team/channels");
+  const { items } = await api<{ items: TeamChannelListItemDto[] }>("/api/workspace/channels");
   return items;
 }
 
 /** The viewer's 1:1 DMs, most-recently-active first. */
 export async function listDirectMessagesForUser(): Promise<TeamDmListItemDto[]> {
-  const { items } = await api<{ items: TeamDmListItemDto[] }>("/api/team/channels/dms");
+  const { items } = await api<{ items: TeamDmListItemDto[] }>("/api/workspace/channels/dms");
   return items;
 }
 
@@ -500,21 +500,21 @@ export async function getPublicChannelPreview(
   channelId: string,
 ): Promise<TeamChannelBrowseItemDto | null> {
   const { channel } = await api<{ channel: TeamChannelBrowseItemDto | null }>(
-    `/api/team/channels/${channelId}/preview`,
+    `/api/workspace/channels/${channelId}/preview`,
   );
   return channel;
 }
 
 export async function getDefaultChannel(): Promise<TeamChannelDto | null> {
   const { channel } = await api<{ channel: TeamChannelDto | null }>(
-    "/api/team/channels/default",
+    "/api/workspace/channels/default",
   );
   return channel;
 }
 
 export async function getChannelById(channelId: string): Promise<TeamChannelDto | null> {
   const { channel } = await api<{ channel: TeamChannelDto | null }>(
-    `/api/team/channels/${channelId}`,
+    `/api/workspace/channels/${channelId}`,
   );
   return channel;
 }
@@ -523,14 +523,14 @@ export async function listChannelMessages(
   channelId: string,
   opts: { take?: number; before?: string } = {},
 ): Promise<ChannelMessagesPage> {
-  return api<ChannelMessagesPage>(`/api/team/channels/${channelId}/messages`, {
+  return api<ChannelMessagesPage>(`/api/workspace/channels/${channelId}/messages`, {
     query: { take: opts.take, before: opts.before },
   });
 }
 
 export async function listChannelPins(channelId: string): Promise<ChannelPinDto[]> {
   const { pins } = await api<{ pins: ChannelPinDto[] }>(
-    `/api/team/channels/${channelId}/pins`,
+    `/api/workspace/channels/${channelId}/pins`,
   );
   return pins;
 }
@@ -540,7 +540,7 @@ export async function listChannelPins(channelId: string): Promise<ChannelPinDto[
 // ---------------------------------------------------------------------------
 
 export async function getTeamWhatsappConfig(): Promise<WhatsappConfigView> {
-  const { config } = await api<{ config: WhatsappConfigView }>("/api/team/whatsapp");
+  const { config } = await api<{ config: WhatsappConfigView }>("/api/workspace/whatsapp");
   return config;
 }
 
@@ -562,7 +562,7 @@ export async function listChannelAccounts(
   channel: "whatsapp" | "messenger" | "instagram",
 ): Promise<ChannelAccountView[]> {
   const { accounts } = await api<{ accounts: ChannelAccountView[] }>(
-    `/api/team/channels/${channel}/accounts`,
+    `/api/workspace/channels/${channel}/accounts`,
   );
   return accounts;
 }
@@ -586,7 +586,7 @@ export interface MessengerConfigView {
 }
 
 export async function getTeamMessengerConfig(): Promise<MessengerConfigView> {
-  const { config } = await api<{ config: MessengerConfigView }>("/api/team/messenger");
+  const { config } = await api<{ config: MessengerConfigView }>("/api/workspace/messenger");
   return config;
 }
 
@@ -611,7 +611,7 @@ export interface InstagramConfigView {
 }
 
 export async function getTeamInstagramConfig(): Promise<InstagramConfigView> {
-  const { config } = await api<{ config: InstagramConfigView }>("/api/team/instagram");
+  const { config } = await api<{ config: InstagramConfigView }>("/api/workspace/instagram");
   return config;
 }
 
@@ -624,7 +624,7 @@ export interface MetaConfigView {
   credentialsUndecryptable: boolean;
 }
 export async function getTeamMetaConfig(): Promise<MetaConfigView> {
-  const { config } = await api<{ config: MetaConfigView }>("/api/team/meta");
+  const { config } = await api<{ config: MetaConfigView }>("/api/workspace/meta");
   return config;
 }
 
@@ -663,7 +663,7 @@ export interface WebchatWidgetView {
 }
 
 export async function getTeamWebchatWidgets(): Promise<WebchatWidgetView[]> {
-  const { widgets } = await api<{ widgets: WebchatWidgetView[] }>("/api/team/webchatwidget");
+  const { widgets } = await api<{ widgets: WebchatWidgetView[] }>("/api/workspace/webchatwidget");
   return widgets;
 }
 
@@ -673,7 +673,7 @@ export async function listWhatsappTemplates(): Promise<{
   hasAppId: boolean;
   connected: boolean;
 }> {
-  return api("/api/team/whatsapp/templates");
+  return api("/api/workspace/whatsapp/templates");
 }
 
 // ---------------------------------------------------------------------------
@@ -784,7 +784,7 @@ export interface ApiKeyListItem {
 }
 
 export async function listApiKeys(): Promise<ApiKeyListItem[]> {
-  const { keys } = await api<{ keys: ApiKeyListItem[] }>("/api/team/api-keys");
+  const { keys } = await api<{ keys: ApiKeyListItem[] }>("/api/workspace/api-keys");
   return keys;
 }
 
@@ -810,7 +810,7 @@ export interface OutboundWebhookListItem {
 
 export async function listOutboundWebhooks(): Promise<OutboundWebhookListItem[]> {
   const { webhooks } = await api<{ webhooks: OutboundWebhookListItem[] }>(
-    "/api/team/outbound-webhooks",
+    "/api/workspace/outbound-webhooks",
   );
   return webhooks;
 }
@@ -832,7 +832,7 @@ export interface WorkflowListItem {
 }
 
 export async function listWorkflows(): Promise<WorkflowListItem[]> {
-  const { workflows } = await api<{ workflows: WorkflowListItem[] }>("/api/team/workflows");
+  const { workflows } = await api<{ workflows: WorkflowListItem[] }>("/api/workspace/workflows");
   return workflows;
 }
 
@@ -894,7 +894,7 @@ export async function loadWorkflowCatalogs(): Promise<{
 
 export async function getWorkflow(id: string): Promise<Record<string, unknown> | null> {
   try {
-    return await api<Record<string, unknown>>(`/api/team/workflows/${id}`);
+    return await api<Record<string, unknown>>(`/api/workspace/workflows/${id}`);
   } catch (err) {
     if (isApiNotFound(err)) return null;
     throw err;

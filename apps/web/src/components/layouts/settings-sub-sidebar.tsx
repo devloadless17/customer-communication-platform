@@ -172,7 +172,7 @@ export function SettingsSubSidebar({
       {/* Tickets are their own domain, not "conversation config": a ticket is
           the unit of WORK on a conversation, with its own lifecycle, SLA and
           board. Burying its settings under Inbox implied it was a per-message
-          setting like tags. Admin-gated on the ROLE — every /api/team/tickets
+          setting like tags. Admin-gated on the ROLE — every /api/workspace/tickets
           route is @RequireRole("admin"), so a capability gate would send a
           manager to the error boundary. */}
       {isAdmin && (

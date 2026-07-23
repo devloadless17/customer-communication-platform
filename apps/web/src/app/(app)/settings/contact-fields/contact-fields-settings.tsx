@@ -78,7 +78,7 @@ export function ContactFieldsSettings({
     setBusyId("__new__");
     setError(null);
     try {
-      const res = await apiFetch("/api/team/contact-fields", {
+      const res = await apiFetch("/api/workspace/contact-fields", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ label }),
@@ -107,7 +107,7 @@ export function ContactFieldsSettings({
       setBuiltins(next);
       setError(null);
       try {
-        const res = await apiFetch("/api/team/contact-fields/builtins", {
+        const res = await apiFetch("/api/workspace/contact-fields/builtins", {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ [key]: next[key] }),
@@ -143,7 +143,7 @@ export function ContactFieldsSettings({
         cur.map((f) => (f.id === field.id ? { ...f, isVisible: next } : f)),
       );
       try {
-        const res = await apiFetch(`/api/team/contact-fields/${field.id}`, {
+        const res = await apiFetch(`/api/workspace/contact-fields/${field.id}`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ isVisible: next }),
@@ -174,7 +174,7 @@ export function ContactFieldsSettings({
       const prev = defs;
       setDefs((cur) => cur.map((f) => (f.id === id ? { ...f, ...patch } : f)));
       try {
-        const res = await apiFetch(`/api/team/contact-fields/${id}`, {
+        const res = await apiFetch(`/api/workspace/contact-fields/${id}`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(patch),
@@ -215,7 +215,7 @@ export function ContactFieldsSettings({
       setDefs(renumbered);
       setBusyId(id);
       try {
-        const res = await apiFetch("/api/team/contact-fields/reorder", {
+        const res = await apiFetch("/api/workspace/contact-fields/reorder", {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ orderedIds: renumbered.map((f) => f.id) }),
@@ -247,7 +247,7 @@ export function ContactFieldsSettings({
       setBusyId(field.id);
       setError(null);
       try {
-        const res = await apiFetch(`/api/team/contact-fields/${field.id}`, {
+        const res = await apiFetch(`/api/workspace/contact-fields/${field.id}`, {
           method: "DELETE",
         });
         if (!res.ok) {

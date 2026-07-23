@@ -17,7 +17,7 @@ import { ExternalV1Module } from "./external/v1/external-v1.module";
 import { HealthModule } from "./health/health.module";
 import { InvitesModule } from "./invites/invites.module";
 import { WorkspacesModule } from "./workspaces/workspaces.module";
-import { ChannelAccountsModule } from "./team/channel-accounts/channel-accounts.module";
+import { ChannelAccountsModule } from "./workspace-settings/channel-accounts/channel-accounts.module";
 import { MediaModule } from "./media/media.module";
 import { MessagesModule } from "./messages/messages.module";
 import { MessageFlagsModule } from "./message-flags/message-flags.module";
@@ -26,7 +26,7 @@ import { NotesModule } from "./notes/notes.module";
 import { OutboundWebhooksModule } from "./outbound-webhooks/outbound-webhooks.module";
 import { DbModule } from "./db/db.module";
 import { RealtimeModule } from "./realtime/realtime.module";
-import { TeamModule } from "./team/team.module";
+import { WorkspaceSettingsModule } from "./workspace-settings/workspace-settings.module";
 import { TeamChatModule } from "./team-chat/team-chat.module";
 import { TeamsModule } from "./registration/teams.module";
 import { UsersModule } from "./users/users.module";
@@ -39,7 +39,7 @@ import { WorkflowsModule } from "./workflows/workflows.module";
  * cosmetic; Nest resolves dependencies via the graph, not source order.
  *
  * Each domain ships as its own module under `./<domain>/`. The catalog
- * modules (tags, snippets, stages, etc.) are nested under TeamModule.
+ * modules (tags, snippets, stages, etc.) are nested under WorkspaceSettingsModule.
  */
 @Module({
   imports: [
@@ -52,7 +52,7 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     WebhooksModule,
     WorkflowsModule,
     // Feature modules
-    TeamModule,
+    WorkspaceSettingsModule,
     TeamsModule,
     InvitesModule,
     WorkspacesModule,
@@ -74,13 +74,13 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     ExternalV1Module,
     OutboundWebhooksModule,
     // Native AI Assistant runtime (subscriber + worker + inbox ops). The
-    // settings side is under TeamModule (team/ai-assistant/). Fully separate
+    // settings side is under WorkspaceSettingsModule (team/ai-assistant/). Fully separate
     // from the legacy n8n autopilot.
     AiAssistantRuntimeModule,
     AssignmentModule,
     // Public visitor surface for the website chat widget (/widget socket
     // namespace + /api/widget media endpoints). Admin onboarding lives under
-    // TeamModule (team/webchatwidget/).
+    // WorkspaceSettingsModule (team/webchatwidget/).
     WebchatwidgetModule,
     // DevModule is import-gated on NODE_ENV. The module's onModuleInit also
     // throws hard if production somehow reaches it — belt-and-suspenders so

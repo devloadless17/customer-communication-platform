@@ -35,7 +35,7 @@ export function AutomationPanel({
   const patch = async (body: Record<string, unknown>) => {
     setSaving(true);
     try {
-      const res = await apiFetch("/api/team/assignment/settings", {
+      const res = await apiFetch("/api/workspace/assignment/settings", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ ...body, expectedVersion: settings.version }),

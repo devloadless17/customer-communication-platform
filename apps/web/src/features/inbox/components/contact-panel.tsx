@@ -1515,7 +1515,7 @@ function ContactPanelImpl({
               await save({ customFields: { [key]: "" } });
             }}
             onAddTeamWide={async (label) => {
-              const res = await apiFetch("/api/team/contact-fields", {
+              const res = await apiFetch("/api/workspace/contact-fields", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({ label }),

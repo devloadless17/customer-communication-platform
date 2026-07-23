@@ -14,7 +14,7 @@ export default async function MessengerSettingsPage() {
   const { user } = await getSession();
   const canManage = canManageUsers(user.role);
 
-  // GET /api/team/messenger is @RequireRole("admin") — it decrypts secrets, so
+  // GET /api/workspace/messenger is @RequireRole("admin") — it decrypts secrets, so
   // a non-admin 403s. Only admins reach this page (nav is admin-gated), but
   // guard anyway with an empty read-only view.
   let current: MessengerCurrent;

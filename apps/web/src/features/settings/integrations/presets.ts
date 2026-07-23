@@ -2,7 +2,7 @@ import type { ApiKeyScope } from "@ccp/shared/api-keys/scopes";
 
 /**
  * Per-integration defaults for the one-click "Connect" flow on the
- * integrations page. The connect flow hits `/api/team/api-keys` with a
+ * integrations page. The connect flow hits `/api/workspace/api-keys` with a
  * preset-derived name + a least-privilege scope set tailored to what
  * the integration actually calls.
  *

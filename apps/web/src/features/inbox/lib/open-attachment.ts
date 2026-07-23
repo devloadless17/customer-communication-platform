@@ -6,7 +6,7 @@ import { toast } from "@/lib/toast";
  * missing (deleted, never uploaded, or expired upstream).
  *
  * Every media URL is now one of our own same-origin proxy routes
- * (`/api/media/<id>`, `/api/team/channels/.../media`, …). Each accepts
+ * (`/api/media/<id>`, `/api/workspace/channels/.../media`, …). Each accepts
  * `?probe=1` and short-circuits with `{ available: boolean }` (a cheap
  * server-side existence check) instead of streaming the bytes. The client
  * only opens a tab when the answer is yes. Probe failures (network error,

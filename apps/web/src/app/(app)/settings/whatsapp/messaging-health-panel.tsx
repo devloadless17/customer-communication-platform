@@ -66,7 +66,7 @@ export function MessagingHealthPanel({ canManage }: { canManage: boolean }) {
 
   function resync() {
     startTransition(async () => {
-      const res = await apiFetch("/api/team/whatsapp/health/refresh", { method: "POST" });
+      const res = await apiFetch("/api/workspace/whatsapp/health/refresh", { method: "POST" });
       if (!res.ok) {
         toast.error(
           res.status === 429

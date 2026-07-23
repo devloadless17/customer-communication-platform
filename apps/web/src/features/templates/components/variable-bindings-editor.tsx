@@ -110,7 +110,7 @@ export function VariableBindingsEditor({
     setError(null);
     setSaving(true);
     try {
-      const res = await apiFetch(`/api/team/whatsapp/templates/${templateId}`, {
+      const res = await apiFetch(`/api/workspace/whatsapp/templates/${templateId}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ variableBindings: bindings }),

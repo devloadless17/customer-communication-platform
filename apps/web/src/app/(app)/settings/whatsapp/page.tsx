@@ -20,7 +20,7 @@ export default async function WhatsappSettingsPage() {
   const { user } = await getSession();
   const canManage = canManageUsers(user.role);
 
-  // GET /api/team/whatsapp is @RequireRole("admin") — it decrypts secrets, so a
+  // GET /api/workspace/whatsapp is @RequireRole("admin") — it decrypts secrets, so a
   // non-admin hitting it 403s straight to the error boundary. Non-admins are
   // linked here from the /templates banners, so give them the read-only summary
   // instead: the members-open templates endpoint exposes only the `connected`
@@ -30,7 +30,7 @@ export default async function WhatsappSettingsPage() {
   // when there's one account, so a single-number workspace is unchanged.
   let accounts: ChannelAccountView[] = [];
   if (canManage) {
-    // Encrypted Meta credentials are decrypted server-side by GET /api/team/whatsapp.
+    // Encrypted Meta credentials are decrypted server-side by GET /api/workspace/whatsapp.
     // The endpoint absorbs decrypt failures (rotated key, corrupt envelope) and
     // returns null + a `credentialsUndecryptable` boolean so this page can prompt
     // the admin to re-paste instead of crashing. Crypto keys no longer live in

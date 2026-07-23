@@ -5,7 +5,7 @@ import { RegisterController } from "./register.controller";
 /**
  * Registration surface — `POST /api/register` only.
  *
- * The old `POST /api/teams` controller + TeamsService were removed: they
+ * The old `POST /api/workspaces` controller + TeamsService were removed: they
  * were internet-reachable, unauthenticated, and dead code (the register
  * controller already creates Team + User + Account + initial stages
  * atomically in one transaction). The module name stays "Teams" to avoid

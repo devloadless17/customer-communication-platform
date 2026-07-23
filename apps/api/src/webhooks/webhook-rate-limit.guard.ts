@@ -86,7 +86,7 @@ export class WebhookRateLimitGuard implements CanActivate {
 }
 
 /**
- * Sibling guard for the per-workflow `/api/team/workflows/:id/incoming-webhook`
+ * Sibling guard for the per-workflow `/api/workspace/workflows/:id/incoming-webhook`
  * endpoint. Two-key bucket: by workflow id (stops a leaked secret from
  * flooding a single workflow) AND by source IP (stops an attacker forging
  * thousands of bogus signatures across many workflow ids).

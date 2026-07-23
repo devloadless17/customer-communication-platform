@@ -76,7 +76,7 @@ export function TagMultiPicker({
     setCreating(true);
     setCreateError(null);
     try {
-      const res = await apiFetch("/api/team/tags", {
+      const res = await apiFetch("/api/workspace/tags", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name, color: newColor }),

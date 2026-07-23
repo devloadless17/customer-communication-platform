@@ -48,7 +48,7 @@ directory, why they can't be broadcast to, and why history replay matters so muc
 | `.../webchatwidget-frame.ts` | The sanitized shape a visitor is allowed to see (a strict subset of `Message`). |
 | `apps/api/src/lib/providers/webchatwidget.ts` | The `MessagingProvider` impl. Sends are **no-ops** — delivery is realtime, not vendor I/O. |
 | `apps/api/src/lib/providers/webchatwidget-config.ts` | Site-key resolution + TTL cache + trust-on-first-use recorder. |
-| `apps/api/src/team/webchatwidget/` | Admin CRUD behind `@RequireRole("admin")`. |
+| `apps/api/src/workspace-settings/webchatwidget/` | Admin CRUD behind `@RequireRole("admin")`. |
 
 ### Where the channel touches shared code
 

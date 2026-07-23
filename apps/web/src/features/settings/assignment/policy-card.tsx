@@ -98,7 +98,7 @@ export function PolicyCard({
   const save = async () => {
     setSaving(true);
     try {
-      const res = await apiFetch(`/api/team/assignment/policies/${policy.id}`, {
+      const res = await apiFetch(`/api/workspace/assignment/policies/${policy.id}`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -184,7 +184,7 @@ export function PolicyCard({
               variant="ghost"
               onClick={() =>
                 void act(
-                  `/api/team/assignment/policies/${policy.id}/default`,
+                  `/api/workspace/assignment/policies/${policy.id}/default`,
                   "POST",
                   "Default policy updated",
                 )
@@ -199,7 +199,7 @@ export function PolicyCard({
                 variant="ghost"
                 onClick={() =>
                   void act(
-                    `/api/team/assignment/policies/${policy.id}`,
+                    `/api/workspace/assignment/policies/${policy.id}`,
                     "DELETE",
                     "Policy archived",
                   )

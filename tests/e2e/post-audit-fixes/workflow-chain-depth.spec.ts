@@ -118,7 +118,7 @@ test.describe("Workflow chain-depth (across all parent trigger events)", () => {
 
     // Fire A via the manual-trigger endpoint.
     const fireResp = await request.post(
-      `/api/team/workflows/${a.id}/manual-trigger`,
+      `/api/workspace/workflows/${a.id}/manual-trigger`,
       { data: { contactId } },
     );
     const fireBody = await fireResp.text();

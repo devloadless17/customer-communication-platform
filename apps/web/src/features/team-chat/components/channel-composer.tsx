@@ -368,8 +368,8 @@ export function ChannelComposer({
     setPopupPos(null);
     setBusy(true);
     const url = threadRootId
-      ? `/api/team/channels/${channelId}/messages/${threadRootId}/thread`
-      : `/api/team/channels/${channelId}/messages`;
+      ? `/api/workspace/channels/${channelId}/messages/${threadRootId}/thread`
+      : `/api/workspace/channels/${channelId}/messages`;
     try {
       const res = await fetchWithSessionGuard(url, {
         method: "POST",
@@ -436,7 +436,7 @@ export function ChannelComposer({
     if (threadRootId) fd.append("threadRootId", threadRootId);
     try {
       const res = await fetchWithSessionGuard(
-        `/api/team/channels/${channelId}/media`,
+        `/api/workspace/channels/${channelId}/media`,
         { method: "POST", body: fd },
       );
       if (!res.ok) onOptimisticFail(clientTempId);

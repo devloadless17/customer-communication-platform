@@ -58,7 +58,7 @@ export function MessengerSettings({
 
   async function save() {
     setError(null);
-    const res = await apiFetch("/api/team/messenger", {
+    const res = await apiFetch("/api/workspace/messenger", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(form),
@@ -87,7 +87,7 @@ export function MessengerSettings({
       destructive: true,
     });
     if (!ok) return;
-    const res = await apiFetch("/api/team/messenger", { method: "DELETE" });
+    const res = await apiFetch("/api/workspace/messenger", { method: "DELETE" });
     if (!res.ok) {
       setError("Failed to disconnect");
       return;

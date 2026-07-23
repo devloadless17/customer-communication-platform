@@ -183,7 +183,7 @@ export function useTeamChannelEvents(
   // every tab. A burst of inbound channel messages fires one POST.
   const markRead = useCoalescedAsync(async () => {
     try {
-      await fetchWithSessionGuard(`/api/team/channels/${channelId}/read`, {
+      await fetchWithSessionGuard(`/api/workspace/channels/${channelId}/read`, {
         method: "POST",
       });
     } catch {
@@ -233,7 +233,7 @@ export function useTeamChannelEvents(
       setLoadingOlder(true);
       try {
         const res = await fetchWithSessionGuard(
-          `/api/team/channels/${channelId}/messages?before=${encodeURIComponent(cursor)}`,
+          `/api/workspace/channels/${channelId}/messages?before=${encodeURIComponent(cursor)}`,
         );
         if (!res.ok) return 0;
         const page = (await res.json()) as {
@@ -277,7 +277,7 @@ export function useTeamChannelEvents(
     setLoadingNewer(true);
     try {
       const res = await fetchWithSessionGuard(
-        `/api/team/channels/${channelId}/messages?after=${encodeURIComponent(newerCursor)}`,
+        `/api/workspace/channels/${channelId}/messages?after=${encodeURIComponent(newerCursor)}`,
       );
       if (!res.ok) return 0;
       const page = (await res.json()) as {
@@ -317,7 +317,7 @@ export function useTeamChannelEvents(
       inFlightAround.current = true;
       try {
         const res = await fetchWithSessionGuard(
-          `/api/team/channels/${channelId}/messages/around?messageId=${encodeURIComponent(messageId)}`,
+          `/api/workspace/channels/${channelId}/messages/around?messageId=${encodeURIComponent(messageId)}`,
         );
         if (!res.ok) return null;
         const page = (await res.json()) as {
@@ -350,7 +350,7 @@ export function useTeamChannelEvents(
    * "Jump to live" pill at the bottom of an anchored view.
    */
   const goToLive = useCallback(async (): Promise<void> => {
-    const res = await fetchWithSessionGuard(`/api/team/channels/${channelId}/messages`);
+    const res = await fetchWithSessionGuard(`/api/workspace/channels/${channelId}/messages`);
     if (!res.ok) return;
     const page = (await res.json()) as {
       items: TeamChannelMessageDto[];
@@ -414,7 +414,7 @@ export function useTeamChannelEvents(
       }
       try {
         const res = await fetchWithSessionGuard(
-          `/api/team/channels/${channelId}/messages`,
+          `/api/workspace/channels/${channelId}/messages`,
         );
         if (!res.ok) {
           runBackfill();
@@ -450,7 +450,7 @@ export function useTeamChannelEvents(
       if (!cursor) return;
       backfillNeededRef.current = false;
       void fetchWithSessionGuard(
-        `/api/team/channels/${channelId}/messages?after=${encodeURIComponent(cursor)}`,
+        `/api/workspace/channels/${channelId}/messages?after=${encodeURIComponent(cursor)}`,
       )
         .then((r) => (r.ok ? (r.json() as Promise<{ items: TeamChannelMessageDto[] }>) : null))
         .then((res) => {
@@ -769,7 +769,7 @@ export function useTeamChannelEvents(
       // Always the channel-root endpoint: this hook's `onMessage` bails on
       // `threadRootId !== null`, so a thread reply's optimistic row never lives
       // here — thread retries go through use-thread-events' own retryOptimistic.
-      const url = `/api/team/channels/${channelId}/messages`;
+      const url = `/api/workspace/channels/${channelId}/messages`;
       void fetchWithSessionGuard(url, {
         method: "POST",
         headers: { "content-type": "application/json" },

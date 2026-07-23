@@ -84,7 +84,7 @@ export class BroadcastsController {
   // Secret-free WhatsApp messaging-limit snapshot for the composer's pre-send
   // eligibility hint. The composer already knows the audience size; it compares
   // it against `messagingDailyCap` locally to warn before submitting. Returns NO
-  // credentials (unlike GET /api/team/whatsapp, which is admin-only), so any
+  // credentials (unlike GET /api/workspace/whatsapp, which is admin-only), so any
   // broadcast user can read it.
   @Get("messaging-health")
   async messagingHealth(@CurrentSession() session: ApiSession) {

@@ -118,7 +118,7 @@ test("the tick carries a member across a shift boundary with nobody watching", a
 }) => {
   // On shift now, closing within the next minute or two.
   const { schedule } = closesSoon(20);
-  await request.put("/api/team/work-hours", { data: { workHours: schedule } });
+  await request.put("/api/workspace/work-hours", { data: { workHours: schedule } });
   // Drop any override an earlier file left behind: a live one legitimately
   // outranks the schedule, so without this the precondition below depends on
   // test-file ordering rather than on the behavior under test.
@@ -145,7 +145,7 @@ test("the tick expires a manual override at the boundary and hands back to the s
 }) => {
   // Re-open, then take a manual pick that must not outlive the shift.
   const { schedule, closesAtMs } = closesSoon(30);
-  await request.put("/api/team/work-hours", { data: { workHours: schedule } });
+  await request.put("/api/workspace/work-hours", { data: { workHours: schedule } });
   const set = await request.patch("/api/users/me/availability", {
     data: { status: "busy", message: "Wrapping up" },
   });
@@ -185,7 +185,7 @@ test("the flip reaches connected clients as exactly ONE realtime frame", async (
 
   // Re-open the schedule BEFORE connecting so the settle-flip isn't counted.
   const { schedule } = closesSoon(45);
-  await request.put("/api/team/work-hours", { data: { workHours: schedule } });
+  await request.put("/api/workspace/work-hours", { data: { workHours: schedule } });
   await page.goto("/inbox");
   await page.waitForTimeout(3_000);
   frames.length = 0;

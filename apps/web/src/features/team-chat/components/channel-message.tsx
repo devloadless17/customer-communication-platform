@@ -180,7 +180,7 @@ function ChannelMessageImpl({
     emit(nextUserIds);
     try {
       const res = await fetchWithSessionGuard(
-        `/api/team/channels/${channelId}/messages/${message.id}/reactions`,
+        `/api/workspace/channels/${channelId}/messages/${message.id}/reactions`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -237,7 +237,7 @@ function ChannelMessageImpl({
     };
     try {
       const res = await fetchWithSessionGuard(
-        `/api/team/channels/${channelId}/messages/${message.id}/pin`,
+        `/api/workspace/channels/${channelId}/messages/${message.id}/pin`,
         { method: message.pinned ? "DELETE" : "POST" },
       );
       // Roll back to the prior value.
@@ -267,7 +267,7 @@ function ChannelMessageImpl({
     });
     try {
       const res = await fetchWithSessionGuard(
-        `/api/team/channels/${channelId}/messages/${message.id}`,
+        `/api/workspace/channels/${channelId}/messages/${message.id}`,
         { method: "DELETE" },
       );
       if (!res.ok) {
@@ -298,7 +298,7 @@ function ChannelMessageImpl({
     });
     try {
       const res = await fetchWithSessionGuard(
-        `/api/team/channels/${channelId}/messages/${message.id}`,
+        `/api/workspace/channels/${channelId}/messages/${message.id}`,
         {
           method: "PATCH",
           headers: { "content-type": "application/json" },

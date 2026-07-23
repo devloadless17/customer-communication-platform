@@ -57,7 +57,7 @@ export function MessageFlagsSettings({
    *  the usage counts honest without hand-patching them client-side. */
   const refresh = useCallback(async () => {
     try {
-      const res = await apiFetch("/api/team/message-flags/usage");
+      const res = await apiFetch("/api/workspace/message-flags/usage");
       if (!res.ok) return;
       const body = (await res.json()) as { definitions: MessageFlagDefinitionWithUsage[] };
       setDefinitions(body.definitions);
@@ -114,7 +114,7 @@ export function MessageFlagsSettings({
       return;
     }
     setBusyId("__new__");
-    const ok = await call("/api/team/message-flags", "POST", {
+    const ok = await call("/api/workspace/message-flags", "POST", {
       name,
       color: newColor,
       ...(newDescription.trim() ? { description: newDescription.trim() } : {}),
@@ -126,7 +126,7 @@ export function MessageFlagsSettings({
   const patch = useCallback(
     async (id: string, body: Record<string, unknown>) => {
       setBusyId(id);
-      await call(`/api/team/message-flags/${id}`, "PATCH", body);
+      await call(`/api/workspace/message-flags/${id}`, "PATCH", body);
       setBusyId(null);
     },
     [call],
@@ -142,7 +142,7 @@ export function MessageFlagsSettings({
       });
       if (!ok) return;
       setBusyId(def.id);
-      await call(`/api/team/message-flags/${def.id}`, "DELETE");
+      await call(`/api/workspace/message-flags/${def.id}`, "DELETE");
       setBusyId(null);
     },
     [call, confirm],

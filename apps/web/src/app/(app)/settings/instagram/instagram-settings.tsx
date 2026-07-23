@@ -60,7 +60,7 @@ export function InstagramSettings({
 
   async function save() {
     setError(null);
-    const res = await apiFetch("/api/team/instagram", {
+    const res = await apiFetch("/api/workspace/instagram", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(form),
@@ -89,7 +89,7 @@ export function InstagramSettings({
       destructive: true,
     });
     if (!ok) return;
-    const res = await apiFetch("/api/team/instagram", { method: "DELETE" });
+    const res = await apiFetch("/api/workspace/instagram", { method: "DELETE" });
     if (!res.ok) {
       setError("Failed to disconnect");
       return;

@@ -250,7 +250,7 @@ export function NewBroadcastForm({
     setTemplatesSyncing(true);
     setTemplatesError(null);
     try {
-      const res = await apiFetch("/api/team/whatsapp/templates", { method: "POST" });
+      const res = await apiFetch("/api/workspace/whatsapp/templates", { method: "POST" });
       const data = (await res.json()) as {
         templates?: TemplateDto[];
         error?: string;
@@ -278,7 +278,7 @@ export function NewBroadcastForm({
       setTemplatesError(null);
       if (!background) setTemplatesLoading(true);
       try {
-        const res = await apiFetch("/api/team/whatsapp/templates");
+        const res = await apiFetch("/api/workspace/whatsapp/templates");
         if (!res.ok) throw new Error(await safeReadError(res));
         const data = (await res.json()) as {
           templates?: TemplateDto[];

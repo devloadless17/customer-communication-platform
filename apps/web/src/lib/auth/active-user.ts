@@ -43,7 +43,7 @@ export const loadActiveUser = cache(async (userId: string) => {
       availabilityOverrideUntil: true,
       // `status` powers the org-approval gate in (app)/layout.tsx. Loaded here
       // (alongside rolePermissions) so the gate never has to call the now
-      // org-gated /api/team endpoint for a pending/suspended org.
+      // org-gated /api/workspace endpoint for a pending/suspended org.
       organization: { select: { status: true, name: true } },
       // Active workspace + effective role come from membership now (mirrors the
       // API resolveSession); ordered so the fallback pick is deterministic.

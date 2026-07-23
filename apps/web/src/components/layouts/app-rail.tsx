@@ -117,7 +117,7 @@ function useTeamMentions(userId: string): number {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const refetch = async () => {
       try {
-        const res = await apiFetch("/api/team/channels/unread-count");
+        const res = await apiFetch("/api/workspace/channels/unread-count");
         if (!res.ok) return;
         const json = (await res.json()) as { mentions?: unknown };
         if (alive && typeof json.mentions === "number") setMentions(json.mentions);
@@ -205,7 +205,7 @@ const PRIMARY_ITEMS: RailItem[] = [
   },
 ];
 
-// Workflows is admin-only: GET /api/team/workflows is @RequireRole("admin")
+// Workflows is admin-only: GET /api/workspace/workflows is @RequireRole("admin")
 // and the page redirects non-admins (workflows/page.tsx). Surfacing the rail
 // icon to agents/managers would resolve to a permanent "failed to load" error
 // boundary — appended only when the user can actually use it.

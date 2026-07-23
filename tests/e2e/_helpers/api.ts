@@ -25,7 +25,7 @@ export async function createWorkflow(
   request: APIRequestContext,
   input: CreateWorkflowInput,
 ): Promise<{ id: string; webhookUrl: string | null; webhookSecret: string | null }> {
-  const resp = await request.post("/api/team/workflows", {
+  const resp = await request.post("/api/workspace/workflows", {
     data: {
       name: input.name,
       trigger: input.trigger,
@@ -47,7 +47,7 @@ export async function publishWorkflow(
   id: string,
   publish = true,
 ): Promise<void> {
-  const resp = await request.post(`/api/team/workflows/${id}/publish`, {
+  const resp = await request.post(`/api/workspace/workflows/${id}/publish`, {
     data: { publish },
   });
   if (!resp.ok()) {
@@ -62,7 +62,7 @@ export async function createOutboundWebhook(
   request: APIRequestContext,
   input: { name: string; url: string; eventTypes: string[] },
 ): Promise<{ id: string; secret: string }> {
-  const resp = await request.post("/api/team/outbound-webhooks", {
+  const resp = await request.post("/api/workspace/outbound-webhooks", {
     data: input,
   });
   if (!resp.ok()) {

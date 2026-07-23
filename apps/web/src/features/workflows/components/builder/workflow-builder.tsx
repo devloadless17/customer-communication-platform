@@ -213,7 +213,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     ) {
       return;
     }
-    void apiFetch(`/api/team/workflows/${workflow.id}`, {
+    void apiFetch(`/api/workspace/workflows/${workflow.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(latestBodyRef.current),
@@ -322,8 +322,8 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     const body = buildBody();
     const path =
       mode === "create"
-        ? "/api/team/workflows"
-        : `/api/team/workflows/${workflow!.id}`;
+        ? "/api/workspace/workflows"
+        : `/api/workspace/workflows/${workflow!.id}`;
     const method = mode === "create" ? "POST" : "PATCH";
     let res: Response;
     try {
@@ -449,7 +449,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
         }
         if (!ok) return;
       }
-      const res = await apiFetch(`/api/team/workflows/${workflow.id}/publish`, {
+      const res = await apiFetch(`/api/workspace/workflows/${workflow.id}/publish`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ publish: goLive }),
@@ -496,7 +496,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
         explicitPersistRef.current = false;
       }
       if (!saved) return;
-      const res = await apiFetch(`/api/team/workflows/${workflow.id}/test`, {
+      const res = await apiFetch(`/api/workspace/workflows/${workflow.id}/test`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
@@ -526,7 +526,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     });
     if (!ok) return;
     setDeleting(true);
-    const res = await apiFetch(`/api/team/workflows/${workflow.id}`, { method: "DELETE" });
+    const res = await apiFetch(`/api/workspace/workflows/${workflow.id}`, { method: "DELETE" });
     if (res.ok) {
       toast.success("Workflow deleted");
       router.push("/workflows"); // navigating away — leave `deleting` set

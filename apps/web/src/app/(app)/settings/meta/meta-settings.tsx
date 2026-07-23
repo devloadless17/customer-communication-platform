@@ -55,7 +55,7 @@ export function MetaSettings({
 
   async function save(): Promise<{ resynced: string[] } | null> {
     setError(null);
-    const res = await apiFetch("/api/team/meta", {
+    const res = await apiFetch("/api/workspace/meta", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(form),

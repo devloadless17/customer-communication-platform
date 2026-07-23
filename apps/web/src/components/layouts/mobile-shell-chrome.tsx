@@ -84,7 +84,7 @@ const PRIMARY_ITEMS: NavItem[] = [
 ];
 
 // Workflows is admin-only — same gate as the desktop AppRail (the page
-// redirects non-admins and GET /api/team/workflows is @RequireRole("admin")).
+// redirects non-admins and GET /api/workspace/workflows is @RequireRole("admin")).
 // Hardcoding it for everyone made non-admins tap it and bounce; appended
 // conditionally below via the `canManageWorkflows` prop.
 const WORKFLOWS_ITEM: NavItem = {

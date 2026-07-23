@@ -36,17 +36,17 @@ import {
 /**
  * Assignment routing configuration.
  *
- *   GET    /api/team/assignment                    — everything the page needs
- *   POST   /api/team/assignment/policies           — create a policy
- *   PUT    /api/team/assignment/policies/:id       — update (CAS on version)
- *   POST   /api/team/assignment/policies/:id/default — make it the fallback
- *   DELETE /api/team/assignment/policies/:id       — archive
- *   POST   /api/team/assignment/rules              — create a routing rule
- *   PATCH  /api/team/assignment/rules/:id          — update
- *   DELETE /api/team/assignment/rules/:id          — delete
- *   PUT    /api/team/assignment/rules/order        — reorder (first match wins)
- *   PATCH  /api/team/assignment/settings           — auto-assign switchboard
- *   POST   /api/team/assignment/preview            — dry run "who gets this?"
+ *   GET    /api/workspace/assignment                    — everything the page needs
+ *   POST   /api/workspace/assignment/policies           — create a policy
+ *   PUT    /api/workspace/assignment/policies/:id       — update (CAS on version)
+ *   POST   /api/workspace/assignment/policies/:id/default — make it the fallback
+ *   DELETE /api/workspace/assignment/policies/:id       — archive
+ *   POST   /api/workspace/assignment/rules              — create a routing rule
+ *   PATCH  /api/workspace/assignment/rules/:id          — update
+ *   DELETE /api/workspace/assignment/rules/:id          — delete
+ *   PUT    /api/workspace/assignment/rules/order        — reorder (first match wins)
+ *   PATCH  /api/workspace/assignment/settings           — auto-assign switchboard
+ *   POST   /api/workspace/assignment/preview            — dry run "who gets this?"
  *
  * Admin-only across the board. Routing decides who gets paid work; unlike the
  * per-capability settings this one stays on the role gate deliberately — it's
@@ -56,7 +56,7 @@ import {
  * load. The inbox never needs this endpoint; it learns about assignments from
  * `conversation:assigned` socket frames like it always has.
  */
-@Controller("api/team/assignment")
+@Controller("api/workspace/assignment")
 @UseGuards(SessionGuard)
 @RequireRole("admin")
 export class AssignmentController {

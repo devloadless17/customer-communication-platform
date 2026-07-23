@@ -32,7 +32,7 @@ import type {
  * Custom fields can be added inline:
  *  - **Per-contact** extras stay local until the contact is created and ride
  *    along in the same POST — no extra round trips.
- *  - **Team-wide** definitions hit `/api/team/contact-fields` immediately
+ *  - **Team-wide** definitions hit `/api/workspace/contact-fields` immediately
  *    because they outlive this dialog. The new definition is bubbled up so
  *    the parent page sees it (filter chips, future opens of the dialog).
  *
@@ -318,7 +318,7 @@ export function NewContactDialog({
               setCustomValues((prev) => ({ ...prev, [key]: "" }));
             }}
             onAddTeamWide={async (label) => {
-              const res = await apiFetch("/api/team/contact-fields", {
+              const res = await apiFetch("/api/workspace/contact-fields", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({ label }),

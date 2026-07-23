@@ -251,7 +251,7 @@ viewer can't do rather than offering it and rejecting the click.
 | Surface | Entry point |
 |---|---|
 | Settings UI | `apps/web/src/features/settings/assignment/` → `/settings/assignment` |
-| Internal API | `apps/api/src/assignment/` (`/api/team/assignment`) |
+| Internal API | `apps/api/src/assignment/` (`/api/workspace/assignment`) |
 | External API | `/v1/assignment/*` + `POST /v1/conversations/:id/assign` with `autoAssign` — see [organization-api.md](organization-api.md) |
 | Inbound routing | `apps/api/src/assignment/auto-assign.subscriber.ts` |
 | AI escalation | `apps/api/src/lib/ai/orchestrator.ts` |

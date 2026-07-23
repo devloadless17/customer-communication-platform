@@ -48,7 +48,7 @@ export function WebchatWidgetSettings({
     setBusy(true);
     setError(null);
     try {
-      const res = await apiFetch("/api/team/webchatwidget", {
+      const res = await apiFetch("/api/workspace/webchatwidget", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: `Website ${widgets.length + 1}`, allowedOrigins: [] }),
@@ -68,7 +68,7 @@ export function WebchatWidgetSettings({
     setBusy(true);
     setError(null);
     try {
-      const res = await apiFetch(`/api/team/webchatwidget/${w.id}`, {
+      const res = await apiFetch(`/api/workspace/webchatwidget/${w.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -113,7 +113,7 @@ export function WebchatWidgetSettings({
     setBusy(true);
     setError(null);
     try {
-      const res = await apiFetch(`/api/team/webchatwidget/${id}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/workspace/webchatwidget/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error("delete failed");
       setWidgets((ws) => ws.filter((w) => w.id !== id));
       setSelectedId((cur) => (cur === id ? null : cur));

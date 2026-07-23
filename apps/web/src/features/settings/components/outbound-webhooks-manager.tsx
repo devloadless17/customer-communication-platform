@@ -264,7 +264,7 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
                           destructive: true,
                         });
                         if (!ok) return;
-                        const res = await apiFetch(`/api/team/outbound-webhooks/${w.id}`, {
+                        const res = await apiFetch(`/api/workspace/outbound-webhooks/${w.id}`, {
                           method: "DELETE",
                         });
                         if (!res.ok) {
@@ -283,7 +283,7 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
                         });
                         if (!ok) return;
                         const res = await apiFetch(
-                          `/api/team/outbound-webhooks/${w.id}/rotate-secret`,
+                          `/api/workspace/outbound-webhooks/${w.id}/rotate-secret`,
                           { method: "POST" },
                         );
                         if (!res.ok) {
@@ -295,7 +295,7 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
                         toast.success("Secret rotated");
                       }}
                       onTest={async () => {
-                        const res = await apiFetch(`/api/team/outbound-webhooks/${w.id}/test`, {
+                        const res = await apiFetch(`/api/workspace/outbound-webhooks/${w.id}/test`, {
                           method: "POST",
                         });
                         if (!res.ok) {
@@ -308,7 +308,7 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
                         });
                       }}
                       onToggleEnabled={async () => {
-                        const res = await apiFetch(`/api/team/outbound-webhooks/${w.id}`, {
+                        const res = await apiFetch(`/api/workspace/outbound-webhooks/${w.id}`, {
                           method: "PATCH",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({ enabled: !w.enabled }),
@@ -410,7 +410,7 @@ function WebhookForm({
       if (editing) {
         // Edit reuses the existing PATCH endpoint. The secret is never
         // touched here (rotate is a separate action), so nothing is revealed.
-        const res = await apiFetch(`/api/team/outbound-webhooks/${initial.id}`, {
+        const res = await apiFetch(`/api/workspace/outbound-webhooks/${initial.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body,
@@ -424,7 +424,7 @@ function WebhookForm({
         return;
       }
 
-      const res = await apiFetch("/api/team/outbound-webhooks", {
+      const res = await apiFetch("/api/workspace/outbound-webhooks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,
@@ -894,7 +894,7 @@ function DeliveriesSheet({
         const qs = new URLSearchParams({ limit: "25" });
         if (cursor) qs.set("cursor", cursor);
         const res = await apiFetch(
-          `/api/team/outbound-webhooks/${webhook.id}/deliveries?${qs.toString()}`,
+          `/api/workspace/outbound-webhooks/${webhook.id}/deliveries?${qs.toString()}`,
         );
         if (!res.ok) {
           setError(`HTTP ${res.status}`);

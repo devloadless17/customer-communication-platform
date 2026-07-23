@@ -58,7 +58,7 @@ function alwaysClosedNow(): WorkHours {
 }
 
 async function setTeamWorkHours(request: APIRequestContext, workHours: WorkHours | null) {
-  const res = await request.put("/api/team/work-hours", { data: { workHours } });
+  const res = await request.put("/api/workspace/work-hours", { data: { workHours } });
   expect(res.status(), await res.text()).toBe(200);
 }
 
@@ -254,12 +254,12 @@ test.describe("working hours → availability", () => {
   test("a malformed schedule is rejected before it can mark anyone away", async ({
     request,
   }) => {
-    const bad = await request.put("/api/team/work-hours", {
+    const bad = await request.put("/api/workspace/work-hours", {
       data: { workHours: { timezone: "Not/AZone", weekly: { mon: [{ open: "09:00", close: "17:00" }] } } },
     });
     expect(bad.status()).toBe(400);
 
-    const badTime = await request.put("/api/team/work-hours", {
+    const badTime = await request.put("/api/workspace/work-hours", {
       data: { workHours: { timezone: TZ, weekly: { mon: [{ open: "9am", close: "17:00" }] } } },
     });
     expect(badTime.status()).toBe(400);
@@ -629,7 +629,7 @@ test.describe("Settings → Team UI", () => {
 test.describe("/v1 parity", () => {
   /** A key with the scopes these routes need. */
   async function apiKey(request: APIRequestContext): Promise<string> {
-    const res = await request.post("/api/team/api-keys", {
+    const res = await request.post("/api/workspace/api-keys", {
       data: { name: `wh-e2e-${Date.now()}`, scopes: ["read:catalog", "write:users"] },
     });
     expect(res.status(), await res.text()).toBeLessThan(300);
@@ -699,7 +699,7 @@ test.describe("/v1 parity", () => {
   });
 
   test("a key WITHOUT write:users is refused", async ({ request, playwright }) => {
-    const res = await request.post("/api/team/api-keys", {
+    const res = await request.post("/api/workspace/api-keys", {
       data: { name: `wh-e2e-noscope-${Date.now()}`, scopes: ["read:catalog"] },
     });
     const body = (await res.json()) as { token?: string; apiKey?: { token?: string } };

@@ -140,7 +140,7 @@ export const WorkHoursSchema = z.object({
     .optional(),
 });
 
-/** `PUT /api/team/work-hours` — null clears the org default. */
+/** `PUT /api/workspace/work-hours` — null clears the org default. */
 export const SetTeamWorkHoursSchema = z.object({
   workHours: z.union([WorkHoursSchema, z.null()]),
 });

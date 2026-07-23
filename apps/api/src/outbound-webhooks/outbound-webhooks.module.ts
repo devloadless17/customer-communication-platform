@@ -17,7 +17,7 @@ import { OutboundWebhooksWorkerService } from "./outbound-webhooks-worker.servic
  *                  ▼ HTTP POST with HMAC, updates delivery row + breaker
  *
  * The CRUD HTTP surface lives in `apps/api/src/team/outbound-webhooks/`
- * (TeamModule import). It's separate from this module by design — the
+ * (WorkspaceSettingsModule import). It's separate from this module by design — the
  * pipeline above must boot even if the admin UI is never used (e.g. a
  * partner created their webhook via API key + curl).
  */

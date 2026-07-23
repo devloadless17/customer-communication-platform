@@ -261,8 +261,8 @@ async function retry<T>(
 
 /**
  * Fire a single workflow on a specific contact/conversation. Used by:
- *   - /api/team/workflows/[id]/manual-trigger  (UI button)
- *   - /api/team/workflows/[id]/test            (test fire)
+ *   - /api/workspace/workflows/[id]/manual-trigger  (UI button)
+ *   - /api/workspace/workflows/[id]/test            (test fire)
  *   - the `trigger_workflow` step              (workflow chaining)
  *
  * Bypasses the trigger-conditions filter — the caller has already decided

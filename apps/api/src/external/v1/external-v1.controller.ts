@@ -41,7 +41,7 @@ import {
   type ListTransfersQueryInput,
 } from "@/contacts/transfer.schemas";
 import { AssignmentService } from "@/assignment/assignment.service";
-import { ChannelAccountsService } from "@/team/channel-accounts/channel-accounts.service";
+import { ChannelAccountsService } from "@/workspace-settings/channel-accounts/channel-accounts.service";
 import { TicketsService } from "@/tickets/tickets.service";
 import {
   CreateTicketFieldSchema,
@@ -59,7 +59,7 @@ import {
   type UpdateTicketInput,
   type UpsertSlaPolicyInput,
 } from "@/tickets/tickets.schemas";
-import { parseAccountChannel } from "@/team/channel-accounts/channel-accounts.schemas";
+import { parseAccountChannel } from "@/workspace-settings/channel-accounts/channel-accounts.schemas";
 import {
   CreatePolicySchema,
   CreateRuleSchema,

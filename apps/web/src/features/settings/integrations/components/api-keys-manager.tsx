@@ -28,7 +28,7 @@ import type { ApiKeyListItem } from "@/lib/api/queries";
  * integration-specific connect panels (n8n, etc.). Lets an admin mint a
  * single organization key (full access) OR scoped keys, see all active keys,
  * and rotate/revoke them. Backed by the same 4 routes the connect panel
- * uses (POST /api/team/api-keys, /:id/rotate, DELETE /:id) so there's no
+ * uses (POST /api/workspace/api-keys, /:id/rotate, DELETE /:id) so there's no
  * new backend surface — this is the missing UI for the existing capability.
  */
 
@@ -108,7 +108,7 @@ export function ApiKeysManager({ initialKeys }: Props) {
     setError(null);
     setCreating(true);
     try {
-      const res = await apiFetch("/api/team/api-keys", {
+      const res = await apiFetch("/api/workspace/api-keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: name.trim(), scopes: chosenScopes }),
@@ -148,7 +148,7 @@ export function ApiKeysManager({ initialKeys }: Props) {
     setError(null);
     setBusyId(key.id);
     try {
-      const res = await apiFetch(`/api/team/api-keys/${key.id}/rotate`, { method: "POST" });
+      const res = await apiFetch(`/api/workspace/api-keys/${key.id}/rotate`, { method: "POST" });
       const json = (await res.json()) as Partial<ApiKeyListItem> & { token?: string; error?: string };
       if (!res.ok || !json.id || !json.token) {
         setError(json.error ?? `error ${res.status}`);
@@ -185,7 +185,7 @@ export function ApiKeysManager({ initialKeys }: Props) {
     setError(null);
     setBusyId(key.id);
     try {
-      const res = await apiFetch(`/api/team/api-keys/${key.id}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/workspace/api-keys/${key.id}`, { method: "DELETE" });
       if (!res.ok) {
         const json = (await res.json().catch(() => ({}))) as { error?: string };
         setError(json.error ?? `error ${res.status}`);

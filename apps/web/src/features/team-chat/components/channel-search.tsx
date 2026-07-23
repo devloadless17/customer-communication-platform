@@ -16,7 +16,7 @@ const RESULT_BODY_EXCERPT = 200;
  * header, mirroring the inbox's in-thread search pattern.
  *
  * Flow:
- *   1. Type → debounced GET /api/team/channels/:id/messages/search?q=…
+ *   1. Type → debounced GET /api/workspace/channels/:id/messages/search?q=…
  *   2. Render the result list (newest-first).
  *   3. Click a result → `onJumpTo(messageId)`. The workspace scrolls to it
  *      via `[data-message-id]` when it's in the loaded slice, and otherwise
@@ -69,7 +69,7 @@ export function ChannelSearch({
     const t = window.setTimeout(async () => {
       try {
         const res = await fetchWithSessionGuard(
-          `/api/team/channels/${channelId}/messages/search?q=${encodeURIComponent(q)}`,
+          `/api/workspace/channels/${channelId}/messages/search?q=${encodeURIComponent(q)}`,
         );
         if (cancelled) return;
         if (!res.ok) {

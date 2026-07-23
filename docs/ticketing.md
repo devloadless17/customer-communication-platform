@@ -147,7 +147,7 @@ no pill at all.
 |---|---|
 | Board / list / detail | `apps/web/src/app/(app)/tickets/` |
 | Admin configuration | `apps/web/src/app/(app)/settings/tickets/` |
-| Internal REST | `apps/api/src/tickets/` (agent-level) + `/api/team/tickets/*` (admin) |
+| Internal REST | `apps/api/src/tickets/` (agent-level) + `/api/workspace/tickets/*` (admin) |
 | External API | `/v1/tickets`, `/v1/tickets-settings`, `/v1/ticket-sla`, `/v1/ticket-fields` — scopes `read:tickets` / `write:tickets`; documented in [organization-api.md](organization-api.md) **and** `/docs/api` |
 | Outbound webhook | `ticket.changed` |
 | Workflow steps | `create_ticket`, `set_ticket_status`, `set_ticket_priority`, `assign_ticket` |

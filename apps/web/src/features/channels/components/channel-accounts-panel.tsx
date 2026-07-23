@@ -45,7 +45,7 @@ export function ChannelAccountsPanel({
   async function call(id: string, path: string, init: RequestInit) {
     setPendingId(id);
     try {
-      const res = await apiFetch(`/api/team/channels/${channel}/accounts/${path}`, init);
+      const res = await apiFetch(`/api/workspace/channels/${channel}/accounts/${path}`, init);
       if (res.ok) startTransition(() => refresh());
     } finally {
       setPendingId(null);

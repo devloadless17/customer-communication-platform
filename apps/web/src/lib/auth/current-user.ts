@@ -36,7 +36,7 @@ export interface Session {
    * Org-approval status of the user's team. The (app) layout reads this to
    * gate pending/suspended orgs to /pending. Carried on the session (loaded in
    * the same `loadActiveUser` query) so the gate never depends on the org-gated
-   * /api/team call. superAdmins are exempt from the gate regardless.
+   * /api/workspace call. superAdmins are exempt from the gate regardless.
    */
   orgStatus: OrgStatus;
   /**

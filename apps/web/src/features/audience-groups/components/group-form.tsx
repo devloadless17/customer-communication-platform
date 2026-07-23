@@ -85,12 +85,12 @@ export function GroupForm({
         contactIds: audience.contactIds,
       };
       const res = initial
-        ? await apiFetch(`/api/team/audience-groups/${initial.id}`, {
+        ? await apiFetch(`/api/workspace/audience-groups/${initial.id}`, {
             method: "PATCH",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(body),
           })
-        : await apiFetch("/api/team/audience-groups", {
+        : await apiFetch("/api/workspace/audience-groups", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(body),
@@ -142,7 +142,7 @@ export function GroupForm({
     if (!ok) return;
     setDeleting(true);
     try {
-      const res = await apiFetch(`/api/team/audience-groups/${initial.id}`, {
+      const res = await apiFetch(`/api/workspace/audience-groups/${initial.id}`, {
         method: "DELETE",
       });
       if (!res.ok) {

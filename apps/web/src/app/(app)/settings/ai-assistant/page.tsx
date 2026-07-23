@@ -12,8 +12,8 @@ export default async function AiAssistantSettingsPage() {
   if (!permissions["aiAssistant:manage"]) redirect("/account");
 
   const [{ config }, { documents }] = await Promise.all([
-    api<{ config: AiConfig }>("/api/team/ai-assistant"),
-    api<{ documents: AiDocument[] }>("/api/team/ai-assistant/documents"),
+    api<{ config: AiConfig }>("/api/workspace/ai-assistant"),
+    api<{ documents: AiDocument[] }>("/api/workspace/ai-assistant/documents"),
   ]);
 
   return <AiAssistantSettings initialConfig={config} initialDocuments={documents} />;

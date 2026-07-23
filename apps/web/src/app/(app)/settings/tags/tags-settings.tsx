@@ -113,7 +113,7 @@ export function TagsSettings({
     setBusyId("__new__");
     setError(null);
     try {
-      const res = await apiFetch("/api/team/tags", {
+      const res = await apiFetch("/api/workspace/tags", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name, color: newColor }),
@@ -148,7 +148,7 @@ export function TagsSettings({
         cur.map((t) => (t.id === id ? { ...t, ...patch } : t)),
       );
       try {
-        const res = await apiFetch(`/api/team/tags/${id}`, {
+        const res = await apiFetch(`/api/workspace/tags/${id}`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(patch),
@@ -187,7 +187,7 @@ export function TagsSettings({
       setBusyId(tag.id);
       setError(null);
       try {
-        const res = await apiFetch(`/api/team/tags/${tag.id}`, { method: "DELETE" });
+        const res = await apiFetch(`/api/workspace/tags/${tag.id}`, { method: "DELETE" });
         if (!res.ok) {
           const body = (await res.json().catch(() => ({}))) as {
             error?: string;

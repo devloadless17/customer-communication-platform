@@ -45,7 +45,7 @@ let channelId: string;
 
 test.beforeAll(async ({ request }) => {
   workspaceId = (await superadminTeam()).workspaceId;
-  const r = await request.get("/api/team/channels/default");
+  const r = await request.get("/api/workspace/channels/default");
   expect(r.ok(), `default channel lookup failed: ${r.status()}`).toBeTruthy();
   channelId = (await r.json()).channel.id;
 });
@@ -55,7 +55,7 @@ test.describe("R2 media serving — streaming proxy, all kinds", () => {
     test(`${f.kind}: upload → stream (200 + type) → range (206) → probe`, async ({
       request,
     }) => {
-      const up = await request.post(`/api/team/channels/${channelId}/media`, {
+      const up = await request.post(`/api/workspace/channels/${channelId}/media`, {
         multipart: {
           file: { name: f.name, mimeType: f.mime, buffer: f.buf },
           clientTempId: `e2e-r2-${f.kind}-${Date.now()}`,
@@ -63,7 +63,7 @@ test.describe("R2 media serving — streaming proxy, all kinds", () => {
       });
       expect(up.status(), `upload failed: ${await up.text()}`).toBeLessThan(300);
       const { messageId } = await up.json();
-      const url = `/api/team/channels/${channelId}/messages/${messageId}/media`;
+      const url = `/api/workspace/channels/${channelId}/messages/${messageId}/media`;
 
       // Full stream — 200, correct Content-Type, Range-capable.
       const g = await request.get(url);
@@ -112,7 +112,7 @@ test.describe("R2 media serving — streaming proxy, all kinds", () => {
   }) => {
     // Upload once to get a real R2 object + key, then seed an inbox Message that
     // reuses it — exercises the /api/media/:id path (the WhatsApp inbox surface).
-    const up = await request.post(`/api/team/channels/${channelId}/media`, {
+    const up = await request.post(`/api/workspace/channels/${channelId}/media`, {
       multipart: {
         file: { name: "seed.pdf", mimeType: "application/pdf", buffer: PDF },
         clientTempId: `e2e-r2-seed-${Date.now()}`,

@@ -31,6 +31,13 @@ Organization → Workspaces → Channels → Accounts
   (`workspaceId` everywhere, in the `where` of every query). This is the renamed `Team`: a
   fully separate inbox with its own channels, contacts, conversations, tags, stages, tickets
   and team chat. Nothing is shared between workspaces except the people you put in both.
+- **Workspace vs Team — the rule.** A **workspace** is HARD separation (its own
+  contacts, channels, inbox, tickets — nothing crosses). A **team** is SOFT separation
+  INSIDE one workspace (`AssignmentPolicy` — Sales vs Support sharing the same customers
+  and tickets). If two groups need to hand work to each other they are teams in one
+  workspace, not two workspaces. This is why tickets are workspace-scoped and never
+  cross-workspace: a `Ticket` binds a `conversationId` the other workspace cannot read,
+  and `number` is unique per workspace.
 - **User** — belongs to ONE organization (`orgRole`: owner / admin / member) and joins many of
   its workspaces via `WorkspaceMember`, holding a **separate role per workspace**
   (admin / manager / agent). Platform operators are `User.isSuperAdmin` — a flag orthogonal to
@@ -209,7 +216,7 @@ Protected against recursion, infinite loops, duplicate execution, and retry-indu
 
 - **Providers are adapters.** They translate a vendor wire shape ↔ `NormalizedEvent` and nothing else. Business logic never depends on a provider. Every external system (Meta, future Telegram/SMS/Email, n8n/Zapier/Make) is just another adapter or a webhook consumer.
 - **Inbound webhooks**: HMAC-verify the raw body on every POST (`X-Hub-Signature-256`), reject malformed signatures, dedupe, keep the raw payload, fail-soft on non-2xx.
-- **Outbound webhooks** (implemented): only meaningful business events; signed (`X-CCP-Signature`, HMAC-SHA256); idempotent (delivery id header); bounded retries (7 attempts, exp backoff) with auto-disable after repeated failure; a stable, versioned payload that carries enough context to avoid extra API calls. Managed under `apps/api/src/team/outbound-webhooks/`.
+- **Outbound webhooks** (implemented): only meaningful business events; signed (`X-CCP-Signature`, HMAC-SHA256); idempotent (delivery id header); bounded retries (7 attempts, exp backoff) with auto-disable after repeated failure; a stable, versioned payload that carries enough context to avoid extra API calls. Managed under `apps/api/src/workspace-settings/outbound-webhooks/`.
 - **External `/v1` API** (`apps/api/src/external/v1/`): full parity with the internal UI actions is a **locked rule** — every capability the UI has, the API has, and every endpoint is documented in both [docs/organization-api.md](docs/organization-api.md) and the in-app `/docs/api` page. Bearer API keys + scopes, mandatory `Idempotency-Key` on sends, chain-depth guard. `/v1` writes publish the same domain events as internal routes.
 
 ---

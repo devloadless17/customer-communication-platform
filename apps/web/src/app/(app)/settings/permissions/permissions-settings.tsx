@@ -22,7 +22,7 @@ type EditableMatrix = Record<EditableRole, Record<Capability, boolean>>;
 /**
  * Admin grid: rows = capabilities, columns = Manager / Agent toggles (plus an
  * always-on Admin column shown for context). Each toggle persists the WHOLE
- * matrix via PATCH /api/team/permissions — the payload is tiny and this is a
+ * matrix via PATCH /api/workspace/permissions — the payload is tiny and this is a
  * low-frequency admin screen, so there's no need for per-field diffing.
  */
 export function PermissionsSettings() {
@@ -51,7 +51,7 @@ export function PermissionsSettings() {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await apiFetch("/api/team/permissions");
+        const res = await apiFetch("/api/workspace/permissions");
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as {
           permissions: EditableMatrix;
@@ -76,7 +76,7 @@ export function PermissionsSettings() {
     };
     setSaving(true);
     try {
-      const res = await apiFetch("/api/team/permissions", {
+      const res = await apiFetch("/api/workspace/permissions", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
@@ -92,7 +92,7 @@ export function PermissionsSettings() {
       // permissions the admin already committed.
       if (gen !== persistGen.current) return;
       try {
-        const res = await apiFetch("/api/team/permissions");
+        const res = await apiFetch("/api/workspace/permissions");
         if (res.ok && gen === persistGen.current) {
           const json = (await res.json()) as { permissions: EditableMatrix };
           matrixRef.current = json.permissions;

@@ -170,6 +170,6 @@ recipients.
 `Channel.webchatwidget`); `@ccp/shared/providers/capabilities` (+ `LIVE_CHANNELS`);
 `apps/api/src/lib/providers/webchatwidget*.ts` + registry;
 `apps/api/src/webchatwidget/` (gateway, delivery, public controller, frame);
-`apps/api/src/team/webchatwidget/` (admin CRUD);
+`apps/api/src/workspace-settings/webchatwidget/` (admin CRUD);
 `apps/web/.../settings/webchatwidget/` (management UI + live preview + embed);
 `apps/web/public/widget.js` + `apps/web/public/webchat/`.

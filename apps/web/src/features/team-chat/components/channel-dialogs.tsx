@@ -129,7 +129,7 @@ export function NewChannelDialog({
     setBusy(true);
     setError(null);
     try {
-      const res = await fetchWithSessionGuard("/api/team/channels", {
+      const res = await fetchWithSessionGuard("/api/workspace/channels", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: normalized, description, visibility }),
@@ -260,7 +260,7 @@ export function EditChannelDialog({
     setBusy(true);
     setError(null);
     try {
-      const res = await fetchWithSessionGuard(`/api/team/channels/${channel.id}`, {
+      const res = await fetchWithSessionGuard(`/api/workspace/channels/${channel.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -354,7 +354,7 @@ export function useDeleteChannel() {
       destructive: true,
     });
     if (!ok) return;
-    const res = await fetchWithSessionGuard(`/api/team/channels/${channelId}`, {
+    const res = await fetchWithSessionGuard(`/api/workspace/channels/${channelId}`, {
       method: "DELETE",
     });
     if (res.ok) {

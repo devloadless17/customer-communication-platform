@@ -32,7 +32,7 @@ export function JoinChannelCard({
     setBusy(true);
     try {
       const res = await fetchWithSessionGuard(
-        `/api/team/channels/${channel.id}/join`,
+        `/api/workspace/channels/${channel.id}/join`,
         { method: "POST" },
       );
       if (!res.ok) {

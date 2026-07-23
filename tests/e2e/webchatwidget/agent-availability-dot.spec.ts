@@ -166,7 +166,7 @@ async function expectDot(dots: boolean[], want: boolean, why: string): Promise<v
 test.describe.configure({ mode: "serial", timeout: 180_000 });
 
 test("an ONLINE + AVAILABLE agent lights the dot", async ({ page, request, browser }) => {
-  await request.put("/api/team/work-hours", { data: { workHours: null } });
+  await request.put("/api/workspace/work-hours", { data: { workHours: null } });
   await request.patch("/api/users/me/availability", { data: { status: "available" } });
 
   // The agent's socket is what puts them in presence — open the real app.
@@ -226,10 +226,10 @@ test("working hours drive the dot — an off-shift team reads as away", async ({
 
   // Closing the org's shift resolves every member to `away`, which must reach
   // the visitor: nobody is going to answer until the next opening.
-  await request.put("/api/team/work-hours", { data: { workHours: closedNow() } });
+  await request.put("/api/workspace/work-hours", { data: { workHours: closedNow() } });
   await expectDot(visitor.dots, false, "live frame after the shift closed");
 
-  await request.put("/api/team/work-hours", { data: { workHours: null } });
+  await request.put("/api/workspace/work-hours", { data: { workHours: null } });
   await expectDot(visitor.dots, true, "live frame after the schedule was lifted");
   await visitor.close();
 });

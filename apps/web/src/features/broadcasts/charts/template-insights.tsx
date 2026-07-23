@@ -81,7 +81,7 @@ export function TemplateInsights({ templateId }: { templateId: string }) {
     async (windowDays: number) => {
       try {
         const res = await apiFetch(
-          `/api/team/whatsapp/templates/${templateId}/analytics?days=${windowDays}`,
+          `/api/workspace/whatsapp/templates/${templateId}/analytics?days=${windowDays}`,
         );
         if (!res.ok) {
           const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -107,7 +107,7 @@ export function TemplateInsights({ templateId }: { templateId: string }) {
   function refresh() {
     startTransition(async () => {
       const res = await apiFetch(
-        `/api/team/whatsapp/templates/${templateId}/analytics/refresh?days=${range}`,
+        `/api/workspace/whatsapp/templates/${templateId}/analytics/refresh?days=${range}`,
         { method: "POST" },
       );
       if (!res.ok) {

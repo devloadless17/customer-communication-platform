@@ -28,7 +28,7 @@ const TRIGGER_LABELS: Record<string, string> = {
 export default async function WorkflowsPage() {
   const { user } = await getSession();
   const canManage = canManageUsers(user.role);
-  // Workflows are admin-only: GET /api/team/workflows is @RequireRole("admin"),
+  // Workflows are admin-only: GET /api/workspace/workflows is @RequireRole("admin"),
   // so a non-admin reaching this page would hit a 403 from listWorkflows() and
   // land on a generic "Workflows failed to load" error boundary. Redirect to a
   // page they can use instead — mirroring the new/[id] sub-pages' own guards.

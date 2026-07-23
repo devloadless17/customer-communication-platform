@@ -438,7 +438,7 @@ export class ChannelsService {
   /**
    * Reject channel-administration operations targeting a DM.
    *
-   * LOAD-BEARING. Without this, `POST /api/team/channels/:dmId/members` would
+   * LOAD-BEARING. Without this, `POST /api/workspace/channels/:dmId/members` would
    * let an admin inject a third party into two colleagues' private 1:1 — the
    * existing members_changed fanout would dutifully wire the new member into
    * the room and hand them the full history. It also breaks the 1:1 invariant

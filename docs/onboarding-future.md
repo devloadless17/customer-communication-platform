@@ -119,7 +119,7 @@ When you come back to build this:
    Remove the `disabled` attribute, swap "Coming soon" for "Connect with
    Facebook", and bind the click to the FB.login flow.
 6. **Disconnect hygiene** — extend
-   [apps/api/src/team/whatsapp/whatsapp.service.ts](../apps/api/src/team/whatsapp/whatsapp.service.ts)
+   [apps/api/src/workspace-settings/whatsapp/whatsapp.service.ts](../apps/api/src/workspace-settings/whatsapp/whatsapp.service.ts)
    `disconnect` to revoke the System User token via Graph API
    (`DELETE /{user-id}/permissions`) when present.
 

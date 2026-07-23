@@ -8,7 +8,7 @@ import type {
 import type { Role } from "@ccp/shared/types";
 
 /**
- * Wire shapes for GET /api/team/assignment. Declared here (not derived from
+ * Wire shapes for GET /api/workspace/assignment. Declared here (not derived from
  * Prisma) because `apps/web` must not import @prisma/client — the shared string
  * unions in `@ccp/shared/assignment/types` are the contract, and the api asserts
  * at boot that they still match the Prisma enums.

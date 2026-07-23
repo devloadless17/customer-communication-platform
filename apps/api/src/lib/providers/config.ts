@@ -212,7 +212,7 @@ function materializeSendConfig(
     // Stored as envelope-encrypted ciphertext (lib/crypto/envelope.ts).
     // decryptSecret() passes legacy plaintext rows through unchanged so the
     // first load after rollout still works; the next credential save in
-    // /api/team/whatsapp rewrites the row as ciphertext.
+    // /api/workspace/whatsapp rewrites the row as ciphertext.
     accessToken = decryptSecret(cipher.accessTokenCipher);
   } catch (err) {
     console.error(

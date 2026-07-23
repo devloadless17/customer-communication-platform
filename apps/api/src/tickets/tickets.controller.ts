@@ -90,7 +90,7 @@ export class TicketsController {
  * These change what every future ticket promises, so they sit with the rest of
  * the workspace settings surface.
  */
-@Controller("api/team/tickets")
+@Controller("api/workspace/tickets")
 @UseGuards(SessionGuard, RoleGuard)
 @RequireRole("admin")
 export class TicketSettingsController {

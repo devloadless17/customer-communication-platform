@@ -11,7 +11,7 @@ import { parseStepConfig, redactStepConfig } from "@/lib/workflows/steps";
 
 /**
  * Validation helpers for workflow CRUD. Centralized so the create + patch
- * routes share validation semantics — and so /api/team/workflows/[id]/publish
+ * routes share validation semantics — and so /api/workspace/workflows/[id]/publish
  * can require zero-error validation as a publish gate while save tolerates
  * a half-edited draft.
  *
@@ -23,7 +23,7 @@ import { parseStepConfig, redactStepConfig } from "@/lib/workflows/steps";
  *     conditions must validate clean. Failing publish keeps the workflow
  *     `published=false` so the dispatcher never picks up a broken graph.
  *
- * Moved from `app/api/team/workflows/_shared.ts` so the NestJS workflows
+ * Moved from `app/api/workspace/workflows/_shared.ts` so the NestJS workflows
  * controller can import it without crossing the `lib/` → `app/api/` boundary
  * (lib code may never depend on app code).
  */

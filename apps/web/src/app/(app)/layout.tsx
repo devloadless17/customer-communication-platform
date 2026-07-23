@@ -57,7 +57,7 @@ export default async function AppShellLayout({
   // Org-approval gate. A `pending` org (awaiting super-admin review) or a
   // `suspended` org (access revoked) can't use the app — route to the status
   // screen, which lives OUTSIDE this (app) group so there's no redirect loop.
-  // Reading status off the session (not /api/team, which is now org-gated)
+  // Reading status off the session (not /api/workspace, which is now org-gated)
   // is what keeps this redirect working for a locked-out org.
   if (orgStatus !== "active") redirect("/pending");
 

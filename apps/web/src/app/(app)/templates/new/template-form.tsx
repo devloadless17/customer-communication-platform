@@ -62,7 +62,7 @@ import { TEMPLATE_LIMITS } from "@ccp/shared/template-render";
  *
  * On submit we build the components array exactly as Meta expects, attach
  * `example.body_text` / `example.header_text` / `example.header_handle`
- * (when applicable), and POST to /api/team/whatsapp/templates/create.
+ * (when applicable), and POST to /api/workspace/whatsapp/templates/create.
  */
 
 interface ButtonRow {
@@ -294,7 +294,7 @@ export function TemplateForm({
       try {
         const fd = new FormData();
         fd.append("file", file);
-        const res = await apiFetch("/api/team/whatsapp/templates/upload-media", {
+        const res = await apiFetch("/api/workspace/whatsapp/templates/upload-media", {
           method: "POST",
           body: fd,
           signal: abort.signal,
@@ -330,7 +330,7 @@ export function TemplateForm({
     setSubmitError(null);
     setSubmitting(true);
     try {
-      const res = await apiFetch("/api/team/whatsapp/templates/create", {
+      const res = await apiFetch("/api/workspace/whatsapp/templates/create", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({

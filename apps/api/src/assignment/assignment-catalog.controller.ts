@@ -19,7 +19,7 @@ import { DbService } from "../db/db.service";
  * composer, both of which managers use. A policy NAME is not sensitive — unlike
  * the admin overview, which exposes every member's live workload.
  */
-@Controller("api/team/assignment-policies")
+@Controller("api/workspace/assignment-policies")
 @UseGuards(SessionGuard)
 export class AssignmentCatalogController {
   constructor(private readonly db: DbService) {}

@@ -72,7 +72,7 @@ function Behaviour({ settings, onSave }: { settings: TicketSettingsView; onSave:
   const [reopenHours, setReopenHours] = useState(String(settings.ticketReopenWindowHours));
 
   const patch = (body: Record<string, unknown>) =>
-    onSave("/api/team/tickets/settings", { method: "PATCH", body: JSON.stringify(body) });
+    onSave("/api/workspace/tickets/settings", { method: "PATCH", body: JSON.stringify(body) });
 
   return (
     <section className="rounded-xl border bg-card p-4">
@@ -187,7 +187,7 @@ function SlaRow({
             toast.error("Enter a whole number of minutes, or leave it empty for no promise");
             return;
           }
-          void onSave("/api/team/tickets/sla", {
+          void onSave("/api/workspace/tickets/sla", {
             method: "POST",
             body: JSON.stringify({ priority, firstResponseMins: f, resolutionMins: r }),
           });
@@ -263,7 +263,7 @@ function CustomFields({
                   destructive: true,
                 });
                 if (ok) {
-                  void onSave(`/api/team/tickets/fields/${f.id}`, { method: "DELETE" });
+                  void onSave(`/api/workspace/tickets/fields/${f.id}`, { method: "DELETE" });
                 }
               }}
             >
@@ -284,7 +284,7 @@ function CustomFields({
           const trimmed = label.trim();
           if (!trimmed) return;
           setLabel("");
-          void onSave("/api/team/tickets/fields", {
+          void onSave("/api/workspace/tickets/fields", {
             method: "POST",
             body: JSON.stringify({ label: trimmed }),
           });

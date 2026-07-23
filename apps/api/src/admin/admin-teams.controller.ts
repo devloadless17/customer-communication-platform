@@ -25,7 +25,7 @@ import { type ApiSession } from "../auth/session.guard";
 import { SessionInvalidationService } from "../auth/session-invalidation.service";
 import { zBody } from "../common/zod-validation.pipe";
 import { DbService } from "../db/db.service";
-import { TeamRootService } from "../team/team-root.service";
+import { WorkspaceRootService } from "../workspace-settings/workspace-root.service";
 import { ResetUserPasswordSchema } from "../users/users.schemas";
 import type { ResetUserPasswordInput } from "../users/users.schemas";
 import { UsersService } from "../users/users.service";
@@ -71,7 +71,7 @@ type SetMaxWorkspacesInput = z.infer<typeof SetMaxWorkspacesSchema>;
 export class AdminTeamsController {
   constructor(
     private readonly db: DbService,
-    private readonly teamRoot: TeamRootService,
+    private readonly teamRoot: WorkspaceRootService,
     private readonly users: UsersService,
     private readonly sessionInvalidator: SessionInvalidationService,
   ) {}
@@ -273,7 +273,7 @@ export class AdminTeamsController {
   ) {
     if (workspaceId === session.workspaceId) {
       throw new BadRequestException({
-        error: "use /api/team to delete your own organization",
+        error: "use /api/workspace to delete your own organization",
       });
     }
     const team = await this.db.workspace.findUnique({

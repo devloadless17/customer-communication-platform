@@ -11,7 +11,7 @@ import {
 
 import { TeamSettings, type PendingInviteRow, type TeamUserRow } from "./team-settings";
 
-export const metadata = { title: "Team · Settings" };
+export const metadata = { title: "Members · Settings" };
 
 export default async function TeamSettingsPage() {
   const { user, permissions } = await getSession();

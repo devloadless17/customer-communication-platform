@@ -174,7 +174,7 @@ export default async function SettingsIndex() {
             ]
           : []),
         // Admin-gated on the ROLE, not a capability: every route under
-        // /api/team/tickets is @RequireRole("admin"), so surfacing this card to
+        // /api/workspace/tickets is @RequireRole("admin"), so surfacing this card to
         // anyone else would land them on the error boundary.
         ...(isAdmin
           ? [

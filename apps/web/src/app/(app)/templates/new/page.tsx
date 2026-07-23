@@ -13,7 +13,7 @@ export default async function NewTemplatePage() {
   if (!permissions["templates:manage"]) redirect("/templates");
 
   // Use the templates endpoint (open to any member) rather than the admin-only
-  // GET /api/team/whatsapp — templates:manage grants access to non-admins too,
+  // GET /api/workspace/whatsapp — templates:manage grants access to non-admins too,
   // and it already returns the connected/hasWabaId/hasAppId flags we need here.
   const [{ connected, hasWabaId, hasAppId }, fieldDefinitions] = await Promise.all([
     listWhatsappTemplates(),

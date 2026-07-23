@@ -272,7 +272,7 @@ export function TeamSettings({
       renamedByUserId: currentUserId,
     });
 
-    const res = await apiFetch("/api/team", {
+    const res = await apiFetch("/api/workspace", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: trimmed }),
@@ -313,14 +313,14 @@ export function TeamSettings({
     setDeletingOrg(true);
     // Drop the socket BEFORE the fetch so the connection banner never gets a
     // chance to flash "Reconnecting…" between the server-side socket kick
-    // (api/team DELETE → disconnectUserSockets) and the /logout hard nav.
+    // (api/workspace DELETE → disconnectUserSockets) and the /logout hard nav.
     // The flag inside closeClientSocket also suppresses the banner across
     // the rest of this teardown. Broadcast first so every other tab in this
     // browser tears down in parallel, not after their own next 401.
     broadcastSignout();
     closeClientSocket();
     try {
-      const res = await apiFetch("/api/team", { method: "DELETE" });
+      const res = await apiFetch("/api/workspace", { method: "DELETE" });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         setError(data.error ?? "Failed to delete organization");
@@ -344,7 +344,7 @@ export function TeamSettings({
   return (
     <div className="flex flex-col gap-8">
       <PageHeader
-        title="Team members"
+        title="Members"
         description={
           canManage
             ? "Generate an invite link for each teammate. They set their own password when they accept."
@@ -979,7 +979,7 @@ function OrgWorkHoursCard({
     setSaving(true);
     onError(null);
     try {
-      const res = await apiFetch("/api/team/work-hours", {
+      const res = await apiFetch("/api/workspace/work-hours", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ workHours: next }),

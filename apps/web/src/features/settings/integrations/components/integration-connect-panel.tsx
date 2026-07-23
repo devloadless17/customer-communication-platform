@@ -69,7 +69,7 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
     setError(null);
     setGenerating(true);
     try {
-      const res = await apiFetch("/api/team/api-keys", {
+      const res = await apiFetch("/api/workspace/api-keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -126,7 +126,7 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
     setError(null);
     setRotating(true);
     try {
-      const res = await apiFetch(`/api/team/api-keys/${connected.id}/rotate`, {
+      const res = await apiFetch(`/api/workspace/api-keys/${connected.id}/rotate`, {
         method: "POST",
       });
       const json = (await res.json()) as {

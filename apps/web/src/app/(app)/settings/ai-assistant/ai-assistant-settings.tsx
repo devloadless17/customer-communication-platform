@@ -136,7 +136,7 @@ export function AiAssistantSettings({
     try {
       const { id: _id, configVersion: _cv, createdAt: _c, updatedAt: _u, workspaceId: _t, ...editable } =
         form as Record<string, unknown>;
-      const res = await apiFetch("/api/team/ai-assistant", {
+      const res = await apiFetch("/api/workspace/ai-assistant", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ ...editable, expectedConfigVersion: version }),
@@ -397,7 +397,7 @@ function VoicePreviewButton({
   async function preview() {
     setLoading(true);
     try {
-      const res = await apiFetch("/api/team/ai-assistant/voice-preview", {
+      const res = await apiFetch("/api/workspace/ai-assistant/voice-preview", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ voiceId, voiceLanguage, voiceSpeed }),
@@ -559,7 +559,7 @@ function KnowledgeFiles({
   const [uploading, setUploading] = useState(false);
 
   async function refresh() {
-    const res = await apiFetch("/api/team/ai-assistant/documents");
+    const res = await apiFetch("/api/workspace/ai-assistant/documents");
     if (!res.ok) return;
     const data = (await res.json()) as { documents?: AiDocument[] };
     if (data.documents) setDocuments(data.documents);
@@ -570,7 +570,7 @@ function KnowledgeFiles({
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const res = await apiFetch("/api/team/ai-assistant/documents", { method: "POST", body: fd });
+      const res = await apiFetch("/api/workspace/ai-assistant/documents", { method: "POST", body: fd });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         toast.error(data.error ? `Upload failed: ${data.error}` : "Upload failed");
@@ -584,7 +584,7 @@ function KnowledgeFiles({
   }
 
   async function toggle(doc: AiDocument) {
-    const res = await apiFetch(`/api/team/ai-assistant/documents/${doc.id}`, {
+    const res = await apiFetch(`/api/workspace/ai-assistant/documents/${doc.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ enabled: !doc.enabled }),
@@ -592,14 +592,14 @@ function KnowledgeFiles({
     if (res.ok) await refresh();
   }
   async function reprocess(doc: AiDocument) {
-    const res = await apiFetch(`/api/team/ai-assistant/documents/${doc.id}/reprocess`, { method: "POST" });
+    const res = await apiFetch(`/api/workspace/ai-assistant/documents/${doc.id}/reprocess`, { method: "POST" });
     if (res.ok) {
       toast.success("Reprocessing…");
       await refresh();
     }
   }
   async function remove(doc: AiDocument) {
-    const res = await apiFetch(`/api/team/ai-assistant/documents/${doc.id}`, { method: "DELETE" });
+    const res = await apiFetch(`/api/workspace/ai-assistant/documents/${doc.id}`, { method: "DELETE" });
     if (res.ok) {
       toast.success("Deleted");
       await refresh();

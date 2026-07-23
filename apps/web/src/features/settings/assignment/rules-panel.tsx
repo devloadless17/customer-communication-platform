@@ -54,7 +54,7 @@ export function RulesPanel({
 
   const createRule = () =>
     call(
-      "/api/team/assignment/rules",
+      "/api/workspace/assignment/rules",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -73,7 +73,7 @@ export function RulesPanel({
     const target = index + delta;
     if (target < 0 || target >= next.length) return;
     [next[index], next[target]] = [next[target]!, next[index]!];
-    return call("/api/team/assignment/rules/order", {
+    return call("/api/workspace/assignment/rules/order", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ruleIds: next.map((r) => r.id) }),
@@ -81,7 +81,7 @@ export function RulesPanel({
   };
 
   const patchRule = (id: string, body: Record<string, unknown>) =>
-    call(`/api/team/assignment/rules/${id}`, {
+    call(`/api/workspace/assignment/rules/${id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -148,7 +148,7 @@ export function RulesPanel({
               variant="ghost"
               onClick={() =>
                 void call(
-                  `/api/team/assignment/rules/${rule.id}`,
+                  `/api/workspace/assignment/rules/${rule.id}`,
                   { method: "DELETE" },
                   "Rule deleted",
                 )

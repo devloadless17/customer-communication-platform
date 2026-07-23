@@ -39,7 +39,7 @@ export function PolicyPreview({ policyId }: { policyId: string }) {
     setRunning(true);
     setError(false);
     try {
-      const res = await apiFetch("/api/team/assignment/preview", {
+      const res = await apiFetch("/api/workspace/assignment/preview", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ source: "inbound", policyId }),

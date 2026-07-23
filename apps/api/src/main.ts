@@ -177,7 +177,7 @@ async function bootstrap(): Promise<void> {
   // signature-verified endpoints need the raw bytes — copying the buffer for
   // every internal REST call is pure waste. Two prefixes need it:
   //   - `/webhooks/*`                                     (Meta provider ingest)
-  //   - `/api/team/workflows/:id/incoming-webhook`        (per-workflow inbound)
+  //   - `/api/workspace/workflows/:id/incoming-webhook`        (per-workflow inbound)
   // Anything else skips the Buffer.from() and stays on the cheap path.
   // 10 MB cap on JSON payloads. Meta webhook bodies are small (KB-scale,
   // they reference media URLs rather than embed binary), and our largest
@@ -193,7 +193,7 @@ async function bootstrap(): Promise<void> {
         if (!url) return;
         const needsRaw =
           url.startsWith("/webhooks/") ||
-          (url.startsWith("/api/team/workflows/") &&
+          (url.startsWith("/api/workspace/workflows/") &&
             url.includes("/incoming-webhook"));
         if (needsRaw) {
           (req as unknown as { rawBody: Buffer }).rawBody = Buffer.from(buf);

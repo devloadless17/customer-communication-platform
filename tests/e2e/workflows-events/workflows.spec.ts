@@ -99,7 +99,7 @@ test.describe("A. Workflow happy path", () => {
     await publishWorkflow(request, wf.id);
 
     // 2. Trigger it with the canonical contact + conversation.
-    const triggerResp = await request.post(`/api/team/workflows/${wf.id}/manual-trigger`, {
+    const triggerResp = await request.post(`/api/workspace/workflows/${wf.id}/manual-trigger`, {
       data: { contactId, conversationId },
     });
     expect(triggerResp.ok(), `manual-trigger ${triggerResp.status()}`).toBe(true);
@@ -186,7 +186,7 @@ test.describe("B. Workflow chain-depth gate", () => {
     // WorkflowRun row written for operator visibility (the P3 fix from
     // 2026-05-26).
     const resp = await request.post(
-      `/api/team/workflows/${wf.id}/incoming-webhook`,
+      `/api/workspace/workflows/${wf.id}/incoming-webhook`,
       {
         headers: {
           "Content-Type": "application/json",
@@ -247,7 +247,7 @@ test.describe("B. Workflow chain-depth gate", () => {
     const { sig, ts } = signRequest(secret, body);
 
     const resp = await request.post(
-      `/api/team/workflows/${wf.id}/incoming-webhook`,
+      `/api/workspace/workflows/${wf.id}/incoming-webhook`,
       {
         headers: {
           "Content-Type": "application/json",
