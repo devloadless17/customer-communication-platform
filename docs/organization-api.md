@@ -783,9 +783,11 @@ curl -s -X PATCH "$CCP_BASE_URL/api/external/v1/tickets/tkt_123" \
 
 Send `expectedVersion` (from your last read) and a write built on a stale view returns **`409 version_conflict`** instead of overwriting someone else's change — re-read and retry. Omit it and the write always applies; that is the right choice for automation, which has no stale view to protect.
 
+**`DELETE /tickets/:id`** · `write:tickets` — permanently delete a ticket (work raised by mistake). The customer's messages survive (only unlinked); the work item and its timeline go. Returns `{ "ok": true }`, or `404` if it doesn't exist in your workspace. In the app this is limited to admins/managers; a scoped key is trusted like an integration.
+
 Lifecycle side effects, so you don't have to replicate them:
 - → `solved` stamps `resolvedAt` and starts the reopen window.
-- → `closed` is terminal; a later message always opens a new ticket.
+- → `closed` is terminal; a later message never reopens it (there is no auto-open — raise a new ticket deliberately).
 - Back from `solved`/`closed` clears the resolution and increments `reopenCount`.
 - → `on_hold` (and `pending`, if the policy says so) **pauses** the SLA clock; leaving it pushes both deadlines out by exactly the parked time rather than restarting the commitment.
 
@@ -832,7 +834,6 @@ colleague's open editor) or move the SLA clock.
 
 | Field | Meaning |
 |---|---|
-| `ticketAutoOpen` | Open a ticket automatically on an inbound with no active one. Default `true`. Off = messages simply carry no `ticketId`. |
 | `ticketReopenWindowHours` | How long after `solved` a follow-up reopens instead of starting fresh. Default `72`, `0` disables, max `720`. |
 | `ticketCloseConversationOnLastSolved` | Close the conversation when its last active ticket is solved. Default `false` — the two lifecycles are deliberately decoupled. |
 

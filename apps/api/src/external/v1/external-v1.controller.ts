@@ -977,6 +977,18 @@ export class ExternalV1Controller {
   }
 
   /**
+   * Permanently delete a ticket. A scoped key is trusted like an integration,
+   * so `write:tickets` authorizes it (no role gate — the in-app route reserves
+   * this for admins/managers, but a key is not an agent). The customer's
+   * messages survive; the work item and its timeline go.
+   */
+  @Delete("tickets/:id")
+  @RequireScope("write:tickets")
+  async deleteTicketV1(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+    return this.tickets.remove(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id);
+  }
+
+  /**
    * Add an internal note to a ticket. Never reaches the customer.
    *
    * Parity with the in-app composer, which is a locked rule — and the one /v1

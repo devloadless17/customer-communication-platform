@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
@@ -16,10 +17,12 @@ import { isRestrictedViewer, type ConversationViewer } from "@/lib/conversations
 import {
   addTicketNote,
   createTicket,
+  deleteTicket,
   updateTicket,
   type TicketActor,
   type TicketOutcome,
 } from "@/lib/tickets/mutations";
+import type { Role } from "@ccp/shared/types";
 import {
   getTicket,
   getTicketCounts,
@@ -190,6 +193,37 @@ export class TicketsService {
       ...body,
     });
     return this.unwrap(outcome);
+  }
+
+  /**
+   * Permanently delete a ticket — a destructive escape hatch for work raised by
+   * mistake, distinct from solving/closing (which keep it for reporting).
+   *
+   * Limited to admins and managers: agents solve or close, they don't destroy
+   * the audit trail. Managers/admins are never conversation-visibility-restricted,
+   * so no per-conversation viewer check is needed here. The customer's messages
+   * survive (SetNull) — only the work item and its timeline go.
+   */
+  async remove(
+    workspaceId: string,
+    actor: TicketActor,
+    id: string,
+    // Session calls pass the workspace role and are gated to admin/manager.
+    // API-key calls pass none: `@RequireScope("write:tickets")` is their
+    // authorization, and a scoped key is trusted like an integration, not an
+    // agent.
+    role?: Role,
+  ): Promise<{ ok: true }> {
+    if (role !== undefined && role !== "admin" && role !== "manager") {
+      throw new ForbiddenException({
+        error: "forbidden",
+        detail:
+          "Deleting a ticket is limited to admins and managers. Solve or close it instead.",
+      });
+    }
+    const outcome = await deleteTicket(this.db, { workspaceId, ticketId: id, actor });
+    if (!outcome.ok) throw new NotFoundException({ error: "ticket_not_found" });
+    return { ok: true };
   }
 
   /**
@@ -365,7 +399,6 @@ export class TicketsService {
     const ws = await this.db.workspace.findUniqueOrThrow({
       where: { id: workspaceId },
       select: {
-        ticketAutoOpen: true,
         ticketReopenWindowHours: true,
         ticketCloseConversationOnLastSolved: true,
       },
@@ -381,7 +414,6 @@ export class TicketsService {
       where: { id: workspaceId },
       data: body,
       select: {
-        ticketAutoOpen: true,
         ticketReopenWindowHours: true,
         ticketCloseConversationOnLastSolved: true,
       },

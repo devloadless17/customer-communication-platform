@@ -28,7 +28,9 @@ Contact ──1:1── Conversation ──1:N── Ticket
 
 ### Raising one
 
-A ticket is created deliberately from the inbox — the **Raise a ticket** button in the contact panel (`raise-ticket-button.tsx`) collects a subject, the cause, a priority, and an optional team to hand it to, then `POST /api/tickets`. Auto-open (`Workspace.ticketAutoOpen`, off by default) and workflows (`create_ticket`, which also carries a `description`) are the non-manual paths. All three converge on `createTicket`, so a ticket means the same thing however it was raised. The customer is always attached (`contactId`) — the detail view shows the contact and links back to the conversation.
+A ticket is created deliberately from the inbox — the **Raise a ticket** button in the contact panel (`raise-ticket-button.tsx`) collects a subject, the cause, a priority, and an optional team to hand it to, then `POST /api/tickets`. A workflow's `create_ticket` step (which also carries a `description`) is the only non-manual path — there is **no auto-open**. Both converge on `createTicket`, so a ticket means the same thing however it was raised. The customer is always attached (`contactId`) — the detail view shows the contact and links back to the conversation.
+
+**Deleting.** A ticket raised by mistake can be permanently deleted (`DELETE /api/tickets/:id`, `deleteTicket`) — distinct from `solved`/`closed`, which keep it for reporting. Limited to **admins and managers** (agents solve or close instead). The FKs do the careful part: `Message.ticketId` is SetNull (the customer's messages survive, merely unlinked), `Conversation.activeTicketId` is SetNull, and `TicketEvent` cascades. The `ticket.changed` event carries `action: "deleted"` with the pre-delete snapshot, so the board drops the card and an open detail view exits.
 
 | `Conversation.activeTicketId` | The ticket new messages attach to. A single column read on the ingest hot path instead of an ordered scan of the thread's ticket history per message. |
 | `Conversation.openTicketCount` | Denormalized non-terminal count, so the inbox badge and filter are a plain column predicate — same rationale as `openFlagCount`, and bumped only on ticket writes (rare), never per message. |
@@ -53,9 +55,10 @@ At ingest, in the same transaction as the message write:
 
 1. An **active** (non-terminal) ticket on the thread → attach to it.
 2. Otherwise a ticket **solved inside `Workspace.ticketReopenWindowHours`** (default **72h**) → reopen it.
-3. Otherwise **auto-open** a new ticket — but only if `Workspace.ticketAutoOpen` is on, which it is
-   **not by default** (changed 2026-07-23). With it off — the normal case — the
-   message simply carries no `ticketId`.
+3. Otherwise → **nothing**. An inbound never opens a new ticket. Tickets are
+   raised deliberately (see "Raising one" above); the message simply carries no
+   `ticketId`, and the inbox tracks the thread as it always has. The auto-open
+   toggle was removed 2026-07-25.
 
 ## Handing a ticket to another team
 
@@ -153,9 +156,9 @@ specific escalation on it belongs to a specialist. Two rules connect them, both 
   `assignedUserId: null` explicitly still means unassigned.
 - When a conversation is assigned and its active ticket has **no** owner, the ticket gets the same one
   (`fillActiveTicketAssignee`). This exists because of an ordering fact, not a preference:
-  auto-assignment runs **detached** in the background tier, after ingest has already opened the ticket.
-  Without it, every auto-opened ticket on an auto-assigned thread would sit unassigned forever and the
-  board's "Mine" filter would be empty for everyone.
+  auto-assignment runs **detached** in the background tier, after a reply has already attached to the
+  ticket. Without it, a ticket on an auto-assigned thread could sit unassigned and the board's "Mine"
+  filter would be empty for everyone.
 
 Neither ever **moves** a ticket that already has an owner — §18's "automated assignment never overrides
 a human", applied to the ticket.

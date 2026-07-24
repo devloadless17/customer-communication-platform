@@ -1085,6 +1085,13 @@ export default function ApiDocsPage() {
           <code>team=none</code>), which ANDs with <code>assignee</code>. Scope{" "}
           <code>write:tickets</code>.
         </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/tickets/:id">
+          <strong>Permanently delete a ticket</strong> — for work raised by mistake. The
+          conversation and every message stay in the inbox (only unlinked); the work item
+          and its timeline go. Returns <code>{"{ ok: true }"}</code>, or <code>404</code> if
+          it isn&apos;t in your workspace. In the app this is limited to admins/managers; a
+          scoped key is trusted like an integration. Scope <code>write:tickets</code>.
+        </Endpoint>
         <Endpoint
           method="POST"
           path="/api/external/v1/tickets/:id/notes"
@@ -1098,7 +1105,7 @@ export default function ApiDocsPage() {
           SLA clock. Scope <code>write:tickets</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/tickets-settings">
-          <code>ticketAutoOpen</code>, <code>ticketReopenWindowHours</code>,{" "}
+          <code>ticketReopenWindowHours</code>,{" "}
           <code>ticketCloseConversationOnLastSolved</code>. <code>PATCH</code> the same
           path to change them (<code>write:tickets</code>). Scope{" "}
           <code>read:tickets</code>.

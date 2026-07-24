@@ -76,17 +76,12 @@ function Behaviour({ settings, onSave }: { settings: TicketSettingsView; onSave:
 
   return (
     <section className="rounded-xl border bg-card p-4">
-      <h2 className="mb-3 text-sm font-semibold">How tickets open</h2>
-
-      <Row
-        title="Open a ticket automatically for every incoming message"
-        hint="Off by default, and that is usually right: the inbox already tracks every conversation, so auto-opening makes a ticket mean the same thing and fills the board with work nobody raised. Leave it off and a ticket means someone decided this needs work — with a subject, a priority and an assignee. Turn it on only for a high-volume desk that genuinely wants one ticket per incoming message."
-      >
-        <Switch
-          checked={settings.ticketAutoOpen}
-          onCheckedChange={(v) => void patch({ ticketAutoOpen: v })}
-        />
-      </Row>
+      <h2 className="text-sm font-semibold">How tickets open</h2>
+      <p className="mb-3 mt-0.5 text-2xs text-muted-foreground">
+        A ticket is always raised deliberately — by an agent from the inbox
+        (&ldquo;Raise a ticket&rdquo;) or by a workflow. Incoming messages never
+        open one on their own; the inbox already tracks every conversation.
+      </p>
 
       <Row
         title="Reopen window"

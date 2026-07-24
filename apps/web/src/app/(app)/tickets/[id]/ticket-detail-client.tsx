@@ -2,9 +2,12 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, ArrowLeft, Clock, Loader2, MessageSquare } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { AlertTriangle, ArrowLeft, Clock, Loader2, MessageSquare, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { LocalTime } from "@/components/local-time";
 import { ChannelBadge } from "@/features/inbox/components/channel-badge";
@@ -80,6 +83,7 @@ export function TicketDetailClient({
   users,
   tags,
   teams,
+  canDelete,
 }: {
   ticket: Ticket;
   events: TicketEvent[];
@@ -87,7 +91,10 @@ export function TicketDetailClient({
   tags: Tag[];
   /** Teams (AssignmentPolicy) this ticket can be handed to. */
   teams: Array<{ id: string; name: string; isDefault: boolean }>;
+  /** Whether the viewer (admin/manager) may permanently delete this ticket. */
+  canDelete: boolean;
 }) {
+  const router = useRouter();
   const [ticket, setTicket] = useState(seed);
   const [events, setEvents] = useState(seedEvents);
   const [busy, setBusy] = useState(false);
@@ -102,20 +109,52 @@ export function TicketDetailClient({
   const [handoffTeamId, setHandoffTeamId] = useState<string>("");
   const [handoffReason, setHandoffReason] = useState("");
   const [note, setNote] = useState("");
+  const { confirm, confirmDialog } = useConfirm();
+
+  async function removeTicket() {
+    const ok = await confirm({
+      title: `Delete ticket #${ticket.number}?`,
+      description:
+        "This permanently removes the ticket and its timeline. The conversation and every message stay in the inbox — only this work item is deleted. This can't be undone.",
+      confirmLabel: "Delete ticket",
+      destructive: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await apiFetch(`/api/tickets/${ticket.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+        throw new Error(d.detail || d.error || "Couldn't delete this ticket");
+      }
+      toast.success(`Ticket #${ticket.number} deleted`);
+      router.replace("/tickets");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Couldn't delete this ticket");
+      setBusy(false);
+    }
+  }
 
   // Filtered to THIS ticket: `ticket:changed` is workspace-scoped, so an
   // unfiltered handler would re-render the page on every ticket in the org.
   useEffect(() => {
     const socket = getClientSocket();
-    const onTicket = (payload: { ticket: Ticket }) => {
+    const onTicket = (payload: { ticket: Ticket; action: string }) => {
       if (payload.ticket.id !== seed.id) return;
+      // Deleted out from under the viewer (an admin removed it elsewhere) — this
+      // page no longer has a ticket to show, so leave for the board.
+      if (payload.action === "deleted") {
+        toast.info("This ticket was deleted.");
+        router.replace("/tickets");
+        return;
+      }
       setTicket((prev) => (prev.version === payload.ticket.version ? prev : payload.ticket));
     };
     socket.on("ticket:changed", onTicket);
     return () => {
       socket.off("ticket:changed", onTicket);
     };
-  }, [seed.id]);
+  }, [seed.id, router]);
 
   const patch = async (body: Record<string, unknown>) => {
     setBusy(true);
@@ -199,6 +238,19 @@ export function TicketDetailClient({
             <Badge variant="muted" className="px-1.5 py-0 text-3xs">
               Reopened {ticket.reopenCount}×
             </Badge>
+          )}
+          {canDelete && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy}
+              onClick={() => void removeTicket()}
+              className="ml-auto h-7 gap-1.5 px-2 text-2xs text-muted-foreground hover:text-destructive"
+            >
+              <Trash2 aria-hidden className="size-3.5" />
+              Delete
+            </Button>
           )}
         </div>
 
@@ -505,6 +557,7 @@ export function TicketDetailClient({
           Saving…
         </p>
       )}
+      {confirmDialog}
     </div>
   );
 }

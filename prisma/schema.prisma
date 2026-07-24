@@ -627,21 +627,13 @@ model Workspace {
   firstTouchGreeter        FirstTouchGreeter @default(ai)
 
   // ---- Ticketing ----
-  // Open a ticket automatically when a message arrives on a thread with no
-  // active one.
+  // There is NO auto-open. A ticket is a deliberate act — raised by an agent
+  // from the inbox or by a workflow's `create_ticket` step — never minted just
+  // because a customer messaged. Auto-opening on every inbound made a ticket
+  // mean the same thing as a conversation (the inbox already tracks every
+  // thread), filling the board with work nobody raised. The toggle that used to
+  // live here (`ticketAutoOpen`) was removed 2026-07-25.
   //
-  // OFF by default (changed 2026-07-23). Auto-opening on every inbound makes a
-  // ticket the same thing as a conversation, which is precisely what a ticket is
-  // NOT: the inbox already tracks every thread, and a board where every "hi"
-  // becomes a work item is noise nobody triages. A ticket should mean "someone
-  // decided this needs work" — raised deliberately, with a subject and an
-  // assignee, by the agent who read the message.
-  //
-  // Left as a per-workspace toggle rather than removed: a high-volume support
-  // desk that genuinely wants one ticket per inbound can still switch it on, and
-  // nothing downstream changes either way — with it off, messages simply carry
-  // no `ticketId`.
-  ticketAutoOpen                      Boolean @default(false)
   // How long after a ticket is SOLVED a follow-up message reopens it instead of
   // opening a new one. This is the single most-debatable rule in ticketing —
   // too short and one issue becomes three tickets, too long and a genuinely new

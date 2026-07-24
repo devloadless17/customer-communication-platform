@@ -65,7 +65,10 @@ export type TicketAction =
   | "solved"
   | "closed"
   | "sla_breached"
-  | "updated";
+  | "updated"
+  /** The ticket was permanently deleted. The board removes the card; the
+   *  detail view redirects. Messages survive (SetNull), events cascade. */
+  | "deleted";
 
 export type TicketOutcome =
   | { ok: true; ticket: Ticket; openTicketCount: number; action: TicketAction }
@@ -287,7 +290,7 @@ export async function routeMessageToTicket(
 
   const workspace = await tx.workspace.findUnique({
     where: { id: args.workspaceId },
-    select: { ticketAutoOpen: true, ticketReopenWindowHours: true },
+    select: { ticketReopenWindowHours: true },
   });
 
   if (conversation.activeTicketId) {
@@ -329,14 +332,12 @@ export async function routeMessageToTicket(
     }
   }
 
-  if (!workspace?.ticketAutoOpen) return { ticketId: null, opened: null };
-
-  const opened = await createTicketInTx(
-    tx,
-    { workspaceId: args.workspaceId, conversationId: conversation.id, actor: {}, source: "auto" },
-    conversation,
-  );
-  return { ticketId: opened.ticket.id, opened };
+  // No auto-open. A ticket is a deliberate act — raised by an agent from the
+  // inbox (the "Raise a ticket" button) or by a workflow's `create_ticket`
+  // step, never minted just because a customer messaged. So an inbound either
+  // ATTACHES to the thread's live ticket, REOPENS a recently-solved one inside
+  // the window, or leaves the thread ticket-free (the inbox already tracks it).
+  return { ticketId: null, opened: null };
 }
 
 /**
@@ -789,6 +790,59 @@ async function allocateNumber(tx: TxClient, workspaceId: string): Promise<number
   // `create` seeded next=2 and handed out 1; `update` returns the POST-increment
   // value, so the number just handed out is one less.
   return row.next - 1;
+}
+
+export interface DeleteTicketArgs extends EventGates {
+  workspaceId: string;
+  ticketId: string;
+  actor: TicketActor;
+}
+
+/**
+ * Permanently delete a ticket.
+ *
+ * A destructive escape hatch for work raised by mistake — distinct from
+ * `solved`/`closed`, which keep the ticket for reporting. The database FKs do
+ * the careful part: `Message.ticketId` is SetNull (the customer's messages
+ * survive, merely unlinked), `Conversation.activeTicketId` is SetNull (the
+ * pointer clears itself), and `TicketEvent` cascades (the timeline goes with the
+ * ticket it described). All we own here is the denormalized `openTicketCount` —
+ * decrement it when the deleted ticket was still counting as open — and the
+ * `deleted` frame so the board drops the card and the detail view exits.
+ */
+export async function deleteTicket(
+  db: Db,
+  args: DeleteTicketArgs,
+): Promise<{ ok: false; reason: "not_found" } | { ok: true }> {
+  const existing = await db.ticket.findFirst({
+    where: { id: args.ticketId, workspaceId: args.workspaceId },
+    select: { id: true, status: true, conversationId: true },
+  });
+  if (!existing) return { ok: false, reason: "not_found" };
+
+  await db.$transaction(async (tx) => {
+    // Snapshot BEFORE the delete — the `deleted` frame carries it so subscribers
+    // know which card to drop without re-reading a row that's about to vanish.
+    const snapshot = await readTicket(tx, existing.id);
+
+    const openTicketCount = isTicketActive(existing.status)
+      ? await bumpOpenTicketCount(tx, existing.conversationId, -1)
+      : await bumpOpenTicketCount(tx, existing.conversationId, 0);
+
+    // Cascade removes TicketEvents; SetNull unlinks Messages and clears the
+    // conversation's activeTicketId. One delete, all side effects handled by FKs.
+    await tx.ticket.delete({ where: { id: existing.id } });
+
+    await publishTicketEvent(tx, {
+      args,
+      ticket: snapshot,
+      openTicketCount,
+      action: "deleted",
+      previousStatus: existing.status,
+    });
+  });
+  kickOutbox();
+  return { ok: true };
 }
 
 async function readTicket(tx: TxClient, id: string): Promise<Ticket> {

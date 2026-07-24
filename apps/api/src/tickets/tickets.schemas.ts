@@ -140,7 +140,6 @@ export const UpdateTicketFieldSchema = z.object({
 export type UpdateTicketFieldInput = z.infer<typeof UpdateTicketFieldSchema>;
 
 export const TicketSettingsSchema = z.object({
-  ticketAutoOpen: z.boolean().optional(),
   // 0 disables reopening entirely. Capped at 30 days — beyond that a follow-up
   // is a new question, not the same one.
   ticketReopenWindowHours: z.number().int().min(0).max(720).optional(),

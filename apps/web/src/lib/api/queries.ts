@@ -252,7 +252,6 @@ export async function getTicketSettings(): Promise<{
 }
 
 export interface TicketSettingsView {
-  ticketAutoOpen: boolean;
   ticketReopenWindowHours: number;
   ticketCloseConversationOnLastSolved: boolean;
 }

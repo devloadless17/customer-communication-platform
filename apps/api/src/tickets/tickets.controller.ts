@@ -103,6 +103,16 @@ export class TicketsController {
   ) {
     return this.tickets.update(session.workspaceId, { userId: session.userId }, id, body, session);
   }
+
+  /**
+   * Permanently delete a ticket. Admin/manager only (the service enforces it) —
+   * agents solve or close instead. The customer's messages survive; the work
+   * item and its timeline go.
+   */
+  @Delete(":id")
+  async remove(@CurrentSession() session: ApiSession, @Param("id") id: string) {
+    return this.tickets.remove(session.workspaceId, { userId: session.userId }, id, session.role);
+  }
 }
 
 /**

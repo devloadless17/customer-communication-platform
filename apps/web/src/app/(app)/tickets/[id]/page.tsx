@@ -7,6 +7,7 @@ import {
   listTeamMembers,
 } from "@/lib/api/queries";
 import { soft } from "@/lib/api/soft";
+import { getSession } from "@/lib/auth/current-user";
 
 import { TicketDetailClient } from "./ticket-detail-client";
 
@@ -25,7 +26,7 @@ export default async function TicketDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const detail = await getTicket(id).catch(() => null);
+  const [detail, session] = await Promise.all([getTicket(id).catch(() => null), getSession()]);
   if (!detail) notFound();
   const [users, tags, teams] = await Promise.all([
     listTeamMembers(),
@@ -36,6 +37,10 @@ export default async function TicketDetailPage({
     soft("assignment policies", [], () => listAssignmentPolicies()),
   ]);
   const { ticket, events } = detail;
+  // Delete is destructive and reserved for the people who supervise the queue —
+  // matches the API's admin/manager gate, so the button only shows when the
+  // click will actually work.
+  const canDelete = session.user.role === "admin" || session.user.role === "manager";
   return (
     <TicketDetailClient
       ticket={ticket}
@@ -43,6 +48,7 @@ export default async function TicketDetailPage({
       users={users}
       tags={tags}
       teams={teams}
+      canDelete={canDelete}
     />
   );
 }

@@ -27,6 +27,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   createTicket,
+  deleteTicket,
   fillActiveTicketAssignee,
   markSlaBreached,
   routeMessageToTicket,
@@ -85,13 +86,6 @@ beforeAll(async () => {
       data: {
         name: `TK WS ${S}`,
         organizationId: orgId,
-        // EXPLICIT, not inherited. Auto-open is off by default (a ticket should
-        // mean someone decided this needs work, not "a message arrived"), and
-        // most of this file tests the auto-open path specifically. Setting it
-        // here keeps those tests meaningful and independent of the default —
-        // the cases that assert the OFF behaviour create their own workspace
-        // with `ticketAutoOpen: false`.
-        ticketAutoOpen: true,
       },
     })
   ).id;
@@ -129,38 +123,41 @@ describe("numbering", () => {
 });
 
 describe("message → ticket routing", () => {
-  it("auto-opens on the first message and stamps the conversation pointer", async () => {
+  // Auto-open was removed 2026-07-25: a ticket is a deliberate act. So an inbound
+  // NEVER opens a new ticket — it only attaches to a live one or reopens a
+  // recently-solved one. Tickets are seeded here via createTicket (the manual
+  // path), exactly as an agent's "Raise a ticket" would.
+  it("does NOT open a ticket on an inbound — tickets are raised deliberately", async () => {
     const conversationId = await makeConversation();
     const routed = await prisma.$transaction((tx) =>
       routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
     );
-    expect(routed.ticketId).toBeTruthy();
+    expect(routed.ticketId).toBeNull();
 
     const convo = await conversationState(conversationId);
-    expect(convo.activeTicketId).toBe(routed.ticketId);
-    expect(convo.openTicketCount).toBe(1);
+    expect(convo.activeTicketId).toBeNull();
+    expect(convo.openTicketCount).toBe(0);
   });
 
-  it("attaches a second message to the SAME ticket, not a new one", async () => {
+  it("attaches an inbound to the thread's ACTIVE ticket, doesn't open a second", async () => {
     const conversationId = await makeConversation();
-    const first = await prisma.$transaction((tx) =>
+    const opened = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
+    const ticketId = opened.ok ? opened.ticket.id : "";
+
+    const routed = await prisma.$transaction((tx) =>
       routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
     );
-    const second = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
-    );
-    expect(second.ticketId).toBe(first.ticketId);
+    expect(routed.ticketId).toBe(ticketId);
     expect((await conversationState(conversationId)).openTicketCount).toBe(1);
   });
 
   it("REOPENS a ticket solved inside the reopen window", async () => {
     const conversationId = await makeConversation();
-    const opened = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
-    );
+    const opened = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
+    const ticketId = opened.ok ? opened.ticket.id : "";
     const solved = await updateTicket(db, {
       workspaceId,
-      ticketId: opened.ticketId!,
+      ticketId,
       actor: { userId },
       status: "solved",
     });
@@ -174,13 +171,13 @@ describe("message → ticket routing", () => {
       routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
     );
     // Same ticket, back open — one issue, not two.
-    expect(followUp.ticketId).toBe(opened.ticketId);
+    expect(followUp.ticketId).toBe(ticketId);
     convo = await conversationState(conversationId);
     expect(convo.openTicketCount).toBe(1);
-    expect(convo.activeTicketId).toBe(opened.ticketId);
+    expect(convo.activeTicketId).toBe(ticketId);
 
     const row = await prisma.ticket.findUniqueOrThrow({
-      where: { id: opened.ticketId! },
+      where: { id: ticketId },
       select: { status: true, reopenCount: true, resolvedAt: true },
     });
     expect(row.status).toBe("open");
@@ -189,81 +186,42 @@ describe("message → ticket routing", () => {
     expect(row.resolvedAt).toBeNull();
   });
 
-  it("opens a NEW ticket when the solve is OUTSIDE the window", async () => {
+  it("does NOT reopen when the solve is OUTSIDE the window, and opens nothing new", async () => {
     const conversationId = await makeConversation();
-    const opened = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
-    );
-    await updateTicket(db, {
-      workspaceId,
-      ticketId: opened.ticketId!,
-      actor: { userId },
-      status: "solved",
-    });
+    const opened = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
+    const ticketId = opened.ok ? opened.ticket.id : "";
+    await updateTicket(db, { workspaceId, ticketId, actor: { userId }, status: "solved" });
     // Age the solve past the 72h default rather than sleeping for three days.
     await prisma.ticket.update({
-      where: { id: opened.ticketId! },
+      where: { id: ticketId },
       data: { lastSolvedAt: new Date(Date.now() - 80 * 3_600_000) },
     });
 
     const fresh = await prisma.$transaction((tx) =>
       routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
     );
-    expect(fresh.ticketId).not.toBe(opened.ticketId);
-    expect((await conversationState(conversationId)).openTicketCount).toBe(1);
+    // Outside the window, the follow-up is a genuinely new question — but with
+    // no auto-open there is nothing to open. The thread simply carries no ticket
+    // until an agent raises one.
+    expect(fresh.ticketId).toBeNull();
+    expect((await conversationState(conversationId)).openTicketCount).toBe(0);
   });
 
   it("never reopens from an OUTBOUND message — an agent's follow-up isn't new work", async () => {
     const conversationId = await makeConversation();
-    const opened = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
-    );
-    await updateTicket(db, {
-      workspaceId,
-      ticketId: opened.ticketId!,
-      actor: { userId },
-      status: "solved",
-    });
+    const opened = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
+    const ticketId = opened.ok ? opened.ticket.id : "";
+    await updateTicket(db, { workspaceId, ticketId, actor: { userId }, status: "solved" });
     const routed = await prisma.$transaction((tx) =>
       routeMessageToTicket(tx, { workspaceId, conversationId, direction: "out" }),
     );
-    // A brand-new ticket, not a resurrection of the solved one.
-    expect(routed.ticketId).not.toBe(opened.ticketId);
+    // Outbound never reopens, and nothing auto-opens.
+    expect(routed.ticketId).toBeNull();
     const row = await prisma.ticket.findUniqueOrThrow({
-      where: { id: opened.ticketId! },
+      where: { id: ticketId },
       select: { status: true },
     });
     expect(row.status).toBe("solved");
-  });
-
-  it("carries no ticket at all when the workspace turned auto-open off", async () => {
-    const otherWs = await prisma.workspace.create({
-      data: { name: `TK off ${S}`, organizationId: orgId, ticketAutoOpen: false },
-      select: { id: true },
-    });
-    const contact = await prisma.contact.create({
-      data: {
-        workspaceId: otherWs.id,
-        name: "TK off",
-        phoneNumber: `+9867${S}`,
-        identityChannel: "whatsapp",
-      },
-      select: { id: true },
-    });
-    const convo = await prisma.conversation.create({
-      data: { workspaceId: otherWs.id, contactId: contact.id, channel: "whatsapp" },
-      select: { id: true },
-    });
-
-    const routed = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, {
-        workspaceId: otherWs.id,
-        conversationId: convo.id,
-        direction: "in",
-      }),
-    );
-    expect(routed.ticketId).toBeNull();
-    expect((await conversationState(convo.id)).openTicketCount).toBe(0);
   });
 
   it("refuses a conversation from another workspace", async () => {
@@ -380,6 +338,73 @@ describe("cause / description", () => {
     });
     expect(cleared.ok).toBe(true);
     if (cleared.ok) expect(cleared.ticket.description).toBeNull();
+  });
+});
+
+describe("delete", () => {
+  it("removes the ticket, clears the pointer + counter, and cascades events", async () => {
+    const conversationId = await makeConversation();
+    const opened = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
+    const ticketId = opened.ok ? opened.ticket.id : "";
+    let convo = await conversationState(conversationId);
+    expect(convo.activeTicketId).toBe(ticketId);
+    expect(convo.openTicketCount).toBe(1);
+    expect(await prisma.ticketEvent.count({ where: { ticketId } })).toBeGreaterThan(0);
+
+    const res = await deleteTicket(db, { workspaceId, ticketId, actor: { userId } });
+    expect(res.ok).toBe(true);
+
+    expect(await prisma.ticket.findUnique({ where: { id: ticketId } })).toBeNull();
+    // TicketEvents cascade with the ticket they described.
+    expect(await prisma.ticketEvent.count({ where: { ticketId } })).toBe(0);
+    // The conversation's active pointer + open counter both clear.
+    convo = await conversationState(conversationId);
+    expect(convo.activeTicketId).toBeNull();
+    expect(convo.openTicketCount).toBe(0);
+  });
+
+  it("PRESERVES the customer's messages — only unlinks them (SetNull)", async () => {
+    const conversationId = await makeConversation();
+    const opened = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
+    const ticketId = opened.ok ? opened.ticket.id : "";
+    const msg = await prisma.message.create({
+      data: {
+        workspaceId,
+        conversationId,
+        channel: "whatsapp",
+        direction: "in",
+        externalId: `del-${S}-${Math.random()}`,
+        body: "the customer's message",
+        ticketId,
+      },
+      select: { id: true },
+    });
+
+    await deleteTicket(db, { workspaceId, ticketId, actor: { userId } });
+
+    const after = await prisma.message.findUnique({
+      where: { id: msg.id },
+      select: { id: true, ticketId: true, body: true },
+    });
+    expect(after).not.toBeNull();
+    expect(after!.body).toBe("the customer's message");
+    expect(after!.ticketId).toBeNull();
+  });
+
+  it("does not decrement the counter for an already-solved ticket", async () => {
+    const conversationId = await makeConversation();
+    const opened = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
+    const ticketId = opened.ok ? opened.ticket.id : "";
+    await updateTicket(db, { workspaceId, ticketId, actor: { userId }, status: "solved" });
+    // Solving already dropped openTicketCount to 0; deleting must not go negative.
+    const res = await deleteTicket(db, { workspaceId, ticketId, actor: { userId } });
+    expect(res.ok).toBe(true);
+    expect((await conversationState(conversationId)).openTicketCount).toBe(0);
+  });
+
+  it("returns not_found for a missing or cross-workspace ticket", async () => {
+    const res = await deleteTicket(db, { workspaceId, ticketId: `tkt_nope_${S}`, actor: {} });
+    expect(res.ok).toBe(false);
   });
 });
 
@@ -514,18 +539,16 @@ describe("SLA", () => {
 
 
 describe("assignee inheritance", () => {
-  it("an auto-opened ticket inherits the thread's owner", async () => {
+  it("a new ticket inherits the thread's owner when no assignee is named", async () => {
     const conversationId = await makeConversation();
     await prisma.conversation.update({
       where: { id: conversationId },
       data: { assignedUserId: userId },
     });
 
-    const routed = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
-    );
+    const created = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
     const ticket = await prisma.ticket.findUniqueOrThrow({
-      where: { id: routed.ticketId! },
+      where: { id: created.ok ? created.ticket.id : "" },
       select: { assignedUserId: true, status: true },
     });
     expect(ticket.assignedUserId).toBe(userId);
@@ -551,15 +574,15 @@ describe("assignee inheritance", () => {
 
   it("assigning the thread later fills an UNASSIGNED ticket", async () => {
     const conversationId = await makeConversation();
-    const routed = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
-    );
-    // Auto-assign runs detached, AFTER ingest opened the ticket — this is the
-    // real ordering, and the reason the follow-through exists at all.
+    // Raised on an unassigned thread → the ticket starts unassigned.
+    const created = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
+    const ticketId = created.ok ? created.ticket.id : "";
+    // Auto-assign runs detached, AFTER the ticket exists — this is the real
+    // ordering, and the reason the follow-through exists at all.
     await fillActiveTicketAssignee(workspaceId, conversationId, userId);
 
     const ticket = await prisma.ticket.findUniqueOrThrow({
-      where: { id: routed.ticketId! },
+      where: { id: ticketId },
       select: { assignedUserId: true },
     });
     expect(ticket.assignedUserId).toBe(userId);
@@ -575,12 +598,11 @@ describe("assignee inheritance", () => {
     });
 
     const conversationId = await makeConversation();
-    const routed = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
-    );
+    const created = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
+    const ticketId = created.ok ? created.ticket.id : "";
     await updateTicket(db, {
       workspaceId,
-      ticketId: routed.ticketId!,
+      ticketId,
       actor: { userId },
       assignedUserId: other.id,
     });
@@ -590,7 +612,7 @@ describe("assignee inheritance", () => {
     await fillActiveTicketAssignee(workspaceId, conversationId, userId);
 
     const ticket = await prisma.ticket.findUniqueOrThrow({
-      where: { id: routed.ticketId! },
+      where: { id: ticketId },
       select: { assignedUserId: true },
     });
     expect(ticket.assignedUserId).toBe(other.id);

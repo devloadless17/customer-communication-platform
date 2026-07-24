@@ -720,8 +720,11 @@ export interface TicketChangedEvent {
     | "solved"
     | "closed"
     | "sla_breached"
-    | "updated";
-  /** The ticket AFTER the change. */
+    | "updated"
+    /** Permanently deleted. `ticket` carries the pre-delete snapshot so
+     *  subscribers know which card to drop; messages survive, events cascade. */
+    | "deleted";
+  /** The ticket AFTER the change (for `deleted`, the pre-delete snapshot). */
   ticket: Ticket;
   /** The status it moved FROM. Null when `action` is `created`. */
   previousStatus: TicketStatus | null;

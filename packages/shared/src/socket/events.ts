@@ -173,7 +173,9 @@ export interface ServerToClientEvents {
       | "solved"
       | "closed"
       | "sla_breached"
-      | "updated";
+      | "updated"
+      /** Permanently deleted — the board drops the card, the detail view exits. */
+      | "deleted";
     ticket: Ticket;
     previousStatus: TicketStatus | null;
     breachedLeg?: "first_response" | "resolution";

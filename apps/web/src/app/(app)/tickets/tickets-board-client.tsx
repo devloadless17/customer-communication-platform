@@ -158,6 +158,18 @@ export function TicketsBoardClient({
       }, 400);
     };
     const onTicket = (payload: { ticket: Ticket; action: string }) => {
+      // A deleted ticket leaves the board entirely — drop the card and refresh
+      // the counts. No status re-check below; it's simply gone.
+      if (payload.action === "deleted") {
+        let held = false;
+        setTickets((prev) => {
+          if (!prev.some((t) => t.id === payload.ticket.id)) return prev;
+          held = true;
+          return prev.filter((t) => t.id !== payload.ticket.id);
+        });
+        if (held) void loadCounts();
+        return;
+      }
       let known = false;
       setTickets((prev) => {
         const idx = prev.findIndex((t) => t.id === payload.ticket.id);

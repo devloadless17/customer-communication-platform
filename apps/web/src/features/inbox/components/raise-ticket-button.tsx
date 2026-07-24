@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { TicketPlus, Loader2 } from "lucide-react";
+import { TicketPlus, Loader2, Check } from "lucide-react";
 import { toast } from "sonner";
 
 import { Dialog, DialogContent } from "@/components/ui/dialog";
@@ -131,22 +131,35 @@ function RaiseTicketDialog({
     }
   }
 
+  const selectClass =
+    "h-9 w-full rounded-md border border-input bg-background px-2.5 text-xs shadow-sm transition-colors focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60";
+
   return (
     <Dialog open onClose={onClose} dismissOnBackdrop={!busy}>
-      <DialogContent ariaLabel="Raise a ticket" className="flex max-w-md flex-col gap-4">
-        <div>
-          <h2 className="text-sm font-semibold">Raise a ticket</h2>
-          <p className="mt-0.5 text-2xs text-muted-foreground">
-            On {contactName}&rsquo;s conversation. Give it a cause so whoever picks it up
-            knows the issue without re-reading the thread.
-          </p>
+      <DialogContent
+        ariaLabel="Raise a ticket"
+        className="flex max-w-md flex-col overflow-hidden p-0"
+      >
+        {/* Header — bordered, with a subtle icon chip, matching the app's dialogs. */}
+        <div className="flex items-start gap-3 border-b border-border px-5 py-4">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <TicketPlus aria-hidden className="size-4" />
+          </div>
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold leading-tight">Raise a ticket</h2>
+            <p className="mt-1 text-2xs leading-relaxed text-muted-foreground">
+              On {contactName}&rsquo;s conversation — give it a cause so whoever picks
+              it up knows the issue without re-reading the thread.
+            </p>
+          </div>
         </div>
 
         {createdId ? (
-          // Success state: confirm + offer to jump to the new ticket, rather than
-          // silently closing (the agent usually wants to set an assignee next).
-          <div className="flex flex-col gap-3">
-            <p className="text-xs text-muted-foreground">The ticket is open on this thread.</p>
+          <div className="flex flex-col gap-4 px-5 py-5">
+            <div className="flex items-center gap-2.5 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2.5 text-xs text-emerald-700 dark:text-emerald-400">
+              <Check aria-hidden className="size-4 shrink-0" />
+              The ticket is open on this thread.
+            </div>
             <div className="flex justify-end gap-2">
               <Button variant="outline" size="sm" onClick={onClose}>
                 Done
@@ -158,84 +171,86 @@ function RaiseTicketDialog({
           </div>
         ) : (
           <form
-            className="flex flex-col gap-3"
             onSubmit={(e) => {
               e.preventDefault();
               if (!busy) void submit();
             }}
           >
-            <div className="flex flex-col gap-1">
-              <label htmlFor="rt-subject" className="text-2xs font-medium text-foreground">
-                Subject
-              </label>
-              <Input
-                id="rt-subject"
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-                placeholder={`${contactName}'s request`}
-                maxLength={200}
-                autoFocus
-              />
-            </div>
-
-            <div className="flex flex-col gap-1">
-              <label htmlFor="rt-cause" className="text-2xs font-medium text-foreground">
-                Cause
-              </label>
-              <textarea
-                id="rt-cause"
-                value={cause}
-                onChange={(e) => setCause(e.target.value)}
-                rows={3}
-                maxLength={5000}
-                placeholder="Why does this need work? What should the team that picks it up know?"
-                className="w-full resize-y rounded-md border bg-background px-2.5 py-1.5 text-xs leading-relaxed focus-visible:border-input focus-visible:outline-none"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="flex flex-col gap-1">
-                <label htmlFor="rt-priority" className="text-2xs font-medium text-foreground">
-                  Priority
+            <div className="flex flex-col gap-4 px-5 py-5">
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="rt-subject" className="text-xs font-medium text-foreground">
+                  Subject
                 </label>
-                <select
-                  id="rt-priority"
-                  value={priority}
-                  onChange={(e) => setPriority(e.target.value as TicketPriority)}
-                  className="h-8 rounded-md border bg-background px-2 text-xs"
-                >
-                  {TICKET_PRIORITIES.map((p) => (
-                    <option key={p} value={p}>
-                      {PRIORITY_LABELS[p]}
-                    </option>
-                  ))}
-                </select>
+                <Input
+                  id="rt-subject"
+                  value={subject}
+                  onChange={(e) => setSubject(e.target.value)}
+                  placeholder={`${contactName}'s request`}
+                  maxLength={200}
+                  autoFocus
+                />
               </div>
 
-              <div className="flex flex-col gap-1">
-                <label htmlFor="rt-team" className="text-2xs font-medium text-foreground">
-                  Hand to team{" "}
-                  <span className="font-normal text-muted-foreground">(optional)</span>
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="rt-cause" className="text-xs font-medium text-foreground">
+                  Cause
                 </label>
-                <select
-                  id="rt-team"
-                  value={teamId}
-                  disabled={!teams || teams.length === 0}
-                  onChange={(e) => setTeamId(e.target.value)}
-                  className="h-8 rounded-md border bg-background px-2 text-xs disabled:opacity-60"
-                >
-                  <option value="">Nobody yet</option>
-                  {(teams ?? []).map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
+                <textarea
+                  id="rt-cause"
+                  value={cause}
+                  onChange={(e) => setCause(e.target.value)}
+                  rows={3}
+                  maxLength={5000}
+                  placeholder="Why does this need work? What should the team that picks it up know?"
+                  className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-xs leading-relaxed shadow-sm transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="rt-priority" className="text-xs font-medium text-foreground">
+                    Priority
+                  </label>
+                  <select
+                    id="rt-priority"
+                    value={priority}
+                    onChange={(e) => setPriority(e.target.value as TicketPriority)}
+                    className={selectClass}
+                  >
+                    {TICKET_PRIORITIES.map((p) => (
+                      <option key={p} value={p}>
+                        {PRIORITY_LABELS[p]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="rt-team" className="text-xs font-medium text-foreground">
+                    Hand to team{" "}
+                    <span className="font-normal text-muted-foreground">(optional)</span>
+                  </label>
+                  <select
+                    id="rt-team"
+                    value={teamId}
+                    disabled={!teams || teams.length === 0}
+                    onChange={(e) => setTeamId(e.target.value)}
+                    className={selectClass}
+                  >
+                    <option value="">Nobody yet</option>
+                    {(teams ?? []).map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </div>
 
-            <div className="mt-1 flex justify-end gap-2">
-              <Button type="button" variant="outline" size="sm" disabled={busy} onClick={onClose}>
+            {/* Footer — bordered, actions right-aligned. */}
+            <div className="flex items-center justify-end gap-2 border-t border-border bg-muted/30 px-5 py-3.5">
+              <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={onClose}>
                 Cancel
               </Button>
               <Button type="submit" size="sm" disabled={busy}>
