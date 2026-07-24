@@ -479,6 +479,12 @@ jobs:
         working-directory: _deploy
         run: |
           set -euo pipefail
+          # Print what compose actually resolved BEFORE pulling. A tag typo or an
+          # unset *_IMAGE_TAG otherwise surfaces only as "pull access denied ...
+          # repository does not exist", which reads like an auth problem and sends
+          # you looking in the wrong place entirely.
+          echo "==> Images compose will pull"
+          docker compose --env-file .env config --images
           echo "==> Pulling images from registry"
           docker compose --env-file .env pull
           echo "==> Booting CI stack"
