@@ -169,7 +169,10 @@ services:
     # Prod pulls :latest-web; `docker compose up --build` builds locally with
     # the same tag. apps/web/Dockerfile carries the Next.js build output +
     # the `next start` entrypoint.
-    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest-web
+    # Tag is parameterised ONLY so CI can smoke-test a `main` build without
+    # touching the tags production pulls. Unset (every real deploy, and any
+    # local `docker compose up`) resolves to :latest-web exactly as before.
+    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:${WEB_IMAGE_TAG:-latest-web}
     build:
       context: .
       dockerfile: apps/web/Dockerfile
@@ -336,7 +339,8 @@ services:
   # Meta webhooks, BullMQ workers, audit/analytics event subscribers,
   # workflow dispatcher.
   api:
-    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest-api
+    # See the WEB_IMAGE_TAG note on `app` — unset resolves to :latest-api.
+    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:${API_IMAGE_TAG:-latest-api}
     build:
       context: .
       dockerfile: apps/api/Dockerfile

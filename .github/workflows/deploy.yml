@@ -40,6 +40,16 @@ concurrency:
 
 env:
   APP_IMAGE_NAME: customer-communication-platform
+  # Which registry tags this run publishes to.
+  #
+  # `latest-{web,api}` is what the VPS pulls, so ONLY a run that is allowed to
+  # ship may write it. A push to main is validated (build + Trivy + smoke) but
+  # never shipped, so it publishes `ci-main-{web,api}` instead — otherwise
+  # unshipped main code would silently become whatever the next production
+  # deploy serves, and `:previous-*` would stop meaning "last image that served
+  # traffic". docker-compose.yml reads WEB_IMAGE_TAG / API_IMAGE_TAG, both
+  # defaulting to latest-*, so nothing outside CI changes.
+  IMAGE_CHANNEL: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'ci-main' || 'latest' }}
 
 jobs:
   typecheck:
@@ -76,12 +86,25 @@ jobs:
       - run: pnpm run check:prisma-fields
 
   changes:
-    # The deploy pipeline (this job + everything that chains off it: build-web,
-    # build-api, smoke, ship) runs ONLY on a push to `production` or a manual
-    # workflow_dispatch. A push to `main` runs the typecheck job above and
-    # nothing else — main never deploys. Downstream jobs skip automatically
-    # when this one is skipped (they read its outputs / gate on its result).
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/production')
+    # Runs on a push to `production`, a push to `main`, or workflow_dispatch.
+    #
+    # main is VALIDATED but never SHIPPED. It used to run typecheck and nothing
+    # else, which meant an entire refactor could sit on main fully green and
+    # still meet the image build, the Trivy gate and the prod-shaped boot for
+    # the very first time on production — where the only way out is forward.
+    # That is exactly how a mail boot gate, five CVEs and a failed migration
+    # all landed in one push. main now runs build + Trivy + smoke, so those
+    # three classes are caught on the integration branch; only `ship` is
+    # production-only.
+    #
+    # Images built for main are pushed under a SEPARATE tag (see `tag` below):
+    # the deploy pulls :latest-{web,api}, so publishing unshipped main code to
+    # those tags would make the next production deploy serve whatever landed on
+    # main last.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/production' || github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     timeout-minutes: 3
     outputs:
@@ -222,7 +245,7 @@ jobs:
           context: .
           file: apps/web/Dockerfile
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest-web
+          tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:${{ env.IMAGE_CHANNEL }}-web
           # Bust ONLY the runtime apt-upgrade layer every deploy so debian
           # security fixes land immediately instead of waiting out the weekly
           # cache scope (+ prev-week fallback) — a mid-week fix (openssl
@@ -244,7 +267,7 @@ jobs:
       - name: Trivy scan — web image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
-          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest-web
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:${{ env.IMAGE_CHANNEL }}-web
           format: table
           exit-code: '1'
           ignore-unfixed: true
@@ -271,7 +294,7 @@ jobs:
           context: .
           file: apps/api/Dockerfile
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest-api
+          tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:${{ env.IMAGE_CHANNEL }}-api
           # Same apt-layer bust as build-web — see the comment there.
           build-args: |
             APT_CACHE_BUST=${{ github.run_id }}
@@ -287,7 +310,7 @@ jobs:
       - name: Trivy scan — api image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
-          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest-api
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:${{ env.IMAGE_CHANNEL }}-api
           format: table
           exit-code: '1'
           ignore-unfixed: true
@@ -331,7 +354,7 @@ jobs:
       - name: Trivy re-scan — shipping web image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
-          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest-web
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:${{ env.IMAGE_CHANNEL }}-web
           format: table
           exit-code: '1'
           ignore-unfixed: true
@@ -341,7 +364,7 @@ jobs:
       - name: Trivy re-scan — shipping api image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
-          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest-api
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:${{ env.IMAGE_CHANNEL }}-api
           format: table
           exit-code: '1'
           ignore-unfixed: true
@@ -419,6 +442,11 @@ jobs:
           cat > _deploy/.env <<EOF
           DOCKER_USERNAME=${DOCKER_USERNAME}
           APP_IMAGE_NAME=${APP_IMAGE_NAME}
+          # Pull the tags THIS run published (ci-main-* on main, latest-* on
+          # production) so a main run smoke-tests its own images, not the ones
+          # currently live in production.
+          WEB_IMAGE_TAG=${{ env.IMAGE_CHANNEL }}-web
+          API_IMAGE_TAG=${{ env.IMAGE_CHANNEL }}-api
           POSTGRES_DB=${POSTGRES_DB}
           POSTGRES_USER=${POSTGRES_USER}
           POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -552,10 +580,16 @@ jobs:
 
   ship:
     # Skipped when nothing rebuilt (smoke skipped → smoke.result != 'success').
+    #
+    # The ref guard is what keeps main VALIDATED but never SHIPPED: main now runs
+    # changes → build → Trivy → smoke, and stops here. Deploying stays an explicit
+    # act — a push to production or a manual dispatch. A main run also publishes
+    # ci-main-* rather than latest-*, so there is nothing for this job to ship.
     if: |
       always() && !cancelled() &&
       needs.smoke.result == 'success' &&
-      needs.typecheck.result == 'success'
+      needs.typecheck.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/production')
     needs: [typecheck, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1127,7 +1161,15 @@ jobs:
               docker push "$REPO:latest-$variant"
             done
             cd /opt/ccp
-            docker compose --env-file .env up -d --remove-orphans
+            # NOT fatal, and that is the whole point. `app` depends_on api with
+            # condition service_healthy, so when the failure being rolled back is
+            # a poisoned schema the ROLLED-BACK api crash-loops too, compose exits
+            # non-zero here, and under `set -e` the step died on this line — which
+            # is precisely the case the P3009 diagnosis below exists to explain.
+            # The runbook was unreachable exactly when it was needed. Record the
+            # outcome and always fall through to the diagnosis.
+            rollback_up_ok=1
+            docker compose --env-file .env up -d --remove-orphans || rollback_up_ok=0
 
             # P3009 detection. If THIS deploy's migration failed mid-apply,
             # Prisma recorded a FAILED row in _prisma_migrations, and every
@@ -1175,7 +1217,20 @@ jobs:
               echo "ℹ this run did not snapshot the Caddyfile (ship failed before the proxy swap) — leaving live config untouched"
             fi
             rm -f "$SNAP_MARKER"
-            echo "✓ rolled back to :previous-{web,api} (registry + local in sync)"
+            if [ "$rollback_up_ok" = "1" ]; then
+              echo "✓ rolled back to :previous-{web,api} (registry + local in sync)"
+            else
+              # The images were swapped, but the stack did NOT come back up. Say so
+              # plainly: this step used to die silently on the compose failure, so a
+              # red rollback looked identical to "auto-rollback is just broken".
+              # It is not — for a poisoned schema no image swap CAN recover, and the
+              # P3009 runbook above is the actual fix.
+              echo "::error::rollback swapped the images but the stack did NOT come back up."
+              echo "::error::If a P3009 runbook was printed above, follow it — an image rollback cannot clear a failed migration row."
+              echo "::error::Otherwise inspect: docker compose --env-file .env ps -a && docker compose --env-file .env logs --tail=200 api"
+              docker compose --env-file .env ps -a || true
+              docker compose --env-file .env logs --no-color --tail=120 api || true
+            fi
             # MIGRATION SAFETY NOTE (read before trusting this rollback):
             # this step swaps CODE images only — it does NOT revert any database
             # migration that already applied during `up`. If THIS deploy shipped
