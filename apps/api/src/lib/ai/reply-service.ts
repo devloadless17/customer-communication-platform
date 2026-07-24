@@ -135,6 +135,9 @@ function normalize(p: ReplyPayload): ReplyPayload {
       typeof p.hallucinationRisk === "number" ? p.hallucinationRisk : 0,
     ),
     hallucinationNotes: (p.hallucinationNotes ?? "").trim(),
+    complaintConfidence: clamp01(
+      typeof p.complaintConfidence === "number" ? p.complaintConfidence : 0,
+    ),
   };
 }
 

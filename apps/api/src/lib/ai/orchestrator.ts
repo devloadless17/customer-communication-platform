@@ -8,8 +8,7 @@ import { claimInbound, legacyAutopilotOwnsTeam } from "./automation-claim";
 import { getState, handoffToHuman, incrementAutoReply, onCustomerInbound } from "./conversation-state";
 import { decideMode } from "./decide-mode";
 import { HALLUCINATION_FLAG_THRESHOLD } from "./hallucination";
-import { aiGloballyEnabled } from "./models";
-import { openaiConfigured } from "./openai-client";
+import { aiTextEngineConfigured } from "./models";
 import { openingStatus } from "./prompt-builder";
 import { enqueueAiPost } from "./queue";
 import { loadReplyContext } from "./reply-context";
@@ -17,6 +16,13 @@ import { generateReply } from "./reply-service";
 import { configEnabled, loadAiConfig } from "./runtime-config";
 import { persistSuggestion } from "./suggestion-store";
 import { deliverReply, renderDraftAudio, wantsVoiceDraft } from "./voice-delivery";
+import { raiseFlag } from "@/lib/message-flags/mutations";
+
+// Scored at/above this, the customer's latest message auto-raises the team's
+// "Complaint" flag (AI-sourced, confidence recorded on the flag itself). A
+// human still triages it from the Flags queue — this only saves them from
+// having to spot it and flag it manually.
+const COMPLAINT_FLAG_THRESHOLD = 0.6;
 
 /**
  * The reply orchestrator. Runs on the `ai-replies` worker for a `reply` job.
@@ -43,7 +49,7 @@ export interface AiReplyJob {
 
 export async function runAiReply(job: AiReplyJob): Promise<void> {
   const { workspaceId, conversationId, inboundMessageId } = job;
-  if (!aiGloballyEnabled() || !openaiConfigured()) return;
+  if (!aiTextEngineConfigured()) return;
 
   const config = await loadAiConfig(workspaceId);
   if (!configEnabled(config)) return;
@@ -117,6 +123,13 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
   if (payload.replyScript === "latin" && /^ar/i.test(payload.replyLanguage)) {
     payload.replyText = arabicToArabizi(payload.replyText);
   }
+
+  // Independent of send/escalate/draft mode below — this is about the
+  // CUSTOMER's inbound message, not the reply the assistant is about to give.
+  if (payload.complaintConfidence >= COMPLAINT_FLAG_THRESHOLD) {
+    await flagComplaint(workspaceId, inboundMessageId, payload.complaintConfidence).catch(() => {});
+  }
+
   const openNow = openingStatus(config, new Date()).open;
   const mode = decideMode(config, payload, openNow, job.isVoice);
 
@@ -322,6 +335,34 @@ async function audit(
   } catch {
     // Audit is best-effort — never let it fail the reply path.
   }
+}
+
+/**
+ * Auto-raise the workspace's "Complaint" flag definition on the customer's
+ * inbound message. Best-effort and silent on any failure (definition renamed/
+ * deleted/archived, race, etc.) — a missed auto-flag is a triage inconvenience,
+ * never worth failing the reply over. `raiseFlag` is idempotent (unique on
+ * messageId+definitionId), so an at-least-once redelivery can't double-raise.
+ */
+async function flagComplaint(
+  workspaceId: string,
+  messageId: string,
+  confidence: number,
+): Promise<void> {
+  const definition = await db.messageFlagDefinition.findFirst({
+    where: { workspaceId, name: "Complaint", archived: false },
+    select: { id: true },
+  });
+  if (!definition) return;
+  await raiseFlag(db, {
+    workspaceId,
+    messageId,
+    definitionId: definition.id,
+    actor: {},
+    source: "ai",
+    confidence,
+    note: "Auto-detected by the AI assistant.",
+  });
 }
 
 function usageFields(u: { inputTokens?: number; outputTokens?: number; cachedTokens?: number }) {

@@ -189,6 +189,7 @@ export function buildSystemPrompt(config: AiConfigRow): string {
     "- Set shouldEscalate=true when the customer explicitly asks to speak with a human, an agent, customer support, or a representative — or when the request clearly needs a person. When escalating, still write a short, polite replyText telling them you're connecting them to a team member.",
     "- Always return the structured fields. `replyText` is the exact message to send. Set `confidence` honestly.",
     "- Set `hallucinationRisk`/`hallucinationNotes` honestly: if replyText states a specific price, policy, order detail, or availability that ISN'T directly supported by the company info or a retrieved knowledge snippet, flag it there instead of silently hoping it's right.",
+    "- Set `complaintConfidence` honestly, based on the CUSTOMER's latest message, not your reply: score it high when they express dissatisfaction, report a defect/problem, ask for a refund/compensation, or are frustrated/angry — even if your replyText is calm and helpful. 0 for an ordinary question, greeting, or neutral request.",
     "- `ttsText`: the reply written to be SPOKEN aloud. If Arabic, it MUST be in natural everyday spoken LEBANESE dialect (Beirut) in Arabic script — exactly how a Lebanese person would say it out loud, using Lebanese words and phrasing. NEVER formal Modern Standard Arabic (Fusha), and NEVER Syrian, Egyptian, or Gulf. Otherwise repeat replyText.",
   ]
     .filter((l) => l !== "")

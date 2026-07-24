@@ -106,20 +106,33 @@ export class AiInboxService {
     return { summary };
   }
 
+  /**
+   * Visibility boundary for a query keyed by messageId on a table that has no
+   * direct `conversation` relation of its own (AiMessageMetadata,
+   * AiMessageTranscription — both only carry a scalar `messageId`). Resolve
+   * visibility against `Message` instead, which DOES have the relation
+   * `conversationRelationWhere` expects, then query the side table by plain
+   * messageId — never nest the relation filter under a relation that doesn't
+   * exist on the target model (Prisma throws on an unknown relation key).
+   */
+  private async assertMessageVisible(
+    workspaceId: string,
+    messageId: string,
+    viewer?: ConversationViewer,
+  ): Promise<boolean> {
+    if (!viewer) return true;
+    const row = await this.db.message.findFirst({
+      where: { id: messageId, workspaceId, ...conversationRelationWhere(viewer) },
+      select: { id: true },
+    });
+    return !!row;
+  }
+
   /** Single-message hallucination flag, for the thread bubble badge. */
   async getMessageFlag(workspaceId: string, messageId: string, viewer?: ConversationViewer) {
+    if (!(await this.assertMessageVisible(workspaceId, messageId, viewer))) return { flag: null };
     const row = await this.db.aiMessageMetadata.findFirst({
-      // Visibility boundary: keyed by messageId, so it needs the RELATION form
-      // — a restricted agent must not read the assistant's notes about a
-      // message on a thread they can't open.
-      where: {
-        workspaceId,
-        messageId,
-        aiGenerated: true,
-        ...(viewer
-          ? { message: { conversation: conversationRelationWhere(viewer).conversation } }
-          : {}),
-      },
+      where: { workspaceId, messageId, aiGenerated: true },
       select: { hallucinationRisk: true, hallucinationNotes: true },
     });
     const risk = row?.hallucinationRisk ?? null;
@@ -385,9 +398,8 @@ export class AiInboxService {
   }
 
   async getTranscription(workspaceId: string, messageId: string, viewer?: ConversationViewer) {
-    return this.db.aiMessageTranscription.findFirst({
-      where: { messageId, workspaceId, ...(viewer ? conversationRelationWhere(viewer) : {}) },
-    });
+    if (!(await this.assertMessageVisible(workspaceId, messageId, viewer))) return null;
+    return this.db.aiMessageTranscription.findFirst({ where: { messageId, workspaceId } });
   }
 
   async correctTranscription(
@@ -397,8 +409,11 @@ export class AiInboxService {
     correctedText: string,
     viewer?: ConversationViewer,
   ) {
+    if (!(await this.assertMessageVisible(workspaceId, messageId, viewer))) {
+      throw new NotFoundException({ error: "transcription_not_found" });
+    }
     const row = await this.db.aiMessageTranscription.findFirst({
-      where: { messageId, workspaceId, ...(viewer ? conversationRelationWhere(viewer) : {}) },
+      where: { messageId, workspaceId },
     });
     if (!row) throw new NotFoundException({ error: "transcription_not_found" });
     return this.db.aiMessageTranscription.update({
