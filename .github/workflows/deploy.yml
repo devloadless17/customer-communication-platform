@@ -928,7 +928,25 @@ jobs:
               echo "⚠ pre-migration snapshot FAILED — proceeding (nightly dump is the fallback). If this deploy's migration misbehaves, a manual restore decision is required."
             fi
 
-            docker compose --env-file .env up -d --remove-orphans
+            # Same reasoning as the smoke step: `app` depends_on api with
+            # condition service_healthy, so compose blocks here and exits
+            # non-zero the moment api fails — and under `set -e` the step ended
+            # with a bare "container ccp-api-1 is unhealthy" and NOT ONE LINE of
+            # why, on the one stack we cannot SSH into from the workflow. The
+            # api's boot failures (validateEnv gates, a P3009 from a migration
+            # that failed mid-apply, a migrate error against real data) all
+            # print their reason on stderr before exiting. Capture it.
+            if ! docker compose --env-file .env up -d --remove-orphans; then
+              echo "::error::stack failed to come up — api logs follow"
+              docker compose --env-file .env ps -a || true
+              echo "----- api logs (last 200) -----"
+              docker compose --env-file .env logs --no-color --tail=200 api || true
+              echo "----- migrate status -----"
+              # Names the FAILED migration outright when this is a P3009.
+              docker compose --env-file .env run --rm --entrypoint sh api \
+                -c 'cd /app && pnpm prisma migrate status' 2>&1 | tail -40 || true
+              exit 1
+            fi
 
             # Reclaim disk: every deploy pulls a fresh :latest-{web,api},
             # orphaning the prior layers as dangling (untagged) images. This
