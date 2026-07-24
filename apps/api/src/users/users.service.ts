@@ -9,6 +9,7 @@ import { Prisma } from "@prisma/client";
 
 import {
   assignableRoles,
+  canDeleteMember,
   canModifyUser,
   canModifyUserAccount,
   type UserActor,
@@ -862,13 +863,16 @@ export class UsersService {
    * DELETE /api/users/:id — remove the account from the ORGANIZATION entirely.
    *
    * Gates:
-   *   1. canModifyUserAccount — org authority, and an owner is only removable
-   *      by another owner (or a platform superAdmin). Deleting a user is not a
-   *      workspace action even though it is reached from a workspace's members
-   *      page: it ends their access to every workspace in the org at once.
-   *   2. self-delete is always refused (an admin must deactivate themselves
+   *   1. canDeleteMember — org owner/admin/superAdmin may delete any non-owner;
+   *      a WORKSPACE admin may delete a member too (their team), but never the
+   *      owner or a platform operator.
+   *   2. cross-workspace guard — a delete is org-wide, so someone relying on the
+   *      workspace-admin path may only delete a person whose every workspace is
+   *      one the actor administers. Org authority skips this. Without it a Sales
+   *      admin could strip a teammate's Support access.
+   *   3. self-delete is always refused (an admin must deactivate themselves
    *      first, deliberately separating the two actions).
-   *   3. last-active-admin, checked across EVERY workspace they administer —
+   *   4. last-active-admin, checked across EVERY workspace they administer —
    *      not just the caller's. Scoping it to one workspace let a delete
    *      performed from workspace A silently leave workspace B with no admin,
    *      which its own guard calls an unrecoverable state.
@@ -897,20 +901,49 @@ export class UsersService {
     });
     if (!target) throw new NotFoundException({ error: "user not found" });
 
-    if (
-      !canModifyUserAccount(actor, {
-        role: (target.workspaceMemberships.find((m) => m.workspaceId === workspaceId)?.role ??
-          "agent") as Role,
-        isSuperAdmin: target.isSuperAdmin,
-        orgRole: target.orgRole as OrgRole,
-      })
-    ) {
+    const targetActor = {
+      role: (target.workspaceMemberships.find((m) => m.workspaceId === workspaceId)?.role ??
+        "agent") as Role,
+      isSuperAdmin: target.isSuperAdmin,
+      orgRole: target.orgRole as OrgRole,
+    };
+
+    if (!canDeleteMember(actor, targetActor)) {
       throw new ForbiddenException({
-        error: "org_admin_required",
+        error: "cannot_delete_member",
         detail:
-          "Deleting an account removes it from every workspace in the organization, so it's an organization owner/admin action. To remove someone from THIS workspace only, use Organization → Members.",
+          "You can remove teammates you administer, but not the organization's owner or a platform operator.",
       });
     }
+
+    // Cross-workspace guard for the WORKSPACE-admin path. A delete is org-wide —
+    // it ends the target's access to EVERY workspace — so someone acting on a
+    // workspace-admin role (not org-directory authority) may only delete a
+    // person whose whole footprint is inside workspaces the actor also
+    // administers. Without this, an admin of Sales could remove a teammate from
+    // Support, a workspace they have no authority over. Org owner/admin and
+    // superAdmin have org-wide authority already, so they skip the check.
+    if (!canModifyUserAccount(actor, targetActor)) {
+      const actorAdminWorkspaceIds = new Set(
+        (
+          await this.db.workspaceMember.findMany({
+            where: { userId: actorUserId, role: "admin" },
+            select: { workspaceId: true },
+          })
+        ).map((m) => m.workspaceId),
+      );
+      const reachesForeignWorkspace = target.workspaceMemberships.some(
+        (m) => !actorAdminWorkspaceIds.has(m.workspaceId),
+      );
+      if (reachesForeignWorkspace) {
+        throw new ForbiddenException({
+          error: "cross_workspace_delete",
+          detail:
+            "This person also belongs to a workspace you don't administer, and deleting them would remove them from it too. An organization owner or admin has to remove them.",
+        });
+      }
+    }
+
     if (targetId === actorUserId) {
       throw new BadRequestException({ error: "cannot delete your own account" });
     }

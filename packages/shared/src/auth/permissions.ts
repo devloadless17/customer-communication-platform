@@ -133,6 +133,33 @@ export function canModifyUserAccount(actor: UserActor, target: UserActor): boole
 }
 
 /**
+ * Whether `actor` may DELETE `target` from the organization — the "remove this
+ * teammate" action on the workspace members page.
+ *
+ * Wider than `canModifyUserAccount` on purpose. Deactivation and password reset
+ * stay org-directory-only (they are account-recovery levers), but *removing a
+ * teammate* is something a workspace admin does to run their own team, so:
+ *
+ *   1. anyone with org-directory authority (owner / org-admin / superAdmin) may
+ *      delete per the account rule above; PLUS
+ *   2. a WORKSPACE admin (an admin of the inbox, even with orgRole "member") may
+ *      delete a member too — but NEVER the org owner and NEVER a platform
+ *      operator.
+ *
+ * A delete is ORG-WIDE (it ends the target's access to every workspace), so the
+ * workspace-admin path carries one more condition that CANNOT be expressed in a
+ * pure predicate: the actor must administer *every* workspace the target belongs
+ * to, so a Sales admin can't strip someone's Support access. That check needs
+ * the membership graph and lives in `users.service.remove()`. This predicate is
+ * the in-principle gate (used by the UI and as the first line of the service);
+ * the service applies the cross-workspace guard on top.
+ */
+export function canDeleteMember(actor: UserActor, target: UserActor): boolean {
+  if (canModifyUserAccount(actor, target)) return true;
+  return actor.role === "admin" && !target.isSuperAdmin && target.orgRole !== "owner";
+}
+
+/**
  * Set of WORKSPACE roles `actor` is allowed to assign to a target. Granting or
  * revoking the platform `isSuperAdmin` flag is deliberately NOT expressible
  * here — it is a platform-level action on its own admin surface, not a

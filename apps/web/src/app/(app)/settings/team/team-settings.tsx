@@ -36,6 +36,7 @@ import { toast } from "@/lib/toast";
 import {
   assignableRoles,
   canManageUsers,
+  canDeleteMember,
   canModifyUser,
   canModifyUserAccount,
   roleLabel,
@@ -583,13 +584,18 @@ function UserRow({
     isSuperAdmin: user.isSuperAdmin ?? false,
     orgRole: user.orgRole,
   };
-  // Two different authorities, deliberately kept apart. `editable` is the
-  // WORKSPACE one: change this person's role here. `manageAccount` is the ORG
-  // one: disable sign-in, reset the password, delete the account — each of
-  // which reaches every workspace they belong to. Same predicates the API
-  // enforces, so a control is only rendered when the click will actually work.
+  // Three authorities, deliberately kept apart. `editable` is the WORKSPACE one:
+  // change this person's role here. `manageAccount` is the ORG-directory one:
+  // disable sign-in / reset the password — account-recovery levers reserved for
+  // owner/admin. `canDelete` is wider: removing a teammate is something a
+  // workspace admin does to run their own team, so an inbox admin may delete a
+  // member too (never the owner, never a platform operator). Same predicates the
+  // API enforces, so a control is only rendered when the click will actually
+  // work — the API additionally blocks a workspace-admin delete that would reach
+  // a workspace they don't administer.
   const editable = canManageUsers(actorRole) && canModifyUser(actor, target);
   const manageAccount = canModifyUserAccount(actor, target);
+  const canDelete = canDeleteMember(actor, target);
   // Live socket value wins; the SSR snapshot is the fallback for the first
   // paint (and for a member the sparse presence map omits, i.e. the default
   // "available, no note").
@@ -692,7 +698,7 @@ function UserRow({
             {roleLabel(user.role)}
           </Badge>
         )}
-        {manageAccount && (
+        {(manageAccount || canDelete) && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -707,33 +713,38 @@ function UserRow({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-52">
-              <DropdownMenuItem
-                disabled={pending || isSelf}
-                onSelect={() => onPatch({ deactivated: !user.deactivated })}
-              >
-                {user.deactivated ? (
-                  <>
-                    <UserCheck className="size-3.5" />
-                    Re-enable account
-                  </>
-                ) : (
-                  <>
-                    <UserX className="size-3.5" />
-                    Disable sign-in
-                  </>
-                )}
-              </DropdownMenuItem>
-              {!isSelf && (
+              {/* Disable + reset stay ORG-directory actions (owner/admin). A
+                  workspace admin sees only Delete below. */}
+              {manageAccount && (
+                <DropdownMenuItem
+                  disabled={pending || isSelf}
+                  onSelect={() => onPatch({ deactivated: !user.deactivated })}
+                >
+                  {user.deactivated ? (
+                    <>
+                      <UserCheck className="size-3.5" />
+                      Re-enable account
+                    </>
+                  ) : (
+                    <>
+                      <UserX className="size-3.5" />
+                      Disable sign-in
+                    </>
+                  )}
+                </DropdownMenuItem>
+              )}
+              {manageAccount && !isSelf && (
                 <DropdownMenuItem disabled={pending} onSelect={onResetPassword}>
                   <KeyRound className="size-3.5" />
                   Reset password
                 </DropdownMenuItem>
               )}
-              {!isSelf && (
+              {canDelete && !isSelf && (
                 <>
                   {/* Separated, per the menu guidance — an irreversible delete
-                      should never sit flush against routine actions. */}
-                  <DropdownMenuSeparator />
+                      should never sit flush against routine actions. The
+                      separator is only meaningful when something precedes it. */}
+                  {manageAccount && <DropdownMenuSeparator />}
                   <DropdownMenuItem
                     disabled={pending}
                     className="text-destructive focus:text-destructive"

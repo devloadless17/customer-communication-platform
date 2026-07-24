@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canDeleteMember,
   canManageOrgDirectory,
   canModifyUser,
   canModifyUserAccount,
@@ -93,5 +94,50 @@ describe("account-level actions (deactivate / delete / reset password)", () => {
   it("a manager never can, in either direction", () => {
     expect(canModifyUserAccount(MANAGER, TARGET_MEMBER)).toBe(false);
     expect(canModifyUser(MANAGER, TARGET_MEMBER)).toBe(false);
+  });
+});
+
+/**
+ * Deleting a teammate is WIDER than the other account actions. Disable + reset
+ * stay org-directory-only, but a workspace admin removes people to run their own
+ * team, so they may delete a member — never the owner, never a platform
+ * operator. The cross-workspace safety (the actor must administer every
+ * workspace the target is in) is enforced in users.service.remove(), not this
+ * pure predicate; here we prove the in-principle gate.
+ */
+describe("deleting a member (canDeleteMember)", () => {
+  it("a workspace admin (org member) MAY delete an ordinary member", () => {
+    // The behaviour the user asked for: an inbox admin can remove teammates.
+    expect(canModifyUserAccount(WORKSPACE_ADMIN, TARGET_MEMBER)).toBe(false);
+    expect(canDeleteMember(WORKSPACE_ADMIN, TARGET_MEMBER)).toBe(true);
+  });
+
+  it("but a workspace admin may NOT delete the org owner", () => {
+    expect(canDeleteMember(WORKSPACE_ADMIN, TARGET_OWNER)).toBe(false);
+  });
+
+  it("and NEVER a platform operator", () => {
+    expect(canDeleteMember(WORKSPACE_ADMIN, TARGET_OPERATOR)).toBe(false);
+    expect(canDeleteMember(ORG_ADMIN, TARGET_OPERATOR)).toBe(false);
+    expect(canDeleteMember(OWNER, TARGET_OPERATOR)).toBe(false);
+  });
+
+  it("org owner/admin keep the account-level authority (delete anyone non-owner)", () => {
+    expect(canDeleteMember(ORG_ADMIN, TARGET_MEMBER)).toBe(true);
+    expect(canDeleteMember(OWNER, TARGET_MEMBER)).toBe(true);
+    // only an owner may delete another owner
+    expect(canDeleteMember(ORG_ADMIN, TARGET_OWNER)).toBe(false);
+    expect(canDeleteMember(OWNER, TARGET_OWNER)).toBe(true);
+  });
+
+  it("a platform operator may delete anyone that isn't another operator", () => {
+    expect(canDeleteMember(OPERATOR, TARGET_OWNER)).toBe(true);
+    expect(canDeleteMember(OPERATOR, TARGET_MEMBER)).toBe(true);
+  });
+
+  it("a manager or agent never can", () => {
+    expect(canDeleteMember(MANAGER, TARGET_MEMBER)).toBe(false);
+    const AGENT: UserActor = { role: "agent", isSuperAdmin: false, orgRole: "member" };
+    expect(canDeleteMember(AGENT, TARGET_MEMBER)).toBe(false);
   });
 });
