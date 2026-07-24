@@ -377,11 +377,29 @@ async function loadPlatformAnalytics(): Promise<PlatformAnalytics> {
         where: { isPlatform: false },
         _count: { _all: true },
       }),
-      db.user.count(),
-      db.contact.count(),
-      db.conversation.count(),
-      db.message.count(),
-      db.broadcast.count(),
+      // The anchor org is excluded from the ORG counts above, but it owns a real
+      // workspace ("Loadless", seeded alongside it), so every total below has to
+      // exclude it too or the console contradicts itself — which is exactly what
+      // it did: "Organizations: 0" sitting next to "Members: 1".
+      //
+      // Members mirrors the per-org seat count (the `seatRows` groupBy above):
+      // no platform operators, no deactivated accounts. Same definition in both
+      // places, so the platform total is the sum of the per-org numbers the
+      // Organizations list shows rather than a second, larger number.
+      db.user.count({
+        where: {
+          isSuperAdmin: false,
+          deactivatedAt: null,
+          organization: { isPlatform: false },
+        },
+      }),
+      // Data totals are scoped through the owning workspace's organization: an
+      // operator who sends a test message from the anchor workspace must not
+      // show up as platform-wide traffic.
+      db.contact.count({ where: { workspace: { organization: { isPlatform: false } } } }),
+      db.conversation.count({ where: { workspace: { organization: { isPlatform: false } } } }),
+      db.message.count({ where: { workspace: { organization: { isPlatform: false } } } }),
+      db.broadcast.count({ where: { workspace: { organization: { isPlatform: false } } } }),
       db.organization.count({ where: { isPlatform: false, createdAt: { gte: since } } }),
       db.organization.findMany({
         where: { isPlatform: false, status: "pending" },
