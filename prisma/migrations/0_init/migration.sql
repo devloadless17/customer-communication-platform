@@ -620,7 +620,6 @@ CREATE TABLE "Invite" (
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "expiresAt" TIMESTAMP(3) NOT NULL,
     "acceptedAt" TIMESTAMP(3),
-    "organizationId" TEXT,
 
     CONSTRAINT "Invite_pkey" PRIMARY KEY ("id")
 );
@@ -1428,7 +1427,6 @@ CREATE TABLE "AiMessageMetadata" (
     "script" TEXT,
     "intent" TEXT,
     "confidence" DOUBLE PRECISION,
-    "interactionId" TEXT,
     "hallucinationRisk" DOUBLE PRECISION,
     "hallucinationNotes" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -2305,9 +2303,6 @@ ALTER TABLE "Invite" ADD CONSTRAINT "Invite_workspaceId_fkey" FOREIGN KEY ("work
 
 -- AddForeignKey
 ALTER TABLE "Invite" ADD CONSTRAINT "Invite_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Invite" ADD CONSTRAINT "Invite_organizationId_fkey" FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "MessageTemplate" ADD CONSTRAINT "MessageTemplate_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;

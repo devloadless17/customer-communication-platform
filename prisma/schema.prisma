@@ -537,7 +537,6 @@ model Organization {
 
   workspaces Workspace[]
   users      User[]
-  invites    Invite[]
 }
 
 // A Workspace is the data-ISOLATION boundary (formerly `Workspace`): every one of
@@ -2194,8 +2193,6 @@ model Invite {
 
   workspace      Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy      User?         @relation("InvitedBy", fields: [createdById], references: [id], onDelete: SetNull)
-  organization   Organization? @relation(fields: [organizationId], references: [id])
-  organizationId String?
 
   @@index([workspaceId, email])
 }
@@ -4658,7 +4655,6 @@ model AiMessageMetadata {
   script             String?
   intent             String?
   confidence         Float?
-  interactionId      String?
   // Model self-reported risk (0..1) that this reply contains a claim not
   // grounded in the company info / retrieved knowledge (see REPLY_SCHEMA).
   // Null for replies generated before this field existed. A conversation's
