@@ -14,8 +14,8 @@ import type { TicketStatus } from "@ccp/shared/tickets/types";
  * a lost race is a silent skip, and a bounded batch so a backlog can't turn one
  * tick into a table scan.
  *
- * The scan is served by the two PARTIAL indexes created in raw SQL by migration
- * 20260722190000_ticketing (`Ticket_first_response_due_idx` /
+ * The scan is served by the two PARTIAL indexes created in raw SQL in the
+ * 0_init baseline's hand-maintained section (`Ticket_first_response_due_idx` /
  * `Ticket_resolution_due_idx`): they cover exactly the rows that can still
  * breach — non-terminal, not-already-flagged, with a due date — which is a tiny
  * fraction of the table. Without them this is a seq scan of every ticket the

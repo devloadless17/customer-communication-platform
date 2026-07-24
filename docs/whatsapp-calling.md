@@ -217,9 +217,9 @@ forced announcement plus the caller's ability to hang up; anything beyond that
   recordings. Call artifacts are not `Message` media and must not be
   cross-checked against a `mediaKey` column.
 - **Models, not columns on `Call`.** `CallRecording` / `CallTranscript`, each
-  `@@unique([teamId, callId])` for at-least-once idempotency. Migration
-  `20260530180000_drop_call_recording_seam` correctly dropped the earlier
-  speculative columns — don't re-add them.
+  `@@unique([teamId, callId])` for at-least-once idempotency. An early migration correctly dropped the
+  speculative columns that predated them (since squashed into `0_init`) —
+  don't re-add them.
 - **Artifacts must not move `Call.status`.** They arrive minutes after the call
   and carry no lifecycle meaning. New additive events
   `call.recording_available` / `call.transcript_available`, scoped to the

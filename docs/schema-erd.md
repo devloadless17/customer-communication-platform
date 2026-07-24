@@ -386,8 +386,9 @@ key references it**. Six partial indexes went with it and were never re-created;
 tell was exact — every raw partial index keyed on `teamId` vanished, and the three that
 weren't (`ChannelConnection_one_default_per_channel`,
 `ConversationSessionSummary_one_open_per_conversation`,
-`OutboundEvent_drainer_pending_idx`) survived untouched. Restored by
-`20260724020000_restore_partial_indexes_lost_in_rename`.
+`OutboundEvent_drainer_pending_idx`) survived untouched. They were restored by
+a follow-up migration, and now live in the hand-maintained section at the bottom
+of the `0_init` baseline.
 
 Two rules:
 

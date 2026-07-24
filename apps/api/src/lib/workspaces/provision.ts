@@ -1,7 +1,8 @@
 import type { PrismaClient } from "@prisma/client";
 
-/** Seeded into every new workspace — kept in lockstep with the backfill in
- *  prisma/migrations/20260722140000_seed_default_message_flags. */
+/** Seeded into every new workspace. This is now the ONLY source of the default
+ *  set: the one-off backfill migration that seeded pre-existing teams was
+ *  squashed into the 0_init baseline (it was a no-op on an empty database). */
 export const DEFAULT_MESSAGE_FLAGS = [
   { name: "Complaint", color: "rose", description: "The customer is unhappy — needs a follow-up." },
   { name: "Refund request", color: "amber", description: "The customer asked for money back." },

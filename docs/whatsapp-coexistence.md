@@ -102,7 +102,7 @@ Handles the three coexistence webhooks; dormant until they arrive.
 
 Supporting pieces:
 - **Schema:** `MessageOrigin { api business_app }` enum + `Message.origin` column
-  (migration `prisma/migrations/20260706120000_message_origin_coexistence`).
+  (in the `0_init` baseline).
 - **Wire/UI:** `origin` on the shared `Message` type + `mapMessage`; "via WhatsApp app"
   chip in `apps/web/src/features/inbox/components/message-bubble.tsx`.
 - **Worker lifecycle:** `apps/api/src/coexistence/coexistence-worker.service.ts`

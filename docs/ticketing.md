@@ -178,8 +178,8 @@ mutex, is bounded per tick, and writes through a CAS on the not-yet-breached fla
 produce **exactly one** breach event per leg. A partner's "SLA missed" webhook firing every 60 seconds
 until someone answers would be worse than not firing at all.
 
-Its scan is served by two **partial indexes** Prisma cannot express, created in raw SQL by migration
-`20260722190000_ticketing` — they cover only rows that can still breach (non-terminal, not already
+Its scan is served by two **partial indexes** Prisma cannot express, created in raw SQL in the
+hand-maintained section of the `0_init` baseline — they cover only rows that can still breach (non-terminal, not already
 flagged, with a due date), which is a tiny fraction of the table.
 
 ---

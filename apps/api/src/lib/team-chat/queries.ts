@@ -861,10 +861,10 @@ export async function searchAllChannels(
   // The old `OR isDefault: true` branch is gone on purpose: it granted search
   // over the default channel regardless of membership, which was harmless
   // while "default" implied "everyone" but becomes a leak now that a channel
-  // can be demoted or have its visibility changed. The
-  // 20260719120000_team_chat_dm_and_visibility migration backfills an explicit
-  // membership row for every user on their default channel, so nobody loses
-  // their #general search results.
+  // can be demoted or have its visibility changed. A one-off migration
+  // backfilled an explicit membership row for every user on their default
+  // channel so nobody lost their #general search results; it has since been
+  // squashed into the 0_init baseline (a no-op on an empty database).
   //
   // `kind: "channel"` excludes DMs. Workspace search is a CHANNEL search —
   // users don't expect Cmd-K to surface private 1:1 conversations, and
