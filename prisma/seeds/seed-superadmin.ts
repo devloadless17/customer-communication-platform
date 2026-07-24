@@ -61,10 +61,23 @@ async function main() {
   // operator's own org in the platform list.
   // The approval gate lives on the ORGANIZATION now, so `status: active` is set
   // there; the workspace is just the operator's anchor data scope.
+  // `isPlatform` marks this as the operator's ANCHOR, not a customer org: a
+  // super admin oversees every organization and belongs to none, but
+  // `User.organizationId` is required, so the row has to exist. Every
+  // customer-facing read filters it out (lib/queries/super-admin.ts), so it
+  // never appears in the console, never counts toward platform totals, and can
+  // never be suspended or deleted as a tenant.
   const org = await db.organization.upsert({
     where: { id: `${PILOT_TEAM_ID}_org` },
-    create: { id: `${PILOT_TEAM_ID}_org`, name: "Loadless", status: "active" },
-    update: { status: "active" },
+    create: {
+      id: `${PILOT_TEAM_ID}_org`,
+      name: "Loadless",
+      status: "active",
+      isPlatform: true,
+    },
+    // Set on update too, so an existing deployment's anchor is reclassified the
+    // first time the seed runs after this change.
+    update: { status: "active", isPlatform: true },
   });
   const team = await db.workspace.upsert({
     where: { id: PILOT_TEAM_ID },

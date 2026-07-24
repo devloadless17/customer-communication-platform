@@ -185,6 +185,7 @@ CREATE TABLE "Organization" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "isPlatform" BOOLEAN NOT NULL DEFAULT false,
     "plan" "Plan" NOT NULL DEFAULT 'starter',
     "maxWorkspaces" INTEGER NOT NULL DEFAULT 2,
     "status" "OrgStatus" NOT NULL DEFAULT 'pending',
@@ -2620,7 +2621,6 @@ ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_A_fk
 -- AddForeignKey
 ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_B_fkey" FOREIGN KEY ("B") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
-
 -- ============================================================================
 -- HAND-MAINTAINED — indexes Prisma's schema language CANNOT express.
 --
@@ -2665,6 +2665,7 @@ CREATE UNIQUE INDEX "InboxView_shared_name_key" ON public."InboxView" USING btre
 CREATE INDEX "Message_broadcastId_idx" ON public."Message" USING btree ("broadcastId") WHERE ("broadcastId" IS NOT NULL);
 CREATE INDEX "Message_conversationId_timestamp_inbound_idx" ON public."Message" USING btree ("conversationId", "timestamp" DESC) WHERE (direction = 'in'::"MessageDirection");
 CREATE INDEX "Message_inbound_media_pending_idx" ON public."Message" USING btree ("createdAt") WHERE ((direction = 'in'::"MessageDirection") AND ("mediaKind" IS NOT NULL) AND ("mediaUrl" IS NULL));
+CREATE INDEX "Organization_isPlatform_idx" ON public."Organization" USING btree ("isPlatform") WHERE "isPlatform";
 CREATE INDEX "OutboundEvent_drainer_pending_idx" ON public."OutboundEvent" USING btree ("createdAt") WHERE (("publishedAt" IS NULL) AND ("failedAt" IS NULL));
 CREATE INDEX "OutboundEvent_retention_idx" ON public."OutboundEvent" USING btree ("publishedAt") WHERE (("publishedAt" IS NOT NULL) AND ("failedAt" IS NULL));
 CREATE INDEX "OutboundWebhookDelivery_orphan_pending_idx" ON public."OutboundWebhookDelivery" USING btree ("createdAt") WHERE (("attemptCount" = 0) AND ("deliveredAt" IS NULL) AND ("failedAt" IS NULL));

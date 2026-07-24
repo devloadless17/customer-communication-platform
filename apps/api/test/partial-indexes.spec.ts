@@ -88,6 +88,12 @@ const REQUIRED_PARTIAL_INDEXES: { name: string; unique: boolean; protects: strin
     unique: false,
     protects: "the transactional-outbox drainer's pending scan",
   },
+  {
+    name: "Organization_isPlatform_idx",
+    unique: false,
+    protects:
+      "the `isPlatform = false` filter every customer-facing org read applies — the platform operator's anchor org must never render as a tenant",
+  },
 ];
 
 describe("hand-written partial indexes", () => {

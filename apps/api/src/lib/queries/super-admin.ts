@@ -172,6 +172,11 @@ export async function listAllOrgsForSuperAdmin(): Promise<SuperAdminOrgRow[]> {
 async function loadAllOrgsForSuperAdmin(): Promise<SuperAdminOrgRow[]> {
   const [orgs, workspaces] = await Promise.all([
     db.organization.findMany({
+      // The platform's own anchor org is not a customer — see
+      // `Organization.isPlatform`. Without this filter the operator's anchor
+      // listed as a tenant called "Loadless" beside real customers, with its
+      // own workspace indented under it.
+      where: { isPlatform: false },
       orderBy: [{ createdAt: "asc" }],
       select: {
         id: true,
@@ -231,8 +236,16 @@ async function loadAllOrgsForSuperAdmin(): Promise<SuperAdminOrgRow[]> {
 export async function getTeamDetailForSuperAdmin(
   workspaceId: string,
 ): Promise<SuperAdminTeamDetail | null> {
-  const team = await db.workspace.findUnique({
-    where: { id: workspaceId },
+  // `findFirst`, not `findUnique`: the where carries a RELATION filter
+  // alongside the id, and `findUnique` accepts only unique fields. Prisma's XOR
+  // union types let the bad shape compile clean and then throw at runtime — the
+  // exact failure mode `check:prisma-fields` exists for.
+  const team = await db.workspace.findFirst({
+    // The platform anchor's workspace is not a customer workspace, and the
+    // console never links to it (its org is filtered out of the list) — but the
+    // detail page is reachable by typing the URL, so exclude it here too rather
+    // than relying on nothing linking there.
+    where: { id: workspaceId, organization: { isPlatform: false } },
     select: {
       id: true,
       name: true,
@@ -356,15 +369,22 @@ async function loadPlatformAnalytics(): Promise<PlatformAnalytics> {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const [byStatus, users, contacts, conversations, messages, broadcasts, newOrgsLast30d, pendingOrgs] =
     await Promise.all([
-      db.organization.groupBy({ by: ["status"], _count: { _all: true } }),
+      // Every org aggregate below excludes the platform anchor: it is not a
+      // customer, so counting it inflates "how many organizations are on the
+      // platform" by one, permanently.
+      db.organization.groupBy({
+        by: ["status"],
+        where: { isPlatform: false },
+        _count: { _all: true },
+      }),
       db.user.count(),
       db.contact.count(),
       db.conversation.count(),
       db.message.count(),
       db.broadcast.count(),
-      db.organization.count({ where: { createdAt: { gte: since } } }),
+      db.organization.count({ where: { isPlatform: false, createdAt: { gte: since } } }),
       db.organization.findMany({
-        where: { status: "pending" },
+        where: { isPlatform: false, status: "pending" },
         orderBy: { createdAt: "desc" },
         take: 8,
         select: { id: true, name: true, createdAt: true },

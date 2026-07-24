@@ -58,12 +58,26 @@ export class AdminOrganizationsController {
     }
   }
 
+  /**
+   * The organization exists AND is a customer.
+   *
+   * The platform's own anchor org (see `Organization.isPlatform`) is filtered
+   * out of every console list, so it is not reachable through the UI — but this
+   * is the API, and an id typed by hand must not be either. Suspending it would
+   * lock the operator out of the console they suspend FROM, and deleting it
+   * cascades the operator's own user row.
+   *
+   * 404, not 403: the anchor is not a tenant, so from this endpoint's point of
+   * view there is no such organization.
+   */
   private async assertExists(organizationId: string): Promise<void> {
     const org = await this.db.organization.findUnique({
       where: { id: organizationId },
-      select: { id: true },
+      select: { id: true, isPlatform: true },
     });
-    if (!org) throw new NotFoundException({ error: "organization not found" });
+    if (!org || org.isPlatform) {
+      throw new NotFoundException({ error: "organization not found" });
+    }
   }
 
   @Patch(":id/status")

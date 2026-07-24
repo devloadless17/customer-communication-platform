@@ -489,6 +489,28 @@ model Organization {
   name      String
   createdAt DateTime @default(now())
 
+  // The PLATFORM's own anchor row — not a customer.
+  //
+  // A super admin is a platform operator, not a tenant: they oversee every
+  // organization and belong to none. But `User.organizationId` is required (a
+  // user must hang off something), so the seed gives the operator an anchor
+  // org. That anchor is an implementation detail of the FK — it is NOT an
+  // organization in any sense the product means, and it must never be listed,
+  // counted, billed, suspended or deleted as one. It was showing up in the
+  // platform console as a customer called "Loadless" with its own workspace,
+  // which is exactly the confusion this flag removes.
+  //
+  // A flag rather than making `organizationId` nullable: the column is read in
+  // ~43 places that are all correctly typed non-null today, and every one would
+  // need a null branch whose omission fails SILENTLY (an `undefined` in a Prisma
+  // `where` does not narrow — it drops the filter). This is the minimal change
+  // that fits the architecture (§17), and it mirrors the `isSuperAdmin: false`
+  // exclusion the seat counts already use.
+  //
+  // Exactly one row carries this. Every customer-facing read filters it out;
+  // see lib/queries/super-admin.ts.
+  isPlatform Boolean @default(false)
+
   // Subscription tier. Default `starter` for every org — feature gating is not
   // wired up yet. See packages/shared/src/auth/plans.ts. UI hidden.
   plan Plan @default(starter)
