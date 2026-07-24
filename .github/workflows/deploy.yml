@@ -401,6 +401,18 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          # Mail is a PRODUCTION BOOT GATE (packages/config validateEnv): with
+          # NODE_ENV=production and no transport the api calls process.exit(1)
+          # before listening, so the container never turns healthy and the smoke
+          # step fails with only "container deploy-api-1 is unhealthy". The
+          # deployed stack has always received these (see the ship step); the
+          # smoke .env is meant to be prod-SHAPED, so it needs them too.
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
+          MAIL_SMTP_HOST: ${{ secrets.MAIL_SMTP_HOST }}
+          MAIL_SMTP_PORT: ${{ secrets.MAIL_SMTP_PORT }}
+          MAIL_SMTP_USER: ${{ secrets.MAIL_SMTP_USER }}
+          MAIL_SMTP_PASSWORD: ${{ secrets.MAIL_SMTP_PASSWORD }}
         run: |
           set -euo pipefail
           umask 077
@@ -421,6 +433,12 @@ jobs:
           R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
           R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
           R2_BUCKET=${R2_BUCKET}
+          MAIL_FROM=${MAIL_FROM}
+          MAIL_FROM_NAME=${MAIL_FROM_NAME}
+          MAIL_SMTP_HOST=${MAIL_SMTP_HOST}
+          MAIL_SMTP_PORT=${MAIL_SMTP_PORT}
+          MAIL_SMTP_USER=${MAIL_SMTP_USER}
+          MAIL_SMTP_PASSWORD=${MAIL_SMTP_PASSWORD}
           META_GRAPH_VERSION=v25.0
           NEXT_PUBLIC_API_URL=
           EOF
@@ -436,7 +454,19 @@ jobs:
           echo "==> Pulling images from registry"
           docker compose --env-file .env pull
           echo "==> Booting CI stack"
-          docker compose --env-file .env up -d
+          # `app` depends_on api: service_healthy, so compose itself blocks here
+          # and exits non-zero the moment api fails its healthcheck — BEFORE the
+          # wait loop below that would have dumped logs. Under `set -e` that
+          # produced a bare "container deploy-api-1 is unhealthy" with no reason
+          # anywhere in the run. Dump every service's logs on that path: a boot
+          # gate that calls process.exit(1) prints WHY on stderr, and that line
+          # is the whole diagnosis.
+          if ! docker compose --env-file .env up -d; then
+            echo "✗ stack failed to come up — logs from every service follow"
+            docker compose --env-file .env ps -a || true
+            docker compose --env-file .env logs --no-color || true
+            exit 1
+          fi
           echo "==> Waiting for app container to be healthy (≤180s)"
           # 180s budget. The chain is: api waits for postgres+redis healthy,
           # then runs `prisma migrate deploy` as the first step of its CMD,
