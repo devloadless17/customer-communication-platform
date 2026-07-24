@@ -27,6 +27,7 @@ import {
   redactExternalContactPii,
   EXTERNAL_CONTACT_INCLUDE,
   type ExternalContact,
+  externalTemplate,
 } from "@/lib/external-shapes";
 import { directoryContactWhere, ensureDefaultStage, toContactWire } from "@/lib/queries";
 import type {
@@ -1895,6 +1896,57 @@ export class ExternalV1Service {
         isDefault: r.isDefault,
       })),
     };
+  }
+
+  /**
+   * The WhatsApp template catalog, for integrations that send templates or
+   * watch template health.
+   *
+   * Read-only on purpose: creating a template is a Meta REVIEW submission with
+   * a component grammar the composer's shared validator enforces, and an API
+   * that accepted a half-valid one would just produce rejections nobody sees.
+   * Everything needed to SEND is here — the id `/v1` sends and analyses by, the
+   * parameter format, and the components.
+   */
+  async listTemplates(
+    workspaceId: string,
+    filters: { status?: string; category?: string } = {},
+  ) {
+    const rows = await this.db.messageTemplate.findMany({
+      where: {
+        workspaceId,
+        // The Zod enums are exactly the Prisma enum members, so the cast is a
+        // shape assertion, not a widening — an unknown value can't reach here.
+        ...(filters.status
+          ? { status: filters.status as Prisma.MessageTemplateWhereInput["status"] }
+          : {}),
+        ...(filters.category
+          ? { category: filters.category as Prisma.MessageTemplateWhereInput["category"] }
+          : {}),
+      },
+      orderBy: [{ name: "asc" }, { language: "asc" }],
+      select: {
+        id: true,
+        externalId: true,
+        wabaId: true,
+        name: true,
+        language: true,
+        category: true,
+        correctCategory: true,
+        status: true,
+        statusReason: true,
+        parameterFormat: true,
+        messageSendTtlSeconds: true,
+        bodyText: true,
+        components: true,
+        qualityScore: true,
+        qualityScoreAt: true,
+        archivedAt: true,
+        lastUsedAt: true,
+        syncedAt: true,
+      },
+    });
+    return { items: rows.map(externalTemplate) };
   }
 
   // ===========================================================================

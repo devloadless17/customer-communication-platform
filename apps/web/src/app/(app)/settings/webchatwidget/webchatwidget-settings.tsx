@@ -4,6 +4,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Check, Copy, ExternalLink, Plus, Trash2 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessage } from "@ccp/shared/api/error-message";
 import { PageHeader } from "@/components/layouts/page-header";
 import type { WebchatWidgetView } from "@/lib/api/queries";
 
@@ -53,8 +54,12 @@ export function WebchatWidgetSettings({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: `Website ${widgets.length + 1}`, allowedOrigins: [] }),
       });
-      const data = (await res.json()) as { widget?: WebchatWidgetView; error?: string };
-      if (!res.ok || !data.widget) throw new Error(data.error || "create failed");
+      // Read the failure BEFORE parsing the success shape — the helper needs an
+      // unconsumed body, and it prefers the API's human `detail` over the raw
+      // `error` key. The thrown message is what the catch below renders.
+      if (!res.ok) throw new Error(await apiErrorMessage(res, "Couldn't create the widget."));
+      const data = (await res.json()) as { widget?: WebchatWidgetView };
+      if (!data.widget) throw new Error("Couldn't create the widget.");
       setWidgets((ws) => [...ws, data.widget!]);
       setSelectedId(data.widget.id);
     } catch (e) {
@@ -98,8 +103,12 @@ export function WebchatWidgetSettings({
           launcherLabel: w.config.launcherLabel ?? "",
         }),
       });
-      const data = (await res.json()) as { widget?: WebchatWidgetView; error?: string };
-      if (!res.ok || !data.widget) throw new Error(data.error || "save failed");
+      // Read the failure BEFORE parsing the success shape — the helper needs an
+      // unconsumed body, and it prefers the API's human `detail` over the raw
+      // `error` key. The thrown message is what the catch below renders.
+      if (!res.ok) throw new Error(await apiErrorMessage(res, "Couldn't save the widget."));
+      const data = (await res.json()) as { widget?: WebchatWidgetView };
+      if (!data.widget) throw new Error("Couldn't save the widget.");
       patchLocal(w.id, data.widget);
     } catch (e) {
       setError(e instanceof Error ? e.message : "save failed");

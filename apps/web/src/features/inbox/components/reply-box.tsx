@@ -68,6 +68,8 @@ const TemplatePicker = dynamic(
 );
 import { SnippetPopup } from "./snippet-popup";
 import { useSnippets } from "./snippets-context";
+import { renderTemplateBodyNamed } from "@ccp/shared/template-render";
+
 import { renderPlaceholders } from "./template-picker/utils";
 
 // Heavy, open-gated popovers — kept OUT of the inbox critical-path bundle and
@@ -812,8 +814,25 @@ function ReplyBoxImpl({
       template: TemplateDto;
       variables: {
         body: string[];
+        bodyNamed?: Array<{ name: string; text: string }>;
         header?: string;
         headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
+        headerLocation?: { latitude: string; longitude: string; name: string; address: string };
+        buttons?: Array<{ index: number; subType: "url" | "copy_code" | "quick_reply"; text: string }>;
+        /** Limited-time offer expiry, UNIX ms. Required when the template shows a
+         *  countdown — Meta has nothing to count to without it. */
+        limitedTimeOfferExpiresAtMs?: number;
+        /** Per-card values for a media-card carousel, in card order. The length
+         *  must equal the card count the template was APPROVED with. */
+        cards?: Array<{
+          headerMedia: { kind: "image" | "video"; link?: string; id?: string };
+          body?: string[];
+          buttons?: Array<{
+            index: number;
+            subType: "url" | "quick_reply" | "copy_code";
+            text: string;
+          }>;
+        }>;
       };
     }) => {
       const clientTempId = newClientTempId();
@@ -840,7 +859,13 @@ function ReplyBoxImpl({
         // when the real `message:new` arrives.
         emitOptimisticListBump({
           conversationId,
-          preview: renderPlaceholders(args.template.bodyText, args.variables.body).slice(0, 200),
+          // Named templates substitute by NAME — rendering them positionally
+          // left `{{order_id}}` visible in the list preview until the real
+          // `message:new` frame replaced it.
+          preview: (args.variables.bodyNamed
+            ? renderTemplateBodyNamed(args.template.bodyText, args.variables.bodyNamed)
+            : renderPlaceholders(args.template.bodyText, args.variables.body)
+          ).slice(0, 200),
           lastMessageAt: new Date().toISOString(),
         });
         return { ok: true as const };

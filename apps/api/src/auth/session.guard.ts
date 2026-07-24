@@ -9,6 +9,11 @@ import {
 import type { Request } from "express";
 
 import { auth } from "@/auth/better-auth";
+import {
+  ACTIVE_WORKSPACE_COOKIE,
+  readActiveWorkspaceCookie,
+  resolveActiveWorkspaceId,
+} from "@ccp/shared/auth/active-workspace";
 import type { Role, OrgRole, OrgStatus } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
@@ -20,49 +25,15 @@ import { DbService } from "../db/db.service";
  * routing refactor.
  *
  * SECURITY: this is client input. It only ever SELECTS among workspaces the
- * user provably belongs to (validated against WorkspaceMember in
- * resolveSession) — it can never widen access. The durable, server-side truth
- * is `Session.activeWorkspaceId`.
- */
-export const ACTIVE_WORKSPACE_COOKIE = "ccp.ws";
-
-/** Pull the raw `ccp.ws` value out of a Cookie header, if present. */
-export function readActiveWorkspaceCookie(cookieHeader: string | undefined): string | null {
-  if (typeof cookieHeader !== "string" || cookieHeader.length === 0) return null;
-  for (const part of cookieHeader.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq === -1) continue;
-    if (part.slice(0, eq).trim() !== ACTIVE_WORKSPACE_COOKIE) continue;
-    const value = decodeURIComponent(part.slice(eq + 1).trim());
-    return value.length > 0 ? value : null;
-  }
-  return null;
-}
-
-/**
- * Does a cached session snapshot match the active workspace THIS request wants?
+ * user provably belongs to (validated in `resolveActiveWorkspaceId`) — it can
+ * never widen access. The durable, server-side truth is
+ * `Session.activeWorkspaceId`.
  *
- * The `sessionCache` snapshot carries workspace-scoped fields (`workspaceId`,
- * `role`, `rolePermissions`, `agentConversationVisibility`) for ONE workspace,
- * but the cache is keyed by userId — so a multi-workspace user (or the same
- * user on a second device, or right after a switch) can land on a snapshot
- * scoped to a DIFFERENT workspace than their `ccp.ws` cookie names. Serving it
- * would silently run the request against the wrong workspace for the cache
- * window — the exact isolation the restructure's multi-workspace membership
- * depends on.
- *
- * If the cookie names a workspace it must equal the snapshot's; if it names
- * none, the snapshot's deterministic fallback (stored choice / first
- * membership) is correct and we accept it. A mismatch returns false, so the
- * caller falls through to a full re-resolve — a cache miss, never wrong data.
+ * Both the cookie name and its parser now live in `@ccp/shared/auth/active-workspace`
+ * alongside the resolution rule itself; re-exported here so the existing
+ * importers (the switch controller, the socket handshake) keep one import path.
  */
-export function snapshotMatchesActiveWorkspace(
-  cookieHeader: string | undefined,
-  snapshot: ApiSession,
-): boolean {
-  const want = readActiveWorkspaceCookie(cookieHeader);
-  return want === null || want === snapshot.workspaceId;
-}
+export { ACTIVE_WORKSPACE_COOKIE, readActiveWorkspaceCookie };
 
 /**
  * Shape attached to req.session on success. Same fields the pre-migration
@@ -110,6 +81,14 @@ export interface ApiSession {
    *  a controller — superAdmins exempt. Bounded by the same 15s session cache
    *  as the deactivation check, so a suspend lands within ~15s on the API. */
   orgStatus: OrgStatus;
+  /**
+   * Has this person proven they control their email address?
+   *
+   * Carried on the session so the guard can refuse an unverified caller and the
+   * web can route them to /verify. See the rejection in `SessionGuard` for why
+   * the check lives at the API boundary rather than in a layout.
+   */
+  emailVerified: boolean;
   /** The team's raw `rolePermissions` JSON (admin-configured per-role
    *  capability overrides). Carried on the session so CapabilityGuard +
    *  handler-level checks resolve permissions with ZERO extra DB read; the
@@ -169,6 +148,21 @@ export class SessionGuard implements CanActivate {
     if (!session.isSuperAdmin && session.orgStatus !== "active") {
       throw new ForbiddenException({ error: "org_not_active" });
     }
+    // Email-verification gate, and it lives HERE for the same reason the
+    // org-approval gate does: this is the boundary. Bouncing an unverified user
+    // in middleware or a layout would leave every API route open to them —
+    // the browser is not what enforces this.
+    //
+    // A distinct error code, not a bare 401: the web needs to tell "you are
+    // signed out" (go to /login) apart from "you are signed in but unverified"
+    // (go to /verify). Collapsing them sends a half-registered user round a
+    // login loop with a session that is perfectly valid.
+    //
+    // superAdmins exempt, matching the gate above — the platform operator is
+    // seeded, not self-registered.
+    if (!session.isSuperAdmin && !session.emailVerified) {
+      throw new ForbiddenException({ error: "email_not_verified" });
+    }
     req.session = session;
     return true;
   }
@@ -202,7 +196,22 @@ export class SessionGuard implements CanActivate {
 // state changes that shouldn't wait for the TTL.
 const SESSION_CACHE_TTL_MS = 15_000;
 const SESSION_CACHE_MAX = 10_000;
+/**
+ * Keyed by `${userId}:${workspaceId}`, NOT by userId alone.
+ *
+ * The snapshot carries workspace-scoped fields (`workspaceId`, `role`,
+ * `rolePermissions`, `agentConversationVisibility`). Keyed by userId, a
+ * multi-workspace user — two devices, or one device mid-switch — could be
+ * served a snapshot scoped to the OTHER workspace and run the request against
+ * it for the whole TTL. The old guard against that (`snapshotMatchesActiveWorkspace`)
+ * accepted any snapshot when the request carried no `ccp.ws` cookie, which is
+ * precisely the case where the two devices disagree. Putting the workspace in
+ * the key removes the ambiguity instead of special-casing it: a lookup can only
+ * ever return a snapshot for the workspace it asked for.
+ */
 const sessionCache = new Map<string, { session: ApiSession; expiresAt: number }>();
+
+const snapshotKey = (userId: string, workspaceId: string) => `${userId}:${workspaceId}`;
 
 // Cookie-hash-keyed cache: short-circuits `auth.api.getSession` itself, not
 // just the deactivation re-check. Without this every fresh socket handshake
@@ -214,15 +223,21 @@ const sessionCache = new Map<string, { session: ApiSession; expiresAt: number }>
 // drops every entry pointing to the given userId — the only mutation paths
 // (signout, deactivation, role change, password change) all know the userId.
 // Entry carries `sessionId` (this cookie's Session row id) ALONGSIDE userId.
-// The deactivation snapshot is keyed by userId and shared across a user's
-// browsers, but `sessionId` is per-cookie. A user with two browsers has two
-// Session rows; the cookie-cache fast path MUST return THIS cookie's sessionId,
-// not whichever row last populated the userId cache — otherwise change-password
-// ("sign out my other devices") deletes the wrong Session row. Mirrors the
-// explicit re-bind on the slow path (`return { ...cached, sessionId }`).
+// The deactivation snapshot is shared across a user's browsers, but `sessionId`
+// is per-cookie. A user with two browsers has two Session rows; the cookie-cache
+// fast path MUST return THIS cookie's sessionId, not whichever row last
+// populated the snapshot cache — otherwise change-password ("sign out my other
+// devices") deletes the wrong Session row. Mirrors the explicit re-bind on the
+// slow path (`return { ...cached, sessionId }`).
+//
+// It also carries the `workspaceId` this cookie RESOLVED to. The snapshot cache
+// is keyed by (userId, workspaceId), and this is what lets the cookie fast path
+// name the right key without re-resolving. Note the hash covers the WHOLE Cookie
+// header — including `ccp.ws` — so a switch produces a different key and can
+// never hit a pre-switch entry.
 const cookieCache = new Map<
   string,
-  { userId: string; sessionId: string; expiresAt: number }
+  { userId: string; sessionId: string; workspaceId: string; expiresAt: number }
 >();
 
 import { createHash } from "node:crypto";
@@ -232,22 +247,28 @@ function hashCookie(cookieHeader: string): string {
 }
 
 /**
- * Public surface so the Socket.io handshake (`SocketAuthService`) can
- * reuse the same per-userId snapshot — without these accessors, every
- * post-deploy reconnect storm pays an independent DB roundtrip.
+ * Public surface so the Socket.io handshake (`SocketAuthService`) can reuse the
+ * same snapshot — without these accessors, every post-deploy reconnect storm
+ * pays an independent DB roundtrip.
+ *
+ * `workspaceId` is REQUIRED on the read: the snapshot is workspace-scoped, so a
+ * caller that doesn't yet know which workspace it wants has nothing to hit the
+ * cache with and must resolve first. That is the point — see `sessionCache`.
  */
-export function sessionCacheGet(userId: string): ApiSession | null {
-  return cacheGet(userId);
+export function sessionCacheGet(userId: string, workspaceId: string): ApiSession | null {
+  return cacheGet(userId, workspaceId);
 }
-export function sessionCacheSet(userId: string, session: ApiSession): void {
-  cacheSet(userId, session);
+/** The snapshot carries its own `userId` + `workspaceId` — the key derives from
+ *  them, so there is no way to file one under the wrong pair. */
+export function sessionCacheSet(session: ApiSession): void {
+  cacheSet(session);
 }
 
 /**
- * Look up an already-resolved (cookie → user) mapping. Returns the cached
- * ApiSession for that cookie, or null if no live entry. Used by the socket
- * handshake to skip `auth.api.getSession` entirely on the hot reconnect
- * path. Returns null if EITHER the cookie cache OR the user cache has
+ * Look up an already-resolved (cookie → user + workspace) mapping. Returns the
+ * cached ApiSession for that cookie, or null if no live entry. Used by the
+ * socket handshake to skip `auth.api.getSession` entirely on the hot reconnect
+ * path. Returns null if EITHER the cookie cache OR the snapshot cache has
  * expired so a stale cookie hash never resurrects a dead session.
  */
 export function sessionCacheGetByCookie(cookieHeader: string): ApiSession | null {
@@ -258,12 +279,12 @@ export function sessionCacheGetByCookie(cookieHeader: string): ApiSession | null
     cookieCache.delete(key);
     return null;
   }
-  const cached = cacheGet(entry.userId);
+  const cached = cacheGet(entry.userId, entry.workspaceId);
   if (!cached) return null;
-  // Re-bind THIS cookie's sessionId over the userId-keyed snapshot — same
-  // reason the slow path does `{ ...cached, sessionId }`. Without it, a user
-  // with two browsers gets the other browser's sessionId here, and
-  // change-password deletes the wrong Session row.
+  // Re-bind THIS cookie's sessionId over the shared snapshot — same reason the
+  // slow path does `{ ...cached, sessionId }`. Without it, a user with two
+  // browsers gets the other browser's sessionId here, and change-password
+  // deletes the wrong Session row.
   return { ...cached, sessionId: entry.sessionId };
 }
 
@@ -271,6 +292,7 @@ export function sessionCacheSetByCookie(
   cookieHeader: string,
   userId: string,
   sessionId: string,
+  workspaceId: string,
 ): void {
   const key = hashCookie(cookieHeader);
   if (cookieCache.size >= SESSION_CACHE_MAX) {
@@ -280,27 +302,29 @@ export function sessionCacheSetByCookie(
   cookieCache.set(key, {
     userId,
     sessionId,
+    workspaceId,
     expiresAt: Date.now() + SESSION_CACHE_TTL_MS,
   });
 }
 
-function cacheGet(userId: string): ApiSession | null {
-  const entry = sessionCache.get(userId);
+function cacheGet(userId: string, workspaceId: string): ApiSession | null {
+  const key = snapshotKey(userId, workspaceId);
+  const entry = sessionCache.get(key);
   if (!entry) return null;
   if (entry.expiresAt <= Date.now()) {
-    sessionCache.delete(userId);
+    sessionCache.delete(key);
     return null;
   }
   return entry.session;
 }
 
-function cacheSet(userId: string, session: ApiSession): void {
+function cacheSet(session: ApiSession): void {
   if (sessionCache.size >= SESSION_CACHE_MAX) {
     // Map preserves insertion order; the first key is the oldest. Drop it.
     const oldest = sessionCache.keys().next().value;
     if (oldest !== undefined) sessionCache.delete(oldest);
   }
-  sessionCache.set(userId, {
+  sessionCache.set(snapshotKey(session.userId, session.workspaceId), {
     session,
     expiresAt: Date.now() + SESSION_CACHE_TTL_MS,
   });
@@ -308,17 +332,22 @@ function cacheSet(userId: string, session: ApiSession): void {
 
 /**
  * Manual invalidation hook for state changes that should bust the cache
- * immediately (sign-out, deactivation, role/team change). Wired via
- * `invalidateSessionCache(userId)` import — call from the controllers
- * that perform those mutations to keep the window from biting on
- * privileged transitions.
+ * immediately (sign-out, deactivation, role/membership change). Wired via
+ * `invalidateSessionCache(userId)` import — call from the services that
+ * perform those mutations to keep the window from biting on privileged
+ * transitions.
  *
- * Also walks the cookie-hash cache to evict every cookie that resolved to
- * this user. Stale cookie cache entries are otherwise self-healing within
- * the 15s TTL, but a deactivation should land immediately for sockets too.
+ * Drops EVERY workspace's snapshot for the user (the cache is keyed by
+ * `${userId}:${workspaceId}`, and a membership change can alter any of them),
+ * then walks the cookie-hash cache to evict every cookie that resolved to this
+ * user. Stale cookie entries are otherwise self-healing within the 15s TTL, but
+ * a deactivation should land immediately for sockets too.
  */
 export function invalidateSessionCache(userId: string): void {
-  sessionCache.delete(userId);
+  const prefix = `${userId}:`;
+  for (const key of sessionCache.keys()) {
+    if (key.startsWith(prefix)) sessionCache.delete(key);
+  }
   for (const [key, entry] of cookieCache) {
     if (entry.userId === userId) cookieCache.delete(key);
   }
@@ -349,11 +378,12 @@ export async function resolveSession(
   // handshake (HTTP or socket) does a Postgres roundtrip via Better Auth.
   const cookieHeader = req.headers["cookie"];
   if (typeof cookieHeader === "string" && cookieHeader.length > 0) {
+    // The cookie-hash entry records the workspace THIS cookie resolved to, and
+    // the snapshot cache is keyed by (userId, workspaceId) — so a hit can only
+    // ever be the right workspace. No post-hoc match check is needed (or
+    // possible to forget).
     const cached = sessionCacheGetByCookie(cookieHeader);
-    // The cookie-hash entry stores (userId, sessionId) and reads the LIVE
-    // per-user snapshot, which a different-workspace request may have
-    // overwritten since — so still confirm it matches this cookie's workspace.
-    if (cached && snapshotMatchesActiveWorkspace(cookieHeader, cached)) return cached;
+    if (cached) return cached;
   }
 
   let result: Awaited<ReturnType<typeof auth.api.getSession>> | null = null;
@@ -374,23 +404,30 @@ export async function resolveSession(
   void getSessionThrew;
   const sessionId = result.session.id;
 
-  // Hot-path: same user just resolved a moment ago — Better Auth already
-  // confirmed the cookie is valid, so the cached deactivation snapshot is
-  // still trustworthy for the cache window. We must still re-bind
-  // `sessionId` to the current request because the cache is keyed by
-  // userId, not by session — a user with two browsers has two session
-  // rows, and `session.sessionId` must reflect THIS request's row.
-  const cached = cacheGet(result.user.id);
-  if (cached && snapshotMatchesActiveWorkspace(cookieHeader, cached)) {
+  // Hot-path: same (user, workspace) just resolved a moment ago — Better Auth
+  // already confirmed the cookie is valid, so the cached deactivation snapshot
+  // is still trustworthy for the cache window. We must still re-bind
+  // `sessionId` to the current request because the snapshot is shared across a
+  // user's devices — a user with two browsers has two Session rows, and
+  // `session.sessionId` must reflect THIS request's row.
+  //
+  // Only reachable when the request NAMES a workspace: without `ccp.ws` there
+  // is no key to look up, and guessing one is precisely the bug this keying
+  // fixes. Cookie-less requests fall through to the full resolve below, which
+  // consults `Session.activeWorkspaceId` — correct, and rare enough that the
+  // extra roundtrip doesn't matter.
+  const cookieCandidate = readActiveWorkspaceCookie(cookieHeader);
+  const cached = cookieCandidate ? cacheGet(result.user.id, cookieCandidate) : null;
+  if (cached) {
     // Repopulate the cookie-hash cache so the NEXT request on THIS cookie hits
     // the fast-path at the top and short-circuits `auth.api.getSession`
     // entirely — matching the full path below and the socket handshake
     // (socket-auth.service.ts). Without this, a user warmed only via the
-    // userId cache (socket handshake / another device) kept paying the Better
+    // snapshot cache (socket handshake / another device) kept paying the Better
     // Auth DB roundtrip on every HTTP request even though the cookie cache
     // could have served it.
     if (typeof cookieHeader === "string" && cookieHeader.length > 0) {
-      sessionCacheSetByCookie(cookieHeader, result.user.id, sessionId);
+      sessionCacheSetByCookie(cookieHeader, result.user.id, sessionId, cached.workspaceId);
     }
     return { ...cached, sessionId };
   }
@@ -409,6 +446,7 @@ export async function resolveSession(
       email: true,
       avatarUrl: true,
       deactivatedAt: true,
+      emailVerified: true,
       organization: { select: { status: true } },
       // Every workspace this user may act in. Ordered so the "first membership"
       // fallback is deterministic across requests/devices.
@@ -447,7 +485,7 @@ export async function resolveSession(
   // Trusting `isOrgAdmin` unscoped let any org owner set `ccp.ws` to any
   // workspace on the platform and act as its admin (mirrors the check
   // `workspaces.service.canAccess` already does for the switch endpoint).
-  const canAccess = async (wsId: string): Promise<boolean> => {
+  const canAccessUncached = async (wsId: string): Promise<boolean> => {
     if (memberWorkspaceIds.has(wsId)) return true;
     if (user.isSuperAdmin) {
       return (await prisma.workspace.count({ where: { id: wsId } })) > 0;
@@ -461,26 +499,42 @@ export async function resolveSession(
     }
     return false;
   };
+  // Memoised: the resolver asks about the same candidate the guard below already
+  // probed, and for an org admin acting outside their membership rows each ask
+  // is a real query. One lookup per distinct workspace id per resolve.
+  const accessCache = new Map<string, Promise<boolean>>();
+  const canAccess = (wsId: string): Promise<boolean> => {
+    const hit = accessCache.get(wsId);
+    if (hit) return hit;
+    const p = canAccessUncached(wsId);
+    accessCache.set(wsId, p);
+    return p;
+  };
 
-  // Active-workspace resolution. The `ccp.ws` cookie is CLIENT INPUT and is
-  // never trusted raw — it only selects among workspaces the user provably may
-  // access. Order: validated cookie → this device's stored choice → first
-  // membership. Anything unresolvable means "no workspace", and the guard
-  // treats that as unauthenticated rather than silently picking someone else's.
-  const cookieCandidate = readActiveWorkspaceCookie(cookieHeader);
-  let activeWorkspaceId: string | null =
-    cookieCandidate && (await canAccess(cookieCandidate)) ? cookieCandidate : null;
-  if (!activeWorkspaceId) {
-    const stored = await prisma.session.findUnique({
-      where: { id: sessionId },
-      select: { activeWorkspaceId: true },
-    });
-    if (stored?.activeWorkspaceId && (await canAccess(stored.activeWorkspaceId))) {
-      activeWorkspaceId = stored.activeWorkspaceId;
-    }
-  }
-  if (!activeWorkspaceId) activeWorkspaceId = memberships[0]?.workspace.id ?? null;
-  if (!activeWorkspaceId) return null; // no workspace to act in
+  // Active-workspace resolution — the SHARED rule
+  // (`@ccp/shared/auth/active-workspace`), used identically by the socket
+  // handshake and the Next.js RSC session so the three can never disagree
+  // about which workspace a signed-in user is acting in.
+  //
+  // Only read the stored per-device choice when the cookie didn't settle it:
+  // the cookie is present on every browser request, so this extra roundtrip is
+  // confined to server-side fetches and post-cookie-wipe recovery.
+  const stored =
+    cookieCandidate && (await canAccess(cookieCandidate))
+      ? null
+      : await prisma.session.findUnique({
+          where: { id: sessionId },
+          select: { activeWorkspaceId: true },
+        });
+  const activeWorkspaceId = await resolveActiveWorkspaceId({
+    memberships: memberships.map((m) => ({ workspaceId: m.workspace.id })),
+    cookieCandidate,
+    storedWorkspaceId: stored?.activeWorkspaceId ?? null,
+    canAccessBeyondMembership: canAccess,
+  });
+  // Nothing resolvable means "no workspace to act in", and the guard treats
+  // that as unauthenticated rather than silently picking someone else's.
+  if (!activeWorkspaceId) return null;
 
   const active = memberships.find((m) => m.workspace.id === activeWorkspaceId);
   // Effective role in the ACTIVE workspace (see ApiSession.role).
@@ -504,14 +558,15 @@ export async function resolveSession(
     email: user.email,
     avatarUrl: user.avatarUrl ?? null,
     orgStatus: (user.organization?.status ?? "active") as OrgStatus,
+    emailVerified: user.emailVerified,
     rolePermissions: active?.workspace.rolePermissions ?? {},
     // Default "team" = unrestricted, matching the column default, so a missing
     // workspace row can never accidentally lock an org out of its own inbox.
     agentConversationVisibility: active?.workspace.agentConversationVisibility ?? "team",
   };
-  cacheSet(user.id, session);
+  cacheSet(session);
   if (typeof cookieHeader === "string" && cookieHeader.length > 0) {
-    sessionCacheSetByCookie(cookieHeader, user.id, sessionId);
+    sessionCacheSetByCookie(cookieHeader, user.id, sessionId, activeWorkspaceId);
   }
   return session;
 }

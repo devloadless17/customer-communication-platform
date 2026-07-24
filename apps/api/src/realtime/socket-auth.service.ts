@@ -2,12 +2,14 @@ import { Injectable, Logger } from "@nestjs/common";
 import type { Socket } from "socket.io";
 
 import { auth } from "@/auth/better-auth";
+import {
+  readActiveWorkspaceCookie,
+  resolveActiveWorkspaceId,
+} from "@ccp/shared/auth/active-workspace";
 import type { Role, OrgStatus } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
 import {
-  readActiveWorkspaceCookie,
-  snapshotMatchesActiveWorkspace,
   sessionCacheGet,
   sessionCacheGetByCookie,
   sessionCacheSet,
@@ -26,6 +28,23 @@ export interface SocketIdentity {
 export type SocketAuthResult =
   | { kind: "ok"; identity: SocketIdentity }
   | { kind: "unauthenticated" }
+  /**
+   * The session is VALID, but the app is gating this user: their organization
+   * is pending review / suspended, or they haven't verified their email.
+   *
+   * Distinct from `unauthenticated` because the CLIENT reacts differently, and
+   * conflating them was a real bug. On `unauthenticated` the browser navigates
+   * to `/logout`, which DELETES the session — so suspending an organization
+   * dumped its members onto a context-free `/login` instead of the `/pending`
+   * screen that explains why they're locked out and shows the reason. The API's
+   * suspend handler goes out of its way NOT to delete Better Auth sessions for
+   * exactly this reason; the socket was undoing that from the other side.
+   *
+   * The gate itself is unchanged — the socket still refuses to connect, so no
+   * realtime data flows. Only the client's reaction differs: stop reconnecting,
+   * and let the server-rendered layout route to `/pending` or `/verify`.
+   */
+  | { kind: "gated" }
   /**
    * Auth backend is degraded (Postgres flap, Better Auth threw). Client
    * receives "auth_unavailable" rather than "unauthenticated" so the browser
@@ -77,7 +96,13 @@ export class SocketAuthService {
         !cachedFromCookie.isSuperAdmin &&
         cachedFromCookie.orgStatus !== "active"
       ) {
-        return { kind: "unauthenticated" };
+        return { kind: "gated" };
+      }
+      // Unverified email — same boundary as the HTTP guard. A socket is a read
+      // channel into the whole workspace's realtime feed, so leaving it open
+      // while the REST API is closed would be the larger hole of the two.
+      if (!cachedFromCookie.isSuperAdmin && !cachedFromCookie.emailVerified) {
+        return { kind: "gated" };
       }
       return {
         kind: "ok",
@@ -117,22 +142,26 @@ export class SocketAuthService {
 
     // After a Caddy bounce / deploy a whole team's tabs reconnect within
     // seconds; without the cache, every handshake paid an independent
-    // `user.findUnique` deactivation check. The HTTP SessionGuard
-    // already maintains a 15s per-userId snapshot; reuse it so socket
-    // handshakes get the same single-DB-hit-per-window economics.
-    const cached = sessionCacheGet(userId);
-    // Only serve the cache when it is scoped to the workspace THIS handshake's
-    // `ccp.ws` cookie names — the per-userId snapshot is shared across a
-    // multi-workspace user's cookies/devices, so a stale one would join the
-    // wrong `ws:` room. Mismatch falls through to a full resolve. Mirrors the
-    // HTTP guard in session.guard.ts.
-    if (cached && snapshotMatchesActiveWorkspace(cookieHeader, cached)) {
+    // `user.findUnique` deactivation check. The HTTP SessionGuard already
+    // maintains a 15s snapshot; reuse it so socket handshakes get the same
+    // single-DB-hit-per-window economics.
+    const cookieCandidate = readActiveWorkspaceCookie(cookieHeader);
+    // The snapshot cache is keyed by (userId, workspaceId), so this can only be
+    // consulted once we know which workspace THIS handshake wants — i.e. when
+    // the `ccp.ws` cookie names one. Without it there is no key, and guessing
+    // would be exactly how a socket joins the wrong `ws:` room; that case falls
+    // through to the full resolve below. Mirrors the HTTP guard.
+    const cached = cookieCandidate ? sessionCacheGet(userId, cookieCandidate) : null;
+    if (cached) {
       // I-10: same org-approval re-check on this fast path (see the cookie-cache
-      // branch above) so a warm per-userId cache can't bypass the gate.
-      if (!cached.isSuperAdmin && cached.orgStatus !== "active") {
-        return { kind: "unauthenticated" };
+      // branch above) so a warm cache can't bypass the gate.
+      if (!cached.isSuperAdmin && !cached.emailVerified) {
+        return { kind: "gated" };
       }
-      sessionCacheSetByCookie(cookieHeader, userId, sessionId);
+      if (!cached.isSuperAdmin && cached.orgStatus !== "active") {
+        return { kind: "gated" };
+      }
+      sessionCacheSetByCookie(cookieHeader, userId, sessionId, cached.workspaceId);
       return {
         kind: "ok",
         identity: {
@@ -157,6 +186,7 @@ export class SocketAuthService {
           email: true,
           avatarUrl: true,
           deactivatedAt: true,
+          emailVerified: true,
           organization: { select: { status: true } },
           // Mirrors resolveSession: the socket's active workspace is resolved
           // from the SAME membership set, so an agent's socket can never join a
@@ -191,23 +221,26 @@ export class SocketAuthService {
     // path only, same as the deactivation check above — a fast-path cache hit
     // means the user passed this check within the 15s window. superAdmins exempt.
     const orgStatus = (dbUser.organization?.status ?? "active") as OrgStatus;
+    if (!dbUser.isSuperAdmin && !dbUser.emailVerified) {
+      return { kind: "gated" };
+    }
     if (!dbUser.isSuperAdmin && orgStatus !== "active") {
-      return { kind: "unauthenticated" };
+      return { kind: "gated" };
     }
 
     // Same resolution — and the same security-critical org scope — as
-    // resolveSession. The `ccp.ws` cookie can only SELECT a workspace this user
-    // may act in: a membership (fast path), any workspace for a superAdmin, or
-    // a workspace IN THEIR OWN ORG for an org admin/owner. The org scope is
-    // verified against the DB; trusting `isOrgAdmin` unscoped let any org owner
-    // join another tenant's `ws:` room and stream its realtime frames. Mirrors
-    // the fix in session.guard.ts — keep the two in lockstep.
+    // resolveSession, via the ONE shared rule in
+    // `@ccp/shared/auth/active-workspace`. The `ccp.ws` cookie can only SELECT
+    // a workspace this user may act in: a membership (fast path), any workspace
+    // for a superAdmin, or a workspace IN THEIR OWN ORG for an org admin/owner.
+    // The org scope is verified against the DB; trusting `isOrgAdmin` unscoped
+    // let any org owner join another tenant's `ws:` room and stream its
+    // realtime frames.
     const memberships = dbUser.workspaceMemberships;
     const isOrgAdmin = dbUser.orgRole === "owner" || dbUser.orgRole === "admin";
     const memberWorkspaceIds = new Set(memberships.map((m) => m.workspace.id));
-    const cookieCandidate = readActiveWorkspaceCookie(cookieHeader);
 
-    const canAccess = async (wsId: string): Promise<boolean> => {
+    const canAccessUncached = async (wsId: string): Promise<boolean> => {
       if (memberWorkspaceIds.has(wsId)) return true;
       if (dbUser.isSuperAdmin) {
         return (await this.db.workspace.count({ where: { id: wsId } })) > 0;
@@ -221,11 +254,35 @@ export class SocketAuthService {
       }
       return false;
     };
+    // Memoised: the resolver asks about the same candidate the guard below already
+    // probed, and for an org admin acting outside their membership rows each ask
+    // is a real query. One lookup per distinct workspace id per resolve.
+    const accessCache = new Map<string, Promise<boolean>>();
+    const canAccess = (wsId: string): Promise<boolean> => {
+      const hit = accessCache.get(wsId);
+      if (hit) return hit;
+      const p = canAccessUncached(wsId);
+      accessCache.set(wsId, p);
+      return p;
+    };
 
-    const activeWorkspaceId =
+    // The stored per-device choice is consulted here too — it used to be
+    // skipped on this path, so a tab whose `ccp.ws` cookie was missing joined
+    // `ws:<first membership>` while its HTTP requests ran against the switched
+    // workspace, and the whole realtime feed silently belonged to the wrong one.
+    const stored =
       cookieCandidate && (await canAccess(cookieCandidate))
-        ? cookieCandidate
-        : (memberships[0]?.workspace.id ?? null);
+        ? null
+        : await this.db.session.findUnique({
+            where: { id: sessionId },
+            select: { activeWorkspaceId: true },
+          });
+    const activeWorkspaceId = await resolveActiveWorkspaceId({
+      memberships: memberships.map((m) => ({ workspaceId: m.workspace.id })),
+      cookieCandidate,
+      storedWorkspaceId: stored?.activeWorkspaceId ?? null,
+      canAccessBeyondMembership: canAccess,
+    });
     if (!activeWorkspaceId) return { kind: "unauthenticated" };
 
     const active = memberships.find((m) => m.workspace.id === activeWorkspaceId);
@@ -233,12 +290,13 @@ export class SocketAuthService {
       dbUser.isSuperAdmin || isOrgAdmin ? "admin" : ((active?.role ?? "agent") as Role);
     const visibility = active?.workspace.agentConversationVisibility ?? "team";
 
-    sessionCacheSet(userId, {
+    sessionCacheSet({
       sessionId,
       userId: dbUser.id,
       organizationId: dbUser.organizationId,
       orgRole: dbUser.orgRole,
       isSuperAdmin: dbUser.isSuperAdmin,
+      emailVerified: dbUser.emailVerified,
       workspaceId: activeWorkspaceId,
       role: effectiveRole,
       workspaceMemberships: memberships.map((m) => ({
@@ -253,7 +311,7 @@ export class SocketAuthService {
       orgStatus,
       rolePermissions: active?.workspace.rolePermissions ?? {},
     });
-    sessionCacheSetByCookie(cookieHeader, dbUser.id, sessionId);
+    sessionCacheSetByCookie(cookieHeader, dbUser.id, sessionId, activeWorkspaceId);
     return {
       kind: "ok",
       identity: {

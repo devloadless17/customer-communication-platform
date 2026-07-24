@@ -121,6 +121,15 @@ export interface User {
    * by an ordinary workspace admin.
    */
   isSuperAdmin?: boolean;
+  /**
+   * Org-directory role. Orthogonal to `role` (which is per-workspace) and
+   * carried on the roster DTO for ONE reason: the members UI has to gate
+   * account-level actions (disable / delete / reset password) with the same
+   * `canModifyUserAccount` predicate the API enforces. Without it the menu
+   * offers an org admin the option to delete the org owner and the click 403s —
+   * a control that exists only to fail.
+   */
+  orgRole?: OrgRole;
   name: string;
   email: string;
   avatarUrl?: string;
@@ -431,6 +440,52 @@ export interface TemplateDto {
    * values would collect the wrong number of them and fail every recipient.
    */
   parameterFormat: "positional" | "named";
+  /**
+   * The WhatsApp Business Account this template's catalog belongs to.
+   *
+   * A workspace can connect numbers under several WABAs, and a template can only
+   * be sent from a number under ITS OWN WABA — so the picker filters on this
+   * rather than offering every template for every conversation. `""` is the
+   * legacy/unknown-WABA sentinel and matches everything.
+   */
+  wabaId: string;
+  /**
+   * Meta's `correct_category` when it DIFFERS from `category`: the category this
+   * template will be moved to, typically on the first of next month. Null when
+   * unaffected.
+   *
+   * Advance notice, not state — `category` stays the billed truth until the move
+   * lands. Surfaced so an operator can see a marketing-rate change coming.
+   */
+  correctCategory: string | null;
+  /** Meta's `reason` on the last status change, e.g. `INCORRECT_CATEGORY`. */
+  statusReason: string | null;
+  /** Meta's `message_send_ttl_seconds`; null = Meta's per-category default. */
+  messageSendTtlSeconds: number | null;
+  /**
+   * When the template was seen to become `archived`, starting Meta's 28-day
+   * deletion countdown. Approximate when learned from a sync rather than the
+   * webhook — render it as "about N days", never a precise deadline.
+   */
+  archivedAt: string | null;
+  /** Last actual send — the activity that resets the 12-month archival clock. */
+  lastUsedAt: string | null;
+  /**
+   * Meta's quality band: `GREEN` | `YELLOW` | `RED` | `UNKNOWN`, verbatim.
+   * Null when Meta has never reported one.
+   *
+   * The EARLY warning: quality drives Meta's template pacing and pausing, so a
+   * RED template is one about to stop sending. Surfaced in the list so an
+   * operator can rewrite it before the pause, not after.
+   */
+  qualityScore: string | null;
+  /** When Meta last recomputed the band. */
+  qualityScoreAt: string | null;
+  /**
+   * The Template Library blueprint this came from, if any. Meta's own marker
+   * that the COPY IS FIXED — the editor must not offer to change it.
+   */
+  libraryTemplateName: string | null;
   syncedAt: string;
 }
 
@@ -918,6 +973,18 @@ export interface Conversation {
    * known; the name is resolved via a join on the primary read paths.
    */
   webchatWidgetId?: string | null;
+  /**
+   * The channel ACCOUNT this thread belongs to — which WhatsApp number, Page or
+   * Instagram handle the customer is actually talking to. Re-stamped on every
+   * inbound (see the schema comment), so it always names the account the reply
+   * will go out on.
+   *
+   * The id only — the display name is resolved client-side against the
+   * workspace's account directory (`GET /api/workspace/channel-accounts`). A
+   * workspace has a handful of accounts and the inbox list is the hottest read
+   * in the app, so one cached lookup beats widening every row with a join.
+   */
+  channelConnectionId?: string | null;
   webchatWidgetName?: string | null;
 }
 

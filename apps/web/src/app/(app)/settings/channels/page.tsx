@@ -8,8 +8,10 @@ import {
   getTeamMetaConfig,
   getTeamWebchatWidgets,
   getTeamWhatsappConfig,
+  listChannelAccountDirectory,
 } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
+import { soft } from "@/lib/api/soft";
 import { PageHeader } from "@/components/layouts/page-header";
 import { ChannelBadge } from "@/features/inbox/components/channel-badge";
 import type { Channel } from "@ccp/shared/types";
@@ -26,6 +28,15 @@ interface CardModel {
   icon?: ReactNode;
   connected: boolean;
   status: "connected" | "not_connected" | "coming_soon";
+  /**
+   * How many accounts are connected on this channel, and what one is called.
+   * A workspace can hold several WhatsApp numbers / Pages / handles, and the
+   * catalog said only "Connected" — so a two-number workspace looked identical
+   * to a one-number one, which is exactly the question this page should answer.
+   * Absent on Meta-App and coming-soon cards.
+   */
+  accountCount?: number;
+  accountNoun?: string;
 }
 
 export default async function ChannelsCatalogPage() {
@@ -37,19 +48,30 @@ export default async function ChannelsCatalogPage() {
   let msgr = false;
   let ig = false;
   let widgetCount = 0;
+  // Per-channel account counts. The four `getTeam*Config` reads above only ever
+  // describe the DEFAULT account, so they can't tell "connected" from
+  // "connected, three of them".
+  const accountCounts = new Map<string, number>();
   if (canManage) {
-    const [meta, w, m, i, widgets] = await Promise.all([
-      getTeamMetaConfig().catch(() => null),
-      getTeamWhatsappConfig().catch(() => null),
-      getTeamMessengerConfig().catch(() => null),
-      getTeamInstagramConfig().catch(() => null),
-      getTeamWebchatWidgets().catch(() => []),
+    const [meta, w, m, i, widgets, directory] = await Promise.all([
+      // Each card degrades independently — one unreachable channel must not
+      // blank the catalog — but every failure is logged, because "Not
+      // connected" and "we couldn't ask" look identical on this page.
+      soft("meta app config", null, () => getTeamMetaConfig()),
+      soft("whatsapp config", null, () => getTeamWhatsappConfig()),
+      soft("messenger config", null, () => getTeamMessengerConfig()),
+      soft("instagram config", null, () => getTeamInstagramConfig()),
+      soft("webchat widgets", [], () => getTeamWebchatWidgets()),
+      soft("channel-account directory", [], () => listChannelAccountDirectory()),
     ]);
     metaReady = Boolean(meta?.appSecret && meta?.systemUserToken);
     wa = Boolean(w?.phoneNumberId);
     msgr = Boolean(m?.pageId);
     ig = Boolean(i?.igId);
     widgetCount = widgets.filter((x) => x.isActive).length;
+    for (const a of directory) {
+      accountCounts.set(a.channel, (accountCounts.get(a.channel) ?? 0) + 1);
+    }
   }
 
   const live: CardModel[] = [
@@ -61,6 +83,8 @@ export default async function ChannelsCatalogPage() {
       href: "/settings/whatsapp",
       connected: wa,
       status: wa ? "connected" : "not_connected",
+      accountCount: accountCounts.get("whatsapp") ?? 0,
+      accountNoun: "number",
     },
     {
       key: "messenger",
@@ -70,6 +94,8 @@ export default async function ChannelsCatalogPage() {
       href: "/settings/messenger",
       connected: msgr,
       status: msgr ? "connected" : "not_connected",
+      accountCount: accountCounts.get("messenger") ?? 0,
+      accountNoun: "Page",
     },
     {
       key: "instagram",
@@ -79,6 +105,8 @@ export default async function ChannelsCatalogPage() {
       href: "/settings/instagram",
       connected: ig,
       status: ig ? "connected" : "not_connected",
+      accountCount: accountCounts.get("instagram") ?? 0,
+      accountNoun: "account",
     },
   ];
 
@@ -92,6 +120,8 @@ export default async function ChannelsCatalogPage() {
       href: "/settings/webchatwidget",
       connected: widgetCount > 0,
       status: widgetCount > 0 ? "connected" : "not_connected",
+      accountCount: widgetCount,
+      accountNoun: "widget",
     },
   ];
 
@@ -218,6 +248,12 @@ function CatalogCard({ card, canManage }: { card: CardModel; canManage: boolean 
       <div className="flex flex-col gap-1">
         <h3 className="text-sm font-semibold">{card.name}</h3>
         <p className="text-xs leading-relaxed text-muted-foreground">{card.description}</p>
+        {card.connected && card.accountCount != null && card.accountCount > 0 && card.accountNoun && (
+          <p className="text-2xs font-medium text-muted-foreground">
+            {card.accountCount} {card.accountNoun}
+            {card.accountCount === 1 ? "" : "s"} connected
+          </p>
+        )}
       </div>
       {clickable && (
         <div className="mt-auto pt-2">

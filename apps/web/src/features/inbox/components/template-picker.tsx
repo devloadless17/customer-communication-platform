@@ -67,8 +67,30 @@ interface PickerProps {
     template: TemplateDto;
     variables: {
       body: string[];
+      /** NAMED-format bodies; mutually exclusive with `body`. */
+      bodyNamed?: Array<{ name: string; text: string }>;
       header?: string;
       headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
+      /** The pin for a LOCATION header — declared with no parameters at create
+       *  time, so the whole thing is supplied here. */
+      headerLocation?: { latitude: string; longitude: string; name: string; address: string };
+      /** Send-time values Meta REQUIRES for a dynamic URL suffix or a copy-code
+       *  coupon button. Without them the send is rejected outright. */
+      buttons?: Array<{ index: number; subType: "url" | "copy_code" | "quick_reply"; text: string }>;
+      /** Limited-time offer expiry, UNIX ms. Required when the template shows a
+       *  countdown — Meta has nothing to count to without it. */
+      limitedTimeOfferExpiresAtMs?: number;
+      /** Per-card values for a media-card carousel, in card order. The length
+       *  must equal the card count the template was APPROVED with. */
+      cards?: Array<{
+        headerMedia: { kind: "image" | "video"; link?: string; id?: string };
+        body?: string[];
+        buttons?: Array<{
+          index: number;
+          subType: "url" | "quick_reply" | "copy_code";
+          text: string;
+        }>;
+      }>;
     };
   }) => Promise<{ ok: boolean; error?: string }>;
 }

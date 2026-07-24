@@ -22,7 +22,11 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@ccp/shared/utils";
-import { templateNamedPlaceholders } from "@ccp/shared/template-render";
+import {
+  requiredCarouselCards,
+  templateNamedPlaceholders,
+  templateNeedsOfferExpiry,
+} from "@ccp/shared/template-render";
 import {
   CampaignAssignment,
   EMPTY_CAMPAIGN_ASSIGNMENT,
@@ -41,6 +45,7 @@ import {
 } from "@ccp/shared/field-tokens";
 import { parseVariableBindings, type VariableBinding } from "@ccp/shared/template-bindings";
 
+import type { ChannelAccountDirectoryEntry } from "@/lib/api/queries";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { useAudienceCount } from "@/hooks/use-audience-count";
 import { toast } from "@/lib/toast";
@@ -48,6 +53,12 @@ import { AudiencePicker, type AudienceState } from "@/features/broadcasts/compon
 import { RecipientsPreviewDialog } from "@/features/broadcasts/components/recipients-preview-dialog";
 import { FieldTokenPicker } from "@/features/templates/components/field-token-picker";
 import { HeaderMediaField } from "@/features/templates/components/header-media-field";
+import {
+  CarouselCardsField,
+  carouselCardsComplete,
+  emptyCarouselCards,
+  type CarouselCardValue,
+} from "@/features/templates/components/carousel-cards-field";
 import { TokenHighlightInput } from "@/features/templates/components/token-highlight";
 
 /** Result of POST /api/broadcasts/preview-missing — recipients whose template
@@ -97,6 +108,7 @@ export function NewBroadcastForm({
   cloneKind = null,
   cloneBodyText = null,
   cloneChannel = null,
+  initialChannel = null,
   teamMembers = [],
   assignmentPolicies = [],
 }: {
@@ -128,6 +140,8 @@ export function NewBroadcastForm({
   cloneKind?: "template" | "freeform" | "customer" | null;
   cloneBodyText?: string | null;
   cloneChannel?: string | null;
+  /** `?channel=` from the channel-scoped Outreach nav — which channel to open on. */
+  initialChannel?: string | null;
 }) {
   const router = useRouter();
   const { confirm, confirmDialog } = useConfirm();
@@ -188,12 +202,56 @@ export function NewBroadcastForm({
   //  - customer: plain text to unified PEOPLE — each reached ONCE on their best
   //    live channel (omnichannel + deduped). Both non-template modes share the
   //    free-form body input + skip the template/variables steps.
-  const [messageKind, setMessageKind] =
-    useState<"template" | "freeform" | "customer">(cloneKind ?? "template");
+  const [messageKind, setMessageKind] = useState<"template" | "freeform" | "customer">(
+    cloneKind ??
+      // `?channel=` from the channel-scoped Outreach nav. A social channel means
+      // free-form (neither has templates); WhatsApp and anything unrecognized
+      // fall back to the template composer.
+      (initialChannel === "messenger" || initialChannel === "instagram"
+        ? "freeform"
+        : "template"),
+  );
   const [freeformChannel, setFreeformChannel] = useState<"messenger" | "instagram">(
-    cloneChannel === "instagram" ? "instagram" : "messenger",
+    cloneChannel === "instagram" || initialChannel === "instagram"
+      ? "instagram"
+      : "messenger",
   );
   const [freeformBody, setFreeformBody] = useState(cloneBodyText ?? "");
+  /**
+   * The ACCOUNT this campaign sends from — a specific WhatsApp number, Page or
+   * Instagram handle. Every account is a distinct sender identity to the
+   * customer, so it scopes both the template catalogue (a template belongs to
+   * one WhatsApp Business Account) and the audience.
+   */
+  const [accountId, setAccountId] = useState<string | null>(null);
+  /**
+   * Opt-in to reaching contacts who belong to the workspace's OTHER accounts on
+   * this channel. Off by default: those customers have never messaged this
+   * sender, so they'd see an unfamiliar number and their reply would open a
+   * separate thread.
+   */
+  const [includeOtherAccounts, setIncludeOtherAccounts] = useState(false);
+  const [accounts, setAccounts] = useState<ChannelAccountDirectoryEntry[]>([]);
+
+  // The workspace's connected accounts, once. Small (a handful per workspace),
+  // member-readable, and needed before the first step can render.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiFetch("/api/workspace/channel-accounts");
+        if (!res.ok) return;
+        const data = (await res.json()) as { accounts?: ChannelAccountDirectoryEntry[] };
+        if (!cancelled) setAccounts(data.accounts ?? []);
+      } catch {
+        // Non-fatal: the composer falls back to the channel's default account,
+        // which is exactly the pre-multi-account behaviour.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [templateQuery, setTemplateQuery] = useState("");
   const [bodyVars, setBodyVars] = useState<string[]>([]);
@@ -203,6 +261,15 @@ export function NewBroadcastForm({
     link: string;
     filename?: string;
   } | null>(null);
+  const [cards, setCards] = useState<CarouselCardValue[]>([]);
+  const [location, setLocation] = useState({
+    latitude: "",
+    longitude: "",
+    name: "",
+    address: "",
+  });
+  // `datetime-local` wall-clock string; converted to UNIX ms on submit.
+  const [offerExpiresAt, setOfferExpiresAt] = useState("");
   const [headerMediaUploading, setHeaderMediaUploading] = useState(false);
   const [headerMediaError, setHeaderMediaError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -274,11 +341,19 @@ export function NewBroadcastForm({
   // server-seeded list is already on screen, so it freshens silently instead of
   // flashing a spinner over a list the user can already read.
   const loadTemplates = useCallback(
-    async (background = false) => {
+    async (background = false, forAccountId?: string | null) => {
       setTemplatesError(null);
       if (!background) setTemplatesLoading(true);
       try {
-        const res = await apiFetch("/api/workspace/whatsapp/templates");
+        // Scoped to the sending ACCOUNT: templates live on a WhatsApp Business
+        // Account and can only go out on a number under that same WABA, so
+        // offering the whole workspace's catalogue would let an operator pick
+        // one Meta then rejects for every recipient.
+        const res = await apiFetch(
+          `/api/workspace/whatsapp/templates${
+            forAccountId ? `?accountId=${encodeURIComponent(forAccountId)}` : ""
+          }`,
+        );
         if (!res.ok) throw new Error(await safeReadError(res));
         const data = (await res.json()) as {
           templates?: TemplateDto[];
@@ -305,9 +380,11 @@ export function NewBroadcastForm({
 
   useEffect(() => {
     // Seeded → freshen in the background (no spinner). Cold → normal load.
-    void loadTemplates(initialTemplates.length > 0);
+    // Re-runs when the sending account changes: the catalogue is per-WABA, so a
+    // different number means a different (possibly disjoint) template list.
+    void loadTemplates(initialTemplates.length > 0, accountId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadTemplates]);
+  }, [loadTemplates, accountId]);
 
   // Clone prefill (?from=<id>): once templates load, select the source's
   // template. The var-reset effect below then fills bodyVars/headerVar from the
@@ -377,6 +454,17 @@ export function NewBroadcastForm({
           : 0
         : countPlaceholders(headerComp.text)
       : 0;
+  // Carousel cards — campaign-level, since every recipient sees the same strip.
+  const cardRequirements = useMemo(
+    () => requiredCarouselCards(components),
+    [components],
+  );
+  // A LOCATION header carries its whole pin at send time — campaign-level,
+  // since a location template promotes one place to the whole audience.
+  const needsLocation = headerComp?.format === "LOCATION";
+  // A countdown template needs ONE campaign-level expiry — the whole point of a
+  // limited-time offer is a single shared deadline.
+  const needsOfferExpiry = templateNeedsOfferExpiry(components);
   // IMAGE/VIDEO/DOCUMENT headers need one campaign media (reused for everyone).
   const headerMediaKind: "image" | "video" | "document" | null =
     headerComp?.format === "IMAGE"
@@ -424,6 +512,11 @@ export function NewBroadcastForm({
   useEffect(() => {
     setHeaderMedia(null);
     setHeaderMediaError(null);
+    // The card COUNT comes from the template, so switching templates reseeds
+    // the strip rather than carrying the old one's cards over.
+    setCards(emptyCarouselCards(cardRequirements));
+    setLocation({ latitude: "", longitude: "", name: "", address: "" });
+    setOfferExpiresAt("");
     if (!selectedTemplate) {
       setBodyVars(Array.from({ length: bodyVarCount }, () => ""));
       setHeaderVar("");
@@ -450,12 +543,86 @@ export function NewBroadcastForm({
     );
     setHeaderVar(headerVarCount > 0 ? tokenForBinding(bindings.header) : "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTemplateId, bodyVarCount, headerVarCount]);
+  }, [selectedTemplateId, bodyVarCount, headerVarCount, cardRequirements]);
 
   // The channel a template/freeform broadcast actually sends on. All/group
   // recipient counts must be scoped to it (a WhatsApp template can't reach a
   // Messenger-only contact). Customer ("People") mode is person-level → the
   // count stays the raw all-channel totals (unscoped, best-channel reach).
+  /**
+   * The channel this campaign targets, as ONE value.
+   *
+   * `messageKind` conflated "what am I sending" with "where am I sending it".
+   * The composer is now channel-first — you pick WhatsApp / Messenger /
+   * Instagram (or People, which spans all of them) and everything downstream
+   * derives from that — so this is the single selection and `messageKind` +
+   * `freeformChannel` are DERIVED from it. Keeping the old state as the
+   * derivation target means every existing gate, cap and count below is
+   * untouched.
+   */
+  const selectedChannel: "whatsapp" | "messenger" | "instagram" | "people" =
+    messageKind === "template"
+      ? "whatsapp"
+      : messageKind === "customer"
+        ? "people"
+        : freeformChannel;
+
+  const setSelectedChannel = useCallback(
+    (next: "whatsapp" | "messenger" | "instagram" | "people") => {
+      if (next === "whatsapp") setMessageKind("template");
+      else if (next === "people") setMessageKind("customer");
+      else {
+        setMessageKind("freeform");
+        setFreeformChannel(next);
+      }
+      // The account and the template belong to the OLD channel — carrying either
+      // across would bind the campaign to a sender that can't send it.
+      setAccountId(null);
+      setIncludeOtherAccounts(false);
+      setSelectedTemplateId(null);
+    },
+    [],
+  );
+
+  /** Connected accounts on the selected channel, default first. */
+  const channelAccounts = useMemo(
+    () =>
+      selectedChannel === "people"
+        ? []
+        : accounts.filter((a) => a.channel === selectedChannel && a.isActive),
+    [accounts, selectedChannel],
+  );
+
+  const selectedAccount = useMemo(
+    () => channelAccounts.find((a) => a.id === accountId) ?? null,
+    [channelAccounts, accountId],
+  );
+
+  /** Which channels the workspace can actually broadcast on. */
+  const connectedChannels = useMemo(() => {
+    const live = (["whatsapp", "messenger", "instagram"] as const).filter((ch) =>
+      accounts.some((a) => a.channel === ch && a.isActive),
+    );
+    // NEVER render an empty channel row. `accounts` is empty both before the
+    // fetch resolves and if it fails outright, and an empty list would leave
+    // "People" as the only selectable mode — silently removing the ability to
+    // send a template at all. Falling back to the current selection keeps the
+    // composer usable and lets the server be the authority on connectivity
+    // (it already rejects an unknown/inactive account).
+    if (live.length > 0) return live;
+    return selectedChannel === "people" ? (["whatsapp"] as const) : ([selectedChannel] as const);
+  }, [accounts, selectedChannel]);
+
+  // Default to the channel's default account as soon as accounts land, so the
+  // template list and the audience are scoped from the first render rather than
+  // silently defaulting server-side.
+  useEffect(() => {
+    if (selectedChannel === "people") return;
+    if (accountId && channelAccounts.some((a) => a.id === accountId)) return;
+    const fallback = channelAccounts.find((a) => a.isDefault) ?? channelAccounts[0];
+    setAccountId(fallback?.id ?? null);
+  }, [selectedChannel, channelAccounts, accountId]);
+
   const countChannel: "whatsapp" | "messenger" | "instagram" | undefined =
     messageKind === "template"
       ? "whatsapp"
@@ -574,12 +741,25 @@ export function NewBroadcastForm({
       ? `Saved group: ${scopedGroup?.name ?? "—"}`
       : `${audience.selectedTagIds.length} tag${audience.selectedTagIds.length === 1 ? "" : "s"} · ${audience.selectedIds.length} hand-picked`;
 
+  // `null` when unset OR already past — both block the send.
+  const offerExpiryMs = (() => {
+    if (!offerExpiresAt) return null;
+    const ms = new Date(offerExpiresAt).getTime();
+    return Number.isFinite(ms) && ms > Date.now() ? ms : null;
+  })();
+
   const templateDone = selectedTemplate !== null;
   const variablesDone =
     templateDone &&
     bodyVars.every((v) => v.trim().length > 0) &&
     (headerVarCount === 0 || headerVar.trim().length > 0) &&
     (headerMediaKind === null || headerMedia !== null) &&
+    // Only the coordinates are required — name and address are optional labels.
+    (!needsLocation ||
+      (location.latitude.trim() !== "" && location.longitude.trim() !== "")) &&
+    (!needsOfferExpiry || offerExpiryMs !== null) &&
+    (cardRequirements.length === 0 ||
+      carouselCardsComplete(cardRequirements, cards)) &&
     // Don't let the broadcast fire while the header media is still uploading —
     // otherwise it sends with a stale/empty link the moment a prior upload
     // populated `headerMedia` but the current pick hasn't finished.
@@ -851,8 +1031,30 @@ export function NewBroadcastForm({
                     body: bodyVars,
                     ...(headerVarCount > 0 ? { header: headerVar } : {}),
                     ...(headerMedia ? { headerMedia } : {}),
+                    ...(needsLocation ? { headerLocation: location } : {}),
+                    // Flattened for the campaign row: one card = one media plus
+                    // its values, exactly what the runner replays per recipient.
+                    ...(cardRequirements.length > 0
+                      ? {
+                          cards: cards.map((c) => ({
+                            kind: c.headerMedia.kind,
+                            link: c.headerMedia.link,
+                            ...(c.body ? { body: c.body } : {}),
+                            ...(c.buttons ? { buttons: c.buttons } : {}),
+                          })),
+                        }
+                      : {}),
+                    ...(offerExpiryMs !== null
+                      ? { limitedTimeOfferExpiresAtMs: offerExpiryMs }
+                      : {}),
                   },
                 }),
+            // Bind the campaign to the chosen sender. Omitted in People mode,
+            // which resolves an account per recipient.
+            ...(accountId && !isCustomerMode ? { channelConnectionId: accountId } : {}),
+            ...(includeOtherAccounts && !isCustomerMode
+              ? { includeOtherAccounts: true }
+              : {}),
             ...(name.trim() ? { name: name.trim() } : {}),
             ...(scheduledAtIso ? { scheduledAt: scheduledAtIso } : {}),
             // Omitted entirely when the campaign assigns nobody, so the request
@@ -932,7 +1134,7 @@ export function NewBroadcastForm({
       </header>
 
       <StepCard
-        index={1}
+        index={2}
         title="Audience"
         summary={
           audienceDone
@@ -977,36 +1179,134 @@ export function NewBroadcastForm({
         />
       </StepCard>
 
-      {/* Message type. Templates reach WhatsApp any time; free-form text reaches
-          one social channel's in-window contacts; People reaches each unified
-          person once on their best live channel (omnichannel + deduped). */}
-      <div className="flex flex-wrap gap-2">
-        {(
-          [
-            { k: "template", label: "WhatsApp template" },
-            { k: "freeform", label: "Free-form (Messenger / Instagram)" },
-            { k: "customer", label: "People (best channel)" },
-          ] as const
-        ).map(({ k, label }) => (
-          <button
-            key={k}
-            type="button"
-            onClick={() => setMessageKind(k)}
-            className={
-              "flex-1 whitespace-nowrap rounded-md border px-3 py-2 text-sm font-medium transition " +
-              (messageKind === k
-                ? "border-primary bg-primary/10 text-foreground"
-                : "border-border bg-muted/20 text-muted-foreground hover:text-foreground")
-            }
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      {/* Channel & sender. Deliberately the FIRST decision: a campaign is
+          WhatsApp OR Messenger OR Instagram, never a mix, and everything after
+          this — templates, audience counts, message type, limits — derives from
+          it. "People" is the one omnichannel mode, and it says so. */}
+      <StepCard
+        index={1}
+        title="Channel"
+        summary={
+          selectedChannel === "people"
+            ? "People · best live channel"
+            : `${CHANNEL_LABEL[selectedChannel]}${
+                selectedAccount ? ` · ${selectedAccount.name}` : ""
+              }`
+        }
+        done
+      >
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap gap-2">
+            {connectedChannels.map((ch) => (
+              <button
+                key={ch}
+                type="button"
+                onClick={() => setSelectedChannel(ch)}
+                className={
+                  "flex-1 whitespace-nowrap rounded-md border px-3 py-2 text-sm font-medium transition " +
+                  (selectedChannel === ch
+                    ? "border-primary bg-primary/10 text-foreground"
+                    : "border-border bg-muted/20 text-muted-foreground hover:text-foreground")
+                }
+              >
+                {CHANNEL_LABEL[ch]}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => setSelectedChannel("people")}
+              className={
+                "flex-1 whitespace-nowrap rounded-md border px-3 py-2 text-sm font-medium transition " +
+                (selectedChannel === "people"
+                  ? "border-primary bg-primary/10 text-foreground"
+                  : "border-border bg-muted/20 text-muted-foreground hover:text-foreground")
+              }
+            >
+              People (best channel)
+            </button>
+          </div>
+
+          {selectedChannel === "people" ? (
+            <p className="text-2xs leading-relaxed text-muted-foreground">
+              Reaches each PERSON once on whichever channel they&apos;re
+              currently reachable on — so someone you know on both WhatsApp and
+              Instagram gets one message, not two. Free-form only, and only for
+              people with an open messaging window.
+            </p>
+          ) : (
+            <>
+              {/* A single-account channel needs no picker — showing one is
+                  noise. The account is still bound on the wire. */}
+              {channelAccounts.length > 1 && (
+                <label className="flex flex-col gap-1">
+                  <span className="text-2xs font-medium text-muted-foreground">
+                    Send from
+                  </span>
+                  <select
+                    value={accountId ?? ""}
+                    onChange={(e) => {
+                      setAccountId(e.target.value || null);
+                      // The template catalogue is per-account; a template picked
+                      // for the old one may not exist on the new.
+                      setSelectedTemplateId(null);
+                      setIncludeOtherAccounts(false);
+                    }}
+                    className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                  >
+                    {channelAccounts.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name}
+                        {a.providerName && a.providerName !== a.name
+                          ? ` — ${a.providerName}`
+                          : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
+              {channelAccounts.length > 1 && (
+                <label className="flex items-start gap-2 rounded-md border border-border bg-muted/20 px-3 py-2">
+                  <input
+                    type="checkbox"
+                    checked={includeOtherAccounts}
+                    onChange={(e) => setIncludeOtherAccounts(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span className="text-2xs leading-relaxed text-muted-foreground">
+                    Also include contacts from your other{" "}
+                    {CHANNEL_LABEL[selectedChannel]} accounts.
+                    <br />
+                    They haven&apos;t messaged this{" "}
+                    {selectedChannel === "whatsapp" ? "number" : "account"} before,
+                    so they&apos;ll see an unfamiliar sender and their reply opens
+                    a new conversation here.
+                  </span>
+                </label>
+              )}
+
+              {selectedChannel === "whatsapp" ? (
+                <p className="text-2xs leading-relaxed text-muted-foreground">
+                  Only a pre-approved <strong>template</strong> reaches someone
+                  outside the 24-hour customer service window. Templates belong to
+                  this account&apos;s WhatsApp Business Account, so the list below
+                  is scoped to it.
+                </p>
+              ) : (
+                <p className="text-2xs leading-relaxed text-muted-foreground">
+                  {CHANNEL_LABEL[selectedChannel]} has no templates — free-form
+                  messages reach only contacts whose messaging window is still
+                  open. Everyone else is skipped.
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      </StepCard>
 
       {messageKind !== "template" ? (
         <StepCard
-          index={2}
+          index={3}
           title="Message"
           summary={
             freeformDone
@@ -1058,7 +1358,7 @@ export function NewBroadcastForm({
         </StepCard>
       ) : (
         <StepCard
-          index={2}
+          index={3}
           title="Template"
           summary={
             selectedTemplate
@@ -1088,7 +1388,7 @@ export function NewBroadcastForm({
           compose one message. */}
       {messageKind === "template" && selectedTemplate && (
         <StepCard
-          index={3}
+          index={4}
           title="Variables"
           summary={
             variablesDone
@@ -1099,7 +1399,11 @@ export function NewBroadcastForm({
           }
           done={variablesDone}
         >
-          {bodyVarCount + headerVarCount === 0 && !headerMediaKind ? (
+          {bodyVarCount + headerVarCount === 0 &&
+          !headerMediaKind &&
+          !needsLocation &&
+          cardRequirements.length === 0 &&
+          !needsOfferExpiry ? (
             <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
               This template has no variables — it&apos;ll send as-is to every
               recipient.
@@ -1122,6 +1426,68 @@ export function NewBroadcastForm({
                       setHeaderMediaError(null);
                     }}
                   />
+                </div>
+              )}
+              {cardRequirements.length > 0 && (
+                <CarouselCardsField
+                  requirements={cardRequirements}
+                  values={cards}
+                  onChange={setCards}
+                />
+              )}
+              {needsLocation && (
+                <div className="flex flex-col gap-2">
+                  <div className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Map header — the same pin for every recipient
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <PinField
+                      label="Latitude"
+                      placeholder="34.018818"
+                      value={location.latitude}
+                      onChange={(v) => setLocation((c) => ({ ...c, latitude: v }))}
+                    />
+                    <PinField
+                      label="Longitude"
+                      placeholder="-118.467087"
+                      value={location.longitude}
+                      onChange={(v) => setLocation((c) => ({ ...c, longitude: v }))}
+                    />
+                  </div>
+                  <PinField
+                    label="Place name (optional)"
+                    placeholder="Lucky Shrub - Santa Monica"
+                    value={location.name}
+                    onChange={(v) => setLocation((c) => ({ ...c, name: v }))}
+                  />
+                  <PinField
+                    label="Address (optional)"
+                    placeholder="3250 Ocean Park Blvd, Santa Monica, CA 90405"
+                    value={location.address}
+                    onChange={(v) => setLocation((c) => ({ ...c, address: v }))}
+                  />
+                </div>
+              )}
+              {needsOfferExpiry && (
+                <div>
+                  <label
+                    htmlFor="broadcast-lto-expiry"
+                    className="mb-1.5 block text-2xs font-medium uppercase tracking-wide text-muted-foreground"
+                  >
+                    Offer expires — the countdown every recipient sees
+                  </label>
+                  <input
+                    id="broadcast-lto-expiry"
+                    type="datetime-local"
+                    value={offerExpiresAt}
+                    onChange={(e) => setOfferExpiresAt(e.target.value)}
+                    className="w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-sm outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/25"
+                  />
+                  {offerExpiresAt && offerExpiryMs === null && (
+                    <p className="mt-1 text-2xs text-destructive">
+                      Pick a time in the future — the countdown would already be over.
+                    </p>
+                  )}
                 </div>
               )}
               {bodyVarCount + headerVarCount > 0 && (
@@ -1586,6 +1952,35 @@ function TemplatePickerInline({
 // ---------------------------------------------------------------------------
 // Small inline helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * One plain field of a LOCATION header's pin. Deliberately NOT a `VarField`:
+ * coordinates are campaign-level constants, so there is no per-recipient token
+ * to insert and offering the picker would only mislead.
+ */
+function PinField({
+  label,
+  placeholder,
+  value,
+  onChange,
+}: {
+  label: string;
+  placeholder: string;
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-2xs text-muted-foreground">{label}</span>
+      <input
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-sm outline-none transition placeholder:text-muted-foreground/60 focus:border-ring focus:ring-2 focus:ring-ring/25"
+      />
+    </label>
+  );
+}
 
 function VarField({
   label,

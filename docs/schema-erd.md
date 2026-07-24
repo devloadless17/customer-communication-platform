@@ -370,8 +370,36 @@ What's already done:
   `OutboundEvent`, `ApiIdempotencyKey`, orphan blobs).
 - **In-process event bus + Socket.io emit** — zero pub/sub hop on the realtime path.
 
+### Hand-written partial indexes — the toolchain cannot see these
+
+Prisma's schema DSL cannot express a `WHERE` predicate, so every partial index lives
+in raw SQL inside a migration. That means **Prisma has no record of them**: `migrate
+diff` doesn't see them, `check:prisma-fields` doesn't see them, and nothing warns when
+one disappears. Four of them are UNIQUE, and they are the backstops under
+check-then-act races the application deliberately does not hold a lock for — so their
+absence fails nothing loudly. It just lets duplicate contacts, duplicate default
+stages and concurrent 100k imports through, occasionally, under load.
+
+This is not hypothetical. The org→workspace rename renamed the tenant column with
+`ALTER TABLE … DROP COLUMN "teamId"`, **and dropping a column drops every index whose
+key references it**. Six partial indexes went with it and were never re-created; the
+tell was exact — every raw partial index keyed on `teamId` vanished, and the three that
+weren't (`ChannelConnection_one_default_per_channel`,
+`ConversationSessionSummary_one_open_per_conversation`,
+`OutboundEvent_drainer_pending_idx`) survived untouched. Restored by
+`20260724020000_restore_partial_indexes_lost_in_rename`.
+
+Two rules:
+
+- **After any migration that drops or renames a column, diff `pg_indexes`.** A rename
+  expressed as drop+add is the dangerous shape.
+- **`apps/api/test/partial-indexes.spec.ts` is the tripwire.** It asserts each one
+  exists AND kept its `UNIQUE`/`WHERE` (a non-partial rebuild of the WhatsApp unique,
+  for instance, would reject every Instagram contact that shares a phone number). Add a
+  row to it whenever you add a partial index in raw SQL.
+
 Rules to NOT regress (apply to every new query):
-1. New list endpoint → keyset pagination + a `teamId`-leading composite index that
+1. New list endpoint → keyset pagination + a `workspaceId`-leading composite index that
    matches the `orderBy`. Never `OFFSET`; never an unbounded `findMany` on a growing table.
 2. Need a count/aggregate on a hot path → denormalize a counter and keep it in sync;
    don't `COUNT`/`GROUP BY` per request.

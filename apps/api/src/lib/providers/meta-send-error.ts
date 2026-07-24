@@ -45,6 +45,8 @@ export type MetaErrorCode =
   | "invalid_recipient"    // WA 131026/131051 · IG linkage 2534013/14/29/41 — recipient invalid/unreachable
   | "rate_limited"         // WA 4/80007/130429/131048/131056 · social 613/80006 — rate/throughput limit
   | "per_user_marketing_cap" // WA 131049 — Meta's per-USER marketing frequency cap (not our rate limit)
+  | "marketing_opt_out"     // WA 131050 — this recipient stopped marketing messages FROM US
+  | "portfolio_paced_drop"  // WA 135000 — dropped by a business-portfolio pacing review
   | "template_unavailable" // WA 132001/132007/132015/132016 — template paused/disabled/not-approved (run-fatal)
   | "auth_expired"         // 190 — access token expired
   | "recipient_unavailable" // social 551/1545041 — person can't be messaged (blocked / deactivated)
@@ -53,6 +55,45 @@ export type MetaErrorCode =
   | "duplicate_button_title" // 131009 + "Duplicate button title" — interactive buttons reuse a title
   | "call_permission_required" // WA 138006 — customer hasn't granted calling permission
   | "provider_rejected";   // catch-all for anything else MetaSendError-shaped
+
+/**
+ * Every `MetaErrorCode`, as a runtime value.
+ *
+ * Exists so the campaign report's label map can be checked for completeness by a
+ * test — a TYPE union can't be iterated, which is exactly how two codes reached
+ * production with no label and rendered as raw snake_case in the report.
+ * Keep in sync with the union above; the test fails if a label is missing, and
+ * this list is the thing that makes that check possible.
+ */
+export const ALL_META_ERROR_CODES = [
+  "outside_24h_window",
+  "invalid_recipient",
+  "rate_limited",
+  "per_user_marketing_cap",
+  "marketing_opt_out",
+  "portfolio_paced_drop",
+  "template_unavailable",
+  "auth_expired",
+  "recipient_unavailable",
+  "message_unavailable",
+  "unsupported_message",
+  "duplicate_button_title",
+  "call_permission_required",
+  "provider_rejected",
+] as const satisfies ReadonlyArray<MetaErrorCode>;
+
+// `satisfies` above catches an entry that ISN'T a MetaErrorCode. This catches the
+// other direction — a new union member that was never added to the list — which
+// is the one that actually happens. A compile error here means: add your new
+// code to ALL_META_ERROR_CODES (and the test will then tell you to label it).
+type MetaErrorCodeMissingFromList = Exclude<
+  MetaErrorCode,
+  (typeof ALL_META_ERROR_CODES)[number]
+>;
+const _allMetaErrorCodesListed: MetaErrorCodeMissingFromList extends never
+  ? true
+  : never = true;
+void _allMetaErrorCodesListed;
 
 export interface NormalizedSendError {
   code: MetaErrorCode;
@@ -118,21 +159,72 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
       httpStatus,
     };
   }
-  // ── Per-user marketing frequency cap ─────────────────────────────────────
+  // ── Marketing message not delivered ──────────────────────────────────────
   // WhatsApp 131049 — "This message was not delivered to maintain healthy
-  // ecosystem engagement." Meta caps how many MARKETING template messages a
-  // given user receives across ALL businesses in a rolling window; when a
-  // recipient is over that cap this send is dropped. This is NOT our account's
-  // throughput/rate limit — retrying or backing off the whole broadcast does
-  // nothing (the cap is per-user, not per-number), so it must NOT fold into
-  // `rate_limited` (which engages the 429 streak + cross-lane pause). Treat it
-  // as a per-recipient permanent skip with an actionable reason. Checked BEFORE
-  // the rate-limited family so the shared body-regex can't misroute it.
+  // ecosystem engagement." It is NOT our account's throughput/rate limit —
+  // retrying or backing off the whole broadcast does nothing — so it must NOT
+  // fold into `rate_limited` (which engages the 429 streak + cross-lane pause).
+  // A per-recipient permanent skip. Checked BEFORE the rate-limited family so
+  // the shared body-regex can't misroute it.
+  //
+  // The code carries TWO distinct causes and we cannot tell them apart from the
+  // response:
+  //   1. The recipient is over Meta's per-USER marketing frequency cap (across
+  //      all businesses, rolling window) — temporary, clears on its own.
+  //   2. The recipient is in the UNITED STATES. Since 2025-04-01 marketing
+  //      messages to US users are not delivered AT ALL, on every Business
+  //      Messaging API including Cloud API — permanent, and no amount of
+  //      retrying will ever succeed.
+  // The phone prefix can't separate them either (+1 is US, Canada and the
+  // Caribbean). So the message names both rather than asserting the temporary
+  // one: telling an operator a US campaign is capped "right now" invites them to
+  // keep retrying a send that can never land.
   if (numericCode === 131049) {
     return {
       code: "per_user_marketing_cap",
       message:
-        "Meta didn't deliver this marketing message — the recipient is over WhatsApp's per-user marketing frequency cap right now.",
+        "Meta didn't deliver this marketing message. Either the recipient is over " +
+        "WhatsApp's per-user marketing frequency cap (temporary), or they're in the " +
+        "United States, where marketing messages haven't been delivered since April " +
+        "2025 (permanent — retrying won't help).",
+      detail,
+      httpStatus,
+    };
+  }
+  // ── Recipient stopped marketing from THIS business ───────────────────────
+  // WhatsApp 131050. Distinct from 131049 in the one way that matters: this is
+  // a deliberate, standing choice by the recipient about US specifically, not a
+  // frequency cap that clears. Every future marketing send to them will fail the
+  // same way, so it is worth suppressing rather than retrying — see the ingest
+  // status path, which mirrors it onto the contact's marketing opt-out.
+  if (numericCode === 131050) {
+    return {
+      code: "marketing_opt_out",
+      message:
+        "This recipient has turned off marketing messages from your business in WhatsApp. " +
+        "They'll still receive utility and authentication messages.",
+      detail,
+      httpStatus,
+    };
+  }
+  // ── Business-portfolio pacing ────────────────────────────────────────────
+  // WhatsApp 135000 — this message was HELD by portfolio pacing and then
+  // DROPPED, because the feedback gathered between batches suggested suspicious
+  // activity. Arrives as a `failed` status webhook, not as a send rejection: the
+  // send itself succeeded and returned a wamid hours earlier.
+  //
+  // Deliberately its own code rather than the generic bucket, because the cause
+  // and the fix are unlike every other failure here. Nothing about THIS
+  // recipient is wrong — retrying them changes nothing, and the whole portfolio
+  // is now blocked from sending or creating templates pending review. It is an
+  // account-level event that happens to be reported per message.
+  if (numericCode === 135000) {
+    return {
+      code: "portfolio_paced_drop",
+      message:
+        "WhatsApp dropped this message during a business-portfolio review. Your portfolio " +
+        "is paused from sending and creating templates while Meta reviews recent activity — " +
+        "check Business Suite and email for the notification, and appeal there if needed.",
       detail,
       httpStatus,
     };
@@ -290,6 +382,16 @@ export function classifyMetaStatusError(code: number | null | undefined): MetaEr
     // invisible to the send path entirely.
     case 131049:
       return "per_user_marketing_cap";
+    // The recipient used WhatsApp's own "Offers and announcements" setting to
+    // STOP marketing messages from this business. Meta accepts the send and then
+    // fails it, so — like 131049 — it is only ever seen on the status webhook.
+    case 131050:
+      return "marketing_opt_out";
+    // Dropped by a business-portfolio pacing review. Like the two above, this
+    // is ONLY ever a status webhook: the send returned a wamid and the message
+    // sat `held` until the review dropped it.
+    case 135000:
+      return "portfolio_paced_drop";
     case 4:
     case 80006:
     case 80007:
@@ -328,7 +430,20 @@ export function classifyMetaStatusError(code: number | null | undefined): MetaEr
  *  - `suppress`   — deliverable in principle, but Meta/user policy blocked it.
  *                   Retrying is wasteful and hurts the number's quality rating.
  */
-export type FailureBucket = "retryable" | "permanent" | "suppress";
+/**
+ * What the operator should DO about a failure — and the labels the report puts
+ * on it, which is why the names matter more than they look:
+ *
+ *   retryable — "Can retry".    Transient; re-sending is expected to work.
+ *   permanent — "Clean list".   Something is wrong with the RECIPIENT. This one
+ *                               tells someone to REMOVE a contact, so it must
+ *                               never catch a person who is perfectly reachable.
+ *   suppress  — "Don't retry".  Leave them alone, and keep them: a standing
+ *                               choice or a limit, not a bad number.
+ *   content   — "Fix the message". Our fault, not theirs. Every recipient fails
+ *                               identically until the template changes.
+ */
+export type FailureBucket = "retryable" | "permanent" | "suppress" | "content";
 
 export function failureBucket(code: MetaErrorCode | string | null): FailureBucket {
   switch (code) {
@@ -336,17 +451,39 @@ export function failureBucket(code: MetaErrorCode | string | null): FailureBucke
     case "template_unavailable":
     case "auth_expired":
       return "retryable";
+    // The ONLY bucket that says "delete this contact" — reserved for a number
+    // that genuinely isn't reachable.
     case "invalid_recipient":
       return "permanent";
+    // "Don't retry" — and, just as important, don't delete. Each of these is a
+    // standing choice, a limit, or a decision Meta made; the person is a
+    // perfectly good contact:
+    //   marketing_opt_out      they stopped MARKETING from us and still get
+    //                          utility + authentication messages. The default
+    //                          bucket used to render this as "clean list",
+    //                          i.e. delete a live customer over a preference.
+    //   portfolio_paced_drop   Meta dropped it in a portfolio review. Nothing
+    //                          about this recipient is wrong at all.
+    //   call_permission_required  they just haven't granted calling permission.
     case "per_user_marketing_cap":
     case "recipient_unavailable":
     case "outside_24h_window":
+    case "marketing_opt_out":
+    case "portfolio_paced_drop":
+    case "call_permission_required":
       return "suppress";
+    // OUR content, not their number. Every recipient fails identically until
+    // the template or the message changes, so pointing the operator at their
+    // contact list is exactly the wrong direction.
+    case "unsupported_message":
+    case "duplicate_button_title":
+    case "message_unavailable":
+      return "content";
     default:
-      // Unknown / provider_rejected / content errors: not safely retryable in
-      // bulk (a content fault would just fail again and re-bill nothing, but a
-      // blind bulk retry is the kind of thing that burns an audience).
-      return "permanent";
+      // Unknown / provider_rejected. Not safely retryable in bulk, and we can't
+      // claim the recipient is bad either — so it stays in the conservative
+      // bucket rather than instructing anyone to change their list.
+      return "suppress";
   }
 }
 

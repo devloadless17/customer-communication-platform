@@ -105,9 +105,15 @@ export default async function PlatformOverviewPage() {
                     Signed up <LocalTime iso={o.createdAt} format="listTime" />
                   </div>
                 </div>
-                <QuickApproveButton workspaceId={o.id} />
+                {/* `pendingOrgs` are ORGANISATIONS. This passed `o.id` to a
+                    workspace-keyed endpoint, so approving from here always
+                    404'd "team not found" — the whole queue was decorative. */}
+                <QuickApproveButton organizationId={o.id} />
+                {/* Same id mix-up: the detail route is keyed by a WORKSPACE id,
+                    so an organisation id 404'd here too. Point at the list,
+                    which is organisation-keyed and shows this org's row. */}
                 <Link
-                  href={`/platform/organizations/${o.id}`}
+                  href="/platform/organizations"
                   className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
                   aria-label="Open organization"
                 >

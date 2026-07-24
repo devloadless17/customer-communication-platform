@@ -43,8 +43,16 @@ export interface TeamEventsState {
  * is `all`-preset (preserves the historical "no filter param = all
  * non-closed" default for any legacy consumers that don't pass one).
  */
-function filterParams(filter: Filter | undefined): URLSearchParams {
+function filterParams(
+  filter: Filter | undefined,
+  /** Orthogonal account narrow — ANDed by the server on top of `filter`. */
+  accountId?: string | null,
+): URLSearchParams {
   const p = new URLSearchParams();
+  // Set FIRST and outside the `!filter` early-return: an account narrow is
+  // independent of which slice is selected, so it must survive even the
+  // no-filter path (which is the "all" preset's historical shape).
+  if (accountId) p.set("accountId", accountId);
   if (!filter) return p;
   if (filter.kind === "preset") {
     p.set("filter", filter.id);
@@ -218,6 +226,16 @@ export function useTeamEvents(
    * against the active view — see `rowMatchesFilterFor`.
    */
   viewFiltersById: Record<string, InboxViewFilters> = EMPTY_VIEW_FILTERS,
+  /**
+   * Narrow the list to ONE channel account, or null/undefined for all of them.
+   *
+   * Appended LAST on purpose: every parameter above is positional and already
+   * has call sites, so inserting beside `filter` (where it belongs
+   * conceptually) silently shifted `restrictedToOwnConversations` into its slot
+   * — a boolean landing where a string was expected. TypeScript caught it here;
+   * had the types happened to line up it would have been a live visibility bug.
+   */
+  accountId?: string | null,
 ): TeamEventsState {
   // SSR ships the team-wide unfiltered feed (the sub-sidebar's first-paint
   // preset counts depend on having closed rows in the seed too). The LIST
@@ -252,6 +270,10 @@ export function useTeamEvents(
   // change effect later in this file owns the actual refetch.
   const filterRef = useRef<Filter | undefined>(filter);
   filterRef.current = filter;
+  // Same sync-assign-during-render pattern as `filterRef`: a socket callback
+  // firing between renders must read the CURRENT narrow, not a stale closure.
+  const accountIdRef = useRef<string | null | undefined>(accountId);
+  accountIdRef.current = accountId;
 
   // Stable ref mirror of the current conversation list. Read by socket
   // handlers that must decide a side effect (e.g. "is this conversation in the
@@ -531,7 +553,7 @@ export function useTeamEvents(
       return;
     }
     setLoadingMore(true);
-    const params = filterParams(filterRef.current);
+    const params = filterParams(filterRef.current, accountIdRef.current);
     params.set("cursor", cursor);
     fetchWithSessionGuard(`/api/conversations?${params.toString()}`)
       .then((r) => (r.ok ? (r.json() as Promise<CursorPage<ConversationWithRefs>>) : null))
@@ -563,7 +585,13 @@ export function useTeamEvents(
   // active view (adding a tag, flipping a status) leaves the id unchanged, so
   // an id-only key would keep the old slice on screen until something else
   // forced a refetch — the view would silently not do what it now says.
-  const filterKey = filter
+  //
+  // The channel-ACCOUNT narrow is folded in for the same reason a view's
+  // criteria are: it changes the server-side WHERE, and this key is the ONLY
+  // thing that triggers the refetch below. Left out, picking a number would
+  // update the picker and change nothing in the list until the agent happened
+  // to switch presets — the filter would silently not apply.
+  const baseFilterKey = filter
     ? filter.kind === "preset"
       ? `p:${filter.id}`
       : filter.kind === "stage"
@@ -572,6 +600,7 @@ export function useTeamEvents(
           ? `v:${filter.viewId}:${JSON.stringify(viewFiltersById[filter.viewId] ?? null)}`
           : "calls"
     : "p:all";
+  const filterKey = `${baseFilterKey}|a:${accountId ?? ""}`;
   const lastFilterKeyRef = useRef<string | null>(null);
   // LAYOUT effect (not useEffect): the instant re-derive below must run BEFORE
   // the browser paints. On a switch from a NARROW filter to a disjoint one
@@ -600,8 +629,14 @@ export function useTeamEvents(
     // fresh rows immediately; the fetch below only ADDS matching rows that
     // weren't in the loaded slice yet and prunes any that no longer match.
     setConversations((prev) =>
-      prev.filter((row) =>
-        rowMatchesFilterFor(filter, currentUserId, row, viewFiltersRef.current),
+      prev.filter(
+        (row) =>
+          rowMatchesFilterFor(filter, currentUserId, row, viewFiltersRef.current) &&
+          // The account narrow prunes locally too, for the same reason the
+          // filter does: without it, threads on the OTHER numbers stayed on
+          // screen for the whole fetch, so picking "Sales" briefly showed
+          // Support's conversations under a Sales-only heading.
+          (!accountId || row.conversation.channelConnectionId === accountId),
       ),
     );
 
@@ -610,7 +645,7 @@ export function useTeamEvents(
     // for this filter). Cleared when the fetch settles.
     setRefetching(true);
 
-    const params = filterParams(filter);
+    const params = filterParams(filter, accountId);
     fetchWithSessionGuard(`/api/conversations?${params.toString()}`)
       .then((r) => (r.ok ? (r.json() as Promise<CursorPage<ConversationWithRefs>>) : null))
       .then((page) => {
@@ -659,7 +694,7 @@ export function useTeamEvents(
     return () => {
       cancelled = true;
     };
-  }, [filterKey, filter, currentUserId]);
+  }, [filterKey, filter, accountId, currentUserId]);
 
   // Mirror activeConversationId into a ref so the message:new handler reads
   // the latest value without re-subscribing on every navigation. Sync-
@@ -702,7 +737,7 @@ export function useTeamEvents(
         // with only my threads, not the whole team. Tail-merge with the
         // existing local list to preserve any newer rows that arrived via
         // realtime between the resync request and its response.
-        const params = filterParams(filterRef.current);
+        const params = filterParams(filterRef.current, accountIdRef.current);
         const url = params.toString() ? `/api/conversations?${params}` : `/api/conversations`;
         const r = await fetchWithSessionGuard(url);
         if (!r.ok) return false;

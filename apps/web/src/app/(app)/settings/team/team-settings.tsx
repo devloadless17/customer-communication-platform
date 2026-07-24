@@ -29,6 +29,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessage, NETWORK_ERROR_MESSAGE } from "@ccp/shared/api/error-message";
 import { broadcastSignout } from "@/lib/auth/auth-broadcast";
 import { closeClientSocket, dispatchLocalSocketEvent } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
@@ -36,6 +37,7 @@ import {
   assignableRoles,
   canManageUsers,
   canModifyUser,
+  canModifyUserAccount,
   roleLabel,
 } from "@ccp/shared/auth/permissions";
 import {
@@ -45,7 +47,7 @@ import {
 } from "@ccp/shared/presence";
 import { PresenceDot } from "@/components/presence-dot";
 import { usePresence } from "@/hooks/use-presence";
-import type { Role, UserAvailabilityStatus } from "@ccp/shared/types";
+import type { OrgRole, Role, UserAvailabilityStatus } from "@ccp/shared/types";
 import {
   asWorkHours,
   type AvailabilitySource,
@@ -80,6 +82,9 @@ export interface TeamUserRow {
   role: Role;
   // Platform operator flag — protects them from edits by a workspace admin.
   isSuperAdmin?: boolean;
+  /** Org-directory role. Gates the account-level menu with the SAME predicate
+   *  the API enforces, so the menu never offers an action that 403s. */
+  orgRole?: OrgRole;
   deactivated: boolean;
   createdAt: string;
   /** Serve-route path for the member's avatar, or null → initials fallback. */
@@ -113,16 +118,24 @@ export function TeamSettings({
   currentUserId,
   currentUserRole,
   currentUserIsSuperAdmin = false,
+  currentUserOrgRole,
   workspaceId,
   teamName,
   users,
   pendingInvites,
   teamWorkHours,
   canManageOthersAvailability,
+  isOrgOwner = false,
 }: {
   currentUserId: string;
   currentUserRole: Role;
   currentUserIsSuperAdmin?: boolean;
+  /** Org-directory role of the viewer. Account-level actions (disable / delete /
+   *  reset password) reach every workspace in the org, so they are gated on
+   *  this rather than on the per-workspace role. */
+  currentUserOrgRole?: OrgRole;
+  /** Org-level owner. Deleting the organization is owner-only — see below. */
+  isOrgOwner?: boolean;
   /** Needed for the live presence subscription behind the member status dots. */
   workspaceId: string;
   teamName: string;
@@ -144,8 +157,11 @@ export function TeamSettings({
   // Sharing `pending` made clicking "Delete organization" look like nothing
   // happened while quietly disabling every other button on the page.
   const [deletingOrg, setDeletingOrg] = useState(false);
-  // Admin-initiated password reset — the recovery path for a locked-out
-  // teammate (no self-serve email reset exists). Non-null = dialog open.
+  // Admin-initiated password reset for a teammate. NOTE: this is no longer the
+  // only recovery path — /forgot-password (emailed OTP) is, and the SUPER-ADMIN
+  // equivalent of this action was removed for that reason. This workspace-admin
+  // one is kept deliberately for now: it is the break-glass for someone who has
+  // lost access to their mailbox. Non-null = dialog open.
   const [resetTarget, setResetTarget] = useState<ResetPasswordTarget | null>(null);
   // Live team name — listens to `team:renamed` so the input + delete dialog
   // + danger-zone copy stay in sync with what this tab just dispatched OR
@@ -162,8 +178,13 @@ export function TeamSettings({
   const refresh = softRefresh;
   const canManage = canManageUsers(currentUserRole);
   const inviteRoles = useMemo(() => assignableRoles({ role: currentUserRole, isSuperAdmin: currentUserIsSuperAdmin }), [currentUserRole, currentUserIsSuperAdmin]);
-  // Org-delete is admin/superAdmin only — same gate as user-management.
-  const canDeleteOrg = canManage;
+  // Org-delete is OWNER-only. It removes every workspace in the organization
+  // plus the user directory, so a workspace-scoped admin would otherwise be
+  // destroying sibling workspaces they may not even belong to — the API refuses
+  // them, and this keeps the button from appearing at all. (It has to be hidden
+  // rather than merely error: the handler tears the socket down BEFORE the
+  // request, so a rejected click would strand the clicker signed-out.)
+  const canDeleteOrg = canManage && isOrgOwner;
 
   async function createInvite(form: FormData) {
     setError(null);
@@ -171,24 +192,41 @@ export function TeamSettings({
       email: form.get("email"),
       role: form.get("role") || "agent",
     };
-    const res = await apiFetch("/api/invites", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = (await res.json().catch(() => ({}))) as {
-      invite?: { url: string; expiresAt: string };
-      error?: string;
-    };
-    if (!res.ok || !data.invite) {
-      setError(data.error ?? "Failed to create invite");
+    try {
+      const res = await apiFetch("/api/invites", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        // Reads `detail` first. The two failures an admin actually hits here
+        // both ship one: the seat cap ("This workspace is at its member
+        // limit…") and inviting a colleague who is already in the org (which
+        // names them and points at Organization → Members). Showing `error`
+        // alone rendered those as `member_limit_reached` /
+        // `already_in_organization` — a dead end wearing a machine key.
+        setError(await apiErrorMessage(res, "Failed to create invite"));
+        return null;
+      }
+      const data = (await res.json().catch(() => ({}))) as {
+        invite?: { url: string; expiresAt: string };
+      };
+      if (!data.invite) {
+        setError("Failed to create invite");
+        return null;
+      }
+      return {
+        url: data.invite.url,
+        expiresAt: data.invite.expiresAt,
+        email: String(body.email),
+      } satisfies InviteResult;
+    } catch {
+      // apiFetch throws on a 401 and on any network failure rather than
+      // returning the response — unguarded, the dialog would sit there doing
+      // nothing at all.
+      setError(NETWORK_ERROR_MESSAGE);
       return null;
     }
-    return {
-      url: data.invite.url,
-      expiresAt: data.invite.expiresAt,
-      email: String(body.email),
-    } satisfies InviteResult;
   }
 
   async function patchUser(id: string, body: { role?: Role; deactivated?: boolean }) {
@@ -199,8 +237,7 @@ export function TeamSettings({
       body: JSON.stringify(body),
     });
     if (!res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(data.error ?? "Failed to update user");
+      setError(await apiErrorMessage(res, "Failed to update user"));
     }
   }
 
@@ -220,8 +257,7 @@ export function TeamSettings({
     startTransition(async () => {
       const res = await apiFetch(`/api/users/${id}`, { method: "DELETE" });
       if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? "Failed to delete user");
+        setError(await apiErrorMessage(res, "Failed to delete user"));
         return;
       }
       refresh();
@@ -241,8 +277,7 @@ export function TeamSettings({
     startTransition(async () => {
       const res = await apiFetch(`/api/invites/${id}`, { method: "DELETE" });
       if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? "Failed to revoke invite");
+        setError(await apiErrorMessage(res, "Failed to revoke invite"));
         return;
       }
       // The socket emit on the server will trigger router.refresh() everywhere
@@ -278,8 +313,7 @@ export function TeamSettings({
       body: JSON.stringify({ name: trimmed }),
     });
     if (!res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(data.error ?? "Failed to rename organization");
+      setError(await apiErrorMessage(res, "Failed to rename organization"));
       // Roll the optimistic patch back to the server-truth name.
       dispatchLocalSocketEvent("team:renamed", {
         workspaceId: "",
@@ -322,8 +356,7 @@ export function TeamSettings({
     try {
       const res = await apiFetch("/api/workspace", { method: "DELETE" });
       if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? "Failed to delete organization");
+        setError(await apiErrorMessage(res, "Failed to delete organization"));
         setDeletingOrg(false);
         return;
       }
@@ -416,6 +449,7 @@ export function TeamSettings({
               isSelf={u.id === currentUserId}
               actorRole={currentUserRole}
               actorIsSuperAdmin={currentUserIsSuperAdmin}
+              actorOrgRole={currentUserOrgRole}
               online={onlineUserIds.has(u.id)}
               liveAvailability={availabilityByUserId[u.id]?.status}
               liveNote={availabilityByUserId[u.id]?.message ?? undefined}
@@ -509,6 +543,7 @@ function UserRow({
   isSelf,
   actorRole,
   actorIsSuperAdmin = false,
+  actorOrgRole,
   online,
   liveAvailability,
   liveNote,
@@ -524,6 +559,7 @@ function UserRow({
   isSelf: boolean;
   actorRole: Role;
   actorIsSuperAdmin?: boolean;
+  actorOrgRole?: OrgRole;
   /** Has a live socket. Offline wins over any availability — see PresenceDot. */
   online: boolean;
   /** Live status/note from the socket; falls back to the SSR snapshot. */
@@ -537,7 +573,23 @@ function UserRow({
   onDelete: () => void;
   onResetPassword: () => void;
 }) {
-  const editable = canManageUsers(actorRole) && canModifyUser({ role: actorRole, isSuperAdmin: actorIsSuperAdmin }, { role: user.role, isSuperAdmin: user.isSuperAdmin ?? false });
+  const actor = {
+    role: actorRole,
+    isSuperAdmin: actorIsSuperAdmin ?? false,
+    orgRole: actorOrgRole,
+  };
+  const target = {
+    role: user.role,
+    isSuperAdmin: user.isSuperAdmin ?? false,
+    orgRole: user.orgRole,
+  };
+  // Two different authorities, deliberately kept apart. `editable` is the
+  // WORKSPACE one: change this person's role here. `manageAccount` is the ORG
+  // one: disable sign-in, reset the password, delete the account — each of
+  // which reaches every workspace they belong to. Same predicates the API
+  // enforces, so a control is only rendered when the click will actually work.
+  const editable = canManageUsers(actorRole) && canModifyUser(actor, target);
+  const manageAccount = canModifyUserAccount(actor, target);
   // Live socket value wins; the SSR snapshot is the fallback for the first
   // paint (and for a member the sparse presence map omits, i.e. the default
   // "available, no note").
@@ -640,7 +692,7 @@ function UserRow({
             {roleLabel(user.role)}
           </Badge>
         )}
-        {editable && (
+        {manageAccount && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -985,8 +1037,7 @@ function OrgWorkHoursCard({
         body: JSON.stringify({ workHours: next }),
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        onError(data.error ?? "Failed to save working hours");
+        onError(await apiErrorMessage(res, "Failed to save working hours"));
         return;
       }
       toast.success(next ? "Working hours saved" : "Working hours turned off");
@@ -1071,8 +1122,7 @@ function MemberAvailabilityMenu({
         body: JSON.stringify(body),
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        onError(data.error ?? "Failed to update availability");
+        onError(await apiErrorMessage(res, "Failed to update availability"));
         return;
       }
       onChanged();
@@ -1208,8 +1258,7 @@ function MemberWorkHoursDialog({
         }),
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        onError(data.error ?? "Failed to save working hours");
+        onError(await apiErrorMessage(res, "Failed to save working hours"));
         return;
       }
       toast.success("Working hours saved");

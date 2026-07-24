@@ -122,6 +122,46 @@ the bucket, and it **fails open** if Redis is unreachable — a limiter that hal
 an already-paid-for campaign because a cache is down has done more damage than
 the overshoot it prevented.
 
+## 6a-bis. Where the tier actually comes from
+
+The messaging limit is the maximum number of unique users you can message
+*outside a customer-service window* in a moving 24h — and since **2025-10-07 it
+is PORTFOLIO-scoped**: every number in a portfolio shares one allowance, so one
+number can consume all of it. That is why `messagingTier` /
+`messagingDailyCap` live on `WhatsappPortfolio` and not on the connection; a
+per-number write would record one portfolio's budget N times.
+
+Meta spells the same ladder four different ways, and the two we used to read are
+gone or going:
+
+| Source | Field | Status |
+|---|---|---|
+| phone-number / WABA / portfolio node | `whatsapp_business_manager_messaging_limit` | **current** |
+| phone-number node | `messaging_limit_tier` | **deprecated** |
+| `business_capability_update` · `phone_number_quality_update` | `max_daily_conversations_per_business` | **current** (on both) |
+| `business_capability_update` | `max_daily_conversation_per_phone` | **removed Feb 2026** |
+| `phone_number_quality_update` | `current_limit` | limit meaning **removed Feb 2026**; now also carries the number's *throughput* level |
+
+`normalizeMessagingTier` is the single funnel for all of them, and it returns
+**null for anything it doesn't recognise** — deliberately. A throughput string
+(`STANDARD` / `HIGH`) now shares the `current_limit` field, and mapping one onto
+a tier would gate a campaign against a number that means nothing. Null = ungated,
+which is the safe direction here because the *rate* limiter still applies.
+
+> **The trap.** Both the poll and the webhook read a field, get nothing, and
+> store null — no error anywhere. The number then looks ungated and the 24h
+> budget gate stops protecting it. That is why the poll asks for the current
+> field **and** the deprecated one, and why the webhook prefers
+> `max_daily_conversations_per_business` and still falls back to both legacy
+> spellings.
+
+Related: the ladder starts at 250 and climbs 2K → 10K → 100K → Unlimited.
+Reaching 2K needs a scaling path (business verification, partner verification, or
+2,000 delivered out-of-window messages to unique users in 30 days on
+high-quality templates); after that Meta auto-scales one level per 6h when you
+use at least half your current limit with high-quality messaging. A quality drop
+no longer downgrades a limit, and the **Flagged** number state no longer exists.
+
 ## 6b. Serving every Meta tier in ONE process
 
 Meta auto-scales a healthy number **250 → 2K → 10K → 100K** within weeks, and the
@@ -220,3 +260,118 @@ path crash-safe.
 Also open: a per-template insights **page** (the drawer panel covers the
 question today; a standalone page is only worth it if someone wants to compare
 templates side by side).
+
+---
+
+## Held for quality assessment (two kinds of pacing)
+
+Meta batches template delivery for portfolios that have sent **under 500k
+template messages in a rolling 365 days**, and for any portfolio under review for
+suspicious activity. An initial set goes out normally; the rest are **held**,
+released batch by batch as feedback comes in — or **dropped** entirely if the
+review turns up a problem.
+
+**There are two pacing mechanisms and they are easy to conflate.** Both hold
+messages the same way, and both are reported through the same `held` state — but
+they have different scopes, different triggers, and *different drop codes*:
+
+| | **Template pacing** | **Business-portfolio pacing** |
+|---|---|---|
+| Scope | one template | every number in the portfolio |
+| Applies to | marketing + utility templates that are new, just-unpaused, or not `GREEN` | portfolios under 500k template sends in a rolling 365d, or under review |
+| Bad signal → | that template is **PAUSED**, held messages dropped | held messages dropped, portfolio blocked from sending **and creating** templates |
+| Drop code | **132015** (`template_unavailable`) | **135000** (`portfolio_paced_drop`) |
+| Good signal → | released and scaled to the whole audience | released batch by batch |
+
+Utility templates are paced only once you have *had* a utility template paused,
+and then for 7 days. Meta also guarantees a decision inside a bounded window —
+the stated goal is that even a paced high-throughput campaign delivers within an
+hour at p99 — and if that guardrail is hit before the feedback is conclusive, the
+held messages are simply released.
+
+**The only signal is on the send response**: `message_status:
+"held_for_quality_assessment"`, alongside a perfectly normal message id. Ignore
+it and the campaign reports as fully sent while most of it sits in Meta's queue —
+the same silent over-count that `undelivered` was added to fix.
+
+So:
+
+- `SendTextResult.heldForQualityAssessment` carries it out of the provider;
+- the runner seeds `deliveryState: "held"` instead of `sent`;
+- `held` ranks **alongside** `sent` in `DELIVERY_RANK`, not below it. A held
+  message has already been accepted, so `delivered`/`read` and a terminal failure
+  still advance past it, while a plain `sent` webhook can't erase the more
+  specific fact;
+- the funnel counts `held` inside `accepted` (Meta did take the message) and
+  surfaces it as its own row — a campaign that looks stalled needs explaining,
+  not discovering;
+- a **template**-pacing drop arrives as `failed` + **132015**, which already maps
+  to `template_unavailable` — and the accompanying `message_template_status_update`
+  (`PAUSED`) is what halts the rest of the campaign, via the halt described in
+  [whatsapp-templates.md](whatsapp-templates.md) §25;
+- a **portfolio**-pacing drop arrives as a `failed` status webhook with code **135000**, mapped to
+  `portfolio_paced_drop`. Nothing about that recipient is wrong and retrying them
+  changes nothing: it is an account-level event reported per message, and the
+  portfolio is already blocked pending Meta's review. Appeals go through Business
+  Suite, which is what the message tells the operator.
+
+
+---
+
+## Per-user marketing limits (131049)
+
+WhatsApp caps how many marketing templates an individual receives **from any
+business**, adapting to that person's own read rate and inbox activity. It is not
+about us and the person made no choice about us — which is why it is recorded
+separately from an opt-out and expires on its own.
+
+Also folded into the same error: **US phone numbers receive no marketing
+templates at all** since 2025-04-01. The two causes are indistinguishable in the
+response, so the operator-facing message names both. Per-user limits are not
+active for numbers in the EEA, UK, Japan or South Korea.
+
+**The rule that changes behaviour**: wait **24 hours** before resending to a
+capped user. Resending sooner earns the same error, *and* a WABA that repeatedly
+retries capped users can have delivery to those users cut off for up to 24 hours.
+So:
+
+- a 131049 status webhook stamps `Contact.marketingCapReachedAt` (mirroring how
+  131050 stamps the opt-out);
+- broadcast audience resolution excludes contacts capped in the last 24h,
+  counting them into `suppressedCount` beside the opt-outs. **Marketing category
+  only** — a utility or authentication template must still reach them, exactly
+  like the opt-out rule it sits next to;
+- the window is rolling, not sticky. Nobody has to clear a flag.
+
+Retrying a finished campaign was already safe and stays that way: 131049 arrives
+*after* a successful send, so the recipient's `status` is `sent` (with
+`deliveryState: undelivered`), and `retryFailed` only re-queues `status: failed`.
+The bucket is `suppress`, so the report never offers them for retry either.
+
+
+---
+
+## Failure buckets are an INSTRUCTION, not a taxonomy
+
+The report tags every failure with a bucket, and the UI turns that into a chip
+telling the operator what to do:
+
+| Bucket | Chip | Means |
+|---|---|---|
+| `retryable` | Can retry | transient — re-sending should work |
+| `permanent` | **Clean list** | the RECIPIENT is unreachable — remove them |
+| `suppress` | Don't retry | a standing choice or a limit; keep the contact |
+| `content` | Fix the message | our fault; every recipient fails until it changes |
+
+`permanent` is the only chip that tells someone to **delete a contact**, which
+makes the default arm of `failureBucket` load-bearing. It used to return
+`permanent`, so every code without an explicit case inherited "clean list" —
+including `marketing_opt_out`, which meant an operator was told to delete a live
+customer because they had turned off *marketing* while still receiving their
+order updates. `portfolio_paced_drop` and `call_permission_required` landed there
+too, and our own content faults (a duplicate button title) pointed at the contact
+list instead of the template.
+
+Now every code is bucketed explicitly, the default is the conservative
+`suppress` (an unrecognised code can't be claimed to mean a bad number), and a
+test asserts both the individual verdicts and that nothing quietly inherits one.

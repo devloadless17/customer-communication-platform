@@ -6,6 +6,8 @@ import { Check, Loader2, PlugZap, TriangleAlert, Unplug } from "lucide-react";
 import { cn } from "@ccp/shared/utils";
 
 import { Button } from "@/components/ui/button";
+import { ChannelAccountsPanel } from "@/features/channels/components/channel-accounts-panel";
+import type { ChannelAccountView } from "@/lib/api/queries";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/layouts/page-header";
@@ -35,9 +37,13 @@ export interface InstagramCurrent {
 export function InstagramSettings({
   current,
   canManage,
+  accounts,
 }: {
   current: InstagramCurrent;
   canManage: boolean;
+  /** Every Instagram account this workspace has connected. A workspace may hold
+   *  several — the panel below is where they are named and managed. */
+  accounts: ChannelAccountView[];
 }) {
   const softRefresh = useSoftRefresh();
   const { confirm, confirmDialog } = useConfirm();
@@ -106,6 +112,25 @@ export function InstagramSettings({
       />
 
       {confirmDialog}
+
+      {canManage && (
+        <ChannelAccountsPanel
+          channel="instagram"
+          accounts={accounts}
+          channelLabel="Instagram"
+          accountNoun="account"
+          // Reveals the connect form (collapsed once connected) and scrolls to
+          // it, so "Add another" visibly does something.
+          onAddAnother={() => {
+            setShowForm(true);
+            requestAnimationFrame(() => {
+              document
+                .getElementById("instagram-connect-form")
+                ?.scrollIntoView({ behavior: "smooth", block: "center" });
+            });
+          }}
+        />
+      )}
 
       <div
         className={cn(
@@ -181,6 +206,7 @@ export function InstagramSettings({
 
       {canManage && showForm && (
         <form
+          id="instagram-connect-form"
           className="flex flex-col gap-4 rounded-xl border bg-card p-5"
           onSubmit={(e) => {
             e.preventDefault();

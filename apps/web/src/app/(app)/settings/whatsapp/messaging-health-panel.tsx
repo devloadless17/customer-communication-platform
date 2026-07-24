@@ -33,6 +33,15 @@ interface Health {
   throughputLevel: string | null;
   externalPortfolioId: string | null;
   portfolioAccountCount: number;
+  /** Meta's raw portfolio `verification_status` ("verified" | "not_verified" | …). */
+  verificationStatus: string | null;
+  /** Templates each WABA under the portfolio may hold — 250 unverified, up to
+   *  6,000 verified. An upper bound, not a hard gate. */
+  templateLimit: number;
+  /** WhatsApp Business policy violation Meta reported — the warning that
+   *  precedes an account restriction. */
+  policyViolationType: string | null;
+  policyViolationAt: string | null;
   messagingHealthUpdatedAt: string | null;
 }
 
@@ -42,7 +51,21 @@ const THROUGHPUT_LABEL: Record<string, string> = {
   HIGH: "High · up to ~1,000 messages/second",
 };
 
-export function MessagingHealthPanel({ canManage }: { canManage: boolean }) {
+export function MessagingHealthPanel({
+  canManage,
+  accountCount = 1,
+}: {
+  canManage: boolean;
+  /**
+   * How many WhatsApp numbers this workspace has. Purely a HONESTY input: this
+   * panel reads `/api/broadcasts/messaging-health`, which describes the channel
+   * DEFAULT account. With one number that is the whole truth; with several it is
+   * one number's quality and throughput presented as if it were the channel's.
+   * Rather than silently mislead, say which account these figures describe and
+   * point at the per-account breakdown above.
+   */
+  accountCount?: number;
+}) {
   const [health, setHealth] = useState<Health | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, startTransition] = useTransition();
@@ -103,8 +126,18 @@ export function MessagingHealthPanel({ canManage }: { canManage: boolean }) {
             Messaging health
           </h2>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            What Meta currently allows this number to send. Updated automatically;
-            refresh to pull it now.
+            {accountCount > 1 ? (
+              <>
+                What Meta allows your <strong>default</strong> number to send. Quality and
+                throughput are per number — see the list above for the others. The 24-hour
+                budget below is shared across the whole business portfolio.
+              </>
+            ) : (
+              <>
+                What Meta currently allows this number to send. Updated automatically;
+                refresh to pull it now.
+              </>
+            )}
           </p>
         </div>
         {canManage && (
@@ -124,6 +157,28 @@ export function MessagingHealthPanel({ canManage }: { canManage: boolean }) {
           </Button>
         )}
       </header>
+
+      {/* A policy violation outranks every figure below it: Meta restricts an
+          account that doesn't address one, and this is the only warning that
+          comes first. Shown even without a snapshot — it arrives by webhook. */}
+      {health.policyViolationType && (
+        <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5">
+          <p className="text-xs font-medium text-destructive">
+            WhatsApp reported a policy violation:{" "}
+            <span className="font-mono">{health.policyViolationType}</span>
+          </p>
+          <p className="mt-1 text-2xs text-muted-foreground">
+            {health.policyViolationAt && (
+              <>
+                Reported <LocalTime iso={health.policyViolationAt} format="localeString" />.{" "}
+              </>
+            )}
+            Meta restricts accounts that don&apos;t address a violation. Review the
+            WhatsApp Business Messaging Policy and your recent campaigns — Meta
+            Business Suite and email carry the details and any appeal.
+          </p>
+        </div>
+      )}
 
       {!health.hasSnapshot ? (
         <p className="mt-4 rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
@@ -229,6 +284,23 @@ export function MessagingHealthPanel({ canManage }: { canManage: boolean }) {
                 <span className="font-sans text-muted-foreground">
                   Not resolved — the connected token may lack{" "}
                   <span className="font-mono">business_management</span>.
+                </span>
+              )}
+            </dd>
+
+            <dt className="text-muted-foreground">Template limit</dt>
+            <dd>
+              {health.templateLimit.toLocaleString()} per WhatsApp Business Account
+              {health.verificationStatus === "verified" ? (
+                <span className="ml-2 text-muted-foreground">
+                  Portfolio is verified — the 6,000 ceiling also needs one number with an
+                  approved display name.
+                </span>
+              ) : (
+                <span className="ml-2 text-muted-foreground">
+                  {health.verificationStatus === null
+                    ? "Verification status not read yet — showing the unverified limit."
+                    : "Verify your business portfolio with Meta to raise this to 6,000."}
                 </span>
               )}
             </dd>

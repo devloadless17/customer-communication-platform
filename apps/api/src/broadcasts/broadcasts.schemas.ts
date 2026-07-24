@@ -67,6 +67,51 @@ export const BroadcastVariablesSchema = z.object({
       filename: z.string().max(255).optional(),
     })
     .optional(),
+  /**
+   * The pin for a LOCATION-header template — one place for the whole campaign,
+   * which is what a location template means (a store opening, an event venue).
+   * Declared with no parameters at create time, so all of it arrives here.
+   */
+  headerLocation: z
+    .object({
+      latitude: z.string().min(1).max(32),
+      longitude: z.string().min(1).max(32),
+      // Optional per Meta: a pin renders from coordinates alone.
+      name: z.string().max(120).optional(),
+      address: z.string().max(255).optional(),
+    })
+    .optional(),
+  /**
+   * Carousel cards, campaign-level: every recipient sees the same strip. The
+   * count is fixed by the approved template, so this is validated against it
+   * rather than bounded here alone.
+   */
+  cards: z
+    .array(
+      z.object({
+        kind: z.enum(["image", "video"]),
+        link: z.string().url().max(2048),
+        body: z.array(z.string()).max(10).optional(),
+        buttons: z
+          .array(
+            z.object({
+              index: z.number().int().min(0).max(1),
+              subType: z.enum(["url", "quick_reply", "copy_code"]),
+              text: z.string().min(1).max(2048),
+            }),
+          )
+          .max(2)
+          .optional(),
+      }),
+    )
+    .max(10)
+    .optional(),
+  /**
+   * Campaign-level limited-time-offer expiry, UNIX **milliseconds**. Required
+   * when the template carries a LIMITED_TIME_OFFER component — one deadline for
+   * the whole campaign, which is what a countdown offer means.
+   */
+  limitedTimeOfferExpiresAtMs: z.number().int().positive().optional(),
 });
 export type BroadcastVariablesInput = z.infer<typeof BroadcastVariablesSchema>;
 
@@ -146,6 +191,27 @@ export const CreateBroadcastSchema = z
     variables: BroadcastVariablesSchema.default({ body: [] }),
     // freeform kind:
     channel: zBroadcastableChannel().optional(),
+    /**
+     * Which of the workspace's accounts on that channel this campaign sends
+     * from — a specific WhatsApp number, Page or Instagram handle. Omitted
+     * falls back to the channel's default account.
+     *
+     * Every account is a distinct sender identity to the customer, so this also
+     * scopes the audience and the template catalogue (a template belongs to one
+     * WhatsApp Business Account and can't be sent from a number outside it).
+     */
+    channelConnectionId: z.string().min(1).optional(),
+    /**
+     * Reach contacts belonging to the workspace's OTHER accounts on this
+     * channel, not just the sending one.
+     *
+     * Off by default and deliberately explicit: those customers have never
+     * messaged this number/Page, so they see an unfamiliar sender and their
+     * reply opens a new thread on it. That is sometimes exactly what an operator
+     * wants (a number migration, a merged brand) — it just must not happen by
+     * accident.
+     */
+    includeOtherAccounts: z.boolean().optional().default(false),
     bodyText: z.string().trim().min(1).max(2000).optional(),
     audience: AudienceSchema,
     // Optional operator label (falls back to template name in the UI).
@@ -203,6 +269,20 @@ export const BroadcastListQuerySchema = z.object({
     ])
     .optional(),
   search: z.string().trim().max(120).optional(),
+  /**
+   * Scope the history to ONE channel.
+   *
+   * Outreach is organized per channel — a campaign is WhatsApp or Messenger or
+   * Instagram, never a mix — so the list has to be able to answer "what has this
+   * channel sent" without the operator eyeballing a mixed table.
+   *
+   * `people` selects the omnichannel target mode rather than a channel: those
+   * campaigns resolve a channel per recipient, so they belong to none of them
+   * and would otherwise be invisible under every filter.
+   */
+  channel: z
+    .enum(["whatsapp", "messenger", "instagram", "people"])
+    .optional(),
   // Keyset pagination. `cursor` is the opaque `<createdAtMs>_<id>` of the last
   // row from the previous page; `take` bounds the page (default 100, max 200).
   // Older history beyond the first page is reachable by paging — previously the

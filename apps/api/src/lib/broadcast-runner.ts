@@ -17,7 +17,7 @@ import {
   requiredTemplateButtonParams,
   templateNamedPlaceholders,
 } from "@ccp/shared/template-render";
-import type { MessagingProvider } from "@ccp/shared/providers/types";
+import type { MessagingProvider, TemplateCardVariables } from "@ccp/shared/providers/types";
 import type { Channel } from "@ccp/shared/types";
 import { CHANNEL_CAPABILITIES, LIVE_CHANNELS, isPhoneChannel } from "@ccp/shared/providers/capabilities";
 import { flagChannelNeedsReconnect } from "@/lib/providers/channel-health";
@@ -358,7 +358,37 @@ interface BroadcastVariables {
   /** Campaign-level media for an IMAGE/VIDEO/DOCUMENT template header — one
    *  media reused across every recipient (a public link, reusable unlike
    *  Meta's single-use upload-media id). */
-  headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
+  headerMedia?: {
+    kind: "image" | "video" | "document";
+    /** Exactly one of link/id — see TemplateHeaderMedia. */
+    link?: string;
+    id?: string;
+    filename?: string;
+  };
+  /**
+   * Carousel cards, campaign-level. The count is fixed by the approved
+   * template, so this is a straight pass-through of what the composer collected.
+   */
+  cards?: Array<{
+    kind: "image" | "video";
+    link?: string;
+    id?: string;
+    body?: string[];
+    buttons?: Array<{
+      index: number;
+      subType: "url" | "quick_reply" | "copy_code";
+      text: string;
+    }>;
+  }>;
+  /** The pin for a LOCATION-header template — one place for every recipient. */
+  headerLocation?: {
+    latitude: string;
+    longitude: string;
+    name?: string;
+    address?: string;
+  };
+  /** Countdown expiry for a LIMITED_TIME_OFFER template, UNIX milliseconds. */
+  limitedTimeOfferExpiresAtMs?: number;
 }
 
 /**
@@ -745,6 +775,18 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     return;
   }
 
+  // A FRESH run must never inherit the previous one's fatal-pause signal, or
+  // every lane exits on its first check and the broadcast sends nothing —
+  // silently, since the row simply completes with its recipients untouched.
+  //
+  // The run tail clears this flag, so it is normally already gone. It survives
+  // in one case: the flag was set from OUTSIDE a live run — which is exactly
+  // what `pauseBroadcastsForTemplate` does off a webhook — against a row that
+  // said `running` while no runner was actually executing (an orphan awaiting
+  // the boot reconciler). Clearing on claim makes that unreachable rather than
+  // relying on every setter to have picked the right moment.
+  FATAL_PAUSE.delete(broadcast.id);
+
   // Cap-check via count — bound the broadcast's blast radius before any
   // recipient row is loaded. count() is cheap (index scan).
   const queuedCount = await db.broadcastRecipient.count({
@@ -788,7 +830,15 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     const binding = getProviderBinding(broadcast.channel);
     let config;
     try {
-      config = await binding.getSendConfig(broadcast.workspaceId);
+      // Send from the ACCOUNT the campaign was bound to at creation — the
+      // specific WhatsApp number / Page / handle the operator chose, and the one
+      // whose contacts the audience was scoped to. Falling through to the
+      // channel default (null) would put the campaign out on a different sender
+      // identity than the one the audience and the template were picked for.
+      config = await binding.getSendConfig(
+        broadcast.workspaceId,
+        broadcast.channelConnectionId,
+      );
     } catch (err) {
       const msg =
         err instanceof ProviderNotConfiguredError
@@ -878,7 +928,12 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     // per-recipient button UI — so Meta would reject every recipient. Fail the
     // whole broadcast HERE, before the CAS claim and before one message is sent,
     // rather than burning the audience on a guaranteed rejection.
-    const requiredButtons = requiredTemplateButtonParams(template.components);
+    // Category included: an authentication template's OTP button is rewritten
+    // by Meta to type `url`, so it is only recognizable from the category.
+    const requiredButtons = requiredTemplateButtonParams(
+      template.components,
+      template.category,
+    );
     if (requiredButtons.length > 0) {
       await fail(
         broadcast.id,
@@ -924,6 +979,37 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     data: { status: "running", startedAt: new Date(), lastError: null },
   });
   if (claimed.count === 0) return;
+
+  // ── Header media: upload ONCE, reuse for the whole run ───────────────────
+  //
+  // With a `link`, Meta fetches our R2 object once PER RECIPIENT — 100,000
+  // fetches for a 100k campaign, each one a chance for a transient fault to fail
+  // a recipient for no reason. Meta's own guidance is to upload the asset and
+  // send its media `id` instead, so nothing is fetched from us at all.
+  //
+  // Whether one media id may be reused across many messages is NOT something we
+  // could confirm from Meta's docs (see docs/whatsapp-templates.md §12), and a
+  // broadcast is billed and irreversible — so this does not bet on the answer.
+  // The id is used optimistically and `mediaState` FALLS BACK to the per-
+  // recipient presigned link the first time an id-mode send fails, retrying that
+  // recipient on the link so nobody is lost either way:
+  //   - ids reusable   → one upload, zero R2 fetches, full win;
+  //   - ids single-use → recipient #2 fails once, is retried on the link, and the
+  //                      run finishes on links exactly as it does today.
+  const mediaState = await prepareBroadcastMedia(broadcast, bindingByChannel);
+
+  // Sending resets Meta's 12-month auto-archival clock. Stamped ONCE per run,
+  // not per recipient: a 100k campaign is one use of the template, and a write
+  // per recipient would add 100k pointless updates to the hot send path.
+  // Fire-and-forget — a failure here costs an archival warning, never a send.
+  if (broadcast.templateId) {
+    void db.messageTemplate
+      .updateMany({
+        where: { id: broadcast.templateId, workspaceId: broadcast.workspaceId },
+        data: { lastUsedAt: new Date() },
+      })
+      .catch(() => undefined);
+  }
 
   await publish({
     type: "broadcast.status_changed",
@@ -1261,6 +1347,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
             wireFormat,
             pendingBumps,
             conversationCache,
+            mediaState,
           );
         } finally {
           // Release in reverse acquire order. Both are in the SAME finally so a
@@ -1499,6 +1586,10 @@ async function processOneRecipient(
   // M5 — per-runBroadcast cache; avoids N+1 conversation.findFirst when
   // the same contact appears multiple times in a single broadcast.
   conversationCache: Map<string, { id: string; status: string; unreadCount: number }>,
+  // Run-scoped header-media strategy. Shared by every lane BY REFERENCE so the
+  // first id-mode failure disables the id for all of them at once, rather than
+  // each lane rediscovering it.
+  mediaState: BroadcastMediaState,
 ): Promise<void> {
   // Resolve the SEND channel + its provider binding for THIS recipient:
   //  - contact-mode: the broadcast's single channel.
@@ -1812,14 +1903,26 @@ async function processOneRecipient(
       // still-valid signature.
       let headerMedia: typeof variables.headerMedia;
       try {
-        headerMedia = variables.headerMedia
-          ? {
-              ...variables.headerMedia,
-              link: blobStorage.isOwnUrl(variables.headerMedia.link)
-                ? await blobStorage.presignGetUrl(variables.headerMedia.link)
-                : variables.headerMedia.link,
-            }
-          : undefined;
+        headerMedia = !variables.headerMedia
+          ? undefined
+          : // The run-scoped id (uploaded once at start) wins — nothing is
+            // fetched from our storage at all. `mediaState.disable()` clears it
+            // if an id-mode send ever fails, and every later recipient falls
+            // through to the presigned-link branch below.
+            mediaState.mediaId
+            ? { kind: variables.headerMedia.kind, id: mediaState.mediaId,
+                ...(variables.headerMedia.filename
+                  ? { filename: variables.headerMedia.filename }
+                  : {}) }
+            : // A caller-supplied id needs no presigning either. Only a link does.
+              variables.headerMedia.id || !variables.headerMedia.link
+              ? variables.headerMedia
+              : {
+                  ...variables.headerMedia,
+                  link: blobStorage.isOwnUrl(variables.headerMedia.link)
+                    ? await blobStorage.presignGetUrl(variables.headerMedia.link)
+                    : variables.headerMedia.link,
+                };
       } catch (err) {
         // Presigning the private-bucket header link can throw (R2 config /
         // network fault, malformed stored URL). No Meta call has happened yet,
@@ -1843,6 +1946,26 @@ async function processOneRecipient(
         );
         return;
       }
+
+      // Carousel cards, built the same way the header media is: the run-scoped
+      // ids win, otherwise each own-storage link is presigned for this send.
+      const cardsForSend = await buildCardsForSend(
+        variables.cards,
+        mediaState,
+        recipient.contact,
+      );
+      const cardsVar = cardsForSend ? { cards: cardsForSend } : {};
+
+      // Campaign-level and constant for the whole run — the countdown counts to
+      // ONE deadline, not a per-recipient one.
+      const offerExpiry =
+        variables.limitedTimeOfferExpiresAtMs !== undefined
+          ? { limitedTimeOfferExpiresAtMs: variables.limitedTimeOfferExpiresAtMs }
+          : {};
+      // Also campaign-level: a location template promotes ONE place.
+      const headerLocation = variables.headerLocation
+        ? { headerLocation: variables.headerLocation }
+        : {};
 
     // The template variables in Meta's wire shape, built ONCE and reused by
       // both the initial send and the 429 retry below. Two inline copies is
@@ -1869,13 +1992,28 @@ async function processOneRecipient(
                   }
                 : {}),
               ...(headerMedia ? { headerMedia } : {}),
+              ...headerLocation,
+              ...offerExpiry,
+              ...cardsVar,
             }
           : {
               body: perRecipientVars.body,
               ...(perRecipientVars.header ? { header: perRecipientVars.header } : {}),
               ...(headerMedia ? { headerMedia } : {}),
+              ...headerLocation,
+              ...offerExpiry,
+              ...cardsVar,
             };
 
+      // Captured BEFORE the send: `mediaState.mediaId` can be cleared by a
+      // sibling lane mid-flight, and the fallback must key off what THIS send
+      // actually put on the wire.
+      // True when THIS send put a run-scoped id on the wire — header or cards.
+      // Captured before the send because a sibling lane can clear the state
+      // mid-flight, and the fallback must key off what actually went out.
+      const usedRunMediaId =
+        Boolean(headerMedia && "id" in headerMedia && mediaState.mediaId) ||
+        Boolean(cardsForSend && mediaState.cardMediaIds);
       try {
         send = isFreeform
           ? await provider.sendText({ to: toPhone, body: broadcast.bodyText ?? "", useHumanAgentTag }, config)
@@ -1969,6 +2107,64 @@ async function processOneRecipient(
             await maybeTripPermanentBreaker(broadcast, retryErr);
             return;
           }
+        } else if (usedRunMediaId && !isFreeform) {
+          // This send used the run-scoped media id. We could not confirm from
+          // Meta's docs that one uploaded id may be referenced by MANY messages
+          // (docs/whatsapp-templates.md §12), so an id-mode failure is treated as
+          // "the id didn't work" and the run falls back to per-recipient
+          // presigned links — permanently, so at most ONE recipient ever pays
+          // for the uncertainty.
+          //
+          // Retrying on the link is safe for the same reason the rate-limit
+          // retry above is: no message reached Meta (the send threw), and the
+          // per-recipient OutboundSendAttempt claim still guards a crash in the
+          // window. If the real cause was something else entirely (a bad number,
+          // an opt-out), the link retry fails identically and the recipient is
+          // marked failed exactly as it would have been.
+          mediaState.disable(normalizeMetaSendError(err)?.code ?? "unknown", broadcast.id);
+          try {
+            const linkMedia = variables.headerMedia?.link
+              ? {
+                  ...variables.headerMedia,
+                  id: undefined,
+                  link: blobStorage.isOwnUrl(variables.headerMedia.link)
+                    ? await blobStorage.presignGetUrl(variables.headerMedia.link)
+                    : variables.headerMedia.link,
+                }
+              : undefined;
+            // `disable()` above cleared BOTH id sets, so this rebuild comes
+            // back on links for the header and every card alike.
+            const linkCards = await buildCardsForSend(
+              variables.cards,
+              mediaState,
+              recipient.contact,
+            );
+            send = await sendTemplate!(
+              {
+                to: toPhone,
+                name: broadcast.templateName!,
+                language: broadcast.templateLanguage!,
+                variables: {
+                  ...templateVariables,
+                  ...(linkMedia ? { headerMedia: linkMedia } : {}),
+                  ...(linkCards ? { cards: linkCards } : {}),
+                },
+              },
+              config,
+            );
+          } catch (retryErr) {
+            await releaseBroadcastSendAttempt(recipient.id);
+            await failRecipientAndCount(
+              recipient.id,
+              errorDetail(retryErr),
+              broadcast.id,
+              broadcast.workspaceId,
+              pendingBumps,
+              normalizeMetaSendError(retryErr)?.code ?? null,
+            );
+            await maybeTripPermanentBreaker(broadcast, retryErr);
+            return;
+          }
         } else {
           await releaseBroadcastSendAttempt(recipient.id);
           await failRecipientAndCount(
@@ -2014,7 +2210,11 @@ async function processOneRecipient(
         // is therefore always a no-op, which is why ingest skips propagating it
         // — that alone removes a third of the webhook write volume on a 100k
         // campaign. From here the ladder is webhook-owned.
-        deliveryState: "sent",
+        //
+        // …unless Meta HELD the message for a portfolio-pacing quality
+        // assessment. It has a wamid but has not left Meta's queue, so counting
+        // it as sent reports a campaign as away when it is parked.
+        deliveryState: send.heldForQualityAssessment ? "held" : "sent",
       },
     });
     if (recipientLocked.count === 0) {
@@ -2043,7 +2243,7 @@ async function processOneRecipient(
           sentAt: send.timestamp,
           // Meta accepted this send, so the delivery ladder starts at `sent`
           // here too — the cancel had wrongly parked it at failed_at_send.
-          deliveryState: "sent",
+          deliveryState: send.heldForQualityAssessment ? "held" : "sent",
         },
       });
       if (reconciled.count === 0) {
@@ -2757,6 +2957,102 @@ async function fail(broadcastId: string, message: string): Promise<void> {
  * Called from BroadcastsService.onModuleInit.
  */
 /**
+ * Park every broadcast that depends on a template Meta just made unsendable.
+ *
+ * Meta's own instruction for a paused template is to "halt any automated
+ * messaging campaigns that rely on it" — the API rejects the sends anyway. We
+ * already trip a breaker after PERMANENT_ERROR_PAUSE_THRESHOLD consecutive
+ * failures, but that is REACTIVE: it burns that many recipients into `failed`
+ * before it fires, and only if the campaign is mid-send. The status webhook is
+ * the PROACTIVE signal — it arrives the moment Meta pauses the template, so
+ * acting on it costs zero wasted recipients.
+ *
+ * Covers `running` (lanes stop via the same in-memory flag the breaker uses),
+ * plus `queued` and `scheduled`, which would otherwise fire later into a
+ * template that cannot send.
+ *
+ * `pausedReason: "template"` is deliberate — the periodic auto-resume sweep
+ * skips that reason, so these rows wait for either the template's approval
+ * webhook (below) or an operator's Retry.
+ */
+export async function pauseBroadcastsForTemplate(
+  workspaceId: string,
+  templateId: string,
+  detail: string,
+): Promise<number> {
+  const rows = await db.broadcast.findMany({
+    where: {
+      workspaceId,
+      templateId,
+      status: { in: ["running", "queued", "scheduled"] },
+    },
+    select: { id: true, status: true },
+  });
+  if (rows.length === 0) return 0;
+
+  for (const row of rows) {
+    // Stop the lanes of anything mid-send before the DB write, same claim the
+    // breaker makes — a lane between recipients must not slip one more through.
+    if (row.status === "running") FATAL_PAUSE.add(row.id);
+    const paused = await db.broadcast.updateMany({
+      where: { id: row.id, status: row.status },
+      data: {
+        status: "paused",
+        pausedAt: new Date(),
+        pausedReason: "template",
+        lastError: detail,
+      },
+    });
+    if (paused.count === 0) continue;
+    await publish({
+      type: "broadcast.status_changed",
+      workspaceId,
+      broadcastId: row.id,
+      status: "paused",
+      error: detail,
+    });
+  }
+  console.warn(
+    `[template ${templateId}] paused ${rows.length} broadcast(s) — ${detail}`,
+  );
+  return rows.length;
+}
+
+/**
+ * The other half: the template is APPROVED again, so the campaigns we parked
+ * for it can go.
+ *
+ * Only rows WE parked with `pausedReason: "template"` are resumed — a campaign
+ * an operator paused by hand, or one parked for a credential fault, is none of
+ * this function's business. Meta's guidance is exactly this: "resume these
+ * campaigns when the template's status has been set to Active again."
+ *
+ * `FATAL_PAUSE` is cleared first, or the re-fired lanes would exit immediately
+ * on the flag we set when we paused them.
+ */
+export async function resumeBroadcastsForTemplate(
+  workspaceId: string,
+  templateId: string,
+): Promise<number> {
+  const rows = await db.broadcast.findMany({
+    where: {
+      workspaceId,
+      templateId,
+      status: "paused",
+      pausedReason: "template",
+    },
+    select: { id: true },
+  });
+  if (rows.length === 0) return 0;
+  for (const row of rows) FATAL_PAUSE.delete(row.id);
+  return resumePausedBroadcasts({
+    workspaceId,
+    ids: rows.map((r) => r.id),
+    label: "template-reapproved",
+  });
+}
+
+/**
  * Resume `paused` broadcasts: flip each back to `queued` and re-fire the runner.
  *
  * Shared by the boot reconciler and the drift sweeper so the subtle parts live
@@ -2797,19 +3093,28 @@ export async function resumePausedBroadcasts({
   pausedBefore,
   limit,
   workspaceId,
+  ids,
   skipTemplatePauses = false,
   label = "broadcast-reconciler",
 }: {
   pausedBefore?: Date;
   limit?: number;
   workspaceId?: string;
+  /**
+   * Resume only these rows. Used when the CAUSE is known to be fixed for a
+   * specific set — a template that just went back to APPROVED — rather than
+   * sweeping everything that has cooled down.
+   */
+  ids?: string[];
   skipTemplatePauses?: boolean;
   label?: string;
 } = {}): Promise<number> {
+  if (ids && ids.length === 0) return 0;
   const pausedRows = await db.broadcast.findMany({
     where: {
       status: "paused",
       ...(workspaceId ? { workspaceId } : {}),
+      ...(ids ? { id: { in: ids } } : {}),
       // NEVER auto-resume a template-fatal pause. The template is disabled or
       // paused at Meta; only an operator can fix that in Meta's console, and
       // each retry burns another PERMANENT_ERROR_PAUSE_THRESHOLD recipients into
@@ -3339,6 +3644,9 @@ async function loadTemplate(
   variableBindings: Prisma.JsonValue;
   components: Prisma.JsonValue;
   parameterFormat: string;
+  /** Needed to spot an authentication template's OTP button, which Meta
+   *  rewrites to type `url` and which is otherwise unrecognizable. */
+  category: string;
 }> {
   const row = await db.messageTemplate.findFirst({
     where: { id: templateId, workspaceId },
@@ -3347,6 +3655,7 @@ async function loadTemplate(
       variableBindings: true,
       components: true,
       parameterFormat: true,
+      category: true,
     },
   });
   return {
@@ -3356,6 +3665,9 @@ async function loadTemplate(
     bodyText: row?.bodyText ?? "",
     variableBindings: row?.variableBindings ?? {},
     components: row?.components ?? [],
+    // "" for a vanished row — not "authentication", so a missing template can
+    // never make us demand an OTP parameter that isn't there.
+    category: row?.category ?? "",
   };
 }
 
@@ -3400,34 +3712,272 @@ function resolvePerRecipientVariables(
   return header ? { body, header } : { body };
 }
 
+/**
+ * Run-scoped header-media strategy for a broadcast.
+ *
+ * `id` mode means Meta already holds the bytes and fetches nothing from us.
+ * `disable()` drops the run back to per-recipient presigned links permanently —
+ * called the first time an id-mode send fails, so an unusable id costs one
+ * retried recipient rather than the whole campaign.
+ */
+interface BroadcastMediaState {
+  mediaId: string | null;
+  /**
+   * Run-scoped media ids for a carousel's cards, in card order — or null when
+   * the run is in link mode. ALL-OR-NOTHING: if any card fails to pre-upload,
+   * every card falls back to links. A partly-id/partly-link carousel would
+   * double the states the fallback path has to reason about for no gain, since
+   * one failed upload almost always means the next will fail too.
+   */
+  cardMediaIds: string[] | null;
+  /** True once an id-mode send has failed and the run fell back to links. */
+  fellBack: boolean;
+  disable(reason: string, broadcastId: string): void;
+}
+
+/**
+ * Per-recipient carousel card values. Mirrors the header-media rule exactly:
+ * a run-scoped uploaded id wins (nothing is fetched from our storage at all),
+ * otherwise an own-storage link is presigned fresh for this send.
+ *
+ * Returns undefined when the campaign has no cards, so callers can spread it
+ * away rather than putting an empty array on the wire.
+ */
+async function buildCardsForSend(
+  cards: BroadcastVariables["cards"],
+  mediaState: BroadcastMediaState,
+  // Same narrow shape `resolvePerRecipientVariables` takes — the token
+  // resolver reads these five fields and nothing else.
+  contact: {
+    name: string;
+    phoneNumber: string | null;
+    email: string | null;
+    location: string | null;
+    customFields: Prisma.JsonValue;
+  },
+): Promise<TemplateCardVariables[] | undefined> {
+  if (!cards || cards.length === 0) return undefined;
+  const runIds = mediaState.cardMediaIds;
+  // Card text gets the SAME `$var.…` pass the body and header get. Without it a
+  // token typed into a card ships literally — to the whole audience, since the
+  // cards are campaign-level. There are no per-card bindings, so this is the
+  // token layer only.
+  const resolve = (v: string) => resolveFieldTokens(v, contact);
+  return Promise.all(
+    cards.map(async (card, i) => ({
+      headerMedia: runIds?.[i]
+        ? { kind: card.kind, id: runIds[i]! }
+        : card.id || !card.link
+          ? { kind: card.kind, ...(card.id ? { id: card.id } : {}), ...(card.link ? { link: card.link } : {}) }
+          : {
+              kind: card.kind,
+              link: blobStorage.isOwnUrl(card.link)
+                ? await blobStorage.presignGetUrl(card.link)
+                : card.link,
+            },
+      ...(card.body ? { body: card.body.map(resolve) } : {}),
+      ...(card.buttons
+        ? { buttons: card.buttons.map((b) => ({ ...b, text: resolve(b.text) })) }
+        : {}),
+    })),
+  );
+}
+
+/**
+ * Upload the template's media — the header and every carousel card — to Meta
+ * ONCE for this run, so Meta doesn't fetch our storage per recipient.
+ *
+ * Only OUR OWN storage is uploaded: a foreign link belongs to the customer's
+ * server and re-hosting it would change what the recipient receives. Any failure
+ * degrades silently to link mode — this is an optimization, never a gate on the
+ * campaign going out.
+ */
+async function prepareBroadcastMedia(
+  broadcast: { id: string; channel: Channel; variables: Prisma.JsonValue },
+  bindingByChannel: Map<Channel, ChannelBinding>,
+): Promise<BroadcastMediaState> {
+  const state: BroadcastMediaState = {
+    mediaId: null,
+    cardMediaIds: null,
+    fellBack: false,
+    disable(reason, broadcastId) {
+      if (this.mediaId === null && this.cardMediaIds === null) return;
+      this.mediaId = null;
+      this.cardMediaIds = null;
+      this.fellBack = true;
+      console.warn(
+        `[broadcast ${broadcastId}] header-media id rejected (${reason}); ` +
+          `falling back to per-recipient links for the rest of this run`,
+      );
+    },
+  };
+
+  const parsed = parseVariables(broadcast.variables);
+  const binding = bindingByChannel.get(broadcast.channel);
+  const upload = binding?.provider.uploadMedia;
+  if (!binding || !upload) return state;
+
+  // Carousel cards, same trade as the header — and it matters far more here:
+  // a 10-card carousel to 100k recipients is a MILLION fetches of our storage
+  // in link mode, versus 10 uploads.
+  const cards = parsed.cards ?? [];
+  if (cards.length > 0 && cards.every((c) => !c.id && c.link && blobStorage.isOwnUrl(c.link))) {
+    try {
+      const ids: string[] = [];
+      for (const card of cards) {
+        const { bytes, mimeType } = await blobStorage.fetch(card.link!);
+        const { mediaId } = await upload(
+          { bytes, mimeType, filename: `card.${mimeType.split("/")[1] ?? "bin"}` },
+          binding.config,
+        );
+        ids.push(mediaId);
+      }
+      state.cardMediaIds = ids;
+      console.log(
+        `[broadcast ${broadcast.id}] ${ids.length} carousel cards uploaded once — ` +
+          `Meta will not fetch our storage per recipient`,
+      );
+    } catch (err) {
+      // All-or-nothing: leave every card on links.
+      state.cardMediaIds = null;
+      console.warn(
+        `[broadcast ${broadcast.id}] carousel card pre-upload failed, using per-recipient links:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  const media = parsed.headerMedia;
+  // Nothing more to optimize: no media header, an id the caller already
+  // supplied, or a link we don't own.
+  if (!media || media.id || !media.link || !blobStorage.isOwnUrl(media.link)) {
+    return state;
+  }
+
+  try {
+    const { bytes, mimeType } = await blobStorage.fetch(media.link);
+    const { mediaId } = await upload(
+      {
+        bytes,
+        mimeType,
+        // Meta requires a filename; documents show it to the recipient.
+        filename: media.filename ?? `header.${mimeType.split("/")[1] ?? "bin"}`,
+      },
+      binding.config,
+    );
+    state.mediaId = mediaId;
+    console.log(
+      `[broadcast ${broadcast.id}] header media uploaded once as ${mediaId} — ` +
+        `Meta will not fetch our storage per recipient`,
+    );
+  } catch (err) {
+    // Not fatal. The per-recipient presigned link is the existing, proven path.
+    console.warn(
+      `[broadcast ${broadcast.id}] header-media pre-upload failed, using per-recipient links:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+  return state;
+}
+
 function parseVariables(v: Prisma.JsonValue): BroadcastVariables {
   if (typeof v !== "object" || v === null || Array.isArray(v)) {
     return { body: [] };
   }
-  const obj = v as { body?: unknown; header?: unknown; headerMedia?: unknown };
+  const obj = v as {
+    body?: unknown;
+    header?: unknown;
+    headerMedia?: unknown;
+    headerLocation?: unknown;
+    cards?: unknown;
+    limitedTimeOfferExpiresAtMs?: unknown;
+  };
   const body = Array.isArray(obj.body)
     ? obj.body.filter((x): x is string => typeof x === "string")
     : [];
   const header = typeof obj.header === "string" ? obj.header : undefined;
   let headerMedia: BroadcastVariables["headerMedia"];
   const hm = obj.headerMedia as
-    | { kind?: unknown; link?: unknown; filename?: unknown }
+    | { kind?: unknown; link?: unknown; id?: unknown; filename?: unknown }
     | undefined;
   if (
     hm &&
     (hm.kind === "image" || hm.kind === "video" || hm.kind === "document") &&
-    typeof hm.link === "string"
+    // Either form is a complete media reference. Requiring `link` would drop a
+    // stored id-based header on the floor, and the send would then fail with
+    // "header media required" for every recipient.
+    (typeof hm.link === "string" || typeof hm.id === "string")
   ) {
     headerMedia = {
       kind: hm.kind,
-      link: hm.link,
+      ...(typeof hm.id === "string" ? { id: hm.id } : {}),
+      ...(typeof hm.link === "string" ? { link: hm.link } : {}),
       ...(typeof hm.filename === "string" ? { filename: hm.filename } : {}),
     };
   }
+  let headerLocation: BroadcastVariables["headerLocation"];
+  const hl = obj.headerLocation as
+    | { latitude?: unknown; longitude?: unknown; name?: unknown; address?: unknown }
+    | undefined;
+  // Coordinates are the whole pin; the labels are optional decoration.
+  if (hl && typeof hl.latitude === "string" && typeof hl.longitude === "string") {
+    headerLocation = {
+      latitude: hl.latitude,
+      longitude: hl.longitude,
+      ...(typeof hl.name === "string" && hl.name ? { name: hl.name } : {}),
+      ...(typeof hl.address === "string" && hl.address ? { address: hl.address } : {}),
+    };
+  }
+  // Cards are validated at create time; here we only keep the well-formed ones
+  // so a hand-edited row can't crash a run mid-send.
+  const cards = Array.isArray(obj.cards)
+    ? (obj.cards as Array<Record<string, unknown>>).flatMap((c) => {
+        if (!c || typeof c !== "object") return [];
+        const kind = c.kind === "video" ? "video" : "image";
+        if (typeof c.link !== "string" && typeof c.id !== "string") return [];
+        return [
+          {
+            kind: kind as "image" | "video",
+            ...(typeof c.id === "string" ? { id: c.id } : {}),
+            ...(typeof c.link === "string" ? { link: c.link } : {}),
+            ...(Array.isArray(c.body)
+              ? { body: c.body.filter((x): x is string => typeof x === "string") }
+              : {}),
+            ...(Array.isArray(c.buttons)
+              ? {
+                  buttons: (c.buttons as Array<Record<string, unknown>>).flatMap((b) =>
+                    typeof b?.index === "number" &&
+                    (b.subType === "url" ||
+                      b.subType === "quick_reply" ||
+                      b.subType === "copy_code") &&
+                    typeof b.text === "string"
+                      ? [
+                          {
+                            index: b.index,
+                            subType: b.subType as "url" | "quick_reply" | "copy_code",
+                            text: b.text,
+                          },
+                        ]
+                      : [],
+                  ),
+                }
+              : {}),
+          },
+        ];
+      })
+    : [];
+  const ltoExpiry =
+    typeof obj.limitedTimeOfferExpiresAtMs === "number" &&
+    Number.isFinite(obj.limitedTimeOfferExpiresAtMs)
+      ? obj.limitedTimeOfferExpiresAtMs
+      : undefined;
   return {
     body,
     ...(header ? { header } : {}),
     ...(headerMedia ? { headerMedia } : {}),
+    ...(headerLocation ? { headerLocation } : {}),
+    ...(cards.length > 0 ? { cards } : {}),
+    ...(ltoExpiry !== undefined ? { limitedTimeOfferExpiresAtMs: ltoExpiry } : {}),
   };
 }
 

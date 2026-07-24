@@ -207,6 +207,46 @@ services:
       # check on signin endpoints.
       BETTER_AUTH_URL: ${BETTER_AUTH_URL}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      # Google sign-in. WEB ONLY — Better Auth lives in the Next.js process and
+      # the api never reads these, so the OAuth client secret stays off the
+      # api's surface (same reasoning as ENCRYPTION_KEY being api-only).
+      #
+      # Both empty = the "Continue with Google" button is not rendered at all
+      # (googleSignInEnabled() in apps/web/src/lib/auth/better-auth.ts), so a
+      # missing secret degrades to password-only rather than a broken button.
+      # The authorized redirect URI in the Google console must be exactly
+      # https://<APP_DOMAIN>/api/auth/callback/google.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # ---- Outbound email -------------------------------------------------
+      # Signup verification codes + password-reset codes are sent by the WEB
+      # process (Better Auth lives there); invite links are sent by the API.
+      # BOTH services send, so both get these.
+      #
+      # Two transports; the seam picks HTTP when BREVO_API_KEY is set and falls
+      # back to SMTP (packages/shared/src/mail/send.ts). Set exactly ONE group:
+      #
+      #   MAIL_SMTP_*   PREFERRED IN PRODUCTION. A Brevo SMTP key can only send
+      #                 mail. A Brevo API key CANNOT be scoped — it grants full
+      #                 account access (contacts, campaigns, settings), so the
+      #                 blast radius if the VPS is compromised is much larger.
+      #                 Needs outbound 587 and the VPS's static IP allowlisted
+      #                 in Brevo (Settings -> Security -> Authorized IPs).
+      #
+      #   BREVO_API_KEY HTTP over 443. Use if the host blocks 587, or locally
+      #                 where a dynamic IP makes the allowlist impractical.
+      #
+      # If NEITHER is set the seam silently STUBS — mail is written to the log
+      # and never sent. In production that locks every new signup out of the
+      # product (the API refuses unverified sessions and the code never
+      # arrives), which is why validateEnv now treats it as a fatal.
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-}
+      MAIL_SMTP_HOST: ${MAIL_SMTP_HOST:-}
+      MAIL_SMTP_PORT: ${MAIL_SMTP_PORT:-587}
+      MAIL_SMTP_USER: ${MAIL_SMTP_USER:-}
+      MAIL_SMTP_PASSWORD: ${MAIL_SMTP_PASSWORD:-}
       # ENCRYPTION_KEY is intentionally NOT injected here. Every envelope
       # encrypt/decrypt call site lives in apps/api; the web process never
       # imports the envelope module, so the master key has no reason to sit on
@@ -325,6 +365,20 @@ services:
       # match `app` exactly or session validation fails silently.
       BETTER_AUTH_URL: ${BETTER_AUTH_URL}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      # ---- Outbound email -------------------------------------------------
+      # Signup verification codes + password-reset codes are sent by the WEB
+      # process (Better Auth lives there); invite links are sent by the API.
+      # BOTH services send, so both get these.
+      #
+      # Transport choice + why SMTP is preferred in production: see the same
+      # block on the `app` service above. Both processes send mail.
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-}
+      MAIL_SMTP_HOST: ${MAIL_SMTP_HOST:-}
+      MAIL_SMTP_PORT: ${MAIL_SMTP_PORT:-587}
+      MAIL_SMTP_USER: ${MAIL_SMTP_USER:-}
+      MAIL_SMTP_PASSWORD: ${MAIL_SMTP_PASSWORD:-}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v25.0}
       # Cloudflare R2 (private bucket) — all media + avatar uploads/serving.

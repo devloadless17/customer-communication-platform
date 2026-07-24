@@ -20,9 +20,14 @@ import {
   renderTemplateBody,
 } from "@/lib/providers/meta";
 import {
+  TEMPLATE_AUTO_ARCHIVE_MONTHS,
   renderTemplateBodyNamed,
+  requiredCarouselCards,
   requiredTemplateButtonParams,
+  templateNeedsOfferExpiry,
+  templateDeletionDaysLeft,
   templateNamedPlaceholders,
+  validateTemplateParamValues,
 } from "@ccp/shared/template-render";
 import type { TemplateComponent, TemplateVariableSet } from "@ccp/shared/providers/types";
 import type { Message } from "@ccp/shared/types";
@@ -87,9 +92,21 @@ export class SendTemplateValidationError extends Error {
     // Template has a dynamic URL button or a copy-code button, which Meta
     // requires a send-time parameter for; the caller supplied none.
     | "button_params_required"
+    // A Template Library template declares a value TYPE per body parameter
+    // (EMAIL, NUMBER, AMOUNT…) which Meta enforces at send time.
+    | "param_type_mismatch"
     | "header_var_required"
     | "header_media_required"
     | "header_media_unsupported"
+    // Template header is a LOCATION map and the caller supplied no (or a
+    // partial) pin. Meta rejects the send without all four fields.
+    | "header_location_required"
+    // Template carries a LIMITED_TIME_OFFER component but no (or a past) expiry
+    // instant, so the countdown has nothing to count to.
+    | "limited_time_offer_expiry_required"
+    // Template carries a CAROUSEL and the per-card values don't match what it
+    // was approved with (count, media kind, body values, or a button value).
+    | "carousel_cards_required"
     | "contact_has_no_phone"
     | "provider_not_configured"
     | "provider_no_template_support";
@@ -132,10 +149,22 @@ export async function sendTemplateInternal(
     throw new SendTemplateValidationError("template_not_found", "template not found");
   }
   if (template.status !== "approved") {
+    // An archived template is the one non-sendable state with a way back AND a
+    // deadline, so it gets its own message: "disabled" would be true and useless.
+    const daysLeft =
+      template.status === "archived"
+        ? templateDeletionDaysLeft(template.archivedAt)
+        : null;
     throw new SendTemplateValidationError(
       "template_not_approved",
       "template not approved",
-      `Template is ${template.status}. Only approved templates can be sent.`,
+      template.status === "archived"
+        ? `Template was archived after ${TEMPLATE_AUTO_ARCHIVE_MONTHS} months without use. ` +
+          `Unarchive it in WhatsApp Manager to restore it` +
+          (daysLeft !== null
+            ? ` — Meta deletes it permanently in about ${daysLeft} day${daysLeft === 1 ? "" : "s"}.`
+            : `.`)
+        : `Template is ${template.status}. Only approved templates can be sent.`,
     );
   }
 
@@ -143,11 +172,14 @@ export async function sendTemplateInternal(
   // expected to fill these out at config time; surfacing the mismatch here
   // catches drift between a config and a template that was later edited.
   //
-  // A body is EITHER positional (`{{1}}`) or NAMED (`{{order_id}}`) — never
-  // both — so we pick the matching check. Named bodies previously scored 0
-  // positional placeholders, passed validation with zero variables, and were
-  // rejected by Meta with nothing the agent could act on.
-  const namedBodyVars = templateNamedPlaceholders(template.bodyText);
+  // A body is EITHER positional (`{{1}}`) or NAMED (`{{order_id}}`) — never both
+  // — and WHICH one is decided by the stored `parameterFormat`, i.e. Meta's own
+  // `parameter_format`, NOT by a regex over the body. That distinction is the
+  // whole reason the column exists: a positional template whose body contains
+  // the literal copy `{{order_id}}` reads as named to a regex, and we would then
+  // build the named wire shape and fail every recipient with error 132000.
+  const isNamed = template.parameterFormat === "named";
+  const namedBodyVars = isNamed ? templateNamedPlaceholders(template.bodyText) : [];
   if (namedBodyVars.length > 0) {
     const supplied = new Set((args.variables.bodyNamed ?? []).map((v) => v.name));
     const missing = namedBodyVars.filter((n) => !supplied.has(n));
@@ -169,14 +201,71 @@ export async function sendTemplateInternal(
     }
   }
 
+  // Authentication templates cap every parameter at 15 characters (Meta's
+  // template-categorization rules, alongside the no-URL/media/emoji content
+  // restrictions). A longer value fails the send with an error that names
+  // neither the parameter nor the limit.
+  if (template.category === "authentication") {
+    const tooLong = args.variables.body.findIndex((v) => v.length > 15);
+    if (tooLong >= 0) {
+      throw new SendTemplateValidationError(
+        "param_type_mismatch",
+        "authentication parameter too long",
+        `Authentication template values are limited to 15 characters — value ` +
+          `${tooLong + 1} is ${args.variables.body[tooLong]!.length}.`,
+      );
+    }
+  }
+
+  // Library templates carry a declared TYPE per body parameter, and Meta checks
+  // those types at send time — a bad value fails the individual message with an
+  // error naming neither the parameter nor the reason. Checking first turns that
+  // into "value 2 (email) must be a valid email address".
+  if (template.bodyParamTypes.length > 0) {
+    const typeIssues = validateTemplateParamValues(
+      template.bodyParamTypes,
+      args.variables.body,
+    );
+    if (typeIssues.length > 0) {
+      throw new SendTemplateValidationError(
+        "param_type_mismatch",
+        "template parameter type mismatch",
+        typeIssues.map((i) => i.message).join(" "),
+      );
+    }
+  }
+
   // Dynamic URL buttons and copy-code buttons carry a send-time parameter. Meta
   // rejects the message without it, so a template like an authentication OTP or
   // a coupon was undeliverable with an opaque provider error. Fail here with the
   // reason instead. (Quick-reply payloads are optional on the wire — not
   // required, so templates that send correctly today keep working.)
-  const requiredButtons = requiredTemplateButtonParams(template.components);
+  // Category is load-bearing: an authentication template's OTP button is
+  // rewritten by Meta to type `url` on creation, so it can only be recognized
+  // from the template's category, not from the button itself.
+  const requiredButtons = requiredTemplateButtonParams(
+    template.components,
+    template.category,
+  );
+
+  // An authentication template's OTP button carries the SAME verification code
+  // as the body, so fill it from `body[0]` instead of demanding it twice. Meta's
+  // own examples put one code in both places, and asking an agent to retype it
+  // invites a message whose button copies a different code than the text shows.
+  const autofilledButtons = requiredButtons
+    .filter((b) => b.autofillFromBody)
+    .filter(
+      (b) =>
+        !(args.variables.buttons ?? []).some(
+          (supplied) => supplied.index === b.index && supplied.subType === b.subType,
+        ),
+    )
+    .map((b) => ({ index: b.index, subType: b.subType, text: args.variables.body[0] ?? "" }))
+    .filter((b) => b.text.length > 0);
+  const effectiveButtons = [...(args.variables.buttons ?? []), ...autofilledButtons];
+
   if (requiredButtons.length > 0) {
-    const supplied = new Set((args.variables.buttons ?? []).map((b) => `${b.index}:${b.subType}`));
+    const supplied = new Set(effectiveButtons.map((b) => `${b.index}:${b.subType}`));
     const missing = requiredButtons.filter((b) => !supplied.has(`${b.index}:${b.subType}`));
     if (missing.length > 0) {
       throw new SendTemplateValidationError(
@@ -192,6 +281,71 @@ export async function sendTemplateInternal(
   const components = Array.isArray(template.components)
     ? (template.components as unknown as TemplateComponent[])
     : [];
+  // Carousel cards. The count is FIXED at approval, so a mismatch fails the
+  // send outright at Meta — catch it here where the message names the number.
+  const requiredCards = requiredCarouselCards(components);
+  if (requiredCards.length > 0) {
+    const supplied = args.variables.cards ?? [];
+    if (supplied.length !== requiredCards.length) {
+      throw new SendTemplateValidationError(
+        "carousel_cards_required",
+        `carousel expects ${requiredCards.length} cards, got ${supplied.length}`,
+        `This template was approved with ${requiredCards.length} cards — send exactly that many.`,
+      );
+    }
+    for (const [i, need] of requiredCards.entries()) {
+      const card = supplied[i]!;
+      if (card.headerMedia.kind !== need.headerKind) {
+        throw new SendTemplateValidationError(
+          "carousel_cards_required",
+          `card ${i + 1} expects a ${need.headerKind}`,
+          `Card ${i + 1} of this template is a ${need.headerKind} — attach one.`,
+        );
+      }
+      if ((card.body?.length ?? 0) !== need.bodyVarCount) {
+        throw new SendTemplateValidationError(
+          "carousel_cards_required",
+          `card ${i + 1} expects ${need.bodyVarCount} body value(s)`,
+          `Card ${i + 1} needs ${need.bodyVarCount} value(s) filled in.`,
+        );
+      }
+      for (const b of need.buttons) {
+        const value = (card.buttons ?? []).find(
+          (x) => x.index === b.index && x.subType === b.subType,
+        );
+        if (!value || value.text.trim() === "") {
+          throw new SendTemplateValidationError(
+            "carousel_cards_required",
+            `card ${i + 1} button ${b.index + 1} needs a value`,
+            `Card ${i + 1}'s button needs a value before this can send.`,
+          );
+        }
+      }
+    }
+  }
+
+  // A limited-time offer's countdown has nothing to count to without an expiry
+  // instant, and Meta rejects the send. Catch it here with the reason.
+  if (templateNeedsOfferExpiry(components)) {
+    const expiresAt = args.variables.limitedTimeOfferExpiresAtMs;
+    if (expiresAt === undefined) {
+      throw new SendTemplateValidationError(
+        "limited_time_offer_expiry_required",
+        "offer expiry required",
+        "This template shows a countdown — set when the offer expires before sending.",
+      );
+    }
+    // An expiry already in the past renders an offer that is over on arrival.
+    // Meta accepts it; the customer just gets something useless.
+    if (expiresAt <= Date.now()) {
+      throw new SendTemplateValidationError(
+        "limited_time_offer_expiry_required",
+        "offer already expired",
+        "That offer expiry is in the past — the countdown would be over before the message arrives.",
+      );
+    }
+  }
+
   const headerComp = components.find((c) => c.type === "HEADER");
   // A TEXT header carries one send-time value in EITHER format: positional
   // `{{1}}` (countTemplatePlaceholders) or NAMED `{{customer_name}}`
@@ -201,7 +355,7 @@ export async function sendTemplateInternal(
       ? countTemplatePlaceholders(headerComp.text)
       : 0;
   const namedHeaderVars =
-    headerComp?.format === "TEXT" && headerComp.text
+    isNamed && headerComp?.format === "TEXT" && headerComp.text
       ? templateNamedPlaceholders(headerComp.text)
       : [];
   // Require the value for BOTH formats. Without the named check a NAMED header
@@ -234,16 +388,31 @@ export async function sendTemplateInternal(
     headerComp && headerComp.format && headerComp.format in HEADER_MEDIA_FORMATS
       ? HEADER_MEDIA_FORMATS[headerComp.format as keyof typeof HEADER_MEDIA_FORMATS]
       : null;
+  // LOCATION headers carry the whole pin at SEND time (the component is declared
+  // with no parameters at create time), so all four fields must be present or
+  // Meta rejects the message.
+  const headerLocation =
+    headerComp?.format === "LOCATION" ? args.variables.headerLocation : undefined;
   if (headerComp?.format === "LOCATION") {
-    throw new SendTemplateValidationError(
-      "header_media_unsupported",
-      "location header not supported",
-      "Templates with a LOCATION header can't be sent from here yet.",
+    // ONLY latitude and longitude are required. `name` and `address` are
+    // optional per Meta's location-template reference — demanding them refuses a
+    // send Meta would accept, which is the same failure mode as a too-tight
+    // length limit and just as invisible.
+    const missing = (["latitude", "longitude"] as const).filter(
+      (k) => !headerLocation?.[k]?.trim(),
     );
+    if (missing.length > 0) {
+      throw new SendTemplateValidationError(
+        "header_location_required",
+        "header location required",
+        `This template's header is a map — supply ${missing.join(" and ")}.`,
+      );
+    }
   }
   if (headerMediaKind) {
     const media = args.variables.headerMedia;
-    if (!media || !media.link) {
+    // Either form satisfies the requirement — an id means Meta already has it.
+    if (!media || !(media.link || media.id)) {
       throw new SendTemplateValidationError(
         "header_media_required",
         "header media required",
@@ -259,27 +428,29 @@ export async function sendTemplateInternal(
     }
   }
   // Build the media payload once: only attach when the template header is a
-  // media format AND the caller supplied one (validated above). Meta FETCHES
-  // this link, and our R2 bucket is private — so if the stored link is one of
-  // our own (stable) object URLs, mint a fresh short-lived presigned URL here,
-  // at send time. Doing it here (the single choke point for direct + workflow +
-  // broadcast + external template sends) means the persisted config keeps the
-  // never-expiring stable URL and every send gets a valid signature. A foreign
-  // link (not ours) passes through untouched.
+  // media format AND the caller supplied one (validated above).
+  //
+  // A caller-supplied media `id` is used as-is — Meta already holds the bytes,
+  // nothing is fetched from us, and there is no link to presign. Otherwise Meta
+  // FETCHES the link, and our R2 bucket is private, so one of our own (stable)
+  // object URLs is presigned fresh HERE, at send time. Doing it at this single
+  // choke point (direct + workflow + broadcast + external template sends) means
+  // the persisted config keeps the never-expiring stable URL and every send gets
+  // a valid signature. A foreign link (not ours) passes through untouched.
+  const suppliedMedia =
+    headerMediaKind && args.variables.headerMedia ? args.variables.headerMedia : null;
   const headerMediaLink =
-    headerMediaKind && args.variables.headerMedia
-      ? blobStorage.isOwnUrl(args.variables.headerMedia.link)
-        ? await blobStorage.presignGetUrl(args.variables.headerMedia.link)
-        : args.variables.headerMedia.link
+    suppliedMedia && !suppliedMedia.id && suppliedMedia.link
+      ? blobStorage.isOwnUrl(suppliedMedia.link)
+        ? await blobStorage.presignGetUrl(suppliedMedia.link)
+        : suppliedMedia.link
       : undefined;
   const headerMedia =
-    headerMediaKind && args.variables.headerMedia && headerMediaLink
+    suppliedMedia && headerMediaKind && (suppliedMedia.id || headerMediaLink)
       ? {
           kind: headerMediaKind,
-          link: headerMediaLink,
-          ...(args.variables.headerMedia.filename
-            ? { filename: args.variables.headerMedia.filename }
-            : {}),
+          ...(suppliedMedia.id ? { id: suppliedMedia.id } : { link: headerMediaLink! }),
+          ...(suppliedMedia.filename ? { filename: suppliedMedia.filename } : {}),
         }
       : undefined;
 
@@ -344,7 +515,13 @@ export async function sendTemplateInternal(
             ? { header: args.variables.header }
             : {}),
         ...(headerMedia ? { headerMedia } : {}),
-        ...(args.variables.buttons ? { buttons: args.variables.buttons } : {}),
+        ...(headerLocation ? { headerLocation } : {}),
+        ...(effectiveButtons.length > 0 ? { buttons: effectiveButtons } : {}),
+        ...(args.variables.tapTarget ? { tapTarget: args.variables.tapTarget } : {}),
+        ...(args.variables.limitedTimeOfferExpiresAtMs !== undefined
+          ? { limitedTimeOfferExpiresAtMs: args.variables.limitedTimeOfferExpiresAtMs }
+          : {}),
+        ...(args.variables.cards ? { cards: args.variables.cards } : {}),
       },
     },
     sendConfig,
@@ -391,7 +568,13 @@ export async function sendTemplateInternal(
             ? { header: args.variables.header }
             : {}),
         ...(headerMedia ? { headerMedia } : {}),
-        ...(args.variables.buttons ? { buttons: args.variables.buttons } : {}),
+        ...(headerLocation ? { headerLocation } : {}),
+        ...(effectiveButtons.length > 0 ? { buttons: effectiveButtons } : {}),
+        ...(args.variables.tapTarget ? { tapTarget: args.variables.tapTarget } : {}),
+        ...(args.variables.limitedTimeOfferExpiresAtMs !== undefined
+          ? { limitedTimeOfferExpiresAtMs: args.variables.limitedTimeOfferExpiresAtMs }
+          : {}),
+        ...(args.variables.cards ? { cards: args.variables.cards } : {}),
       },
     } as unknown as Prisma.InputJsonValue,
     timestamp: messageTimestamp,
@@ -438,6 +621,18 @@ export async function sendTemplateInternal(
       );
     },
   });
+
+  // Sending is one of the activities that resets Meta's 12-month auto-archival
+  // clock, so record it — that is what lets the app warn BEFORE a template is
+  // archived instead of only reporting it afterwards.
+  //
+  // Fire-and-forget: a failure here costs a warning, never a delivered message.
+  void db.messageTemplate
+    .updateMany({
+      where: { id: template.id, workspaceId: args.workspaceId },
+      data: { lastUsedAt: messageTimestamp },
+    })
+    .catch(() => undefined);
 
   return {
     messageId: created.id,

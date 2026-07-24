@@ -36,6 +36,7 @@ export interface BroadcastReportDto {
     delivered: number;
     read: number;
     undelivered: number;
+    held: number;
     accepted: number;
     reached: number;
     neverReceived: number;
@@ -57,7 +58,7 @@ export interface BroadcastReportDto {
     errorCode: string;
     label: string;
     count: number;
-    bucket: "retryable" | "permanent" | "suppress";
+    bucket: "retryable" | "permanent" | "suppress" | "content";
     sampleMessage: string | null;
   }>;
   diagnostics: Array<{
@@ -87,6 +88,8 @@ const BUCKET_COPY: Record<string, { label: string; tone: string }> = {
     label: "Can retry",
     tone: "border-warning-border bg-warning-bg text-warning-fg",
   },
+  // The only chip that tells someone to REMOVE a contact. Reserved for a number
+  // that genuinely isn't reachable — never for a preference or a limit.
   permanent: {
     label: "Clean list",
     tone: "border-destructive/30 bg-destructive/10 text-destructive",
@@ -94,6 +97,10 @@ const BUCKET_COPY: Record<string, { label: string; tone: string }> = {
   suppress: {
     label: "Don't retry",
     tone: "border-border bg-muted/40 text-muted-foreground",
+  },
+  content: {
+    label: "Fix the message",
+    tone: "border-warning-border bg-warning-bg text-warning-fg",
   },
 };
 
@@ -260,7 +267,17 @@ export function BroadcastReport({
           <div className="mt-0.5 text-lg font-semibold tabular-nums">
             {funnel.optedOut.toLocaleString()}
           </div>
-          <div className="text-3xs text-muted-foreground">
+          <div
+            className="text-3xs text-muted-foreground"
+            // "Pre-suppressed" now covers two causes — opted out, and recently
+            // over WhatsApp's per-user marketing limit — so the tooltip says
+            // which, rather than leaving a number nobody can account for.
+            title={
+              funnel.suppressed > 0
+                ? "Excluded before sending: opted out of marketing, or hit WhatsApp's per-user marketing limit in the last 24 hours."
+                : undefined
+            }
+          >
             {funnel.suppressed > 0
               ? `${funnel.suppressed.toLocaleString()} pre-suppressed`
               : "excluded from future sends"}
@@ -269,6 +286,24 @@ export function BroadcastReport({
       </div>
 
       {/* ── Never received: the question clients actually ask ──────────────── */}
+      {/* Held by portfolio pacing. Its own row, not folded into "sent": these
+          recipients are parked in Meta's queue, and the campaign looking
+          stalled is the thing an operator needs explained rather than
+          discovered. */}
+      {funnel.held > 0 && (
+        <div className="rounded-lg border border-warning-border bg-warning-bg px-3 py-2.5">
+          <p className="text-xs font-medium text-warning-fg">
+            {funnel.held.toLocaleString()} held by WhatsApp for review
+          </p>
+          <p className="mt-0.5 text-2xs text-muted-foreground">
+            WhatsApp batches delivery for newer business portfolios, releasing
+            each batch after checking feedback on the last. These will go out
+            over the coming period — or be dropped if the review finds a
+            problem, in which case they move to undeliverable.
+          </p>
+        </div>
+      )}
+
       {funnel.neverReceived > 0 && (
         <button
           type="button"

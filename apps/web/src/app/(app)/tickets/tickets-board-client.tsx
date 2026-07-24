@@ -58,7 +58,14 @@ const PRIORITY_CLASSES: Record<TicketPriority, string> = {
   urgent: "text-destructive",
 };
 
-export function TicketsBoardClient({ users }: { users: User[] }) {
+export function TicketsBoardClient({
+  users,
+  teams,
+}: {
+  users: User[];
+  /** Teams (AssignmentPolicy) — drives the queue filter. */
+  teams: Array<{ id: string; name: string; isDefault: boolean }>;
+}) {
   const params = useSearchParams();
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [counts, setCounts] = useState<TicketCounts | null>(null);
@@ -67,6 +74,11 @@ export function TicketsBoardClient({ users }: { users: User[] }) {
   // the view itself is URL state, owned by the sidebar, so it is linkable and
   // survives a refresh.
   const [priority, setPriority] = useState<TicketPriority | null>(null);
+  // The team QUEUE — "everything waiting on Sales". Local like priority: it is
+  // a narrowing you toggle while working, not a view you link to. Orthogonal to
+  // `assignee`, and both together is the query a team actually wants: in our
+  // queue AND still unclaimed.
+  const [teamFilter, setTeamFilter] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const view = params.get("view");
@@ -89,10 +101,11 @@ export function TicketsBoardClient({ users }: { users: User[] }) {
     // that one, including `closed`.
     p.set("status", columns.join(","));
     if (assignee) p.set("assignee", assignee);
+    if (teamFilter) p.set("team", teamFilter);
     if (priority) p.set("priority", priority);
     if (breachedOnly) p.set("breached", "true");
     return p;
-  }, [assignee, priority, breachedOnly, columns]);
+  }, [assignee, teamFilter, priority, breachedOnly, columns]);
 
   const load = useCallback(async () => {
     const token = ++requestToken.current;
@@ -232,6 +245,32 @@ export function TicketsBoardClient({ users }: { users: User[] }) {
             <span className={cn("capitalize", PRIORITY_CLASSES[p])}>{p}</span>
           </FilterChip>
         ))}
+
+        {/* Team QUEUE. Rendered only when the workspace actually has teams —
+            a one-entry filter is clutter, same rule as the inbox account
+            picker. Composes with the sidebar's Mine/Unassigned view rather
+            than replacing it: "Sales' queue AND unclaimed" is the query a team
+            uses to find work handed to them. */}
+        {teams.length > 0 && (
+          <>
+            <span className="ml-2 text-2xs text-muted-foreground">Team</span>
+            {teams.map((t) => (
+              <FilterChip
+                key={t.id}
+                active={teamFilter === t.id}
+                onClick={() => setTeamFilter(teamFilter === t.id ? null : t.id)}
+              >
+                {t.name}
+              </FilterChip>
+            ))}
+            <FilterChip
+              active={teamFilter === "none"}
+              onClick={() => setTeamFilter(teamFilter === "none" ? null : "none")}
+            >
+              No team
+            </FilterChip>
+          </>
+        )}
       </div>
 
       {loading && tickets.length === 0 ? (

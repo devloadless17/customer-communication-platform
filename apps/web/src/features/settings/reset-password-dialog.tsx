@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessage } from "@ccp/shared/api/error-message";
 import { toast } from "@/lib/toast";
 import { MIN_PASSWORD_LENGTH } from "@ccp/shared/auth/password-policy";
 
@@ -107,8 +108,7 @@ export function ResetPasswordDialog({
         body: JSON.stringify({ newPassword: password }),
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? "Failed to reset password");
+        setError(await apiErrorMessage(res, "Failed to reset password"));
         return;
       }
       setSavedPassword(password);

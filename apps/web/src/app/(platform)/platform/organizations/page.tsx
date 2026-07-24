@@ -8,6 +8,8 @@ import { listAllOrgsForSuperAdmin } from "@/lib/api/queries";
 import { formatPhone } from "@ccp/shared/utils";
 import type { OrgStatus } from "@ccp/shared/types";
 
+import { DeleteOrgButton } from "./delete-org-button";
+
 export const metadata = { title: "Organizations · Platform" };
 export const dynamic = "force-dynamic";
 
@@ -120,8 +122,17 @@ export default async function PlatformOrganizationsPage() {
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-2">
-                      {o.status === "pending" && o.workspaces[0] && (
-                        <QuickApproveButton workspaceId={o.workspaces[0].id} />
+                      {o.status === "pending" && (
+                        <QuickApproveButton organizationId={o.id} />
+                      )}
+                      {/* An org with no workspaces has no detail page to reach
+                          (that route is keyed by a workspace id), so without
+                          this it can never be removed from anywhere — see
+                          DeleteOrgButton. Orgs that DO have workspaces keep the
+                          delete on their detail page, where the full
+                          type-the-name confirm lives alongside the counts. */}
+                      {o.workspaces.length === 0 && (
+                        <DeleteOrgButton organizationId={o.id} orgName={o.name} />
                       )}
                     </div>
                   </td>

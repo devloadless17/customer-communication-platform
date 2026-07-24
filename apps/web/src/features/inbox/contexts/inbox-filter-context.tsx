@@ -49,6 +49,23 @@ export {
 interface InboxFilterContextValue {
   filter: Filter;
   setFilter: (next: Filter) => void;
+  /**
+   * Narrow the list to ONE channel account (a WhatsApp number / Page / handle),
+   * or null for "every account".
+   *
+   * A SECOND, orthogonal dimension rather than another `Filter` variant, and
+   * that distinction is the whole design. `Filter` is an exclusive union —
+   * picking a stage clears the preset — which is right for "which slice of work"
+   * but wrong here: "Unassigned" and "on the Sales number" are different
+   * questions and an agent wants both at once. Folding accounts into the union
+   * would have forced a choice between them.
+   *
+   * The inbox stays UNIFIED by default (null): every number in one list, each
+   * row labelled with the account it arrived on. This narrows on demand; it is
+   * not a per-number inbox.
+   */
+  accountId: string | null;
+  setAccountId: (next: string | null) => void;
 }
 
 const InboxFilterContext = createContext<InboxFilterContextValue | null>(null);
@@ -63,6 +80,14 @@ export function InboxFilterProvider({
   initialFilter?: Filter;
 }) {
   const [filter, setFilterState] = useState<Filter>(initialFilter ?? INBOX_FILTER_DEFAULT);
+  // Deliberately NOT persisted to a cookie, unlike `filter`.
+  //
+  // A forgotten account narrow is a silent trap: an agent returns tomorrow, sees
+  // an inbox missing every conversation on the other numbers, and has no reason
+  // to suspect a filter they set once. The preset/stage/view choice is safe to
+  // remember because the sub-sidebar always shows which one is lit; "all
+  // accounts" is the honest default to land on every session.
+  const [accountId, setAccountIdState] = useState<string | null>(null);
 
   const setFilter = useCallback((next: Filter) => {
     setFilterState(next);
@@ -79,7 +104,14 @@ export function InboxFilterProvider({
     document.cookie = `${INBOX_FILTER_COOKIE}=${serializeInboxFilter(next)}; path=/; max-age=${INBOX_FILTER_COOKIE_MAX_AGE_S}; samesite=lax${secureFlag}`;
   }, []);
 
-  const value = useMemo(() => ({ filter, setFilter }), [filter, setFilter]);
+  const setAccountId = useCallback((next: string | null) => {
+    setAccountIdState(next);
+  }, []);
+
+  const value = useMemo(
+    () => ({ filter, setFilter, accountId, setAccountId }),
+    [filter, setFilter, accountId, setAccountId],
+  );
   return (
     <InboxFilterContext.Provider value={value}>
       {children}

@@ -54,6 +54,12 @@ export function shouldIssueSecureCookies(): boolean {
   return process.env.NODE_ENV === "production";
 }
 
+/** How long a verification code stays valid. Short enough that a leaked code in
+ *  a shared inbox is near-useless, long enough to survive mail-provider delay. */
+export const OTP_EXPIRY_MINUTES = 10;
+/** Wrong attempts before the code is burned and a new one must be requested. */
+export const OTP_MAX_ATTEMPTS = 5;
+
 export interface SharedAuthOptionsParams {
   database: BetterAuthOptions["database"];
   secret: string;
@@ -61,6 +67,15 @@ export interface SharedAuthOptionsParams {
   isProd: boolean;
   passwordHash: (password: string) => Promise<string>;
   passwordVerify: (input: { password: string; hash: string }) => Promise<boolean>;
+  /**
+   * Google OAuth credentials, INJECTED rather than read from `process.env`
+   * here — this file is deliberately framework- and runtime-neutral (see the
+   * header), and reaching for a Node global would break that.
+   *
+   * Omit to disable Google sign-in. A deployment without an OAuth client should
+   * lose the button, not fail to boot.
+   */
+  google?: { clientId: string; clientSecret: string } | undefined;
 }
 
 export function buildSharedAuthOptions(p: SharedAuthOptionsParams): BetterAuthOptions {
@@ -108,6 +123,35 @@ export function buildSharedAuthOptions(p: SharedAuthOptionsParams): BetterAuthOp
       // ACTIVE workspace is resolved per-request from the membership-validated
       // `ccp.ws` cookie. Re-adding them here would reintroduce a stale copy
       // that survives a workspace switch.
+      /**
+       * Tenant columns Better Auth must be TOLD about before it will write
+       * them.
+       *
+       * Its adapter builds the insert with
+       * `for (const field in schema.user.fields)` — a key that is not declared
+       * here is dropped from the payload silently, with no warning and no
+       * error. The `databaseHooks.user.create.before` hook (see the web auth
+       * instance) injects `organizationId` for a first-time Google user, and
+       * without these two entries that injection evaporated between the hook
+       * and Prisma: `organizationId` is required with no default, so the insert
+       * failed as `Argument 'organization' is missing` and every "Continue with
+       * Google" dead-ended at `unable_to_create_user`.
+       *
+       * `orgRole` is here for a quieter version of the same bug: the column
+       * defaults to `member`, so a dropped value did not fail the insert — it
+       * would just have made the person who CREATED the organization a plain
+       * member of it.
+       *
+       * `input: false` on both: these are server-assigned tenant scope. Left
+       * writable, a crafted signup body could name its own `organizationId` and
+       * join an arbitrary tenant. Better Auth rejects a client that tries
+       * (`parseInputData`), while the database hook — which runs after parsing
+       * and merges straight into the adapter call — is unaffected.
+       */
+      additionalFields: {
+        organizationId: { type: "string", required: false, input: false },
+        orgRole: { type: "string", required: false, input: false },
+      },
       // Map Better Auth's standard `image` field to our existing avatarUrl
       // column. Lets the framework think it's writing to `image` while the
       // DB keeps its domain-meaningful name.
@@ -133,6 +177,30 @@ export function buildSharedAuthOptions(p: SharedAuthOptionsParams): BetterAuthOp
       // cache OFF the NestJS pair becomes the single source of truth —
       // one TTL across both maps, one invalidation path that hits both.
       cookieCache: { enabled: false },
+    },
+
+    // Google sign-in.
+    //
+    // Configured in the SHARED builder so both processes agree on what a valid
+    // session looks like, but only ever exercised by the web process (which
+    // owns /api/auth/*). Absent credentials disable it rather than crash: a
+    // deployment that hasn't set up a Google OAuth client should lose the
+    // button, not fail to boot.
+    ...(p.google
+      ? { socialProviders: { google: p.google } }
+      : {}),
+
+    account: {
+      accountLinking: {
+        enabled: true,
+        // Google asserts a verified email, so linking on a matching address is
+        // safe. WITHOUT this, someone who signed up with a password and later
+        // clicks "Continue with Google" either gets an opaque error or ends up
+        // with a second identity — and since `User.email` is globally unique,
+        // the second one cannot even be created. They would simply be locked
+        // out of their own account by using the other button.
+        trustedProviders: ["google"],
+      },
     },
 
     advanced: {

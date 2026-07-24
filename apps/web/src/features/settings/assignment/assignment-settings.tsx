@@ -65,13 +65,13 @@ export function AssignmentSettings() {
       const res = await apiFetch("/api/workspace/assignment/policies", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: "New policy" }),
+        body: JSON.stringify({ name: "New team" }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await load();
-      toast("Policy created");
+      toast("Team created");
     } catch {
-      toast("Couldn't create the policy");
+      toast("Couldn't create the team");
     } finally {
       setCreating(false);
     }

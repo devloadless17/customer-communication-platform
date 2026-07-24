@@ -14,6 +14,7 @@ import type {
 } from "@ccp/shared/tickets/types";
 import { isRestrictedViewer, type ConversationViewer } from "@/lib/conversations/visibility";
 import {
+  addTicketNote,
   createTicket,
   updateTicket,
   type TicketActor,
@@ -94,6 +95,11 @@ export class TicketsService {
             ? null
             : query.assignee;
 
+    // Same three-way shape as `assignee`: `none` is a real filter ("owned by no
+    // team"), distinct from omitting the param entirely.
+    const assignedTeamId =
+      query.team === undefined ? undefined : query.team === "none" ? null : query.team;
+
     // The boundary is a FILTER passed into the one query every read goes
     // through — not a branch here. Computing a restriction and then forgetting
     // to apply it is how this control has silently died before.
@@ -102,6 +108,7 @@ export class TicketsService {
     return listTickets(this.db, workspaceId, {
       ...this.filters(query),
       ...(assignedUserId !== undefined ? { assignedUserId } : {}),
+      ...(assignedTeamId !== undefined ? { assignedTeamId } : {}),
       ...(restrictedTo ? { restrictToConversationsAssignedTo: restrictedTo } : {}),
     });
   }
@@ -160,6 +167,7 @@ export class TicketsService {
       ...(body.subject !== undefined ? { subject: body.subject } : {}),
       ...(body.priority ? { priority: body.priority } : {}),
       ...(body.assignedUserId !== undefined ? { assignedUserId: body.assignedUserId } : {}),
+      ...(body.assignedTeamId !== undefined ? { assignedTeamId: body.assignedTeamId } : {}),
       ...(body.tagIds ? { tagIds: body.tagIds } : {}),
       ...(body.customFields ? { customFields: body.customFields } : {}),
     });
@@ -183,6 +191,33 @@ export class TicketsService {
     return this.unwrap(outcome);
   }
 
+  /**
+   * Append an internal note to a ticket. Never reaches the customer.
+   *
+   * The receiving half of a handoff: Sales answers "tell them it ships Tuesday"
+   * without messaging the customer themselves.
+   */
+  async addNote(
+    workspaceId: string,
+    actor: TicketActor,
+    id: string,
+    body: string,
+    viewer?: ConversationViewer,
+  ): Promise<{ ok: true }> {
+    await this.assertVisible(viewer, id);
+    const outcome = await addTicketNote(this.db, {
+      workspaceId,
+      ticketId: id,
+      actor,
+      body,
+    });
+    if (outcome.ok) return { ok: true };
+    if (outcome.reason === "empty_note") {
+      throw new BadRequestException({ error: "empty_note" });
+    }
+    throw new NotFoundException({ error: outcome.reason });
+  }
+
   /** Map the domain's typed outcome onto HTTP. The domain never throws. */
   private unwrap(outcome: TicketOutcome): { ticket: Ticket; openTicketCount: number } {
     if (outcome.ok) return { ticket: outcome.ticket, openTicketCount: outcome.openTicketCount };
@@ -193,6 +228,11 @@ export class TicketsService {
         throw new ConflictException({ error: "version_conflict" });
       case "assignee_not_found":
         throw new BadRequestException({ error: "assignee_not_found" });
+      case "team_not_found":
+        // 400, not 404: the TICKET was found — the team id the caller supplied
+        // is the bad input. A 404 here would read as "no such ticket" and send
+        // the caller looking in the wrong place.
+        throw new BadRequestException({ error: "team_not_found" });
       case "ticket_terminal":
         throw new BadRequestException({ error: "ticket_terminal" });
       default:

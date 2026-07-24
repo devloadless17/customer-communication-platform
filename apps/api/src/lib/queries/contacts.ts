@@ -206,7 +206,7 @@ export async function listContacts(
   // (jsonb_path_ops only serves @>/@?/@@ containment, which is why the old
   // Contact_customFields_gin_idx was dropped as dead write overhead, migration
   // 20260611130200). It seq-scans, but ONLY over this team's LIVE rows (workspaceId
-  // + deletedAt IS NULL narrow first via Contact_teamId_active_idx), so it's
+  // + deletedAt IS NULL narrow first via Contact_workspaceId_deletedAt_idx), so it's
   // bounded by one tenant's contact count. Dropping the arm would lose "find a
   // contact by any custom-field value" from quick-search. TRIGGER to revisit: a
   // team crosses ~50k contacts AND EXPLAIN shows this as the hot cost.
@@ -268,7 +268,7 @@ export async function listContacts(
       SELECT id, "lastMessageAt"
       FROM "Conversation" co
       -- Match on (workspaceId, contactId) so the LEFT JOIN LATERAL seeks the
-      -- Conversation_teamId_contactId_key unique index. Filtering on
+      -- Conversation_workspaceId_contactId_key unique index. Filtering on
       -- contactId alone could not use it (contactId is not the leading column),
       -- degrading to a scan per contact row on the list. Contacts are
       -- team-siloed, so co.workspaceId always equals c.workspaceId.
@@ -300,7 +300,7 @@ export async function listContacts(
     -- the LEFT JOIN LATERAL, so NO index can serve this ORDER BY — and the
     -- keyset cursor predicate above references the same expression. So EVERY
     -- page (incl. scroll pages 2,3,…) re-runs the lateral probe (one
-    -- Conversation_teamId_contactId_key seek per contact passing workspaceId +
+    -- Conversation_workspaceId_contactId_key seek per contact passing workspaceId +
     -- deletedAt IS NULL), materializes N sort keys, top-N sorts, then LIMIT.
     -- Bounded by one tenant's live-contact count — single-digit ms at a few
     -- thousand. WHEN it trips (50k contacts AND EXPLAIN shows this hot):

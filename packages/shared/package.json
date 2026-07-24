@@ -7,17 +7,22 @@
   "exports": {
     "./types": "./src/types.ts",
     "./dtos": "./src/dtos.ts",
+    "./api/error-message": "./src/api/error-message.ts",
     "./socket/events": "./src/socket/events.ts",
+    "./auth/active-workspace": "./src/auth/active-workspace.ts",
     "./auth/permissions": "./src/auth/permissions.ts",
     "./auth/permissions-schema": "./src/auth/permissions-schema.ts",
     "./auth/better-auth-config": "./src/auth/better-auth-config.ts",
     "./auth/password-policy": "./src/auth/password-policy.ts",
+    "./auth/oauth-error": "./src/auth/oauth-error.ts",
     "./api-keys/scopes": "./src/api-keys/scopes.ts",
     "./assignment/types": "./src/assignment/types.ts",
     "./contacts/reserved-fields": "./src/contacts/reserved-fields.ts",
     "./contacts/transfer-columns": "./src/contacts/transfer-columns.ts",
     "./presence": "./src/presence.ts",
     "./work-hours": "./src/work-hours.ts",
+    "./mail/send": "./src/mail/send.ts",
+    "./mail/templates": "./src/mail/templates.ts",
     "./providers/types": "./src/providers/types.ts",
     "./providers/capabilities": "./src/providers/capabilities.ts",
     "./providers/calling-regions": "./src/providers/calling-regions.ts",
@@ -33,6 +38,7 @@
     "./events/types": "./src/events/types.ts",
     "./field-tokens": "./src/field-tokens.ts",
     "./template-bindings": "./src/template-bindings.ts",
+    "./template-languages": "./src/template-languages.ts",
     "./template-render": "./src/template-render.ts",
     "./utils": "./src/utils.ts",
     "./utils/avatar-color": "./src/utils/avatar-color.ts",
@@ -44,12 +50,14 @@
     "better-auth": "^1.6.13",
     "clsx": "^2.1.1",
     "libphonenumber-js": "^1.12.43",
+    "nodemailer": "^9.0.3",
     "tailwind-merge": "^3.6.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@ccp/tsconfig": "workspace:*",
     "@prisma/client": "^7.8.0",
+    "@types/nodemailer": "^8.0.1",
     "typescript": "^6.0.3"
   }
 }

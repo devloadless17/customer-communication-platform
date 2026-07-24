@@ -2,10 +2,12 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
 
 import { provisionWorkspace } from "@/lib/workspaces/provision";
+import { detachMemberFromWorkspace } from "@/lib/workspaces/remove-member";
 
 import { invalidateSessionCache, type ApiSession } from "../auth/session.guard";
 import { Prisma } from "@prisma/client";
@@ -16,23 +18,66 @@ export interface WorkspaceSummary {
   name: string;
   role: string;
   isActive: boolean;
+  /** True when the user holds an explicit `WorkspaceMember` row here; false when
+   *  they can open it purely by org authority. Lets the switcher distinguish
+   *  "my workspace" from "one I administer" without a second call. */
+  joined: boolean;
 }
 
 @Injectable()
 export class WorkspacesService {
+  private readonly logger = new Logger(WorkspacesService.name);
+
   constructor(private readonly db: DbService) {}
 
   /**
-   * The workspaces this user may act in, for the switcher. Read straight off
-   * the session — `resolveSession` already loaded the membership set, so the
-   * switcher costs ZERO extra queries on every render.
+   * The workspaces this user may act in, for the switcher.
+   *
+   * For an ordinary member this is their membership set, read straight off the
+   * session — `resolveSession` already loaded it, so the switcher costs ZERO
+   * extra queries.
+   *
+   * For an ORG MANAGER (owner / admin / platform operator) it is every workspace
+   * in the organization, because that is what `canAccess` and `setActive`
+   * already let them open. Returning memberships alone made three surfaces
+   * disagree: the Organization page offered "Open" on a workspace the rail
+   * switcher didn't list, `setActive` accepted it, and once switched the
+   * switcher marked NOTHING as active because the current workspace wasn't in
+   * the list it rendered. One rule, applied everywhere it is read.
    */
-  list(session: ApiSession): WorkspaceSummary[] {
-    return session.workspaceMemberships.map((m) => ({
-      id: m.workspaceId,
-      name: m.name,
-      role: m.role,
-      isActive: m.workspaceId === session.workspaceId,
+  async list(session: ApiSession): Promise<WorkspaceSummary[]> {
+    const memberRoles = new Map(
+      session.workspaceMemberships.map((m) => [m.workspaceId, m.role]),
+    );
+
+    if (!this.isOrgManager(session)) {
+      return session.workspaceMemberships.map((m) => ({
+        id: m.workspaceId,
+        name: m.name,
+        role: m.role,
+        isActive: m.workspaceId === session.workspaceId,
+        joined: true,
+      }));
+    }
+
+    // Scoped to the caller's own org even for a platform operator: `setActive`
+    // lets them reach any workspace on the box, but the switcher is a workspace
+    // picker, not a directory of every tenant — operators manage from the
+    // (platform) shell, and the (app) layout redirects them there anyway.
+    const all = await this.db.workspace.findMany({
+      where: { organizationId: session.organizationId },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, name: true },
+    });
+
+    return all.map((w) => ({
+      id: w.id,
+      name: w.name,
+      // No membership row → they are here by org authority, which resolves to
+      // "admin" everywhere in the org (see ApiSession.role).
+      role: memberRoles.get(w.id) ?? "admin",
+      isActive: w.id === session.workspaceId,
+      joined: memberRoles.has(w.id),
     }));
   }
 
@@ -219,6 +264,12 @@ export class WorkspacesService {
    *   - a workspace can never be left with zero admins. Removing the last one
    *     leaves nobody able to configure channels, invite members or undo the
    *     mistake — an unrecoverable state reachable by one careless click.
+   *
+   * REMOVAL is not just the row: `detachMemberFromWorkspace` re-homes their open
+   * conversations and tickets and drops every grant this workspace held for
+   * them. Deleting only the membership left work owned by someone who cannot
+   * open the workspace — absent from the Unassigned queue and therefore owned by
+   * nobody in practice.
    */
   async setMembership(
     session: ApiSession,
@@ -279,6 +330,36 @@ export class WorkspacesService {
     // The TARGET's session carries their membership set + effective role, so
     // theirs is the cache that must drop — not the actor's.
     invalidateSessionCache(userId);
+
+    // Detach the work and the grants. Detached + best-effort ON PURPOSE, exactly
+    // like the deactivation path: the membership write has committed and is what
+    // the caller is waiting on. Anything that fails to re-home stays visible in
+    // the workspace inbox, and the removed member is already excluded from every
+    // candidate pool (which filters on WorkspaceMember).
+    if (role === null && existing) {
+      void detachMemberFromWorkspace(this.db, workspaceId, userId, {
+        rebalance: true,
+        // They are gone from this workspace for good — take the grants with
+        // them (policy seat, channel memberships, personal views, pointers).
+        clearGrants: true,
+        // They can never open this workspace again, so a thread left on them is
+        // invisible work. Unassigned is strictly better. (Deactivation reasons
+        // the opposite way — see the option's comment.)
+        unassignWhenNoCandidate: true,
+      })
+        .then(({ conversationsMoved, ticketsMoved }) => {
+          if (conversationsMoved > 0 || ticketsMoved > 0) {
+            this.logger.log(
+              `removed ${userId} from workspace ${workspaceId}: re-homed ${conversationsMoved} conversation(s), ${ticketsMoved} ticket(s)`,
+            );
+          }
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `detach-on-remove failed for ${userId} in ${workspaceId}: ${err instanceof Error ? err.message : err}`,
+          );
+        });
+    }
   }
 
   /**
@@ -382,15 +463,6 @@ export class WorkspacesService {
 // ---------------------------------------------------------------------------
 // Organization surface.
 // ---------------------------------------------------------------------------
-
-/**
- * How many workspaces one organization may hold.
- *
- * A ceiling exists because a workspace is not free: it seeds rows, holds its
- * own channel connections, and every list query in the app is scoped to one.
- * 50 is far above any real team's need and low enough that a scripted loop
- * can't quietly provision thousands.
- */
 
 export interface OrganizationOverview {
   id: string;

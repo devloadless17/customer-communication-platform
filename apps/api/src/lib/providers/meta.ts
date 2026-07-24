@@ -38,7 +38,11 @@ import type {
   NormalizedReaction,
   NormalizedStatusUpdate,
   NormalizedTemplateStatusUpdate,
+  ProviderAccountStatus,
+  ProviderBusinessProfile,
+  ProviderQrCode,
   ProviderTemplate,
+  UpdateBusinessProfileArgs,
   SendInteractiveArgs,
   SendLocationArgs,
   SendContactsArgs,
@@ -50,8 +54,20 @@ import type {
   TemplateCategory,
   TemplateComponent,
   TemplateStatus,
+  AuthTemplatePreview,
+  AuthTemplatePreviewArgs,
+  CreateFromLibraryArgs,
+  EditTemplateArgs,
+  UpsertAuthTemplateArgs,
+  UpsertAuthTemplateResult,
+  LibraryTemplate,
+  TemplateLibraryFilters,
+  TemplateParamType,
   ProviderTemplateAnalyticsRow,
+  ProviderTemplateComparison,
+  TemplateVariableSet,
   TemplateAnalyticsArgs,
+  TemplateComparisonArgs,
   UploadHeaderMediaArgs,
   UploadHeaderMediaResult,
   UploadMediaArgs,
@@ -277,6 +293,15 @@ interface MetaChangeValue {
     timestamp?: string;
   }>;
   max_daily_conversation_per_phone?: number | string;
+  /**
+   * The business PORTFOLIO's messaging limit (2000 | 10000 | 100000 |
+   * UNLIMITED). Present on BOTH `business_capability_update` and
+   * `phone_number_quality_update` since the 2025-10-07 move to portfolio-scoped
+   * limits, and it is the replacement for the two legacy fields below it:
+   * `max_daily_conversation_per_phone` and (for the limit meaning)
+   * `current_limit` were both removed in February 2026.
+   */
+  max_daily_conversations_per_business?: number | string;
   max_phone_numbers_per_business?: number | string;
   // WhatsApp Coexistence webhook fields (one number on both the Business App +
   // Cloud API). Each arrives under its own `change.field`, keyed as its own
@@ -1263,10 +1288,20 @@ function parseTemplateStatusUpdate(
 }
 
 /**
- * Parse a `template_category_update` webhook into a normalized event carrying
- * only the new `category` (status stays null — this webhook doesn't change
- * review status). Returns null with no id/name to match on, or when the category
- * doesn't map to a known enum value.
+ * Parse a `template_category_update` webhook. Status stays null — this webhook
+ * never changes review status.
+ *
+ * Meta sends this field for TWO different moments and they must not be merged:
+ *
+ *   - ADVANCE NOTICE — carries `correct_category`, the category the template
+ *     WILL be moved to (typically on the 1st of next month). Nothing has changed
+ *     yet, so this maps to `pendingCategory`.
+ *   - ACTION TAKEN — carries `new_category` (plus `previous_category`). The move
+ *     has happened, so this maps to `category`.
+ *
+ * Preferring `correct_category` — as this parser used to — applied the future
+ * category immediately, relabelling and mispricing a UTILITY template as
+ * MARKETING for up to a month before Meta actually moved it.
  */
 function parseTemplateCategoryUpdate(
   value: MetaChangeValue,
@@ -1278,8 +1313,9 @@ function parseTemplateCategoryUpdate(
       : undefined;
   const name = value.message_template_name;
   if (!externalId && !name) return null;
-  const category = mapTemplateCategory(value.correct_category ?? value.new_category);
-  if (!category) return null;
+  const applied = mapTemplateCategory(value.new_category);
+  const pending = mapTemplateCategory(value.correct_category);
+  if (!applied && !pending) return null;
   return {
     kind: "template_status",
     ...(externalId ? { externalId } : {}),
@@ -1288,9 +1324,73 @@ function parseTemplateCategoryUpdate(
       ? { language: value.message_template_language }
       : {}),
     status: null,
-    category,
+    ...(applied ? { category: applied } : {}),
+    // An applied move settles the question: clear any prior pending notice by
+    // reporting the landed category as the pending one too. Ingest turns an
+    // equal pair into "not impacted".
+    ...(pending ? { pendingCategory: pending } : applied ? { pendingCategory: applied } : {}),
     rawPayload,
   };
+}
+
+/**
+ * Parse a `message_template_quality_update` webhook into the same
+ * `template_status` shape a status/category update uses — the identity keys and
+ * the local match are identical, and only the field written differs.
+ *
+ * `status: null` is deliberate: this webhook says nothing about approval, and
+ * ingest only writes the fields that are actually present. Meta's band is
+ * carried VERBATIM, uppercased for a stable comparison but never mapped to an
+ * enum — an unrecognized future band is informational and must still be
+ * storable.
+ */
+function parseTemplateQualityUpdate(
+  value: MetaChangeValue,
+  rawPayload: Record<string, unknown>,
+): NormalizedTemplateStatusUpdate | null {
+  const externalId =
+    value.message_template_id != null
+      ? String(value.message_template_id)
+      : undefined;
+  const name = value.message_template_name;
+  if (!externalId && !name) return null;
+  const score = value.new_quality_score?.trim();
+  if (!score) return null;
+  return {
+    kind: "template_status",
+    ...(externalId ? { externalId } : {}),
+    ...(name ? { name } : {}),
+    ...(value.message_template_language
+      ? { language: value.message_template_language }
+      : {}),
+    status: null,
+    qualityScore: score.toUpperCase(),
+    rawPayload,
+  };
+}
+
+
+/**
+ * An `account_update` we recognise the topic of but not the event.
+ *
+ * Deliberately `console.warn` with the RAW payload: this is an account-level
+ * channel (enforcement, partner removal, account-model changes), so the volume
+ * is trivial and the value of seeing an unknown shape once is high.
+ */
+function logUnhandledAccountUpdate(
+  value: MetaChangeValue,
+  rawPayload: Record<string, unknown>,
+): void {
+  console.warn(
+    JSON.stringify({
+      event: "meta.account_update_unhandled",
+      severity: "warn",
+      metaEvent: value.event ?? null,
+      // Truncated: an account payload is small, but a log line is not a place
+      // to page in something unbounded.
+      payload: JSON.stringify(rawPayload).slice(0, 2000),
+    }),
+  );
 }
 
 /**
@@ -1301,8 +1401,17 @@ function parseTemplateCategoryUpdate(
  * Ingest merges the partial onto the WhatsApp ChannelConnection. Returns null
  * when nothing usable is present (e.g. a generic account_alerts envelope), so a
  * pure alert doesn't blank a stored snapshot. Field mapping:
- *   - phone_number_quality_update: `current_limit` → messaging tier.
- *   - business_capability_update: `max_daily_conversation_per_phone` (number) → tier.
+ *   - either webhook: `max_daily_conversations_per_business` → the PORTFOLIO's
+ *     messaging limit. This is the current field on both, and the only one that
+ *     survives: Meta removed `max_daily_conversation_per_phone` and the
+ *     limit-meaning of `current_limit` in February 2026.
+ *   - legacy fallbacks, kept because a workspace pinned to an older webhook
+ *     version still receives them and reading them costs nothing:
+ *     `phone_number_quality_update.current_limit` (which now carries EITHER the
+ *     portfolio limit or the number's throughput level — `normalizeMessagingTier`
+ *     returns null for a throughput string, so a throughput value can't be
+ *     mistaken for a tier), and
+ *     `business_capability_update.max_daily_conversation_per_phone`.
  */
 function parseChannelHealthUpdate(
   field: string,
@@ -1331,24 +1440,58 @@ function parseChannelHealthUpdate(
         };
       }
       // A restriction on something OTHER than calling — leave calling state
-      // untouched rather than implying it was cleared.
+      // untouched rather than implying it was cleared. Logged, not dropped: the
+      // restriction types are not enumerated anywhere we can read, so the log
+      // line is how a new one becomes known instead of being invisible.
+      logUnhandledAccountUpdate(value, rawPayload);
       return null;
     }
     if (value.event === "ACCOUNT_VIOLATION") {
       const type = value.violation_info?.violation_type;
-      if (type?.includes("CALLING")) {
+      if (!type) return null;
+      // A CALLING violation is the early warning before calling is paused, and
+      // has its own field because the actionable response is different (narrow
+      // call hours, hide the call button).
+      if (type.includes("CALLING")) {
         return {
           kind: "channel_health",
           callingQualityWarning: type,
           rawPayload,
         };
       }
-      return null;
+      // Everything else is a WhatsApp Business POLICY violation — the very
+      // thing Meta says this webhook exists to report, and the warning that
+      // precedes an account restriction. It used to be parsed and then dropped,
+      // so the first a tenant heard of it was the restriction.
+      return {
+        kind: "channel_health",
+        policyViolationType: type,
+        rawPayload,
+      };
     }
+    // Any OTHER `account_update` event.
+    //
+    // This used to be a bare `return null` — invisible, which is how a wire
+    // change goes unnoticed for months (see the messaging-limit fields Meta
+    // removed in Feb 2026 while we kept reading them). It matters more from
+    // here on: Meta's account-model evolution says an `account_update` fires
+    // when an app is REMOVED from a WhatsApp Business Account — the event that
+    // makes an integration go dark — and publishes no name or shape for it.
+    //
+    // So the rule is: parse what Meta has documented, and make everything else
+    // LOUD rather than guessing at a payload. When Phase 1 lands, this line is
+    // what turns "sends mysteriously stopped" into a shape we can read and
+    // implement against.
+    logUnhandledAccountUpdate(value, rawPayload);
     return null;
   }
   let messagingTier: string | undefined;
-  if (field === "phone_number_quality_update") {
+  // The portfolio limit, on whichever webhook delivered it, wins. Limits have
+  // been portfolio-scoped since 2025-10-07 — a per-phone number is at best the
+  // same value and at worst a stale one.
+  if (value.max_daily_conversations_per_business != null) {
+    messagingTier = String(value.max_daily_conversations_per_business);
+  } else if (field === "phone_number_quality_update") {
     if (value.current_limit) messagingTier = value.current_limit;
   } else if (field === "business_capability_update") {
     if (value.max_daily_conversation_per_phone != null) {
@@ -1400,6 +1543,7 @@ async function sendVoiceCallButton(
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",
+      ...messagingAccountField(config),
       recipient_type: "individual",
       to: args.to,
       type: "interactive",
@@ -1467,6 +1611,26 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           continue;
         }
 
+        // A template's COMPONENTS changed at Meta (an edit in WhatsApp Manager,
+        // or a Meta-side correction). Our cached `components` drive the whole
+        // send-time parameter shape — how many body values, whether the header
+        // is media, which buttons need a value — so a stale copy builds the
+        // wrong wire payload and Meta rejects every send with 132000.
+        //
+        // The webhook body doesn't carry enough to rebuild a row safely, so this
+        // event asks for a catalog refetch rather than trying to patch in place.
+        if (change.field === "message_template_components_update") {
+          events.push({
+            kind: "template_components_changed",
+            ...(value.message_template_id != null
+              ? { externalId: String(value.message_template_id) }
+              : {}),
+            ...(value.message_template_name ? { name: value.message_template_name } : {}),
+            rawPayload: payload as Record<string, unknown>,
+          });
+          continue;
+        }
+
         // Template category migration: Meta auto-moved a template between
         // categories (e.g. MARKETING→UTILITY). Category drives pricing + which
         // window reopens the conversation, so keep the local row accurate rather
@@ -1527,21 +1691,17 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           continue;
         }
 
-        // Template quality band change (GREEN/YELLOW/RED). Informational — a RED
-        // band that pauses the template arrives separately as a status update
-        // (PAUSED), which we already ingest. Log it for observability; there's no
-        // sendability decision to make here.
+        // Template quality band change (GREEN/YELLOW/RED/UNKNOWN). Not a
+        // sendability decision — the pause arrives separately as a status
+        // update (PAUSED), which we already ingest — but it is the EARLY
+        // warning, and by the time the pause lands the campaign is dead. So it
+        // is stored and surfaced, not just logged.
         if (change.field === "message_template_quality_update") {
-          console.warn(
-            JSON.stringify({
-              event: "meta.template_quality_update",
-              severity: "info",
-              template: value.message_template_name,
-              language: value.message_template_language,
-              previous: value.previous_quality_score,
-              current: value.new_quality_score,
-            }),
+          const evt = parseTemplateQualityUpdate(
+            value,
+            payload as Record<string, unknown>,
           );
+          if (evt) events.push(evt);
           continue;
         }
 
@@ -2095,6 +2255,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        ...messagingAccountField(config),
         recipient_type: "individual",
         to: args.to,
         type: "text",
@@ -2123,7 +2284,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     }
 
     const json = (await res.json()) as {
-      messages?: Array<{ id?: string }>;
+      messages?: Array<{ id?: string; message_status?: string }>;
     };
     const externalId = json.messages?.[0]?.id;
     if (!externalId) {
@@ -2131,7 +2292,14 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     }
 
     // Meta's response doesn't include a server timestamp; we stamp at send.
-    return { externalId, timestamp: new Date() };
+    return {
+      externalId,
+      timestamp: new Date(),
+      // Meta documents portfolio pacing for TEMPLATE sends. Reading the field
+      // here too costs one comparison and means a freeform send that ever gets
+      // held is reported honestly rather than as delivered-and-fine.
+      ...(isHeldForQualityAssessment(json) ? { heldForQualityAssessment: true } : {}),
+    };
   },
 
   async sendInteractive(
@@ -2217,6 +2385,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        ...messagingAccountField(config),
         recipient_type: "individual",
         to: args.to,
         type: "interactive",
@@ -2254,6 +2423,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        ...messagingAccountField(config),
         recipient_type: "individual",
         to: args.to,
         type: "location",
@@ -2360,6 +2530,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        ...messagingAccountField(config),
         recipient_type: "individual",
         to: args.to,
         type: "reaction",
@@ -2408,6 +2579,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        ...messagingAccountField(config),
         status: "read",
         message_id: externalId,
         typing_indicator: { type: "text" },
@@ -2439,6 +2611,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        ...messagingAccountField(config),
         status: "read",
         message_id: externalId,
       }),
@@ -2522,7 +2695,16 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     config: MetaSendConfig,
   ): Promise<UploadMediaResult> {
     // Multipart upload to /{phone-number-id}/media. Meta returns an id valid
-    // for ~30 days, single-use per outbound message.
+    // for ~30 days.
+    //
+    // Whether one id may be referenced by MANY messages is UNVERIFIED here: an
+    // earlier comment asserted "single-use per outbound message" with no
+    // citation and no test, while Meta's template-media doc recommends ids
+    // precisely to "avoid unnecessary requests to your public server" — advice
+    // that only pays off if ids are reusable. Every current caller uploads one
+    // id per message, so nothing depends on the answer today. It matters the
+    // moment a broadcast wants to upload once and reuse across recipients; see
+    // docs/whatsapp-templates.md §12 for how to settle it.
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/media`;
     const fd = new FormData();
     fd.append("messaging_product", "whatsapp");
@@ -2596,6 +2778,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        ...messagingAccountField(config),
         recipient_type: "individual",
         to: args.to,
         type: args.kind,
@@ -2653,9 +2836,18 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // POSITIONAL template whose body happens to contain `{{order_id}}` as
     // literal text would be misread, and the wire assembly would then send the
     // wrong parameter shape and 132000 every recipient.
+    // `correct_category` is how Meta announces a PENDING recategorization: when
+    // it differs from `category` and isn't empty, the template moves to that
+    // category on the first of next month (which changes what it costs to send).
+    // It is only readable by asking for it — there is no webhook that carries
+    // the current pending state, only one-shot notices we may have missed.
     url.searchParams.set(
       "fields",
-      "name,language,status,category,components,id,parameter_format",
+      "name,language,status,category,correct_category,components,id,parameter_format," +
+        // `quality_score` is only returned if asked for. It is the EARLY warning
+        // that a template is heading for a pause — the `PAUSED` status that
+        // follows is too late to act on.
+        "message_send_ttl_seconds,quality_score",
     );
     url.searchParams.set("limit", "200");
 
@@ -2711,7 +2903,22 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         name: args.name,
         language: args.language,
         category: args.category.toUpperCase(),
-        components: args.components,
+        // Meta defaults an absent `parameter_format` to POSITIONAL. Say it
+        // outright so the stored `MessageTemplate.parameterFormat` is a
+        // statement of fact rather than a bet on a vendor default.
+        parameter_format: args.parameterFormat.toUpperCase(),
+        // Omitted unless the author set one — Meta's per-category default is the
+        // right answer when nobody has an opinion, and pinning a value silently
+        // would change how long delivery is retried.
+        ...(args.messageSendTtlSeconds !== undefined
+          ? { message_send_ttl_seconds: args.messageSendTtlSeconds }
+          : {}),
+        // Meta documents some component types ONLY in lower snake_case
+        // (`call_permission_request`, `limited_time_offer`, `carousel` and its
+        // nested card components). Every other type is accepted in either case;
+        // these are only ever shown lowercase, so don't gamble on the uppercase
+        // form being recognized.
+        components: args.components.map(lowercaseComponentForCreate),
       }),
     });
 
@@ -2728,12 +2935,348 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       );
     }
 
-    const json = (await res.json()) as { id?: string; status?: string };
+    const json = (await res.json()) as {
+      id?: string;
+      status?: string;
+      category?: string;
+    };
     if (!json.id) {
       throw new Error(`meta createTemplate response missing id: ${JSON.stringify(json)}`);
     }
     const status = mapTemplateStatus(json.status) ?? "pending";
-    return { externalId: json.id, status };
+    // Meta echoes the category it ACTUALLY assigned, which may not be the one we
+    // asked for: since 2025-04-09 a UTILITY submission whose content reads as
+    // promotional is approved as MARKETING outright (the old opt-in
+    // `allow_category_change` is now the default). Persisting our request instead
+    // of this answer left the row claiming a cheaper category than Meta bills.
+    return { externalId: json.id, status, category: mapTemplateCategory(json.category) };
+  },
+
+  /**
+   * Browse Meta's Template Library — pre-written, pre-categorized blueprints.
+   *
+   * A ROOT-LEVEL edge (`/message_template_library`), not WABA-scoped: the
+   * library is Meta's catalogue, identical for everyone, so there is nothing
+   * account-specific to scope it to. (Meta's own example curl on this endpoint
+   * shows `/{waba-id}/message_templates?search=…`, which is a different endpoint
+   * entirely and returns YOUR templates — the documented request syntax above it
+   * is the correct one.)
+   */
+  async fetchTemplateLibrary(
+    filters: TemplateLibraryFilters,
+    config: MetaSendConfig,
+  ): Promise<LibraryTemplate[]> {
+    const url = new URL(`${GRAPH_BASE}/${config.graphVersion}/message_template_library`);
+    for (const key of ["search", "topic", "usecase", "industry", "language", "name"] as const) {
+      const value = filters[key];
+      if (value) url.searchParams.set(key, value);
+    }
+    url.searchParams.set("limit", "200");
+
+    // Idempotent read of a static catalogue — retry is safe.
+    const res = await metaFetch(url, {
+      method: "GET",
+      retry: true,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta fetchTemplateLibrary failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+    const json = (await res.json()) as { data?: unknown };
+    // Graph list edges wrap in `{ data: [...] }`; the doc's example response
+    // shows a bare object. Accept either rather than betting on the formatting.
+    const rows = Array.isArray(json.data)
+      ? json.data
+      : Array.isArray(json)
+        ? json
+        : [json];
+    return rows
+      .map(normalizeLibraryTemplate)
+      .filter((t): t is LibraryTemplate => t !== null);
+  },
+
+  /**
+   * Instantiate a library template under our own name.
+   *
+   * Same endpoint as `createTemplate` but a different body: no `components` at
+   * all — the blueprint owns the copy — just `library_template_name` plus the
+   * per-business button/body inputs. An UNMODIFIED instantiation comes back
+   * `APPROVED` immediately rather than `PENDING`, which is the whole reason the
+   * library is worth a dedicated path.
+   *
+   * `library_template_button_inputs` is sent as a JSON STRING, which is how Meta
+   * documents it — the value is a quoted array in every published example.
+   */
+  async createFromLibrary(
+    args: CreateFromLibraryArgs,
+    config: MetaSendConfig,
+  ): Promise<CreateTemplateResult> {
+    if (!config.wabaId) throw new MissingWabaIdError();
+
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`;
+    const res = await metaFetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        name: args.name,
+        language: args.language,
+        category: args.category.toUpperCase(),
+        library_template_name: args.libraryTemplateName,
+        ...(args.buttonInputs && args.buttonInputs.length > 0
+          ? { library_template_button_inputs: JSON.stringify(args.buttonInputs) }
+          : {}),
+        ...(args.bodyInputs && Object.keys(args.bodyInputs).length > 0
+          ? { library_template_body_inputs: args.bodyInputs }
+          : {}),
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta createFromLibrary failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+
+    const json = (await res.json()) as { id?: string; status?: string; category?: string };
+    if (!json.id) {
+      throw new Error(`meta createFromLibrary response missing id: ${JSON.stringify(json)}`);
+    }
+    return {
+      externalId: json.id,
+      // Library instantiations normally return APPROVED outright; fall back to
+      // pending rather than assuming.
+      status: mapTemplateStatus(json.status) ?? "pending",
+      category: mapTemplateCategory(json.category),
+    };
+  },
+
+  /**
+   * Edit an existing template in place — `POST /{template-id}`.
+   *
+   * Targets the TEMPLATE node, not the WABA edge that `createTemplate` posts to.
+   * `components` REPLACES the whole component array (Meta does not merge), so
+   * the caller must send the complete set or silently drop what it omits.
+   *
+   * On success Meta re-enters the template into review automatically; an
+   * approved or paused template is re-approved unless review now fails it.
+   */
+  /**
+   * Render the preset authentication text per language.
+   *
+   * `GET /{waba-id}/message_template_previews`. Meta owns this wording, so this
+   * is the only way to show an operator what they are about to create — the
+   * strings differ per language and are not something we could compose.
+   *
+   * `button_types=OTP` is REQUIRED for authentication previews; without it the
+   * response omits the button labels entirely.
+   */
+  async previewAuthTemplates(
+    args: AuthTemplatePreviewArgs,
+    config: MetaSendConfig,
+  ): Promise<AuthTemplatePreview[]> {
+    if (!config.wabaId) throw new MissingWabaIdError();
+    const url = new URL(
+      `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_template_previews`,
+    );
+    url.searchParams.set("category", "AUTHENTICATION");
+    // Marked Optional in the syntax block and Required in the parameter table of
+    // the same page. Always sent: it satisfies both readings, and without it the
+    // response omits the button labels entirely.
+    url.searchParams.set("button_types", "OTP");
+    if (args.languages.length > 0) {
+      // `languages`, PLURAL — the syntax block writes `language=` but both
+      // published curl examples use `languages=en_US,es_ES`. The working example
+      // wins over the prose; Meta's syntax blocks have been wrong repeatedly
+      // (see the /compare millisecond timestamp and the utility footer claim).
+      url.searchParams.set("languages", args.languages.join(","));
+    }
+    if (args.addSecurityRecommendation) {
+      url.searchParams.set("add_security_recommendation", "true");
+    }
+    if (args.codeExpirationMinutes !== undefined) {
+      url.searchParams.set("code_expiration_minutes", String(args.codeExpirationMinutes));
+    }
+
+    const res = await metaFetch(url, {
+      method: "GET",
+      retry: true,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta previewAuthTemplates failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+    const json = (await res.json()) as { data?: unknown };
+    if (!Array.isArray(json.data)) return [];
+    return json.data.filter(isObject).map((raw) => {
+      const row = raw as Record<string, unknown>;
+      return {
+        language: typeof row.language === "string" ? row.language : "",
+        body: typeof row.body === "string" ? row.body : "",
+        ...(typeof row.footer === "string" ? { footer: row.footer } : {}),
+        buttons: Array.isArray(row.buttons)
+          ? row.buttons.filter(isObject).map((b) => {
+              const btn = b as Record<string, unknown>;
+              return {
+                ...(typeof btn.text === "string" ? { text: btn.text } : {}),
+                ...(typeof btn.autofill_text === "string"
+                  ? { autofill_text: btn.autofill_text }
+                  : {}),
+              };
+            })
+          : [],
+      };
+    });
+  },
+
+  /**
+   * `POST /{template-id}/unpause` — lift a quality pause.
+   *
+   * A quality pause lifts itself (3h, then 6h, then the template is DISABLED on
+   * the third instance), so this is not the normal recovery path. It exists for
+   * templates paused by **Template Pacing**, which never unpause on their own.
+   *
+   * Meta re-derives the quality band from recent feedback when a template
+   * unpauses, so the stored band is cleared by the caller rather than left
+   * showing the RED that caused the pause.
+   */
+  async unpauseTemplate(externalId: string, config: MetaSendConfig): Promise<void> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(externalId)}/unpause`;
+    const res = await metaFetch(url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta unpauseTemplate failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+  },
+
+  /**
+   * Create/update an authentication template in MANY languages at once.
+   *
+   * `POST /{waba-id}/upsert_message_templates` — a different edge from
+   * `createTemplate`, with a different contract: `languages` (plural), and no
+   * `text` or `autofill_text` at all, because the wording is Meta's. An existing
+   * (name, language) pair is UPDATED rather than colliding, which is what makes
+   * this safe to re-run when adding a language.
+   */
+  async upsertAuthTemplate(
+    args: UpsertAuthTemplateArgs,
+    config: MetaSendConfig,
+  ): Promise<UpsertAuthTemplateResult> {
+    if (!config.wabaId) throw new MissingWabaIdError();
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/upsert_message_templates`;
+
+    const res = await metaFetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        name: args.name,
+        languages: args.languages,
+        category: "AUTHENTICATION",
+        components: [
+          {
+            type: "BODY",
+            ...(args.addSecurityRecommendation
+              ? { add_security_recommendation: true }
+              : {}),
+          },
+          // The footer exists ONLY to carry the expiry warning — omit the whole
+          // component when there is no expiry, rather than sending an empty one.
+          ...(args.codeExpirationMinutes !== undefined
+            ? [{ type: "FOOTER", code_expiration_minutes: args.codeExpirationMinutes }]
+            : []),
+          {
+            type: "BUTTONS",
+            buttons: [
+              {
+                type: "OTP",
+                otp_type: args.otpType,
+                // Zero-tap will NOT be created without this acknowledgement —
+                // Meta rejects rather than defaulting it.
+                ...(args.otpType === "ZERO_TAP"
+                  ? { zero_tap_terms_accepted: args.zeroTapTermsAccepted === true }
+                  : {}),
+                ...(args.supportedApps && args.supportedApps.length > 0
+                  ? { supported_apps: args.supportedApps }
+                  : {}),
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta upsertAuthTemplate failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+    const json = (await res.json()) as { data?: unknown };
+    const rows = Array.isArray(json.data) ? json.data.filter(isObject) : [];
+    return {
+      templates: rows.map((raw) => {
+        const row = raw as Record<string, unknown>;
+        return {
+          externalId: typeof row.id === "string" ? row.id : "",
+          language: typeof row.language === "string" ? row.language : "",
+          status: mapTemplateStatus(
+            typeof row.status === "string" ? row.status : undefined,
+          ),
+        };
+      }),
+    };
+  },
+
+  async editTemplate(args: EditTemplateArgs, config: MetaSendConfig): Promise<void> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(args.externalId)}`;
+    const res = await metaFetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        ...(args.category ? { category: args.category.toUpperCase() } : {}),
+        ...(args.components ? { components: args.components } : {}),
+        ...(args.messageSendTtlSeconds !== undefined
+          ? { message_send_ttl_seconds: args.messageSendTtlSeconds }
+          : {}),
+      }),
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta editTemplate failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
   },
 
   async deleteTemplate(args: DeleteTemplateArgs, config: MetaSendConfig): Promise<void> {
@@ -2850,6 +3393,54 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     return parseTemplateAnalytics(json);
   },
 
+  /**
+   * Head-to-head comparison of two templates.
+   *
+   * `GET /{template-id}/compare?template_ids=[...]&start=&end=`
+   *
+   * Timestamps are UNIX SECONDS. Meta's own example on this endpoint shows a
+   * 13-digit (millisecond) value, but its "Timeframes" section tells you to
+   * subtract 604800 / 2592000 / 5184000 / 7776000 from the end value — plain
+   * SECOND counts, which only work against a seconds timestamp. The example is
+   * wrong; the analytics endpoint has the same seconds contract, where passing
+   * ms silently returns an empty set.
+   *
+   * Meta answers a constraint violation (under 1,000 sends, different WABAs, an
+   * unsupported window) with an EMPTY result rather than an error, so the caller
+   * validates first and the empty case is reported honestly as "not enough data"
+   * rather than rendered as a tie.
+   */
+  async compareTemplates(
+    args: TemplateComparisonArgs,
+    config: MetaSendConfig,
+  ): Promise<ProviderTemplateComparison> {
+    const url = new URL(
+      `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(args.templateExternalId)}/compare`,
+    );
+    url.searchParams.set(
+      "template_ids",
+      `[${args.againstExternalIds.map((id) => JSON.stringify(id)).join(",")}]`,
+    );
+    url.searchParams.set("start", String(Math.floor(args.start.getTime() / 1000)));
+    url.searchParams.set("end", String(Math.floor(args.end.getTime() / 1000)));
+
+    // Idempotent read — the transient-blip retry is safe here.
+    const res = await metaFetch(url, {
+      method: "GET",
+      retry: true,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta compareTemplates failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+    return parseTemplateComparison(await res.json());
+  },
+
   async uploadHeaderMedia(
     args: UploadHeaderMediaArgs,
     config: MetaSendConfig,
@@ -2928,77 +3519,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   ): Promise<SendTextResult> {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
 
-    // Build the `components` array Meta expects. Each parameterized component
-    // becomes one entry with `type` ("header" | "body" | "button") and a
-    // `parameters` array of `{ type: "text", text }`. Empty arrays are omitted
-    // entirely — sending an empty `parameters` triggers Meta error 132000.
-    const components: Array<Record<string, unknown>> = [];
-    // Media header (IMAGE/VIDEO/DOCUMENT) takes precedence — Meta wants the
-    // parameter typed to the media kind with a `{ link }` (or `{ id }`) object,
-    // NOT a text parameter. A template's header is either text OR media, never
-    // both, so these two branches are mutually exclusive.
-    if (args.variables.headerMedia) {
-      const { kind, link, filename } = args.variables.headerMedia;
-      const media: Record<string, unknown> = { link };
-      if (kind === "document" && filename) media.filename = filename;
-      components.push({
-        type: "header",
-        parameters: [{ type: kind, [kind]: media }],
-      });
-    } else if (args.variables.headerNamed) {
-      // NAMED-format template: Meta requires `parameter_name` on the header
-      // component exactly like the body, else it rejects with 132000.
-      components.push({
-        type: "header",
-        parameters: [
-          {
-            type: "text",
-            parameter_name: args.variables.headerNamed.name,
-            text: args.variables.headerNamed.text,
-          },
-        ],
-      });
-    } else if (args.variables.header && args.variables.header.length > 0) {
-      components.push({
-        type: "header",
-        parameters: [{ type: "text", text: args.variables.header }],
-      });
-    }
-    // Body params. Named format (`parameter_format: NAMED`, `{{order_id}}`)
-    // takes precedence when the caller supplied `bodyNamed`; otherwise the
-    // positional `{{1}}, {{2}}, …` array. Empty in both cases → no body entry.
-    if (args.variables.bodyNamed && args.variables.bodyNamed.length > 0) {
-      components.push({
-        type: "body",
-        parameters: args.variables.bodyNamed.map(({ name, text }) => ({
-          type: "text",
-          parameter_name: name,
-          text,
-        })),
-      });
-    } else if (args.variables.body.length > 0) {
-      components.push({
-        type: "body",
-        parameters: args.variables.body.map((text) => ({ type: "text", text })),
-      });
-    }
-    // Dynamic buttons (URL suffix / copy-code / quick-reply payload). Each is
-    // its own `button` component keyed by `sub_type` + `index`. Static buttons
-    // carry no parameter and are simply not listed here.
-    for (const btn of args.variables.buttons ?? []) {
-      const parameter =
-        btn.subType === "copy_code"
-          ? { type: "coupon_code", coupon_code: btn.text }
-          : btn.subType === "quick_reply"
-            ? { type: "payload", payload: btn.text }
-            : { type: "text", text: btn.text };
-      components.push({
-        type: "button",
-        sub_type: btn.subType,
-        index: String(btn.index),
-        parameters: [parameter],
-      });
-    }
+    const components = buildTemplateSendComponents(args.variables);
 
     const res = await metaFetch(url, {
       method: "POST",
@@ -3008,6 +3529,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        ...messagingAccountField(config),
         recipient_type: "individual",
         to: args.to,
         type: "template",
@@ -3028,14 +3550,283 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       );
     }
 
-    const json = (await res.json()) as { messages?: Array<{ id?: string }> };
+    const json = (await res.json()) as {
+      messages?: Array<{ id?: string; message_status?: string }>;
+    };
     const externalId = json.messages?.[0]?.id;
     if (!externalId) {
       throw new Error(
         `meta sendTemplate response missing message id: ${JSON.stringify(json)}`,
       );
     }
-    return { externalId, timestamp: new Date() };
+    return {
+      externalId,
+      timestamp: new Date(),
+      ...(isHeldForQualityAssessment(json) ? { heldForQualityAssessment: true } : {}),
+    };
+  },
+
+  // -------------------------------------------------------------------------
+  // Business profile — what a customer sees when they tap the business name.
+  // -------------------------------------------------------------------------
+
+  async getBusinessProfile(config: MetaSendConfig): Promise<ProviderBusinessProfile> {
+    // Fields must be requested explicitly; an unqualified GET returns almost
+    // nothing useful.
+    const url =
+      `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/whatsapp_business_profile` +
+      `?fields=about,address,description,email,profile_picture_url,websites,vertical`;
+    const res = await metaFetch(new URL(url), {
+      method: "GET",
+      retry: true,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta getBusinessProfile failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+    // Meta wraps a SINGLE profile in a `data` ARRAY. Reading `json.about`
+    // directly returns undefined for every field and looks like an empty
+    // profile rather than a parsing mistake.
+    const json = (await res.json()) as {
+      data?: Array<{
+        about?: string;
+        address?: string;
+        description?: string;
+        email?: string;
+        profile_picture_url?: string;
+        websites?: string[];
+        vertical?: string;
+      }>;
+    };
+    const row = json.data?.[0] ?? {};
+    return {
+      ...(row.about ? { about: row.about } : {}),
+      ...(row.address ? { address: row.address } : {}),
+      ...(row.description ? { description: row.description } : {}),
+      ...(row.email ? { email: row.email } : {}),
+      ...(Array.isArray(row.websites) ? { websites: row.websites } : {}),
+      ...(row.vertical ? { vertical: row.vertical } : {}),
+      ...(row.profile_picture_url ? { profilePictureUrl: row.profile_picture_url } : {}),
+    };
+  },
+
+  async updateBusinessProfile(
+    args: UpdateBusinessProfileArgs,
+    config: MetaSendConfig,
+  ): Promise<void> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/whatsapp_business_profile`;
+    const res = await metaFetch(new URL(url), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        // Only what the caller actually set. Sending `""` for an untouched
+        // field CLEARS it at Meta, so an "update the description" request would
+        // wipe the address.
+        ...(args.about !== undefined ? { about: args.about } : {}),
+        ...(args.address !== undefined ? { address: args.address } : {}),
+        ...(args.description !== undefined ? { description: args.description } : {}),
+        ...(args.email !== undefined ? { email: args.email } : {}),
+        ...(args.profilePictureHandle
+          ? { profile_picture_handle: args.profilePictureHandle }
+          : {}),
+        // Meta's own POST example sends `websites` as a JSON-ENCODED STRING
+        // (`"[\n  \"https://…\"\n]"`), even though the GET returns a real
+        // array. The send example is the authority on the send shape — an
+        // overview's prose describes the user-visible result, the example
+        // describes the payload — so it is stringified here deliberately.
+        ...(args.websites !== undefined
+          ? { websites: JSON.stringify(args.websites) }
+          : {}),
+      }),
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta updateBusinessProfile failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+  },
+
+  /**
+   * The number's Official Business Account status, and the WABA's own record.
+   *
+   * Two GETs because they live on different nodes, folded into one call so the
+   * settings panel makes one request. Both are read-only: OBA is REQUESTED in
+   * WhatsApp Manager (no wire shape for the request is published, only for the
+   * status), and WABA fields aren't ours to write.
+   */
+  async getAccountStatus(config: MetaSendConfig): Promise<ProviderAccountStatus> {
+    const numberUrl =
+      `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}` +
+      `?fields=official_business_account`;
+    const numberRes = await metaFetch(new URL(numberUrl), {
+      method: "GET",
+      retry: true,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!numberRes.ok) {
+      const text = await safeMetaText(numberRes);
+      throw new MetaSendError(
+        `meta getAccountStatus failed: ${numberRes.status} ${text}`,
+        numberRes.status,
+        text,
+      );
+    }
+    const numberJson = (await numberRes.json()) as {
+      official_business_account?: { oba_status?: string };
+    };
+
+    // The WABA record is best-effort: a token without
+    // `whatsapp_business_management` can read the number but not the account,
+    // and that must degrade to "unknown" rather than failing the whole panel.
+    let waba: ProviderAccountStatus["waba"];
+    if (config.wabaId) {
+      try {
+        const wabaUrl =
+          `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}` +
+          `?fields=name,status,currency,country,business_verification_status`;
+        const wabaRes = await metaFetch(new URL(wabaUrl), {
+          method: "GET",
+          retry: true,
+          headers: { authorization: `Bearer ${config.accessToken}` },
+        });
+        if (wabaRes.ok) {
+          const row = (await wabaRes.json()) as {
+            name?: string;
+            status?: string;
+            currency?: string;
+            country?: string;
+            business_verification_status?: string;
+          };
+          waba = {
+            ...(row.name ? { name: row.name } : {}),
+            ...(row.status ? { status: row.status } : {}),
+            ...(row.currency ? { currency: row.currency } : {}),
+            ...(row.country ? { country: row.country } : {}),
+            ...(row.business_verification_status
+              ? { businessVerificationStatus: row.business_verification_status }
+              : {}),
+          };
+        }
+      } catch {
+        // Leave `waba` undefined — see above.
+      }
+    }
+
+    return {
+      // Passed through verbatim. Meta documents only `NOT_STARTED` in the
+      // status reference, so mapping the others would be guessing at an enum.
+      ...(numberJson.official_business_account?.oba_status
+        ? { obaStatus: numberJson.official_business_account.oba_status }
+        : {}),
+      ...(waba ? { waba } : {}),
+    };
+  },
+
+  // -------------------------------------------------------------------------
+  // QR codes & short links
+  //
+  // `/{phone-number-id}/message_qrdls`. A code IS the short link's slug, so
+  // deleting one breaks any signage already printed with it — Meta shows the
+  // customer "this QR code has expired".
+  //
+  // Note the asymmetry the wire has and the docs don't call out: CREATE and
+  // UPDATE return a bare object, LIST and GET wrap rows in `data`. Reading the
+  // create response as `data[0]` yields undefined and looks like a failed
+  // create that actually succeeded — the caller then retries and burns another
+  // of the 2,000-per-number allowance.
+  // -------------------------------------------------------------------------
+
+  async listQrCodes(config: MetaSendConfig): Promise<ProviderQrCode[]> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/message_qrdls`;
+    const res = await metaFetch(new URL(url), {
+      method: "GET",
+      retry: true,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(`meta listQrCodes failed: ${res.status} ${text}`, res.status, text);
+    }
+    const json = (await res.json()) as { data?: MetaQrRow[] };
+    return (json.data ?? []).map(normalizeQrRow);
+  },
+
+  async createQrCode(
+    args: { prefilledMessage: string; imageFormat: "SVG" | "PNG" },
+    config: MetaSendConfig,
+  ): Promise<ProviderQrCode> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/message_qrdls`;
+    const res = await metaFetch(new URL(url), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        prefilled_message: args.prefilledMessage,
+        generate_qr_image: args.imageFormat,
+      }),
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(`meta createQrCode failed: ${res.status} ${text}`, res.status, text);
+    }
+    // Bare object, NOT wrapped in `data` — see the block comment above.
+    return normalizeQrRow((await res.json()) as MetaQrRow);
+  },
+
+  async updateQrCode(
+    args: { code: string; prefilledMessage: string },
+    config: MetaSendConfig,
+  ): Promise<ProviderQrCode> {
+    // Same POST edge as create; the presence of `code` is what makes it an edit.
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/message_qrdls`;
+    const res = await metaFetch(new URL(url), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        code: args.code,
+        prefilled_message: args.prefilledMessage,
+      }),
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(`meta updateQrCode failed: ${res.status} ${text}`, res.status, text);
+    }
+    return normalizeQrRow((await res.json()) as MetaQrRow);
+  },
+
+  async deleteQrCode(code: string, config: MetaSendConfig): Promise<void> {
+    const url =
+      `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}` +
+      `/message_qrdls/${encodeURIComponent(code)}`;
+    const res = await metaFetch(new URL(url), {
+      method: "DELETE",
+      retry: true,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    // Already gone is success — a repeat delete of a code someone removed in
+    // Business Manager must not error.
+    if (res.status === 404) return;
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(`meta deleteQrCode failed: ${res.status} ${text}`, res.status, text);
+    }
   },
 
   // -------------------------------------------------------------------------
@@ -3087,6 +3878,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        ...messagingAccountField(config),
         recipient_type: "individual",
         // `to` takes precedence when both are present (Meta's rule); we send
         // whichever identity the contact actually has. A cold caller Meta
@@ -3641,6 +4433,181 @@ export class MissingAppIdError extends Error {
   }
 }
 
+/**
+ * Assemble the `components` array a template send needs.
+ *
+ * Extracted from `sendTemplate` so the wire shape is unit-testable: this is
+ * where a mistake costs EVERY recipient of a broadcast (Meta answers a malformed
+ * parameter set with 132000 per message), and it is pure — inputs in, payload
+ * out, no network.
+ */
+export function buildTemplateSendComponents(
+  variables: TemplateVariableSet,
+): Array<Record<string, unknown>> {
+  // Build the `components` array Meta expects. Each parameterized component
+  // becomes one entry with `type` ("header" | "body" | "button") and a
+  // `parameters` array of `{ type: "text", text }`. Empty arrays are omitted
+  // entirely — sending an empty `parameters` triggers Meta error 132000.
+  const components: Array<Record<string, unknown>> = [];
+  // Media header (IMAGE/VIDEO/DOCUMENT) takes precedence — Meta wants the
+  // parameter typed to the media kind with a `{ link }` (or `{ id }`) object,
+  // NOT a text parameter. A template's header is either text OR media, never
+  // both, so these two branches are mutually exclusive.
+  if (variables.headerMedia) {
+    const { kind, link, id, filename } = variables.headerMedia;
+    // `id` wins over `link` when both are present. Meta accepts either but
+    // recommends the id: a link makes Meta fetch from our server on every
+    // send, which is slower and one more failure mode. Sending both is not a
+    // documented shape, so we pick rather than pass both through.
+    const media: Record<string, unknown> = id ? { id } : { link };
+    if (kind === "document" && filename) media.filename = filename;
+    components.push({
+      type: "header",
+      parameters: [{ type: kind, [kind]: media }],
+    });
+  } else if (variables.headerLocation) {
+    // LOCATION headers are declared with NO parameters at create time and
+    // carry the entire pin here. Coordinates are required; `name` and `address`
+    // are optional labels on the map card.
+    const { latitude, longitude, name, address } = variables.headerLocation;
+    components.push({
+      type: "header",
+      parameters: [
+        {
+          type: "location",
+          // Omit the optional labels rather than sending empty strings, which
+          // Meta renders as a blank caption on the card.
+          location: {
+            latitude,
+            longitude,
+            ...(name ? { name } : {}),
+            ...(address ? { address } : {}),
+          },
+        },
+      ],
+    });
+  } else if (variables.headerNamed) {
+    // NAMED-format template: Meta requires `parameter_name` on the header
+    // component exactly like the body, else it rejects with 132000.
+    components.push({
+      type: "header",
+      parameters: [
+        {
+          type: "text",
+          parameter_name: variables.headerNamed.name,
+          text: variables.headerNamed.text,
+        },
+      ],
+    });
+  } else if (variables.header && variables.header.length > 0) {
+    components.push({
+      type: "header",
+      parameters: [{ type: "text", text: variables.header }],
+    });
+  }
+  // Body params. Named format (`parameter_format: NAMED`, `{{order_id}}`)
+  // takes precedence when the caller supplied `bodyNamed`; otherwise the
+  // positional `{{1}}, {{2}}, …` array. Empty in both cases → no body entry.
+  if (variables.bodyNamed && variables.bodyNamed.length > 0) {
+    components.push({
+      type: "body",
+      parameters: variables.bodyNamed.map(({ name, text }) => ({
+        type: "text",
+        parameter_name: name,
+        text,
+      })),
+    });
+  } else if (variables.body.length > 0) {
+    components.push({
+      type: "body",
+      parameters: variables.body.map((text) => ({ type: "text", text })),
+    });
+  }
+  // Limited-time offer: the countdown's expiry instant, supplied per send. Goes
+  // BEFORE the button components, matching Meta's example ordering.
+  if (variables.limitedTimeOfferExpiresAtMs !== undefined) {
+    components.push({
+      type: "limited_time_offer",
+      parameters: [
+        {
+          type: "limited_time_offer",
+          // MILLISECONDS. The sibling analytics/compare endpoints take SECONDS —
+          // mixing them up here doesn't error, it just renders a nonsense
+          // countdown, so the unit is named everywhere it travels.
+          limited_time_offer: {
+            expiration_time_ms: variables.limitedTimeOfferExpiresAtMs,
+          },
+        },
+      ],
+    });
+  }
+
+  // Dynamic buttons (URL suffix / copy-code / quick-reply payload). Each is
+  // its own `button` component keyed by `sub_type` + `index`. Static buttons
+  // carry no parameter and are simply not listed here.
+  for (const btn of variables.buttons ?? []) {
+    components.push(buttonComponent(btn));
+  }
+
+  // Carousel cards. Each card is a mini-template — its own header parameter,
+  // body parameters and button components — keyed by `card_index`. The array
+  // must have exactly as many entries as the template was approved with.
+  if (variables.cards && variables.cards.length > 0) {
+    components.push({
+      type: "carousel",
+      cards: variables.cards.map((card, cardIndex) => {
+        const cardComponents: Array<Record<string, unknown>> = [
+          {
+            type: "header",
+            parameters: [
+              {
+                type: card.headerMedia.kind,
+                // Meta's example uses an uploaded media id; a public link works
+                // the same way it does for a top-level media header. Prefer the
+                // id when both are present — it's the one Meta recommends,
+                // since a link makes Meta fetch from our server per send.
+                [card.headerMedia.kind]: card.headerMedia.id
+                  ? { id: card.headerMedia.id }
+                  : { link: card.headerMedia.link },
+              },
+            ],
+          },
+        ];
+        if (card.body && card.body.length > 0) {
+          cardComponents.push({
+            type: "body",
+            parameters: card.body.map((text) => ({ type: "text", text })),
+          });
+        }
+        for (const btn of card.buttons ?? []) {
+          cardComponents.push(buttonComponent(btn));
+        }
+        return { card_index: cardIndex, components: cardComponents };
+      }),
+    });
+  }
+
+  // Tap-target override, LAST: it is a whole-message affordance rather than a
+  // parameter for any one component, and Meta's examples place it after the
+  // content components.
+  if (variables.tapTarget) {
+    components.push({
+      type: "tap_target_configuration",
+      parameters: [
+        {
+          type: "tap_target_configuration",
+          // Meta nests an ARRAY here even though only one entry is documented.
+          tap_target_configuration: [
+            { url: variables.tapTarget.url, title: variables.tapTarget.title },
+          ],
+        },
+      ],
+    });
+  }
+
+  return components;
+}
+
 // ---------------------------------------------------------------------------
 // Template helpers — keep wire-shape parsing local to this file so the
 // provider interface stays Meta-agnostic.
@@ -3655,27 +4622,264 @@ interface MetaTemplateRow {
   components?: TemplateComponent[];
   /** Meta's own answer: "POSITIONAL" | "NAMED". Absent on old rows. */
   parameter_format?: string;
+  /** The category Meta has decided this template SHOULD be, when it disagrees
+   *  with `category`. "" / absent = not impacted. See ProviderTemplate. */
+  correct_category?: string;
+  /** Delivery retry window. Meta returns it as a number; absent = category default. */
+  message_send_ttl_seconds?: number;
+  /** Quality band + when Meta last computed it. `date` is unix SECONDS. */
+  quality_score?: { score?: string; date?: number };
 }
 
+/**
+ * Did Meta accept this send but HOLD it?
+ *
+ * Business-portfolio pacing batches template delivery so feedback can be
+ * gathered between batches. Held messages get a real wamid, so the only signal
+ * is `message_status` on the send response — and a caller that ignores it
+ * reports a campaign as fully sent while most of it sits in Meta's queue.
+ *
+ * Applies to portfolios under 500k template sends in a rolling 365 days, and to
+ * any portfolio under review for suspicious activity. Distinct from TEMPLATE
+ * pacing, which pauses the template itself.
+ */
+function isHeldForQualityAssessment(json: {
+  messages?: Array<{ message_status?: string }>;
+}): boolean {
+  return json.messages?.[0]?.message_status === "held_for_quality_assessment";
+}
+
+/**
+ * `messaging_account_id` for a Messages API call — or nothing at all.
+ *
+ * Meta's account-model split lets one phone number carry several Messaging
+ * Accounts (one per partner), and this names the one to bill. It is OPTIONAL at
+ * Phase 1 and only required when a single app holds more than one of them,
+ * which a single-integration workspace never does.
+ *
+ * Returning `{}` when unset is the whole design: the parameter belongs to a
+ * beta that is "subject to change", and Graph rejects an unrecognised body
+ * field with `#100` — failing the entire send, for every tenant. So the wire is
+ * byte-identical to today until someone who actually needs it opts in.
+ */
+export function messagingAccountField(
+  config: MetaSendConfig,
+): { messaging_account_id?: string } {
+  return config.messagingAccountId
+    ? { messaging_account_id: config.messagingAccountId }
+    : {};
+}
+
+/** One `message_qrdls` row as Meta returns it. */
+interface MetaQrRow {
+  code?: string;
+  prefilled_message?: string;
+  deep_link_url?: string;
+  qr_image_url?: string;
+}
+
+function normalizeQrRow(row: MetaQrRow): ProviderQrCode {
+  return {
+    code: row.code ?? "",
+    prefilledMessage: row.prefilled_message ?? "",
+    // Meta returns this on every shape, but deriving it from `code` as a
+    // fallback keeps the UI's copy button working if it ever stops.
+    deepLinkUrl: row.deep_link_url ?? `https://wa.me/message/${row.code ?? ""}`,
+    ...(row.qr_image_url ? { qrImageUrl: row.qr_image_url } : {}),
+  };
+}
+
+/**
+ * One `button` send component. Shared by top-level buttons and carousel-card
+ * buttons, which take the identical shape — the card's `index` is scoped to
+ * the card, not to the message.
+ *
+ * Note `index` is a STRING: Meta writes it both ways across its examples and
+ * accepts either, so we emit one form everywhere rather than varying by
+ * template kind.
+ */
+function buttonComponent(btn: {
+  index: number;
+  subType: "url" | "quick_reply" | "copy_code";
+  text: string;
+}): Record<string, unknown> {
+  const parameter =
+    btn.subType === "copy_code"
+      ? { type: "coupon_code", coupon_code: btn.text }
+      : btn.subType === "quick_reply"
+        ? { type: "payload", payload: btn.text }
+        : { type: "text", text: btn.text };
+  return {
+    type: "button",
+    sub_type: btn.subType,
+    index: String(btn.index),
+    parameters: [parameter],
+  };
+}
+
+/**
+ * Component types Meta's docs only ever write in lower snake_case. Sending the
+ * uppercase form is an unverified gamble, so they are lowered on the way out —
+ * including a carousel's NESTED card components, which the create example shows
+ * as `"type": "header"` / `"buttons"` / `"body"`.
+ */
+const LOWERCASE_ON_CREATE = new Set([
+  "CALL_PERMISSION_REQUEST",
+  "LIMITED_TIME_OFFER",
+  "CAROUSEL",
+]);
+
+export function lowercaseComponentForCreate(c: TemplateComponent): TemplateComponent {
+  const type = LOWERCASE_ON_CREATE.has(c.type) ? c.type.toLowerCase() : c.type;
+  if (!c.cards) return { ...c, type } as TemplateComponent;
+  return {
+    ...c,
+    type,
+    cards: c.cards.map((card) => ({
+      ...card,
+      components: (card.components ?? []).map((cc) => ({
+        ...cc,
+        // Nested types AND formats are lowercase in Meta's carousel example.
+        type: cc.type.toLowerCase(),
+        ...(cc.format ? { format: cc.format.toLowerCase() } : {}),
+        ...(cc.buttons
+          ? { buttons: cc.buttons.map((b) => ({ ...b, type: b.type.toLowerCase() })) }
+          : {}),
+      })),
+    })),
+  } as TemplateComponent;
+}
+
+/**
+ * Uppercase a component's `type`, and recurse into a carousel's cards — their
+ * nested components arrive in the same mixed casing.
+ */
+function normalizeComponentCasing<T extends { type?: unknown; cards?: unknown }>(
+  c: T,
+): T {
+  if (!c || typeof c !== "object") return c;
+  const type = typeof c.type === "string" ? c.type.toUpperCase() : c.type;
+  const cards = Array.isArray(c.cards)
+    ? c.cards.map((card: { components?: unknown }) =>
+        card && typeof card === "object" && Array.isArray(card.components)
+          ? { ...card, components: card.components.map(normalizeComponentCasing) }
+          : card,
+      )
+    : c.cards;
+  return { ...c, type, ...(cards === undefined ? {} : { cards }) } as T;
+}
+
+/**
+ * Meta row → `ProviderTemplate`.
+ *
+ * Returns null ONLY when there is no identity to key on (no name/language).
+ * An unmappable `status` or `category` yields a row with that field `null`
+ * rather than dropping the whole template: the catalog sync prunes local rows
+ * Meta didn't return, so a dropped row was indistinguishable from a deleted one
+ * and the template — plus the `variableBindings` we own — was destroyed. That is
+ * not hypothetical: `LIMIT_EXCEEDED` is a documented status, so hitting the WABA
+ * template cap used to delete templates out of the app.
+ */
 function normalizeMetaTemplate(row: MetaTemplateRow): ProviderTemplate | null {
   if (!row.name || !row.language) return null;
   const status = mapTemplateStatus(row.status);
   const category = mapTemplateCategory(row.category);
-  if (!status || !category) return null;
-  const components = Array.isArray(row.components) ? row.components : [];
+  // Meta returns component types uppercase EXCEPT the ones whose docs only ever
+  // show them lowercase (`call_permission_request`, `limited_time_offer`,
+  // `carousel`). Normalize on the way in so every downstream reader can compare
+  // against one casing — a `c.type === "CAROUSEL"` check that silently never
+  // matches is the kind of bug that only shows up at send time.
+  const components = (Array.isArray(row.components) ? row.components : []).map(
+    normalizeComponentCasing,
+  );
   const body = components.find((c) => c.type === "BODY");
   return {
     name: row.name,
     language: row.language,
     status,
     category,
+    // Meta returns "" (not null) for "not impacted", which `mapTemplateCategory`
+    // already turns into null.
+    correctCategory: mapTemplateCategory(row.correct_category),
+    // Passed through verbatim — an unmapped band is informational, so storing
+    // what Meta said beats dropping it. `date` is unix SECONDS (the same trap
+    // as every other Meta timestamp on this surface).
+    ...(row.quality_score?.score ? { qualityScore: row.quality_score.score } : {}),
+    ...(typeof row.quality_score?.date === "number"
+      ? { qualityScoreAt: new Date(row.quality_score.date * 1000) }
+      : {}),
     bodyText: body?.text ?? "",
     components,
     // Default POSITIONAL when Meta omits it: that is the historical default and
     // the shape every pre-existing row was synced under, so an omitted field
     // can't silently flip a working template to the named wire format.
     parameterFormat: (row.parameter_format ?? "").toUpperCase() === "NAMED" ? "named" : "positional",
+    ...(typeof row.message_send_ttl_seconds === "number"
+      ? { messageSendTtlSeconds: row.message_send_ttl_seconds }
+      : {}),
     ...(row.id ? { externalId: row.id } : {}),
+  };
+}
+
+const PARAM_TYPES = new Set<string>([
+  "ADDRESS",
+  "TEXT",
+  "AMOUNT",
+  "DATE",
+  "PHONE_NUMBER",
+  "EMAIL",
+  "NUMBER",
+]);
+
+/**
+ * One library-catalogue row → `LibraryTemplate`.
+ *
+ * Null only when there is no name or body to work with. An unmappable category
+ * is kept as null rather than dropping the blueprint — the same reasoning as
+ * `normalizeMetaTemplate`: hiding a template because ONE field was unfamiliar is
+ * a worse answer than showing it with a gap.
+ */
+function normalizeLibraryTemplate(raw: unknown): LibraryTemplate | null {
+  if (!isObject(raw)) return null;
+  const row = raw as Record<string, unknown>;
+  const name = typeof row.name === "string" ? row.name : "";
+  const body = typeof row.body === "string" ? row.body : "";
+  if (!name || !body) return null;
+
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+
+  return {
+    name,
+    language: typeof row.language === "string" ? row.language : "",
+    category: mapTemplateCategory(typeof row.category === "string" ? row.category : undefined),
+    ...(typeof row.topic === "string" ? { topic: row.topic } : {}),
+    ...(typeof row.usecase === "string" ? { usecase: row.usecase } : {}),
+    industry: strings(row.industry),
+    ...(typeof row.header === "string" ? { header: row.header } : {}),
+    body,
+    ...(typeof row.footer === "string" ? { footer: row.footer } : {}),
+    bodyParams: strings(row.body_params),
+    // Drop anything outside Meta's documented set rather than passing an unknown
+    // type through to a send-time validator that would not know what to do
+    // with it.
+    bodyParamTypes: strings(row.body_param_types)
+      .map((t) => t.toUpperCase().replace(/\s+/g, "_"))
+      .filter((t): t is TemplateParamType => PARAM_TYPES.has(t)),
+    buttons: Array.isArray(row.buttons)
+      ? row.buttons.filter(isObject).map((b) => {
+          const btn = b as Record<string, unknown>;
+          return {
+            type: typeof btn.type === "string" ? btn.type : "",
+            ...(typeof btn.text === "string" ? { text: btn.text } : {}),
+            ...(typeof btn.url === "string" ? { url: btn.url } : {}),
+            ...(typeof btn.phone_number === "string"
+              ? { phone_number: btn.phone_number }
+              : {}),
+          };
+        })
+      : [],
+    ...(typeof row.id === "string" ? { id: row.id } : {}),
   };
 }
 
@@ -3694,15 +4898,21 @@ function mapTemplateStatus(s: string | undefined): TemplateStatus | null {
     case "REJECTED":
       return "rejected";
     // A FLAGGED template can't be sent — treat like paused so it's not offered.
+    // LIMIT_EXCEEDED means the WABA is at its template cap: the template is not
+    // usable, but it is not gone and it recovers on its own once the account is
+    // back under the limit — which is exactly "paused", not "disabled".
     case "PAUSED":
     case "FLAGGED":
+    case "LIMIT_EXCEEDED":
       return "paused";
-    // ARCHIVED templates are scheduled for deletion and can't be sent — mark them
-    // non-sendable rather than leaving a stale "approved".
     case "DISABLED":
     case "DELETED":
-    case "ARCHIVED":
       return "disabled";
+    // Its own state, NOT `disabled`. An archived template is recoverable for 28
+    // days and then deleted for good — collapsing it into `disabled` hid both
+    // the escape hatch and the deadline.
+    case "ARCHIVED":
+      return "archived";
     default:
       return null;
   }
@@ -3729,6 +4939,68 @@ export {
   countTemplatePlaceholders,
   renderTemplateBody,
 } from "@ccp/shared/template-render";
+
+/**
+ * Parse a `/compare` response.
+ *
+ * The payload is a list of metric envelopes discriminated by `metric`, each with
+ * its own value shape. Read them by name rather than by position — the order is
+ * not contractual, and an unknown metric is ignored rather than shifting the
+ * others.
+ */
+export function parseTemplateComparison(json: unknown): ProviderTemplateComparison {
+  const out: ProviderTemplateComparison = {
+    blockRateOrder: [],
+    sends: [],
+    topBlockReasons: [],
+  };
+  const data = (json as { data?: unknown })?.data;
+  if (!Array.isArray(data)) return out;
+
+  for (const raw of data) {
+    if (!isObject(raw)) continue;
+    const entry = raw as {
+      metric?: unknown;
+      order_by_relative_metric?: unknown;
+      number_values?: unknown;
+      string_values?: unknown;
+    };
+    switch (entry.metric) {
+      case "BLOCK_RATE":
+        if (Array.isArray(entry.order_by_relative_metric)) {
+          out.blockRateOrder = entry.order_by_relative_metric.filter(
+            (v): v is string => typeof v === "string",
+          );
+        }
+        break;
+      case "MESSAGE_SENDS":
+        if (Array.isArray(entry.number_values)) {
+          for (const kv of entry.number_values) {
+            if (!isObject(kv)) continue;
+            const { key, value } = kv as { key?: unknown; value?: unknown };
+            if (typeof key === "string" && typeof value === "number") {
+              out.sends.push({ templateExternalId: key, count: value });
+            }
+          }
+        }
+        break;
+      case "TOP_BLOCK_REASON":
+        if (Array.isArray(entry.string_values)) {
+          for (const kv of entry.string_values) {
+            if (!isObject(kv)) continue;
+            const { key, value } = kv as { key?: unknown; value?: unknown };
+            if (typeof key === "string" && typeof value === "string") {
+              out.topBlockReasons.push({ templateExternalId: key, reason: value });
+            }
+          }
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  return out;
+}
 
 /**
  * Parse Meta's `template_analytics` response into flat template-day rows.

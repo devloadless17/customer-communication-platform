@@ -10,6 +10,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessage } from "@ccp/shared/api/error-message";
 import { toast } from "@/lib/toast";
 
 interface ProfileFormProps {
@@ -50,8 +51,7 @@ export function ProfileForm({ user }: ProfileFormProps) {
         body: JSON.stringify({ name: next }),
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        toast.error(data.error ?? "Couldn't update name");
+        toast.error(await apiErrorMessage(res, "Couldn't update name"));
         return;
       }
       toast.success("Name updated.");
@@ -119,8 +119,7 @@ export function ProfileForm({ user }: ProfileFormProps) {
         body: JSON.stringify({ avatarUrl: null }),
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        toast.error(data.error ?? "Couldn't remove avatar");
+        toast.error(await apiErrorMessage(res, "Couldn't remove avatar"));
         return;
       }
       setAvatarUrl(null);

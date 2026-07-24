@@ -501,6 +501,16 @@ export interface NormalizedTemplateStatusUpdate {
   /** New status, already mapped to our enum; null when unmappable. */
   status: TemplateStatus | null;
   /**
+   * New quality band (`GREEN` | `YELLOW` | `RED` | `UNKNOWN`), set ONLY by the
+   * `message_template_quality_update` webhook. Verbatim from Meta — quality
+   * vocabulary churns and this is informational, never a sendability decision.
+   *
+   * It IS the early warning, though: quality drives Meta's template pacing and
+   * pausing, so a RED band is a template about to stop sending. The `PAUSED`
+   * status that follows arrives too late for an operator to act on.
+   */
+  qualityScore?: string;
+  /**
    * New category, already mapped to our enum — set ONLY by the
    * `template_category_update` webhook (Meta auto-migrates a template's category,
    * e.g. MARKETING→UTILITY, which changes its pricing + which window reopens it).
@@ -508,8 +518,41 @@ export interface NormalizedTemplateStatusUpdate {
    * when present.
    */
   category?: TemplateCategory;
+  /**
+   * The category Meta says this template SHOULD be, announced in ADVANCE of the
+   * move (Meta's `correct_category`). This is notice, not state — the template
+   * is still billed and rendered as `category` until the move lands, typically on
+   * the first of the following month.
+   *
+   * Kept strictly apart from `category` because conflating them is a real
+   * mispricing bug: applying `correct_category` on the notice webhook relabels a
+   * UTILITY template as MARKETING up to a month before Meta actually charges
+   * marketing rates for it.
+   */
+  pendingCategory?: TemplateCategory;
   /** Provider's human reason for the change (Meta `reason`), if any. */
   reason?: string;
+  rawPayload: Record<string, unknown>;
+}
+
+/**
+ * A template's COMPONENTS changed at the provider (Meta's
+ * `message_template_components_update`).
+ *
+ * Carries identity only, deliberately: the cached `components` array decides the
+ * entire send-time parameter shape, and a webhook payload isn't a safe basis for
+ * rebuilding it. Ingest responds by refetching the catalog, which is the one
+ * path that produces a complete, authoritative row.
+ *
+ * Without this, an edit made in WhatsApp Manager left us building the OLD
+ * parameter shape — wrong body-variable count, a header we still think is text —
+ * and Meta rejected every send with error 132000 until someone happened to press
+ * "Sync".
+ */
+export interface NormalizedTemplateComponentsChanged {
+  kind: "template_components_changed";
+  externalId?: string;
+  name?: string;
   rawPayload: Record<string, unknown>;
 }
 
@@ -687,6 +730,13 @@ export interface NormalizedChannelHealth {
    * buttons or narrow call hours, which is a change we can offer in one click.
    */
   callingQualityWarning?: string | null;
+  /**
+   * A WhatsApp Business POLICY violation type (e.g. "ALCOHOL") from
+   * `account_update`. Distinct from `callingQualityWarning`, which is the same
+   * webhook narrowed to CALLING violations. An account restriction follows if
+   * it isn't addressed, so this is the warning that arrives FIRST.
+   */
+  policyViolationType?: string | null;
   rawPayload: Record<string, unknown>;
 }
 
@@ -714,6 +764,7 @@ export type NormalizedEvent =
   | NormalizedCallEvent
   | NormalizedReaction
   | NormalizedTemplateStatusUpdate
+  | NormalizedTemplateComponentsChanged
   | NormalizedOutboundEcho
   | NormalizedContactSync
   | NormalizedMessageCorrection
@@ -759,6 +810,16 @@ export interface SendTextResult {
    * "via app" message). Absent when the caption rode inline or there was none.
    */
   captionExternalId?: string;
+  /**
+   * True when the provider ACCEPTED the send but is holding the message for a
+   * quality assessment rather than delivering it (WhatsApp business-portfolio
+   * pacing: `message_status: "held_for_quality_assessment"`).
+   *
+   * The message has a real id and may still be delivered in a later batch — or
+   * dropped outright, which arrives as a `failed` status with code 135000.
+   * Callers that report on delivery must not count a held message as sent.
+   */
+  heldForQualityAssessment?: boolean;
 }
 
 /**
@@ -898,7 +959,12 @@ export interface UploadMediaArgs {
 }
 
 export interface UploadMediaResult {
-  /** Provider-side media id, valid for ~30 days, single-use per message. */
+  /**
+   * Provider-side media id, valid for ~30 days.
+   *
+   * Reusability across messages is unverified — see the note in
+   * `metaProvider.uploadMedia`. Callers upload one id per message today.
+   */
   mediaId: string;
 }
 
@@ -950,7 +1016,13 @@ export type TemplateStatus =
   | "pending"
   | "rejected"
   | "paused"
-  | "disabled";
+  | "disabled"
+  /**
+   * Auto-archived after 12 months of inactivity. Not sendable — but unlike
+   * `disabled` it is RECOVERABLE, and only for 28 days, after which Meta
+   * deletes it permanently. Its own value precisely so that clock is visible.
+   */
+  | "archived";
 export type TemplateCategory = "marketing" | "utility" | "authentication";
 
 /**
@@ -960,21 +1032,123 @@ export type TemplateCategory = "marketing" | "utility" | "authentication";
  * source of truth.
  */
 export interface TemplateComponent {
-  type: "HEADER" | "BODY" | "FOOTER" | "BUTTONS";
-  format?: "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT" | "LOCATION";
+  /**
+   * `CALL_PERMISSION_REQUEST` is a parameterless component that turns the
+   * template into a request for permission to CALL the recipient. It is the only
+   * way to ask outside the 24-hour window (the interactive
+   * `call_permission_request` message we already send requires an open window).
+   * Meta allows it on MARKETING and UTILITY only, and it cannot be combined with
+   * any other interactive component.
+   */
+  type:
+    | "HEADER"
+    | "BODY"
+    | "FOOTER"
+    | "BUTTONS"
+    | "CALL_PERMISSION_REQUEST"
+    /**
+     * A countdown offer. Declared at create time with its heading text and
+     * whether to show expiry; the actual expiry INSTANT is supplied per send.
+     * Marketing only, and the template may not carry a footer.
+     */
+    | "LIMITED_TIME_OFFER"
+    /**
+     * Up to 10 horizontally-scrollable media cards under one body. Marketing
+     * only. The CARD COUNT is fixed at creation — an approved template can only
+     * ever send exactly the number of cards it was approved with.
+     */
+    | "CAROUSEL";
+  // GIF is accepted by Meta only through the Marketing Messages API, so it is
+  // listed for parse-tolerance (a synced template may carry it) but the
+  // composer never authors one.
+  format?: "TEXT" | "IMAGE" | "VIDEO" | "GIF" | "DOCUMENT" | "LOCATION";
   text?: string;
   example?: {
     header_text?: string[];
     body_text?: string[][];
     header_handle?: string[];
+    // NAMED-format templates (`parameter_format: NAMED`) carry their examples
+    // keyed by placeholder name instead of position. Meta returns these on
+    // `GET /{waba-id}/message_templates`, so the send-time UI can hint each
+    // field the same way it does for positional templates.
+    body_text_named_params?: Array<{ param_name: string; example: string }>;
+    header_text_named_params?: Array<{ param_name: string; example: string }>;
   };
+  buttons?: Array<TemplateButton>;
+  /**
+   * Present on a `CAROUSEL` component. Every card must carry the SAME set of
+   * components as every other — Meta renders them at one uniform height.
+   */
+  cards?: Array<TemplateCard>;
+  /** Present on a `LIMITED_TIME_OFFER` component. */
+  limited_time_offer?: {
+    /** Heading shown above the countdown. Max 16 characters. */
+    text?: string;
+    /** Show the expiry countdown in the delivered message. */
+    has_expiration?: boolean;
+  };
+}
+
+/** Send-time values for one carousel card. */
+export interface TemplateCardVariables {
+  /**
+   * The card's image/video. Meta's send example uses an uploaded media `id`;
+   * a public `link` works the same way as it does for a normal media header.
+   * Exactly one of the two.
+   */
+  headerMedia: {
+    kind: "image" | "video";
+    link?: string;
+    id?: string;
+  };
+  /** Values for the card body's `{{1}}…{{n}}`, in order. */
+  body?: string[];
+  /** Values for the card's dynamic buttons, indexed WITHIN the card. */
   buttons?: Array<{
-    type: "QUICK_REPLY" | "URL" | "PHONE_NUMBER" | "COPY_CODE";
+    index: number;
+    subType: "url" | "quick_reply" | "copy_code";
     text: string;
-    url?: string;
-    phone_number?: string;
-    example?: string[];
   }>;
+}
+
+/**
+ * One card of a media-card carousel. A card is a mini-template: its own
+ * image/video header, an optional body (≤160 chars), and up to two buttons.
+ * It reuses `TemplateComponent` because that is literally what Meta nests here.
+ */
+export interface TemplateCard {
+  components?: TemplateComponent[];
+}
+
+/**
+ * One button inside a template's BUTTONS component, exactly as Meta defines it.
+ *
+ * `text` is OPTIONAL because not every button type has a label: a `COPY_CODE`
+ * button is defined solely by its `example` string, and typing `text` as
+ * required made every validator that read `b.text.length` lie about it.
+ *
+ * `example` is `string | string[]` for the same reason — Meta documents the URL
+ * button's example as an ARRAY (`"example": ["summer2023"]`) and the copy-code
+ * button's as a bare STRING (`"example": "250FF"`). Both shapes really occur on
+ * the wire; normalize at the point of use, never by narrowing the type.
+ */
+export interface TemplateButton {
+  type:
+    | "QUICK_REPLY"
+    | "URL"
+    | "PHONE_NUMBER"
+    | "COPY_CODE"
+    | "VOICE_CALL"
+    // Authentication-template one-tap autofill button, and the catalog buttons.
+    // Parsed, never authored by our composer.
+    | "OTP"
+    | "MPM"
+    | "SPM"
+    | "CATALOG";
+  text?: string;
+  url?: string;
+  phone_number?: string;
+  example?: string | string[];
 }
 
 /**
@@ -986,8 +1160,42 @@ export interface ProviderTemplate {
   externalId?: string;
   name: string;
   language: string;
-  category: TemplateCategory;
-  status: TemplateStatus;
+  /**
+   * `null` when Meta returned a category we don't map.
+   *
+   * NOT the same as "absent". The catalog sync treats a returned-but-unmappable
+   * template as PRESENT (so its local row is preserved) while leaving the
+   * unmappable field alone. Dropping the whole row instead — which is what
+   * returning `null` from the normalizer used to do — fed the sync's
+   * prune-what-Meta-didn't-return step and silently DELETED the template plus
+   * the `variableBindings` we own and Meta cannot give back.
+   */
+  category: TemplateCategory | null;
+  /** `null` when Meta returned a status we don't map. See `category`. */
+  status: TemplateStatus | null;
+  /**
+   * Meta's `correct_category`: the category this template WILL be moved to on
+   * the first of next month, when Meta has decided the author miscategorized it.
+   * Null/absent means "not impacted"; equal to `category` means the move already
+   * happened.
+   *
+   * Deliberately separate from `category` — it is advance notice, not state. The
+   * pricing a broadcast quotes must follow `category` until Meta actually moves
+   * it. See the `template_category_update` webhook, which carries the same
+   * distinction as `correct_category` (notice) vs `new_category` (applied).
+   */
+  correctCategory?: TemplateCategory | null;
+  /**
+   * Meta's quality band for this template: `GREEN` | `YELLOW` | `RED` |
+   * `UNKNOWN`. Passed through as Meta wrote it — an unrecognized band is stored
+   * verbatim rather than dropped, because quality vocabulary churns and the
+   * value is informational, never a sendability decision.
+   *
+   * Absent when Meta didn't return one (it is only present if asked for).
+   */
+  qualityScore?: string | null;
+  /** When Meta last recomputed the band (`quality_score.date`). */
+  qualityScoreAt?: Date | null;
   bodyText: string;
   components: TemplateComponent[];
   /**
@@ -1001,6 +1209,8 @@ export interface ProviderTemplate {
    * recipient then fails with Meta error 132000.
    */
   parameterFormat: TemplateParameterFormat;
+  /** Meta's `message_send_ttl_seconds`. Absent = the category's default. */
+  messageSendTtlSeconds?: number;
 }
 
 /** Mirrors Meta's `parameter_format`. Defaults to positional — the historical
@@ -1028,13 +1238,42 @@ export type TemplateParameterFormat = "positional" | "named";
 export interface TemplateHeaderMedia {
   kind: "image" | "video" | "document";
   /**
-   * URL to the media Meta will fetch. For our own media this is a stable R2
+   * URL to the media Meta will FETCH. For our own media this is a stable R2
    * object URL, presigned fresh at send time (send-template-internal.ts);
    * external callers may pass any public URL.
+   *
+   * Ignored when `id` is set. Meta accepts either, and prefers `id`: a link
+   * means Meta reaches back into your server on every single send, which is
+   * both slower and one more thing that can fail.
    */
-  link: string;
+  link?: string;
+  /**
+   * A provider-side media id from a prior upload, used INSTEAD of `link`.
+   *
+   * Meta's recommended form — "to reduce the likelihood of errors and avoid
+   * unnecessary requests to your public server". Nothing is fetched from us at
+   * send time; Meta already holds the bytes.
+   */
+  id?: string;
   /** Filename shown to the recipient — DOCUMENT headers only. */
   filename?: string;
+}
+
+/**
+ * The pin supplied for a LOCATION template header at SEND time.
+ *
+ * Meta renders a generic map card; tapping it opens the recipient's map app.
+ * All four fields ship as strings on the wire (`latitude`/`longitude` are
+ * decimal degrees), and Meta only allows a LOCATION header on `UTILITY` and
+ * `MARKETING` templates. Real-time locations are not supported.
+ */
+export interface TemplateHeaderLocation {
+  latitude: string;
+  longitude: string;
+  /** Optional per Meta — the pin renders from coordinates alone. */
+  name?: string;
+  /** Optional per Meta. */
+  address?: string;
 }
 
 /**
@@ -1081,10 +1320,47 @@ export interface TemplateVariableSet {
    *  HEADER component format is one of those; ignored for TEXT headers. */
   headerMedia?: TemplateHeaderMedia;
   /**
+   * Pin for a LOCATION header. Required when the template's HEADER format is
+   * `LOCATION` — the component is declared with no parameters at CREATE time and
+   * carries the whole pin at SEND time, which is why it needs its own slot here
+   * rather than riding on `headerMedia`.
+   */
+  headerLocation?: TemplateHeaderLocation;
+  /**
    * Dynamic button parameters. Empty/absent for templates with only static
    * buttons (or none) — the common case. See `TemplateButtonParam`.
    */
   buttons?: TemplateButtonParam[];
+  /**
+   * Tap-target override: makes an image-based, text-based or header-less
+   * template behave as a call-to-action, showing `title` and opening `url`.
+   *
+   * SEND-time only — nothing about it is declared when the template is created,
+   * which is why it lives here and not in `components`. Meta gates it on a fully
+   * verified WABA with sustained high quality, so a workspace without that
+   * simply gets a rejection; we surface it rather than pre-judging eligibility
+   * we cannot see.
+   */
+  tapTarget?: { url: string; title: string };
+  /**
+   * When a limited-time offer expires, as a UNIX timestamp in **MILLISECONDS**.
+   *
+   * Milliseconds — note the contrast with `template_analytics` and `/compare`,
+   * which both take SECONDS and silently return nothing when handed ms. Getting
+   * it wrong here doesn't fail loudly either: the countdown simply renders
+   * absurdly, so the unit is stated at every layer it passes through.
+   */
+  limitedTimeOfferExpiresAtMs?: number;
+  /**
+   * Per-card values for a media-card carousel, in card order. The array length
+   * must equal the card count the template was APPROVED with — Meta fixes that
+   * number at creation and rejects any other.
+   *
+   * Each card supplies its header media, its body values (if the cards carry a
+   * body), and a value for each dynamic button — the same three kinds of
+   * send-time value a top-level template takes, scoped to one card.
+   */
+  cards?: TemplateCardVariables[];
 }
 
 export interface SendTemplateArgs {
@@ -1108,6 +1384,28 @@ export interface CreateTemplateArgs {
   language: string;
   category: TemplateCategory;
   components: TemplateComponent[];
+  /**
+   * Meta's `parameter_format` — sent EXPLICITLY on every create rather than
+   * left to the provider's default.
+   *
+   * Meta documents "if you do not specify a format, the template uses
+   * positional format by default", so omitting it worked only by accident: the
+   * template we authored and the template Meta stored agreed because both
+   * happened to land on positional. Stating it means the row we persist and the
+   * row Meta reviews can never disagree, and the day a named-authoring surface
+   * exists it flips one field instead of relying on a vendor default.
+   */
+  parameterFormat: TemplateParameterFormat;
+  /**
+   * Meta's `message_send_ttl_seconds` — how long Meta keeps retrying delivery
+   * before giving up on a message sent from this template.
+   *
+   * Omitted means "take Meta's default for the category". We never invent a
+   * value: the defaults differ per category (authentication is minutes,
+   * marketing/utility is days) and silently pinning one would change delivery
+   * behaviour the author never asked for.
+   */
+  messageSendTtlSeconds?: number;
 }
 
 export interface CreateTemplateResult {
@@ -1115,6 +1413,46 @@ export interface CreateTemplateResult {
   externalId: string;
   /** Initial review state — almost always `pending`. */
   status: TemplateStatus;
+  /**
+   * The category Meta ACTUALLY assigned, which is not necessarily the one we
+   * asked for.
+   *
+   * Since 2025-04-09 the old `allow_category_change` behaviour is the default:
+   * submit `UTILITY`, and if Meta's classifier says the content is promotional
+   * it approves the template as `MARKETING` outright. Persisting the requested
+   * category instead of this one left the local row claiming a cheaper category
+   * than the one Meta bills, which is wrong in the picker, wrong in the
+   * category filter, and wrong in every broadcast cost estimate.
+   *
+   * `null` when Meta's response omitted it — keep the requested value then.
+   */
+  category: TemplateCategory | null;
+}
+
+/**
+ * Edit an EXISTING template in place.
+ *
+ * Meta's rules, all enforced by the caller because each one has a distinct
+ * user-facing consequence:
+ *   - only `APPROVED`, `REJECTED` or `PAUSED` templates can be edited;
+ *   - only category, components and TTL are editable — not name or language;
+ *   - **components are REPLACED wholesale**, never merged, so a partial payload
+ *     silently deletes the components it omits;
+ *   - the category of an APPROVED template cannot be changed;
+ *   - approved templates allow 10 edits / 30 days and 1 / 24h; rejected and
+ *     paused ones are unlimited.
+ *
+ * Editing exists for a reason worth stating: the alternative — delete and
+ * recreate — blocks re-using that template NAME for 30 days if the template was
+ * approved, so recommending it (as this app used to) strands the operator.
+ */
+export interface EditTemplateArgs {
+  /** Meta's template id. */
+  externalId: string;
+  category?: TemplateCategory;
+  /** Replaces ALL components. Omit to leave the content untouched. */
+  components?: TemplateComponent[];
+  messageSendTtlSeconds?: number;
 }
 
 export interface DeleteTemplateArgs {
@@ -1130,6 +1468,220 @@ export interface DeleteTemplateArgs {
  * model only the result the second leg returns — a `header_handle` that gets
  * embedded in `example.header_handle` on a HEADER component.
  */
+// ---------------------------------------------------------------------------
+// Template Library — Meta's catalogue of pre-written, pre-categorized utility
+// and authentication templates.
+//
+// A library template is NOT a template you own. It is a blueprint: its copy is
+// fixed and uneditable, and you instantiate it under your own name by naming it
+// in a create call. The payoff is that an unmodified instantiation skips review
+// and comes back APPROVED immediately — which is why this is worth having as a
+// first-class path rather than telling people to retype the copy into the
+// composer (where it WOULD go to review, and could be rejected).
+// ---------------------------------------------------------------------------
+
+/**
+ * The value type a library template expects in one of its body parameters.
+ *
+ * These are enforced by Meta AT SEND TIME, not at creation: a value outside the
+ * type's accepted range fails the individual message. That is why we keep them
+ * on the row — it is the only way to tell an agent "that isn't a valid email"
+ * before the send instead of after.
+ */
+export type TemplateParamType =
+  | "ADDRESS"
+  | "TEXT"
+  | "AMOUNT"
+  | "DATE"
+  | "PHONE_NUMBER"
+  | "EMAIL"
+  | "NUMBER";
+
+/** Filters accepted by the library browse endpoint. All optional. */
+export interface TemplateLibraryFilters {
+  /** Substring searched across name, header, body and footer. */
+  search?: string;
+  topic?: string;
+  usecase?: string;
+  industry?: string;
+  language?: string;
+  /** Exact library-template name. */
+  name?: string;
+}
+
+/** One blueprint from Meta's library. */
+export interface LibraryTemplate {
+  /** The library name — what you pass as `library_template_name` to create. */
+  name: string;
+  language: string;
+  category: TemplateCategory | null;
+  topic?: string;
+  usecase?: string;
+  industry: string[];
+  header?: string;
+  body: string;
+  footer?: string;
+  /** Meta's own sample values, positionally aligned with the body's `{{n}}`. */
+  bodyParams: string[];
+  /** Value type per body parameter, positionally aligned. May be empty on
+   *  templates Meta hasn't typed. */
+  bodyParamTypes: TemplateParamType[];
+  /**
+   * The buttons the blueprint carries. `FLOW` marks a WhatsApp Flows form —
+   * available only to accounts with raised messaging limits, so it is surfaced
+   * rather than filtered out (a silently missing template is worse than a
+   * labelled one that may not create).
+   */
+  buttons: Array<{
+    type: string;
+    text?: string;
+    url?: string;
+    phone_number?: string;
+  }>;
+  id?: string;
+}
+
+/**
+ * Button values supplied when instantiating a library template.
+ *
+ * The blueprint fixes the button's TYPE and LABEL; what varies per business is
+ * the destination — your URL, your phone number — which is what this carries.
+ */
+export interface LibraryTemplateButtonInput {
+  type: string;
+  phone_number?: string;
+  url?: { base_url: string; url_suffix_example?: string };
+  otp_type?: "COPY_CODE" | "ONE_TAP" | "ZERO_TAP";
+  zero_tap_terms_accepted?: boolean;
+  supported_apps?: Array<{ package_name: string; signature_hash: string }>;
+}
+
+/** Optional add-ons the blueprint supports (authentication + utility extras). */
+export interface LibraryTemplateBodyInput {
+  add_contact_number?: boolean;
+  add_learn_more_link?: boolean;
+  add_security_recommendation?: boolean;
+  add_track_package_link?: boolean;
+  code_expiration_minutes?: number;
+}
+
+export interface CreateFromLibraryArgs {
+  /** OUR name for the instantiated template. */
+  name: string;
+  language: string;
+  category: TemplateCategory;
+  /** The blueprint's name. */
+  libraryTemplateName: string;
+  buttonInputs?: LibraryTemplateButtonInput[];
+  bodyInputs?: LibraryTemplateBodyInput;
+}
+
+/**
+ * A head-to-head comparison of two templates over a lookback window.
+ *
+ * Meta's constraints, all enforced by the caller because Meta answers a
+ * violation with an EMPTY result rather than an error — which reads as "these
+ * templates are identical" instead of "your request was invalid":
+ *   - exactly TWO templates, both under the SAME WhatsApp Business Account;
+ *   - each must have been sent at least 1,000 times inside the window;
+ *   - the window must be 7, 30, 60 or 90 days.
+ */
+export interface TemplateComparisonArgs {
+  /** The template being compared FROM (Meta's id). */
+  templateExternalId: string;
+  /** The template(s) to compare against. Meta allows exactly one today. */
+  againstExternalIds: string[];
+  start: Date;
+  end: Date;
+}
+
+/** Why a customer blocked the business after a template send. */
+export type TemplateBlockReason =
+  | "NO_LONGER_NEEDED"
+  | "NO_REASON"
+  | "NO_REASON_GIVEN"
+  | "NO_SIGN_UP"
+  | "OFFENSIVE_MESSAGES"
+  | "OTHER"
+  | "OTP_DID_NOT_REQUEST"
+  | "SPAM"
+  | "UNKNOWN_BLOCK_REASON";
+
+export interface ProviderTemplateComparison {
+  /**
+   * Template ids in INCREASING order of block rate — the first is the better
+   * performer. Meta gives only the ORDER, never the rate itself, so this must
+   * never be rendered as a number.
+   */
+  blockRateOrder: string[];
+  /** Times each template was sent in the window. */
+  sends: Array<{ templateExternalId: string; count: number }>;
+  /** Each template's most common block reason. */
+  topBlockReasons: Array<{ templateExternalId: string; reason: TemplateBlockReason | string }>;
+}
+
+// ---------------------------------------------------------------------------
+// Authentication templates.
+//
+// Their body is FIXED preset text Meta owns ("<CODE> is your verification
+// code."), which is why they cannot be authored in a normal composer: there is
+// nothing to write. What you choose is which optional strings to include and
+// which OTP button to use — and Meta then generates the wording in every
+// language you ask for.
+// ---------------------------------------------------------------------------
+
+/** One language's rendering of the preset authentication text. */
+export interface AuthTemplatePreview {
+  language: string;
+  body: string;
+  footer?: string;
+  buttons: Array<{ text?: string; autofill_text?: string }>;
+}
+
+export interface AuthTemplatePreviewArgs {
+  /** Language codes to render. Empty = every supported language. */
+  languages: string[];
+  /** Include "For your security, do not share this code." */
+  addSecurityRecommendation?: boolean;
+  /** Include "This code expires in N minutes." Meta allows 1–90. */
+  codeExpirationMinutes?: number;
+}
+
+/** How the recipient gets the code off the message. */
+export type OtpType = "COPY_CODE" | "ONE_TAP" | "ZERO_TAP";
+
+/**
+ * Create/update an authentication template across MANY languages at once.
+ *
+ * Meta exposes this as `upsert_message_templates`, and it is the documented way
+ * to manage authentication templates: `language` (singular), `text` and
+ * `autofill_text` are all unsupported here — the wording is Meta's, so you name
+ * the languages and it writes them.
+ */
+export interface UpsertAuthTemplateArgs {
+  name: string;
+  languages: string[];
+  addSecurityRecommendation?: boolean;
+  /** 1–90. Omit to leave the expiry footer off entirely. */
+  codeExpirationMinutes?: number;
+  otpType: OtpType;
+  /** Required for ONE_TAP and ZERO_TAP — the app that receives the code. */
+  supportedApps?: Array<{ package_name: string; signature_hash: string }>;
+  /**
+   * ZERO_TAP only, and REQUIRED there: an acknowledgement that zero-tap use is
+   * subject to the WhatsApp Business Terms and that it is your responsibility to
+   * make sure customers expect the code to be filled in for them.
+   *
+   * Meta does not treat a missing/false value as a default — it refuses to
+   * create the template at all.
+   */
+  zeroTapTermsAccepted?: boolean;
+}
+
+export interface UpsertAuthTemplateResult {
+  templates: Array<{ externalId: string; language: string; status: TemplateStatus | null }>;
+}
+
 export interface UploadHeaderMediaArgs {
   bytes: Uint8Array;
   mimeType: string;
@@ -1289,6 +1841,87 @@ export interface ProviderTemplateAnalyticsRow {
   currency: string | null;
 }
 
+/**
+ * A WhatsApp business phone number's public profile — what a customer sees when
+ * they tap the business name in a chat.
+ *
+ * Every field is optional because Meta returns only what has been set, and a
+ * profile with nothing filled in is a legitimate (if unhelpful) state.
+ */
+export interface ProviderBusinessProfile {
+  /** Short status line under the business name. */
+  about?: string;
+  /** Freeform, max 256 chars. Meta does NOT validate it against any map data. */
+  address?: string;
+  description?: string;
+  email?: string;
+  websites?: string[];
+  /**
+   * Meta's industry category (`RETAIL`, `HEALTH`, …). READ-ONLY here on
+   * purpose: the `WhatsAppVertical` enum's members are not published in the
+   * profile reference, and writing a value we guessed would be rejected — or
+   * worse, silently set the wrong industry. Editable in WhatsApp Manager.
+   */
+  vertical?: string;
+  /** Meta-hosted URL. Set by uploading a handle, never by writing this. */
+  profilePictureUrl?: string;
+}
+
+/** The writable subset. `vertical` and `profilePictureUrl` are excluded above. */
+export interface UpdateBusinessProfileArgs {
+  about?: string;
+  address?: string;
+  description?: string;
+  email?: string;
+  websites?: string[];
+  /**
+   * A handle from the resumable upload API (the same one template header media
+   * uses) — Meta hosts the image itself, so there is no URL to set.
+   */
+  profilePictureHandle?: string;
+}
+
+/**
+ * Account-level status for a WhatsApp number: its Official Business Account
+ * standing, plus the WABA it belongs to. Read-only — OBA is requested in
+ * WhatsApp Manager (Meta publishes a wire shape for reading the status, not for
+ * making the request), and WABA fields aren't ours to write.
+ */
+export interface ProviderAccountStatus {
+  /**
+   * Verbatim from Meta. Only `NOT_STARTED` appears in the reference, so this is
+   * NOT narrowed to an enum — a status we mapped by guessing would render as
+   * something Meta never said.
+   */
+  obaStatus?: string;
+  waba?: {
+    name?: string;
+    /** e.g. `ACTIVE`. */
+    status?: string;
+    currency?: string;
+    country?: string;
+    /** `verified` | `not_verified` | … — an OBA prerequisite. */
+    businessVerificationStatus?: string;
+  };
+}
+
+/**
+ * A WhatsApp QR code / short link — a "digital doorstep": a customer scans or
+ * taps and lands in a chat with the business, with an optional message already
+ * typed. No phone number to key in.
+ *
+ * `code` is the identity AND the short link's slug
+ * (`https://wa.me/message/<code>`). `qrImageUrl` is only returned by the CREATE
+ * call — the list endpoint omits it, so it is optional here rather than a field
+ * the UI can assume.
+ */
+export interface ProviderQrCode {
+  code: string;
+  prefilledMessage: string;
+  deepLinkUrl: string;
+  qrImageUrl?: string;
+}
+
 export interface MessagingProvider<SendConfig = unknown> {
   name: Channel;
   /** Feature flags channel-agnostic code branches on. */
@@ -1359,8 +1992,86 @@ export interface MessagingProvider<SendConfig = unknown> {
    * via a later `fetchTemplates` sync.
    */
   createTemplate?(args: CreateTemplateArgs, config: SendConfig): Promise<CreateTemplateResult>;
+  /**
+   * Edit an existing template's category, components or TTL. Distinct from
+   * `createTemplate` because it targets the TEMPLATE node, replaces components
+   * wholesale, and re-enters review automatically on success.
+   */
+  editTemplate?(args: EditTemplateArgs, config: SendConfig): Promise<void>;
   /** Remove a template from the provider catalog. */
   deleteTemplate?(args: DeleteTemplateArgs, config: SendConfig): Promise<void>;
+  /**
+   * Lift a quality pause on a template (`POST /{template-id}/unpause`).
+   *
+   * Meta unpauses a quality-paused template on its own after 3h, then 6h, then
+   * DISABLES it on the third instance — but a template paused by **Template
+   * Pacing** never self-unpauses and must be lifted manually, which is the case
+   * this exists for.
+   */
+  unpauseTemplate?(externalId: string, config: SendConfig): Promise<void>;
+  /** The business phone number's public profile. */
+  getBusinessProfile?(config: SendConfig): Promise<ProviderBusinessProfile>;
+  /** OBA standing + the owning WABA's record. */
+  getAccountStatus?(config: SendConfig): Promise<ProviderAccountStatus>;
+  /** QR codes / short links for the business phone number. */
+  listQrCodes?(config: SendConfig): Promise<ProviderQrCode[]>;
+  createQrCode?(
+    args: { prefilledMessage: string; imageFormat: "SVG" | "PNG" },
+    config: SendConfig,
+  ): Promise<ProviderQrCode>;
+  updateQrCode?(
+    args: { code: string; prefilledMessage: string },
+    config: SendConfig,
+  ): Promise<ProviderQrCode>;
+  deleteQrCode?(code: string, config: SendConfig): Promise<void>;
+  updateBusinessProfile?(
+    args: UpdateBusinessProfileArgs,
+    config: SendConfig,
+  ): Promise<void>;
+  /**
+   * Render the preset authentication text in the requested languages, so an
+   * operator can SEE the wording before committing to it. Meta owns the copy, so
+   * this is the only way to show it.
+   */
+  previewAuthTemplates?(
+    args: AuthTemplatePreviewArgs,
+    config: SendConfig,
+  ): Promise<AuthTemplatePreview[]>;
+  /** Create/update an authentication template across many languages at once. */
+  upsertAuthTemplate?(
+    args: UpsertAuthTemplateArgs,
+    config: SendConfig,
+  ): Promise<UpsertAuthTemplateResult>;
+  /** Browse the provider's library of pre-written, pre-categorized templates. */
+  fetchTemplateLibrary?(
+    filters: TemplateLibraryFilters,
+    config: SendConfig,
+  ): Promise<LibraryTemplate[]>;
+  /**
+   * Instantiate a library template under our own name. Distinct from
+   * `createTemplate` because the wire shape is different — no `components`, just
+   * the blueprint name plus per-business button/body inputs — and because an
+   * unmodified instantiation is approved immediately rather than queued for
+   * review.
+   */
+  createFromLibrary?(
+    args: CreateFromLibraryArgs,
+    config: SendConfig,
+  ): Promise<CreateTemplateResult>;
+  /**
+   * Head-to-head performance of two templates: which has the lower block rate,
+   * how often each was sent, and each one's top block reason.
+   *
+   * Distinct from `fetchTemplateAnalytics` because it answers a different
+   * question with different data — block RATE (as an ordering, never a number)
+   * rather than the per-day sent/delivered/read series — and carries its own
+   * constraints (two templates, same WABA, 1,000+ sends each, a fixed set of
+   * lookback windows).
+   */
+  compareTemplates?(
+    args: TemplateComparisonArgs,
+    config: SendConfig,
+  ): Promise<ProviderTemplateComparison>;
   /**
    * Switch on the provider's own template analytics for this account.
    *

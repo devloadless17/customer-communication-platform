@@ -85,6 +85,29 @@ export interface WhatsappHealthSnapshot {
   /** How many WhatsApp accounts share this portfolio's 24h budget. The number
    *  that makes "7,850 of 10,000 remaining" legible when it isn't just yours. */
   portfolioAccountCount: number;
+  /** Meta's raw `verification_status` for the portfolio. Drives the TEMPLATE
+   *  limit (see {@link portfolioTemplateLimit}), not the messaging limit. */
+  verificationStatus: string | null;
+  /** A WhatsApp Business policy violation Meta reported, and when we saw it. */
+  policyViolationType?: string | null;
+  policyViolationAt?: Date | null;
+}
+
+/**
+ * How many templates each WABA under this portfolio may hold.
+ *
+ * Meta scopes the template limit to the parent BUSINESS PORTFOLIO: an
+ * unverified portfolio caps every one of its WABAs at 250 templates; a verified
+ * one raises that to 6,000 — provided at least one of its WABAs also has a
+ * business phone number with an APPROVED DISPLAY NAME.
+ *
+ * That second condition is not readable from any single node we already fetch,
+ * so the verified figure is an upper bound, not a promise. The UI says "up to"
+ * and treats the number as a headroom cue, never as a hard gate — Meta is the
+ * authority and rejects at the real limit with its own error.
+ */
+export function portfolioTemplateLimit(verificationStatus: string | null): number {
+  return verificationStatus === "verified" ? 6_000 : 250;
 }
 
 /** A partial update — a webhook carries only the field(s) that changed. */
@@ -102,14 +125,23 @@ export interface WhatsappHealthUpdate {
   callingRestrictionType?: string | null;
   callingRestrictionReason?: string | null;
   callingQualityWarning?: string | null;
+  policyViolationType?: string | null;
 }
 
 /**
  * Canonicalize whatever tier representation Meta hands us into a `TIER_*` key.
- * The phone-number node returns `messaging_limit_tier` as `TIER_1K` etc; the
- * `phone_number_quality_update` webhook uses `current_limit` with the SAME
- * vocabulary; some legacy payloads send a bare number ("1000"). Returns null for
- * anything unrecognized so the caller stores null (ungated) rather than a bad key.
+ * Every source uses a different spelling of the same ladder:
+ *   - `whatsapp_business_manager_messaging_limit` (the current field, on the
+ *     portfolio / WABA / phone-number node) → `TIER_250`, `TIER_2K`, …
+ *   - `messaging_limit_tier` on the phone-number node → same vocabulary, but
+ *     DEPRECATED;
+ *   - `max_daily_conversations_per_business` on either health webhook → a bare
+ *     number (2000 | 10000 | 100000) or the string `UNLIMITED`;
+ *   - `current_limit` on `phone_number_quality_update` → same vocabulary, but it
+ *     now carries EITHER the limit or the number's throughput level, so an
+ *     unrecognized value must return null rather than guess.
+ * Returns null for anything unrecognized so the caller stores null (ungated)
+ * rather than a bad key.
  */
 export function normalizeMessagingTier(raw: unknown): string | null {
   if (typeof raw === "number") return numberToTier(raw);
@@ -206,6 +238,8 @@ export async function persistWhatsappHealth(
     callingRestrictionType?: string | null;
     callingRestrictionReason?: string | null;
     callingQualityWarning?: string | null;
+    policyViolationType?: string | null;
+    policyViolationAt?: Date | null;
     messagingHealthUpdatedAt: Date;
   } = { messagingHealthUpdatedAt: new Date() };
 
@@ -241,6 +275,13 @@ export async function persistWhatsappHealth(
   }
   if (update.callingQualityWarning !== undefined) {
     data.callingQualityWarning = update.callingQualityWarning;
+    touched = true;
+  }
+  if (update.policyViolationType !== undefined) {
+    data.policyViolationType = update.policyViolationType;
+    // Meta's violation payload carries no timestamp, so observation time is
+    // what we have — and "when did this land" is the question an operator asks.
+    data.policyViolationAt = update.policyViolationType ? new Date() : null;
     touched = true;
   }
   if (!touched) return;
@@ -452,8 +493,14 @@ export async function checkBroadcastEligibility(
    * See the overlap note below.
    */
   audienceContactIds?: readonly string[],
+  /**
+   * The account this campaign sends FROM. Load-bearing: the 24h budget belongs
+   * to that number's portfolio, not to whichever account happens to be the
+   * channel default. Omit only when the caller genuinely has no account yet.
+   */
+  channelConnectionId?: string | null,
 ): Promise<BroadcastEligibility> {
-  const health = await getWhatsappHealth(workspaceId);
+  const health = await getWhatsappHealth(workspaceId, channelConnectionId);
   const base: BroadcastEligibility = {
     allowed: true,
     reason: null,
@@ -543,16 +590,34 @@ export async function checkBroadcastEligibility(
   return withUsage;
 }
 
-/** Read the current snapshot for the team's WhatsApp connection (null if none). */
+/**
+ * Read the messaging-health snapshot for ONE WhatsApp account.
+ *
+ * `channelConnectionId` selects the account; omitting it falls back to the
+ * channel DEFAULT, which is right for a workspace with one number and for
+ * surfaces that genuinely describe "the default" (compose-new, the settings
+ * summary).
+ *
+ * Passing it is REQUIRED wherever the answer changes per number — above all the
+ * broadcast gate. Quality and throughput are per-number, and the 24h cap is per
+ * PORTFOLIO, so a campaign sent from the second number was being gated against
+ * the first number's portfolio budget: either refused while it had headroom, or
+ * waved through against a budget it did not own.
+ */
 export async function getWhatsappHealth(
   workspaceId: string,
+  channelConnectionId?: string | null,
 ): Promise<WhatsappHealthSnapshot | null> {
   const row = await db.channelConnection.findFirst({
-    where: { workspaceId, channel: "whatsapp", isDefault: true },
+    where: channelConnectionId
+      ? { id: channelConnectionId, workspaceId, channel: "whatsapp" }
+      : { workspaceId, channel: "whatsapp", isDefault: true },
     select: {
       qualityRating: true,
       throughputLevel: true,
       messagingHealthUpdatedAt: true,
+      policyViolationType: true,
+      policyViolationAt: true,
       portfolioId: true,
       // The 24h messaging limit is PORTFOLIO-scoped since 2025-10-07 (shared by
       // every number in the portfolio), so tier + cap come off the portfolio,
@@ -562,6 +627,7 @@ export async function getWhatsappHealth(
           messagingTier: true,
           messagingDailyCap: true,
           externalPortfolioId: true,
+          verificationStatus: true,
           _count: { select: { connections: true } },
         },
       },
@@ -573,10 +639,13 @@ export async function getWhatsappHealth(
     messagingDailyCap: row.portfolio?.messagingDailyCap ?? null,
     qualityRating: row.qualityRating,
     throughputLevel: row.throughputLevel,
+    policyViolationType: row.policyViolationType,
+    policyViolationAt: row.policyViolationAt,
     messagingHealthUpdatedAt: row.messagingHealthUpdatedAt,
     portfolioId: row.portfolioId,
     externalPortfolioId: row.portfolio?.externalPortfolioId ?? null,
     portfolioAccountCount: row.portfolio?._count.connections ?? 0,
+    verificationStatus: row.portfolio?.verificationStatus ?? null,
   };
 }
 
@@ -632,14 +701,20 @@ export async function linkWhatsappPortfolio(
   // belongs to is valuable on its own, so a failure to read the limit must not
   // discard the id we just resolved.
   let tier: string | null = null;
+  // Portfolio verification decides the TEMPLATE limit (250 unverified vs up to
+  // 6,000 verified, per WABA), so it rides along on the same node read rather
+  // than costing a second round trip.
+  let verificationStatus: string | null = null;
   try {
     const node = await graphGetJson(
       `${GRAPH_BASE}/${graphVersion}/${encodeURIComponent(externalPortfolioId)}` +
-        `?fields=whatsapp_business_manager_messaging_limit`,
+        `?fields=whatsapp_business_manager_messaging_limit,verification_status`,
       accessToken,
       { retry: true },
     );
     tier = normalizeMessagingTier(node.whatsapp_business_manager_messaging_limit);
+    const vs = node.verification_status;
+    if (typeof vs === "string" && vs.length > 0) verificationStatus = vs.toLowerCase();
   } catch {
     tier = null;
   }
@@ -653,12 +728,15 @@ export async function linkWhatsappPortfolio(
       workspaceId,
       externalPortfolioId,
       ...(tier ? { messagingTier: tier, messagingDailyCap: tierDailyCap(tier) } : {}),
+      ...(verificationStatus ? { verificationStatus } : {}),
       messagingHealthUpdatedAt: new Date(),
     },
     // A null tier must NOT clobber a good stored one — a scope-less token would
     // otherwise wipe the cap on every sweep and leave the gate permanently open.
+    // Same rule for verificationStatus, for the same reason.
     update: {
       ...(tier ? { messagingTier: tier, messagingDailyCap: tierDailyCap(tier) } : {}),
+      ...(verificationStatus ? { verificationStatus } : {}),
       messagingHealthUpdatedAt: new Date(),
     },
     select: { id: true },
@@ -688,9 +766,15 @@ export async function fetchWhatsappHealthFromGraph(workspaceId: string): Promise
     if (err instanceof ProviderNotConfiguredError) return; // not connected — nothing to poll
     throw err;
   }
+  // `whatsapp_business_manager_messaging_limit` is the CURRENT field — Meta
+  // deprecated `messaging_limit_tier`, which is what this used to ask for alone.
+  // Both are requested because a deprecated field is not yet a removed one, and
+  // the tier drives lane derivation and the rolling-24h budget gate: reading
+  // null there silently ungates a number rather than failing loudly.
   const url =
     `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}` +
-    `?fields=messaging_limit_tier,quality_rating,throughput`;
+    `?fields=whatsapp_business_manager_messaging_limit,messaging_limit_tier,` +
+    `quality_rating,throughput`;
   // Idempotent GET — one retry on a 5xx blip. No appsecret_proof (matches the
   // send path default); the token alone authorizes a read of the number's own node.
   const node = await graphGetJson(url, config.accessToken, { retry: true });
@@ -723,7 +807,12 @@ export async function fetchWhatsappHealthFromGraph(workspaceId: string): Promise
   await persistWhatsappHealth(
     workspaceId,
     {
-      messagingTier: (node.messaging_limit_tier as string | undefined) ?? null,
+      // Prefer the current field; fall back to the deprecated one so a graph
+      // version that still only returns the old shape keeps working.
+      messagingTier:
+        (node.whatsapp_business_manager_messaging_limit as string | undefined) ??
+        (node.messaging_limit_tier as string | undefined) ??
+        null,
       qualityRating: (node.quality_rating as string | undefined) ?? null,
       throughputLevel: (throughputLevel as string | undefined) ?? null,
     },
@@ -754,13 +843,35 @@ export interface MessagingHealthSummary {
   throughputLevel: string | null;
   externalPortfolioId: string | null;
   portfolioAccountCount: number;
+  /** The account these figures describe; null = the channel default. */
+  channelConnectionId: string | null;
+  /** Meta's raw portfolio `verification_status`, or null if never read. */
+  verificationStatus: string | null;
+  /** Templates each WABA under the portfolio may hold, derived from
+   *  `verificationStatus`. An upper bound — see `portfolioTemplateLimit`. */
+  templateLimit: number;
+  /**
+   * A WhatsApp Business POLICY violation Meta reported via `account_update`
+   * (e.g. "ALCOHOL"), and when we observed it. This is the warning that arrives
+   * BEFORE an account restriction — it used to be parsed and dropped, so the
+   * first thing a tenant learned was the restriction itself.
+   */
+  policyViolationType: string | null;
+  policyViolationAt: string | null;
   messagingHealthUpdatedAt: string | null;
 }
 
 export async function getMessagingHealthSummary(
   workspaceId: string,
+  /**
+   * Which account to describe. Omit for the channel default — correct for a
+   * one-number workspace and for surfaces that mean "the default". The broadcast
+   * composer passes the account it is about to send from, because quality and
+   * throughput are per-number and the budget is per-portfolio.
+   */
+  channelConnectionId?: string | null,
 ): Promise<MessagingHealthSummary> {
-  const health = await getWhatsappHealth(workspaceId);
+  const health = await getWhatsappHealth(workspaceId, channelConnectionId);
   const cap = health?.messagingDailyCap ?? null;
   // Only pay for the usage count when there's a cap to measure against —
   // mirrors checkBroadcastEligibility so the two never disagree.
@@ -776,6 +887,15 @@ export async function getMessagingHealthSummary(
     throughputLevel: health?.throughputLevel ?? null,
     externalPortfolioId: health?.externalPortfolioId ?? null,
     portfolioAccountCount: health?.portfolioAccountCount ?? 0,
+    /** Which account these figures describe — so the UI never has to guess. */
+    channelConnectionId: channelConnectionId ?? null,
+    verificationStatus: health?.verificationStatus ?? null,
+    templateLimit: portfolioTemplateLimit(health?.verificationStatus ?? null),
+    // The warning that PRECEDES an account restriction. Surfaced beside the
+    // other health figures because "we got restricted out of nowhere" is
+    // exactly what dropping this used to produce.
+    policyViolationType: health?.policyViolationType ?? null,
+    policyViolationAt: health?.policyViolationAt?.toISOString() ?? null,
     messagingHealthUpdatedAt: health?.messagingHealthUpdatedAt?.toISOString() ?? null,
   };
 }

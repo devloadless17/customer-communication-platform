@@ -35,6 +35,9 @@ type Db = Pick<
   | "workspace"
   | "user"
   | "tag"
+  // Handing a ticket to a team has to verify the team is this workspace's and
+  // not archived — see assertWorkspaceTeam.
+  | "assignmentPolicy"
   | "$transaction"
 >;
 
@@ -54,6 +57,8 @@ interface EventGates {
 export type TicketAction =
   | "created"
   | "assigned"
+  /** Handed to a different team — a distinct action from assigning a person. */
+  | "team_changed"
   | "status_changed"
   | "priority_changed"
   | "reopened"
@@ -68,6 +73,7 @@ export type TicketOutcome =
   | { ok: false; reason: "conversation_not_found" }
   | { ok: false; reason: "assignee_not_found" }
   | { ok: false; reason: "version_conflict" }
+  | { ok: false; reason: "team_not_found" }
   | { ok: false; reason: "ticket_terminal" };
 
 // ---------------------------------------------------------------------------
@@ -81,6 +87,8 @@ export interface CreateTicketArgs extends EventGates {
   subject?: string | null;
   priority?: TicketPriority;
   assignedUserId?: string | null;
+  /** Hand it straight to a team's queue (an AssignmentPolicy id). */
+  assignedTeamId?: string | null;
   source?: TicketSource;
   tagIds?: string[];
   customFields?: Record<string, string>;
@@ -105,6 +113,14 @@ export async function createTicket(db: Db, args: CreateTicketArgs): Promise<Tick
 
   if (args.assignedUserId && !(await assertWorkspaceMember(db, args.workspaceId, args.assignedUserId))) {
     return { ok: false, reason: "assignee_not_found" };
+  }
+
+  // The team must belong to THIS workspace. Without the check a caller could
+  // hand a ticket to another tenant's team id: the FK would accept it (it only
+  // proves the row exists), and that team's queue would surface work whose
+  // conversation they cannot open.
+  if (args.assignedTeamId && !(await assertWorkspaceTeam(db, args.workspaceId, args.assignedTeamId))) {
+    return { ok: false, reason: "team_not_found" };
   }
 
   return withUniqueRetry(() =>
@@ -354,6 +370,16 @@ export interface UpdateTicketArgs extends EventGates {
   priority?: TicketPriority;
   /** `null` unassigns. Omitted leaves the assignee alone. */
   assignedUserId?: string | null;
+  /**
+   * Hand the ticket to another TEAM; `null` takes it out of every queue.
+   * Omitted leaves the team alone.
+   *
+   * Setting this clears `assignedUserId` unless the caller names one too — see
+   * the reasoning at the write site.
+   */
+  assignedTeamId?: string | null;
+  /** Why the ticket is being handed over. Stored on the `team_changed` event. */
+  handoffReason?: string | null;
   subject?: string | null;
   resolutionCode?: string | null;
   resolutionNote?: string | null;
@@ -381,6 +407,9 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       status: true,
       priority: true,
       conversationId: true,
+      // Snapshotted onto the team_changed event so the timeline reads
+      // "Support → Sales" even after a rename.
+      assignedTeamId: true,
       slaPolicyId: true,
       slaPausedAt: true,
       slaPausedMs: true,
@@ -391,6 +420,12 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
   if (!existing) return { ok: false, reason: "ticket_not_found" };
   if (args.expectedVersion !== undefined && args.expectedVersion !== existing.version) {
     return { ok: false, reason: "version_conflict" };
+  }
+  // Same tenancy check as create — the UPDATE path is the one a handoff
+  // actually goes through, so omitting it here would leave the hole open on the
+  // only route that matters.
+  if (args.assignedTeamId && !(await assertWorkspaceTeam(db, args.workspaceId, args.assignedTeamId))) {
+    return { ok: false, reason: "team_not_found" };
   }
   if (args.assignedUserId && !(await assertWorkspaceMember(db, args.workspaceId, args.assignedUserId))) {
     return { ok: false, reason: "assignee_not_found" };
@@ -418,6 +453,22 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       // A `new` ticket that gets an owner is being worked; move it out of the
       // untriaged column unless the caller is explicitly setting a status too.
       if (args.assignedUserId && existing.status === "new" && !statusMoves) {
+        data.status = "open";
+      }
+    }
+
+    if (args.assignedTeamId !== undefined) {
+      data.assignedTeamId = args.assignedTeamId;
+      // Handing a ticket to another team CLEARS the current owner unless the
+      // caller names one in the same breath. Keeping the old assignee would
+      // leave it looking claimed by someone on the team that just handed it
+      // away — so it sits in nobody's queue and nobody's list.
+      if (args.assignedTeamId && args.assignedUserId === undefined) {
+        data.assignedUserId = null;
+      }
+      // Same "it's being worked now" nudge as taking an assignee: a handed-over
+      // ticket is not untriaged any more.
+      if (args.assignedTeamId && existing.status === "new" && !statusMoves) {
         data.status = "open";
       }
     }
@@ -553,8 +604,14 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       existing.id,
       ticketEventKindFor(action, args),
       args.actor,
-      { status: existing.status, priority: existing.priority },
-      { status: ticket.status, priority: ticket.priority },
+      // Snapshot the team on both sides so the timeline reads "Support → Sales"
+      // even after a team is renamed or archived.
+      { status: existing.status, priority: existing.priority, teamId: existing.assignedTeamId },
+      { status: ticket.status, priority: ticket.priority, teamId: ticket.assignedTeamId },
+      // The "why" on a handoff. A handoff with no reason is the most common way
+      // this workflow fails — the receiving team re-reads the whole thread to
+      // work out what was wanted.
+      args.handoffReason ?? null,
     );
     const pill = conversationPillFor(existing.status, statusMoves ? finalStatus : null);
     if (pill) {
@@ -814,6 +871,10 @@ function deriveAction(
     if (!isTicketActive(previous)) return "reopened";
     return "status_changed";
   }
+  // Checked BEFORE `assignedUserId`: a handoff usually clears the assignee in
+  // the same write, and filing that as "unassigned" would hide the thing that
+  // actually happened.
+  if (args.assignedTeamId !== undefined) return "team_changed";
   if (args.assignedUserId !== undefined) return "assigned";
   if (args.priority !== undefined) return "priority_changed";
   return "updated";
@@ -830,6 +891,8 @@ function ticketEventKindFor(
   args: UpdateTicketArgs,
 ): Prisma.TicketEventCreateInput["kind"] {
   switch (action) {
+    case "team_changed":
+      return "team_changed";
     case "assigned":
       return args.assignedUserId ? "assigned" : "unassigned";
     case "priority_changed":
@@ -866,6 +929,8 @@ async function writeTicketEvent(
   actor: TicketActor,
   before: Record<string, unknown> | null,
   after: Record<string, unknown> | null,
+  /** Note text, or the "why" on a handoff. */
+  body?: string | null,
 ): Promise<void> {
   await tx.ticketEvent.create({
     data: {
@@ -874,10 +939,56 @@ async function writeTicketEvent(
       kind,
       before: (before ?? Prisma.JsonNull) as Prisma.InputJsonValue,
       after: (after ?? Prisma.JsonNull) as Prisma.InputJsonValue,
+      ...(body ? { body } : {}),
       actorUserId: actor.userId ?? null,
       actorApiKeyId: actor.apiKeyId ?? null,
     },
   });
+}
+
+/**
+ * Add an internal note to a ticket. The customer never sees it.
+ *
+ * This is the other half of a team handoff: Sales receives a ticket and answers
+ * "tell them their order ships Tuesday" WITHOUT messaging the customer
+ * themselves. Without it the receiving team's only options are to say nothing or
+ * to contact the customer directly — and a handoff that forces the second one
+ * isn't a handoff, it's a transfer.
+ *
+ * Deliberately NOT a ticket UPDATE: a note changes nothing about the ticket, so
+ * it must not bump `version` (which would 409 a colleague's open editor) or move
+ * the SLA clock. It appends to the timeline and nothing else.
+ */
+export async function addTicketNote(
+  db: Db,
+  args: {
+    workspaceId: string;
+    ticketId: string;
+    actor: TicketActor;
+    body: string;
+  },
+): Promise<{ ok: true } | { ok: false; reason: "ticket_not_found" | "empty_note" }> {
+  const body = args.body.trim();
+  if (!body) return { ok: false, reason: "empty_note" };
+
+  // Scoped read — a ticket id from another workspace must 404, not append.
+  const ticket = await db.ticket.findFirst({
+    where: { id: args.ticketId, workspaceId: args.workspaceId },
+    select: { id: true },
+  });
+  if (!ticket) return { ok: false, reason: "ticket_not_found" };
+
+  await db.ticketEvent.create({
+    data: {
+      workspaceId: args.workspaceId,
+      ticketId: args.ticketId,
+      kind: "note",
+      body,
+      actorUserId: args.actor.userId ?? null,
+      actorApiKeyId: args.actor.apiKeyId ?? null,
+    },
+  });
+  return { ok: true };
 }
 
 /**
@@ -946,6 +1057,27 @@ async function publishTicketEvent(
 
 /** An assignee must be a live member of THIS workspace — otherwise a crafted id
  *  could hand work to someone in another tenant. */
+/**
+ * Does this team (AssignmentPolicy) belong to this workspace, and is it live?
+ *
+ * The FK alone only proves the row exists — it says nothing about WHOSE it is.
+ * A handoff to another tenant's team id would otherwise be accepted and put
+ * work in a queue whose members cannot open the conversation behind it.
+ * Archived teams are refused too: handing work to a disbanded queue is a silent
+ * way to lose it.
+ */
+async function assertWorkspaceTeam(
+  db: Db,
+  workspaceId: string,
+  policyId: string,
+): Promise<boolean> {
+  const policy = await db.assignmentPolicy.findFirst({
+    where: { id: policyId, workspaceId, archivedAt: null },
+    select: { id: true },
+  });
+  return Boolean(policy);
+}
+
 async function assertWorkspaceMember(
   db: Db,
   workspaceId: string,

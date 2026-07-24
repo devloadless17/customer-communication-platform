@@ -21,7 +21,7 @@ import { auth } from "@/lib/auth/better-auth";
 // Note: `/api/auth/change-password` is NOT served by this handler — that path
 // is owned by the NestJS ChangePasswordController. Caddy routes
 // `/api/auth/change-password*` to :4000 *before* this catch-all; the browser
-// form at apps/web/src/app/settings/account/change-password-form.tsx targets
+// form at apps/web/src/app/(app)/account/change-password-form.tsx targets
 // `NEXT_PUBLIC_API_URL` directly in dev (where Caddy isn't in front).
 
 export const runtime = "nodejs";

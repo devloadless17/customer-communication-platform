@@ -50,8 +50,8 @@ export class WorkspacesController {
   constructor(private readonly workspaces: WorkspacesService) {}
 
   @Get()
-  list(@CurrentSession() session: ApiSession) {
-    return { workspaces: this.workspaces.list(session) };
+  async list(@CurrentSession() session: ApiSession) {
+    return { workspaces: await this.workspaces.list(session) };
   }
 
   /** Everything Organization settings renders — org, workspaces, members. */

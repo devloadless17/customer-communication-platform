@@ -73,6 +73,7 @@ export function BroadcastsBrowser({
   initialFilter = "all",
   initialSearch = "",
   initialView = "table",
+  channel = null,
 }: {
   initial: BroadcastListItem[];
   /** SSR-computed total matching the seeded filter — drives the page count so
@@ -88,6 +89,11 @@ export function BroadcastsBrowser({
   /** SSR-seeded from the `broadcasts-view` cookie. View is purely visual
    *  (table vs calendar render of the same rows), so no refetch tied to it. */
   initialView?: BroadcastView;
+  /**
+   * Scope the history to one channel (or `people` for omnichannel campaigns).
+   * Read from the URL by the page so a shared link keeps its scope.
+   */
+  channel?: string | null;
 }) {
   const [rows, setRows] = useState<BroadcastListItem[]>(initial);
   const [page, setPage] = useState(1);
@@ -125,6 +131,11 @@ export function BroadcastsBrowser({
   // event) reads the latest values without re-subscribing every change.
   const filterRef = useRef(filter);
   filterRef.current = filter;
+  // `?channel=` comes from the channel-scoped Outreach nav. A ref (not a dep)
+  // for the same reason as `filter`: the fetcher reads the latest value without
+  // being re-created, and the effect below drives WHEN it re-runs.
+  const channelRef = useRef(channel);
+  channelRef.current = channel;
   const searchRef = useRef(search);
   searchRef.current = search;
   // Current page mirrored so the stable `refetch` (and the socket-driven
@@ -144,6 +155,10 @@ export function BroadcastsBrowser({
     if (opts?.showLoading !== false) setLoading(true);
     const seq = ++seqRef.current;
     const params = new URLSearchParams();
+    // Outreach is scoped per channel, so the history is too: a WhatsApp
+    // campaign and a Messenger one are different work and don't belong in one
+    // mixed table.
+    if (channelRef.current) params.set("channel", channelRef.current);
     if (filterRef.current !== "all") params.set("status", filterRef.current);
     if (searchRef.current.trim()) params.set("search", searchRef.current.trim());
     params.set("page", String(pageRef.current));

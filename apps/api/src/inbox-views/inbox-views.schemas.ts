@@ -41,6 +41,10 @@ export const InboxViewFiltersSchema = z
     // here we only bound the list. Kept as a plain string array so adding a
     // channel to the enum doesn't need a matching edit in this file.
     channels: z.array(z.string().min(1)).max(20).optional(),
+    // Which ACCOUNT (WhatsApp number / Page / handle) — ChannelConnection ids.
+    // Bounded generously: a workspace's account count is small, but the cap
+    // exists for the same reason every other list here has one.
+    channelAccountIds: idList(50).optional(),
     stageIds: idList(50).optional(),
     tagIds: idList(50).optional(),
     tagMatch: z.enum(["any", "all"]).optional(),

@@ -180,6 +180,9 @@ export class ExternalV1MessagingService {
         workspaceId,
         ...(q.status ? { status: q.status } : {}),
         ...(phone ? { contact: { phoneNumber: phone } } : {}),
+        // Narrow to one connected account. Scoped by `workspaceId` above, so an
+        // id from another tenant matches nothing rather than reading across.
+        ...(q.accountId ? { channelConnectionId: q.accountId } : {}),
         ...(cursor
           ? {
               OR: [

@@ -112,6 +112,13 @@ export async function listConversations(
      */
     visibility?: { assignedUserId?: string };
     /**
+     * Narrow to ONE channel account. A plain independent predicate ANDed with
+     * everything else — never merged into the filter object, for the same
+     * reason the saved-view builder returns an array: a spread would let a
+     * filter's own keys overwrite it (or it overwrite theirs).
+     */
+    accountId?: string;
+    /**
      * Server-side preset / stage narrowing. Without it the list is the
      * full team-recency feed. With it, "Mine" returns only my threads
      * regardless of where they fall in the team's activity, and so on.
@@ -199,7 +206,7 @@ export async function listConversations(
         // denormalized counter rather than a nested EXISTS over Message ->
         // MessageFlag: this is the hottest query in the app and a correlated
         // subquery against the largest table would be the wrong shape here.
-        // Served by the PARTIAL index Conversation_teamId_openFlag_idx, which
+        // Served by the PARTIAL index Conversation_workspaceId_openFlag_idx, which
         // carries the list's (lastMessageAt DESC, id DESC) sort key and spans
         // only the flagged rows.
         //
@@ -242,10 +249,16 @@ export async function listConversations(
   // correctly yields nothing for a restricted agent, because a conversation
   // cannot be both unassigned and assigned to them.
   const visibilityClause = opts.visibility ?? {};
-  const allClauses =
-    Object.keys(visibilityClause).length > 0
-      ? [...composedClauses, visibilityClause as Prisma.ConversationWhereInput]
-      : composedClauses;
+  const allClauses: Prisma.ConversationWhereInput[] = [
+    ...composedClauses,
+    ...(Object.keys(visibilityClause).length > 0
+      ? [visibilityClause as Prisma.ConversationWhereInput]
+      : []),
+    // The channel-account narrow ("only the Sales number"). Its own element in
+    // the AND array for exactly the reason spelled out above — it must compose
+    // with the preset/view/visibility clauses, never merge with them.
+    ...(opts.accountId ? [{ channelConnectionId: opts.accountId }] : []),
+  ];
   const where: Prisma.ConversationWhereInput = {
     workspaceId,
     ...(allClauses.length > 1

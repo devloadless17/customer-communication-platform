@@ -75,8 +75,19 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
 
   await d.workspace.upsert({
     where: { id: META_TEST_TEAM_ID },
-    create: { id: META_TEST_TEAM_ID, name: "E2E Meta Test Team", organizationId: orgId },
-    update: { organizationId: orgId },
+    create: {
+      id: META_TEST_TEAM_ID,
+      name: "E2E Meta Test Team",
+      organizationId: orgId,
+      // EXPLICIT, not inherited. Auto-open is OFF by default (a ticket means
+      // someone decided this needs work, not "a message arrived"), but the
+      // ingest→ticket routing specs exercise the auto-open path specifically.
+      // Pinning it here keeps them testing what they claim to test, and the
+      // specs that assert the OFF behaviour flip it through the real settings
+      // endpoint rather than relying on the default.
+      ticketAutoOpen: true,
+    },
+    update: { organizationId: orgId, ticketAutoOpen: true },
   });
 
   await d.user.upsert({
@@ -150,25 +161,41 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
     },
   ];
   for (const c of channels) {
-    await d.channelConnection.upsert({
-      where: {
-        workspaceId_channel_externalAccountId: {
+    // Drop any OTHER default on this channel before claiming it. The partial
+    // unique `ChannelConnection_one_default_per_channel` permits exactly one
+    // default per (workspace, channel), so a second account left as default by
+    // an earlier spec turns this seed into a P2002 — and a seed that throws
+    // fails every test downstream of it with an error about channel accounts.
+    await d.$transaction(async (tx) => {
+      await tx.channelConnection.updateMany({
+        where: {
+          workspaceId: META_TEST_TEAM_ID,
+          channel: c.channel,
+          isDefault: true,
+          NOT: { externalAccountId: c.accountId },
+        },
+        data: { isDefault: false },
+      });
+      await tx.channelConnection.upsert({
+        where: {
+          workspaceId_channel_externalAccountId: {
+            workspaceId: META_TEST_TEAM_ID,
+            channel: c.channel,
+            externalAccountId: c.accountId,
+          },
+        },
+        create: {
           workspaceId: META_TEST_TEAM_ID,
           channel: c.channel,
           externalAccountId: c.accountId,
+          isDefault: true,
+          ...(c.channel === "whatsapp" ? { wabaId: WA_WABA_ID } : {}),
+          config: c.config,
+          secrets: c.secrets,
+          isActive: true,
         },
-      },
-      create: {
-        workspaceId: META_TEST_TEAM_ID,
-        channel: c.channel,
-        externalAccountId: c.accountId,
-        isDefault: true,
-        ...(c.channel === "whatsapp" ? { wabaId: WA_WABA_ID } : {}),
-        config: c.config,
-        secrets: c.secrets,
-        isActive: true,
-      },
-      update: { config: c.config, secrets: c.secrets, isActive: true },
+        update: { isDefault: true, config: c.config, secrets: c.secrets, isActive: true },
+      });
     });
   }
 

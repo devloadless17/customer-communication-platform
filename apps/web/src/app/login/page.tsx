@@ -2,6 +2,9 @@ import { redirect } from "next/navigation";
 import { MessageSquareText } from "lucide-react";
 
 import { getCurrentSession } from "@/lib/auth";
+import { googleSignInEnabled } from "@/lib/auth/better-auth";
+
+import { GoogleButton } from "./google-button";
 import { LoginForm } from "./login-form";
 
 export const metadata = {
@@ -49,6 +52,21 @@ export default async function LoginPage({ searchParams }: PageProps) {
           <p className="mb-5 text-xs text-muted-foreground">
             Use the email your admin invited you with.
           </p>
+
+          {/* Google first, then the divider, then the form — the order every
+              product with both uses, because the one-click path should not be
+              below the fold of a password field. */}
+          {googleSignInEnabled() && (
+            <>
+              <GoogleButton next={nextPath} label="Continue with Google" />
+              <div className="my-4 flex items-center gap-3">
+                <span className="h-px flex-1 bg-border" />
+                <span className="text-2xs text-muted-foreground">Or</span>
+                <span className="h-px flex-1 bg-border" />
+              </div>
+            </>
+          )}
+
           <LoginForm next={nextPath} />
         </div>
 

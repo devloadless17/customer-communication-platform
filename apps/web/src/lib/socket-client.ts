@@ -104,6 +104,27 @@ export function getClientSocket(): ClientSocket {
       }
       return;
     }
+    // The session is VALID but the app is gating this user — their org is
+    // pending review / suspended, or their email isn't verified. Stop the
+    // socket (there is nothing to stream, and retrying would loop), but do NOT
+    // go to /logout: that DELETES a good session, and the member ends up on a
+    // context-free /login rather than the /pending screen explaining the
+    // suspension, or the /verify screen that would unblock them.
+    //
+    // Reload instead. The gate lives in the server-rendered (app) layout, so a
+    // reload routes them to the right explanation screen with no client-side
+    // duplicate of the rule. Guarded against a loop: the gate screens live
+    // outside (app) and never open a socket, so this can only fire once.
+    if (err.message === "session_gated") {
+      teardown = true;
+      try {
+        socket?.disconnect();
+      } finally {
+        socket = null;
+      }
+      window.location.reload();
+      return;
+    }
     // Transient classes: auth backend is degraded (Postgres flap) OR the
     // handshake rate-limit caught a reconnect storm. In both cases the
     // server is telling us "retry, don't log out." Socket.io's reconnect

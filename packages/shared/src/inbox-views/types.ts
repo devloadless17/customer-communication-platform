@@ -73,6 +73,21 @@ export interface InboxViewFilters {
   assignee?: InboxViewAssignee;
   /** Channel the thread arrived on. Absent/empty = any channel. */
   channels?: Channel[];
+  /**
+   * The channel ACCOUNT the thread is on — which WhatsApp number, Facebook Page
+   * or Instagram handle. `ChannelConnection.id`s. Absent/empty = any account.
+   *
+   * Distinct from `channels`, and both are useful: "WhatsApp" is the medium,
+   * "the Sales number" is one of possibly several inboxes inside it. A workspace
+   * running Sales and Support on two numbers wants a saved view per number far
+   * more than it wants one per channel.
+   *
+   * A conversation with no account (legacy rows, or an account since
+   * disconnected) can never satisfy this filter — the same exclude-on-absent
+   * rule `channels` uses, and for the same reason: admitting it would show a
+   * thread under a number it demonstrably is not on.
+   */
+  channelAccountIds?: string[];
   /** Contact lifecycle stage. Absent/empty = any stage. */
   stageIds?: string[];
   /** Contact tags. */
@@ -188,6 +203,12 @@ export interface InboxViewMatchTarget {
   status: ConversationStatus;
   /** Absent on rows built before the column existed — see `Conversation.channel`. */
   channel?: string | null;
+  /**
+   * Which channel ACCOUNT the thread is on. Absent on lean construction sites
+   * that don't select it, and null on a thread never bound to one — both mean
+   * "cannot satisfy an account filter", same rule as `channel`.
+   */
+  channelConnectionId?: string | null;
   assignedUserId: string | null;
   unreadCount?: number | null;
   openFlagCount?: number | null;
@@ -242,6 +263,16 @@ export function matchesInboxViewFilters(
     if (!row.channel || !filters.channels.includes(row.channel as Channel)) return false;
   }
 
+  if (filters.channelAccountIds?.length) {
+    // Same exclude-on-absent rule as `channels` above.
+    if (
+      !row.channelConnectionId ||
+      !filters.channelAccountIds.includes(row.channelConnectionId)
+    ) {
+      return false;
+    }
+  }
+
   if (filters.stageIds?.length) {
     if (!row.contact.stageId || !filters.stageIds.includes(row.contact.stageId)) return false;
   }
@@ -278,6 +309,8 @@ export function summarizeInboxViewFilters(
     tagNames?: Record<string, string>;
     userNames?: Record<string, string>;
     channelLabels?: Record<string, string>;
+    /** ChannelConnection id → display name ("Sales line", "+961 70 …"). */
+    accountNames?: Record<string, string>;
   },
 ): string {
   const parts: string[] = [];
@@ -301,6 +334,10 @@ export function summarizeInboxViewFilters(
         .map((c) => lookup?.channelLabels?.[c] ?? titleCase(c))
         .join(", "),
     );
+  }
+
+  if (filters.channelAccountIds?.length) {
+    parts.push(namesOrCount(filters.channelAccountIds, lookup?.accountNames, "account"));
   }
 
   if (filters.stageIds?.length) {

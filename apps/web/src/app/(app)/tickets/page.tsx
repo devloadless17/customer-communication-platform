@@ -1,4 +1,5 @@
-import { listTeamMembers } from "@/lib/api/queries";
+import { listAssignmentPolicies, listTeamMembers } from "@/lib/api/queries";
+import { soft } from "@/lib/api/soft";
 
 import { TicketsBoardClient } from "./tickets-board-client";
 
@@ -18,6 +19,11 @@ import { TicketsBoardClient } from "./tickets-board-client";
  * frame, so an SSR seed would be discarded by the first interaction.
  */
 export default async function TicketsPage() {
-  const users = await listTeamMembers();
-  return <TicketsBoardClient users={users} />;
+  const [users, teams] = await Promise.all([
+    listTeamMembers(),
+    // Teams drive the queue filter. Degrades to [] so a teams read failing
+    // hides one filter rather than 500-ing the board; the failure is logged.
+    soft("assignment policies", [], () => listAssignmentPolicies()),
+  ]);
+  return <TicketsBoardClient users={users} teams={teams} />;
 }

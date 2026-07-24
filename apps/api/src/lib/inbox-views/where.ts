@@ -69,6 +69,14 @@ export function inboxViewWhereClauses(
     clauses.push({ channel: { in: filters.channels } });
   }
 
+  // --- Channel ACCOUNT (which number / Page / handle) ----------------------
+  // A separate clause, never merged with the channel one: a view may legitimately
+  // name both ("WhatsApp, but only the Sales number"), and ANDing independent
+  // predicates is the whole reason this function returns an array.
+  if (filters.channelAccountIds?.length) {
+    clauses.push({ channelConnectionId: { in: filters.channelAccountIds } });
+  }
+
   // --- Contact stage ------------------------------------------------------
   // `deletedAt: null` for the same reason the stage preset carries it: a
   // tombstoned contact must not be counted by the badge and then be absent
@@ -101,7 +109,7 @@ export function inboxViewWhereClauses(
 
   // --- Triage flags -------------------------------------------------------
   // Reads the denormalized counter, served by the partial index
-  // Conversation_teamId_openFlag_idx — not a correlated EXISTS over Message ->
+  // Conversation_workspaceId_openFlag_idx — not a correlated EXISTS over Message ->
   // MessageFlag, which would be the wrong shape against the largest table.
   if (filters.hasOpenFlags) {
     clauses.push({ openFlagCount: { gt: 0 } });

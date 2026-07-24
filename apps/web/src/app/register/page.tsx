@@ -3,6 +3,9 @@ import Link from "next/link";
 import { MessageSquareText } from "lucide-react";
 
 import { getCurrentSession } from "@/lib/auth";
+import { googleSignInEnabled } from "@/lib/auth/better-auth";
+import { GoogleButton } from "@/app/login/google-button";
+
 import { RegisterForm } from "./register-form";
 
 export const metadata = {
@@ -32,9 +35,25 @@ export default async function RegisterPage() {
             Create your workspace
           </h1>
           <p className="mb-5 text-xs text-muted-foreground">
-            You&apos;ll be the admin of your team. Connect your WhatsApp number after
+            You&apos;ll own the organization. Connect your WhatsApp number after
             sign-up — that takes about 5 minutes.
           </p>
+
+          {/* Same button as sign-in: Google is one handshake, and a first-time
+              address gets its organization provisioned on arrival. Splitting it
+              into "sign in with" vs "sign up with" would imply a choice the
+              user doesn't actually have to make. */}
+          {googleSignInEnabled() && (
+            <>
+              <GoogleButton next="/inbox" label="Continue with Google" />
+              <div className="my-4 flex items-center gap-3">
+                <span className="h-px flex-1 bg-border" />
+                <span className="text-2xs text-muted-foreground">Or</span>
+                <span className="h-px flex-1 bg-border" />
+              </div>
+            </>
+          )}
+
           <RegisterForm />
         </div>
 

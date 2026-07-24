@@ -117,7 +117,12 @@ test.describe("auth", () => {
     await page.fill('input[name="password"]', LOGIN_PASSWORD);
     await Promise.all([
       page.waitForURL(/\/inbox/, { timeout: 20_000 }),
-      page.click('button[type="submit"]'),
+      // Scoped to the form that owns the password field, NOT `button[type=
+    // "submit"]`. Since "Continue with Google" was added it renders ABOVE the
+    // password form (deliberately — the one-click path belongs above the fold),
+    // and it is a submit button in its own form, so the bare selector matched
+    // GOOGLE first and every login here navigated to accounts.google.com.
+    page.locator('form:has(input[name="password"]) button[type="submit"]').click(),
     ]);
     expect(page.url()).toMatch(/\/inbox/);
     const cookies = await context.cookies();
@@ -181,7 +186,10 @@ const PAGES = [
   "/settings/snippets",
   "/settings/contact-fields",
   "/settings/integrations",
-  "/settings/account",
+  // Account + notifications are per-PERSON, so they live at /account/*, not
+  // /settings/* (which is per-workspace). Moved in the org→workspace restructure.
+  "/account",
+  "/account/notifications",
 ];
 
 for (const path of PAGES) {
@@ -237,7 +245,12 @@ test.describe("logout flow", () => {
     await page.fill('input[name="password"]', LOGIN_PASSWORD);
     await Promise.all([
       page.waitForURL(/\/inbox/, { timeout: 20_000 }),
-      page.click('button[type="submit"]'),
+      // Scoped to the form that owns the password field, NOT `button[type=
+    // "submit"]`. Since "Continue with Google" was added it renders ABOVE the
+    // password form (deliberately — the one-click path belongs above the fold),
+    // and it is a submit button in its own form, so the bare selector matched
+    // GOOGLE first and every login here navigated to accounts.google.com.
+    page.locator('form:has(input[name="password"]) button[type="submit"]').click(),
     ]);
   }
 

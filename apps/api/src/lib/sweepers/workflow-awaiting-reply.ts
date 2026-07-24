@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { isPoolClosedError } from "@/lib/sweepers/_mutex";
 
 /**
  * Periodic sweeper that cleans up stale `WorkflowAwaitingReply` rows. The
@@ -37,6 +38,16 @@ export function startWorkflowAwaitingReplySweeper(): void {
     inFlight = true;
     sweepOnce()
       .catch((err) => {
+        // Pool already ended (dev hot-reload / graceful shutdown). The work
+        // is simply over — stop the timer instead of logging a stack trace on
+        // every remaining tick. `clearInterval` does NOT cancel a tick already
+        // in flight, so without this the sweeper keeps querying a closed pool
+        // and Prisma logs "Cannot use a pool after calling end on the pool"
+        // once per tick for the whole drain.
+        if (isPoolClosedError(err)) {
+          stopWorkflowAwaitingReplySweeper();
+          return;
+        }
         console.warn(
           "[workflow-awaiting-reply-sweeper] iteration failed:",
           err instanceof Error ? err.message : err,

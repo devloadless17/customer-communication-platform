@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, Loader2, Save } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,12 @@ import type {
   VariableSource,
 } from "@ccp/shared/template-bindings";
 import { cn } from "@ccp/shared/utils";
+// Shared with the server so the editor and the send path agree on what counts
+// as a variable — a local copy is how the two drift.
+import {
+  countTemplatePlaceholders as countPlaceholders,
+  templateNamedPlaceholders,
+} from "@ccp/shared/template-render";
 
 /**
  * Per-variable editor. For every `{{n}}` in the template body (and the header
@@ -47,6 +53,7 @@ const CONTACT_FIELDS: Array<{ key: ContactFieldKey; label: string }> = [
 export function VariableBindingsEditor({
   templateId,
   components,
+  parameterFormat = "positional",
   initialBindings,
   fieldDefinitions,
   onSaved,
@@ -55,6 +62,14 @@ export function VariableBindingsEditor({
   /** Set in the drawer (drives PATCH on save). Omitted in the create wizard. */
   templateId?: string;
   components: TemplateComponent[];
+  /**
+   * Meta's `parameter_format` for this template. Passed in rather than sniffed
+   * from the text: a positional template whose body contains the literal copy
+   * `{{order_id}}` reads as named to a regex, and the editor would then offer a
+   * binding slot for a variable that doesn't exist. Defaults to positional,
+   * which is Meta's own default.
+   */
+  parameterFormat?: "positional" | "named";
   initialBindings: VariableBindings;
   fieldDefinitions: ContactFieldDefinition[];
   /** Drawer mode — fires after a successful PATCH. */
@@ -64,11 +79,26 @@ export function VariableBindingsEditor({
 }) {
   const body = components.find((c) => c.type === "BODY");
   const header = components.find((c) => c.type === "HEADER");
+  const isNamed = parameterFormat === "named";
 
-  const bodyVarCount = body?.text ? countPlaceholders(body.text) : 0;
-  const headerHasVar = header?.format === "TEXT" && header.text
-    ? countPlaceholders(header.text) > 0
-    : false;
+  // Variable KEYS, in the order Meta fills them: `["1","2"]` or the named
+  // placeholders in first-appearance order. Bindings stay index-addressed —
+  // `bindings.body[i]` binds `bodyVarKeys[i]` — so a named template needs no
+  // change to the persisted shape, only to how each row is LABELLED.
+  const bodyVarKeys = useMemo<string[]>(() => {
+    const text = body?.text ?? "";
+    if (isNamed) return templateNamedPlaceholders(text);
+    const n = countPlaceholders(text);
+    return Array.from({ length: n }, (_, i) => String(i + 1));
+  }, [isNamed, body?.text]);
+  const bodyVarCount = bodyVarKeys.length;
+
+  const headerVarKey = useMemo<string | null>(() => {
+    if (header?.format !== "TEXT" || !header.text) return null;
+    if (isNamed) return templateNamedPlaceholders(header.text)[0] ?? null;
+    return countPlaceholders(header.text) > 0 ? "1" : null;
+  }, [isNamed, header?.format, header?.text]);
+  const headerHasVar = headerVarKey !== null;
 
   const [bindings, setBindings] = useState<VariableBindings>(() =>
     normalize(initialBindings, bodyVarCount, headerHasVar),
@@ -135,7 +165,7 @@ export function VariableBindingsEditor({
   if (bodyVarCount === 0 && !headerHasVar) {
     return (
       <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
-        This template has no <code className="rounded bg-muted px-1 text-2xs">{"{{n}}"}</code> variables.
+        This template has no variables.
       </div>
     );
   }
@@ -144,7 +174,7 @@ export function VariableBindingsEditor({
     <div className="flex flex-col gap-3">
       {headerHasVar && bindings.header && (
         <BindingRow
-          slot="Header {{1}}"
+          slot={`Header {{${headerVarKey}}}`}
           binding={bindings.header}
           onChange={setHeader}
           fieldDefinitions={fieldDefinitions}
@@ -153,7 +183,7 @@ export function VariableBindingsEditor({
       {bindings.body.map((b, i) => (
         <BindingRow
           key={i}
-          slot={`Body {{${i + 1}}}`}
+          slot={`Body {{${bodyVarKeys[i] ?? i + 1}}}`}
           binding={b}
           onChange={(next) => setBody(i, next)}
           fieldDefinitions={fieldDefinitions}
@@ -304,13 +334,3 @@ function normalize(
   return header ? { body, header } : { body };
 }
 
-function countPlaceholders(text: string): number {
-  let max = 0;
-  const re = /\{\{(\d+)\}\}/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const n = Number(m[1]);
-    if (Number.isFinite(n) && n > max) max = n;
-  }
-  return max;
-}

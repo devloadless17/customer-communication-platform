@@ -131,7 +131,61 @@ const apiProdRequired: Check[] = [
     name: "R2_BUCKET",
     hint: "R2 bucket name that stores all media + avatars (e.g. central-ccp).",
   },
+  {
+    name: "MAIL_FROM",
+    hint:
+      "The From address for verification codes + invites (e.g. " +
+      "noreply@yourdomain.com). MUST be on a domain verified in Brevo with SPF " +
+      "and DKIM DNS records — an unverified sender is either rejected outright " +
+      "or delivered straight to spam, and no amount of application code fixes " +
+      "that.",
+  },
 ];
+
+// Mail needs ONE of two credential sets, so neither can be individually
+// required. Brevo issues an HTTP API key (`xkeysib-…`) and an SMTP key
+// (`xsmtpsib-…`) and they are not interchangeable — pasting one where the other
+// belongs fails with an error that names neither. `recommended` warns when
+// BOTH are absent, which is the state that actually breaks signup + invites:
+// with no credential the api LOGS every email instead of sending it, so nobody
+// receives a verification code and both flows dead-end silently.
+const mailRecommended: Check[] = [
+  {
+    name: "BREVO_API_KEY",
+    hint:
+      "Brevo HTTP API key (starts `xkeysib-`). Only needs outbound 443, " +
+      "whereas SMTP needs port 587 open and fails as a HANG when it isn't. " +
+      "Alternatively set MAIL_SMTP_HOST/USER/PASSWORD to send over the SMTP " +
+      "relay with an `xsmtpsib-` key — preferred in production, because an " +
+      "SMTP key can only SEND while a Brevo API key cannot be scoped and " +
+      "grants full account access.",
+  },
+];
+
+/**
+ * Is outbound email actually configured?
+ *
+ * Mirrors `mailTransport()` in @ccp/shared/mail/send: HTTP when BREVO_API_KEY
+ * is set, otherwise SMTP, otherwise a stub that writes the message to the log
+ * and sends nothing.
+ *
+ * In production that stub is not a degraded mode, it is a broken product: a new
+ * signup's verification code never arrives, and because the API refuses
+ * unverified sessions the account can never be used. Password reset dies the
+ * same way. So production BOOT FAILS rather than starting a deployment whose
+ * only symptom is customers quietly unable to sign up.
+ *
+ * `MAIL_FROM` is checked alongside the credential because Brevo rejects a send
+ * with no verified sender — having a valid key and no MAIL_FROM fails at the
+ * first send instead of at boot, which is the same silent failure one step
+ * later.
+ */
+function mailIsConfigured(): boolean {
+  const hasTransport = Boolean(
+    process.env.BREVO_API_KEY?.trim() || process.env.MAIL_SMTP_HOST?.trim(),
+  );
+  return hasTransport && Boolean(process.env.MAIL_FROM?.trim());
+}
 
 // Required in production, but ONLY in the web process (the api process never
 // reads these). Mirrors apiRequired but gated on PROD like prodRequired.
@@ -177,7 +231,13 @@ export function validateEnv(label: "api" | "web" = "api"): void {
     label === "api" ? apiProdRequired.filter((c) => !present(c)) : [];
   const missingWebProdRequired =
     label === "web" ? webProdRequired.filter((c) => !present(c)) : [];
-  const missingRecommended = recommended.filter((c) => !present(c));
+  const missingRecommended = [
+    ...recommended,
+    // Mail is satisfied by EITHER transport, so it cannot be a plain per-var
+    // check: warning about a missing API key while SMTP is happily configured
+    // is the kind of noise that teaches operators to ignore boot warnings.
+    ...(process.env.BREVO_API_KEY || process.env.MAIL_SMTP_HOST ? [] : mailRecommended),
+  ].filter((c) => !present(c));
 
   const fatals = [
     ...missingRequired,
@@ -186,6 +246,24 @@ export function validateEnv(label: "api" | "web" = "api"): void {
     ...(PROD ? missingApiProdRequired : []),
     ...(PROD ? missingWebProdRequired : []),
   ];
+
+  // Mail is a production fatal, but it cannot be expressed as a per-variable
+  // check: it is satisfied by EITHER credential group, so listing any single
+  // name as required would be wrong in the other configuration.
+  if (PROD && !mailIsConfigured()) {
+    console.error(
+      `${tag} fatal: outbound email is not configured. Set MAIL_FROM plus ` +
+        `EITHER BREVO_API_KEY (HTTP, port 443) OR MAIL_SMTP_HOST/USER/PASSWORD ` +
+        `(SMTP, port 587 — preferred in production: an SMTP key can only send, ` +
+        `while a Brevo API key grants full account access).`,
+    );
+    console.error(
+      `${tag} without it every email is written to the log and never sent, so ` +
+        `no new account can complete verification and none can be used.`,
+    );
+    console.error(`${tag} aborting boot. Run \`pnpm mail:check\` to verify credentials.`);
+    process.exit(1);
+  }
 
   if (fatals.length > 0) {
     console.error(`${tag} fatal: missing required environment variable(s):`);

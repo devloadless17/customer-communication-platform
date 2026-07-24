@@ -6,6 +6,7 @@ import { CheckCircle2, Loader2, RotateCcw, ShieldX } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessage } from "@ccp/shared/api/error-message";
 import type { OrgStatus } from "@ccp/shared/types";
 
 /**
@@ -13,8 +14,13 @@ import type { OrgStatus } from "@ccp/shared/types";
  * `router.refresh()` re-runs the RSC so the badge + analytics reflect the
  * change. The server also busts the target org's session cache, so the change
  * takes effect for that org on its next request — not after the 15s TTL.
+ *
+ * Keyed by ORGANISATION id. It used to take a workspace id and reach the org
+ * through it, which meant an org with no workspaces had no id to pass — so the
+ * approve button was gated behind `workspaces[0]` and a zero-workspace org sat
+ * `pending` forever with an empty Action column and no way out.
  */
-function useSetTeamStatus(workspaceId: string) {
+function useSetTeamStatus(organizationId: string) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -27,14 +33,13 @@ function useSetTeamStatus(workspaceId: string) {
     setError(null);
     startTransition(async () => {
       try {
-        const res = await apiFetch(`/api/admin/teams/${workspaceId}/status`, {
+        const res = await apiFetch(`/api/admin/organizations/${organizationId}/status`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(reason ? { status, reason } : { status }),
         });
         if (!res.ok) {
-          const data = (await res.json().catch(() => ({}))) as { error?: string };
-          setError(data.error ?? "Failed to update status");
+          setError(await apiErrorMessage(res, "Failed to update status"));
           return;
         }
         onDone?.();
@@ -54,8 +59,8 @@ function useSetTeamStatus(workspaceId: string) {
  * One-click "Approve" for a pending org. Used inline in the Organizations list
  * (the approval queue) so the common action doesn't need a detail-page trip.
  */
-export function QuickApproveButton({ workspaceId }: { workspaceId: string }) {
-  const { setStatus, pending, error } = useSetTeamStatus(workspaceId);
+export function QuickApproveButton({ organizationId }: { organizationId: string }) {
+  const { setStatus, pending, error } = useSetTeamStatus(organizationId);
   return (
     <div className="flex flex-col items-end gap-1">
       <Button size="sm" disabled={pending} onClick={() => setStatus("active")}>
@@ -78,15 +83,15 @@ export function QuickApproveButton({ workspaceId }: { workspaceId: string }) {
  * org — that's managed from Settings, mirroring the delete button's guard.
  */
 export function TeamStatusControls({
-  workspaceId,
+  organizationId,
   status,
   isOwnTeam,
 }: {
-  workspaceId: string;
+  organizationId: string;
   status: OrgStatus;
   isOwnTeam: boolean;
 }) {
-  const { setStatus, pending, error } = useSetTeamStatus(workspaceId);
+  const { setStatus, pending, error } = useSetTeamStatus(organizationId);
   const [suspendOpen, setSuspendOpen] = useState(false);
   const [reason, setReason] = useState("");
 

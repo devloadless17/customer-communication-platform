@@ -30,6 +30,7 @@ import type {
 import { useConversationCounts } from "@/features/inbox/hooks/use-conversation-counts";
 import { useLiveCalls } from "@/features/calls/hooks/use-live-calls";
 import { InboxViewsSection } from "@/features/inbox/components/views/inbox-views-section";
+import { InboxAccountsSection } from "@/features/inbox/components/inbox-accounts-section";
 
 import { SubSidebar, SubSidebarSection } from "./sub-sidebar";
 
@@ -311,6 +312,10 @@ export function InboxSubSidebar({
         tags={tags}
         teammates={teammates ?? []}
       />
+
+      {/* Which NUMBER / Page / handle — orthogonal to everything above, and
+          self-hiding when the workspace has only one account per channel. */}
+      <InboxAccountsSection />
 
       <div className="mt-3">
         <button

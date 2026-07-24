@@ -402,8 +402,12 @@ test("the /flags queue lists the open flag and resolving there clears it", async
   // The row leaves the OPEN queue — driven by the socket frame, not a reload.
   await expect(row).toBeHidden({ timeout: 15_000 });
 
-  // …and is findable under "Handled".
-  await page.getByRole("button", { name: "Handled" }).click();
+  // …and is findable under "Handled" — a sub-sidebar LINK (`?status=resolved`),
+  // not a button. It was an in-page tab when this was written; the queue's
+  // filters have since moved into the section sub-sidebar, where every entry is
+  // a `<Link>`. `getByRole("button")` could never match it again, so this spec
+  // had been failing on that line rather than on anything it tests.
+  await page.getByRole("link", { name: "Handled" }).click();
   await expect(
     page.getByText(`${PREFIX}the order arrived late again`),
   ).toBeVisible({ timeout: 15_000 });
@@ -500,8 +504,8 @@ test("the /flags queue search narrows by message text and by contact", async ({
   ).toBeHidden({ timeout: 20_000 });
 
   // Searching by CONTACT name finds it again (the flag is resolved by now, so
-  // look under Handled).
-  await page.getByRole("button", { name: "Handled" }).click();
+  // look under Handled — a sub-sidebar link, see the note above).
+  await page.getByRole("link", { name: "Handled" }).click();
   await search.fill(`${PREFIX}Layla`);
   await expect(
     page.getByText(`${PREFIX}the order arrived late again`).first(),

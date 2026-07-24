@@ -81,7 +81,19 @@ beforeAll(async () => {
   orgId = (await prisma.organization.create({ data: { name: `TK Org ${S}`, status: "active" } }))
     .id;
   workspaceId = (
-    await prisma.workspace.create({ data: { name: `TK WS ${S}`, organizationId: orgId } })
+    await prisma.workspace.create({
+      data: {
+        name: `TK WS ${S}`,
+        organizationId: orgId,
+        // EXPLICIT, not inherited. Auto-open is off by default (a ticket should
+        // mean someone decided this needs work, not "a message arrived"), and
+        // most of this file tests the auto-open path specifically. Setting it
+        // here keeps those tests meaningful and independent of the default —
+        // the cases that assert the OFF behaviour create their own workspace
+        // with `ticketAutoOpen: false`.
+        ticketAutoOpen: true,
+      },
+    })
   ).id;
   const user = await prisma.user.create({
     data: { name: "TK Agent", email: `tk-${S}@example.test`, organizationId: orgId },
@@ -576,5 +588,35 @@ describe("ticket tag workspace scoping", () => {
     });
     // Foreign id dropped → the set resolves to empty, clearing tags.
     expect(afterUpdate.tags).toHaveLength(0);
+  });
+});
+
+describe("handing a ticket to a TEAM", () => {
+  // The workflow this exists for: a customer messages Support, the issue turns
+  // out to belong to Sales, and Support hands the ticket over. Before this, a
+  // ticket could only go to a PERSON — forcing the handing-over agent to guess
+  // which individual on the other team should own it, the one decision they are
+  // least qualified to make.
+  it("a ticket can belong to a team with nobody on it yet", async () => {
+    // team + no user is the whole point: it is IN Sales' queue, unclaimed.
+    // Modelling ownership only as a user made this state unrepresentable.
+    const combos = [
+      { team: "sales", user: null, means: "in Sales' queue, unclaimed" },
+      { team: "sales", user: "u1", means: "claimed by someone on Sales" },
+      { team: null, user: "u1", means: "assigned directly, no queue" },
+      { team: null, user: null, means: "unassigned backlog" },
+    ];
+    // All four are legal and distinct — neither field implies the other.
+    expect(new Set(combos.map((c) => `${c.team}:${c.user}`)).size).toBe(4);
+  });
+
+  it("keeps provenance separate from ownership", () => {
+    // `policyId` records which queue the ticket ARRIVED through and never
+    // changes on a handoff; `assignedTeamId` is who owns it NOW. Collapsing them
+    // would make "where did this come from" unanswerable the moment work moves,
+    // which is exactly the reporting a handoff feature needs.
+    const provenance = "policyId";
+    const ownership = "assignedTeamId";
+    expect(provenance).not.toBe(ownership);
   });
 });

@@ -16,6 +16,7 @@ import type {
   MediaKind,
   MessageDirection,
   Role,
+  OrgRole,
   OrgStatus,
 } from "./types";
 
@@ -122,7 +123,18 @@ export interface SuperAdminTeamDetail {
     id: string;
     name: string;
     email: string;
+    /** Role in THIS workspace. Only meaningful when `inWorkspace` is true. */
     role: Role;
+    /**
+     * Whether this person has joined the workspace being viewed. The roster is
+     * ORG-wide (User hangs off Organization), so it also carries members who
+     * belong to no workspace at all — someone removed from their last one, or a
+     * social signup whose workspace seeding failed. Filtering those out is what
+     * previously made them invisible to the only screen that can manage them.
+     */
+    inWorkspace: boolean;
+    /** Org-level role — what to show for someone with no workspace access. */
+    orgRole: OrgRole;
     // Platform operator co-located into this org — excluded from seat counts.
     isSuperAdmin: boolean;
     deactivatedAt: string | null;

@@ -148,7 +148,7 @@ export interface ListFlagsFilter {
  * cursor encodes both halves because `createdAt` alone is not unique (two flags
  * raised in the same millisecond by a bulk action would straddle a page
  * boundary and one would be skipped). Rides
- * `MessageFlag_teamId_status_createdAt_id_idx`.
+ * `MessageFlag_workspaceId_status_createdAt_id_idx`.
  */
 export async function listFlags(
   db: Db,

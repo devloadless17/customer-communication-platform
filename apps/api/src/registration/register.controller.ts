@@ -22,7 +22,7 @@ import {
 import { createTokenBucket } from "../common/token-bucket";
 import { zBody } from "../common/zod-validation.pipe";
 import { DbService } from "../db/db.service";
-import { provisionWorkspace } from "@/lib/workspaces/provision";
+import { provisionOrganization } from "./provision-organization";
 
 // Per-IP register bucket. Tighter than the global 600/min/IP cap because
 // register is unauthenticated AND creates an entire Team+User+Account+...
@@ -86,43 +86,28 @@ export class RegisterController {
 
     try {
       const result = await this.db.$transaction(async (tx) => {
-        // `status: pending` (explicit, though it's the column default too) — the
-        // org is created but locked out of the app until a superAdmin approves
-        // it. The web action redirects the new admin to /pending afterward.
-        // A signup provisions the whole hierarchy: the Organization is the
-        // tenant/billing root and carries the approval gate, and it gets one
-        // starter Workspace which is what all the data below scopes to.
-        const organization = await tx.organization.create({
-          data: { name: body.orgName, status: "pending" },
-        });
-        // The founder owns the ORG (billing + directory) and is admin of the
-        // starter workspace — two separate grants now, not one `role` column.
-        const user = await tx.user.create({
-          data: {
-            organizationId: organization.id,
-            orgRole: "owner",
-            name: body.name,
-            email: body.email,
-          },
+        // One shared implementation with the Google path — see
+        // provision-organization.ts for why this is extracted rather than
+        // inlined twice.
+        //
+        // `emailVerified: false` is the change that makes signup real: the
+        // account exists but cannot act until the OTP is confirmed. The web
+        // action sends the code immediately after this returns.
+        const { userId, workspaceId } = await provisionOrganization(tx, {
+          orgName: body.orgName,
+          name: body.name,
+          email: body.email,
+          emailVerified: false,
         });
         await tx.account.create({
           data: {
-            userId: user.id,
+            userId,
             providerId: "credential",
             accountId: body.email,
             password: passwordHash,
           },
         });
-        // Everything a new workspace contains — stages, starter flags,
-        // #general, and the founder's admin membership — lives in ONE place so
-        // a workspace created later from Organization settings is identical to
-        // this one. See lib/workspaces/provision.ts.
-        const team = await provisionWorkspace(tx, {
-          organizationId: organization.id,
-          name: body.orgName,
-          founderUserId: user.id,
-        });
-        return { email: body.email, workspaceId: team.id };
+        return { email: body.email, workspaceId };
       });
 
       // The super-admin roster + overview are memoized for 60s. A brand-new

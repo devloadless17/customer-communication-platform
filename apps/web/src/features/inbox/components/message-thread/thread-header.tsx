@@ -8,6 +8,7 @@ import { AiStateControl } from "../ai/ai-state-control";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { useCallApi } from "@/features/calls/call-provider";
+import { useChannelAccounts } from "@/features/inbox/contexts/channel-accounts-context";
 import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { formatPhone, initials } from "@ccp/shared/utils";
@@ -148,6 +149,7 @@ function ThreadHeaderImpl({
   onMobileBack,
   onOpenContactDetails,
   channel,
+  channelConnectionId,
   visitorPresent,
   visitorLeftAt,
 }: {
@@ -204,6 +206,9 @@ function ThreadHeaderImpl({
   onOpenContactDetails?: () => void;
   /** Channel of this conversation — presence chip is webchatwidget-only. */
   channel?: Channel;
+  /** Which of the workspace's accounts (WhatsApp number / Page / IG handle)
+   *  this thread is on. Shown only when the channel has more than one. */
+  channelConnectionId?: string | null;
   /** Website visitor presence (null until a frame arrives). */
   visitorPresent?: boolean | null;
   visitorLeftAt?: number | null;
@@ -218,6 +223,11 @@ function ThreadHeaderImpl({
   const [aiState, setAiState] = useState<
     "ai_active" | "human_active" | "ai_paused" | "disabled" | null
   >(null);
+  // "You are replying AS this number." The single most useful place for it: an
+  // agent about to type sees which of the workspace's numbers the customer is
+  // talking to, without opening settings. Null unless the channel actually has
+  // more than one account.
+  const inboundAccount = useChannelAccounts().accountFor(channel, channelConnectionId);
   return (
     <header className="@container flex h-15 shrink-0 items-center gap-2 border-b border-border px-3 md:gap-3 md:px-4">
       {onMobileBack && (
@@ -247,8 +257,24 @@ function ThreadHeaderImpl({
             <VisitorPresenceChip present={visitorPresent} leftAt={visitorLeftAt} />
           )}
         </div>
-        <div className="truncate font-mono text-2xs tabular-nums text-muted-foreground">
-          {formatPhone(phone)}
+        <div className="flex items-center gap-1.5 truncate text-2xs text-muted-foreground">
+          <span className="truncate font-mono tabular-nums">{formatPhone(phone)}</span>
+          {inboundAccount && (
+            <>
+              <span aria-hidden className="text-muted-foreground/50">·</span>
+              <span
+                className="truncate"
+                title={
+                  inboundAccount.providerName &&
+                  inboundAccount.providerName !== inboundAccount.name
+                    ? `Replying from ${inboundAccount.name} (${inboundAccount.providerName})`
+                    : `Replying from ${inboundAccount.name}`
+                }
+              >
+                via <span className="font-medium text-foreground/70">{inboundAccount.name}</span>
+              </span>
+            </>
+          )}
         </div>
       </div>
 

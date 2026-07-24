@@ -5,7 +5,7 @@ import type {
   SuperAdminTeamRow,
   SuperAdminOrgRow,
 } from "@ccp/shared/dtos";
-import type { OrgStatus } from "@ccp/shared/types";
+import type { OrgRole, OrgStatus } from "@ccp/shared/types";
 
 // superAdmin: cross-team browsing. These queries are the ONLY ones that
 // legitimately ignore the team scope — all callers must be gated through
@@ -278,14 +278,27 @@ export async function getTeamDetailForSuperAdmin(
   // superAdmin's visibility ends at aggregate counts + the member roster,
   // never at message bodies or contact names. Customer chats stay private
   // to each team.
+  //
+  // Selected by ORGANISATION, not by membership of this workspace. `User` hangs
+  // off `Organization`, so `workspaceMemberships.some(workspaceId)` silently
+  // omitted anyone belonging to no workspace. Two routine ways to get there:
+  //   - an admin removes someone from their last workspace — that deletes the
+  //     `WorkspaceMember` row and keeps the account (workspaces.service.ts);
+  //   - a social signup whose phase-2 workspace seeding failed, leaving a user
+  //     with an org and nothing else (oauth-provision.controller.ts).
+  // Both accounts still hold a globally-unique email, so they are exactly what
+  // an operator needs to see — and they were invisible on the only screen that
+  // lists members. Everyone in the org is listed; `inWorkspace` says who
+  // actually has access to THIS one.
   const members = await db.user.findMany({
-    where: { workspaceMemberships: { some: { workspaceId } } },
+    where: { organizationId: team.organizationId },
     orderBy: [{ name: "asc" }],
     select: {
       id: true,
       name: true,
       email: true,
       isSuperAdmin: true,
+      orgRole: true,
       workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 },
       deactivatedAt: true,
       createdAt: true,
@@ -316,7 +329,12 @@ export async function getTeamDetailForSuperAdmin(
       id: m.id,
       name: m.name,
       email: m.email,
+      // Role IN THIS WORKSPACE. Meaningless when `inWorkspace` is false — the
+      // UI shows the org role there instead of implying workspace access the
+      // person doesn't have.
       role: m.workspaceMemberships[0]?.role ?? "agent",
+      inWorkspace: m.workspaceMemberships.length > 0,
+      orgRole: m.orgRole as OrgRole,
       isSuperAdmin: m.isSuperAdmin,
       deactivatedAt: m.deactivatedAt?.toISOString() ?? null,
       createdAt: m.createdAt.toISOString(),

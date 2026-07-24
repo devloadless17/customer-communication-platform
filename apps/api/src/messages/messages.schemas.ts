@@ -89,15 +89,119 @@ export const SendTemplateSchema = z.object({
   variables: z
     .object({
       body: z.array(z.string()).default([]),
+      /**
+       * NAMED-format bodies (`parameter_format: NAMED`, `{{order_id}}`).
+       *
+       * A template is EITHER positional or named, never both, so exactly one of
+       * `body` / `bodyNamed` carries values. Without this field a named template
+       * synced from WhatsApp Manager was un-sendable from the inbox: the picker
+       * had no way to put the values on the wire, and `sendTemplateInternal`
+       * rejected the send with `named_body_vars_required`.
+       */
+      bodyNamed: z
+        .array(z.object({ name: z.string().min(1).max(64), text: z.string() }))
+        .max(64)
+        .optional(),
       header: z.string().optional(),
       // Media for an IMAGE/VIDEO/DOCUMENT template header. `link` is the stable
       // R2 object URL the composer produces (presigned fresh at send time).
       headerMedia: z
         .object({
           kind: z.enum(["image", "video", "document"]),
-          link: z.string().url().max(2048),
+          // Either form. `id` is a media id already uploaded to Meta — its
+          // recommended shape, because a `link` makes Meta fetch from our
+          // server on every send. Exactly one is required.
+          link: z.string().url().max(2048).optional(),
+          id: z.string().min(1).max(255).optional(),
           filename: z.string().max(255).optional(),
         })
+        .refine((m) => Boolean(m.link) !== Boolean(m.id), {
+          message: "header media needs exactly one of `link` or `id`",
+        })
+        .optional(),
+      /**
+       * The pin for a LOCATION template header. Declared with no parameters at
+       * template-create time, so the whole thing arrives here at send time.
+       */
+      headerLocation: z
+        .object({
+          latitude: z.string().min(1).max(32),
+          longitude: z.string().min(1).max(32),
+          // Optional per Meta: a pin renders from coordinates alone. Requiring
+          // these refused sends Meta accepts.
+          name: z.string().max(120).optional(),
+          address: z.string().max(255).optional(),
+        })
+        .optional(),
+      /**
+       * Send-time parameters for dynamic buttons — a URL button's `{{1}}`
+       * suffix, a copy-code coupon, or a quick-reply payload.
+       *
+       * `/v1` has accepted these since the field existed; the INTERNAL schema
+       * did not, so a template with a dynamic URL or copy-code button was
+       * sendable through the API and a dead end in the inbox — the picker showed
+       * the buttons, then the send failed `button_params_required` with no way
+       * for the agent to supply a value. Parity with the UI is a locked rule and
+       * this closes it in the direction that was actually broken.
+       */
+      buttons: z
+        .array(
+          z.object({
+            index: z.number().int().min(0).max(9),
+            subType: z.enum(["url", "copy_code", "quick_reply"]),
+            text: z.string().min(1).max(2048),
+          }),
+        )
+        .max(10)
+        .optional(),
+      /**
+       * Tap-target override — makes an image/text/header-less template act as a
+       * call-to-action showing `title` and opening `url`. Send-time only; Meta
+       * gates it on a fully verified WABA with sustained high quality.
+       */
+      tapTarget: z
+        .object({
+          url: z.string().url().max(2048),
+          title: z.string().trim().min(1).max(120),
+        })
+        .optional(),
+      /**
+       * Limited-time offer expiry, a UNIX timestamp in MILLISECONDS. Required
+       * when the template carries a LIMITED_TIME_OFFER component — the countdown
+       * has nothing to count to without it.
+       */
+      limitedTimeOfferExpiresAtMs: z.number().int().positive().optional(),
+      /**
+       * Per-card values for a media-card carousel, in card order. The array
+       * length must equal the card count the template was APPROVED with — Meta
+       * fixes that number at creation and rejects any other.
+       */
+      cards: z
+        .array(
+          z.object({
+            headerMedia: z
+              .object({
+                kind: z.enum(["image", "video"]),
+                link: z.string().url().max(2048).optional(),
+                id: z.string().min(1).max(255).optional(),
+              })
+              .refine((m) => Boolean(m.link) !== Boolean(m.id), {
+                message: "card media needs exactly one of `link` or `id`",
+              }),
+            body: z.array(z.string()).max(10).optional(),
+            buttons: z
+              .array(
+                z.object({
+                  index: z.number().int().min(0).max(1),
+                  subType: z.enum(["url", "quick_reply", "copy_code"]),
+                  text: z.string().min(1).max(2048),
+                }),
+              )
+              .max(2)
+              .optional(),
+          }),
+        )
+        .max(10)
         .optional(),
     })
     .default({ body: [] }),

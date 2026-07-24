@@ -43,6 +43,12 @@ export interface BroadcastFunnel {
   read: number;
   /** Accepted, then reported undeliverable. The "never received it" bucket. */
   undelivered: number;
+  /**
+   * Accepted by Meta, then HELD for a business-portfolio pacing quality
+   * assessment — not en route. Released in a later batch, or dropped (135000).
+   * Counted in `accepted` alongside `sent`, because Meta did take it.
+   */
+  held: number;
   /** Accepted by Meta at least once — the billable population. */
   accepted: number;
   /** Reached the handset (delivered or read). */
@@ -77,7 +83,7 @@ export interface FailureBreakdownRow {
   label: string;
   count: number;
   /** What the operator can DO about it: retry / clean the list / leave alone. */
-  bucket: "retryable" | "permanent" | "suppress";
+  bucket: "retryable" | "permanent" | "suppress" | "content";
   sampleMessage: string | null;
 }
 
@@ -135,11 +141,19 @@ export interface BroadcastReport {
 
 /** Human labels for the normalized codes. Kept beside the buckets so the report,
  *  the CSV, and the API all say the same thing about the same failure. */
-const ERROR_LABELS: Record<string, string> = {
+export const ERROR_LABELS: Record<string, string> = {
   invalid_recipient: "Invalid or unreachable number",
-  per_user_marketing_cap: "Meta per-user marketing cap",
+  per_user_marketing_cap: "Meta per-user marketing cap (or US recipient)",
+  marketing_opt_out: "Stopped marketing from your business",
   rate_limited: "Rate limited by Meta",
   template_unavailable: "Template paused or disabled",
+  // Two situations share Meta's 132015: a send rejected because the template was
+  // already paused, and a message that was HELD by template pacing and then
+  // dropped when the pacing review paused the template. Both mean the same
+  // thing to an operator — the template stopped being sendable — so one label
+  // covers them.
+  portfolio_paced_drop: "Dropped by WhatsApp portfolio review",
+  call_permission_required: "No calling permission from this customer",
   auth_expired: "WhatsApp connection expired",
   outside_24h_window: "Messaging window closed",
   recipient_unavailable: "Recipient blocked or deactivated",
@@ -163,6 +177,7 @@ interface FunnelRow {
   delivered: bigint;
   read: bigint;
   undelivered: bigint;
+  held: bigint;
   replied: bigint;
   clicked: bigint;
   opted_out: bigint;
@@ -210,6 +225,7 @@ export async function getBroadcastReport(
         count(*) FILTER (WHERE "deliveryState" = 'delivered')       AS delivered,
         count(*) FILTER (WHERE "deliveryState" = 'read')            AS read,
         count(*) FILTER (WHERE "deliveryState" = 'undelivered')     AS undelivered,
+        count(*) FILTER (WHERE "deliveryState" = 'held')            AS held,
         count(*) FILTER (WHERE "repliedAt" IS NOT NULL)             AS replied,
         count(*) FILTER (WHERE "clickedAt" IS NOT NULL)             AS clicked,
         count(*) FILTER (WHERE "optedOutAt" IS NOT NULL)            AS opted_out,
@@ -243,6 +259,7 @@ export async function getBroadcastReport(
   const delivered = n(f?.delivered);
   const read = n(f?.read);
   const undelivered = n(f?.undelivered);
+  const held = n(f?.held);
   const failedAtSend = n(f?.failed_at_send);
   const sent = n(f?.sent);
   const targeted = n(f?.targeted);
@@ -251,7 +268,10 @@ export async function getBroadcastReport(
   // "reached the handset" is delivered + read, not delivered alone. Getting this
   // wrong is how a read-heavy campaign reports a nonsense delivery rate.
   const reached = delivered + read;
-  const accepted = reached + undelivered + sent;
+  // `held` counts as accepted for the same reason `sent` does: Meta took the
+  // message and issued a wamid. Leaving it out would drop those recipients from
+  // every bucket and make the funnel silently not add up.
+  const accepted = reached + undelivered + sent + held;
   const neverReceived = failedAtSend + undelivered;
 
   const funnel: BroadcastFunnel = {
@@ -262,6 +282,7 @@ export async function getBroadcastReport(
     delivered,
     read,
     undelivered,
+    held,
     accepted,
     reached,
     neverReceived,
@@ -366,7 +387,7 @@ async function computeBenchmark(
   const rows = await db.$queryRaw<{ reached: bigint; accepted: bigint; read: bigint }[]>`
     SELECT
       count(*) FILTER (WHERE "deliveryState" IN ('delivered','read'))               AS reached,
-      count(*) FILTER (WHERE "deliveryState" IN ('delivered','read','undelivered','sent')) AS accepted,
+      count(*) FILTER (WHERE "deliveryState" IN ('delivered','read','undelivered','sent','held')) AS accepted,
       count(*) FILTER (WHERE "deliveryState" = 'read')                              AS read
     FROM "BroadcastRecipient"
     WHERE "broadcastId" = ANY(${priors.map((p) => p.id)})

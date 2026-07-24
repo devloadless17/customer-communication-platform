@@ -6,6 +6,12 @@ import { AlertTriangle, Check, FileText, Loader2, Send } from "lucide-react";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { Button } from "@/components/ui/button";
 import { HeaderMediaField, headerMediaPreviewSrc } from "@/features/templates/components/header-media-field";
+import {
+  CarouselCardsField,
+  carouselCardsComplete,
+  emptyCarouselCards,
+  type CarouselCardValue,
+} from "@/features/templates/components/carousel-cards-field";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import type {
   Contact,
@@ -23,6 +29,15 @@ import { FieldTokenPicker } from "@/features/templates/components/field-token-pi
 import { TokenHighlightInput } from "@/features/templates/components/token-highlight";
 
 import {
+  templateNamedPlaceholders,
+  renderTemplateBodyNamed,
+  requiredCarouselCards,
+  requiredTemplateButtonParams,
+  templateNeedsOfferExpiry,
+} from "@ccp/shared/template-render";
+
+import {
+  asArray,
   countPlaceholders,
   extractExample,
   firstEmptyIndex,
@@ -58,24 +73,79 @@ export function TemplateFillView({
   lastInboundAt: string | null;
   onSubmit: (vars: {
     body: string[];
+    bodyNamed?: Array<{ name: string; text: string }>;
     header?: string;
     headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
+    headerLocation?: { latitude: string; longitude: string; name: string; address: string };
+    buttons?: Array<{ index: number; subType: "url" | "copy_code" | "quick_reply"; text: string }>;
+    /** Limited-time offer expiry, UNIX ms. Required when the template shows a
+     *  countdown — Meta has nothing to count to without it. */
+    limitedTimeOfferExpiresAtMs?: number;
+    /** Per-card values for a media-card carousel, in card order. The length
+     *  must equal the card count the template was APPROVED with. */
+    cards?: Array<{
+      headerMedia: { kind: "image" | "video"; link?: string; id?: string };
+      body?: string[];
+      buttons?: Array<{
+        index: number;
+        subType: "url" | "quick_reply" | "copy_code";
+        text: string;
+      }>;
+    }>;
   }) => Promise<void>;
 }) {
   // The DTO carries `components: unknown[]` to keep the boundary loose;
-  // narrow once here so the rest of the component sees a real shape.
-  const components = (
-    Array.isArray(template.components) ? template.components : []
-  ) as TemplateComponent[];
+  // narrow once here so the rest of the component sees a real shape. Memoized
+  // on the template so the derived memos below keep a stable dependency — a
+  // fresh array each render would recompute them on every keystroke.
+  const components = useMemo(
+    () =>
+      (Array.isArray(template.components) ? template.components : []) as TemplateComponent[],
+    [template.components],
+  );
   const headerComp = components.find((c) => c.type === "HEADER");
+  const bodyComp = components.find((c) => c.type === "BODY");
   const footerComp = components.find((c) => c.type === "FOOTER");
   const buttonsComp = components.find((c) => c.type === "BUTTONS");
 
-  const bodyVarCount = countPlaceholders(template.bodyText);
+  // A body is EITHER positional (`{{1}}`) or NAMED (`{{order_id}}`), and WHICH
+  // one is Meta's own `parameter_format` — carried on the DTO — not something to
+  // re-derive from the text. Sniffing the body with a regex misreads a positional
+  // template that contains the literal copy `{{order_id}}`, and the send then
+  // builds the named wire shape and fails with Meta error 132000. The server
+  // reads the same column, so the two can no longer disagree about a template.
+  const isNamed = template.parameterFormat === "named";
+  const bodyNamedVars = useMemo(
+    () => (isNamed ? templateNamedPlaceholders(template.bodyText) : []),
+    [isNamed, template.bodyText],
+  );
+  const bodyVarCount = isNamed ? bodyNamedVars.length : countPlaceholders(template.bodyText);
+  // The header carries at most one value; the server pairs it back to the
+  // placeholder NAME for named templates, so the UI only needs "is there one".
   const headerVarCount =
     headerComp?.format === "TEXT" && headerComp.text
-      ? countPlaceholders(headerComp.text)
+      ? isNamed
+        ? templateNamedPlaceholders(headerComp.text).length
+        : countPlaceholders(headerComp.text)
       : 0;
+  // A LOCATION header carries its whole pin at send time.
+  const needsLocation = headerComp?.format === "LOCATION";
+  // A limited-time offer renders a live countdown, so the expiry INSTANT is a
+  // send-time value (the template only declares the offer heading).
+  const needsOfferExpiry = templateNeedsOfferExpiry(components);
+  // Carousel cards. The count is fixed at approval, so this drives the whole
+  // card strip — the UI never offers to add or remove one.
+  const cardRequirements = useMemo(
+    () => requiredCarouselCards(components),
+    [components],
+  );
+  // Buttons Meta REQUIRES a send-time value for: a URL button with a `{{n}}`
+  // suffix, and a copy-code coupon. Same helper the server validates with, so the
+  // picker can no longer render a template it will then refuse to send.
+  const requiredButtons = useMemo(
+    () => requiredTemplateButtonParams(components, template.category),
+    [components, template.category],
+  );
   // IMAGE/VIDEO/DOCUMENT headers need real media supplied at send time.
   const headerMediaKind: "image" | "video" | "document" | null =
     headerComp?.format === "IMAGE"
@@ -97,6 +167,21 @@ export function TemplateFillView({
   } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [location, setLocation] = useState({
+    latitude: "",
+    longitude: "",
+    name: "",
+    address: "",
+  });
+  // Keyed `index:subType` so a template with two dynamic buttons keeps them
+  // apart even when both are URLs.
+  const [buttonVars, setButtonVars] = useState<Record<string, string>>({});
+  // `datetime-local` value ("YYYY-MM-DDTHH:mm") — local wall-clock, which is
+  // what an agent thinks in. Converted to UNIX ms on submit.
+  const [offerExpiresAt, setOfferExpiresAt] = useState("");
+  const [cards, setCards] = useState<CarouselCardValue[]>(() =>
+    emptyCarouselCards(cardRequirements),
+  );
 
   // Reset whenever the template changes — agents pick template A, back out,
   // pick template B; we don't want B's slots prefilled with A's values.
@@ -105,7 +190,11 @@ export function TemplateFillView({
     setHeaderVar("");
     setHeaderMedia(null);
     setUploadError(null);
-  }, [template.id, bodyVarCount]);
+    setLocation({ latitude: "", longitude: "", name: "", address: "" });
+    setButtonVars({});
+    setOfferExpiresAt("");
+    setCards(emptyCarouselCards(cardRequirements));
+  }, [template.id, bodyVarCount, cardRequirements]);
 
   const uploadHeaderMedia = useCallback(
     async (file: File) => {
@@ -181,10 +270,34 @@ export function TemplateFillView({
   );
   const resolvedHeaderVar = useMemo(() => resolve(headerVar), [headerVar, resolve]);
 
+  // `null` when unset OR already past — both block the send.
+  const offerExpiryMs = useMemo(() => {
+    if (!offerExpiresAt) return null;
+    const ms = new Date(offerExpiresAt).getTime();
+    return Number.isFinite(ms) && ms > Date.now() ? ms : null;
+  }, [offerExpiresAt]);
+
   const allFilled =
     resolvedBodyVars.every((v) => v.trim().length > 0) &&
     (headerVarCount === 0 || resolvedHeaderVar.trim().length > 0) &&
-    (headerMediaKind === null || headerMedia !== null);
+    (headerMediaKind === null || headerMedia !== null) &&
+    // Only the coordinates are required — Meta treats the place name and
+    // address as optional labels on the map card.
+    (!needsLocation ||
+      (location.latitude.trim() !== "" && location.longitude.trim() !== "")) &&
+    // Gate on the RESOLVED value, exactly like the body fields: a `$var.…`
+    // token that resolves to empty for this contact must block the send, not
+    // sail through and be rejected by Meta.
+    requiredButtons.every(
+      (b) => resolve(buttonVars[`${b.index}:${b.subType}`] ?? "").trim() !== "",
+    ) &&
+    // A countdown to a past instant arrives already expired, so the gate is
+    // "in the future", not merely "filled in".
+    (!needsOfferExpiry || offerExpiryMs !== null) &&
+    // Gate on the RESOLVED card values for the same reason the body fields do:
+    // a `$var.…` token that comes out empty for this contact must block.
+    (cardRequirements.length === 0 ||
+      carouselCardsComplete(cardRequirements, cards, resolve));
 
   return (
     <form
@@ -197,9 +310,42 @@ export function TemplateFillView({
         // but per-conversation template send doesn't), so the on-the-wire
         // variables must already be literal strings.
         void onSubmit({
-          body: resolvedBodyVars,
+          // A named template puts its values in `bodyNamed` and sends an empty
+          // `body` — the server picks the arm off the template's own format, so
+          // filling both would be ambiguous.
+          body: isNamed ? [] : resolvedBodyVars,
+          ...(isNamed
+            ? {
+                bodyNamed: bodyNamedVars.map((name, i) => ({
+                  name,
+                  text: resolvedBodyVars[i] ?? "",
+                })),
+              }
+            : {}),
           ...(headerVarCount > 0 ? { header: resolvedHeaderVar } : {}),
           ...(headerMedia ? { headerMedia } : {}),
+          ...(needsLocation ? { headerLocation: location } : {}),
+          ...(offerExpiryMs !== null ? { limitedTimeOfferExpiresAtMs: offerExpiryMs } : {}),
+          ...(cardRequirements.length > 0
+            ? {
+                cards: cards.map((c) => ({
+                  ...c,
+                  ...(c.body ? { body: c.body.map(resolve) } : {}),
+                  ...(c.buttons
+                    ? { buttons: c.buttons.map((b) => ({ ...b, text: resolve(b.text) })) }
+                    : {}),
+                })),
+              }
+            : {}),
+          ...(requiredButtons.length > 0
+            ? {
+                buttons: requiredButtons.map((b) => ({
+                  index: b.index,
+                  subType: b.subType,
+                  text: resolve(buttonVars[`${b.index}:${b.subType}`] ?? ""),
+                })),
+              }
+            : {}),
         });
       }}
     >
@@ -224,6 +370,79 @@ export function TemplateFillView({
           </div>
         )}
 
+        {/* Location header — the pin ships at SEND time (the component is
+            declared with no parameters at create time), so all four fields are
+            collected here. */}
+        {needsLocation && (
+          <div className="mb-4 flex flex-col gap-2">
+            <div className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+              Map header
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <LocationField
+                label="Latitude"
+                placeholder="37.442117"
+                value={location.latitude}
+                onChange={(v) => setLocation((c) => ({ ...c, latitude: v }))}
+              />
+              <LocationField
+                label="Longitude"
+                placeholder="-122.161560"
+                value={location.longitude}
+                onChange={(v) => setLocation((c) => ({ ...c, longitude: v }))}
+              />
+            </div>
+            <LocationField
+              label="Place name (optional)"
+              placeholder="Philz Coffee"
+              value={location.name}
+              onChange={(v) => setLocation((c) => ({ ...c, name: v }))}
+            />
+            <LocationField
+              label="Address (optional)"
+              placeholder="101 Forest Ave, Palo Alto, CA 94301"
+              value={location.address}
+              onChange={(v) => setLocation((c) => ({ ...c, address: v }))}
+            />
+          </div>
+        )}
+
+        {cardRequirements.length > 0 && (
+          <div className="mb-4">
+            <CarouselCardsField
+              requirements={cardRequirements}
+              values={cards}
+              onChange={setCards}
+              resolve={resolve}
+            />
+          </div>
+        )}
+
+        {/* Limited-time offer — the countdown's target instant. Declared once
+            on the template (heading + code); WHEN it expires is per-send. */}
+        {needsOfferExpiry && (
+          <div className="mb-4 flex flex-col gap-1.5">
+            <label
+              htmlFor="lto-expiry"
+              className="text-2xs font-medium uppercase tracking-wide text-muted-foreground"
+            >
+              Offer expires
+            </label>
+            <input
+              id="lto-expiry"
+              type="datetime-local"
+              value={offerExpiresAt}
+              onChange={(e) => setOfferExpiresAt(e.target.value)}
+              className="w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-sm outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/25"
+            />
+            <p className="text-2xs text-muted-foreground">
+              {offerExpiresAt && offerExpiryMs === null
+                ? "Pick a time in the future — the countdown would already be over."
+                : "WhatsApp shows a live countdown to this time in the recipient's timezone."}
+            </p>
+          </div>
+        )}
+
         {/* Variables form */}
         {bodyVarCount + headerVarCount > 0 ? (
           <div className="flex flex-col gap-3">
@@ -244,7 +463,7 @@ export function TemplateFillView({
             {bodyVars.map((v, i) => (
               <VarField
                 key={i}
-                label={`Body {{${i + 1}}}`}
+                label={isNamed ? `{{${bodyNamedVars[i]}}}` : `Body {{${i + 1}}}`}
                 value={v}
                 resolved={resolvedBodyVars[i] ?? ""}
                 onChange={(next) => {
@@ -254,7 +473,16 @@ export function TemplateFillView({
                     return copy;
                   });
                 }}
-                placeholder={extractExample(headerComp?.example?.body_text?.[0], i)}
+                // The BODY component's example — not the header's. Reading
+                // `headerComp.example.body_text` meant every body field lost
+                // its "e.g. …" hint (a header component never carries one).
+                placeholder={
+                  isNamed
+                    ? bodyComp?.example?.body_text_named_params?.find(
+                        (p) => p.param_name === bodyNamedVars[i],
+                      )?.example
+                    : extractExample(bodyComp?.example?.body_text?.[0], i)
+                }
                 inputRef={
                   headerVarCount === 0 && i === firstEmptyIndex(bodyVars)
                     ? firstEmptyRef
@@ -265,8 +493,53 @@ export function TemplateFillView({
             ))}
           </div>
         ) : (
-          <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-2xs text-muted-foreground">
-            This template has no variables — it&apos;ll send as-is.
+          !needsLocation &&
+          requiredButtons.length === 0 && (
+            <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-2xs text-muted-foreground">
+              This template has no variables — it&apos;ll send as-is.
+            </div>
+          )
+        )}
+
+        {/* Dynamic button values. Meta REQUIRES these — a URL button with a
+            `{{n}}` suffix, or a copy-code coupon — and rejects the send without
+            them. The picker used to render such buttons read-only in the
+            preview, so the agent hit `button_params_required` with no field to
+            fill: the template was simply un-sendable from the inbox. */}
+        {requiredButtons.length > 0 && (
+          <div className="mt-4 flex flex-col gap-3">
+            <div className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+              Button values
+            </div>
+            {requiredButtons.map((b) => {
+              const btn = buttonsComp?.buttons?.[b.index];
+              const k = `${b.index}:${b.subType}`;
+              return (
+                <VarField
+                  key={k}
+                  label={
+                    b.subType === "copy_code"
+                      ? `Coupon code${btn?.text ? ` — ${btn.text}` : ""}`
+                      : `Link suffix — ${btn?.text ?? `button ${b.index + 1}`}`
+                  }
+                  value={buttonVars[k] ?? ""}
+                  resolved={resolve(buttonVars[k] ?? "")}
+                  onChange={(next) => setButtonVars((cur) => ({ ...cur, [k]: next }))}
+                  placeholder={
+                    b.subType === "copy_code"
+                      ? extractExample(asArray(btn?.example), 0) ?? "250FF"
+                      : extractExample(asArray(btn?.example), 0) ?? "summer2023"
+                  }
+                  fieldDefinitions={fieldDefinitions}
+                />
+              );
+            })}
+            {requiredButtons.some((b) => b.subType === "url") && (
+              <p className="text-3xs text-muted-foreground">
+                The value is appended to the button&apos;s URL. Percent-encode
+                spaces and special characters (a space becomes %20).
+              </p>
+            )}
           </div>
         )}
 
@@ -283,6 +556,7 @@ export function TemplateFillView({
             headerMedia={headerMedia}
             bodyText={template.bodyText}
             bodyVars={resolvedBodyVars}
+            bodyNames={isNamed ? bodyNamedVars : null}
             footerComp={footerComp}
             buttonsComp={buttonsComp}
           />
@@ -316,6 +590,36 @@ export function TemplateFillView({
         </Button>
       </div>
     </form>
+  );
+}
+
+/**
+ * One plain field of a LOCATION header's pin. Deliberately NOT a `VarField`:
+ * these values go to Meta as map coordinates, so `$var.contact.*` token
+ * substitution would be meaningless here and the token affordance would only
+ * invite a value Meta rejects.
+ */
+function LocationField({
+  label,
+  placeholder,
+  value,
+  onChange,
+}: {
+  label: string;
+  placeholder: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-2xs font-medium text-muted-foreground">{label}</span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      />
+    </label>
   );
 }
 
@@ -404,6 +708,7 @@ function PreviewBubble({
   headerMedia,
   bodyText,
   bodyVars,
+  bodyNames,
   footerComp,
   buttonsComp,
 }: {
@@ -412,13 +717,28 @@ function PreviewBubble({
   headerMedia: { kind: "image" | "video" | "document"; link: string; filename?: string } | null;
   bodyText: string;
   bodyVars: string[];
+  /** Placeholder names, positionally aligned with `bodyVars`, for a NAMED
+   *  template; null for a positional one. */
+  bodyNames: string[] | null;
   footerComp: TemplateComponent | undefined;
   buttonsComp: TemplateComponent | undefined;
 }) {
-  const renderedBody = renderPlaceholders(bodyText, bodyVars);
+  const renderedBody = bodyNames
+    ? renderTemplateBodyNamed(
+        bodyText,
+        bodyNames.map((name, i) => ({ name, text: bodyVars[i] ?? "" })),
+      )
+    : renderPlaceholders(bodyText, bodyVars);
   const renderedHeader =
     headerComp?.format === "TEXT" && headerComp.text
-      ? renderPlaceholders(headerComp.text, [headerValue])
+      ? // A named header substitutes by name; `renderPlaceholders` only knows
+        // `{{1}}`, so it left `{{customer_name}}` visible in the preview.
+        renderTemplateBodyNamed(renderPlaceholders(headerComp.text, [headerValue]), [
+          ...templateNamedPlaceholders(headerComp.text).map((name) => ({
+            name,
+            text: headerValue,
+          })),
+        ])
       : null;
 
   return (

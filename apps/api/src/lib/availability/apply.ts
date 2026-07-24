@@ -99,10 +99,19 @@ export type AvailabilityIntent =
 export interface ApplyAvailabilityArgs {
   db: AvailabilityDb;
   user: AvailabilityRow;
-  // Passed explicitly: the User row is org-scoped and no longer carries a
-  // workspaceId, but the availability event is workspace-scoped.
-  workspaceId: string;
-  /** The team's default schedule, already narrowed (see teamScheduleOf). */
+  /**
+   * EVERY workspace that should be told, because availability is a property of
+   * the person while the event is workspace-scoped (each workspace's agents sit
+   * in their own `ws:` room and their client drops any frame whose
+   * `workspaceId` isn't theirs).
+   *
+   * Announcing to only one workspace meant a member of two showed a live status
+   * in whichever one happened to trigger the write and a permanently stale dot
+   * in the other. Callers pass `loadAvailabilityScope().workspaceIds`.
+   */
+  workspaceIds: string[];
+  /** The GOVERNING default schedule, already narrowed — see
+   *  `loadAvailabilityScope` for which workspace's it is and why only one. */
   teamSchedule: WorkHours | null;
   intent: AvailabilityIntent;
   nowMs: number;
@@ -139,7 +148,7 @@ export function computeEffective(
 export async function applyAvailability(
   args: ApplyAvailabilityArgs,
 ): Promise<ApplyAvailabilityResult> {
-  const { db, user, workspaceId, teamSchedule, intent, nowMs } = args;
+  const { db, user, workspaceIds, teamSchedule, intent, nowMs } = args;
   const schedule = resolveUserSchedule(user, teamSchedule);
 
   // --- 1. Fold the intent into the manual pick -----------------------------
@@ -245,20 +254,25 @@ export async function applyAvailability(
   // request from this user needs to see it without a 15s session-cache wait.
   args.bustSessionCache?.(user.id);
 
-  await publish({
-    type: "user.availability_changed",
-    workspaceId,
-    userId: user.id,
-    status: effective.status,
-    message: effective.message,
-    source: effective.source,
-    until: effective.overrideUntil?.toISOString() ?? null,
-    // The picker's NOTE INPUT needs the user's OWN pick, not the
-    // schedule-derived value — otherwise an off-shift agent's note box would
-    // fill with "Outside working hours" and save it back as their personal
-    // note on the next edit.
-    manual: { status: manualStatus, message: manualMessage },
-  });
+  // One frame per workspace: the payload is identical, but the room is not, and
+  // clients filter on `workspaceId`. Sequential rather than parallel — a person
+  // is in a handful of workspaces at most, and the bus is in-process.
+  for (const workspaceId of workspaceIds) {
+    await publish({
+      type: "user.availability_changed",
+      workspaceId,
+      userId: user.id,
+      status: effective.status,
+      message: effective.message,
+      source: effective.source,
+      until: effective.overrideUntil?.toISOString() ?? null,
+      // The picker's NOTE INPUT needs the user's OWN pick, not the
+      // schedule-derived value — otherwise an off-shift agent's note box would
+      // fill with "Outside working hours" and save it back as their personal
+      // note on the next edit.
+      manual: { status: manualStatus, message: manualMessage },
+    });
+  }
 
   return {
     changed: true,

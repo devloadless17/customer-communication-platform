@@ -20,6 +20,7 @@ import type {
   MessageDirection,
   MessageStatus,
   Channel,
+  OrgRole,
   ReplySnapshot,
   Role,
   SocialProfile,
@@ -106,6 +107,10 @@ export function mapReplySnapshot(row: ReplyToRow | null | undefined): ReplySnaps
 const USER_COLUMNS = {
   id: true,
   isSuperAdmin: true,
+  // Org-directory role. Rides along on every roster/attribution read because
+  // the members UI gates account-level actions on it with the same predicate
+  // the API enforces (`canModifyUserAccount`). One column, no extra query.
+  orgRole: true,
   name: true,
   email: true,
   avatarUrl: true,
@@ -157,6 +162,7 @@ export function mapUser(u: MappableUser, workspaceId: string): User {
     id: u.id,
     workspaceId,
     isSuperAdmin: u.isSuperAdmin,
+    orgRole: u.orgRole as OrgRole,
     // No membership row for this workspace means the user is reachable here
     // only via an org-admin/superAdmin override; "agent" is the safe floor for
     // a DISPLAY dto — it never grants anything (every real gate reads the
@@ -332,6 +338,9 @@ type PrismaContactListItem = Omit<
   // operator ever needs to see consent while replying.
   | "marketingOptOutAt"
   | "marketingOptOutSource"
+  // Same reasoning: the per-user marketing cap is a broadcast-audience concern,
+  // never rendered in the inbox list row.
+  | "marketingCapReachedAt"
 >;
 export function mapContactListItem(c: PrismaContactListItem): Contact {
   const display = contactDisplayIdentity(c);
@@ -387,6 +396,12 @@ export function mapConversation(
     // Website-widget attribution — which site this chat came from.
     ...(c.webchatWidgetId ? { webchatWidgetId: c.webchatWidgetId } : {}),
     ...(c.webchatWidget ? { webchatWidgetName: c.webchatWidget.name } : {}),
+    // Channel-ACCOUNT attribution — which of the workspace's WhatsApp numbers /
+    // Pages / IG handles this thread is on. Scalar already on the row, so it
+    // costs nothing; the name is resolved client-side from the account
+    // directory. Only emitted when set, keeping single-account workspaces as
+    // terse on the wire as before.
+    ...(c.channelConnectionId ? { channelConnectionId: c.channelConnectionId } : {}),
   };
 }
 

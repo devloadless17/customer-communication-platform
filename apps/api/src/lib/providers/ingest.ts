@@ -16,6 +16,7 @@ import {
   createOutboundMessageIdempotentDetailed,
 } from "@/lib/messages/idempotent-create";
 import { ingestCallEvent } from "@/lib/providers/ingest-call";
+import { syncTemplateCatalog } from "@/lib/templates/catalog-sync";
 import { resumeOnReopen } from "@/lib/ai/conversation-state";
 import { routeMessageToTicket } from "@/lib/tickets/mutations";
 import { applyContactShareFromReply } from "@/lib/identity/contact-share";
@@ -165,6 +166,8 @@ export async function ingestEvents(
         await ingestContactNumberChange(workspaceId, channel, evt);
       } else if (evt.kind === "template_status") {
         await ingestTemplateStatusUpdate(workspaceId, evt);
+      } else if (evt.kind === "template_components_changed") {
+        await ingestTemplateComponentsChanged(workspaceId);
       } else if (evt.kind === "marketing_preference") {
         // Marketing opt-out / resume from Meta. Resolve the contact by phone
         // within this team, then set or clear consent.
@@ -190,6 +193,9 @@ export async function ingestEvents(
                 callingRestrictionType: evt.callingRestrictionType ?? null,
                 callingRestrictionReason: evt.callingRestrictionReason ?? null,
               }
+            : {}),
+          ...(evt.policyViolationType !== undefined
+            ? { policyViolationType: evt.policyViolationType }
             : {}),
           ...(evt.callingQualityWarning !== undefined
             ? { callingQualityWarning: evt.callingQualityWarning }
@@ -833,6 +839,7 @@ async function ingestStatusUpdate(
   // skipping drops roughly a third of the webhook write volume on a 100k campaign.
   if (existing.broadcastId && (evt.status !== "sent" || evt.pricing)) {
     void applyBroadcastDeliveryStatus(
+      workspaceId,
       existing.broadcastId,
       existing.conversation.contactId,
       evt,
@@ -917,6 +924,24 @@ async function ingestStatusUpdate(
 }
 
 /**
+ * Loaded at CALL time, not as a static import.
+ *
+ * `broadcast-runner` reaches this module transitively
+ * (broadcast-runner → messages/idempotent-create → ingest, for
+ * `drainParkedStatus`), so importing it at the top of this file would close a
+ * cycle — which CLAUDE.md §17 forbids and which is a genuine module-init hazard,
+ * not a style preference. The alternative was moving `drainParkedStatus` out of
+ * here, but it is wired into this module's status-rank/CAS internals and
+ * relocating stable code for an import graph is the worse trade.
+ *
+ * Deferring the resolution to the moment a template actually changes status
+ * keeps the static graph acyclic: by then both modules are fully initialized.
+ */
+function loadBroadcastTemplateHalt() {
+  return import("@/lib/broadcast-runner");
+}
+
+/**
  * Apply a `message_template_status_update` webhook to the local catalog. Meta
  * sends these when a template is approved, paused for quality, disabled, or
  * rejected — keeping the local `MessageTemplate.status` fresh AUTOMATICALLY so a
@@ -937,11 +962,43 @@ async function ingestTemplateStatusUpdate(
   workspaceId: string,
   evt: NormalizedTemplateStatusUpdate,
 ): Promise<void> {
-  // A status update sets `status`; a category update sets `category`; both flip
-  // the local row. Nothing to write when neither mapped to a known enum value.
+  // A status update sets `status`; a category update sets `category` and/or the
+  // ADVANCE-NOTICE `correctCategory`. Nothing to write when none mapped to a
+  // known enum value.
   const data: Prisma.MessageTemplateUpdateManyMutationInput = {};
-  if (evt.status) data.status = evt.status;
-  if (evt.category) data.category = evt.category;
+  if (evt.status) {
+    data.status = evt.status;
+    // Meta's `reason` (e.g. `INCORRECT_CATEGORY`) is what makes a rejection
+    // actionable. Cleared on any status that arrives without one, so a stale
+    // rejection reason can't hang off a since-approved template.
+    data.statusReason = evt.reason ?? null;
+    // Archival starts a 28-day deletion countdown. This webhook is the EXACT
+    // moment it began — a catalog sync can only tell us a template is already
+    // archived, not when. Unarchiving restores the previous status and cancels
+    // the deletion, so any non-archived status clears the deadline.
+    data.archivedAt = evt.status === "archived" ? new Date() : null;
+  }
+  if (evt.qualityScore) {
+    data.qualityScore = evt.qualityScore;
+    // Meta's quality webhook carries no timestamp, so the observation time is
+    // the best we have — and it is what the UI needs anyway ("as of when").
+    data.qualityScoreAt = new Date();
+  }
+  if (evt.category) {
+    data.category = evt.category;
+    // Meta CLEARS the custom TTL when it reclassifies a template — the ranges
+    // are per-category and don't overlap at the low end (a utility maximum of
+    // 12h is exactly the marketing minimum), so the old value is not merely
+    // stale, it is out of range for the new category. Keeping it would show a
+    // TTL the template no longer has and offer it back as a valid edit.
+    data.messageSendTtlSeconds = null;
+  }
+  if (evt.pendingCategory) {
+    // Notice, not state. Equal to the applied category means "the move landed /
+    // no longer impacted", which is exactly how Meta reports it too.
+    data.correctCategory =
+      evt.pendingCategory === (evt.category ?? undefined) ? null : evt.pendingCategory;
+  }
   if (Object.keys(data).length === 0) return;
 
   // Prefer matching on Meta's template id (externalId); fall back to the
@@ -956,11 +1013,45 @@ async function ingestTemplateStatusUpdate(
     return; // no identity to match on (parser already guards, belt-and-braces)
   }
 
+  // The affected rows are needed BY ID for the campaign halt below, and the
+  // PREVIOUS status decides whether this is a transition worth acting on.
+  const affected = await db.messageTemplate.findMany({
+    where,
+    select: { id: true, status: true, name: true },
+  });
+  if (affected.length === 0) return; // not in our catalog yet — sync owns creation
+
   const result = await db.messageTemplate.updateMany({
     where,
     data,
   });
-  if (result.count === 0) return; // template not in our catalog yet — sync owns creation
+  if (result.count === 0) return;
+
+  // Meta's instruction for a paused template is to halt the campaigns that rely
+  // on it — the API rejects those sends anyway. Doing it HERE, off the webhook,
+  // is what makes it free: the runner's own breaker only trips after
+  // PERMANENT_ERROR_PAUSE_THRESHOLD consecutive failures, so it burns that many
+  // recipients first and only if the campaign is already mid-send.
+  if (evt.status && evt.status !== "approved") {
+    const { pauseBroadcastsForTemplate } = await loadBroadcastTemplateHalt();
+    for (const row of affected) {
+      await pauseBroadcastsForTemplate(
+        workspaceId,
+        row.id,
+        `Template "${row.name}" is ${evt.status} at Meta — WhatsApp rejects sends until it is active again.`,
+      );
+    }
+  }
+  // …and the other half. Only campaigns WE parked for this template resume;
+  // Meta: "resume these campaigns when the template's status has been set to
+  // Active again."
+  if (evt.status === "approved") {
+    const { resumeBroadcastsForTemplate } = await loadBroadcastTemplateHalt();
+    for (const row of affected) {
+      if (row.status === "approved") continue; // no transition, nothing parked
+      await resumeBroadcastsForTemplate(workspaceId, row.id);
+    }
+  }
 
   // Refresh every open /settings/whatsapp + broadcast-form tab so the new
   // status (e.g. a now-paused template) surfaces without a manual reload. Reuses
@@ -970,6 +1061,54 @@ async function ingestTemplateStatusUpdate(
     workspaceId,
     scope: "whatsapp-templates",
   });
+}
+
+/**
+ * Cooldown between webhook-driven catalog refetches, per workspace.
+ *
+ * Editing a template in WhatsApp Manager fires one
+ * `message_template_components_update` per change, and bulk edits arrive in a
+ * burst. A refetch pages the whole catalog, so firing one per webhook would turn
+ * a tidy-up session into a Graph hammering. One refetch per window picks up every
+ * edit in that burst — the sync is whole-catalog, not per-template, so there is
+ * nothing to lose by coalescing.
+ *
+ * In-process only, and that is fine: this is a rate limiter, not a lock. A second
+ * api instance doing one extra refetch is harmless; the sync itself is idempotent.
+ */
+const COMPONENTS_REFETCH_COOLDOWN_MS = 60_000;
+const lastComponentsRefetch = new Map<string, number>();
+
+/**
+ * A template's components changed at Meta — refetch the catalog so the cached
+ * `components` (which decide the entire send-time parameter shape) stop being
+ * stale.
+ *
+ * Fail-soft: a Graph blip here must not fail the webhook, or Meta redelivers the
+ * whole batch and we re-ingest messages. The periodic sweeper is the backstop.
+ */
+async function ingestTemplateComponentsChanged(workspaceId: string): Promise<void> {
+  const now = Date.now();
+  const last = lastComponentsRefetch.get(workspaceId) ?? 0;
+  if (now - last < COMPONENTS_REFETCH_COOLDOWN_MS) return;
+  lastComponentsRefetch.set(workspaceId, now);
+
+  try {
+    await syncTemplateCatalog(workspaceId);
+    await publish({
+      type: "team.catalog_changed",
+      workspaceId,
+      scope: "whatsapp-templates",
+    });
+  } catch (err) {
+    console.warn(
+      JSON.stringify({
+        event: "meta.template_components_refetch_failed",
+        workspaceId,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  }
 }
 
 /**
@@ -1182,7 +1321,7 @@ export async function drainParkedStatus(
   // Same campaign propagation as the live path. Calling it from both is safe:
   // the whole thing is guard + CAS, so a double-apply is a no-op.
   if (existing.broadcastId && parked.status !== "sent") {  // parked statuses carry no pricing
-    void applyBroadcastDeliveryStatus(existing.broadcastId, contactId, {
+    void applyBroadcastDeliveryStatus(workspaceId, existing.broadcastId, contactId, {
       kind: "status",
       externalId,
       status: parked.status,
@@ -1282,13 +1421,19 @@ function statusWinsOver(
 const DELIVERY_RANK: Record<BroadcastDeliveryState, number> = {
   pending: 0,
   sent: 1,
+  // ALONGSIDE `sent`, not below it: a held message has already been accepted by
+  // Meta (it has a wamid), it is just not en route yet. Equal rank means a plain
+  // `sent` webhook can't erase the more specific fact, while `delivered`/`read`
+  // and a terminal failure still advance past it — which is exactly the set of
+  // transitions a held message can make.
+  held: 1,
   delivered: 2,
   read: 3,
   failed_at_send: -1, // terminal
   undelivered: -1, // terminal
 };
 
-function deliveryWinsOver(
+export function deliveryWinsOver(
   next: BroadcastDeliveryState,
   current: BroadcastDeliveryState,
 ): boolean {
@@ -1313,6 +1458,7 @@ function deliveryWinsOver(
  * the ladder is only three rungs deep, so it cannot spin.
  */
 async function applyBroadcastDeliveryStatus(
+  workspaceId: string,
   broadcastId: string,
   contactId: string,
   evt: NormalizedStatusUpdate,
@@ -1377,7 +1523,57 @@ async function applyBroadcastDeliveryStatus(
           : {}),
       },
     });
-    if (written.count > 0) return;
+    if (written.count > 0) {
+      // 131050 = this recipient used WhatsApp's own "Offers and announcements"
+      // setting to stop marketing from THIS business. Meta accepts the send and
+      // then fails it, so without mirroring it onto the contact we would keep
+      // paying to enqueue them into every future marketing campaign and keep
+      // getting the same refusal.
+      //
+      // The `user_preferences` webhook is the primary signal; this is the
+      // backstop for a workspace that hasn't subscribed to it or that missed a
+      // delivery. `applyOptOut` is idempotent, so both firing is harmless.
+      // 131049 = this recipient has hit Meta's PER-USER marketing cap (or is on
+      // a US number, which no longer receives marketing at all). Not an opt-out
+      // — the person made no choice about us — so it is recorded separately and
+      // only suppresses them for 24h.
+      //
+      // Meta is explicit that resending sooner makes it worse: more of the same
+      // error, and a WABA that repeatedly retries capped users can have delivery
+      // to those users cut off for up to 24 hours. It also keeps reporting
+      // honest, since those recipients were never reachable in the first place.
+      if (evt.errorCode === 131049) {
+        await db.contact
+          .updateMany({
+            where: { workspaceId, id: contactId },
+            data: { marketingCapReachedAt: evt.timestamp ?? new Date() },
+          })
+          .catch((err) => {
+            // Same rule as the opt-out mirror below: never fail the webhook over
+            // suppression bookkeeping — Meta would redeliver the whole batch.
+            console.warn(
+              `[status] could not record marketing cap for contact ${contactId}:`,
+              err instanceof Error ? err.message : err,
+            );
+          });
+      }
+      if (evt.errorCode === 131050) {
+        await applyOptOut(
+          workspaceId,
+          contactId,
+          "meta_preferences",
+          evt.timestamp,
+        ).catch((err) => {
+          // Never fail the webhook over a suppression bookkeeping error — Meta
+          // would redeliver the whole batch and we'd re-ingest the statuses.
+          console.warn(
+            `[status] could not record marketing opt-out for contact ${contactId}:`,
+            err instanceof Error ? err.message : err,
+          );
+        });
+      }
+      return;
+    }
     const current = await db.broadcastRecipient.findUnique({
       where: { id: recipient.id },
       select: { deliveryState: true },
@@ -1441,7 +1637,7 @@ async function ingestInboundMessage(
   // see `findFirst({ status: { not: "closed" } }) === null` and both
   // `conversation.create()` succeed — producing duplicate conversation rows
   // for one contact. The contact race is backstopped by the partial unique
-  // `Contact_teamId_phoneNumber_whatsapp_key` (raw SQL — WhatsApp/null
+  // `Contact_workspaceId_phoneNumber_whatsapp_key` (raw SQL — WhatsApp/null
   // identityChannel only, so Instagram/Telegram can store the same phone
   // across distinct accounts); the conversation lookup-then-create pattern
   // is the classic check-then-act race that Serializable resolves.
@@ -1509,9 +1705,13 @@ async function ingestInboundMessage(
         phoneNumber: true,
         bsuid: true,
         username: true,
+        // Needed to decide whether the stored name is a real one or just the
+        // identity fallback — see the name backfill below.
+        name: true,
       } as const;
       let existingContact: {
         id: string;
+        name: string | null;
         deletedAt: Date | null;
         phoneNumber: string | null;
         bsuid: string | null;
@@ -1588,9 +1788,31 @@ async function ingestInboundMessage(
           if (evt.bsuid && !existingContact.bsuid) identityBackfill.bsuid = evt.bsuid;
           if (evt.username && !existingContact.username) identityBackfill.username = evt.username;
         }
+        // NAME backfill — the same fill-a-NULL discipline as the identity keys
+        // above, and it heals the same class of gap.
+        //
+        // WhatsApp only shares `profile.name` on an INBOUND message: a contact
+        // first seen through an outbound call or a compose-new has no name to
+        // store, so `Contact.name` falls back to the raw phone number. Without
+        // this, the moment that person finally replies — with their real name
+        // right there in `contacts[0].profile.name` — we threw it away and left
+        // the inbox showing "96171505894" forever.
+        //
+        // Adopt ONLY when what we hold isn't a real name (null, or the identity
+        // fallback). An agent-edited name and a previously-captured profile name
+        // are both left alone: a customer who renames their WhatsApp profile must
+        // not silently overwrite what the team deliberately typed.
+        const incomingName = evt.contactName?.trim();
+        const storedIsPlaceholder =
+          !existingContact.name?.trim() || looksLikeIdentityFallback(existingContact.name);
+        const nameBackfill =
+          incomingName && !looksLikeIdentityFallback(incomingName) && storedIsPlaceholder
+            ? { name: incomingName, ...splitContactName(incomingName) }
+            : {};
+
         contact = await tx.contact.update({
           where: { id: existingContact.id },
-          data: { deletedAt: null, ...identityBackfill },
+          data: { deletedAt: null, ...identityBackfill, ...nameBackfill },
           // Load tags as `{ id }` so the `message.received` contact snapshot
           // (toWorkflowContact below) emits the RETURNING contact's real
           // tagIds — without this the relation is absent and tagIds is [].
@@ -3255,12 +3477,42 @@ export function splitContactName(name: string | null | undefined): {
 } {
   const trimmed = name?.trim();
   if (!trimmed) return { firstName: null, lastName: null };
+  // NEVER split an identity fallback into a first name.
+  //
+  // `Contact.name` legitimately falls back to the phone number / handle so the
+  // inbox list has something to render. `firstName` must not: it is a CLAIM
+  // that we know the person's given name, and it is what
+  // `$var.contact.first_name` resolves to. Left unguarded, a broadcast
+  // personalised with "Hi {{first_name}}" greeted customers as
+  // "Hi 96171505894" — and the contact panel asserted a first name we were
+  // never told. WhatsApp only shares `profile.name` once the customer messages
+  // FIRST, so an outbound-initiated contact legitimately has no name at all;
+  // null is the honest answer until they reply.
+  if (looksLikeIdentityFallback(trimmed)) return { firstName: null, lastName: null };
   const idx = trimmed.indexOf(" ");
   if (idx === -1) return { firstName: trimmed, lastName: null };
   return {
     firstName: trimmed.slice(0, idx),
     lastName: trimmed.slice(idx + 1).trim() || null,
   };
+}
+
+/**
+ * Is this "name" actually just the raw identity we fell back to?
+ *
+ * Deliberately narrow: an all-digits string (a phone number, with or without a
+ * leading +), or an opaque provider id (`vis_…`, a BSUID like `LB.9464…`, a
+ * PSID). A real display name that happens to contain digits is untouched.
+ */
+function looksLikeIdentityFallback(value: string): boolean {
+  const compact = value.replace(/[\s()+-]/g, "");
+  if (compact.length === 0) return false;
+  // Pure digits → a phone number.
+  if (/^\d+$/.test(compact)) return true;
+  // Opaque ids we mint or receive: `vis_<uuid>`, `LB.9464…`-style BSUIDs.
+  if (/^vis_/i.test(compact)) return true;
+  if (/^[A-Z]{2}\.\d+$/.test(compact)) return true;
+  return false;
 }
 
 /** Pull the most recent N messages on the conversation, excluding the trigger

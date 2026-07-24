@@ -33,6 +33,10 @@ export const loadActiveUser = cache(async (userId: string) => {
       email: true,
       avatarUrl: true,
       deactivatedAt: true,
+      // Drives the /verify bounce in getSession(). The API's session guard is
+      // the real gate; this only decides where the browser lands so an
+      // unverified user sees the code screen instead of a wall of 403s.
+      emailVerified: true,
       availabilityStatus: true,
       availabilityMessage: true,
       // Schedule provenance, so the availability picker can explain an
@@ -44,7 +48,17 @@ export const loadActiveUser = cache(async (userId: string) => {
       // `status` powers the org-approval gate in (app)/layout.tsx. Loaded here
       // (alongside rolePermissions) so the gate never has to call the now
       // org-gated /api/workspace endpoint for a pending/suspended org.
-      organization: { select: { status: true, name: true } },
+      //
+      // `workspaces` is the switcher's list for an ORG OWNER/ADMIN, who may open
+      // any workspace in their org regardless of membership. Ordered to match
+      // the API's `GET /api/workspaces` so the two render the same sequence.
+      organization: {
+        select: {
+          status: true,
+          name: true,
+          workspaces: { orderBy: { createdAt: "asc" }, select: { id: true, name: true } },
+        },
+      },
       // Active workspace + effective role come from membership now (mirrors the
       // API resolveSession); ordered so the fallback pick is deterministic.
       workspaceMemberships: {
@@ -53,6 +67,16 @@ export const loadActiveUser = cache(async (userId: string) => {
           role: true,
           workspace: { select: { id: true, name: true, rolePermissions: true } },
         },
+      },
+      // Every live session's stored active workspace. `getSession` needs THIS
+      // DEVICE's, keyed by the Better Auth session token it already holds — it
+      // is the fallback when the `ccp.ws` cookie is missing, exactly as
+      // `resolveSession` does on the API side. Sessions are per-device and few
+      // (one row per active sign-in), so carrying them costs a tiny join rather
+      // than a second query on every render.
+      sessions: {
+        where: { expiresAt: { gt: new Date() } },
+        select: { id: true, activeWorkspaceId: true },
       },
     },
   });

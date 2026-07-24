@@ -35,6 +35,10 @@ export default async function NewBroadcastPage({
     // variables + audience from it. The agent reviews + sends (or schedules)
     // a fresh broadcast; nothing is mutated on the source.
     from?: string | string[];
+    // `?channel=whatsapp|messenger|instagram` — the Outreach nav is scoped to a
+    // channel, so opening the composer from it lands on that channel already
+    // selected instead of always defaulting to WhatsApp.
+    channel?: string | string[];
   }>;
 }) {
   const { permissions } = await getSession();
@@ -164,6 +168,12 @@ export default async function NewBroadcastPage({
       cloneKind={cloneMessageKind}
       cloneBodyText={clone?.bodyText ?? null}
       cloneChannel={clone?.channel ?? null}
+      // A clone's own channel wins — the point of duplicating is to repeat it.
+      initialChannel={
+        clone
+          ? null
+          : ((Array.isArray(sp.channel) ? sp.channel[0] : sp.channel) ?? null)
+      }
       teamMembers={teamMembers}
       assignmentPolicies={assignmentPolicies}
     />

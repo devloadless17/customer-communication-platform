@@ -156,6 +156,12 @@ enum TemplateStatus {
   rejected
   paused
   disabled
+  // Meta auto-archives a template after 12 months of inactivity (no create,
+  // edit, send, appeal or unarchive). It cannot be sent — but unlike `disabled`
+  // it is RECOVERABLE, and only for 28 days, after which Meta deletes it for
+  // good. Folding it into `disabled` hid both facts: the operator saw a dead
+  // template with no clock and no way back, and lost it permanently.
+  archived
 }
 
 enum TemplateCategory {
@@ -237,6 +243,18 @@ enum BroadcastDeliveryState {
   /// state that was previously invisible: such recipients stayed `sent` and
   /// were counted as successes, so "who never received it" answered wrongly.
   undelivered
+  /// Meta accepted the send and issued a wamid, then HELD the message for a
+  /// business-portfolio pacing quality assessment (`message_status:
+  /// held_for_quality_assessment` in the send response). It is not en route: it
+  /// is released in a later batch, or DROPPED outright if Meta's review finds
+  /// suspicious activity (a `failed` webhook with code 135000).
+  ///
+  /// Exactly the failure mode `undelivered` above exists for: without this the
+  /// recipient sits at `sent` and is counted a success while nothing has left
+  /// Meta's queue. Ranked ALONGSIDE `sent`, not below it — a held message has
+  /// already been accepted, so `delivered`/`read` still advance past it, and a
+  /// later plain `sent` webhook must not erase the more specific fact.
+  held
 }
 
 /// What a broadcast sends. `template` = a pre-approved WhatsApp template
@@ -589,11 +607,20 @@ model Workspace {
 
   // ---- Ticketing ----
   // Open a ticket automatically when a message arrives on a thread with no
-  // active one. On by default: a helpdesk where work only exists if someone
-  // remembered to press a button has no backlog worth reporting on. Turning it
-  // off leaves tickets a purely manual entity — messages simply carry no
-  // ticketId, and nothing else changes.
-  ticketAutoOpen                      Boolean @default(true)
+  // active one.
+  //
+  // OFF by default (changed 2026-07-23). Auto-opening on every inbound makes a
+  // ticket the same thing as a conversation, which is precisely what a ticket is
+  // NOT: the inbox already tracks every thread, and a board where every "hi"
+  // becomes a work item is noise nobody triages. A ticket should mean "someone
+  // decided this needs work" — raised deliberately, with a subject and an
+  // assignee, by the agent who read the message.
+  //
+  // Left as a per-workspace toggle rather than removed: a high-volume support
+  // desk that genuinely wants one ticket per inbound can still switch it on, and
+  // nothing downstream changes either way — with it off, messages simply carry
+  // no `ticketId`.
+  ticketAutoOpen                      Boolean @default(false)
   // How long after a ticket is SOLVED a follow-up message reopens it instead of
   // opening a new one. This is the single most-debatable rule in ticketing —
   // too short and one issue becomes three tickets, too long and a genuinely new
@@ -787,6 +814,17 @@ model ChannelConnection {
   // before any restriction bites. Actionable while it's still only a warning:
   // hiding call icons or narrowing call hours can head off the pause.
   callingQualityWarning    String?
+  // A WhatsApp Business POLICY violation (`account_update` →
+  // `ACCOUNT_VIOLATION`), e.g. "ALCOHOL". Distinct from the calling warning
+  // above, which is the same webhook narrowed to CALLING violations — a
+  // non-calling violation used to be parsed and then dropped on the floor.
+  //
+  // Meta's own docs name this webhook as the notification channel for policy
+  // violations, and a restriction follows if it isn't addressed. Storing it is
+  // what turns "our account got restricted out of nowhere" into a dated warning
+  // the operator saw first.
+  policyViolationType      String?
+  policyViolationAt        DateTime?
 
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
@@ -801,6 +839,15 @@ model ChannelConnection {
   // WhatsApp numbers / Pages / IG handles. `externalAccountId` is the provider's
   // own id, so re-connecting the same number updates rather than duplicates.
   @@unique([workspaceId, channel, externalAccountId])
+  // EXACTLY ONE DEFAULT per (workspace, channel) is enforced by a PARTIAL unique
+  // index Prisma can't express:
+  //   ChannelConnection_one_default_per_channel ON (workspaceId, channel)
+  //   WHERE "isDefault"
+  // created in raw SQL by migration 20260723160000. A plain
+  // @@unique([workspaceId, channel]) would forbid holding several accounts on
+  // one channel — the whole point of this table. Load-bearing because every
+  // read of the default is `findFirst({ isDefault: true })`: with two, which
+  // number a broadcast sends from is whatever Postgres returns first.
   // "which accounts does this workspace have on channel X" — the connected-set
   // read on every send/route decision.
   @@index([workspaceId, channel])
@@ -823,6 +870,15 @@ model WhatsappPortfolio {
   /// Derived numeric 24h unique-recipient cap. Null = UNLIMITED or unknown
   /// (unknown deliberately means "ungated" rather than "blocked").
   messagingDailyCap        Int?
+  /// Meta's `verification_status` for the portfolio, raw ("verified" |
+  /// "not_verified" | "pending" | …). Null until read from Graph.
+  ///
+  /// Load-bearing for ONE thing: the TEMPLATE limit. Meta scopes it to the
+  /// parent portfolio — an unverified portfolio caps each of its WABAs at 250
+  /// templates, a verified one at up to 6,000. Stored raw (not a boolean) for
+  /// the same reason as `messagingTier`: Meta's vocabulary churns and we never
+  /// want a migration to track a new vendor value.
+  verificationStatus       String?
   messagingHealthUpdatedAt DateTime?
   createdAt                DateTime  @default(now())
   updatedAt                DateTime  @updatedAt
@@ -914,10 +970,21 @@ model User {
   name                String
   // Globally unique: a user belongs to one org, so one login = one identity.
   email               String    @unique
-  // Better Auth requires this column. Default true: existing users were
-  // verified via the invite flow; new sign-ups get true on creation since
-  // we don't run an email-confirmation step yet.
-  emailVerified       Boolean   @default(true)
+  // Has this person proven they control this inbox?
+  //
+  // Default FALSE as of 2026-07-23. It used to be true, which meant any string
+  // matching an email regex created a working account — the signup flow was a
+  // demo, not a product. A new password signup is now unverified until a 6-digit
+  // OTP is confirmed, and `resolveSession` refuses to act for an unverified
+  // user (the API is the boundary — a UI-only redirect would leave every
+  // endpoint open to an unverified session).
+  //
+  // Two paths set it TRUE without an OTP, both because the address is already
+  // proven: Google sign-in (the provider asserts a verified email) and invite
+  // acceptance (the invite link landed in that inbox, which IS the proof).
+  // Existing rows were backfilled to true by the migration — they were all
+  // vouched for by the invite flow.
+  emailVerified       Boolean   @default(false)
   // Mapped to Better Auth's `image` field via lib/auth/better-auth.ts so the
   // column name stays domain-meaningful while Better Auth sees the standard
   // field name in session payloads.
@@ -1240,6 +1307,25 @@ model Contact {
   // book un-messageable the moment suppression shipped. Do not "improve" this
   // into an opt-in model without a backfill plan.
   marketingOptOutAt     DateTime?
+  // When this contact last hit Meta's PER-USER marketing cap (error 131049).
+  //
+  // Not an opt-out and deliberately a separate column: the person made no
+  // choice about us. WhatsApp decided they have had enough marketing for now,
+  // based on their own read rate and inbox activity, and it clears on its own.
+  //
+  // It is stamped so new MARKETING campaigns can skip them for 24h. Meta's rule
+  // is explicit: resend sooner and you get more of the same error, and a WABA
+  // that repeatedly retries capped users can have delivery to those users cut
+  // off for up to 24 hours. Skipping also keeps campaign reporting honest —
+  // those recipients were never reachable, so counting them as failures
+  // misreports the campaign.
+  // Indexed in SQL as a PARTIAL index (`WHERE ... IS NOT NULL`) — the audience
+  // builder only ever asks who is CURRENTLY capped, a small recent slice. Prisma
+  // can't express a partial index, so it is declared in the migration only and
+  // deliberately has no `@@index` here (one would make the next `migrate dev`
+  // create a second, full index beside it). Same pattern as
+  // `Message_broadcastId_idx`.
+  marketingCapReachedAt DateTime?
   /**
    * "stop_keyword" | "meta_preferences" | "agent" | "api"
    */
@@ -2116,7 +2202,70 @@ model MessageTemplate {
   name             String
   language         String
   category         TemplateCategory
+  // The category Meta has decided this template SHOULD be, when it disagrees
+  // with `category`. Meta announces this IN ADVANCE (`correct_category` on the
+  // template node, and the notice form of the `template_category_update`
+  // webhook) and only moves the template on the first of the following month.
+  //
+  // Deliberately a separate column, never folded into `category`: until Meta
+  // actually moves it, the template is still reviewed, rendered and BILLED as
+  // `category`. Writing the future value into `category` mispriced every
+  // broadcast quote for up to a month. Null = not impacted.
+  correctCategory  TemplateCategory?
   status           TemplateStatus
+  // Meta's `reason` from the last `message_template_status_update` — the
+  // difference between "rejected" and the actionable "rejected:
+  // INCORRECT_CATEGORY", which tells the author to resubmit under a different
+  // category rather than rewrite the copy.
+  statusReason     String?
+  // Meta's `message_send_ttl_seconds`: how long delivery is retried before the
+  // message is dropped. Null = the template uses Meta's per-category default
+  // (minutes for authentication, days for marketing/utility) — we never
+  // materialize that default locally, because it is Meta's to change.
+  messageSendTtlSeconds Int?
+  // When this template was seen to become ARCHIVED, which starts Meta's 28-day
+  // deletion countdown.
+  //
+  // Meta never states an archival DATE, so this is when we observed the
+  // transition: exact when the `message_template_status_update` webhook
+  // delivered it, approximate when a catalog sync found a template already
+  // archived. The UI says "about N days" for that reason. Cleared when the
+  // template leaves the archived state.
+  archivedAt      DateTime?
+  // Meta's `quality_score.score` for this template: GREEN | YELLOW | RED |
+  // UNKNOWN. A plain String, NOT an enum, for the same reason the number's
+  // `qualityRating` is one — Meta's quality vocabulary churns and we never want
+  // an unrecognized band to need a migration before it can be stored.
+  //
+  // This is the EARLY warning. Quality feeds Meta's template pacing and
+  // pausing, so a RED template is one about to stop sending; by the time the
+  // `PAUSED` status arrives the campaign is already dead. Null = never reported.
+  qualityScore    String?
+  // When Meta last recomputed the score (`quality_score.date`, unix seconds).
+  // Shown beside the band because a GREEN from three months ago says much less
+  // than one from yesterday.
+  qualityScoreAt  DateTime?
+  // Last time this template was actually SENT — the activity that resets Meta's
+  // 12-month archival clock (along with create/edit/appeal/unarchive).
+  //
+  // Written once per direct send and once per broadcast RUN, never per
+  // recipient: a 100k campaign is one use of the template, and a write per
+  // recipient would add 100k pointless updates to the hot send path.
+  lastUsedAt      DateTime?
+  // The Template Library blueprint this template was instantiated from.
+  //
+  // Meta's own marker: a template carrying `library_template_name` has FIXED,
+  // uneditable copy and is subject to per-parameter TYPE CHECKS at send time.
+  // Both facts change what the UI may offer, so the marker is stored rather than
+  // inferred. Null for a template authored in the composer or in Manager.
+  libraryTemplateName String?
+  // Per-body-parameter value types (`["TEXT","AMOUNT","DATE"]`), positionally
+  // aligned with the body's `{{n}}`. ONLY library templates have these, and they
+  // are only readable from the library catalogue — the template node doesn't
+  // return them — so they are captured at instantiation. Without them, a value
+  // Meta rejects at send time fails the message with no indication of which
+  // parameter was wrong.
+  bodyParamTypes  String[]      @default([])
   // Body text with `{{1}}, {{2}}, …` placeholders. Denormalized from components
   // for cheap previews / search; the canonical source is `components`.
   bodyText         String           @default("")
@@ -2846,6 +2995,18 @@ enum TicketEventKind {
   created
   assigned
   unassigned
+  // The ticket was handed to a different TEAM (or taken out of every queue).
+  // Distinct from `assigned`, which is about a PERSON: a handoff to Sales and a
+  // claim by someone on Sales are two different things a reader needs to tell
+  // apart, and collapsing them makes "how long did Sales sit on this" unanswerable.
+  team_changed
+  // An internal note on the ticket. The customer never sees it.
+  //
+  // Lives on the ticket TIMELINE rather than in a separate table because that is
+  // exactly where it has to be read: the whole point is Sales answering "tell
+  // them X" in-line with the handoff that prompted it. A parallel notes table
+  // would put the question and the answer on two different screens.
+  note
   status_changed
   priority_changed
   subject_changed
@@ -2889,8 +3050,29 @@ model Ticket {
   lastAssignedUserId String?
   // The AssignmentPolicy that routed it, for reporting "which queue did this
   // come through". Plain id, no FK — an archived policy must not cascade into
-  // closed work.
+  // closed work. PROVENANCE ONLY: it records how the ticket arrived, and never
+  // changes when the ticket is handed on. See `assignedTeamId` for ownership.
   policyId           String?
+  // The TEAM that currently owns this ticket — an AssignmentPolicy, which is
+  // what a "team" is in this product (Sales, Support, Billing).
+  //
+  // This is the handoff primitive, and it is deliberately separate from
+  // `assignedUserId`. The real workflow is: Support reads a message, realises
+  // the issue belongs to Sales, and hands the TICKET to Sales — at which point
+  // it belongs to a queue, not yet to a person. Whoever on Sales picks it up
+  // then takes `assignedUserId`. Modelling only a person forced the handing-over
+  // agent to guess WHO on the other team should own it, which is exactly the
+  // decision they are unqualified to make.
+  //
+  // The two are independent, and every combination is meaningful:
+  //   team + no user  → in Sales' queue, unclaimed
+  //   team + user     → claimed by someone on Sales
+  //   no team + user  → assigned directly, no queue involved
+  //   neither         → unassigned backlog
+  //
+  // SetNull, not Cascade: deleting a team must never delete the work it was
+  // holding — the tickets fall back to the unassigned backlog, visibly.
+  assignedTeamId     String?
 
   // ---- SLA ----
   // Due dates are COMPUTED at create / priority-change from the matching
@@ -2942,6 +3124,7 @@ model Ticket {
   conversation Conversation     @relation("ConversationTickets", fields: [conversationId], references: [id], onDelete: Cascade)
   contact      Contact          @relation(fields: [contactId], references: [id], onDelete: Cascade)
   assignedUser User?            @relation("AssignedTickets", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  assignedTeam AssignmentPolicy? @relation("TeamTickets", fields: [assignedTeamId], references: [id], onDelete: SetNull)
   resolvedBy   User?            @relation("ResolvedTickets", fields: [resolvedById], references: [id], onDelete: SetNull)
   slaPolicy    TicketSlaPolicy? @relation(fields: [slaPolicyId], references: [id], onDelete: SetNull)
   // Shared taxonomy with contacts — an org that already colour-codes "VIP" and
@@ -2970,6 +3153,13 @@ model Ticket {
   @@index([workspaceId, status, createdAt(sort: Desc), id(sort: Desc)])
   // "My tickets" — the view an agent lives in, same shape as the Mine inbox.
   @@index([workspaceId, assignedUserId, status, createdAt(sort: Desc), id(sort: Desc)])
+  // The team-queue board: "everything waiting on Sales", newest first. Carries
+  // the sort key so the list is a range scan that stops after `take`, matching
+  // the assignedUserId board index above.
+  @@index([workspaceId, assignedTeamId, status, createdAt(sort: Desc), id(sort: Desc)])
+  // FK index for the SetNull relation — without it, deleting a team seq-scans
+  // every ticket in the deployment to null the column.
+  @@index([assignedTeamId])
   // Priority-sorted board column.
   @@index([workspaceId, priority, status])
   // The conversation rail ("other work on this thread") and the ingest-time
@@ -2995,6 +3185,12 @@ model TicketEvent {
   // so history keeps reading correctly after a rename or a departure.
   before        Json?
   after         Json?
+  // Free text — the note body, and the optional "why" on a team handoff.
+  //
+  // A handoff without a reason is the most common way this feature fails in
+  // practice: Sales receives a ticket and has to re-read the whole thread to
+  // work out what Support wanted. Null on every other kind.
+  body          String?
   // Nullable + SetNull: ticket history must outlive whoever made it.
   actorUserId   String?
   // Set when a /v1 partner call or a workflow made the change (actorUserId is
@@ -4683,6 +4879,9 @@ model AssignmentPolicy {
 
   workspace Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   members   AssignmentPolicyMember[]
+  /// Tickets currently owned by this team — the queue side of a handoff.
+  /// See `Ticket.assignedTeamId`.
+  tickets   Ticket[]                 @relation("TeamTickets")
   rules     AssignmentRule[]
 
   @@index([workspaceId, archivedAt])

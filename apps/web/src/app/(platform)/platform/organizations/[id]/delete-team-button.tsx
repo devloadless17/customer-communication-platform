@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessage } from "@ccp/shared/api/error-message";
 
 /**
  * superAdmin-only inline delete button for a foreign team. Renders nothing
@@ -15,16 +16,21 @@ import { apiFetch } from "@/lib/api/client-fetch";
  * self-destruct.
  */
 export function DeleteTeamButton({
-  workspaceId,
+  organizationId,
   teamName,
   isOwnTeam,
 }: {
-  workspaceId: string;
+  organizationId: string;
   teamName: string;
   isOwnTeam: boolean;
 }) {
   const router = useRouter();
-  const [pending, startTransition] = useTransition();
+  // A plain busy flag, NOT useTransition. `run` awaits `confirm()`, and inside
+  // an async transition that await is part of the in-flight action — React
+  // holds it pending while the state update that opens the dialog is scheduled
+  // within that same action, so the button spun forever and the confirm never
+  // reached the user. Every other confirm-delete in the app uses this pattern.
+  const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { confirm, confirmDialog } = useConfirm();
 
@@ -51,13 +57,27 @@ export function DeleteTeamButton({
       ),
     });
     if (!ok) return;
-    const res = await apiFetch(`/api/admin/teams/${workspaceId}`, { method: "DELETE" });
-    if (!res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(data.error ?? "Failed to delete organization");
-      return;
+    setPending(true);
+    try {
+      const res = await apiFetch(`/api/admin/organizations/${organizationId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        setError(await apiErrorMessage(res, "Failed to delete organization"));
+        return;
+      }
+      router.replace("/platform/organizations");
+      // The list is an RSC page; replace() alone can serve it from the client
+      // router cache still showing the org that was just deleted.
+      router.refresh();
+    } catch {
+      // apiFetch THROWS on a 401 (and on any network failure) rather than
+      // returning the response — unguarded, that left the spinner stuck on
+      // forever with nothing shown, which is the bug this catch exists for.
+      setError("Couldn't reach the server. Check your connection and try again.");
+    } finally {
+      setPending(false);
     }
-    router.replace("/platform/organizations");
   }
 
   return (
@@ -67,7 +87,7 @@ export function DeleteTeamButton({
         variant="outline"
         disabled={pending}
         className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
-        onClick={() => startTransition(run)}
+        onClick={run}
       >
         {pending ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
         Delete organization

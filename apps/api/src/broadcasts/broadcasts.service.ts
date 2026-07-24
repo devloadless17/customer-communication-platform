@@ -42,7 +42,11 @@ import { teamConnectedChannels } from "@/lib/providers";
 import { pickBestChannel, type RankableContact } from "@/lib/identity/best-channel";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import {
+  TEMPLATE_AUTO_ARCHIVE_MONTHS,
+  templateDeletionDaysLeft,
+  requiredCarouselCards,
   requiredTemplateButtonParams,
+  templateNeedsOfferExpiry,
   templateNamedPlaceholders,
 } from "@ccp/shared/template-render";
 import type { Channel } from "@ccp/shared/types";
@@ -81,6 +85,17 @@ function bindingFieldLabel(binding: VariableBinding | undefined): string | null 
   }
   return binding.source.key;
 }
+
+
+/**
+ * How long a contact is skipped for MARKETING sends after hitting Meta's
+ * per-user marketing cap (131049).
+ *
+ * Meta's own number: "wait at least 24 hours before attempting to resend."
+ * Sooner earns the same error, and a WABA that repeatedly retries capped users
+ * can have delivery to those users cut off for up to 24 hours.
+ */
+const PER_USER_MARKETING_CAP_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
@@ -210,6 +225,46 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * Resolution runs concurrency-bounded (the per-person best-channel query is
    * indexed but there's one per person).
    */
+  /**
+   * The account a campaign sends from: the one the operator chose, else the
+   * channel's default.
+   *
+   * Validated against the workspace AND the channel — an id from the request
+   * body could otherwise name another tenant's connection, or a Messenger Page
+   * on a WhatsApp campaign.
+   */
+  private async resolveSendingAccount(
+    workspaceId: string,
+    channel: Channel,
+    requested: string | undefined,
+  ): Promise<string | null> {
+    if (requested) {
+      const row = await this.db.channelConnection.findFirst({
+        where: { id: requested, workspaceId, channel },
+        select: { id: true, isActive: true },
+      });
+      if (!row) {
+        throw new BadRequestException({
+          error: "unknown_account",
+          detail: `That ${channel} account doesn't belong to this workspace.`,
+        });
+      }
+      if (!row.isActive) {
+        throw new BadRequestException({
+          error: "account_inactive",
+          detail: `That ${channel} account isn't connected right now. Reconnect it or pick another.`,
+        });
+      }
+      return row.id;
+    }
+    const fallback = await this.db.channelConnection.findFirst({
+      where: { workspaceId, channel, isActive: true },
+      orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+      select: { id: true },
+    });
+    return fallback?.id ?? null;
+  }
+
   private async resolveCustomerRecipients(
     workspaceId: string,
     contactIds: string[],
@@ -348,9 +403,24 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     }
     if (template) {
       if (template.status !== "approved") {
+        // Archived is the one non-sendable state with a way back AND a deadline
+        // — and a broadcast is exactly where an operator meets a template they
+        // haven't used in a year. "Template is archived" alone would be true and
+        // useless.
+        const days =
+          template.status === "archived"
+            ? templateDeletionDaysLeft(template.archivedAt)
+            : null;
         throw new ConflictException({
           error: "template not approved",
-          detail: `Template is ${template.status}. Only approved templates can be broadcast.`,
+          detail:
+            template.status === "archived"
+              ? `Template was archived after ${TEMPLATE_AUTO_ARCHIVE_MONTHS} months without use. ` +
+                `Unarchive it in WhatsApp Manager to restore it` +
+                (days !== null
+                  ? ` — Meta deletes it permanently in about ${days} day${days === 1 ? "" : "s"}.`
+                  : `.`)
+              : `Template is ${template.status}. Only approved templates can be broadcast.`,
         });
       }
 
@@ -366,7 +436,10 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           detail: `This template's body uses named variables (${namedBodyVars.join(", ")}). Broadcasts support numbered {{1}} placeholders only.`,
         });
       }
-      const requiredButtons = requiredTemplateButtonParams(template.components);
+      const requiredButtons = requiredTemplateButtonParams(
+        template.components,
+        template.category,
+      );
       if (requiredButtons.length > 0) {
         throw new BadRequestException({
           error: "template needs button parameters",
@@ -436,6 +509,73 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           throw new BadRequestException({
             error: "header media kind mismatch",
             detail: `This template's header expects a ${headerMediaKind}.`,
+          });
+        }
+      }
+      // Carousel cards. The count is FIXED at approval — a mismatch fails every
+      // recipient at Meta, so it is caught before the campaign is scheduled.
+      const cardRequirements = requiredCarouselCards(components);
+      if (cardRequirements.length > 0) {
+        const supplied = variables.cards ?? [];
+        if (supplied.length !== cardRequirements.length) {
+          throw new BadRequestException({
+            error: "carousel cards required",
+            detail: `This template was approved with ${cardRequirements.length} cards — supply all of them.`,
+          });
+        }
+        for (const [i, need] of cardRequirements.entries()) {
+          const card = supplied[i]!;
+          if (card.kind !== need.headerKind) {
+            throw new BadRequestException({
+              error: "carousel cards required",
+              detail: `Card ${i + 1} of this template is a ${need.headerKind} — attach one.`,
+            });
+          }
+          if ((card.body?.length ?? 0) !== need.bodyVarCount) {
+            throw new BadRequestException({
+              error: "carousel cards required",
+              detail: `Card ${i + 1} needs ${need.bodyVarCount} value(s) filled in.`,
+            });
+          }
+          for (const b of need.buttons) {
+            const value = (card.buttons ?? []).find(
+              (x) => x.index === b.index && x.subType === b.subType,
+            );
+            if (!value || value.text.trim() === "") {
+              throw new BadRequestException({
+                error: "carousel cards required",
+                detail: `Card ${i + 1}'s button needs a value.`,
+              });
+            }
+          }
+        }
+      }
+      // A LOCATION header carries no coordinates on the template — the pin is
+      // per-message. Campaign-level here: one store opening, one venue.
+      if (headerComp?.format === "LOCATION" && !variables.headerLocation) {
+        throw new BadRequestException({
+          error: "header location required",
+          detail: "This template shows a map — set the location before scheduling.",
+        });
+      }
+      // A countdown template needs the instant it counts to. It is campaign-
+      // level (one deadline for the whole send), and without it Meta rejects
+      // EVERY recipient — so it is caught here, like the header media above.
+      if (templateNeedsOfferExpiry(components)) {
+        const expiresAt = variables.limitedTimeOfferExpiresAtMs;
+        if (expiresAt === undefined) {
+          throw new BadRequestException({
+            error: "offer expiry required",
+            detail: "This template shows a countdown — set when the offer expires.",
+          });
+        }
+        // Checked against NOW rather than the scheduled send time: a campaign
+        // scheduled for next week whose offer expires tomorrow is a real (if
+        // odd) choice, but one that has ALREADY expired is always a mistake.
+        if (expiresAt <= Date.now()) {
+          throw new BadRequestException({
+            error: "offer expiry required",
+            detail: "That offer expiry is in the past — pick a future time.",
           });
         }
       }
@@ -614,6 +754,42 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     const filterChannel: Channel = template ? "whatsapp" : freeformChannel ?? "whatsapp";
     const hadAnyBeforeFilter = recipientIds.length > 0;
 
+    // ── The sending ACCOUNT ─────────────────────────────────────────────────
+    // Which number / Page / handle this campaign goes out on. A workspace can
+    // hold several per channel, and every one of them is a distinct sender
+    // identity to the customer — so the campaign binds to one, and both the
+    // audience and the template catalogue are scoped to it below.
+    //
+    // Customer-mode is the deliberate exception: it routes per recipient across
+    // channels, so there is no single account to bind.
+    const sendingAccountId = isCustomerMode
+      ? null
+      : await this.resolveSendingAccount(workspaceId, filterChannel, input.channelConnectionId);
+
+    // A template belongs to a WhatsApp Business Account, and a number can only
+    // send templates from its OWN WABA. Sending one from the wrong account is
+    // rejected by Meta per-recipient with an opaque error, so catch it here —
+    // before a single row is written.
+    if (template && sendingAccountId) {
+      const account = await this.db.channelConnection.findFirst({
+        where: { id: sendingAccountId, workspaceId },
+        select: { wabaId: true },
+      });
+      const accountWaba = account?.wabaId ?? "";
+      const templateWaba = template.wabaId ?? "";
+      // `""` is the legacy/unknown-WABA sentinel on both sides — treat it as
+      // "no opinion" rather than a mismatch, or every pre-multi-account template
+      // becomes unsendable.
+      if (accountWaba && templateWaba && accountWaba !== templateWaba) {
+        throw new BadRequestException({
+          error: "template_wrong_account",
+          detail:
+            "That template belongs to a different WhatsApp Business Account than the number " +
+            "you're sending from. Pick a template from this account, or switch the sending number.",
+        });
+      }
+    }
+
     // The `limit: MAX + 1` on the group/custom resolvers above is a HEAP guard,
     // and it must be converted into a rejection HERE — before the channel and
     // opt-out filters below shrink the list.
@@ -638,6 +814,10 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     }
 
     let recipientRows: Array<{ contactId: string; customerId: string | null }>;
+    // Set when the audience was narrowed to the sending ACCOUNT and the operator
+    // did NOT opt into reaching other accounts' contacts — used only to make the
+    // "empty audience" message say which of the two filters emptied it.
+    let droppedByAccount = 0;
     if (isCustomerMode) {
       recipientRows = await this.resolveCustomerRecipients(workspaceId, recipientIds);
     } else {
@@ -653,6 +833,44 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         });
         recipientIds = rows.map((c) => c.id);
       }
+
+      // ── Account scoping ───────────────────────────────────────────────────
+      // A workspace can hold several accounts on one channel (WhatsApp numbers
+      // under a portfolio, Pages, IG handles). Broadcasting from account B to a
+      // contact who has only ever talked to account A shows them a sender they
+      // don't recognise, and their reply opens a SEPARATE thread on B — the
+      // customer's history looks split in two.
+      //
+      // So the default audience is the sending account's own contacts, and
+      // reaching the rest is an explicit opt-in rather than a silent default.
+      if (sendingAccountId && recipientIds.length > 0 && !input.includeOtherAccounts) {
+        // Only contacts that BELONG TO ANOTHER account are dropped.
+        //
+        // A contact with no conversation at all has no account yet — imported
+        // and manually-added contacts are exactly that, and they are the whole
+        // point of a cold broadcast. Filtering to "has a conversation on THIS
+        // account" would have removed every one of them and reported an empty
+        // audience for the commonest campaign there is.
+        //
+        // A null `channelConnectionId` is the same story for a different reason:
+        // conversations that predate multi-account carry no account, so they
+        // belong to no one in particular and stay reachable.
+        const elsewhere = await this.db.conversation.findMany({
+          where: {
+            workspaceId,
+            contactId: { in: recipientIds },
+            channelConnectionId: { not: null },
+            NOT: { channelConnectionId: sendingAccountId },
+          },
+          select: { contactId: true },
+        });
+        const foreign = new Set(elsewhere.map((c) => c.contactId));
+        droppedByAccount = foreign.size;
+        if (foreign.size > 0) {
+          recipientIds = recipientIds.filter((id) => !foreign.has(id));
+        }
+      }
+
       recipientRows = recipientIds.map((id) => ({ contactId: id, customerId: null }));
     }
 
@@ -661,9 +879,14 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         error: "empty audience",
         detail: isCustomerMode
           ? "None of the selected people are reachable on a live channel right now (no open messaging window)."
-          : hadAnyBeforeFilter
-            ? `None of the selected contacts are on ${filterChannel}.`
-            : "Pick at least one contact (or 'All contacts') to broadcast to.",
+          : droppedByAccount > 0
+            ? `All ${droppedByAccount} selected contact${droppedByAccount === 1 ? "" : "s"} ` +
+              `belong to another of your ${filterChannel} accounts. Switch the sending ` +
+              `account, or turn on "include contacts from other accounts" to reach them ` +
+              `from this one.`
+            : hadAnyBeforeFilter
+              ? `None of the selected contacts are on ${filterChannel}.`
+              : "Pick at least one contact (or 'All contacts') to broadcast to.",
       });
     }
 
@@ -691,8 +914,29 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         where: { workspaceId, marketingOptOutAt: { not: null } },
         select: { id: true },
       });
-      if (optedOut.length > 0) {
-        const blocked = new Set(optedOut.map((c) => c.id));
+      // Contacts who hit Meta's PER-USER marketing cap (131049) inside the last
+      // 24 hours. Meta's instruction is to wait a full day before resending:
+      // sooner just earns the same error again, and a WABA that repeatedly
+      // retries capped users can have delivery to them cut off for up to 24h.
+      // Skipping them also keeps the campaign report honest — they were never
+      // reachable, so counting them as failures misreports the send.
+      //
+      // Separate from an opt-out and NOT sticky: the person made no choice about
+      // us, and the cap clears on its own, so this is a rolling window rather
+      // than a flag anyone has to clear.
+      const cappedSince = new Date(Date.now() - PER_USER_MARKETING_CAP_COOLDOWN_MS);
+      const capped = await this.db.contact.findMany({
+        where: { workspaceId, marketingCapReachedAt: { gte: cappedSince } },
+        select: { id: true },
+      });
+      if (optedOut.length > 0 || capped.length > 0) {
+        // Same inverted-lookup reasoning as above: both sets are a small slice
+        // of the contact book, so intersecting in memory beats a 100k-parameter
+        // `in` list.
+        const blocked = new Set([
+          ...optedOut.map((c) => c.id),
+          ...capped.map((c) => c.id),
+        ]);
         const before = recipientRows.length;
         recipientRows = recipientRows.filter((r) => !blocked.has(r.contactId));
         suppressedCount = before - recipientRows.length;
@@ -700,7 +944,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       if (recipientRows.length === 0) {
         throw new BadRequestException({
           error: "all_recipients_opted_out",
-          detail: `All ${suppressedCount} selected contacts have opted out of marketing messages.`,
+          detail:
+            capped.length > 0 && optedOut.length === 0
+              ? `All ${suppressedCount} selected contacts recently hit WhatsApp's per-user ` +
+                `marketing limit. Try again in 24 hours — resending sooner is refused anyway.`
+              : `All ${suppressedCount} selected contacts have opted out of marketing messages.`,
         });
       }
     }
@@ -727,10 +975,15 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // rolling window consume no additional Meta budget, and without the ids
       // the gate assumes all of them are new and refuses legitimate re-sends.
       const audienceContactIds = recipientRows.map((r) => r.contactId);
+      // Gate against the account this campaign actually sends FROM. The 24h
+      // budget belongs to that number's PORTFOLIO — passing the workspace alone
+      // silently measured the channel default's portfolio instead, so a send
+      // from a second number was checked against a budget it does not draw on.
       let gate = await checkBroadcastEligibility(
         workspaceId,
         recipientRows.length,
         audienceContactIds,
+        sendingAccountId,
       );
       if (!gate.allowed) {
         // The cached tier may be stale (a missed quality webhook on a number Meta
@@ -742,6 +995,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           workspaceId,
           recipientRows.length,
           audienceContactIds,
+          sendingAccountId,
         );
       }
       if (!gate.allowed) {
@@ -763,6 +1017,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // customer-mode routes per recipient, so the broadcast's own channel is
       // unused — store whatsapp as an inert default.
       channel: isCustomerMode ? "whatsapp" : filterChannel,
+      // The account this campaign sends from. Null only in customer-mode, which
+      // resolves an account per recipient at send time.
+      channelConnectionId: sendingAccountId,
       templateId: template?.id ?? null,
       templateName: template?.name ?? null,
       templateLanguage: template?.language ?? null,
@@ -1224,6 +1481,17 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
 
   async list(workspaceId: string, query?: BroadcastListQuery) {
     const where: Prisma.BroadcastWhereInput = { workspaceId };
+    if (query?.channel === "people") {
+      // Omnichannel campaigns carry an inert `channel`, so they are selected by
+      // their TARGET MODE — matching on `channel` would misfile them under
+      // whatever inert value was stored.
+      where.targetMode = "customer";
+    } else if (query?.channel) {
+      where.channel = query.channel;
+      // A per-channel view must not include the omnichannel campaigns that
+      // merely happen to carry this channel as their inert default.
+      where.targetMode = "contact";
+    }
     if (query?.status && query.status !== "all") {
       where.status = query.status;
     }

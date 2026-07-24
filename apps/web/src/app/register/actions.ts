@@ -5,6 +5,8 @@ import { redirect } from "next/navigation";
 import { signInWithCredentials } from "@/lib/auth";
 import { api, ApiError } from "@/lib/api-client";
 import { validatePasswordStructure } from "@/lib/auth/password";
+import { auth } from "@/lib/auth/better-auth";
+import { checkEmailPolicy } from "@ccp/shared/auth/email-policy";
 
 /**
  * Org self-signup. Delegates the Team + User + credential Account + stage
@@ -35,8 +37,6 @@ export interface RegisterState {
   };
 }
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
 export async function registerAction(
   _prev: RegisterState,
   formData: FormData,
@@ -52,7 +52,15 @@ export async function registerAction(
 
   if (!orgName) return fail("Organization name is required.");
   if (!name) return fail("Your name is required.");
-  if (!EMAIL_RE.test(email)) return fail("Enter a valid email.");
+  // Shape + disposable-domain check. The regex this replaced accepted `a@b.c`
+  // and every throwaway-inbox service, which is how "any email works" became
+  // true. The OTP below is the real proof; this only avoids spending a send on
+  // something that was never going to arrive.
+  const emailProblem = checkEmailPolicy(email);
+  if (emailProblem === "invalid") return fail("Enter a valid email address.");
+  if (emailProblem === "disposable") {
+    return fail("Please use a permanent work or personal email address.");
+  }
 
   const policyError = validatePasswordStructure(password);
   if (policyError) return fail(policyError);
@@ -83,11 +91,37 @@ export async function registerAction(
     return { error: "Account created — please sign in." };
   }
 
-  // Server-side redirect — single hop. Better Auth's nextCookies plugin
-  // already committed the session cookie to the action response above;
-  // redirect() throws NEXT_REDIRECT AFTER that commit so the browser receives
-  // cookie + navigation in one round-trip. Lands on /pending: the org is
-  // `pending` until a superAdmin approves it. /pending self-heals to
-  // /settings/whatsapp the moment the org flips to `active`.
-  redirect("/pending");
+  // Send the verification code.
+  //
+  // AFTER sign-in, deliberately: the user now holds a session, so /verify knows
+  // who is verifying without putting the email in a query string (which would
+  // let anyone request codes for any address by editing the URL).
+  //
+  // A send failure does NOT fail the signup — the account exists and the code
+  // can be re-requested from /verify. Failing here would leave them with an
+  // account they cannot reach and no screen explaining why.
+  let sendFailed = false;
+  try {
+    await auth.api.sendVerificationOTP({
+      body: { email, type: "email-verification" },
+    });
+  } catch (err) {
+    // Carried to /verify so the screen can SAY so. Logging alone left the user
+    // staring at a code box for a message that was never coming — and the
+    // failure is routinely environmental rather than transient (Brevo answers
+    // `525 Unauthorized IP address` when the sending IP isn't allowlisted), so
+    // "wait a moment" is the wrong silent default.
+    sendFailed = true;
+    console.error("[register] verification email failed to send:", err);
+  }
+
+  // Server-side redirect — single hop. Better Auth's nextCookies plugin already
+  // committed the session cookie to the action response above; redirect() throws
+  // NEXT_REDIRECT AFTER that commit so the browser receives cookie + navigation
+  // in one round-trip.
+  //
+  // /verify, not /pending: the org-approval gate matters only once they can act
+  // at all, and an unverified session is refused by the API regardless. /verify
+  // hands off to /pending once the code is accepted.
+  redirect(sendFailed ? "/verify?send=failed" : "/verify");
 }

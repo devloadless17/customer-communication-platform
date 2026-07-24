@@ -24,6 +24,8 @@ interface MetaChannelConfig {
   phoneNumberId?: string;
   displayPhoneNumber?: string;
   wabaId?: string;
+  /** See MetaSendConfig.messagingAccountId — opt-in, unset for everyone. */
+  messagingAccountId?: string;
   appId?: string;
   verifyToken?: string;
 }
@@ -44,6 +46,25 @@ export interface MetaSendConfig {
    * send routes can ignore it; the templates sync route enforces presence.
    */
   wabaId?: string;
+  /**
+   * Meta's Messaging Account id, for the account-model split (WABA → WhatsApp
+   * Business Account + Messaging Account). Sent as `messaging_account_id` on
+   * Messages API calls to say WHICH account to bill.
+   *
+   * OPT-IN, and unset for everyone by default — that is deliberate. It is
+   * optional at Phase 1 and only *required* when one app holds SEVERAL
+   * Messaging Accounts on one number, which a single-integration workspace
+   * never has. Meanwhile the parameter belongs to a beta that is "subject to
+   * change", and Graph rejects an unrecognised body field with `#100`, failing
+   * the whole send. So the wire stays byte-identical until a tenant who
+   * actually needs it sets one.
+   *
+   * The value is the Messaging Account id — which IS the existing WABA id, so
+   * for most tenants it would equal `wabaId`. It is stored separately rather
+   * than derived, because "the account that owns our templates" and "the
+   * account to bill" are only the same thing until they aren't.
+   */
+  messagingAccountId?: string;
   /**
    * Meta App ID — required only by the resumable upload endpoint used when
    * creating a template with a media header. Optional everywhere else.
@@ -135,6 +156,7 @@ interface SendConfigCipher {
   phoneNumberId: string;
   accessTokenCipher: string;
   wabaId?: string;
+  messagingAccountId?: string;
   appId?: string;
   displayPhoneNumber?: string;
 }
@@ -195,6 +217,9 @@ async function loadSendCipher(
       // uses it. See the cache header comment for the security rationale.
       accessTokenCipher: secrets.accessToken!,
       ...(config.wabaId ? { wabaId: config.wabaId } : {}),
+      ...(config.messagingAccountId
+        ? { messagingAccountId: config.messagingAccountId }
+        : {}),
       ...(config.appId ? { appId: config.appId } : {}),
       ...(config.displayPhoneNumber
         ? { displayPhoneNumber: config.displayPhoneNumber }
@@ -230,6 +255,9 @@ function materializeSendConfig(
     accessToken,
     graphVersion: DEFAULT_GRAPH_VERSION,
     ...(cipher.wabaId ? { wabaId: cipher.wabaId } : {}),
+    ...(cipher.messagingAccountId
+      ? { messagingAccountId: cipher.messagingAccountId }
+      : {}),
     ...(cipher.appId ? { appId: cipher.appId } : {}),
     ...(cipher.displayPhoneNumber
       ? { displayPhoneNumber: cipher.displayPhoneNumber }

@@ -1,0 +1,138 @@
+/**
+ * Every language code Cloud API message templates support.
+ *
+ * Verbatim from Meta's "Supported Languages" table — do not prune it to the ones
+ * we think customers need. The composer's dropdown IS this list, and a code that
+ * is missing here is a template an operator simply cannot create: the previous
+ * hand-picked set of 14 silently locked out Chinese, Russian, Hebrew, Dutch,
+ * Polish, Urdu and ~90 others on a platform whose whole point is reaching
+ * customers in their own language.
+ *
+ * Used for the PICKER only. The server keeps a permissive shape check rather
+ * than validating against this array, so the day Meta adds a language we don't
+ * reject a template Meta would have accepted — a limit stricter than the
+ * provider's is as wrong as a looser one.
+ */
+export interface TemplateLanguage {
+  code: string;
+  label: string;
+}
+
+export const TEMPLATE_LANGUAGES: readonly TemplateLanguage[] = [
+  { code: "af", label: "Afrikaans" },
+  { code: "sq", label: "Albanian" },
+  { code: "ar", label: "Arabic" },
+  { code: "ar_EG", label: "Arabic (Egypt)" },
+  { code: "ar_AE", label: "Arabic (UAE)" },
+  { code: "ar_LB", label: "Arabic (Lebanon)" },
+  { code: "ar_MA", label: "Arabic (Morocco)" },
+  { code: "ar_QA", label: "Arabic (Qatar)" },
+  { code: "az", label: "Azerbaijani" },
+  { code: "be_BY", label: "Belarusian" },
+  { code: "bn", label: "Bengali" },
+  { code: "bn_IN", label: "Bengali (India)" },
+  { code: "bg", label: "Bulgarian" },
+  { code: "ca", label: "Catalan" },
+  { code: "zh_CN", label: "Chinese (China)" },
+  { code: "zh_HK", label: "Chinese (Hong Kong)" },
+  { code: "zh_TW", label: "Chinese (Taiwan)" },
+  { code: "hr", label: "Croatian" },
+  { code: "cs", label: "Czech" },
+  { code: "da", label: "Danish" },
+  { code: "prs_AF", label: "Dari" },
+  { code: "nl", label: "Dutch" },
+  { code: "nl_BE", label: "Dutch (Belgium)" },
+  { code: "en", label: "English" },
+  { code: "en_GB", label: "English (UK)" },
+  { code: "en_US", label: "English (US)" },
+  { code: "en_AE", label: "English (UAE)" },
+  { code: "en_AU", label: "English (Australia)" },
+  { code: "en_CA", label: "English (Canada)" },
+  { code: "en_GH", label: "English (Ghana)" },
+  { code: "en_IE", label: "English (Ireland)" },
+  { code: "en_IN", label: "English (India)" },
+  { code: "en_JM", label: "English (Jamaica)" },
+  { code: "en_MY", label: "English (Malaysia)" },
+  { code: "en_NZ", label: "English (New Zealand)" },
+  { code: "en_QA", label: "English (Qatar)" },
+  { code: "en_SG", label: "English (Singapore)" },
+  { code: "en_UG", label: "English (Uganda)" },
+  { code: "en_ZA", label: "English (South Africa)" },
+  { code: "et", label: "Estonian" },
+  { code: "fil", label: "Filipino" },
+  { code: "fi", label: "Finnish" },
+  { code: "fr", label: "French" },
+  { code: "fr_BE", label: "French (Belgium)" },
+  { code: "fr_CA", label: "French (Canada)" },
+  { code: "fr_CH", label: "French (Switzerland)" },
+  { code: "fr_CI", label: "French (Côte d'Ivoire)" },
+  { code: "fr_MA", label: "French (Morocco)" },
+  { code: "ka", label: "Georgian" },
+  { code: "de", label: "German" },
+  { code: "de_AT", label: "German (Austria)" },
+  { code: "de_CH", label: "German (Switzerland)" },
+  { code: "el", label: "Greek" },
+  { code: "gu", label: "Gujarati" },
+  { code: "ha", label: "Hausa" },
+  { code: "he", label: "Hebrew" },
+  { code: "hi", label: "Hindi" },
+  { code: "hu", label: "Hungarian" },
+  { code: "id", label: "Indonesian" },
+  { code: "ga", label: "Irish" },
+  { code: "it", label: "Italian" },
+  { code: "ja", label: "Japanese" },
+  { code: "kn", label: "Kannada" },
+  { code: "kk", label: "Kazakh" },
+  { code: "rw_RW", label: "Kinyarwanda" },
+  { code: "ko", label: "Korean" },
+  { code: "ky_KG", label: "Kyrgyz" },
+  { code: "lo", label: "Lao" },
+  { code: "lv", label: "Latvian" },
+  { code: "lt", label: "Lithuanian" },
+  { code: "mk", label: "Macedonian" },
+  { code: "ms", label: "Malay" },
+  { code: "ml", label: "Malayalam" },
+  { code: "mr", label: "Marathi" },
+  { code: "nb", label: "Norwegian" },
+  { code: "ps_AF", label: "Pashto" },
+  { code: "fa", label: "Persian" },
+  { code: "pl", label: "Polish" },
+  { code: "pt_BR", label: "Portuguese (Brazil)" },
+  { code: "pt_PT", label: "Portuguese (Portugal)" },
+  { code: "pa", label: "Punjabi" },
+  { code: "ro", label: "Romanian" },
+  { code: "ru", label: "Russian" },
+  { code: "sr", label: "Serbian" },
+  { code: "si_LK", label: "Sinhala" },
+  { code: "sk", label: "Slovak" },
+  { code: "sl", label: "Slovenian" },
+  { code: "es", label: "Spanish" },
+  { code: "es_AR", label: "Spanish (Argentina)" },
+  { code: "es_CL", label: "Spanish (Chile)" },
+  { code: "es_CO", label: "Spanish (Colombia)" },
+  { code: "es_CR", label: "Spanish (Costa Rica)" },
+  { code: "es_DO", label: "Spanish (Dominican Republic)" },
+  { code: "es_EC", label: "Spanish (Ecuador)" },
+  { code: "es_HN", label: "Spanish (Honduras)" },
+  { code: "es_MX", label: "Spanish (Mexico)" },
+  { code: "es_PA", label: "Spanish (Panama)" },
+  { code: "es_PE", label: "Spanish (Peru)" },
+  { code: "es_ES", label: "Spanish (Spain)" },
+  { code: "es_UY", label: "Spanish (Uruguay)" },
+  { code: "sw", label: "Swahili" },
+  { code: "sv", label: "Swedish" },
+  { code: "ta", label: "Tamil" },
+  { code: "te", label: "Telugu" },
+  { code: "th", label: "Thai" },
+  { code: "tr", label: "Turkish" },
+  { code: "uk", label: "Ukrainian" },
+  { code: "ur", label: "Urdu" },
+  { code: "uz", label: "Uzbek" },
+  { code: "vi", label: "Vietnamese" },
+  { code: "zu", label: "Zulu" },
+] as const;
+
+/** Human label for a code, falling back to the code itself for one we don't know. */
+export function templateLanguageLabel(code: string): string {
+  return TEMPLATE_LANGUAGES.find((l) => l.code === code)?.label ?? code;
+}

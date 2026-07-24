@@ -84,11 +84,21 @@ async function main() {
       isSuperAdmin: true,
       name: NAME,
       email,
+      // EXPLICIT, because `emailVerified` now defaults to FALSE (2026-07-23).
+      // The platform operator is provisioned by someone with database access,
+      // not through signup — there is no OTP to send and no inbox to prove.
+      // The session guard exempts superAdmins from the verification gate, but
+      // relying on that exemption would leave the row itself saying something
+      // untrue, and a future gate that forgets the exemption would lock the
+      // operator out of the platform they administer.
+      emailVerified: true,
     },
     update: {
       isSuperAdmin: true,
       name: NAME,
       deactivatedAt: null,
+      // Heals a row seeded between the default flip and this fix.
+      emailVerified: true,
     },
   });
   await db.workspaceMember.upsert({

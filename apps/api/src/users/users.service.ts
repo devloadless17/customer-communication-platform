@@ -7,10 +7,16 @@ import {
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
-import { assignableRoles, canModifyUser, type UserActor } from "@ccp/shared/auth/permissions";
-import type { Role, User } from "@ccp/shared/types";
+import {
+  assignableRoles,
+  canModifyUser,
+  canModifyUserAccount,
+  type UserActor,
+} from "@ccp/shared/auth/permissions";
+import type { OrgRole, Role, User } from "@ccp/shared/types";
 
-import { rebalanceDeactivatedUser } from "@/lib/sweepers/assignment-rebalance";
+import { invalidateAssignmentCache } from "@/lib/assignment/resolve";
+import { detachMemberFromWorkspace } from "@/lib/workspaces/remove-member";
 
 import { hashPassword, validatePasswordStructure } from "../auth/password";
 import { SessionInvalidationService } from "../auth/session-invalidation.service";
@@ -23,7 +29,7 @@ import {
 } from "../lib/blob-storage/avatar";
 import { AVAILABILITY_SELECT, applyAvailability } from "../lib/availability/apply";
 
-import { teamScheduleOf } from "../lib/availability/schedule";
+import { loadAvailabilityScope } from "../lib/availability/schedule";
 import { assignedUserSelect, mapUser } from "../lib/queries/_shared";
 import type {
   SetUserAvailabilityInput,
@@ -197,16 +203,19 @@ export class UsersService {
       where: { id: userId, workspaceMemberships: { some: { workspaceId } } },
       select: { ...AVAILABILITY_SELECT, ...assignedUserSelect(workspaceId) },
     });
-    const team = await this.db.workspace.findUnique({
-      where: { id: workspaceId },
-      select: { workHours: true },
-    });
+    // The governing schedule + every workspace to announce to. NOT
+    // `workspaceId`'s own schedule: availability is one column on the shared
+    // User row, so exactly one schedule may drive it (see loadAvailabilityScope)
+    // and every workspace the person is in has to hear about the result — an
+    // admin flipping someone's status from workspace A must not leave workspace
+    // B showing yesterday's dot.
+    const scope = await loadAvailabilityScope(this.db, userId);
 
     await applyAvailability({
       db: this.db,
       user,
-      workspaceId,
-      teamSchedule: teamScheduleOf(team),
+      workspaceIds: scope.workspaceIds,
+      teamSchedule: scope.teamSchedule,
       intent: input.followSchedule
         ? { kind: "followSchedule" }
         : { kind: "pick", status: input.status, message: input.message, actorUserId },
@@ -226,7 +235,15 @@ export class UsersService {
     return mapUser(updated, workspaceId);
   }
 
-  /** A teammate's schedule config + the org default they'd inherit. */
+  /**
+   * A teammate's schedule config + the default they'd inherit.
+   *
+   * The inherited default is the GOVERNING one (`loadAvailabilityScope`), not
+   * whichever workspace the admin happens to be looking from. For anyone in a
+   * single workspace those are the same thing; for a member of two, showing the
+   * viewing workspace's grid would have the editor preview a schedule that will
+   * never be applied to them.
+   */
   async getUserWorkHours(
     workspaceId: string,
     userId: string,
@@ -236,14 +253,11 @@ export class UsersService {
       select: { workHoursMode: true, workHours: true },
     });
     if (!user) throw new NotFoundException({ error: "not_found" });
-    const team = await this.db.workspace.findUnique({
-      where: { id: workspaceId },
-      select: { workHours: true },
-    });
+    const { teamSchedule } = await loadAvailabilityScope(this.db, userId);
     return {
       mode: user.workHoursMode,
       workHours: user.workHours ?? null,
-      teamWorkHours: team?.workHours ?? null,
+      teamWorkHours: teamSchedule,
     };
   }
 
@@ -295,11 +309,6 @@ export class UsersService {
    * on its own cadence for the boundaries nobody is around to trigger.
    */
   async resyncAvailability(workspaceId: string, userIds?: string[]): Promise<void> {
-    const team = await this.db.workspace.findUnique({
-      where: { id: workspaceId },
-      select: { workHours: true },
-    });
-    const teamSchedule = teamScheduleOf(team);
     const users = await this.db.user.findMany({
       where: {
         workspaceMemberships: { some: { workspaceId } },
@@ -310,11 +319,16 @@ export class UsersService {
     });
     const nowMs = Date.now();
     for (const user of users) {
+      // Per user, because the governing schedule is a property of the PERSON
+      // (their own grid, else their primary workspace's default) rather than of
+      // the workspace this edit was made from.
+      const scope = await loadAvailabilityScope(this.db, user.id);
+      if (scope.workspaceIds.length === 0) continue;
       await applyAvailability({
         db: this.db,
         user,
-        workspaceId,
-        teamSchedule,
+        workspaceIds: scope.workspaceIds,
+        teamSchedule: scope.teamSchedule,
         // Every caller of this method is a SCHEDULE EDIT (org default or a
         // member's own), so a live override must be re-anchored to the new
         // schedule rather than keep an expiry pointing at the old one's
@@ -533,11 +547,18 @@ export class UsersService {
   }
 
   /**
-   * PATCH /api/users/:id. Four layered guards:
+   * PATCH /api/users/:id. Five layered guards:
    *   1. canModifyUser(actor, target) — admin can't touch a superAdmin.
    *   2. assignableRoles(actor) — admin can't promote to superAdmin.
-   *   3. self-edit safeguards — no self-demote / self-deactivate.
-   *   4. last-active-admin guard — never strip the team of every manager.
+   *   3. canModifyUserAccount — DEACTIVATION additionally needs org authority.
+   *   4. self-edit safeguards — no self-demote / self-deactivate.
+   *   5. last-active-admin guard — never strip the team of every manager.
+   *
+   * Guard 3 exists because this one endpoint does two things of very different
+   * reach. Changing `role` affects THIS workspace and is rightly a workspace
+   * admin's call. Setting `deactivated` blocks sign-in to the whole
+   * organization — every workspace, every device — so it is an org-directory
+   * action and is gated as one.
    */
   async update(
     workspaceId: string,
@@ -548,11 +569,16 @@ export class UsersService {
   ) {
     const target = await this.db.user.findFirst({
       where: { id: targetId, workspaceMemberships: { some: { workspaceId } } },
-      select: { id: true, isSuperAdmin: true, deactivatedAt: true, workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
+      select: { id: true, isSuperAdmin: true, orgRole: true, deactivatedAt: true, workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
     });
     if (!target) throw new NotFoundException({ error: "user not found" });
 
-    if (!canModifyUser(actor, { role: (target.workspaceMemberships[0]?.role ?? "agent") as Role, isSuperAdmin: target.isSuperAdmin })) {
+    const targetActor: UserActor = {
+      role: (target.workspaceMemberships[0]?.role ?? "agent") as Role,
+      isSuperAdmin: target.isSuperAdmin,
+      orgRole: target.orgRole as OrgRole,
+    };
+    if (!canModifyUser(actor, targetActor)) {
       throw new ForbiddenException({ error: "cannot modify this user" });
     }
 
@@ -574,6 +600,14 @@ export class UsersService {
     }
     const userData: { deactivatedAt?: Date | null } = {};
     if (typeof input.deactivated === "boolean") {
+      // Org-wide effect → org-wide authority. See the method comment.
+      if (!canModifyUserAccount(actor, targetActor)) {
+        throw new ForbiddenException({
+          error: "org_admin_required",
+          detail:
+            "Activating or deactivating an account affects every workspace in the organization, so it's an organization owner/admin action. You can still change this person's role in this workspace.",
+        });
+      }
       userData.deactivatedAt = input.deactivated ? new Date() : null;
     }
 
@@ -674,31 +708,73 @@ export class UsersService {
 
     // A deactivated agent's open conversations would otherwise sit on a person
     // who can no longer log in — invisible in the Unassigned queue and owned by
-    // nobody in practice. Route them to someone real through the team's
-    // assignment policy (opt-out via AssignmentSettings.reassignOnDeactivate).
+    // nobody in practice. Route them to someone real through each workspace's
+    // assignment policy (opt-out per workspace via
+    // AssignmentSettings.reassignOnDeactivate).
+    //
+    // EVERY workspace they belong to, not just the caller's. Deactivation blocks
+    // sign-in org-wide, so scoping the rebalance to the acting workspace left
+    // their queues in every OTHER workspace owned by someone who can't log in —
+    // the exact state this is here to prevent, just one page further away.
     //
     // Detached + best-effort ON PURPOSE: deactivation is a security action and
     // must return immediately and succeed regardless. Anything that fails to
-    // re-route stays visible in the team inbox, and the deactivated user is
+    // re-route stays visible in the workspace inbox, and the deactivated user is
     // excluded from every future candidate pool anyway.
     if (deactivated) {
-      void rebalanceDeactivatedUser(workspaceId, targetId)
-        .then((moved) => {
-          if (moved > 0) {
-            this.logger.log(
-              `reassigned ${moved} conversation(s) from deactivated user ${targetId}`,
-            );
-          }
-        })
-        .catch((err) => {
-          this.logger.warn(
-            `reassign-on-deactivate failed for ${targetId}: ${err instanceof Error ? err.message : err}`,
-          );
-        });
+      void this.detachFromAllWorkspaces(targetId).catch((err) => {
+        this.logger.warn(
+          `reassign-on-deactivate failed for ${targetId}: ${err instanceof Error ? err.message : err}`,
+        );
+      });
     }
 
     await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "members" });
     return updated;
+  }
+
+  /**
+   * Re-home a deactivated user's work in EVERY workspace they belong to.
+   *
+   * Keeps the `reassignOnDeactivate` opt-out per workspace — it is a workspace
+   * setting, and one workspace choosing to leave threads put doesn't bind
+   * another. Membership rows are left alone: deactivation is reversible, and
+   * re-enabling someone should restore their access, not require re-inviting
+   * them to every workspace.
+   */
+  private async detachFromAllWorkspaces(userId: string): Promise<void> {
+    const memberships = await this.db.workspaceMember.findMany({
+      where: { userId },
+      select: { workspaceId: true },
+    });
+    for (const { workspaceId } of memberships) {
+      const settings = await this.db.assignmentSettings.findUnique({
+        where: { workspaceId },
+        select: { reassignOnDeactivate: true },
+      });
+      const { conversationsMoved, ticketsMoved } = await detachMemberFromWorkspace(
+        this.db,
+        workspaceId,
+        userId,
+        {
+          // No row = the column default, which is ON.
+          rebalance: settings?.reassignOnDeactivate ?? true,
+          // Deactivation is REVERSIBLE, so their grants stay: re-enabling must
+          // restore the account they had, not a stripped one. Deactivated users
+          // are already excluded from every candidate pool.
+          clearGrants: false,
+          // A deactivated account may be re-enabled tomorrow, so "owned by
+          // someone inactive" beats "owned by nobody" — the offline sweeper
+          // reasons the same way. Removal is the case that unassigns.
+          unassignWhenNoCandidate: false,
+        },
+      );
+      if (conversationsMoved > 0 || ticketsMoved > 0) {
+        this.logger.log(
+          `deactivated ${userId}: re-homed ${conversationsMoved} conversation(s), ${ticketsMoved} ticket(s) in workspace ${workspaceId}`,
+        );
+      }
+    }
   }
 
   /**
@@ -710,10 +786,13 @@ export class UsersService {
    * verifies against — no separate hash scheme.
    *
    * Gates:
-   *   1. canModifyUser(actor, target) — admin can't reset a superAdmin's
-   *      password; superAdmin can reset anyone's.
-   *   2. team scope — `targetId` must belong to `workspaceId` (a team admin can
-   *      only touch their own org; the superAdmin path passes the org's id).
+   *   1. canModifyUserAccount(actor, target) — ORG authority required. A reset
+   *      kicks every device and hands control of the account to whoever typed
+   *      the new password; that reaches every workspace the person belongs to,
+   *      so administering one of them is not enough. Nobody but an owner or a
+   *      superAdmin may reset an org owner's password.
+   *   2. workspace scope — `targetId` must belong to `workspaceId`, so an id
+   *      from another tenant is not even addressable.
    *
    * On success EVERY session for the target is deleted + revoked, so any
    * device still holding the old password's session is kicked — the same
@@ -735,12 +814,22 @@ export class UsersService {
 
     const target = await this.db.user.findFirst({
       where: { id: targetId, workspaceMemberships: { some: { workspaceId } } },
-      select: { id: true, isSuperAdmin: true, workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
+      select: { id: true, isSuperAdmin: true, orgRole: true, workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
     });
     if (!target) throw new NotFoundException({ error: "user not found" });
 
-    if (!canModifyUser(actor, { role: (target.workspaceMemberships[0]?.role ?? "agent") as Role, isSuperAdmin: target.isSuperAdmin })) {
-      throw new ForbiddenException({ error: "cannot reset this user's password" });
+    if (
+      !canModifyUserAccount(actor, {
+        role: (target.workspaceMemberships[0]?.role ?? "agent") as Role,
+        isSuperAdmin: target.isSuperAdmin,
+        orgRole: target.orgRole as OrgRole,
+      })
+    ) {
+      throw new ForbiddenException({
+        error: "org_admin_required",
+        detail:
+          "Resetting someone's password signs them out of every workspace, so it's an organization owner/admin action.",
+      });
     }
 
     const account = await this.db.account.findFirst({
@@ -770,10 +859,22 @@ export class UsersService {
   }
 
   /**
-   * DELETE /api/users/:id. Same gate stack as PATCH except self-delete is
-   * always refused (admin must deactivate themselves first, deliberately
-   * separating the two actions). Cascade clears Session + Account; attribution
-   * survives via SetNull FKs.
+   * DELETE /api/users/:id — remove the account from the ORGANIZATION entirely.
+   *
+   * Gates:
+   *   1. canModifyUserAccount — org authority, and an owner is only removable
+   *      by another owner (or a platform superAdmin). Deleting a user is not a
+   *      workspace action even though it is reached from a workspace's members
+   *      page: it ends their access to every workspace in the org at once.
+   *   2. self-delete is always refused (an admin must deactivate themselves
+   *      first, deliberately separating the two actions).
+   *   3. last-active-admin, checked across EVERY workspace they administer —
+   *      not just the caller's. Scoping it to one workspace let a delete
+   *      performed from workspace A silently leave workspace B with no admin,
+   *      which its own guard calls an unrecoverable state.
+   *
+   * Cascade clears Session + Account + WorkspaceMember; attribution survives
+   * via SetNull FKs.
    */
   async remove(
     workspaceId: string,
@@ -783,41 +884,78 @@ export class UsersService {
   ): Promise<void> {
     const target = await this.db.user.findFirst({
       where: { id: targetId, workspaceMemberships: { some: { workspaceId } } },
-      select: { id: true, isSuperAdmin: true, deactivatedAt: true, workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
+      select: {
+        id: true,
+        isSuperAdmin: true,
+        orgRole: true,
+        organizationId: true,
+        deactivatedAt: true,
+        // EVERY membership, not just the caller's workspace — the delete reaches
+        // all of them, so the last-admin guard has to as well.
+        workspaceMemberships: { select: { workspaceId: true, role: true } },
+      },
     });
     if (!target) throw new NotFoundException({ error: "user not found" });
 
-    if (!canModifyUser(actor, { role: (target.workspaceMemberships[0]?.role ?? "agent") as Role, isSuperAdmin: target.isSuperAdmin })) {
-      throw new ForbiddenException({ error: "cannot delete this user" });
+    if (
+      !canModifyUserAccount(actor, {
+        role: (target.workspaceMemberships.find((m) => m.workspaceId === workspaceId)?.role ??
+          "agent") as Role,
+        isSuperAdmin: target.isSuperAdmin,
+        orgRole: target.orgRole as OrgRole,
+      })
+    ) {
+      throw new ForbiddenException({
+        error: "org_admin_required",
+        detail:
+          "Deleting an account removes it from every workspace in the organization, so it's an organization owner/admin action. To remove someone from THIS workspace only, use Organization → Members.",
+      });
     }
     if (targetId === actorUserId) {
       throw new BadRequestException({ error: "cannot delete your own account" });
     }
 
-    const targetCurrentlyManages =
-      (target.workspaceMemberships[0]?.role === "admin" || target.isSuperAdmin) &&
-      !target.deactivatedAt;
+    // Every workspace this delete could strip of its last admin.
+    const administeredWorkspaceIds = target.deactivatedAt
+      ? [] // already deactivated → holds no live admin seat anywhere
+      : target.isSuperAdmin
+        ? target.workspaceMemberships.map((m) => m.workspaceId)
+        : target.workspaceMemberships
+            .filter((m) => m.role === "admin")
+            .map((m) => m.workspaceId);
+    const memberWorkspaceIds = target.workspaceMemberships.map((m) => m.workspaceId);
 
-    // Serialize the last-active-manager re-check + delete under a per-team lock
+    // Serialize the last-active-admin re-check + delete under an ORG-row lock
     // (SELECT ... FOR UPDATE) so two concurrent deletes/demotes can't each see
-    // the other admin still active and both commit → zero managers (TOCTOU).
-    // Same pattern as update() and invites.accept().
-    if (targetCurrentlyManages) {
+    // the other admin still active and both commit → zero admins (TOCTOU). The
+    // lock is on the ORG rather than one workspace because the invariant now
+    // spans every workspace the target administers. Same pattern as update()
+    // and invites.accept().
+    if (administeredWorkspaceIds.length > 0) {
       await this.db.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
-        // Role lives on WorkspaceMember now; a platform operator also counts.
-        const otherManagers = await tx.user.count({
-          where: {
-            OR: [
-              { workspaceMemberships: { some: { workspaceId, role: "admin" } } },
-              { isSuperAdmin: true, workspaceMemberships: { some: { workspaceId } } },
-            ],
-            deactivatedAt: null,
-            NOT: { id: targetId },
-          },
-        });
-        if (otherManagers === 0) {
-          throw new BadRequestException({ error: "cannot delete the last active admin" });
+        await tx.$queryRaw`SELECT id FROM "Organization" WHERE id = ${target.organizationId} FOR UPDATE`;
+        for (const wsId of administeredWorkspaceIds) {
+          // Role lives on WorkspaceMember now; a platform operator also counts.
+          const otherAdmins = await tx.user.count({
+            where: {
+              OR: [
+                { workspaceMemberships: { some: { workspaceId: wsId, role: "admin" } } },
+                { isSuperAdmin: true, workspaceMemberships: { some: { workspaceId: wsId } } },
+              ],
+              deactivatedAt: null,
+              NOT: { id: targetId },
+            },
+          });
+          if (otherAdmins === 0) {
+            const ws = await tx.workspace.findUnique({
+              where: { id: wsId },
+              select: { name: true },
+            });
+            throw new BadRequestException({
+              error: "cannot delete the last active admin",
+              detail: `They are the only admin of ${ws?.name ?? "another workspace"}. Promote someone else there first — a workspace with no admin can't be configured or repaired.`,
+            });
+          }
         }
         await tx.user.delete({ where: { id: targetId } });
       });
@@ -831,9 +969,66 @@ export class UsersService {
     // owner id. Shared views are untouched. Same best-effort GC placement as
     // the avatar below — the user row is already gone at this point, so these
     // rows are unreachable either way.
-    await this.db.inboxView
-      .deleteMany({ where: { visibility: "personal", createdById: null } })
-      .catch(() => undefined);
+    //
+    // SCOPED to the workspaces this user actually belonged to. Without the
+    // `workspaceId` clause this ran platform-wide: deleting one user swept
+    // orphaned personal views out of EVERY tenant on the box. §18 — workspaceId
+    // belongs in the where of every query, and this is why.
+    if (memberWorkspaceIds.length > 0) {
+      await this.db.inboxView
+        .deleteMany({
+          where: {
+            workspaceId: { in: memberWorkspaceIds },
+            visibility: "personal",
+            createdById: null,
+          },
+        })
+        .catch(() => undefined);
+    }
+
+    // Null the no-FK pointer columns that name this user. The delete cascaded
+    // their WorkspaceMember / TeamChannelMember / AssignmentPolicyMember rows and
+    // SetNull'd every real FK (assigned conversations, message flags, audit
+    // authors), but four columns hold a user id WITHOUT a foreign key — a
+    // deliberate choice so a deleted user degrades a policy rather than cascading
+    // into it — and nothing clears those automatically. A `fixed`/`fallback`
+    // policy still naming a now-deleted user routes every matching conversation
+    // to a person who no longer exists, and the picker finds no candidate, so
+    // traffic silently stops. (`cursorUserId` / the round-robin cursor dangling
+    // is harmless — a rotation restart — but cleared in the same pass for
+    // tidiness.) Scoped to the workspaces this user belonged to; best-effort,
+    // like the GC below.
+    if (memberWorkspaceIds.length > 0) {
+      await Promise.all([
+        this.db.assignmentPolicy
+          .updateMany({
+            where: { workspaceId: { in: memberWorkspaceIds }, fixedUserId: targetId },
+            data: { fixedUserId: null },
+          })
+          .catch(() => undefined),
+        this.db.assignmentPolicy
+          .updateMany({
+            where: { workspaceId: { in: memberWorkspaceIds }, fallbackUserId: targetId },
+            data: { fallbackUserId: null },
+          })
+          .catch(() => undefined),
+        this.db.assignmentPolicy
+          .updateMany({
+            where: { workspaceId: { in: memberWorkspaceIds }, cursorUserId: targetId },
+            data: { cursorUserId: null },
+          })
+          .catch(() => undefined),
+        this.db.workspace
+          .updateMany({
+            where: { id: { in: memberWorkspaceIds }, aiRoundRobinCursorUserId: targetId },
+            data: { aiRoundRobinCursorUserId: null },
+          })
+          .catch(() => undefined),
+      ]);
+      // The routing config is cached in-process per workspace; without this the
+      // picker keeps handing work to a now-null `fixedUserId` until the TTL.
+      for (const wsId of memberWorkspaceIds) invalidateAssignmentCache(wsId);
+    }
 
     // GC the R2 avatar object — the orphan sweeper skips the `avatars/` prefix,
     // so a hard-deleted user's blob would otherwise leak forever. Best-effort

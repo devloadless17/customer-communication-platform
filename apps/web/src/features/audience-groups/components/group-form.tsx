@@ -15,6 +15,7 @@ import {
 } from "@/features/broadcasts/components/audience-builder";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessage } from "@ccp/shared/api/error-message";
 import { toast } from "@/lib/toast";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
 import type { ContactFieldDefinition, ContactStage, Tag } from "@ccp/shared/types";
@@ -146,8 +147,9 @@ export function GroupForm({
         method: "DELETE",
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? `HTTP ${res.status}`);
+        // `HTTP 409` told the user nothing; the helper prefers the API's own
+        // sentence and falls back to a humanized key.
+        setError(await apiErrorMessage(res, `Couldn't delete the group.`));
         return;
       }
       toast.success(`Deleted "${initial.name}"`);

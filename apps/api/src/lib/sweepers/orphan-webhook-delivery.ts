@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 
+import { isPoolClosedError } from "@/lib/sweepers/_mutex";
 import {
   enqueueWebhookDelivery,
   getWebhookDeliverQueue,
@@ -50,6 +51,12 @@ async function runTick(label: string): Promise<void> {
   try {
     await sweepOnce();
   } catch (err) {
+    // See the note in assignment-rebalance: an in-flight tick outlives
+    // clearInterval, so a closed pool must stop the sweeper, not log per tick.
+    if (isPoolClosedError(err)) {
+      stopOrphanWebhookDeliverySweeper();
+      return;
+    }
     console.error(`[sweeper.orphan-webhook-delivery] ${label} failed`, err);
   } finally {
     inFlight = false;

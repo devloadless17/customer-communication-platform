@@ -98,6 +98,10 @@ export class ConversationsService {
        *  controller (which owns the membership check). Never the raw id — this
        *  layer must not be able to read the InboxView table. */
       viewFilters?: InboxViewFilters;
+      /** One channel account (WhatsApp number / Page / handle). ANDed on top of
+       *  whichever filter above applied — see the schema comment for why it is
+       *  orthogonal rather than part of the precedence chain. */
+      accountId?: string;
     },
   ) {
     // Translate the flat query-string surface into the typed filter union
@@ -121,6 +125,7 @@ export class ConversationsService {
       // it; `{}` (a no-op) for everyone else.
       ...(opts.viewer ? { visibility: visibilityWhere(opts.viewer) } : {}),
       ...(filter ? { filter } : {}),
+      ...(opts.accountId ? { accountId: opts.accountId } : {}),
     });
   }
 
@@ -138,7 +143,7 @@ export class ConversationsService {
    * (`unreadCount > 0`) variants, and 1 per-stage groupBy. The total/preset counts
    * hit the (workspaceId, status, lastMessageAt) + (workspaceId, assignedUserId) indexes;
    * the 5 unread counts narrow on those same indexes and are served by the
-   * hand-written PARTIAL index `Conversation_teamId_unread_idx`
+   * hand-written PARTIAL index `Conversation_workspaceId_unread_idx`
    * (`Conversation(workspaceId) WHERE unreadCount > 0`, migration
    * 20260615130000) — tiny, because zero-unread rows dominate. (This comment
    * used to say no index covered `unreadCount`; that was true when written and
@@ -302,7 +307,7 @@ export class ConversationsService {
         where: { workspaceId, ...scope, status: "closed" },
       }),
       // Threads with at least one unresolved triage flag. Rides the partial
-      // index Conversation_teamId_openFlag_idx, which spans only flagged rows —
+      // index Conversation_workspaceId_openFlag_idx, which spans only flagged rows —
       // so this count reads a tiny index, not the team's conversation
       // partition. Deliberately NOT status-narrowed: an unresolved complaint on
       // a closed thread still needs triage (matches the list filter).
@@ -939,6 +944,30 @@ export class ConversationsService {
       /* keep default */
     }
 
+    // Bind the thread to a real ACCOUNT at creation.
+    //
+    // Leaving it null still SENT — `getSendConfig(null)` falls back to the
+    // channel default — but the thread was unattributed in the inbox, invisible
+    // to the per-account filter, and silently migrated to whichever number
+    // became the default later. Resolving it now makes compose-new behave like
+    // an inbound thread: bound, labelled, and stable.
+    //
+    // An explicit id is validated against this workspace + channel, so a caller
+    // cannot start a conversation on another workspace's number or on an
+    // account belonging to a different channel.
+    const account = input.channelConnectionId
+      ? await this.db.channelConnection.findFirst({
+          where: { id: input.channelConnectionId, workspaceId, channel, isActive: true },
+          select: { id: true },
+        })
+      : await this.db.channelConnection.findFirst({
+          where: { workspaceId, channel, isDefault: true, isActive: true },
+          select: { id: true },
+        });
+    if (input.channelConnectionId && !account) {
+      throw new NotFoundException({ error: "account_not_found" });
+    }
+
     try {
       const created = await this.db.conversation.create({
         data: {
@@ -947,6 +976,10 @@ export class ConversationsService {
           channel,
           status: "pending",
           lastMessagePreview: "",
+          // Null when the channel has no active account at all — the send then
+          // fails with the same actionable error it always did, rather than
+          // this create throwing and losing the contact too.
+          channelConnectionId: account?.id ?? null,
         },
         select: { id: true },
       });

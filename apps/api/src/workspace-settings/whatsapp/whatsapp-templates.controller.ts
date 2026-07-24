@@ -37,10 +37,17 @@ import { WhatsappService } from "./whatsapp.service";
  *
  *   GET    /api/workspace/whatsapp/templates                — list cached
  *   POST   /api/workspace/whatsapp/templates                — re-sync from Meta
+ *   GET    /api/workspace/whatsapp/templates/library         — browse Meta's blueprints
+ *   POST   /api/workspace/whatsapp/templates/library/create  — instantiate one
+ *   GET    /api/workspace/whatsapp/templates/auth/preview    — preset auth wording per language
+ *   POST   /api/workspace/whatsapp/templates/auth/upsert     — create auth templates (multi-language)
  *   POST   /api/workspace/whatsapp/templates/create         — create new template
  *   POST   /api/workspace/whatsapp/templates/upload-media   — resumable header upload
+ *   POST   /api/workspace/whatsapp/templates/:id/edit        — edit category/components/TTL
+ *   POST   /api/workspace/whatsapp/templates/:id/unpause     — lift a quality pause
  *   DELETE /api/workspace/whatsapp/templates/:id            — remove (Meta first, then local)
  *   PATCH  /api/workspace/whatsapp/templates/:id            — update variableBindings only
+ *   GET    /api/workspace/whatsapp/templates/:id/compare      — head-to-head vs another
  *   GET    /api/workspace/whatsapp/templates/:id/analytics   — stored daily rollup
  *   POST   /api/workspace/whatsapp/templates/:id/analytics/refresh — pull from Meta
  *
@@ -49,7 +56,8 @@ import { WhatsappService } from "./whatsapp.service";
  * `templates:manage` capability — admin-configurable per role (defaults to on
  * for everyone, preserving prior open behavior until an admin restricts it).
  *
- * Route order: static paths (`create`, `upload-media`) MUST precede `:id`
+ * Route order: static paths (`library`, `auth/*`, `create`, `upload-media`) MUST
+ * precede `:id`
  * — Express matches in registration order.
  */
 @Controller("api/workspace/whatsapp/templates")
@@ -57,9 +65,17 @@ import { WhatsappService } from "./whatsapp.service";
 export class WhatsappTemplatesController {
   constructor(private readonly whatsapp: WhatsappService) {}
 
+  /**
+   * `?accountId=` scopes the catalogue to ONE WhatsApp number's WABA — what the
+   * broadcast composer and the per-channel templates page use, so a campaign
+   * bound to a number can only pick templates that number can actually send.
+   */
   @Get()
-  async list(@CurrentSession() session: ApiSession) {
-    return this.whatsapp.listTemplates(session.workspaceId);
+  async list(
+    @CurrentSession() session: ApiSession,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.listTemplates(session.workspaceId, accountId);
   }
 
   @Post()
@@ -73,6 +89,77 @@ export class WhatsappTemplatesController {
    * to mirror, and Meta's own errors are more informative than anything
    * we'd reimplement.
    */
+  /**
+   * Browse Meta's Template Library — pre-written, pre-categorized blueprints.
+   *
+   * Static-path route, so it MUST precede `:id` (Express matches in registration
+   * order). Rate-limited because every call is a live Graph read and the filter
+   * UI fires one per keystroke-debounce.
+   */
+  @Get("library")
+  @RateLimit({ perMinute: 30 })
+  async library(
+    @CurrentSession() session: ApiSession,
+    @Query("search") search?: string,
+    @Query("topic") topic?: string,
+    @Query("usecase") usecase?: string,
+    @Query("industry") industry?: string,
+    @Query("language") language?: string,
+    @Query("name") name?: string,
+  ) {
+    return this.whatsapp.browseTemplateLibrary(session.workspaceId, {
+      ...(search ? { search } : {}),
+      ...(topic ? { topic } : {}),
+      ...(usecase ? { usecase } : {}),
+      ...(industry ? { industry } : {}),
+      ...(language ? { language } : {}),
+      ...(name ? { name } : {}),
+    });
+  }
+
+  /** Instantiate a library blueprint under our own name. */
+  @Post("library/create")
+  @RequireCapability("templates:manage")
+  async createFromLibrary(
+    @CurrentSession() session: ApiSession,
+    @Body() body: unknown,
+  ) {
+    const out = await this.whatsapp.createFromLibrary(session.workspaceId, body);
+    return { ok: true, ...out };
+  }
+
+  /**
+   * Preview the preset authentication wording per language.
+   *
+   * Static path — MUST precede `:id`. Rate-limited: every call is a live Graph
+   * read and the options UI re-previews on each toggle.
+   */
+  @Get("auth/preview")
+  @RateLimit({ perMinute: 30 })
+  async authPreview(
+    @CurrentSession() session: ApiSession,
+    @Query("languages") languages?: string,
+    @Query("addSecurityRecommendation") addSecurityRecommendation?: string,
+    @Query("codeExpirationMinutes") codeExpirationMinutes?: string,
+  ) {
+    return this.whatsapp.previewAuthTemplates(session.workspaceId, {
+      languages: languages ? languages.split(",").filter(Boolean) : [],
+      addSecurityRecommendation: addSecurityRecommendation === "true",
+      ...(codeExpirationMinutes ? { codeExpirationMinutes: Number(codeExpirationMinutes) } : {}),
+    });
+  }
+
+  /** Create/update an authentication template across many languages at once. */
+  @Post("auth/upsert")
+  @RequireCapability("templates:manage")
+  async authUpsert(
+    @CurrentSession() session: ApiSession,
+    @Body() body: unknown,
+  ) {
+    const out = await this.whatsapp.upsertAuthTemplate(session.workspaceId, body);
+    return { ok: true, ...out };
+  }
+
   @Post("create")
   @RequireCapability("templates:manage")
   async create(
@@ -143,6 +230,30 @@ export class WhatsappTemplatesController {
     return this.whatsapp.templateAnalytics(session.workspaceId, id, daysRaw);
   }
 
+  /**
+   * Head-to-head comparison of this template against another
+   * (`?against=<templateId>&days=7|30|60|90`).
+   *
+   * Rate-limited like the analytics refresh: every call is a live Graph read,
+   * and the comparison picker makes it easy to fire one per selection change.
+   */
+  @Get(":id/compare")
+  @RateLimit({ perMinute: 20 })
+  async compare(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Query("against") against?: string,
+    @Query("days") daysRaw?: string,
+  ) {
+    if (!against) {
+      throw new BadRequestException({
+        error: "against_required",
+        detail: "Pass ?against=<templateId> — comparison needs two templates.",
+      });
+    }
+    return this.whatsapp.compareTemplates(session.workspaceId, id, against, daysRaw);
+  }
+
   @Post(":id/analytics/refresh")
   @HttpCode(200)
   @RateLimit({ perMinute: 10 })
@@ -152,6 +263,38 @@ export class WhatsappTemplatesController {
     @Query("days") daysRaw?: string,
   ) {
     return this.whatsapp.refreshTemplateAnalytics(session.workspaceId, id, daysRaw);
+  }
+
+  /**
+   * Edit an existing template's category, components and/or TTL.
+   *
+   * Exists so an operator never has to delete-and-recreate to fix a template:
+   * deleting an APPROVED one blocks reusing that NAME for 30 days.
+   */
+  @Post(":id/edit")
+  @HttpCode(200)
+  @RequireCapability("templates:manage")
+  async edit(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    const out = await this.whatsapp.editTemplate(session.workspaceId, id, body);
+    return { ok: true, ...out };
+  }
+
+  /**
+   * Lift a quality pause. Meta lifts one itself after 3h/6h, so this is for a
+   * template paused by Template Pacing, which never unpauses on its own.
+   */
+  @Post(":id/unpause")
+  @RequireCapability("templates:manage")
+  async unpause(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    await this.whatsapp.unpauseTemplate(session.workspaceId, id);
+    return { ok: true };
   }
 
   @Delete(":id")

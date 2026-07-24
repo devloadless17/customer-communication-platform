@@ -257,9 +257,19 @@ One conversation per contact (closed threads reopen, never fork). Scopes: `read:
 
 **List conversations** — `GET /conversations` · `read:conversations`
 Optional: `phone`, `status` (`open|pending|closed`), `viewId` (a saved inbox
-view — see §4b), `limit`, `cursor`.
+view — see §4b), `accountId`, `limit`, `cursor`.
+
+`accountId` narrows to ONE connected account — a specific WhatsApp number,
+Facebook Page or Instagram handle. Ids come from `GET /channel-accounts`; every
+conversation also carries `channelConnectionId`, which is the same id. It is
+ANDed with the other filters, so `status=open&accountId=…` means both. An id
+that doesn't exist simply matches nothing.
 ```bash
 curl -s "$CCP_BASE_URL/api/external/v1/conversations?status=open&limit=50" \
+  -H "Authorization: Bearer $CCP_API_KEY"
+
+# Only the threads on one WhatsApp number
+curl -s "$CCP_BASE_URL/api/external/v1/conversations?accountId=cnx_123&status=open" \
   -H "Authorization: Bearer $CCP_API_KEY"
 ```
 
@@ -436,6 +446,36 @@ Template (works **outside** the 24h window):
 ```bash
   -d '{ "contact": { "phone": "+96170123456" },
         "template": { "name": "hello_world", "language": "en_US", "variables": { "body": ["Ali"] } } }'
+```
+
+`variables` accepts every parameter shape Meta defines. Which ones a given template
+*requires* comes from the template itself — supply the wrong set and the send is
+rejected with a named error (`wrong_body_var_count`, `named_body_vars_required`,
+`button_params_required`, `header_media_required`, `header_location_required`)
+rather than an opaque Meta code.
+
+| Field | When it applies |
+| --- | --- |
+| `body: string[]` | Positional templates (`parameter_format: POSITIONAL`, `{{1}}`). One value per variable, in order. |
+| `bodyNamed: [{ name, text }]` | Named templates (`{{order_id}}`). Mutually exclusive with `body` — the template's stored `parameter_format` decides which is read. |
+| `header: string` | A TEXT header carrying a variable. The placeholder name is paired server-side for named templates, so you only send the value. |
+| `headerMedia: { kind, link, filename? }` | An `IMAGE`/`VIDEO`/`DOCUMENT` header. `link` must be publicly fetchable — Meta downloads it. |
+| `headerLocation: { latitude, longitude, name, address }` | A `LOCATION` header. The template declares no coordinates, so the whole pin is per-message. |
+| `buttons: [{ index, subType, text }]` | Dynamic buttons only: `url` (the suffix appended to the button's URL — **percent-encode it**), `copy_code` (the coupon), `quick_reply` (the payload). Static buttons take nothing. |
+| `tapTarget: { url, title }` | Makes an image/text/header-less template act as a call-to-action showing `title` and opening `url`. Send-time only; Meta gates it on a fully verified WABA. |
+| `cards: [{ headerMedia, body?, buttons? }]` | Media-card carousel. One entry per card, in order — the length must equal the card count the template was **approved with**. `headerMedia` is `{ kind: "image"\|"video", link\|id }`; `buttons` are indexed **within the card** (card 2's first button is index `0` again). |
+| `limitedTimeOfferExpiresAtMs: number` | **Required** when the template carries a `LIMITED_TIME_OFFER` component. UNIX **milliseconds** — note the contrast with the analytics endpoints, which take seconds. A past instant is rejected (`limited_time_offer_expiry_required`) rather than sent as an already-expired countdown. |
+
+```bash
+# A named template with a media header and a dynamic URL button
+  -d '{ "contact": { "phone": "+96170123456" },
+        "template": { "name": "order_shipped", "language": "en_US",
+          "variables": {
+            "bodyNamed": [{ "name": "first_name", "text": "Ali" },
+                          { "name": "order_number", "text": "SKBUP2-4CPIG9" }],
+            "headerMedia": { "kind": "image", "link": "https://example.com/receipt.png" },
+            "buttons": [{ "index": 0, "subType": "url", "text": "SKBUP2-4CPIG9" }]
+          } } }'
 ```
 
 **Reply inside a conversation** — `POST /conversations/:id/messages` · `write:messages`
@@ -733,7 +773,7 @@ Fields: `conversationId` (required), `subject`, `priority`, `assignedUserId`, `t
 
 ### Updating
 
-**`PATCH /tickets/:id`** · `write:tickets` — status, priority, assignee, subject, tags, custom fields, resolution.
+**`PATCH /tickets/:id`** · `write:tickets` — status, priority, assignee, **team**, subject, tags, custom fields, resolution.
 
 ```bash
 curl -s -X PATCH "$CCP_BASE_URL/api/external/v1/tickets/tkt_123" \
@@ -748,6 +788,43 @@ Lifecycle side effects, so you don't have to replicate them:
 - → `closed` is terminal; a later message always opens a new ticket.
 - Back from `solved`/`closed` clears the resolution and increments `reopenCount`.
 - → `on_hold` (and `pending`, if the policy says so) **pauses** the SLA clock; leaving it pushes both deadlines out by exactly the parked time rather than restarting the commitment.
+
+### Handing a ticket to another team
+
+A ticket can belong to a **team** (an assignment policy — Sales, Support, Billing) as
+well as, or instead of, a person. This is the handoff: Support reads a message, realises
+the issue belongs to Sales, and hands the *ticket* over — at which point it sits in Sales'
+queue with nobody on it, until someone there claims it.
+
+```bash
+curl -s -X PATCH "$CCP_BASE_URL/api/external/v1/tickets/tkt_123" \
+  -H "Authorization: Bearer $CCP_API_KEY" -H "Content-Type: application/json" \
+  -d '{"assignedTeamId":"pol_sales","handoffReason":"Customer wants to upgrade their plan"}'
+```
+
+- `assignedTeamId` is an id from `GET /assignment-policies`; `null` takes the ticket out of
+  every queue. A team from another workspace is rejected with **`400 team_not_found`**.
+- Setting it **clears `assignedUserId`** unless you name one in the same call — otherwise
+  the ticket looks claimed by the team that just handed it away.
+- `handoffReason` is stored on the timeline event. Send it: a handoff with no reason makes
+  the receiving team re-read the whole thread to work out what was wanted.
+- The resulting `ticket.changed` webhook carries `action: "team_changed"` — deliberately
+  distinct from `"assigned"`, so you can tell a queue handoff from someone claiming work.
+- Filter the queue with `GET /tickets?team=pol_sales` (or `team=none`). It ANDs with
+  `assignee`, so `?team=pol_sales&assignee=none` is "in Sales' queue and still unclaimed".
+
+**`POST /tickets/:id/notes`** · `write:tickets` — an internal note. The customer never sees it.
+
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/tickets/tkt_123/notes" \
+  -H "Authorization: Bearer $CCP_API_KEY" -H "Content-Type: application/json" \
+  -d '{"body":"Tell them their order ships Tuesday and we have waived the fee."}'
+```
+
+This is the other half of a handoff: the receiving team answers *what to say* without
+messaging the customer themselves. It is a separate route, not a `PATCH` field, because a
+note changes nothing about the ticket — it must not bump `version` (which would 409 a
+colleague's open editor) or move the SLA clock.
 
 ### Settings
 
@@ -803,6 +880,42 @@ curl -s "$CCP_BASE_URL/api/external/v1/broadcasts/BROADCAST_ID/timeseries" \
 sends, and a Graph call on that path would exhaust Meta's rate limit for an
 aggregate that barely moves minute to minute. After this, `metaAnalytics` on the
 report reads the refreshed rollup.
+
+**Business profile** — `GET /whatsapp/profile` / `POST /whatsapp/profile` reads
+and updates what a customer sees when they tap the business name (`about`,
+`address`, `description`, `email`, `websites`, plus read-only `vertical` and
+`profilePictureUrl`). `?accountId=` picks one of the workspace's numbers — each
+has its own profile. **Only the fields you send are changed**; sending `""`
+CLEARS a field, so omit what you don't mean to touch. The response is read back
+from Meta rather than echoed, so it reflects what was actually stored. Scopes:
+`read:catalog` / `write:catalog`.
+
+**QR codes & short links** — `GET/POST /whatsapp/qr-codes`,
+`POST /whatsapp/qr-codes/:code` (edit the prefilled message),
+`DELETE /whatsapp/qr-codes/:code`. A code is both the identity and the short
+link slug (`https://wa.me/message/<code>`); `prefilledMessage` is capped at
+**140** chars and `imageFormat` is `SVG` (default) or `PNG`. `qrImageUrl` comes
+back only from CREATE. **Deleting breaks anything already printed** — scanners
+see "this QR code has expired" — so edit to change the wording. Meta caps a
+number at 2,000 codes and publishes **no scan analytics**. Scopes:
+`read:catalog` / `write:catalog`.
+
+**Account standing** — `GET /whatsapp/account-status` returns the number's
+Official Business Account status (`obaStatus`, verbatim from Meta) and its WABA
+record (`name`, `status`, `currency`, `country`, `businessVerificationStatus`).
+Read-only: OBA is requested in WhatsApp Manager. Scope: `read:catalog`.
+
+**Template catalog** — `GET /templates?status=&category=` lists the WhatsApp
+templates, each with the `id` the send and analytics routes take, Meta's
+`externalId`, the `parameterFormat` that decides the send shape, the components,
+and `qualityScore` (`GREEN`/`YELLOW`/`RED`/`UNKNOWN` — the signal worth alerting
+on, since quality drives Meta's template pausing). Read-only: creating a template
+is a Meta review submission, not a CRUD write. Scope: `read:catalog`.
+
+**Unpause a template** — `POST /templates/:id/unpause` lifts a quality pause and
+releases any campaigns paused with it. Meta lifts a *quality* pause itself (3h,
+then 6h, then it **disables** the template), so this is for one paused by
+Template Pacing, which never unpauses on its own. Scope: `write:catalog`.
 
 **Per-template trend** — `GET /templates/:id/analytics?start=&end=` ·
 `read:broadcasts`. Defaults to the last 30 days; Meta's lookback ceiling is 90.
@@ -898,6 +1011,48 @@ curl -s "$CCP_BASE_URL/api/external/v1/channels/whatsapp/accounts" \
 - `isDefault` is the account used when a conversation doesn't name one — an outbound-initiated
   send or a broadcast. A reply to an existing thread always goes out the account the customer
   messaged, never the default.
+
+**`GET /channel-accounts`** · `read:catalog`
+
+Every account across **every** channel in one call, display fields only. This is the lookup
+for `conversation.channelConnectionId` — a conversation names the account it is on, and
+without this you have an opaque id.
+
+```bash
+curl -s "$CCP_BASE_URL/api/external/v1/channel-accounts" \
+  -H "Authorization: Bearer $CCP_API_KEY"
+```
+
+```json
+{
+  "accounts": [
+    {
+      "id": "cnx_123",
+      "channel": "whatsapp",
+      "name": "Sales line",
+      "providerName": "+961 70 000 000",
+      "isDefault": true,
+      "isActive": true
+    },
+    {
+      "id": "cnx_456",
+      "channel": "instagram",
+      "name": "@acme",
+      "providerName": "@acme",
+      "isDefault": true,
+      "isActive": true
+    }
+  ]
+}
+```
+
+- `name` is what a human should see: the admin's label when set, else the provider's own
+  name, else the raw id. Never blank.
+- Carries **no credentials** — no token, App secret, WABA or portfolio id — which is why it
+  sits under `read:catalog` rather than `read:channels`.
+- `conversation.channelConnectionId` (on every conversation read) is the `id` here. It names
+  which of your numbers/Pages the customer is talking to, and therefore which one a reply
+  goes out from. Null when a thread has never been bound, or its account was disconnected.
 - `needsReconnect` means the stored credentials were rejected by the provider; sends on that
   account will fail until an admin re-authorizes it in the app.
 
@@ -1144,6 +1299,7 @@ and the dashboard can never disagree about a number:
 | `funnel.reached` | arrived on the handset (`delivered` + `read`) |
 | `funnel.read` | read receipt received |
 | `funnel.neverReceived` | rejected at send **+** accepted-then-undeliverable |
+| `funnel.held` | accepted, then **held** by business-portfolio pacing — parked in Meta's queue, not en route. Counted inside `accepted`; released in a later batch or dropped (error `135000`) |
 | `funnel.replied` / `clicked` | unique recipients who replied / tapped a button |
 | `funnel.optedOut` / `suppressed` | opted out during / excluded before the send |
 | `rates.*` | `deliveryRate = reached/accepted`, `readRate = read/reached`, `replyRate = replied/reached` |

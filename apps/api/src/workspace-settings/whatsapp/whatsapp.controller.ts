@@ -1,4 +1,13 @@
-import { Body, Controller, Delete, Get, HttpCode, Post } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  Post,
+  Query,
+} from "@nestjs/common";
 
 import { CurrentSession } from "../../auth/current-session.decorator";
 import { RateLimit } from "../../common/rate-limit.interceptor";
@@ -6,7 +15,13 @@ import { RequireRole } from "../../auth/role.guard";
 import type { ApiSession } from "../../auth/session.guard";
 import { zBody } from "../../common/zod-validation.pipe";
 import {
+  CreateQrCodeSchema,
+  UpdateQrCodeSchema,
+  UpdateBusinessProfileSchema,
   UpdateWhatsappConfigSchema,
+  type CreateQrCodeInput,
+  type UpdateQrCodeInput,
+  type UpdateBusinessProfileInput,
   type UpdateWhatsappConfigInput,
 } from "./whatsapp.schemas";
 import { WhatsappService } from "./whatsapp.service";
@@ -23,6 +38,10 @@ import {
  *                                  the security tradeoff around exposing
  *                                  plaintext secrets to the admin's browser)
  *   POST   /api/workspace/whatsapp    — set/update credentials (validates against Meta first)
+ *   GET    /api/workspace/whatsapp/profile   — the number's public business profile
+ *   POST   /api/workspace/whatsapp/profile   — update it (?accountId= picks the number)
+ *   GET/POST/DELETE /api/workspace/whatsapp/qr-codes[/:code]
+ *                                — QR codes + short links for the number
  *   DELETE /api/workspace/whatsapp    — disconnect (wipes secrets, keeps history)
  *   GET    /api/workspace/whatsapp/insights/status
  *                                — is template analytics on for this WABA?
@@ -89,6 +108,104 @@ export class WhatsappController {
   @RateLimit({ perMinute: 3 })
   async enableInsights(@CurrentSession() session: ApiSession) {
     return enableTemplateInsights(session.workspaceId);
+  }
+
+  /**
+   * Business profile — what a customer sees when they tap the business name.
+   *
+   * `?accountId=` selects one of the workspace's numbers; omitted uses the
+   * default. Each number has its OWN profile, so this must not be
+   * workspace-global.
+   */
+  // Rate-limited like `health/refresh`: this costs a Graph read, and the
+  // default 300/min would let one agent drive 300 calls/min at Meta against
+  // the number's own budget. A lazily-opened settings panel needs single
+  // digits per minute.
+  @Get("profile")
+  @RateLimit({ perMinute: 20 })
+  async businessProfile(
+    @CurrentSession() session: ApiSession,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.getBusinessProfile(session.workspaceId, accountId);
+  }
+
+  /**
+   * Official Business Account standing + the WABA record. Read-only — the OBA
+   * request itself is made in WhatsApp Manager.
+   */
+  // TWO Graph reads (the number node + the WABA node) — the same cost that
+  // earned `health/refresh` a cap of 6.
+  @Get("account-status")
+  @RateLimit({ perMinute: 12 })
+  async accountStatus(
+    @CurrentSession() session: ApiSession,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.getAccountStatus(session.workspaceId, accountId);
+  }
+
+  @Post("profile")
+  @HttpCode(200)
+  @RateLimit({ perMinute: 12 })
+  async updateBusinessProfile(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(UpdateBusinessProfileSchema)) body: UpdateBusinessProfileInput,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.updateBusinessProfile(session.workspaceId, body, accountId);
+  }
+
+  /**
+   * QR codes & short links. `?accountId=` picks one of the workspace's numbers.
+   * Meta caps a number at 2,000 and reports no scan analytics (a privacy
+   * choice), so there is nothing to poll — these are pure CRUD.
+   */
+  @Get("qr-codes")
+  @RateLimit({ perMinute: 20 })
+  async listQrCodes(
+    @CurrentSession() session: ApiSession,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.listQrCodes(session.workspaceId, accountId);
+  }
+
+  @Post("qr-codes")
+  @HttpCode(200)
+  @RateLimit({ perMinute: 20 })
+  async createQrCode(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(CreateQrCodeSchema)) body: CreateQrCodeInput,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.createQrCode(session.workspaceId, body, accountId);
+  }
+
+  @Post("qr-codes/:code")
+  @HttpCode(200)
+  @RateLimit({ perMinute: 20 })
+  async updateQrCode(
+    @CurrentSession() session: ApiSession,
+    @Param("code") code: string,
+    @Body(zBody(UpdateQrCodeSchema)) body: UpdateQrCodeInput,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.updateQrCode(session.workspaceId, code, body, accountId);
+  }
+
+  /**
+   * Deleting a code BREAKS any signage already printed with it — the customer
+   * sees "this QR code has expired". The UI confirms before calling this.
+   */
+  @Delete("qr-codes/:code")
+  @RateLimit({ perMinute: 20 })
+  async deleteQrCode(
+    @CurrentSession() session: ApiSession,
+    @Param("code") code: string,
+    @Query("accountId") accountId?: string,
+  ) {
+    await this.whatsapp.deleteQrCode(session.workspaceId, code, accountId);
+    return { ok: true };
   }
 
   @Delete()

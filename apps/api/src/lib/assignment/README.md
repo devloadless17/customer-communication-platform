@@ -55,7 +55,8 @@ rebalance (moving work off someone who isn't there is the entire point).
 | `/v1` assign with `autoAssign: true` | `external/v1/…messaging.service.ts` | `api` | — |
 | Campaign replies | `lib/broadcast-runner.ts` (drawn in `broadcast-plan.ts`) | `broadcast` | off |
 | Agent goes offline | `lib/sweepers/assignment-rebalance.ts` | `rebalance` | off |
-| Teammate deactivated | `users.service.ts` → `rebalanceDeactivatedUser` | `rebalance` | **on** |
+| Teammate deactivated | `users.service.ts` → `lib/workspaces/remove-member.ts` | `rebalance` | **on** |
+| Teammate removed from a workspace | `workspaces.service.ts` → `lib/workspaces/remove-member.ts` | `rebalance` | always |
 
 Everything ships OFF except deactivation rebalance, and every team's seeded
 default policy reproduces the old hardcoded behavior exactly — so enabling this

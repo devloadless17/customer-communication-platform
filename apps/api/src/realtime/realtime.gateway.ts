@@ -406,6 +406,16 @@ export class RealtimeGateway
         // distinguishes this string from "unauthenticated".
         return next(new Error("auth_unavailable"));
       }
+      if (result.kind === "gated") {
+        // Session is VALID but the app is gating them (org pending/suspended,
+        // or email unverified). The socket still refuses to connect — no
+        // realtime data flows — but the client must NOT navigate to /logout,
+        // because that deletes a perfectly good session and lands them on a
+        // context-free /login instead of the /pending screen that explains the
+        // suspension (with its reason) or the /verify screen that unblocks
+        // them. See SocketAuthResult["gated"].
+        return next(new Error("session_gated"));
+      }
       // Error message is the wire payload (Socket.io serializes Error.message
       // into the client's `connect_error` event). Keep it stable — the
       // browser matches on this exact string.
@@ -515,7 +525,7 @@ export class RealtimeGateway
     // Per-user room (RT-1) — lets the server target this user across all their
     // tabs for membership-scoped fanout (private-channel activity badges)
     // without a team-wide broadcast that leaks metadata to non-members.
-    client.join(userRoom(identity.userId));
+    client.join(userRoom(identity.workspaceId, identity.userId));
 
     // connectionStateRecovery re-joins this socket's previous rooms with no
     // handler involved, so a membership revoked while it was disconnected was

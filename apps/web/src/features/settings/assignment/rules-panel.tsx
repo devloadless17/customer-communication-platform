@@ -93,7 +93,7 @@ export function RulesPanel({
         Checked top to bottom — the first rule that matches decides which policy
         runs. Anything that matches no rule uses{" "}
         <span className="font-medium text-foreground">
-          {defaultPolicy?.name ?? "the default policy"}
+          {defaultPolicy?.name ?? "the default team"}
         </span>
         .
       </p>
@@ -101,7 +101,7 @@ export function RulesPanel({
       {rules.length === 0 && (
         <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
           No rules yet. Every conversation uses{" "}
-          {defaultPolicy?.name ?? "the default policy"}.
+          {defaultPolicy?.name ?? "the default team"}.
         </div>
       )}
 

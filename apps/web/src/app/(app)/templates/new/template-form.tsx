@@ -12,6 +12,8 @@ import {
   ExternalLink,
   Image as ImageIcon,
   Loader2,
+  Copy,
+  MapPin,
   Phone,
   Plus,
   Reply,
@@ -29,6 +31,12 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { TemplatePreview } from "@/features/templates/components/template-preview";
 import { VariableBindingsEditor } from "@/features/templates/components/variable-bindings-editor";
+import {
+  CarouselEditor,
+  carouselDraftToComponent,
+  emptyCarouselDraft,
+  type CarouselDraft,
+} from "@/features/templates/components/carousel-editor";
 import { apiFetch } from "@/lib/api/client-fetch";
 import type { ContactFieldDefinition } from "@ccp/shared/types";
 import type {
@@ -39,7 +47,18 @@ import type { VariableBindings } from "@ccp/shared/template-bindings";
 import { cn } from "@ccp/shared/utils";
 // Meta's real field limits, shared with the server-side validator so the
 // counter under the textarea and the API's rejection can never disagree.
-import { TEMPLATE_LIMITS } from "@ccp/shared/template-render";
+import {
+  LIMITED_TIME_OFFER_LIMITS,
+  TEMPLATE_LIMITS,
+  TEMPLATE_NAME_PATTERN,
+  TEMPLATE_TTL_RULES,
+  formatTtlSeconds,
+  validateTemplateTtl,
+  positionalPlaceholderIndices,
+  templateNamedPlaceholders,
+  validateTemplateComponents,
+} from "@ccp/shared/template-render";
+import { TEMPLATE_LANGUAGES } from "@ccp/shared/template-languages";
 
 /**
  * Two-pane template wizard.
@@ -67,51 +86,90 @@ import { TEMPLATE_LIMITS } from "@ccp/shared/template-render";
 
 interface ButtonRow {
   id: string;
-  kind: "QUICK_REPLY" | "URL" | "PHONE_NUMBER";
+  kind: "QUICK_REPLY" | "URL" | "PHONE_NUMBER" | "COPY_CODE";
   text: string;
   url: string; // only used when kind === "URL"
   phone: string; // only used when kind === "PHONE_NUMBER"
+  /**
+   * Meta's `example`. Required for a URL whose target ends in a variable (the
+   * sample suffix) and for a COPY_CODE button (the sample coupon) — Meta rejects
+   * both without it, and the composer used to send neither.
+   */
+  example: string;
 }
 
-type HeaderKind = "none" | "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT";
+type HeaderKind = "none" | "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT" | "LOCATION";
 
-const LANGUAGES: Array<{ code: string; label: string }> = [
-  { code: "en_US", label: "English (US)" },
-  { code: "en_GB", label: "English (UK)" },
-  { code: "en", label: "English" },
-  { code: "es", label: "Spanish" },
-  { code: "es_MX", label: "Spanish (MX)" },
-  { code: "fr", label: "French" },
-  { code: "pt_BR", label: "Portuguese (BR)" },
-  { code: "de", label: "German" },
-  { code: "ar", label: "Arabic" },
-  { code: "hi", label: "Hindi" },
-  { code: "id", label: "Indonesian" },
-  { code: "it", label: "Italian" },
-  { code: "ja", label: "Japanese" },
-  { code: "tr", label: "Turkish" },
-];
+/**
+ * Which placeholder dialect the author is writing in.
+ *
+ * Meta stores exactly ONE `parameter_format` per template, so this is a real
+ * mode, not a display preference — the two dialects need different `example`
+ * shapes (`body_text` vs `body_text_named_params`) and different send payloads.
+ * Before this existed the composer only emitted `{{1}}`, but nothing stopped an
+ * author typing `{{first_name}}` into the textarea; the server then declared the
+ * template NAMED while shipping positional examples, and Meta rejected it with
+ * an error that named no field.
+ */
+type VarFormat = "positional" | "named";
+
+// Meta's full supported-language table, shared so the list can't drift. A
+// hand-picked subset silently blocks templates Meta would accept.
+const LANGUAGES = TEMPLATE_LANGUAGES;
 
 const SAMPLE_PLACEHOLDER = ["John", "12345", "Friday at 5pm", "Cairo", "20%"];
+
+/**
+ * The template being EDITED, when this form is in edit mode.
+ *
+ * Edit mode exists so nobody has to delete-and-recreate: Meta blocks reusing an
+ * APPROVED template's NAME for 30 days after deletion, so the delete+recreate
+ * workflow this app used to recommend stranded an operator for a month over a
+ * typo.
+ */
+export interface TemplateEditTarget {
+  id: string;
+  name: string;
+  language: string;
+  category: TemplateCategory;
+  status: string;
+  parameterFormat: "positional" | "named";
+  components: TemplateComponent[];
+  messageSendTtlSeconds: number | null;
+  /** Set when the template came from Meta's Template Library — copy is fixed. */
+  libraryTemplateName: string | null;
+}
 
 export function TemplateForm({
   fieldDefinitions,
   hasAppId,
+  editing = null,
 }: {
   fieldDefinitions: ContactFieldDefinition[];
   hasAppId: boolean;
+  /** Null = create a new template. Set = edit this one in place. */
+  editing?: TemplateEditTarget | null;
 }) {
   const router = useRouter();
   const softRefresh = useSoftRefresh();
 
+  const initial = useMemo(
+    () => (editing ? hydrateFromTemplate(editing) : null),
+    [editing],
+  );
+
   // ---- Core fields -----
-  const [name, setName] = useState("");
-  const [language, setLanguage] = useState("en_US");
-  const [category, setCategory] = useState<TemplateCategory>("utility");
+  // Name and language are IMMUTABLE at Meta — the edit endpoint has no field for
+  // either — so in edit mode they are shown, never edited.
+  const [name, setName] = useState(editing?.name ?? "");
+  const [language, setLanguage] = useState(editing?.language ?? "en_US");
+  const [category, setCategory] = useState<TemplateCategory>(
+    editing?.category ?? "utility",
+  );
 
   // ---- Header -----
-  const [headerKind, setHeaderKind] = useState<HeaderKind>("none");
-  const [headerText, setHeaderText] = useState("");
+  const [headerKind, setHeaderKind] = useState<HeaderKind>(initial?.headerKind ?? "none");
+  const [headerText, setHeaderText] = useState(initial?.headerText ?? "");
   const [headerHandle, setHeaderHandle] = useState<string | null>(null);
   const [headerPreviewUrl, setHeaderPreviewUrl] = useState<string | null>(null);
   const [headerFile, setHeaderFile] = useState<File | null>(null);
@@ -119,11 +177,37 @@ export function TemplateForm({
   const [headerError, setHeaderError] = useState<string | null>(null);
 
   // ---- Body / footer -----
-  const [body, setBody] = useState("Hi {{1}}, your order {{2}} is on its way.");
-  const [footer, setFooter] = useState("");
+  const [varFormat, setVarFormat] = useState<VarFormat>(
+    editing?.parameterFormat ?? "positional",
+  );
+  const [body, setBody] = useState(
+    initial?.body ?? "Hi {{1}}, your order {{2}} is on its way.",
+  );
+  const [footer, setFooter] = useState(initial?.footer ?? "");
+  // ---- Limited-time offer (marketing only) -----
+  // The template declares the offer HEADING; the expiry instant is per-send.
+  const [offerHeading, setOfferHeading] = useState(initial?.offerHeading ?? "");
+  const [offerEnabled, setOfferEnabled] = useState(initial?.offerHeading !== undefined);
+  // ---- Carousel (marketing only) -----
+  const [carousel, setCarousel] = useState<CarouselDraft>(
+    () => initial?.carousel ?? emptyCarouselDraft(),
+  );
+  /**
+   * Author-supplied example value per variable, keyed by `{{1}}` index or by
+   * name. Meta REVIEWS these — a reviewer seeing "John" where an order number
+   * belongs is a common rejection — so they are editable rather than silently
+   * generated. Seeded from the sample list so the zero-effort path still works.
+   */
+  const [examples, setExamples] = useState<Record<string, string>>(
+    initial?.examples ?? {},
+  );
+  /** Meta's `message_send_ttl_seconds`; blank = Meta's per-category default. */
+  const [ttlSeconds, setTtlSeconds] = useState(
+    editing?.messageSendTtlSeconds != null ? String(editing.messageSendTtlSeconds) : "",
+  );
 
   // ---- Buttons -----
-  const [buttons, setButtons] = useState<ButtonRow[]>([]);
+  const [buttons, setButtons] = useState<ButtonRow[]>(initial?.buttons ?? []);
 
   // ---- Variable bindings (per-recipient personalization) -----
   const [bindings, setBindings] = useState<VariableBindings>({ body: [] });
@@ -137,23 +221,72 @@ export function TemplateForm({
   // -------------------------------------------------------------------------
   // Derived state
   // -------------------------------------------------------------------------
-  const bodyVarCount = useMemo(() => countPlaceholders(body), [body]);
-  const headerHasVar = useMemo(
-    () => headerKind === "TEXT" && countPlaceholders(headerText) > 0,
-    [headerKind, headerText],
+  const isNamed = varFormat === "named";
+  /** Body variable KEYS in order: `["1","2"]` or `["first_name","order_id"]`. */
+  const bodyVarKeys = useMemo<string[]>(
+    () =>
+      isNamed
+        ? templateNamedPlaceholders(body)
+        : Array.from(
+            { length: Math.max(0, ...positionalPlaceholderIndices(body)) },
+            (_, i) => String(i + 1),
+          ),
+    [isNamed, body],
+  );
+  const bodyVarCount = bodyVarKeys.length;
+  const headerVarKeys = useMemo<string[]>(
+    () =>
+      headerKind !== "TEXT"
+        ? []
+        : isNamed
+          ? templateNamedPlaceholders(headerText)
+          : [...new Set(positionalPlaceholderIndices(headerText))].map(String),
+    [headerKind, isNamed, headerText],
+  );
+  const headerHasVar = headerVarKeys.length > 0;
+
+  /**
+   * The example for a variable: what the author typed, else a sample.
+   *
+   * Keys are NAMESPACED by component. A positional header's variable is `{{1}}`
+   * and so is the first body variable — sharing one keyspace meant typing a
+   * header example silently overwrote the body's, and both shipped to Meta with
+   * the same value.
+   */
+  const exampleKey = useCallback(
+    (slot: "h" | "b", key: string) => `${slot}:${key}`,
+    [],
+  );
+  const exampleFor = useCallback(
+    (slot: "h" | "b", key: string, i: number) =>
+      examples[`${slot}:${key}`]?.trim() ||
+      SAMPLE_PLACEHOLDER[i % SAMPLE_PLACEHOLDER.length]!,
+    [examples],
   );
 
   const components = useMemo<TemplateComponent[]>(() => {
     const out: TemplateComponent[] = [];
 
-    if (headerKind === "TEXT" && headerText.trim().length > 0) {
-      const headerExample = SAMPLE_PLACEHOLDER[0]!;
+    if (headerKind === "LOCATION") {
+      // A location header is declared with NO parameters; the pin is supplied
+      // per-message at send time.
+      out.push({ type: "HEADER", format: "LOCATION" });
+    } else if (headerKind === "TEXT" && headerText.trim().length > 0) {
+      const key = headerVarKeys[0];
       out.push({
         type: "HEADER",
         format: "TEXT",
         text: headerText,
-        ...(countPlaceholders(headerText) > 0
-          ? { example: { header_text: [headerExample] } }
+        ...(key
+          ? {
+              example: isNamed
+                ? {
+                    header_text_named_params: [
+                      { param_name: key, example: exampleFor("h", key, 0) },
+                    ],
+                  }
+                : { header_text: [exampleFor("h", key, 0)] },
+            }
           : {}),
       });
     } else if (
@@ -172,13 +305,33 @@ export function TemplateForm({
         type: "BODY",
         text: body,
         ...(bodyVarCount > 0
-          ? { example: { body_text: [exampleBodyValues(bodyVarCount)] } }
+          ? {
+              example: isNamed
+                ? {
+                    body_text_named_params: bodyVarKeys.map((k, i) => ({
+                      param_name: k,
+                      example: exampleFor("b", k, i),
+                    })),
+                  }
+                : // Positional examples are an array-of-arrays: one inner array
+                  // per example set.
+                  { body_text: [bodyVarKeys.map((k, i) => exampleFor("b", k, i))] },
+            }
           : {}),
       });
     }
 
     if (footer.trim().length > 0) {
       out.push({ type: "FOOTER", text: footer });
+    }
+
+    // Countdown offer. `has_expiration` is what makes WhatsApp render the live
+    // timer; without it the card shows the heading and code only.
+    if (offerEnabled && category === "marketing") {
+      out.push({
+        type: "LIMITED_TIME_OFFER",
+        limited_time_offer: { text: offerHeading, has_expiration: true },
+      });
     }
 
     if (buttons.length > 0) {
@@ -188,28 +341,96 @@ export function TemplateForm({
       });
     }
 
-    return out;
-  }, [headerKind, headerText, headerHandle, body, bodyVarCount, footer, buttons]);
+    // Carousel LAST, matching Meta's example ordering (body, then cards).
+    if (carousel.enabled && category === "marketing") {
+      out.push(carouselDraftToComponent(carousel) as TemplateComponent);
+    }
 
-  const sampleBodyValues = useMemo(() => exampleBodyValues(bodyVarCount), [bodyVarCount]);
-  const sampleHeaderValue = headerHasVar ? SAMPLE_PLACEHOLDER[0]! : "";
+    return out;
+  }, [
+    headerKind,
+    headerText,
+    headerHandle,
+    headerVarKeys,
+    body,
+    bodyVarKeys,
+    bodyVarCount,
+    isNamed,
+    exampleFor,
+    footer,
+    offerEnabled,
+    offerHeading,
+    category,
+    buttons,
+    carousel,
+  ]);
+
+  const sampleBodyValues = useMemo(
+    () => bodyVarKeys.map((k, i) => exampleFor("b", k, i)),
+    [bodyVarKeys, exampleFor],
+  );
+  const sampleHeaderValue = headerVarKeys[0] ? exampleFor("h", headerVarKeys[0], 0) : "";
 
   // -------------------------------------------------------------------------
   // Validation
+  //
+  // The SHARED validator is the authority, so the errors shown here and the
+  // rejection the API returns are literally the same rules — the form used to
+  // carry its own looser copy and an author could pass every field here and
+  // still be rejected on submit.
   // -------------------------------------------------------------------------
-  const nameValid = /^[a-z0-9_]{1,512}$/.test(name);
-  const bodyValid = body.trim().length > 0 && body.length <= 1024;
+  const issues = useMemo(
+    () => validateTemplateComponents(name, components, { category }),
+    [name, components, category],
+  );
+  const issuesFor = useCallback(
+    (field: string) => issues.filter((i) => i.field === field).map((i) => i.message),
+    [issues],
+  );
+
+  // Meta refuses to change an approved template's category (it may recategorize
+  // one itself, or you request a review) — so the picker is disabled rather than
+  // letting the author submit something guaranteed to 409.
+  const categoryLocked = editing?.status === "approved";
+
+  // TTL is judged against the CATEGORY — the ranges differ and don't overlap at
+  // the low end, so the same number can be valid for utility and invalid for
+  // marketing. Blank means "Meta's default", which is never materialized.
+  const ttlRules = TEMPLATE_TTL_RULES[category];
+  const ttlError = ttlSeconds.trim()
+    ? Number.isInteger(Number(ttlSeconds.trim()))
+      ? validateTemplateTtl(category, Number(ttlSeconds.trim()))
+      : "Enter a whole number of seconds."
+    : null;
+  const ttlHint =
+    `${formatTtlSeconds(ttlRules.min)}–${formatTtlSeconds(ttlRules.max)} for a ` +
+    `${category} template` +
+    (category === "marketing" ? "" : ", or -1 for 30 days") +
+    `. Blank uses Meta's default (${formatTtlSeconds(ttlRules.defaultSeconds)}).` +
+    // Meta's TTL compatibility table: authentication and utility TTLs apply to
+    // Cloud API sends, but a MARKETING TTL only takes effect on the Marketing
+    // Messages API, which we don't send through. Saying so beats letting an
+    // operator set a value and quietly get Meta's default.
+    (category === "marketing"
+      ? " Note: Meta applies a custom marketing TTL only to Marketing Messages" +
+        " API sends, so it has no effect on messages sent from here yet."
+      : "");
+  const nameValid = TEMPLATE_NAME_PATTERN.test(name);
+  const bodyValid = body.trim().length > 0 && issuesFor("body").length === 0;
   const headerValid =
-    headerKind === "none" ||
-    (headerKind === "TEXT" &&
-      headerText.length > 0 &&
-      headerText.length <= 60 &&
-      countPlaceholders(headerText) <= 1) ||
-    (headerKind !== "TEXT" && headerHandle !== null);
-  const footerValid = footer.length <= 60 && !/\{\{\d+\}\}/.test(footer);
-  const buttonsValid = buttons.every(buttonRowValid);
+    (headerKind === "none" ||
+      headerKind === "LOCATION" ||
+      (headerKind === "TEXT" && headerText.trim().length > 0) ||
+      (headerKind !== "TEXT" && headerHandle !== null)) &&
+    issuesFor("header").length === 0;
+  const footerValid = issuesFor("footer").length === 0;
+  // Countdown offers are a MARKETING-only shape, so the section only exists
+  // there — and the numbered steps after it shift by one when it does.
+  const offerSectionVisible = category === "marketing";
+  const offerValid = issuesFor("limited_time_offer").length === 0;
+  const buttonsValid = issuesFor("buttons").length === 0;
   // Only the bindings the body/header actually still need. Removing every
-  // {{n}} unmounts Section 6 (line ~590) but leaves the old entries in
+  // {{n}} unmounts the personalize section but leaves the old entries in
   // `bindings.body`; validating/submitting the raw state would keep Submit
   // disabled on stale empty-label rows with no visible error, and would
   // persist orphaned bindings. Slice to the effective count instead.
@@ -224,8 +445,15 @@ export function TemplateForm({
     effBindings.body.every((b) => b.label.trim().length > 0) &&
     (!effBindings.header || effBindings.header.label.trim().length > 0);
 
+  // Body is required and `issues` never reports "missing body" (an absent
+  // component has nothing to measure), so it is checked separately.
   const canSubmit =
-    nameValid && bodyValid && headerValid && footerValid && buttonsValid && labelsValid;
+    nameValid &&
+    body.trim().length > 0 &&
+    issues.length === 0 &&
+    !ttlError &&
+    headerValid &&
+    labelsValid;
 
   // -------------------------------------------------------------------------
   // Side effects
@@ -256,9 +484,12 @@ export function TemplateForm({
   // Handlers
   // -------------------------------------------------------------------------
   const insertVar = useCallback(() => {
-    const next = bodyVarCount + 1;
+    // Numbered variables must run 1..N with no gaps, so the next one is always
+    // max+1. Named ones only have to be unique.
+    const insert = isNamed
+      ? `{{variable_${bodyVarCount + 1}}}`
+      : `{{${bodyVarCount + 1}}}`;
     const ta = bodyTextareaRef.current;
-    const insert = `{{${next}}}`;
     if (ta) {
       const start = ta.selectionStart ?? ta.value.length;
       const end = ta.selectionEnd ?? ta.value.length;
@@ -272,7 +503,45 @@ export function TemplateForm({
     } else {
       setBody((cur) => cur + insert);
     }
-  }, [bodyVarCount]);
+  }, [isNamed, bodyVarCount]);
+
+  /**
+   * Switching dialect rewrites the placeholders already typed rather than
+   * leaving a mix behind. A mixed body cannot be expressed under Meta's single
+   * `parameter_format`, so silently allowing the toggle to strand `{{1}}` next to
+   * `{{order_id}}` would just move the rejection to submit time.
+   */
+  const changeVarFormat = useCallback(
+    (next: VarFormat) => {
+      if (next === varFormat) return;
+      const rewrite = (text: string) =>
+        next === "named"
+          ? text.replace(/\{\{\s*(\d+)\s*\}\}/g, (_m, n: string) => `{{variable_${n}}}`)
+          : (() => {
+              let i = 0;
+              const seen = new Map<string, number>();
+              return text.replace(
+                /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g,
+                (_m, nm: string) => {
+                  let idx = seen.get(nm);
+                  if (idx === undefined) {
+                    i += 1;
+                    idx = i;
+                    seen.set(nm, idx);
+                  }
+                  return `{{${idx}}}`;
+                },
+              );
+            })();
+      setBody(rewrite);
+      setHeaderText(rewrite);
+      // Example values are keyed by the OLD variable keys, so they no longer
+      // address anything. Clearing beats silently mismatching them.
+      setExamples({});
+      setVarFormat(next);
+    },
+    [varFormat],
+  );
 
   const onHeaderFileChange = useCallback(
     async (file: File | null) => {
@@ -330,17 +599,43 @@ export function TemplateForm({
     setSubmitError(null);
     setSubmitting(true);
     try {
-      const res = await apiFetch("/api/workspace/whatsapp/templates/create", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          name,
-          language,
-          category,
-          components,
-          variableBindings: effBindings,
-        }),
-      });
+      // Edit targets the template node and carries ONLY what Meta lets you
+      // change; name and language have no field on that endpoint at all.
+      // `components` REPLACES the whole array, which is why the full set is sent.
+      const res = await apiFetch(
+        editing
+          ? `/api/workspace/whatsapp/templates/${editing.id}/edit`
+          : "/api/workspace/whatsapp/templates/create",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(
+            editing
+              ? {
+                  // Meta refuses a category change on an APPROVED template, so
+                  // don't even send it — an unchanged value would still trip it.
+                  ...(categoryLocked ? {} : { category }),
+                  // A Library template's copy is Meta's and immutable.
+                  ...(editing.libraryTemplateName ? {} : { components }),
+                  ...(ttlSeconds.trim()
+                    ? { messageSendTtlSeconds: Number(ttlSeconds) }
+                    : {}),
+                }
+              : {
+                  name,
+                  language,
+                  category,
+                  components,
+                  variableBindings: effBindings,
+                  // Omitted when blank so Meta applies its own per-category
+                  // default rather than us pinning a number nobody chose.
+                  ...(ttlSeconds.trim()
+                    ? { messageSendTtlSeconds: Number(ttlSeconds) }
+                    : {}),
+                },
+          ),
+        },
+      );
       const data = (await res.json()) as {
         templateId?: string;
         error?: string;
@@ -357,7 +652,19 @@ export function TemplateForm({
       setSubmitError(err instanceof Error ? err.message : "Submit failed");
       setSubmitting(false);
     }
-  }, [canSubmit, name, language, category, components, effBindings, router, softRefresh]);
+  }, [
+    canSubmit,
+    editing,
+    categoryLocked,
+    name,
+    language,
+    category,
+    components,
+    effBindings,
+    ttlSeconds,
+    router,
+    softRefresh,
+  ]);
 
   // -------------------------------------------------------------------------
   // Render
@@ -372,11 +679,25 @@ export function TemplateForm({
           <ArrowLeft className="size-3.5" />
           Back to templates
         </Link>
-        <h1 className="text-2xl font-semibold tracking-tight">New template</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {editing ? `Edit “${editing.name}”` : "New template"}
+        </h1>
         <p className="text-sm text-muted-foreground">
-          Submit a new WhatsApp template for review. Meta typically replies
-          within a few hours, sometimes a day. You can&apos;t broadcast with a
-          template until it&apos;s in the <span className="font-medium">approved</span> state.
+          {editing ? (
+            <>
+              Editing keeps the template&apos;s name and history. It goes back
+              through review and is re-approved unless review fails — unlike
+              deleting and recreating, which would block reusing the name{" "}
+              <span className="font-medium">for 30 days</span>.
+            </>
+          ) : (
+            <>
+              Submit a new WhatsApp template for review. Meta typically replies
+              within a few hours, sometimes a day. You can&apos;t broadcast with a
+              template until it&apos;s in the{" "}
+              <span className="font-medium">approved</span> state.
+            </>
+          )}
         </p>
       </header>
 
@@ -408,13 +729,18 @@ export function TemplateForm({
                   value={name}
                   onChange={(e) => setName(e.target.value.toLowerCase())}
                   placeholder="order_confirmation"
+                  // Meta's edit endpoint has no field for the name — changing it
+                  // would mean a new template.
+                  disabled={Boolean(editing)}
                 />
               </Field>
               <Field label="Language">
                 <select
                   value={language}
                   onChange={(e) => setLanguage(e.target.value)}
-                  className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                  // Immutable for the same reason as the name.
+                  disabled={Boolean(editing)}
+                  className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm disabled:opacity-60"
                 >
                   {LANGUAGES.map((l) => (
                     <option key={l.code} value={l.code}>
@@ -430,20 +756,51 @@ export function TemplateForm({
                 <div className="flex gap-2">
                   <CategoryPill
                     active={category === "marketing"}
+                    disabled={categoryLocked}
                     onClick={() => setCategory("marketing")}
                   >
                     Marketing
                   </CategoryPill>
                   <CategoryPill
                     active={category === "utility"}
+                    disabled={categoryLocked}
                     onClick={() => setCategory("utility")}
                   >
                     Utility
                   </CategoryPill>
                 </div>
+                {categoryLocked && (
+                  <p className="mt-1 text-2xs text-muted-foreground">
+                    An approved template&apos;s category can&apos;t be changed. Meta may
+                    recategorize it itself, or you can request a review in WhatsApp
+                    Manager.
+                  </p>
+                )}
                 <p className="mt-1 text-2xs text-muted-foreground">
-                  Authentication category templates have a different shape and aren&apos;t supported here yet.
+                  Authentication templates must come from Meta&apos;s Template
+                  Library (they require a one-time-password button and forbid
+                  URLs, media and emoji), so they aren&apos;t authored here.
+                  Create one in WhatsApp Manager and it syncs in ready to send.
                 </p>
+              </Field>
+            </div>
+
+            <div className="mt-3">
+              <Field
+                label="Time-to-live (optional)"
+                hint={ttlHint}
+                error={ttlError}
+              >
+                <Input
+                  value={ttlSeconds}
+                  // `-` is allowed through so Meta's documented `-1` (= 30 days,
+                  // authentication + utility only) can be typed; the shared
+                  // validator judges the result.
+                  onChange={(e) => setTtlSeconds(e.target.value.replace(/[^\d-]/g, ""))}
+                  inputMode="numeric"
+                  placeholder={`e.g. ${TEMPLATE_TTL_RULES[category].min}`}
+                  className="max-w-45"
+                />
               </Field>
             </div>
           </Section>
@@ -466,20 +823,33 @@ export function TemplateForm({
               <HeaderKindPill icon={<FileTextIcon className="size-3.5" />} active={headerKind === "DOCUMENT"} onClick={() => setHeaderKind("DOCUMENT")}>
                 Document
               </HeaderKindPill>
+              {/* Meta allows a map header only on utility/marketing templates —
+                  the shared validator enforces it, this just doesn't offer it. */}
+              {category !== "authentication" && (
+                <HeaderKindPill
+                  icon={<MapPin className="size-3.5" />}
+                  active={headerKind === "LOCATION"}
+                  onClick={() => setHeaderKind("LOCATION")}
+                >
+                  Location
+                </HeaderKindPill>
+              )}
             </div>
+
+            {headerKind === "LOCATION" && (
+              <p className="mt-3 rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-2xs leading-relaxed text-muted-foreground">
+                A map card appears above the message. The template carries no
+                coordinates — the pin (latitude, longitude, place name, address)
+                is supplied per message when you send or broadcast it.
+              </p>
+            )}
 
             {headerKind === "TEXT" && (
               <div className="mt-3">
                 <Field
                   label="Header text"
                   hint="Up to 60 chars. Can include at most one {{1}}."
-                  error={
-                    headerText.length > 60
-                      ? "Header text must be 60 chars or fewer."
-                      : countPlaceholders(headerText) > 1
-                        ? "Header can include at most one placeholder."
-                        : null
-                  }
+                  error={issuesFor("header")[0] ?? null}
                 >
                   <Input
                     value={headerText}
@@ -558,6 +928,29 @@ export function TemplateForm({
 
           {/* Body */}
           <Section index={3} title="Body" done={bodyValid}>
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <span className="text-2xs text-muted-foreground">Variable style</span>
+              <VarFormatPill
+                active={!isNamed}
+                disabled={Boolean(editing)}
+                onClick={() => changeVarFormat("positional")}
+              >
+                Numbered {"{{1}}"}
+              </VarFormatPill>
+              <VarFormatPill
+                active={isNamed}
+                disabled={Boolean(editing)}
+                onClick={() => changeVarFormat("named")}
+              >
+                Named {"{{order_id}}"}
+              </VarFormatPill>
+            </div>
+            <p className="mb-2 text-2xs leading-relaxed text-muted-foreground">
+              {editing
+                ? "Meta stores one variable style per template and an edit can't change it. Create a new template to switch styles."
+                : "Meta stores one style per template — switching rewrites the variables you've already typed. Named variables make long templates easier to fill in correctly."}
+            </p>
+
             <div className="flex items-center justify-between gap-2">
               <span className="text-2xs text-muted-foreground">
                 Up to {TEMPLATE_LIMITS.bodyMaxLength} chars ·{" "}
@@ -572,21 +965,67 @@ export function TemplateForm({
               </span>
               <Button type="button" variant="outline" size="sm" onClick={insertVar} className="h-7 gap-1.5 text-2xs">
                 <Plus className="size-3" />
-                Insert {`{{${bodyVarCount + 1}}}`}
+                Insert {isNamed ? `{{variable_${bodyVarCount + 1}}}` : `{{${bodyVarCount + 1}}}`}
               </Button>
             </div>
             <Textarea
               ref={bodyTextareaRef}
               value={body}
               onChange={(e) => setBody(e.target.value)}
-              placeholder="Hi {{1}}, your order {{2}} is on its way."
+              placeholder={
+                isNamed
+                  ? "Hi {{first_name}}, your order {{order_number}} is on its way."
+                  : "Hi {{1}}, your order {{2}} is on its way."
+              }
               maxLength={TEMPLATE_LIMITS.bodyMaxLength}
               className="mt-2 min-h-35 font-mono text-[13px]"
             />
-            {body.length > 0 && !bodyValid && (
-              <p className="mt-1 text-2xs text-destructive">
-                Body is required and must be {TEMPLATE_LIMITS.bodyMaxLength} chars or fewer.
+            {body.trim().length === 0 && (
+              <p className="mt-1 text-2xs text-destructive">Body is required.</p>
+            )}
+            {issuesFor("body").map((m) => (
+              <p key={m} className="mt-1 text-2xs text-destructive">
+                {m}
               </p>
+            ))}
+
+            {/* Example values. Meta REVIEWS these — a reviewer who sees "John"
+                where an order number belongs is a common rejection — so they are
+                the author's to write, not ours to generate. */}
+            {(bodyVarCount > 0 || headerHasVar) && (
+              <div className="mt-4 rounded-lg border border-border bg-muted/20 p-3">
+                <div className="mb-1 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Example values
+                </div>
+                <p className="mb-2 text-2xs leading-relaxed text-muted-foreground">
+                  Meta&apos;s reviewers read these to judge what the template is
+                  for. Use realistic samples — they are never sent to customers.
+                </p>
+                <div className="flex flex-col gap-2">
+                  {headerVarKeys.map((k) => (
+                    <ExampleField
+                      key={`h:${k}`}
+                      label={`Header {{${k}}}`}
+                      value={examples[exampleKey("h", k)] ?? ""}
+                      placeholder={exampleFor("h", k, 0)}
+                      onChange={(v) =>
+                        setExamples((cur) => ({ ...cur, [exampleKey("h", k)]: v }))
+                      }
+                    />
+                  ))}
+                  {bodyVarKeys.map((k, i) => (
+                    <ExampleField
+                      key={`b:${k}`}
+                      label={`Body {{${k}}}`}
+                      value={examples[exampleKey("b", k)] ?? ""}
+                      placeholder={exampleFor("b", k, i)}
+                      onChange={(v) =>
+                        setExamples((cur) => ({ ...cur, [exampleKey("b", k)]: v }))
+                      }
+                    />
+                  ))}
+                </div>
+              </div>
             )}
           </Section>
 
@@ -598,6 +1037,9 @@ export function TemplateForm({
               placeholder="Reply STOP to opt out"
               maxLength={TEMPLATE_LIMITS.footerMaxLength}
             />
+            {issuesFor("footer")[0] && (
+              <p className="mt-1 text-2xs text-destructive">{issuesFor("footer")[0]}</p>
+            )}
             <p className="mt-1 text-2xs text-muted-foreground">
               Up to {TEMPLATE_LIMITS.footerMaxLength} chars. No variables.{" "}
               <span
@@ -610,15 +1052,99 @@ export function TemplateForm({
             </p>
           </Section>
 
+          {/* Limited-time offer (marketing only) */}
+          {offerSectionVisible && (
+            <Section
+              index={5}
+              title="Limited-time offer (optional)"
+              done={offerEnabled && offerValid}
+              summary={offerEnabled ? offerHeading || undefined : undefined}
+            >
+              <label className="flex items-start gap-2.5">
+                <input
+                  type="checkbox"
+                  checked={offerEnabled}
+                  onChange={(e) => setOfferEnabled(e.target.checked)}
+                  className="mt-0.5 size-3.5 accent-primary"
+                />
+                <span className="text-xs leading-relaxed text-muted-foreground">
+                  Show a live countdown above the buttons. WhatsApp counts down to
+                  an expiry time you set on each send, so one template covers every
+                  campaign.
+                </span>
+              </label>
+              {offerEnabled && (
+                <div className="mt-3">
+                  <Input
+                    value={offerHeading}
+                    onChange={(e) => setOfferHeading(e.target.value)}
+                    placeholder="Expiring offer!"
+                    maxLength={LIMITED_TIME_OFFER_LIMITS.offerTextMaxLength}
+                  />
+                  {issuesFor("limited_time_offer").map((m) => (
+                    <p key={m} className="mt-1 text-2xs text-destructive">
+                      {m}
+                    </p>
+                  ))}
+                  <p className="mt-1 text-2xs text-muted-foreground">
+                    Up to {LIMITED_TIME_OFFER_LIMITS.offerTextMaxLength} chars, no
+                    variables. These templates take an image or video header, no
+                    footer, and a body up to{" "}
+                    {LIMITED_TIME_OFFER_LIMITS.bodyMaxLength} characters.{" "}
+                    <span
+                      className={cn(
+                        offerHeading.length >
+                          LIMITED_TIME_OFFER_LIMITS.offerTextMaxLength &&
+                          "text-destructive",
+                      )}
+                    >
+                      {offerHeading.length}/
+                      {LIMITED_TIME_OFFER_LIMITS.offerTextMaxLength}
+                    </span>
+                  </p>
+                </div>
+              )}
+            </Section>
+          )}
+
           {/* Buttons */}
-          <Section index={5} title="Buttons (optional)" done={buttonsValid}>
+          <Section index={offerSectionVisible ? 6 : 5} title="Buttons (optional)" done={buttonsValid}>
             <ButtonsEditor buttons={buttons} onChange={setButtons} />
+            {issuesFor("buttons").map((m) => (
+              <p key={m} className="mt-1 text-2xs text-destructive">
+                {m}
+              </p>
+            ))}
+            {buttons.length > TEMPLATE_LIMITS.buttonsBeforeSeeAllOptions && (
+              <p className="mt-1 text-2xs text-muted-foreground">
+                With more than {TEMPLATE_LIMITS.buttonsBeforeSeeAllOptions} buttons WhatsApp
+                shows the first two and hides the rest behind &ldquo;See all
+                options&rdquo;. Templates with 4+ buttons, or a quick reply mixed with
+                other types, can&apos;t be opened on WhatsApp Desktop.
+              </p>
+            )}
           </Section>
+
+          {/* Carousel (marketing only) */}
+          {offerSectionVisible && (
+            <Section
+              index={7}
+              title="Product cards (optional)"
+              done={carousel.enabled && issuesFor("carousel").length === 0}
+              summary={carousel.enabled ? `${carousel.cards.length} cards` : undefined}
+            >
+              <CarouselEditor
+                draft={carousel}
+                onChange={setCarousel}
+                issues={issuesFor("carousel")}
+              />
+            </Section>
+          )}
 
           {/* Bindings */}
           {(bodyVarCount > 0 || headerHasVar) && (
             <Section
-              index={6}
+              index={offerSectionVisible ? 8 : 6}
               title="Personalize variables"
               done={labelsValid}
               summary={
@@ -634,6 +1160,7 @@ export function TemplateForm({
               </p>
               <VariableBindingsEditor
                 components={components}
+                parameterFormat={varFormat}
                 initialBindings={bindings}
                 fieldDefinitions={fieldDefinitions}
                 onChange={setBindings}
@@ -657,7 +1184,13 @@ export function TemplateForm({
             </Button>
             <Button type="button" onClick={submit} disabled={!canSubmit || submitting} className="gap-1.5">
               {submitting ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-              {submitting ? "Submitting…" : "Submit for review"}
+              {submitting
+                ? editing
+                  ? "Saving…"
+                  : "Submitting…"
+                : editing
+                  ? "Save and resubmit"
+                  : "Submit for review"}
             </Button>
           </div>
         </div>
@@ -675,6 +1208,8 @@ export function TemplateForm({
                 bodyValues={sampleBodyValues}
                 headerValue={sampleHeaderValue}
                 headerMediaUrl={headerPreviewUrl}
+                bodyNames={isNamed ? bodyVarKeys : null}
+                headerName={isNamed ? headerVarKeys[0] ?? null : null}
               />
             </div>
             <p className="mt-3 text-2xs leading-relaxed text-muted-foreground">
@@ -700,10 +1235,10 @@ function ButtonsEditor({
   onChange: (next: ButtonRow[]) => void;
 }) {
   const addButton = (kind: ButtonRow["kind"]) => {
-    if (buttons.length >= 10) return;
+    if (buttons.length >= TEMPLATE_LIMITS.maxButtons) return;
     onChange([
       ...buttons,
-      { id: cryptoRandomId(), kind, text: "", url: "", phone: "" },
+      { id: cryptoRandomId(), kind, text: "", url: "", phone: "", example: "" },
     ]);
   };
   const updateButton = (id: string, patch: Partial<ButtonRow>) => {
@@ -715,7 +1250,8 @@ function ButtonsEditor({
     <div className="flex flex-col gap-2">
       {buttons.length === 0 ? (
         <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
-          No buttons. Add up to 10 — replies, links or phone calls.
+          No buttons. Add up to {TEMPLATE_LIMITS.maxButtons} — quick replies,
+          links, a phone call or a coupon code.
         </div>
       ) : (
         buttons.map((b) => (
@@ -742,6 +1278,13 @@ function ButtonsEditor({
               >
                 Phone
               </ButtonKindPill>
+              <ButtonKindPill
+                active={b.kind === "COPY_CODE"}
+                icon={<Copy className="size-3.5" />}
+                onClick={() => updateButton(b.id, { kind: "COPY_CODE" })}
+              >
+                Copy code
+              </ButtonKindPill>
               <button
                 type="button"
                 onClick={() => removeButton(b.id)}
@@ -752,17 +1295,29 @@ function ButtonsEditor({
               </button>
             </div>
             <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <Input
-                value={b.text}
-                onChange={(e) => updateButton(b.id, { text: e.target.value })}
-                placeholder="Button label (≤ 25 chars)"
-                maxLength={30}
-              />
+              {/* A copy-code button has no label — Meta renders its own. */}
+              {b.kind !== "COPY_CODE" && (
+                <Input
+                  value={b.text}
+                  onChange={(e) => updateButton(b.id, { text: e.target.value })}
+                  placeholder={`Button label (\u2264 ${TEMPLATE_LIMITS.buttonTextMaxLength} chars)`}
+                  maxLength={TEMPLATE_LIMITS.buttonTextMaxLength}
+                />
+              )}
               {b.kind === "URL" && (
                 <Input
                   value={b.url}
                   onChange={(e) => updateButton(b.id, { url: e.target.value })}
-                  placeholder="https://… (Meta opens this URL)"
+                  placeholder="https://shop.com/order/{{1}}"
+                  maxLength={TEMPLATE_LIMITS.urlMaxLength}
+                />
+              )}
+              {b.kind === "COPY_CODE" && (
+                <Input
+                  value={b.example}
+                  onChange={(e) => updateButton(b.id, { example: e.target.value })}
+                  placeholder={`Sample code (\u2264 ${TEMPLATE_LIMITS.copyCodeExampleMaxLength} chars)`}
+                  maxLength={TEMPLATE_LIMITS.copyCodeExampleMaxLength}
                 />
               )}
               {b.kind === "PHONE_NUMBER" && (
@@ -770,14 +1325,33 @@ function ButtonsEditor({
                   value={b.phone}
                   onChange={(e) => updateButton(b.id, { phone: e.target.value })}
                   placeholder="+15551234567"
+                  maxLength={TEMPLATE_LIMITS.phoneNumberMaxLength}
                 />
               )}
             </div>
+            {/* Meta substitutes a URL variable as a SUFFIX and requires a sample
+                to review it. Without this field a link like
+                `https://shop.com/{{1}}` was submitted with no example and
+                rejected — the composer offered no way to supply one. */}
+            {b.kind === "URL" && /\{\{\s*[A-Za-z0-9_]+\s*\}\}/.test(b.url) && (
+              <div className="mt-2">
+                <Input
+                  value={b.example}
+                  onChange={(e) => updateButton(b.id, { example: e.target.value })}
+                  placeholder="Example value for the variable, e.g. summer2023"
+                />
+                <p className="mt-1 text-2xs text-muted-foreground">
+                  The variable must be the LAST thing in the URL. At send time the
+                  value is appended — percent-encode spaces and special
+                  characters (a space becomes %20).
+                </p>
+              </div>
+            )}
           </div>
         ))
       )}
 
-      {buttons.length < 10 && (
+      {buttons.length < TEMPLATE_LIMITS.maxButtons && (
         <div className="flex flex-wrap items-center gap-2">
           <Button type="button" variant="outline" size="sm" onClick={() => addButton("QUICK_REPLY")} className="h-7 gap-1.5 text-2xs">
             <Plus className="size-3" /> Quick reply
@@ -787,6 +1361,9 @@ function ButtonsEditor({
           </Button>
           <Button type="button" variant="outline" size="sm" onClick={() => addButton("PHONE_NUMBER")} className="h-7 gap-1.5 text-2xs">
             <Plus className="size-3" /> Phone
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={() => addButton("COPY_CODE")} className="h-7 gap-1.5 text-2xs">
+            <Plus className="size-3" /> Copy code
           </Button>
         </div>
       )}
@@ -853,18 +1430,21 @@ function HeaderKindPill({
 function CategoryPill({
   active,
   onClick,
+  disabled = false,
   children,
 }: {
   active: boolean;
   onClick: () => void;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={cn(
-        "rounded-md border px-3 py-1.5 text-[12.5px] font-medium transition-colors",
+        "rounded-md border px-3 py-1.5 text-[12.5px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60",
         active
           ? "border-primary bg-primary text-primary-foreground"
           : "border-border bg-background text-muted-foreground hover:text-foreground",
@@ -912,6 +1492,65 @@ function Section({
   );
 }
 
+/**
+ * Pill for the numbered/named variable-style toggle. Separate from
+ * `CategoryPill` only because the two carry different weights in the layout;
+ * behaviour is identical.
+ */
+function VarFormatPill({
+  active,
+  onClick,
+  disabled = false,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-pressed={active}
+      className={cn(
+        "rounded-full border px-2.5 py-1 font-mono text-2xs transition-colors",
+        active
+          ? "border-primary bg-primary/10 text-primary"
+          : "border-border text-muted-foreground hover:bg-accent/40",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** One reviewer-facing sample value for a variable. */
+function ExampleField({
+  label,
+  value,
+  placeholder,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label className="flex items-center gap-2">
+      <span className="w-28 shrink-0 font-mono text-2xs text-muted-foreground">{label}</span>
+      <Input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="h-8 text-xs"
+      />
+    </label>
+  );
+}
+
 function Field({
   label,
   hint,
@@ -933,32 +1572,141 @@ function Field({
   );
 }
 
-function buttonRowValid(b: ButtonRow): boolean {
-  if (b.text.trim().length === 0 || b.text.length > 25) return false;
-  if (b.kind === "URL") return /^https?:\/\//.test(b.url.trim());
-  if (b.kind === "PHONE_NUMBER") return /^\+?\d{6,15}$/.test(b.phone.trim().replace(/\s/g, ""));
-  return true;
-}
-
 function toMetaButton(b: ButtonRow): NonNullable<TemplateComponent["buttons"]>[number] {
-  if (b.kind === "URL") return { type: "URL", text: b.text, url: b.url };
+  if (b.kind === "URL") {
+    // `example` is REQUIRED once the URL ends in a variable — Meta substitutes a
+    // suffix, and rejects the template if it has no sample to review. Omitted
+    // for a static URL, where an example would itself be invalid.
+    const hasVar = /\{\{\s*[A-Za-z0-9_]+\s*\}\}/.test(b.url);
+    return {
+      type: "URL",
+      text: b.text,
+      url: b.url,
+      ...(hasVar && b.example.trim() ? { example: [b.example.trim()] } : {}),
+    };
+  }
   if (b.kind === "PHONE_NUMBER") return { type: "PHONE_NUMBER", text: b.text, phone_number: b.phone };
+  // A copy-code button has NO label — it is defined solely by the sample code
+  // Meta puts on the recipient's clipboard.
+  if (b.kind === "COPY_CODE") return { type: "COPY_CODE", example: b.example.trim() };
   return { type: "QUICK_REPLY", text: b.text };
 }
 
-function countPlaceholders(text: string): number {
-  let max = 0;
-  const re = /\{\{(\d+)\}\}/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const n = Number(m[1]);
-    if (Number.isFinite(n) && n > max) max = n;
+/**
+ * Meta's component array → the form's editing state.
+ *
+ * The inverse of the `components` memo below. Examples are read back out of
+ * `example.body_text` / `body_text_named_params` so an edit starts from the
+ * values Meta already reviewed rather than regenerating samples — a reviewer
+ * seeing different examples on a re-submission is a needless rejection risk.
+ */
+function hydrateFromTemplate(t: TemplateEditTarget): {
+  headerKind: HeaderKind;
+  headerText: string;
+  body: string;
+  footer: string;
+  buttons: ButtonRow[];
+  examples: Record<string, string>;
+  /** Present only when the template carries a LIMITED_TIME_OFFER component. */
+  offerHeading?: string;
+  /** Present only when the template carries a CAROUSEL component. */
+  carousel?: CarouselDraft;
+} {
+  const comps = t.components;
+  const header = comps.find((c) => c.type === "HEADER");
+  const bodyComp = comps.find((c) => c.type === "BODY");
+  const footerComp = comps.find((c) => c.type === "FOOTER");
+  const buttonsComp = comps.find((c) => c.type === "BUTTONS");
+  const ltoComp = comps.find((c) => c.type === "LIMITED_TIME_OFFER");
+  const carouselComp = comps.find((c) => c.type === "CAROUSEL");
+
+  const headerFormat = (header?.format ?? "TEXT").toUpperCase();
+  const headerKind: HeaderKind = !header
+    ? "none"
+    : headerFormat === "TEXT" ||
+        headerFormat === "IMAGE" ||
+        headerFormat === "VIDEO" ||
+        headerFormat === "DOCUMENT" ||
+        headerFormat === "LOCATION"
+      ? (headerFormat as HeaderKind)
+      : "none";
+
+  // Examples are namespaced by component exactly as the form keys them, because
+  // a positional header's `{{1}}` and the first body `{{1}}` are different
+  // values that would otherwise collide.
+  const examples: Record<string, string> = {};
+  if (t.parameterFormat === "named") {
+    for (const p of bodyComp?.example?.body_text_named_params ?? []) {
+      if (p.param_name) examples[`b:${p.param_name}`] = p.example ?? "";
+    }
+    for (const p of header?.example?.header_text_named_params ?? []) {
+      if (p.param_name) examples[`h:${p.param_name}`] = p.example ?? "";
+    }
+  } else {
+    (bodyComp?.example?.body_text?.[0] ?? []).forEach((v, i) => {
+      examples[`b:${i + 1}`] = v;
+    });
+    const h = header?.example?.header_text?.[0];
+    if (h) examples["h:1"] = h;
   }
-  return max;
+
+  return {
+    headerKind,
+    headerText: header?.text ?? "",
+    body: bodyComp?.text ?? "",
+    footer: footerComp?.text ?? "",
+    buttons: (buttonsComp?.buttons ?? []).map((b) => {
+      const kind = (b.type ?? "").toUpperCase();
+      return {
+        id: cryptoRandomId(),
+        kind:
+          kind === "URL" || kind === "PHONE_NUMBER" || kind === "COPY_CODE"
+            ? (kind as ButtonRow["kind"])
+            : "QUICK_REPLY",
+        text: b.text ?? "",
+        url: b.url ?? "",
+        phone: b.phone_number ?? "",
+        example: Array.isArray(b.example) ? (b.example[0] ?? "") : (b.example ?? ""),
+      };
+    }),
+    examples,
+    ...(ltoComp ? { offerHeading: ltoComp.limited_time_offer?.text ?? "" } : {}),
+    ...(carouselComp ? { carousel: hydrateCarousel(carouselComp) } : {}),
+  };
 }
 
-function exampleBodyValues(count: number): string[] {
-  return Array.from({ length: count }, (_, i) => SAMPLE_PLACEHOLDER[i % SAMPLE_PLACEHOLDER.length]!);
+/**
+ * A CAROUSEL component back into the editor's draft. The structure flags
+ * (header format, has-body, button slots) are read from card 1 — every card
+ * carries the same components, which is the rule the editor enforces on the
+ * way out too.
+ */
+function hydrateCarousel(comp: TemplateComponent): CarouselDraft {
+  const cards = comp.cards ?? [];
+  const first = cards[0]?.components ?? [];
+  const firstHeader = first.find((c) => c.type === "HEADER");
+  return {
+    enabled: true,
+    headerFormat: (firstHeader?.format ?? "").toUpperCase() === "VIDEO" ? "VIDEO" : "IMAGE",
+    hasBody: first.some((c) => c.type === "BODY"),
+    cards: cards.map((card) => {
+      const cc = card.components ?? [];
+      const header = cc.find((c) => c.type === "HEADER");
+      return {
+        id: cryptoRandomId(),
+        handle: header?.example?.header_handle?.[0] ?? null,
+        // Meta never returns the original filename — the handle is the identity.
+        filename: header?.example?.header_handle?.[0] ? "Uploaded" : "",
+        body: cc.find((c) => c.type === "BODY")?.text ?? "",
+        buttons: (cc.find((c) => c.type === "BUTTONS")?.buttons ?? []).map((b) => ({
+          kind: (b.type ?? "").toUpperCase() === "URL" ? ("URL" as const) : ("QUICK_REPLY" as const),
+          text: b.text ?? "",
+          url: b.url ?? "",
+          example: Array.isArray(b.example) ? (b.example[0] ?? "") : (b.example ?? ""),
+        })),
+      };
+    }),
+  };
 }
 
 function cryptoRandomId(): string {

@@ -38,6 +38,12 @@ const RATE_LIMITED_POSTS: Record<string, number> = {
   // point of meaningless for that threat model.
   "/login": 5, // login attempts via the server action
   "/register": 8, // account creation
+  // Each request here can SEND AN EMAIL against a 300/day quota, from an
+  // endpoint that takes an arbitrary address and needs no session. Unlimited,
+  // it is both a free mail cannon aimed at third parties and a way to burn the
+  // day's sends. 5 covers a genuine typo-and-retry; nothing legitimate needs
+  // more.
+  "/forgot-password": 5,
 };
 const RATE_WINDOW_MS = 10 * 60 * 1000;
 // Tighter window for the per-IP login limit (5 attempts / 1 minute).
@@ -335,6 +341,10 @@ export default function proxy(req: NextRequest): NextResponse {
   const isPublicPage =
     pathname === "/login" ||
     pathname === "/register" ||
+    // Password recovery is BY DEFINITION unauthenticated — someone who can't
+    // sign in cannot have a cookie. Without this the gate 307s them to /login,
+    // which is the exact screen they're stuck on.
+    pathname === "/forgot-password" ||
     pathname === "/logout" ||
     pathname.startsWith("/invite/") ||
     // API reference is deliberately public — it renders only static reference

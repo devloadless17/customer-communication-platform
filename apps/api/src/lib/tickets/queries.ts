@@ -42,6 +42,7 @@ export const TICKET_SELECT = {
   status: true,
   priority: true,
   assignedUserId: true,
+  assignedTeamId: true,
   firstResponseDueAt: true,
   resolutionDueAt: true,
   firstResponseAt: true,
@@ -97,6 +98,7 @@ export function mapTicket(t: TicketRow): Ticket {
     status: t.status,
     priority: t.priority,
     assignedUserId: t.assignedUserId,
+    assignedTeamId: t.assignedTeamId,
     assignedUserName: t.assignedUser?.name ?? null,
     tags: t.tags.map((tag) => ({ id: tag.id, name: tag.name, color: tag.color })),
     sla: {
@@ -130,6 +132,7 @@ export const TICKET_EVENT_SELECT = {
   kind: true,
   before: true,
   after: true,
+  body: true,
   actorUserId: true,
   createdAt: true,
   actorUser: { select: { name: true } },
@@ -147,6 +150,7 @@ export function mapTicketEvent(e: TicketEventRow): TicketEvent {
     kind: e.kind,
     before: asJsonObject(e.before),
     after: asJsonObject(e.after),
+    body: e.body,
     actorUserId: e.actorUserId,
     actorName: e.actorUser?.name ?? null,
     createdAt: e.createdAt.toISOString(),
@@ -157,6 +161,8 @@ export interface ListTicketsFilters {
   status?: TicketStatus[];
   priority?: TicketPriority[];
   assignedUserId?: string | null;
+  /** The team queue. `null` filters to "owned by no team". */
+  assignedTeamId?: string | null;
   contactId?: string;
   conversationId?: string;
   channel?: string;
@@ -198,6 +204,13 @@ export async function listTickets(
   if (filters.priority?.length) and.push({ priority: { in: filters.priority } });
   // `null` is a real filter value here ("unassigned"), distinct from `undefined`
   // ("don't filter on assignee") — hence the explicit undefined check.
+  if (filters.assignedTeamId !== undefined) {
+    // Its own AND element, never merged: a board can legitimately ask for
+    // "Sales' queue AND unclaimed", and merging would let one overwrite the
+    // other.
+    and.push({ assignedTeamId: filters.assignedTeamId });
+  }
+
   if (filters.assignedUserId !== undefined) {
     and.push({ assignedUserId: filters.assignedUserId });
   }

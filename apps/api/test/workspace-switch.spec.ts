@@ -164,9 +164,41 @@ describe("setActive", () => {
 });
 
 describe("list", () => {
-  it("marks exactly the active workspace and reports the per-workspace role", () => {
-    const out = service.list(sessionFor());
+  it("marks exactly the active workspace and reports the per-workspace role", async () => {
+    const out = await service.list(sessionFor());
     expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ id: wsA1, role: "agent", isActive: true });
+    expect(out[0]).toMatchObject({
+      id: wsA1,
+      role: "agent",
+      isActive: true,
+      joined: true,
+    });
+  });
+
+  it("shows an ORG ADMIN every workspace in their org — the same set setActive accepts", async () => {
+    // The three surfaces have to agree. `setActive` lets an org admin open A2
+    // without a membership row (asserted above), and the Organization page marks
+    // it openable — so the switcher must list it. When this returned memberships
+    // only, that workspace was reachable from one page and invisible in the rail,
+    // and once switched to it NOTHING was marked active because the current
+    // workspace wasn't in the list being rendered.
+    const out = await service.list(sessionFor({ orgRole: "admin", role: "admin" }));
+    expect(out.map((w) => w.id).sort()).toEqual([wsA1, wsA2].sort());
+    // ...and never another organization's.
+    expect(out.some((w) => w.id === wsB1)).toBe(false);
+  });
+
+  it("distinguishes a membership from mere org authority", async () => {
+    const out = await service.list(sessionFor({ orgRole: "admin", role: "admin" }));
+    // A1: a real WorkspaceMember row, with the role it actually carries.
+    expect(out.find((w) => w.id === wsA1)).toMatchObject({ joined: true, role: "agent" });
+    // A2: reachable only because they administer the org, so `joined` is false
+    // and the effective role there is admin.
+    expect(out.find((w) => w.id === wsA2)).toMatchObject({ joined: false, role: "admin" });
+  });
+
+  it("shows a plain member only what they joined", async () => {
+    const out = await service.list(sessionFor());
+    expect(out.map((w) => w.id)).toEqual([wsA1]);
   });
 });

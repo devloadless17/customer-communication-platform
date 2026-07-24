@@ -35,6 +35,47 @@ export function db(): PrismaClient {
   return _client;
 }
 
+
+/**
+ * Guarantee a default `#general` in `workspaceId` with `userId` in it.
+ *
+ * Created when missing rather than assumed: this suite is destructive and
+ * several specs sweep team-chat rows, so #general does get deleted. A `/team`
+ * with no channel never redirects, which surfaces as a navigation timeout in
+ * unrelated specs and reads like a product regression. A setup helper should
+ * leave the world in the state it promises.
+ */
+export async function ensureDefaultChannel(
+  workspaceId: string,
+  userId: string,
+): Promise<string> {
+  const channel =
+    (await db().teamChannel.findFirst({
+      where: { workspaceId, isDefault: true },
+      select: { id: true },
+    })) ??
+    (await db().teamChannel.create({
+      // `visibility: public` is explicit for the same reason provisionWorkspace
+      // spells it out: the column defaults to private, and `update` refuses to
+      // change a default channel's visibility, so a private #general is
+      // unfixable through the UI.
+      data: {
+        workspaceId,
+        name: "general",
+        isDefault: true,
+        visibility: "public",
+        createdById: userId,
+      },
+      select: { id: true },
+    }));
+  await db().teamChannelMember.upsert({
+    where: { channelId_userId: { channelId: channel.id, userId } },
+    create: { channelId: channel.id, userId, addedById: userId },
+    update: {},
+  });
+  return channel.id;
+}
+
 /**
  * The single superadmin row created by `prisma/seeds/seed-superadmin.ts`.
  * Resolved once at suite start so we don't keep pinging the user table.
@@ -53,6 +94,7 @@ export async function superadminTeam(): Promise<{ workspaceId: string; userId: s
   }
   const wsId = user.workspaceMemberships[0]?.workspaceId;
   if (!wsId) throw new Error("seeded user has no workspace membership");
+  await ensureDefaultChannel(wsId, user.id);
   return { workspaceId: wsId, userId: user.id };
 }
 
@@ -86,7 +128,13 @@ export async function ensureAppAdmin(): Promise<{
   const user = await db().user.upsert({
     where: { email: APP_ADMIN_EMAIL },
     create: { organizationId: ws.organizationId, name: "E2E Admin", email: APP_ADMIN_EMAIL },
-    update: { organizationId: ws.organizationId, deactivatedAt: null },
+    // Clear any avatarUrl a prior avatar-upload spec left on this fixture. Dev/CI
+    // R2 blobs don't persist across runs, so a lingering
+    // `/api/users/<id>/avatar?v=…` URL 404s on every surface that renders the
+    // member — which made `/team` (and any member-list page) fail the predeploy
+    // "no console errors" gate with a handful of identical avatar 404s. The
+    // fixture should carry no avatar; real UI falls back to initials.
+    update: { organizationId: ws.organizationId, deactivatedAt: null, avatarUrl: null },
   });
   await db().workspaceMember.upsert({
     where: { userId_workspaceId: { userId: user.id, workspaceId } },
@@ -105,19 +153,10 @@ export async function ensureAppAdmin(): Promise<{
     },
     update: { password: passwordHash, userId: user.id },
   });
-  // Default-channel membership so /team doesn't dead-end on the "no channels"
-  // path (mirrors registration + the superadmin seed).
-  const channel = await db().teamChannel.findFirst({
-    where: { workspaceId, isDefault: true },
-    select: { id: true },
-  });
-  if (channel) {
-    await db().teamChannelMember.upsert({
-      where: { channelId_userId: { channelId: channel.id, userId: user.id } },
-      create: { channelId: channel.id, userId: user.id, addedById: user.id },
-      update: {},
-    });
-  }
+  // A default channel AND membership in it, so /team doesn't dead-end on the
+  // "no channels" path (mirrors `provisionWorkspace` + the superadmin seed).
+  await ensureDefaultChannel(workspaceId, user.id);
+
   return { workspaceId, userId: user.id, email: APP_ADMIN_EMAIL, password: APP_ADMIN_PASSWORD };
 }
 

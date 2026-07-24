@@ -221,11 +221,30 @@ const nextConfig: NextConfig = {
         },
       ],
       afterFiles: [
-        // Anything under `/api/*` the filesystem didn't claim falls through
-        // to NestJS. Next.js's own routes (`/api/auth/[...all]`, `/api/health`,
-        // `/api/webhooks/meta/*`) win because afterFiles only fires when no
-        // filesystem route matches.
-        { source: "/api/:path*", destination: `${apiUpstream}/api/:path*` },
+        // Anything under `/api/*` the filesystem didn't claim falls through to
+        // NestJS.
+        //
+        // The negative lookahead is LOAD-BEARING, and the reason is a Next.js
+        // routing-order subtlety that is easy to get wrong: `afterFiles`
+        // rewrites are evaluated AFTER static filesystem routes but BEFORE
+        // DYNAMIC ones. So `/api/health/web` (static) correctly beat this
+        // rewrite, while `/api/auth/[...all]` and `/api/webhooks/meta/[teamId]`
+        // (both dynamic) did NOT — every Better Auth endpoint was silently
+        // proxied to NestJS, which answered `404 Cannot GET
+        // /api/auth/callback/google`. That made Google sign-in impossible and
+        // would have done the same to any future Better Auth flow.
+        //
+        // The comment this replaces claimed "Next.js's own routes win because
+        // afterFiles only fires when no filesystem route matches" — true for
+        // static routes, false for dynamic ones.
+        //
+        // Excluded here rather than moved to `beforeFiles`, because beforeFiles
+        // would ALSO shadow `/api/auth/change-password` above, which genuinely
+        // does live on NestJS.
+        {
+          source: "/api/:path((?!auth/|auth$|webhooks/meta/).*)",
+          destination: `${apiUpstream}/api/:path`,
+        },
         // Canonical post-migration webhook path. NestJS owns it; this lets
         // the path also work when Next.js receives it directly (no-Caddy
         // dev, or a tunnel that happens to terminate at :3000).

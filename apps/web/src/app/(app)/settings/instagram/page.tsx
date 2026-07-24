@@ -1,6 +1,11 @@
 import { getSession } from "@/lib/auth/current-user";
-import { getTeamInstagramConfig } from "@/lib/api/queries";
+import {
+  getTeamInstagramConfig,
+  listChannelAccounts,
+  type ChannelAccountView,
+} from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
+import { soft } from "@/lib/api/soft";
 
 import { InstagramSettings, type InstagramCurrent } from "./instagram-settings";
 
@@ -15,8 +20,15 @@ export default async function InstagramSettingsPage() {
   const canManage = canManageUsers(user.role);
 
   let current: InstagramCurrent;
+  // Every connected account on this channel (admin-only endpoint). Degrades to
+  // [] so a transient failure hides the panel rather than erroring the page.
+  let accounts: ChannelAccountView[] = [];
   if (canManage) {
-    const config = await getTeamInstagramConfig();
+    const [config, accountRows] = await Promise.all([
+      getTeamInstagramConfig(),
+      soft("instagram accounts", [] as ChannelAccountView[], () => listChannelAccounts("instagram")),
+    ]);
+    accounts = accountRows;
     current = {
       connected: Boolean(config.igId),
       igId: config.igId,
@@ -45,5 +57,5 @@ export default async function InstagramSettingsPage() {
     };
   }
 
-  return <InstagramSettings current={current} canManage={canManage} />;
+  return <InstagramSettings current={current} canManage={canManage} accounts={accounts} />;
 }

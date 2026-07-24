@@ -51,7 +51,7 @@ curl -X POST "https://graph.facebook.com/v25.0/{PAGE_ID}/messages?access_token={
 |---|---|
 | Phone Number ID | App → WhatsApp → API Setup (or WhatsApp Manager → phone number) |
 | WABA ID | Same API Setup screen / Business Settings → WhatsApp Accounts |
-| Access token | System-user token with `whatsapp_business_messaging` + `whatsapp_business_management` |
+| Access token | System-user token with `whatsapp_business_messaging` + `whatsapp_business_management`, **plus `business_management`** — the latter is optional to Meta but required for us to resolve the business portfolio (24h shared budget + template limit). Without it those panels read "not resolved" and broadcasts send ungated. |
 | App secret | App Settings → Basic → App secret (Show) |
 | Verify token | Pre-minted on our WhatsApp settings page — paste into App → WhatsApp → Configuration → Webhooks |
 

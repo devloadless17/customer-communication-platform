@@ -3,7 +3,7 @@ import { loadAssignmentSettings } from "@/lib/assignment/resolve";
 import { getOnlineUserIds } from "@/lib/conversations/presence-bridge";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
-import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Offline rebalance: move work off an agent who is no longer there.
@@ -77,6 +77,14 @@ async function runTick(): Promise<void> {
   try {
     await withSweeperMutex("assignment-rebalance", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / graceful shutdown) — the work is
+    // over. `clearInterval` does not cancel a tick already in flight, so
+    // without this the sweeper keeps querying a closed pool for the whole
+    // drain and Prisma logs an error on every one.
+    if (isPoolClosedError(err)) {
+      stopAssignmentRebalanceSweeper();
+      return;
+    }
     console.error("[sweeper.assignment-rebalance] tick failed", err);
   } finally {
     inFlight = false;
@@ -164,46 +172,14 @@ async function rebalanceTeam(workspaceId: string): Promise<void> {
 }
 
 /**
- * Deactivation rebalance — called synchronously from the user-deactivation
- * flow, not on a timer. Deactivation is permanent and operator-initiated, so
- * unlike the offline sweep this runs immediately, moves EVERY open thread, and
- * is on by default.
+ * Deactivation rebalance used to live here as `rebalanceDeactivatedUser`. It
+ * moved to `lib/workspaces/remove-member.ts`, which now owns BOTH "this person
+ * left a workspace" transitions — removal and deactivation — because they have
+ * to do the same set of things (re-home conversations and tickets, drop policy
+ * seats, channel memberships, saved views and the pointer columns naming them)
+ * and two implementations of that list would drift on the first addition.
  *
- * Best-effort by contract: deactivating a user must succeed even if routing
- * their work fails. Anything left behind still surfaces — a deactivated
- * assignee is excluded from every candidate pool, and the conversation stays
- * visible in the team inbox.
+ * What stays here is the TIMER-driven offline sweep above: a different trigger,
+ * a different risk profile (an agent between tabs is not an agent who left) and
+ * a deliberately different set of restraints.
  */
-export async function rebalanceDeactivatedUser(
-  workspaceId: string,
-  userId: string,
-): Promise<number> {
-  const settings = await loadAssignmentSettings(db, workspaceId);
-  if (!settings.reassignOnDeactivate) return 0;
-
-  const open = await db.conversation.findMany({
-    where: { workspaceId, assignedUserId: userId, status: { not: "closed" } },
-    select: { id: true },
-    orderBy: { lastMessageAt: "desc" },
-    // Bounded: a departing manager with 5k threads shouldn't stall the
-    // deactivation request. The rest stay assigned to the (now inactive) user
-    // and are picked up by the offline sweep or manual triage.
-    take: 500,
-  });
-
-  let moved = 0;
-  for (const conv of open) {
-    const outcome = await assignByPolicy({
-      db,
-      publish,
-      workspaceId,
-      conversationId: conv.id,
-      source: "rebalance",
-      onlyIfUnassigned: false,
-      context: { excludeUserIds: [userId] },
-      changedByUserId: null,
-    }).catch(() => null);
-    if (outcome?.applied) moved++;
-  }
-  return moved;
-}

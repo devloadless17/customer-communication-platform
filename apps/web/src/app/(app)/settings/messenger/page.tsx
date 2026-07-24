@@ -1,6 +1,11 @@
 import { getSession } from "@/lib/auth/current-user";
-import { getTeamMessengerConfig } from "@/lib/api/queries";
+import {
+  getTeamMessengerConfig,
+  listChannelAccounts,
+  type ChannelAccountView,
+} from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
+import { soft } from "@/lib/api/soft";
 
 import { MessengerSettings, type MessengerCurrent } from "./messenger-settings";
 
@@ -18,8 +23,15 @@ export default async function MessengerSettingsPage() {
   // a non-admin 403s. Only admins reach this page (nav is admin-gated), but
   // guard anyway with an empty read-only view.
   let current: MessengerCurrent;
+  // Every connected account on this channel (admin-only endpoint). Degrades to
+  // [] so a transient failure hides the panel rather than erroring the page.
+  let accounts: ChannelAccountView[] = [];
   if (canManage) {
-    const config = await getTeamMessengerConfig();
+    const [config, accountRows] = await Promise.all([
+      getTeamMessengerConfig(),
+      soft("messenger accounts", [] as ChannelAccountView[], () => listChannelAccounts("messenger")),
+    ]);
+    accounts = accountRows;
     current = {
       connected: Boolean(config.pageId),
       pageId: config.pageId,
@@ -44,5 +56,5 @@ export default async function MessengerSettingsPage() {
     };
   }
 
-  return <MessengerSettings current={current} canManage={canManage} />;
+  return <MessengerSettings current={current} canManage={canManage} accounts={accounts} />;
 }

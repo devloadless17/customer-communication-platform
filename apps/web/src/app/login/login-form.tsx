@@ -2,12 +2,14 @@
 
 import { useActionState, useEffect } from "react";
 import { useFormStatus } from "react-dom";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { broadcastSignout } from "@/lib/auth/auth-broadcast";
+import { oauthErrorMessage } from "@ccp/shared/auth/oauth-error";
 
 import { loginAction, type LoginState } from "./actions";
 
@@ -38,6 +40,14 @@ export function LoginForm({ next }: { next: string }) {
   // (email "sign out" links, 401 → /logout chains). Rail-button signouts
   // already broadcast before navigating; this catches the rest. Strip the
   // flag from the URL so a back-forward navigation doesn't re-broadcast.
+  const searchParams = useSearchParams();
+  const justReset = searchParams.get("reset") === "1";
+  // Better Auth redirects a failed OAuth callback here as `?error=<code>`
+  // (onAPIError.errorURL). Rendered as a sentence rather than the raw code —
+  // the common one, `account_not_linked`, is fixed by signing in with the
+  // password on this very form.
+  const oauthError = oauthErrorMessage(searchParams.get("error"));
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
@@ -50,6 +60,29 @@ export function LoginForm({ next }: { next: string }) {
   return (
     <form action={action} className="flex flex-col gap-4">
       <input type="hidden" name="next" value={next} />
+
+      {/* A failed "Continue with Google" lands back here rather than on Better
+          Auth's bare API error page, so the recovery (sign in with the
+          password) is one field away. */}
+      {oauthError && (
+        <div
+          role="alert"
+          className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-2xs text-destructive"
+        >
+          {oauthError}
+        </div>
+      )}
+
+      {/* Confirms the reset actually landed. Without it the user is bounced to
+          a plain login screen and can't tell whether the new password took. */}
+      {justReset && (
+        <div
+          role="status"
+          className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-2xs text-emerald-700 dark:text-emerald-400"
+        >
+          Password updated. Sign in with your new password.
+        </div>
+      )}
 
       <div className="flex flex-col gap-1.5">
         <label htmlFor="email" className="text-xs font-medium text-foreground">
@@ -71,12 +104,14 @@ export function LoginForm({ next }: { next: string }) {
           <label htmlFor="password" className="text-xs font-medium text-foreground">
             Password
           </label>
-          {/* No self-serve reset (no email provider by design) — recovery is
-              admin-initiated. Point users at the right person instead of a
-              dead "Forgot password?" link. */}
-          <span className="text-2xs text-muted-foreground">
-            Forgot it? Ask your admin to reset it.
-          </span>
+          {/* Now a real link: recovery is self-serve by emailed code, and the
+              super-admin "reset a member's password" action is gone. */}
+          <Link
+            href="/forgot-password"
+            className="text-2xs text-muted-foreground hover:text-foreground"
+          >
+            Forgot password?
+          </Link>
         </div>
         <Input
           id="password"

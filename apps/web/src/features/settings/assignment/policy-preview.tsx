@@ -12,13 +12,13 @@ import type { PreviewResult } from "./types";
  *  "why is nothing being assigned?" gets the answer here rather than from a
  *  server log they can't see. */
 const REASON_COPY: Record<string, string> = {
-  picked: "picked by this policy",
-  fixed: "this policy always assigns one person",
+  picked: "picked by this team",
+  fixed: "this team always assigns one person",
   fallback: "everyone was full, so the fallback person took it",
-  overflow_uncapped: "everyone was at their limit, and the policy ignores limits",
-  manual_strategy: "this policy never auto-assigns",
-  no_policy: "the team has no usable policy",
-  no_candidates: "nobody is eligible right now — check who's online and who's in the policy",
+  overflow_uncapped: "everyone was at their limit, and the team ignores limits",
+  manual_strategy: "this team never auto-assigns",
+  no_policy: "the workspace has no usable team",
+  no_candidates: "nobody is eligible right now — check who's online and who's on the team",
   at_capacity: "everyone eligible is at their limit",
 };
 

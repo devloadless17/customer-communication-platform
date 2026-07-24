@@ -408,6 +408,24 @@ export default function ApiDocsPage() {
           connecting or disconnecting an account moves real credentials and changes
           which number a customer hears from, so it stays an in-app admin action.
         </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/conversations?accountId=">
+          Narrow the conversation list to ONE connected account — a specific
+          WhatsApp number, Page or Instagram handle. The id comes from{" "}
+          <code>GET /channel-accounts</code>, and every conversation carries the same
+          id as <code>channelConnectionId</code>. ANDed with{" "}
+          <code>status</code> / <code>phone</code> / <code>viewId</code> rather than
+          replacing them. This is parity with the inbox&apos;s account picker.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/channel-accounts">
+          Every account across <em>every</em> channel in one call, display fields
+          only: <code>id</code>, <code>channel</code>, <code>name</code> (the
+          admin&apos;s label when set, else the provider&apos;s own name, else the raw
+          id — never blank), <code>providerName</code>, <code>isDefault</code>,{" "}
+          <code>isActive</code>. This is the lookup for a conversation&apos;s{" "}
+          <code>channelConnectionId</code>, which names the account a thread is on
+          and therefore the number a reply goes out from. Carries no credentials, so
+          scope <code>read:catalog</code> rather than <code>read:channels</code>.
+        </Endpoint>
       </Section>
 
       <Section title="Users">
@@ -589,6 +607,78 @@ export default function ApiDocsPage() {
           Manual on purpose — the report is polled while a campaign sends, and a
           Graph call on that path would exhaust Meta&apos;s rate limit for an
           aggregate that barely moves minute to minute.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/whatsapp/qr-codes">
+          QR codes and short links on the number. A <code>code</code> is both the
+          identity and the short-link slug (
+          <code>https://wa.me/message/&lt;code&gt;</code>).
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/whatsapp/qr-codes"
+          body={{ prefilledMessage: "Hi! Tell me about your workshop", imageFormat: "SVG" }}
+        >
+          Create one. <code>prefilledMessage</code> is capped at{" "}
+          <strong>140</strong> characters — it lands in the customer&apos;s chat
+          box ready to send. <code>qrImageUrl</code> is returned{" "}
+          <em>only here</em>, not by the list. Meta caps a number at 2,000 codes
+          and reports no scan analytics.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/whatsapp/qr-codes/:code"
+          body={{ prefilledMessage: "Hi! Tell me about your spring workshop" }}
+        >
+          Change the prefilled message. The code and its link keep working —
+          which is why editing beats delete-and-recreate.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/whatsapp/qr-codes/:code">
+          Retire a code. <strong>Anything already printed with it stops
+          working</strong> — scanners see &ldquo;this QR code has expired.&rdquo;
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/whatsapp/account-status">
+          The number&apos;s Official Business Account status (<code>obaStatus</code>,
+          verbatim from Meta) and its WABA record (<code>name</code>,{" "}
+          <code>status</code>, <code>currency</code>, <code>country</code>,{" "}
+          <code>businessVerificationStatus</code>). Read-only — an OBA request is
+          made in WhatsApp Manager.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/whatsapp/profile">
+          The number&apos;s public business profile — <code>about</code>,{" "}
+          <code>address</code>, <code>description</code>, <code>email</code>,{" "}
+          <code>websites</code>, plus read-only <code>vertical</code> and{" "}
+          <code>profilePictureUrl</code>. <code>?accountId=</code> picks one of
+          the workspace&apos;s numbers; each has its own profile.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/whatsapp/profile"
+          body={{ description: "Succulent specialists", websites: ["https://example.com"] }}
+        >
+          Update it. <strong>Only the fields you send are changed</strong>, and
+          sending <code>&quot;&quot;</code> <em>clears</em> a field — so omit
+          anything you don&apos;t mean to touch. <code>vertical</code> isn&apos;t
+          writable here (Meta doesn&apos;t publish the enum&apos;s members);
+          change it in WhatsApp Manager. The response is read back from Meta, not
+          echoed.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/templates">
+          The WhatsApp template catalog — the <code>id</code> the send and
+          analytics routes take, Meta&apos;s <code>externalId</code>, the{" "}
+          <code>parameterFormat</code> that decides the send shape, the
+          components, and <code>qualityScore</code> (
+          <code>GREEN</code>/<code>YELLOW</code>/<code>RED</code>/
+          <code>UNKNOWN</code>). The quality band is the one worth alerting on:
+          all four bands still send, but it drives Meta&apos;s template pausing,
+          so <code>RED</code> is a template about to stop working. Filter with{" "}
+          <code>?status=</code> / <code>?category=</code>. Read-only — creating a
+          template is a Meta review submission, not a CRUD write.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/templates/:id/unpause">
+          Lift a quality pause, and release any campaigns that were paused with
+          it. Meta lifts a <em>quality</em> pause on its own (3h, then 6h, then it{" "}
+          <strong>disables</strong> the template on the third instance) — this is
+          for one paused by Template Pacing, which never unpauses by itself.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/templates/:id/analytics">
           Per-template daily trend. <code>?start=</code> / <code>?end=</code>{" "}
@@ -849,6 +939,32 @@ export default function ApiDocsPage() {
           <strong>reaction</strong>, and message <strong>forward</strong> — are
           likewise roadmap and have no <code>/v1</code> endpoint yet; text,
           template, and interactive sends have full parity.
+          <br />
+          <br />
+          <code>variables</code> accepts every parameter shape Meta defines:{" "}
+          <code>body</code> (positional <code>{`{{1}}`}</code> templates),{" "}
+          <code>bodyNamed</code> (<code>{`{{order_id}}`}</code> templates —
+          mutually exclusive with <code>body</code>; the template&apos;s stored{" "}
+          <code>parameter_format</code> decides which is read),{" "}
+          <code>header</code> (a text header&apos;s one value),{" "}
+          <code>headerMedia</code> (<code>{`{ kind, link, filename? }`}</code> for
+          an image/video/document header — Meta fetches <code>link</code>),{" "}
+          <code>headerLocation</code> (
+          <code>{`{ latitude, longitude, name, address }`}</code> for a map
+          header), and <code>buttons</code> (
+          <code>{`{ index, subType, text }`}</code> for a dynamic URL suffix,
+          a copy-code coupon, or a quick-reply payload — percent-encode a URL
+          value), <code>tapTarget</code> (<code>{`{ url, title }`}</code>, which
+          makes the whole message a call-to-action),{" "}
+          <code>cards</code> (one entry per media-card carousel card, in order —
+          the length must equal the card count the template was approved with;
+          button indexes are scoped to the card), and{" "}
+          <code>limitedTimeOfferExpiresAtMs</code> (UNIX{" "}
+          <strong>milliseconds</strong> — required when the template shows a
+          countdown; a past instant is rejected rather than delivered already
+          expired). Supplying the wrong set is rejected with a named error such as{" "}
+          <code>named_body_vars_required</code> or{" "}
+          <code>button_params_required</code>, not an opaque Meta code.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/messages/:id">
           Find a single message by id.
@@ -938,13 +1054,45 @@ export default function ApiDocsPage() {
           path="/api/external/v1/tickets/:id"
           body={{ expectedVersion: 3, status: "solved", resolutionCode: "refunded" }}
         >
-          Status, priority, assignee, subject, tags, custom fields, resolution. Send{" "}
+          Status, priority, assignee, <strong>team</strong>, subject, tags, custom fields,
+          resolution. Send{" "}
           <code>expectedVersion</code> from your last read and a write built on a stale
           view returns <code>409 version_conflict</code> instead of overwriting someone
           else&apos;s change; omit it and the write always applies (right for automation,
           which has no stale view to protect). Moving to <code>on_hold</code> pauses the
           SLA clock — leaving it pushes both deadlines out by exactly the parked time
           rather than restarting the commitment. Scope <code>write:tickets</code>.
+        </Endpoint>
+        <Endpoint
+          method="PATCH"
+          path="/api/external/v1/tickets/:id"
+          body={{ assignedTeamId: "pol_sales", handoffReason: "Wants to upgrade their plan" }}
+        >
+          <strong>Hand a ticket to another team.</strong> A ticket can belong to a team (an
+          assignment policy — Sales, Support, Billing) as well as, or instead of, a person:
+          Support hands the <em>ticket</em> over and it sits in Sales&apos; queue with nobody
+          on it until someone there claims it. <code>assignedTeamId</code> comes from{" "}
+          <code>GET /assignment-policies</code>; <code>null</code> takes it out of every
+          queue; a team from another workspace is rejected{" "}
+          <code>400 team_not_found</code>. Setting it <strong>clears the assignee</strong>{" "}
+          unless you name one too. Send <code>handoffReason</code> — without it the
+          receiving team re-reads the whole thread to work out what was wanted. The
+          resulting webhook carries <code>action: &quot;team_changed&quot;</code>, distinct
+          from <code>&quot;assigned&quot;</code>. Filter with <code>?team=</code> (or{" "}
+          <code>team=none</code>), which ANDs with <code>assignee</code>. Scope{" "}
+          <code>write:tickets</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/tickets/:id/notes"
+          body={{ body: "Tell them their order ships Tuesday." }}
+        >
+          An <strong>internal note</strong> — the customer never sees it. The other half of
+          a handoff: the receiving team answers <em>what to say</em> without messaging the
+          customer themselves. A separate route rather than a <code>PATCH</code> field
+          because a note changes nothing about the ticket — it must not bump{" "}
+          <code>version</code> (which would 409 a colleague&apos;s open editor) or move the
+          SLA clock. Scope <code>write:tickets</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/tickets-settings">
           <code>ticketAutoOpen</code>, <code>ticketReopenWindowHours</code>,{" "}

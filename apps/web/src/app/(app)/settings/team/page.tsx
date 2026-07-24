@@ -14,7 +14,7 @@ import { TeamSettings, type PendingInviteRow, type TeamUserRow } from "./team-se
 export const metadata = { title: "Members · Settings" };
 
 export default async function TeamSettingsPage() {
-  const { user, permissions } = await getSession();
+  const { user, permissions, orgRole } = await getSession();
   const isAdmin = canManageUsers(user.role);
   // Who may set a teammate's status / edit their schedule. Admin-configurable
   // per role (default: admin + manager), so it's read from the resolved
@@ -45,6 +45,7 @@ export default async function TeamSettingsPage() {
       name: u.name,
       email: u.email,
       role: u.role,
+      orgRole: u.orgRole,
       deactivated: !u.isActive,
       createdAt: u.createdAt ?? "",
       avatarUrl: u.avatarUrl ?? null,
@@ -68,12 +69,14 @@ export default async function TeamSettingsPage() {
     <TeamSettings
       currentUserId={user.id}
       currentUserRole={user.role}
+      currentUserOrgRole={orgRole}
       workspaceId={user.workspaceId}
       teamName={team.name}
       users={users}
       pendingInvites={pendingInvites}
       teamWorkHours={asWorkHours(teamWorkHours)}
       canManageOthersAvailability={canManageOthersAvailability}
+      isOrgOwner={orgRole === "owner"}
     />
   );
 }

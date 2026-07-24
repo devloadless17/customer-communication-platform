@@ -24,6 +24,7 @@ import type {
   TeamDmListItemDto,
 } from "@ccp/shared/team-chat/types";
 import type {
+  Channel,
   Contact,
   ContactFieldDefinition,
   ContactListItem,
@@ -556,6 +557,22 @@ export interface ChannelAccountView {
   displayPhoneNumber: string | null;
   wabaId: string | null;
   createdAt: string;
+  /** WhatsApp only — per-number quality/throughput + the shared portfolio. */
+  health: ChannelAccountHealth | null;
+}
+
+export interface ChannelAccountHealth {
+  qualityRating: string | null;
+  throughputLevel: string | null;
+  updatedAt: string | null;
+  portfolio: {
+    externalId: string | null;
+    messagingTier: string | null;
+    messagingDailyCap: number | null;
+    verificationStatus: string | null;
+    templateLimit: number;
+    accountCount: number;
+  } | null;
 }
 
 export async function listChannelAccounts(
@@ -563,6 +580,27 @@ export async function listChannelAccounts(
 ): Promise<ChannelAccountView[]> {
   const { accounts } = await api<{ accounts: ChannelAccountView[] }>(
     `/api/workspace/channels/${channel}/accounts`,
+  );
+  return accounts;
+}
+
+/**
+ * Display-only view of every connected account, across all channels — what an
+ * AGENT is allowed to see so the inbox can attribute a thread to the number /
+ * Page / handle it arrived on. No credentials cross this boundary.
+ */
+export interface ChannelAccountDirectoryEntry {
+  id: string;
+  channel: Channel;
+  name: string;
+  providerName: string | null;
+  isDefault: boolean;
+  isActive: boolean;
+}
+
+export async function listChannelAccountDirectory(): Promise<ChannelAccountDirectoryEntry[]> {
+  const { accounts } = await api<{ accounts: ChannelAccountDirectoryEntry[] }>(
+    "/api/workspace/channel-accounts",
   );
   return accounts;
 }
@@ -727,6 +765,8 @@ export interface BroadcastDetail extends BroadcastListItem {
 export async function listBroadcasts(opts?: {
   status?: string;
   search?: string;
+  /** Scope to one channel, or `people` for omnichannel campaigns. */
+  channel?: string;
   /** Numbered (offset) pagination — when set, the API returns `totalCount`. */
   page?: number;
   take?: number;
@@ -734,6 +774,7 @@ export async function listBroadcasts(opts?: {
   const params = new URLSearchParams();
   if (opts?.status && opts.status !== "all") params.set("status", opts.status);
   if (opts?.search) params.set("search", opts.search);
+  if (opts?.channel) params.set("channel", opts.channel);
   if (opts?.page != null) params.set("page", String(opts.page));
   if (opts?.take != null) params.set("take", String(opts.take));
   const qs = params.toString();

@@ -268,7 +268,7 @@ export function InboxShell({
   // Filter lives in the layout-level InboxFilterProvider so it's shared with
   // the sub-sidebar (which now renders in /inbox/layout.tsx and owns the
   // setter). Read-only here — the conversation list + live hook consume it.
-  const { filter, setFilter } = useInboxFilter();
+  const { filter, setFilter, accountId } = useInboxFilter();
   const [search, setSearch] = useState("");
 
   // -----------------------------------------------------------------
@@ -781,6 +781,7 @@ export function InboxShell({
     restrictedToOwnConversations,
     displayedThread?.data ?? null,
     viewFiltersById,
+    accountId,
   );
 
   // Memoized lookup for the cache-miss skeleton (needs the contact for the

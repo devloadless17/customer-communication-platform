@@ -12,6 +12,7 @@ import {
   ListTicketsQuerySchema,
   TicketSettingsSchema,
   UpdateTicketFieldSchema,
+  AddTicketNoteSchema,
   UpdateTicketSchema,
   UpsertSlaPolicySchema,
   type CreateTicketFieldInput,
@@ -19,6 +20,7 @@ import {
   type ListTicketsQuery,
   type TicketSettingsInput,
   type UpdateTicketFieldInput,
+  type AddTicketNoteInput,
   type UpdateTicketInput,
   type UpsertSlaPolicyInput,
 } from "./tickets.schemas";
@@ -70,6 +72,27 @@ export class TicketsController {
     @Body(zBody(CreateTicketSchema)) body: CreateTicketInput,
   ) {
     return this.tickets.create(session.workspaceId, { userId: session.userId }, body);
+  }
+
+  /**
+   * Add an internal note. Deliberately its own route rather than a field on
+   * PATCH: a note changes nothing about the ticket, so it must not bump
+   * `version` (which would 409 a colleague's open editor) or touch the SLA
+   * clock. It appends to the timeline and nothing else.
+   */
+  @Post(":id/notes")
+  async addNote(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body(zBody(AddTicketNoteSchema)) body: AddTicketNoteInput,
+  ) {
+    return this.tickets.addNote(
+      session.workspaceId,
+      { userId: session.userId },
+      id,
+      body.body,
+      session,
+    );
   }
 
   @Patch(":id")

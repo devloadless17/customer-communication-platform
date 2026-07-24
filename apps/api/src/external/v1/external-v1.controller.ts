@@ -42,9 +42,19 @@ import {
 } from "@/contacts/transfer.schemas";
 import { AssignmentService } from "@/assignment/assignment.service";
 import { ChannelAccountsService } from "@/workspace-settings/channel-accounts/channel-accounts.service";
+import { WhatsappService } from "@/workspace-settings/whatsapp/whatsapp.service";
+import {
+  CreateQrCodeSchema,
+  UpdateBusinessProfileSchema,
+  UpdateQrCodeSchema,
+  type CreateQrCodeInput,
+  type UpdateBusinessProfileInput,
+  type UpdateQrCodeInput,
+} from "@/workspace-settings/whatsapp/whatsapp.schemas";
 import { TicketsService } from "@/tickets/tickets.service";
 import {
   CreateTicketFieldSchema,
+  AddTicketNoteSchema,
   CreateTicketSchema,
   ListTicketsQuerySchema,
   TicketSettingsSchema,
@@ -52,6 +62,7 @@ import {
   UpdateTicketSchema,
   UpsertSlaPolicySchema,
   type CreateTicketFieldInput,
+  type AddTicketNoteInput,
   type CreateTicketInput,
   type ListTicketsQuery,
   type TicketSettingsInput,
@@ -89,7 +100,9 @@ import {
 import { getBroadcastTimeseries } from "@/lib/broadcast-timeseries";
 import {
   ExternalTemplateAnalyticsQuerySchema,
+  ExternalTemplateListQuerySchema,
   type ExternalTemplateAnalyticsQueryInput,
+  type ExternalTemplateListQueryInput,
 } from "./external-v1.schemas";
 import {
   CreateInboxViewSchema,
@@ -240,6 +253,7 @@ export class ExternalV1Controller {
     private readonly inboxViews: InboxViewsService,
     private readonly channelAccounts: ChannelAccountsService,
     private readonly tickets: TicketsService,
+    private readonly whatsapp: WhatsappService,
   ) {}
 
   /**
@@ -962,6 +976,28 @@ export class ExternalV1Controller {
     return this.tickets.update(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body);
   }
 
+  /**
+   * Add an internal note to a ticket. Never reaches the customer.
+   *
+   * Parity with the in-app composer, which is a locked rule — and the one /v1
+   * route a handoff integration genuinely needs: a partner system that receives
+   * a `ticket.changed` webhook with `action: "team_changed"` answers by writing
+   * a note back, not by messaging the customer.
+   *
+   * Its own route rather than a PATCH field for the same reason as internally:
+   * a note changes nothing about the ticket, so it must not bump `version` (and
+   * 409 a colleague's open editor) or move the SLA clock.
+   */
+  @Post("tickets/:id/notes")
+  @RequireScope("write:tickets")
+  async addTicketNoteV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(AddTicketNoteSchema)) body: AddTicketNoteInput,
+  ) {
+    return this.tickets.addNote(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body.body);
+  }
+
   // Ticketing configuration. Read is deliberately under `read:tickets` (a BI
   // system needs the SLA promise to report against it); every write changes
   // what FUTURE tickets promise, so it needs `write:tickets`.
@@ -1046,6 +1082,23 @@ export class ExternalV1Controller {
   ) {
     const ch = parseAccountChannel(channel);
     return { accounts: await this.channelAccounts.list(auth.workspaceId, ch) };
+  }
+
+  // The same accounts across EVERY channel, display fields only.
+  //
+  // Needed for parity with what the inbox now shows: a conversation carries
+  // `channel_connection_id` (which number/Page/handle the thread is on, and
+  // therefore which one a reply goes out from), and without this an integration
+  // has an opaque id and no way to resolve it. Also the only way a partner can
+  // tell which number a broadcast will use before submitting it.
+  //
+  // No tokens, no App secret, no WABA or portfolio id — so `read:catalog`,
+  // matching `whatsapp/health`, rather than the credential-adjacent
+  // `read:channels` the per-channel route above uses.
+  @Get("channel-accounts")
+  @RequireScope("read:catalog")
+  async channelAccountDirectory(@CurrentApiKey() auth: ApiKeyContext) {
+    return { accounts: await this.channelAccounts.directory(auth.workspaceId) };
   }
 
   @Get("broadcasts")
@@ -1578,6 +1631,36 @@ export class ExternalV1Controller {
   // These sit BESIDE the per-recipient funnel in `/broadcasts/:id/report`,
   // never merged into it: the two measure different things and will not agree.
 
+  /**
+   * The template catalog. Read-only — creating a template is a Meta review
+   * submission, not a CRUD write. `id` here is what the send and analytics
+   * routes take.
+   */
+  @Get("templates")
+  @RequireScope("read:catalog")
+  async listTemplates(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query(zQuery(ExternalTemplateListQuerySchema))
+    query: ExternalTemplateListQueryInput,
+  ) {
+    return this.api.listTemplates(auth.workspaceId, query);
+  }
+
+  /**
+   * Lift a quality pause. Meta lifts a quality pause itself (3h, then 6h, then
+   * it DISABLES the template), so this is for one paused by Template Pacing,
+   * which never unpauses on its own. Campaigns parked for the template resume.
+   */
+  @Post("templates/:id/unpause")
+  @RequireScope("write:catalog")
+  async unpauseTemplate(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    await this.whatsapp.unpauseTemplate(auth.workspaceId, id);
+    return { ok: true };
+  }
+
   @Get("templates/:id/analytics")
   @RequireScope("read:broadcasts")
   async templateAnalytics(
@@ -1593,6 +1676,87 @@ export class ExternalV1Controller {
       ? new Date(query.start)
       : new Date(end.getTime() - 30 * 86_400_000);
     return readTemplateAnalytics(auth.workspaceId, template, start, end);
+  }
+
+  /**
+   * The business phone number's public profile — what a customer sees when they
+   * tap the business name. `?accountId=` picks one of the workspace's numbers;
+   * each has its own profile.
+   */
+  @Get("whatsapp/profile")
+  @RequireScope("read:catalog")
+  async businessProfile(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.getBusinessProfile(auth.workspaceId, accountId);
+  }
+
+  /** OBA standing + the owning WABA's record. Read-only. */
+  @Get("whatsapp/account-status")
+  @RequireScope("read:catalog")
+  async accountStatus(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.getAccountStatus(auth.workspaceId, accountId);
+  }
+
+  @Post("whatsapp/profile")
+  @RequireScope("write:catalog")
+  async updateBusinessProfile(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(UpdateBusinessProfileSchema)) body: UpdateBusinessProfileInput,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.updateBusinessProfile(auth.workspaceId, body, accountId);
+  }
+
+  /**
+   * QR codes & short links. Meta caps a number at 2,000 and publishes no scan
+   * analytics, so this is pure CRUD — there is nothing to report on.
+   */
+  @Get("whatsapp/qr-codes")
+  @RequireScope("read:catalog")
+  async listQrCodes(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.listQrCodes(auth.workspaceId, accountId);
+  }
+
+  @Post("whatsapp/qr-codes")
+  @RequireScope("write:catalog")
+  async createQrCode(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(CreateQrCodeSchema)) body: CreateQrCodeInput,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.createQrCode(auth.workspaceId, body, accountId);
+  }
+
+  @Post("whatsapp/qr-codes/:code")
+  @RequireScope("write:catalog")
+  async updateQrCode(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("code") code: string,
+    @Body(zBody(UpdateQrCodeSchema)) body: UpdateQrCodeInput,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.updateQrCode(auth.workspaceId, code, body, accountId);
+  }
+
+  /** Deleting a code breaks any signage printed with it — Meta shows the
+   *  customer "this QR code has expired". */
+  @Delete("whatsapp/qr-codes/:code")
+  @RequireScope("write:catalog")
+  async deleteQrCode(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("code") code: string,
+    @Query("accountId") accountId?: string,
+  ) {
+    await this.whatsapp.deleteQrCode(auth.workspaceId, code, accountId);
+    return { ok: true };
   }
 
   @Get("whatsapp/insights/status")

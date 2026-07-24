@@ -10,13 +10,18 @@ import { DbService } from "../db/db.service";
 import { EventBus } from "../events/event-bus.module";
 
 /**
- * Whole-team destroy. Cascades through every team-scoped table (users,
- * contacts, conversations, messages, notes, templates, broadcasts, invites,
- * automations, api keys, sessions, accounts, blob references) in a single
- * Prisma delete. Used by both:
+ * Destroy, at two levels:
  *
- *   - DELETE /api/workspace          (admin removing their own org)
- *   - DELETE /api/admin/teams/:id (superAdmin removing any org)
+ *   - `destroy(workspaceId)`            — ONE workspace and every
+ *     workspace-scoped table under it (contacts, conversations, messages,
+ *     notes, templates, broadcasts, invites, automations, api keys, blob
+ *     references).
+ *   - `destroyOrganization(orgId)`      — every workspace in the org, then the
+ *     org row, which cascades the USER DIRECTORY. `User` hangs off
+ *     `Organization`, not `Workspace`, so only this level actually removes a
+ *     tenant. Both delete routes use it:
+ *       DELETE /api/workspace        (owner removing their own organization)
+ *       DELETE /api/admin/teams/:id  (superAdmin removing any organization)
  *
  * Blob cleanup is best-effort: a partial R2 failure leaves orphan
  * files but does NOT block the DB delete. Orphans cost storage, not
@@ -287,6 +292,59 @@ export class WorkspaceRootService {
           await blobStorage.delete(blobKeys.slice(i, i + BATCH));
         }
       })();
+    }
+  }
+
+  /**
+   * Destroy an entire ORGANIZATION — every workspace in it, then the org row
+   * itself (which cascades the user directory).
+   *
+   * `destroy()` above removes ONE workspace, and that is not what deleting a
+   * tenant means: `User` hangs off `Organization`, not `Workspace`, so dropping
+   * the last workspace used to leave the org row and every member account
+   * alive. The result was unreachable rather than merely untidy — the platform
+   * list enumerates workspaces, so a zero-workspace org disappeared from the
+   * only UI that can delete it, while `User.email` (globally unique, and one
+   * email belongs to exactly one org) stayed claimed forever. The person could
+   * neither sign in nor sign up again.
+   *
+   * Workspaces are destroyed one at a time through `destroy()` so each keeps
+   * the bounded message pre-drain, the blob snapshot and the socket kick.
+   * Deleting the org row alone would cascade every table at once — the lock
+   * storm `destroy()` exists to avoid.
+   */
+  async destroyOrganization(organizationId: string, label: string): Promise<void> {
+    const workspaces = await this.db.workspace.findMany({
+      where: { organizationId },
+      select: { id: true },
+      orderBy: { id: "asc" },
+    });
+
+    for (const ws of workspaces) {
+      await this.destroy(ws.id, `${label} → workspace ${ws.id}`);
+    }
+
+    // Members with no workspace membership (an owner who never joined one, or
+    // an invited user who never accepted) are unreachable by the loop above and
+    // are exactly the rows that stranded the email address. Revoke them before
+    // the cascade so live sockets close and the session caches drop.
+    const orphans = await this.db.user.findMany({
+      where: { organizationId },
+      select: { id: true },
+    });
+
+    try {
+      await this.db.organization.delete({ where: { id: organizationId } });
+    } catch (err) {
+      this.logger.error(`[${label}] organization delete failed`, err);
+      throw new InternalServerErrorException({
+        error: "delete failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    for (const u of orphans) {
+      this.sessionInvalidator.revoke(u.id, "organization-deletion");
     }
   }
 }

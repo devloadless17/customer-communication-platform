@@ -41,6 +41,19 @@ export const ListConversationsQuerySchema = z.object({
    * id is a 404.
    */
   viewId: z.string().min(1).optional(),
+  /**
+   * One channel ACCOUNT — a specific WhatsApp number, Facebook Page or
+   * Instagram handle (`ChannelConnection.id`, from `GET /v1/channel-accounts`).
+   *
+   * Parity with the inbox's account picker, which is a locked rule: the UI can
+   * narrow to one number, so a partner must be able to as well. ANDed with
+   * everything else rather than replacing it — "unassigned" and "on the Sales
+   * number" are different questions.
+   *
+   * An unknown id is not an error: it simply matches nothing, the same as a
+   * `status` that no thread has. Validating it would leak whether an id exists.
+   */
+  accountId: z.string().min(1).optional(),
 });
 export type ListConversationsQueryInput = z.infer<typeof ListConversationsQuerySchema>;
 
@@ -109,8 +122,28 @@ export const ExternalTopLevelSendMessageSchema = z.object({
           headerMedia: z
             .object({
               kind: z.enum(["image", "video", "document"]),
-              link: z.string().url().max(2048),
+              // Either form. `id` is a media id already uploaded to Meta —
+              // Meta's recommended shape, since a `link` makes it fetch from
+              // your server on every send. Exactly one is required.
+              link: z.string().url().max(2048).optional(),
+              id: z.string().min(1).max(255).optional(),
               filename: z.string().max(255).optional(),
+            })
+            .refine((m) => Boolean(m.link) !== Boolean(m.id), {
+              message: "header media needs exactly one of `link` or `id`",
+            })
+            .optional(),
+          // The pin for a LOCATION template header. The component is declared
+          // with no parameters at template-create time, so the whole pin is
+          // supplied per message here. Parity with the inbox composer, which
+          // gained the same field — a locked rule for /v1.
+          headerLocation: z
+            .object({
+              latitude: z.string().min(1).max(32),
+              longitude: z.string().min(1).max(32),
+              // Optional per Meta — a pin renders from coordinates alone.
+              name: z.string().max(120).optional(),
+              address: z.string().max(255).optional(),
             })
             .optional(),
           // NAMED-format bodies (`parameter_format: NAMED`, `{{order_id}}`).
@@ -138,6 +171,55 @@ export const ExternalTopLevelSendMessageSchema = z.object({
             )
             .max(10)
             .optional(),
+        /**
+         * Tap-target override — makes an image/text/header-less template act as a
+         * call-to-action showing `title` and opening `url`. Send-time only; Meta
+         * gates it on a fully verified WABA with sustained high quality.
+         */
+        tapTarget: z
+          .object({
+            url: z.string().url().max(2048),
+            title: z.string().trim().min(1).max(120),
+          })
+          .optional(),
+        /**
+         * Limited-time offer expiry, a UNIX timestamp in MILLISECONDS. Required
+         * when the template carries a LIMITED_TIME_OFFER component — the countdown
+         * has nothing to count to without it.
+         */
+        limitedTimeOfferExpiresAtMs: z.number().int().positive().optional(),
+        /**
+         * Per-card values for a media-card carousel, in card order. The array
+         * length must equal the card count the template was APPROVED with — Meta
+         * fixes that number at creation and rejects any other.
+         */
+        cards: z
+          .array(
+            z.object({
+              headerMedia: z
+                .object({
+                  kind: z.enum(["image", "video"]),
+                  link: z.string().url().max(2048).optional(),
+                  id: z.string().min(1).max(255).optional(),
+                })
+                .refine((m) => Boolean(m.link) !== Boolean(m.id), {
+                  message: "card media needs exactly one of `link` or `id`",
+                }),
+              body: z.array(z.string()).max(10).optional(),
+              buttons: z
+                .array(
+                  z.object({
+                    index: z.number().int().min(0).max(1),
+                    subType: z.enum(["url", "quick_reply", "copy_code"]),
+                    text: z.string().min(1).max(2048),
+                  }),
+                )
+                .max(2)
+                .optional(),
+            }),
+          )
+          .max(10)
+          .optional(),
         })
         .default({ body: [] }),
     })
@@ -719,4 +801,19 @@ export const ExternalTemplateAnalyticsQuerySchema = z
   .strict();
 export type ExternalTemplateAnalyticsQueryInput = z.infer<
   typeof ExternalTemplateAnalyticsQuerySchema
+>;
+
+/**
+ * Template list filters. Both are exact matches on our stored values, which are
+ * Meta's own vocabulary lowercased — so `status=approved` is the one that
+ * matters (an integration checking what it may send).
+ */
+export const ExternalTemplateListQuerySchema = z.object({
+  status: z
+    .enum(["approved", "pending", "rejected", "paused", "disabled", "archived"])
+    .optional(),
+  category: z.enum(["marketing", "utility", "authentication"]).optional(),
+});
+export type ExternalTemplateListQueryInput = z.infer<
+  typeof ExternalTemplateListQuerySchema
 >;

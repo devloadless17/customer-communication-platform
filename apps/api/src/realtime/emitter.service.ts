@@ -245,8 +245,8 @@ export class RealtimeEmitter {
     // `alsoUserIds` covers a handover's PREVIOUS owner. socket.io de-duplicates
     // a socket matching several of these, so nobody receives the frame twice.
     const rooms = new Set<string>([workspaceRoom(workspaceId)]);
-    if (assignee) rooms.add(userRoom(assignee));
-    for (const uid of alsoUserIds) rooms.add(userRoom(uid));
+    if (assignee) rooms.add(userRoom(workspaceId, assignee));
+    for (const uid of alsoUserIds) rooms.add(userRoom(workspaceId, uid));
     io.to([...rooms]).emit(event, ...args);
   }
 
@@ -320,6 +320,7 @@ export class RealtimeEmitter {
    * resolver, because the caller already knows exactly who should receive it.
    */
   emitToUser<E extends keyof ServerToClientEvents>(
+    workspaceId: string,
     userId: string,
     event: E,
     ...args: Parameters<ServerToClientEvents[E]>
@@ -329,7 +330,7 @@ export class RealtimeEmitter {
       this.logger.warn(`emitToUser("${String(event)}") dropped — IO not ready yet`);
       return;
     }
-    io.to(userRoom(userId)).emit(event, ...args);
+    io.to(userRoom(workspaceId, userId)).emit(event, ...args);
   }
 
   emitToConversation<E extends keyof ServerToClientEvents>(
@@ -425,7 +426,7 @@ export class RealtimeEmitter {
       return;
     }
     for (const uid of audience.memberUserIds) {
-      io.to(userRoom(uid)).emit(event, ...args);
+      io.to(userRoom(workspaceId, uid)).emit(event, ...args);
     }
   }
 

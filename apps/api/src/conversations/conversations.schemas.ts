@@ -44,6 +44,17 @@ export const ListConversationsQuerySchema = z.object({
    * Precedence, applied in the service: `viewId` > `stageId` > `filter`.
    */
   viewId: z.string().min(1).optional(),
+  /**
+   * Narrow to ONE channel account — a specific WhatsApp number, Page or IG
+   * handle (`ChannelConnection.id`).
+   *
+   * Deliberately ORTHOGONAL to `filter` / `stageId` / `viewId` rather than
+   * another value in that precedence chain: "unassigned" and "on the Sales
+   * number" are different questions and an agent wants both at once. It is
+   * ANDed on top of whichever of those applied, so every existing view keeps
+   * its meaning and simply gets narrower.
+   */
+  accountId: z.string().min(1).optional(),
 });
 export type ListConversationsQuery = z.infer<typeof ListConversationsQuerySchema>;
 
@@ -120,6 +131,15 @@ export const StartConversationSchema = z
     phone: z.string().min(1).optional(),
     /** Display name to seed a newly-created contact (ignored if it exists). */
     name: z.string().trim().max(200).optional(),
+    /**
+     * Which of the workspace's accounts to start FROM (a WhatsApp number / Page
+     * / handle). Omit to use the channel's default account.
+     *
+     * Only meaningful for a brand-new thread: an existing conversation already
+     * belongs to the account the customer messaged, and a reply must go back out
+     * that way regardless of what the caller asks for.
+     */
+    channelConnectionId: z.string().min(1).optional(),
   })
   .refine((v) => !!v.contactId || !!v.phone, {
     message: "contactId or phone is required",

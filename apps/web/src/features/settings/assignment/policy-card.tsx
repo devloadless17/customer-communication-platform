@@ -128,15 +128,15 @@ export function PolicyCard({
         }),
       });
       if (res.status === 409) {
-        toast("Someone else changed this policy — reloading their version");
+        toast("Someone else changed this team — reloading their version");
         await onChanged();
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await onChanged();
-      toast("Policy saved");
+      toast("Team saved");
     } catch {
-      toast("Couldn't save the policy");
+      toast("Couldn't save the team");
     } finally {
       setSaving(false);
     }
@@ -186,10 +186,10 @@ export function PolicyCard({
                 void act(
                   `/api/workspace/assignment/policies/${policy.id}/default`,
                   "POST",
-                  "Default policy updated",
+                  "Default team updated",
                 )
               }
-              title="Make this the fallback policy"
+              title="Make this the fallback team"
             >
               <Star className="size-4" />
             </Button>
@@ -201,10 +201,10 @@ export function PolicyCard({
                   void act(
                     `/api/workspace/assignment/policies/${policy.id}`,
                     "DELETE",
-                    "Policy archived",
+                    "Team archived",
                   )
                 }
-                title="Archive this policy"
+                title="Archive this team"
               >
                 <Trash2 className="size-4" />
               </Button>
@@ -323,7 +323,7 @@ export function PolicyCard({
             <>
               <Field
                 label="Default limit per person"
-                hint="Maximum open conversations anyone in this policy carries at once. Leave empty for no limit; set it per person below to override."
+                hint="Maximum open conversations anyone on this team carries at once. Leave empty for no limit; set it per person below to override."
               >
                 <Input
                   type="number"

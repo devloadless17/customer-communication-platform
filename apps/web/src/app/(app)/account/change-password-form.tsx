@@ -6,6 +6,7 @@ import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessage } from "@ccp/shared/api/error-message";
 import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
 import { toast } from "@/lib/toast";
 
@@ -40,8 +41,7 @@ export function ChangePasswordForm() {
             }),
           });
           if (!res.ok) {
-            const data = (await res.json().catch(() => ({}))) as { error?: string };
-            setError(data.error ?? "Failed to change password");
+            setError(await apiErrorMessage(res, "Failed to change password"));
             return;
           }
           toast.success("Password updated.");

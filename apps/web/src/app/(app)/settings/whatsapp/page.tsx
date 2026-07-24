@@ -6,8 +6,8 @@ import {
   type ChannelAccountView,
 } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
+import { soft } from "@/lib/api/soft";
 
-import { ChannelAccountsPanel } from "@/features/channels/components/channel-accounts-panel";
 import { WhatsappSettings, type WhatsappCurrent } from "./whatsapp-settings";
 
 export const metadata = {
@@ -26,8 +26,8 @@ export default async function WhatsappSettingsPage() {
   // instead: the members-open templates endpoint exposes only the `connected`
   // flag (no secrets), which feeds the component's `!canManage` branch.
   let current: WhatsappCurrent;
-  // Connected accounts (admin-only endpoint). The panel renders itself away
-  // when there's one account, so a single-number workspace is unchanged.
+  // Connected accounts (admin-only endpoint). Rendered by WhatsappSettings so
+  // its "Add another number" button can open the connect form directly.
   let accounts: ChannelAccountView[] = [];
   if (canManage) {
     // Encrypted Meta credentials are decrypted server-side by GET /api/workspace/whatsapp.
@@ -37,7 +37,7 @@ export default async function WhatsappSettingsPage() {
     // the web container — that's the security win of Step 7b for this page.
     const [config, accountRows] = await Promise.all([
       getTeamWhatsappConfig(),
-      listChannelAccounts("whatsapp").catch(() => [] as ChannelAccountView[]),
+      soft("whatsapp accounts", [] as ChannelAccountView[], () => listChannelAccounts("whatsapp")),
     ]);
     accounts = accountRows;
     current = {
@@ -70,10 +70,5 @@ export default async function WhatsappSettingsPage() {
     };
   }
 
-  return (
-    <>
-      <WhatsappSettings current={current} canManage={canManage} />
-      <ChannelAccountsPanel channel="whatsapp" accounts={accounts} channelLabel="WhatsApp" />
-    </>
-  );
+  return <WhatsappSettings current={current} canManage={canManage} accounts={accounts} />;
 }

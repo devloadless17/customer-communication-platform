@@ -711,6 +711,9 @@ export interface TicketChangedEvent {
   action:
     | "created"
     | "assigned"
+    /** Handed to a different TEAM. Distinct from `assigned` (a person) so a
+     *  subscriber can tell a queue handoff from someone claiming the work. */
+    | "team_changed"
     | "status_changed"
     | "priority_changed"
     | "reopened"

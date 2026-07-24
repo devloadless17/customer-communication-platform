@@ -14,7 +14,8 @@ export type TemplatesStatusFilter =
   | "pending"
   | "rejected"
   | "paused"
-  | "disabled";
+  | "disabled"
+  | "archived";
 
 const VALID_STATUS_FILTERS: ReadonlySet<TemplatesStatusFilter> = new Set([
   "all",
@@ -23,6 +24,7 @@ const VALID_STATUS_FILTERS: ReadonlySet<TemplatesStatusFilter> = new Set([
   "rejected",
   "paused",
   "disabled",
+  "archived",
 ]);
 
 export const TEMPLATES_STATUS_COOKIE = "templates-status";

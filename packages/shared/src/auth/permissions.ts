@@ -1,4 +1,4 @@
-import type { Role } from "../types";
+import type { OrgRole, Role } from "../types";
 
 /**
  * Single source of truth for "who can do what." Every permission check —
@@ -49,17 +49,29 @@ export function canManageStages(role: Role): boolean {
 }
 
 /** An actor/target for the user-management checks below. `isSuperAdmin` is the
- *  platform flag; `role` is the effective role in the workspace being acted in. */
+ *  platform flag; `role` is the effective role in the workspace being acted in;
+ *  `orgRole` is the org-directory role.
+ *
+ *  `orgRole` is OPTIONAL and its absence means "no org authority". That default
+ *  is deliberate: the org-wide checks below are the security boundary, so a call
+ *  site that forgets to pass it fails CLOSED rather than silently granting the
+ *  power it was supposed to gate. UI gating that only knows the workspace role
+ *  (the members table's inline role picker) legitimately omits it. */
 export interface UserActor {
   role: Role;
   isSuperAdmin: boolean;
+  orgRole?: OrgRole;
 }
 
 /**
- * Whether `actor` is allowed to mutate `target`'s role / activation.
+ * Whether `actor` is allowed to mutate `target`'s role WITHIN one workspace.
  * - a platform superAdmin can modify anyone (incl. other superAdmins).
  * - a workspace admin can modify anyone EXCEPT a platform superAdmin.
  * - everyone else: never.
+ *
+ * This is the WORKSPACE-scoped gate. Anything whose effect reaches beyond the
+ * workspace — deactivating an account, deleting it, resetting its password —
+ * must use `canModifyUserAccount` instead. See its comment for why.
  *
  * SECURITY: the "admin cannot touch a superAdmin" rule keys on the target's
  * `isSuperAdmin` FLAG. It used to key on the target's role, which no longer
@@ -73,6 +85,51 @@ export function canModifyUser(actor: UserActor, target: UserActor): boolean {
   if (actor.isSuperAdmin) return true;
   if (actor.role === "admin") return !target.isSuperAdmin;
   return false;
+}
+
+/**
+ * Does this actor administer the ORGANIZATION — its directory, its plan, its
+ * workspaces? Platform operators always do.
+ *
+ * Distinct from `canManageUsers(role)`, which asks about the ACTIVE WORKSPACE.
+ * `resolveSession` collapses a superAdmin, an org owner/admin AND a plain org
+ * member who happens to hold `WorkspaceMember.role = "admin"` in one workspace
+ * all down to the effective workspace role `"admin"` — so a workspace-role
+ * check cannot tell the third case from the first two.
+ */
+export function canManageOrgDirectory(actor: UserActor): boolean {
+  return (
+    actor.isSuperAdmin || actor.orgRole === "owner" || actor.orgRole === "admin"
+  );
+}
+
+/**
+ * Whether `actor` may act on `target`'s ACCOUNT — deactivate it, delete it, or
+ * reset its password.
+ *
+ * These are org-wide, irreversible-ish effects: a deactivated user can't sign in
+ * to ANY workspace, a deleted one is gone from the organization entirely, and a
+ * reset password kicks every device. Gating them on the per-workspace role let
+ * a plain org member who administers one workspace delete the org owner — the
+ * authority to run one inbox is not the authority to run the company's account
+ * directory.
+ *
+ * Three rules, in order:
+ *   1. a platform superAdmin may act on anyone;
+ *   2. the actor must administer the organization (owner / admin);
+ *   3. nobody may act on a platform superAdmin, and only an OWNER may act on
+ *      another owner — so an org admin can't remove the person who owns the
+ *      account they were granted admin on.
+ *
+ * Same-organization membership is NOT checked here (this is a pure predicate);
+ * every caller already scopes its target lookup to the tenant.
+ */
+export function canModifyUserAccount(actor: UserActor, target: UserActor): boolean {
+  if (actor.isSuperAdmin) return true;
+  if (!canManageOrgDirectory(actor)) return false;
+  if (target.isSuperAdmin) return false;
+  if (target.orgRole === "owner" && actor.orgRole !== "owner") return false;
+  return true;
 }
 
 /**

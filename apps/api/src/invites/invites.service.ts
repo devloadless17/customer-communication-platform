@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
@@ -11,6 +12,8 @@ import { generateInviteToken, hashInviteToken, inviteExpiry } from "@/auth/invit
 import { hashPassword } from "@/auth/password";
 import { assignableRoles, type UserActor } from "@ccp/shared/auth/permissions";
 import { validatePasswordStructure } from "@ccp/shared/auth/password-policy";
+import { sendMail } from "@ccp/shared/mail/send";
+import { inviteEmail } from "@ccp/shared/mail/templates";
 import type { Role } from "@ccp/shared/types";
 
 import { EventBus } from "../events/event-bus.module";
@@ -31,10 +34,20 @@ export interface InviteCreateDto {
   id: string;
   expiresAt: string;
   url: string;
+  /**
+   * Did the invite email actually go out?
+   *
+   * Returned so the UI can say "we couldn't email it — send them this link"
+   * rather than implying a delivery that never happened. The `url` is always
+   * present precisely so a mail failure is recoverable by hand.
+   */
+  emailed: boolean;
 }
 
 @Injectable()
 export class InvitesService {
+  private readonly logger = new Logger(InvitesService.name);
+
   constructor(
     private readonly db: DbService,
     private readonly bus: EventBus,
@@ -133,10 +146,38 @@ export class InvitesService {
       throw new ForbiddenException({ error: "role not assignable by you" });
     }
 
+    // Loaded once, up front: the org id gates the message below, `maxMembers`
+    // gates the seat pre-check, and `name` rides along for the invite EMAIL —
+    // "you've been invited to Acme Support" is the difference between a message
+    // someone trusts and one that reads like phishing.
+    const workspace = await this.db.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { organizationId: true, maxMembers: true, name: true },
+    });
+    if (!workspace) throw new NotFoundException({ error: "workspace_not_found" });
+
     // User.email is globally unique — friendly error before we create an
-    // invite that could never be accepted anyway.
-    const existingUser = await this.db.user.findUnique({ where: { email: input.email } });
+    // invite that could never be accepted anyway (accept always does
+    // `user.create`, so an existing account can never redeem one).
+    const existingUser = await this.db.user.findUnique({
+      where: { email: input.email },
+      select: { id: true, organizationId: true, name: true },
+    });
     if (existingUser) {
+      // Someone already in THIS organisation is the common, legitimate case in
+      // a multi-workspace product: an admin staffing a second workspace types a
+      // colleague's address. A bare "email already in use" reads as "that
+      // address belongs to a stranger" and dead-ends them, when the action they
+      // want is one page away. Name it, and point at it.
+      if (existingUser.organizationId === workspace.organizationId) {
+        throw new ConflictException({
+          error: "already_in_organization",
+          detail: `${existingUser.name} is already in your organization. Add them to this workspace from Organization → Members instead of inviting them.`,
+        });
+      }
+      // A user of ANOTHER organisation. Deliberately kept generic: naming them
+      // would let any workspace admin probe whether an arbitrary address has an
+      // account on the platform, and who it belongs to.
       throw new ConflictException({ error: "email already in use" });
     }
 
@@ -164,10 +205,6 @@ export class InvitesService {
     // as a whole — the same person can hold seats in two workspaces and that is
     // the intended model. The organisation instead caps how many WORKSPACES it
     // may create (`Organization.maxWorkspaces`), which is what bounds the total.
-    const workspace = await this.db.workspace.findUnique({
-      where: { id: workspaceId },
-      select: { organizationId: true, maxMembers: true },
-    });
     const [activeMembers, pendingInvites] = await Promise.all([
       // superAdmins are platform operators, not seats — never counted. In
       // production a customer workspace has none; this only matters where
@@ -182,7 +219,7 @@ export class InvitesService {
         where: { workspaceId, acceptedAt: null, expiresAt: { gt: new Date() } },
       }),
     ]);
-    const maxMembers = workspace?.maxMembers;
+    const maxMembers = workspace.maxMembers;
     if (maxMembers !== undefined && activeMembers + pendingInvites >= maxMembers) {
       throw new ConflictException({
         error: "member_limit_reached",
@@ -212,7 +249,35 @@ export class InvitesService {
 
     await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "invites" });
 
-    return { id: invite.id, expiresAt: invite.expiresAt.toISOString(), url };
+    // SEND it. Until now this endpoint only ever RETURNED a link and left the
+    // admin to forward it by hand — which is why "invite a teammate" was a
+    // multi-step chore involving another app.
+    //
+    // Best-effort on purpose, and this is the one place a swallowed mail error
+    // is right: the invite ROW is already committed and the URL is returned
+    // below, so an admin whose mail fails can still copy the link. Throwing
+    // here would roll the useful part of the work into an error.
+    let emailed = true;
+    try {
+      const { subject, html, text } = inviteEmail({
+        url,
+        workspaceName: workspace?.name ?? "your workspace",
+        // UserActor carries no display name, and re-reading the inviter here
+        // would add a query to every invite for one line of copy. "You've been
+        // invited to <workspace>" is the part that matters.
+        inviterName: null,
+      });
+      await sendMail({ to: input.email, subject, html, text });
+    } catch (err) {
+      emailed = false;
+      this.logger.error(
+        `invite email failed for ${input.email}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+
+    // `emailed` is returned so the UI can say "we couldn't email it — send them
+    // this link" instead of implying delivery that never happened.
+    return { id: invite.id, expiresAt: invite.expiresAt.toISOString(), url, emailed };
   }
 
   /**
@@ -380,6 +445,13 @@ export class InvitesService {
             organizationId,
             name: input.name,
             email: invite.email,
+            // VERIFIED without an OTP, and this is load-bearing rather than a
+            // shortcut: the invite link was emailed to THIS address and they
+            // are holding the token from it, which is the same proof a code
+            // would give. `emailVerified` now defaults to FALSE, so without
+            // this line every invited teammate lands on /verify waiting for a
+            // code nobody sent — the invite flow would be dead on arrival.
+            emailVerified: true,
           },
         });
         await tx.workspaceMember.create({

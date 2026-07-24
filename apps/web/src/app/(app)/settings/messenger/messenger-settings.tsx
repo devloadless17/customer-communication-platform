@@ -6,6 +6,8 @@ import { Check, CheckCircle2, Loader2, Phone, PlugZap, TriangleAlert, Unplug } f
 import { cn } from "@ccp/shared/utils";
 
 import { Button } from "@/components/ui/button";
+import { ChannelAccountsPanel } from "@/features/channels/components/channel-accounts-panel";
+import type { ChannelAccountView } from "@/lib/api/queries";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/layouts/page-header";
@@ -34,9 +36,13 @@ export interface MessengerCurrent {
 export function MessengerSettings({
   current,
   canManage,
+  accounts,
 }: {
   current: MessengerCurrent;
   canManage: boolean;
+  /** Every Messenger account this workspace has connected. A workspace may hold
+   *  several — the panel below is where they are named and managed. */
+  accounts: ChannelAccountView[];
 }) {
   const softRefresh = useSoftRefresh();
   const { confirm, confirmDialog } = useConfirm();
@@ -104,6 +110,25 @@ export function MessengerSettings({
       />
 
       {confirmDialog}
+
+      {canManage && (
+        <ChannelAccountsPanel
+          channel="messenger"
+          accounts={accounts}
+          channelLabel="Messenger"
+          accountNoun="Page"
+          // Reveals the connect form (collapsed once connected) and scrolls to
+          // it, so "Add another" visibly does something.
+          onAddAnother={() => {
+            setShowForm(true);
+            requestAnimationFrame(() => {
+              document
+                .getElementById("messenger-connect-form")
+                ?.scrollIntoView({ behavior: "smooth", block: "center" });
+            });
+          }}
+        />
+      )}
 
       <div
         className={cn(
@@ -185,6 +210,7 @@ export function MessengerSettings({
 
       {canManage && showForm && (
         <form
+          id="messenger-connect-form"
           className="flex flex-col gap-4 rounded-xl border bg-card p-5"
           onSubmit={(e) => {
             e.preventDefault();

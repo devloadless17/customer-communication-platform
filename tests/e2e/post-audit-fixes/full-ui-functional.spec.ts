@@ -312,9 +312,15 @@ test("settings/webhooks: register an outbound webhook", async ({ page }) => {
 // ───────────────────────────────────────────────────────────────────────────
 // 10. CHANGE PASSWORD — wrong current password is rejected (no change made)
 // ───────────────────────────────────────────────────────────────────────────
-test("settings/account: wrong current password is rejected", async ({ page }) => {
+// The account surfaces live under `/account`, not `/settings/*`: they are about
+// the PERSON (their password, their notification preferences), which is a
+// different thing from the WORKSPACE settings `/settings/*` configures — the
+// same person carries them across every workspace they belong to. Both paths
+// below were 404ing, so these two tests were asserting against Next's not-found
+// page rather than the feature.
+test("account: wrong current password is rejected", async ({ page }) => {
   const errs = track(page);
-  await page.goto("/settings/account");
+  await page.goto("/account");
   const current = page.getByPlaceholder("Current password");
   await expect(current).toBeVisible();
 
@@ -330,9 +336,9 @@ test("settings/account: wrong current password is rejected", async ({ page }) =>
 // ───────────────────────────────────────────────────────────────────────────
 // 11. NOTIFICATIONS — a preference switch toggles (and reverts)
 // ───────────────────────────────────────────────────────────────────────────
-test("settings/notifications: a preference switch toggles", async ({ page }) => {
+test("account/notifications: a preference switch toggles", async ({ page }) => {
   const errs = track(page);
-  await page.goto("/settings/notifications");
+  await page.goto("/account/notifications");
   await expect(page.getByRole("heading", { name: "Notifications" })).toBeVisible();
 
   const sw = page.getByRole("switch").first();

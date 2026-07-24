@@ -7,6 +7,7 @@ import { Check, Loader2, Pencil, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessage } from "@ccp/shared/api/error-message";
 
 /**
  * Inline editor for a super-admin-controlled limit on the platform org-detail
@@ -68,8 +69,7 @@ export function LimitControl({
         body: JSON.stringify({ [bodyKey]: next }),
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? `Failed to update the ${noun} limit.`);
+        setError(await apiErrorMessage(res, `Failed to update the ${noun} limit.`));
         return;
       }
       setEditing(false);

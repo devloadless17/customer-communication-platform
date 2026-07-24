@@ -51,7 +51,7 @@ Organization → Workspaces → Channels → Accounts
 - **Ticket** — the unit of *work* on a conversation, **many per thread over time**. See §2 note
   below and [docs/ticketing.md](docs/ticketing.md).
 
-A conversation is the long-lived thread. A **ticket** is one piece of *work* on it, and there are many over time — the refund in March and the delivery question in June are two tickets on one unbroken thread, each with its own assignee, priority, SLA clock and outcome. Tickets open by themselves on an inbound; the inbox is untouched (the board is a parallel lens joined by `Message.ticketId`). See [docs/ticketing.md](docs/ticketing.md).
+A conversation is the long-lived thread. A **ticket** is one piece of *work* on it, and there are many over time — the refund in March and the delivery question in June are two tickets on one unbroken thread, each with its own assignee, priority, SLA clock and outcome. Tickets are **raised deliberately** — by the agent who read the message, with a subject, a priority and an assignee. Auto-open on every inbound is a per-workspace toggle and is **OFF by default** (`Workspace.ticketAutoOpen`): the inbox already tracks every thread, so auto-opening makes a ticket mean the same thing as a conversation and fills the board with work nobody raised. The inbox is untouched either way (the board is a parallel lens joined by `Message.ticketId`). See [docs/ticketing.md](docs/ticketing.md).
 
 Collaboration primitives on a conversation: **assignment** (manual, or routed by admin-configured policies — see [docs/assignment.md](docs/assignment.md)), **status** (open/pending/closed), **stage** (pipeline), **tags**, **custom fields**, **internal notes**, and **saved views** (a named, reusable filter over the list — personal or shared with the workspace). Around them: **triggers → workflows → actions** (automation), **outbound webhooks** (notify external systems), **broadcasts** (bulk templated outbound), the external **`/v1` API** (n8n/Zapier/partners), and **calling** (WhatsApp Business Calling over WebRTC).
 
@@ -199,7 +199,7 @@ Minimize socket traffic and re-renders: coalesce bursts, return the same referen
 
 ## 11. Workflow model
 
-Engine internals: [apps/api/src/lib/workflows/README.md](apps/api/src/lib/workflows/README.md). AI-autopilot design: [docs/n8n-ai-autopilot.md](docs/n8n-ai-autopilot.md).
+Engine internals: [apps/api/src/lib/workflows/README.md](apps/api/src/lib/workflows/README.md).
 
 ```
 Trigger (domain event) → Conditions → Step actions → Completion
@@ -302,8 +302,14 @@ Each links to the reasoning:
 - **Providers hold no business logic**; app code only sees `NormalizedEvent`. — §5, §12
 - **Event tier order** (realtime → audit → analytics → workflow → webhooks); **never subscribe audit/workflow to `broadcast.*`**. — [docs/events.md](docs/events.md)
 - **Automated assignment never overrides a human**: every automated caller passes `onlyIfUnassigned`, and every automated assignment writes through `assignConversation` so it is indistinguishable downstream from a manual one. — [docs/assignment.md](docs/assignment.md)
+- **A template sync is authoritative ONLY for the WABA it fetched**, and a template Meta *returned* is never pruned — an unmappable status/category leaves the stored value alone rather than dropping the row. Both failure modes are silent, permanent data loss (they take `variableBindings` with them). — [docs/whatsapp-templates.md](docs/whatsapp-templates.md)
+- **A carousel's card COUNT and each card's component signature are frozen at approval** — every card carries the same components, and a button's `index` is scoped to its CARD, not the message. `requiredCarouselCards` is the one authority both the UIs and the send guards read. — [docs/whatsapp-templates.md](docs/whatsapp-templates.md)
+- **`MessageTemplate.parameterFormat` is the single authority on positional vs named** — never re-derive it from a regex over the body, or a template containing literal `{{word}}` copy fails every recipient with Meta error 132000. — [docs/whatsapp-templates.md](docs/whatsapp-templates.md)
 - **Broadcasts never open tickets** (the runner bypasses `commitOutboundSend`); a customer's REPLY does. Same reasoning as the audit/workflow rule above. — [docs/ticketing.md](docs/ticketing.md)
 - **A saved view's filter never merges by spread** — `inboxViewWhereClauses` returns independent predicates that callers AND in, so an `Unassigned` view can't clobber an agent's visibility restriction. — [docs/inbox-views.md](docs/inbox-views.md)
+- **The ACTIVE WORKSPACE is resolved in exactly one place** — `resolveActiveWorkspaceId` (`@ccp/shared/auth/active-workspace`), called by the NestJS guard, the Socket.io handshake AND the Next.js RSC session. Order: membership-validated `ccp.ws` cookie → `Session.activeWorkspaceId` → first membership; the beyond-membership escape (org owner/admin, superAdmin) is always DB-verified and org-scoped. Three copies drifted once and the web silently rendered every switched session against the wrong workspace. Anything workspace-scoped that is cached (the session snapshot) is keyed by **(userId, workspaceId)**, and the per-user socket room is `user:<ws>:<uid>`. — §7
+- **Org-wide actions need ORG authority.** `resolveSession` collapses a superAdmin, an org owner/admin and a plain member who admins ONE workspace all to the effective role `"admin"` — so deactivate / delete / password-reset gate on `canModifyUserAccount` (orgRole), never on the workspace role. Removing someone from a workspace goes through `lib/workspaces/remove-member.ts`, the counterpart to `provisionWorkspace`: one definition of what that transition means. — §2
+- **Raw-SQL PARTIAL indexes are invisible to the whole toolchain** — Prisma's DSL can't express a `WHERE`, so `migrate diff` and `check:prisma-fields` are both blind to them, and four of them are UNIQUE constraints backstopping check-then-act races the app deliberately doesn't lock for. A `DROP COLUMN` silently destroys every index keyed on that column: the org→workspace rename took out six. `apps/api/test/partial-indexes.spec.ts` is the tripwire — keep it in lockstep with the raw migrations. — §7
 - **Realtime read-state convergence** (mark-read only when viewing; all recovery paths converge; local `conversation:read` drives the badge); **team-wide unread only**. — [docs/realtime.md](docs/realtime.md)
 - **Graceful shutdown**: `server.close()` before `app.close()`; keep the manual SIGTERM handler; `stop_grace_period ≥ ~100s` on api. — [docs/operations.md](docs/operations.md)
 - **Heap ≤ ~75% of the service's `mem_limit`** (api 2048/3g, web 1536/2g). — [docs/operations.md](docs/operations.md)
@@ -314,6 +320,7 @@ Each links to the reasoning:
 
 ## 19. Deferred / not now (with triggers)
 
+- **Meta's WABA → WAAC + Messaging Account split** (phased H2 2026 → H1 2028) — Phase 1 needs **no code changes** for a single-integration app like this one; `wabaId` simply comes to mean "Messaging Account id". Per-phase triggers for `messaging_account_id`, WAAC ids and the `whatsapp_account` topic are tabulated in [docs/whatsapp-templates.md](docs/whatsapp-templates.md) §28. Don't pre-build any of it.
 - **More channels** (Telegram, TikTok, SMS, Email) — the interface is ready; build one when a pilot asks. Recipe: [docs/adding-a-channel.md](docs/adding-a-channel.md). *(Messenger + Instagram are **live**, not deferred.)*
 - **Messenger calling · social opt-in/proactive messaging · capability-driven broadcasting · per-`Customer` omnichannel targeting** — designed, not yet built; each is a bounded add along an existing seam. See the Meta-parity roadmap.
 - **WhatsApp Embedded Signup** (no more manual credential paste) — needs Meta Tech-Provider review; after the product is worth onboarding into. [docs/onboarding-future.md](docs/onboarding-future.md).
@@ -340,7 +347,8 @@ Each links to the reasoning:
 | Website chat widget: **developer** guide — file map, local run, tests, invariants, debugging | [docs/webchatwidget-dev-guide.md](docs/webchatwidget-dev-guide.md) |
 | Website chat widget: **customer-facing** install guide (also in-app at `/docs/webchat-install`) | [docs/webchat-install-guide.md](docs/webchat-install-guide.md) |
 | Adding a channel: recipe + per-channel constraints | [docs/adding-a-channel.md](docs/adding-a-channel.md) |
-| Meta channels capability & gap matrix (WhatsApp/Messenger/Instagram) | [docs/meta-channels-capabilities.md](docs/meta-channels-capabilities.md) |
+| Channel accounts: several numbers/Pages per workspace, one Meta app, inbox attribution | [docs/channel-accounts.md](docs/channel-accounts.md) |
+| WhatsApp templates: WABA scoping, parameter format, categories, component rules | [docs/whatsapp-templates.md](docs/whatsapp-templates.md) |
 | WhatsApp Calling: wire shapes, permission, region, accept handshake, recording/transcription | [docs/whatsapp-calling.md](docs/whatsapp-calling.md) |
 | Campaign analytics: the two sources, the null rules, the send-rate bucket | [docs/campaign-analytics.md](docs/campaign-analytics.md) |
 | Contact import/export: CSV + Excel, streaming, at 100k | [docs/contact-import-export.md](docs/contact-import-export.md) |

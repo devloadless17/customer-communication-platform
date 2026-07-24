@@ -41,6 +41,10 @@ import {
   stopTemplateAnalyticsCaptureSweeper,
 } from "@/lib/sweepers/template-analytics-capture";
 import {
+  startTemplateCatalogRefreshSweeper,
+  stopTemplateCatalogRefreshSweeper,
+} from "@/lib/sweepers/template-catalog-refresh";
+import {
   startWorkHoursSweeper,
   stopWorkHoursSweeper,
 } from "@/lib/sweepers/work-hours";
@@ -174,6 +178,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private broadcastMaterializeWorkerStarted = false;
   private broadcastMaterializeDriftSweeperStarted = false;
   private whatsappHealthRefreshSweeperStarted = false;
+  private templateCatalogRefreshStarted = false;
   private templateAnalyticsCaptureStarted = false;
   private workHoursSweeperStarted = false;
 
@@ -446,6 +451,18 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start whatsapp-health-refresh sweeper", err);
     }
+    // Its OWN try, like every sibling — see the note below on why a shared try
+    // leaves the other sweeper's stop-flag unset.
+    try {
+      // Backstop for template CREATE/DELETE done in WhatsApp Manager, which no
+      // webhook covers. Without it a catalog is only as fresh as the last time a
+      // human pressed "Sync".
+      startTemplateCatalogRefreshSweeper();
+      this.templateCatalogRefreshStarted = true;
+      this.logger.log("Template catalog-refresh sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start template-catalog-refresh sweeper", err);
+    }
     // Its OWN try, like every sibling. Sharing one with the health sweeper
     // above meant a throw in either left the OTHER's stop-flag unset — so it
     // would be running but never stopped on shutdown, and the graceful-drain
@@ -501,6 +518,13 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(
         `stopWhatsappHealthRefreshSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.templateCatalogRefreshStarted) stopTemplateCatalogRefreshSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopTemplateCatalogRefreshSweeper threw: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {

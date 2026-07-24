@@ -7,6 +7,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ChannelBadge } from "./channel-badge";
 import { LocalTime } from "@/components/local-time";
 import { useTimezone } from "@/providers/tz-provider";
+import { useChannelAccounts } from "../contexts/channel-accounts-context";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { cn, formatLocaleString, initials } from "@ccp/shared/utils";
@@ -58,6 +59,10 @@ function ConversationListItemImpl({
   // markAsRead zeroes that counter and it clears for EVERYONE. There is no
   // per-agent read state for the inbox — "read" means read for all.
   const unread = conversation.unreadCount > 0;
+  // Null unless this channel has more than one connected account — see
+  // ChannelAccountsProvider for why attribution is conditional.
+  const { accountFor } = useChannelAccounts();
+  const inboundAccount = accountFor(conversation.channel, conversation.channelConnectionId);
   // Absent on rows fetched before flags shipped / by lean construction sites.
   const openFlags = conversation.openFlagCount ?? 0;
 
@@ -173,6 +178,22 @@ function ConversationListItemImpl({
               style={{ maxWidth: "40%" }}
             >
               {conversation.webchatWidgetName}
+            </span>
+          )}
+          {/* Which of the workspace's numbers/Pages this thread is on. Renders
+              only when the channel actually has more than one account, so a
+              single-number workspace's rows are byte-identical to before. */}
+          {inboundAccount && (
+            <span
+              title={
+                inboundAccount.providerName && inboundAccount.providerName !== inboundAccount.name
+                  ? `Received on ${inboundAccount.name} (${inboundAccount.providerName})`
+                  : `Received on ${inboundAccount.name}`
+              }
+              className="shrink-0 truncate rounded bg-muted px-1.5 py-0.5 text-2xs text-muted-foreground"
+              style={{ maxWidth: "40%" }}
+            >
+              {inboundAccount.name}
             </span>
           )}
           <span title={fullDateTime} className="shrink-0">
@@ -332,5 +353,10 @@ export const ConversationListItem = memo(
     // short-circuit the re-render.
     prev.conversation.openFlagCount === next.conversation.openFlagCount &&
     prev.conversation.status === next.conversation.status &&
+    // The account is RE-STAMPED on every inbound (a customer who messages a
+    // second number moves the thread), so the attribution chip goes stale
+    // without this — the one field on the row that can change while every
+    // other compared field stays put.
+    prev.conversation.channelConnectionId === next.conversation.channelConnectionId &&
     prev.conversation.assignedUserId === next.conversation.assignedUserId,
 );

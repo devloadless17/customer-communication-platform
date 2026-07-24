@@ -110,24 +110,48 @@ async function setBusinessNumber(displayPhoneNumber: string): Promise<void> {
   const phoneNumberId = String(
     (existing?.config as Record<string, unknown> | null)?.phoneNumberId ?? "e2e_calls_wa",
   );
-  await db().channelConnection.upsert({
-    where: {
-      workspaceId_channel_externalAccountId: {
+  // Clear any OTHER default first, then claim it — the same order the product's
+  // own `setDefaultAccount` uses, and for the same reason: a partial unique
+  // (`ChannelConnection_one_default_per_channel`) enforces exactly one default
+  // per (workspace, channel), so creating a second one that also claims the flag
+  // is a P2002.
+  //
+  // This bit the suite for real. The `phoneNumberId` above falls back to a
+  // literal when the existing default's config doesn't carry one, so the upsert
+  // then targets an externalAccountId that doesn't exist, takes the CREATE
+  // branch, and collides with the default already sitting there — failing every
+  // calls spec with a constraint error that looks nothing like a calls problem.
+  // Whether it fires depends on what earlier specs left behind, which is why it
+  // reads as flaky.
+  await db().$transaction(async (tx) => {
+    await tx.channelConnection.updateMany({
+      where: {
+        workspaceId,
+        channel: "whatsapp",
+        isDefault: true,
+        NOT: { externalAccountId: phoneNumberId },
+      },
+      data: { isDefault: false },
+    });
+    await tx.channelConnection.upsert({
+      where: {
+        workspaceId_channel_externalAccountId: {
+          workspaceId,
+          channel: "whatsapp",
+          externalAccountId: phoneNumberId,
+        },
+      },
+      create: {
         workspaceId,
         channel: "whatsapp",
         externalAccountId: phoneNumberId,
+        isDefault: true,
+        config,
+        secrets: {},
+        isActive: true,
       },
-    },
-    create: {
-      workspaceId,
-      channel: "whatsapp",
-      externalAccountId: phoneNumberId,
-      isDefault: true,
-      config,
-      secrets: {},
-      isActive: true,
-    },
-    update: { config },
+      update: { config, isDefault: true },
+    });
   });
 }
 

@@ -32,6 +32,30 @@ test.describe("platform shell", () => {
   });
 });
 
+/**
+ * The email-verification OTP for `email`, straight out of the database.
+ *
+ * There is no mail provider in the test environment, so the code has to come
+ * from where Better Auth put it: a `Verification` row keyed
+ * `email-verification-otp-<email>` whose `value` is `<code>:<attempts>`. Polled
+ * briefly because the row is written by the request that renders /verify, so a
+ * fast test can arrive a beat early.
+ */
+async function readEmailOtp(email: string): Promise<string> {
+  const identifier = `email-verification-otp-${email}`;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const row = await db().verification.findFirst({
+      where: { identifier },
+      orderBy: { createdAt: "desc" },
+      select: { value: true },
+    });
+    const code = row?.value.split(":")[0];
+    if (code && /^\d{6}$/.test(code)) return code;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`no email-verification OTP was issued for ${email}`);
+}
+
 test.describe("org-approval gate (register → approve → suspend)", () => {
   // One throwaway org per run; cleaned up at the end.
   const email = `e2e-gate-${Date.now()}@example.com`;
@@ -60,8 +84,26 @@ test.describe("org-approval gate (register → approve → suspend)", () => {
     await orgPage.fill('input[name="password"]', password);
     await orgPage.fill('input[name="confirmPassword"]', password);
     await Promise.all([
+      // A password signup now lands on /verify, NOT /pending: `emailVerified`
+      // defaults to false and the API refuses to act for an unverified session,
+      // so the OTP screen comes FIRST and the org-approval gate only after it.
+      orgPage.waitForURL(/\/verify/, { timeout: 30_000 }),
+      // Scoped to the form that owns the password field, NOT `button[type=
+    // "submit"]`. Since "Continue with Google" was added it renders ABOVE the
+    // password form (deliberately — the one-click path belongs above the fold),
+    // and it is a submit button in its own form, so the bare selector matched
+    // GOOGLE first and every login here navigated to accounts.google.com.
+    orgPage.locator('form:has(input[name="password"]) button[type="submit"]').click(),
+    ]);
+
+    // Clear the verification step the way a real user would — by typing the
+    // code. It is readable here because Better Auth stores the OTP in
+    // `Verification.value` as `<code>:<attempts>`, keyed by
+    // `email-verification-otp-<email>`.
+    await orgPage.getByRole("textbox", { name: /6-digit/i }).fill(await readEmailOtp(email));
+    await Promise.all([
       orgPage.waitForURL(/\/pending/, { timeout: 30_000 }),
-      orgPage.click('button[type="submit"]'),
+      orgPage.getByRole("button", { name: /verify email/i }).click(),
     ]);
     // The gate screen renders — the org is created but locked out. Match the
     // heading specifically (the page <title> also echoes via Next's route

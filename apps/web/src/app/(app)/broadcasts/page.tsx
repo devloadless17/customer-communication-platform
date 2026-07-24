@@ -22,7 +22,24 @@ import {
 export const metadata = { title: "Broadcasts" };
 export const dynamic = "force-dynamic";
 
-export default async function BroadcastsPage() {
+const OUTREACH_CHANNELS = ["whatsapp", "messenger", "instagram", "people"] as const;
+
+export default async function BroadcastsPage({
+  searchParams,
+}: {
+  // `?channel=` from the channel-scoped Outreach nav. Kept in the URL (not a
+  // cookie) so a shared link carries its scope — and so the SSR seed below can
+  // apply it, making the first paint already correct.
+  searchParams: Promise<{ channel?: string | string[] }>;
+}) {
+  const sp = await searchParams;
+  const rawChannel = Array.isArray(sp.channel) ? sp.channel[0] : sp.channel;
+  const channel = OUTREACH_CHANNELS.includes(
+    rawChannel as (typeof OUTREACH_CHANNELS)[number],
+  )
+    ? (rawChannel as string)
+    : null;
+
   // Restore the user's last filter / search / view across hard refreshes.
   // The seed query below uses the persisted filter + search so first paint
   // already renders the right rows — no SSR-vs-client desync, no flash.
@@ -52,6 +69,7 @@ export default async function BroadcastsPage() {
     listBroadcasts({
       ...(persistedStatus !== "all" ? { status: persistedStatus } : {}),
       ...(persistedSearch ? { search: persistedSearch } : {}),
+      ...(channel ? { channel } : {}),
       page: 1,
       take: 25,
     }),
@@ -96,6 +114,7 @@ export default async function BroadcastsPage() {
           initialFilter={persistedStatus}
           initialSearch={persistedSearch}
           initialView={persistedView}
+          channel={channel}
         />
       )}
     </div>

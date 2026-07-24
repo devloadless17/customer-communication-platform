@@ -345,7 +345,7 @@ export class ContactTransferService {
    *
    * This is the FRIENDLY path only. It's a read-then-write with no lock, so two
    * requests arriving together both see zero and both proceed — the partial
-   * unique index `ContactTransferJob_teamId_active_key` is what actually
+   * unique index `ContactTransferJob_workspaceId_active_key` is what actually
    * enforces the invariant, and `createJob` maps its P2002 to this same error.
    */
   private async assertNoRunningJob(workspaceId: string): Promise<void> {

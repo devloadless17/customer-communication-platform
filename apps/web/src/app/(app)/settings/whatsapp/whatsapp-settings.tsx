@@ -20,8 +20,12 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
+import type { ChannelAccountView } from "@/lib/api/queries";
+import { ChannelAccountsPanel } from "@/features/channels/components/channel-accounts-panel";
 import { CallingSettings } from "./calling-settings";
 import { MessagingHealthPanel } from "./messaging-health-panel";
+import { BusinessProfilePanel } from "./business-profile-panel";
+import { QrCodesPanel } from "./qr-codes-panel";
 import { formatPhone } from "@ccp/shared/utils";
 
 export interface WhatsappCurrent {
@@ -52,9 +56,14 @@ export interface WhatsappCurrent {
 export function WhatsappSettings({
   current,
   canManage,
+  accounts,
 }: {
   current: WhatsappCurrent;
   canManage: boolean;
+  /** Every WhatsApp number this workspace has connected. Rendered by
+   *  ChannelAccountsPanel below `ConnectionStatus`, which reports only the
+   *  DEFAULT number. */
+  accounts: ChannelAccountView[];
 }) {
   const softRefresh = useSoftRefresh();
   const params = useSearchParams();
@@ -211,9 +220,36 @@ export function WhatsappSettings({
       {header}
       <ConnectionStatus current={current} showFinalStepHint />
 
+      {/* Which numbers this workspace actually holds. ConnectionStatus above
+          reports the DEFAULT one only, so without this a workspace running two
+          numbers had no surface that said so. */}
+      {canManage && (
+        <ChannelAccountsPanel
+          channel="whatsapp"
+          accounts={accounts}
+          channelLabel="WhatsApp"
+          accountNoun="number"
+          onAddAnother={() => {
+            setShowForm(true);
+            requestAnimationFrame(() => {
+              document
+                .getElementById("whatsapp-connect-form")
+                ?.scrollIntoView({ behavior: "smooth", block: "center" });
+            });
+          }}
+        />
+      )}
+
       {/* Only meaningful once connected — an unconnected number has no tier,
           no quality rating and no budget to report. */}
-      <MessagingHealthPanel canManage={canManage} />
+      <MessagingHealthPanel canManage={canManage} accountCount={accounts.length} />
+
+      {/* The number's public profile. Only shown once connected — there is no
+          profile to read before Meta knows the number. */}
+      {current.connected && <BusinessProfilePanel canManage={canManage} />}
+
+      {/* Also connected-only: the codes live on the phone number. */}
+      {current.connected && <QrCodesPanel canManage={canManage} />}
 
       {canManage && !showForm && (
         <div className="flex gap-2">
@@ -395,6 +431,7 @@ function ManualForm({
     Boolean(current.wabaId || current.appId) || Boolean(defaultExpandAdvanced);
   return (
     <form
+      id="whatsapp-connect-form"
       onSubmit={(e) => {
         e.preventDefault();
         onSubmit(new FormData(e.currentTarget));

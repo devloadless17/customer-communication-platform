@@ -102,6 +102,7 @@ export class ConversationsController {
       filter: query.filter,
       stageId: query.stageId,
       viewFilters,
+      accountId: query.accountId,
     });
   }
 

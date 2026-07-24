@@ -1,13 +1,18 @@
 import "server-only";
 
 import { cache } from "react";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { loadActiveUser } from "@/lib/auth/active-user";
 import { getCurrentSession } from "@/lib/auth";
+import {
+  ACTIVE_WORKSPACE_COOKIE,
+  resolveActiveWorkspaceId,
+} from "@ccp/shared/auth/active-workspace";
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
 import type { Capability } from "@ccp/shared/auth/permissions";
-import type { OrgStatus, Role, User, UserAvailabilityStatus } from "@ccp/shared/types";
+import type { OrgRole, OrgStatus, Role, User, UserAvailabilityStatus } from "@ccp/shared/types";
 import type { AvailabilitySource } from "@ccp/shared/work-hours";
 
 /**
@@ -32,6 +37,19 @@ import type { AvailabilitySource } from "@ccp/shared/work-hours";
 export interface Session {
   user: User;
   workspaceId: string;
+  /**
+   * The org this user belongs to. Needed wherever a decision is about the
+   * TENANT rather than the active workspace — the platform pages gate
+   * "is this my own organization?" on it, because comparing workspace ids
+   * mistakes a sibling workspace of your own org for someone else's.
+   */
+  organizationId: string;
+  /**
+   * Org-level role (owner/admin/member), distinct from `user.role`, which is
+   * the *effective workspace* role. Deleting the organization is owner-only,
+   * so the UI has to gate on this rather than on workspace-admin.
+   */
+  orgRole: OrgRole;
   /**
    * Org-approval status of the user's team. The (app) layout reads this to
    * gate pending/suspended orgs to /pending. Carried on the session (loaded in
@@ -71,14 +89,53 @@ export const getSession = cache(async (): Promise<Session> => {
     redirect("/logout");
   }
 
-  // Mirrors the API's resolveSession: an org owner/admin (and a platform
-  // superAdmin) is implicitly admin in every workspace; otherwise the role
-  // comes from the membership row for the active workspace. RSC has no request
-  // cookie access here, so it falls back to the first membership — the API is
-  // the authority for a switched workspace.
+  // Unverified signup → the code screen, not the app.
+  //
+  // This is a ROUTING decision, not the security boundary: the API's
+  // `resolveSession` independently refuses an unverified session, so an
+  // attacker skipping the browser gains nothing. Without this the user would
+  // technically be "logged in" and see every panel fail with 403 instead of
+  // being told what to do.
+  //
+  // superAdmins are exempt for the same reason as in the API gate — the
+  // platform operator is seeded, not self-registered.
+  // (Not carried on the returned DTO: past this point every user is either
+  // verified or a superAdmin, so a field that is always true would only invite
+  // a redundant second check downstream.)
+  if (!row.isSuperAdmin && !row.emailVerified) {
+    redirect("/verify");
+  }
+
+  // Active workspace — the SAME rule the API's `resolveSession` and the socket
+  // handshake use (`@ccp/shared/auth/active-workspace`), fed with the SAME
+  // inputs: the `ccp.ws` cookie, then this device's stored choice, then the
+  // first membership.
+  //
+  // This used to be a bare `workspaceMemberships[0]`, on the belief that an RSC
+  // can't read request cookies. It can — `cookies()` works here exactly as it
+  // does in the (app) layout. The consequence of getting it wrong was a render
+  // split across two tenants: the rail and `/api/workspace` (cookie-aware) said
+  // workspace B while `workspaceId`, the effective role and the whole
+  // capability map still described workspace A. Presence frames were filtered
+  // against the wrong id and simply vanished; admin-only UI was gated on the
+  // wrong workspace's role.
+  //
+  // The org-admin escape is deliberately NOT applied here. This is a UI-shaping
+  // read, and an org admin acting in a workspace they hold no membership row in
+  // gets a validated scope from the API on the very next call; widening it here
+  // would mean the browser, not the server, deciding tenant scope.
   const isOrgAdmin = row.orgRole === "owner" || row.orgRole === "admin";
-  const activeMembership = row.workspaceMemberships[0];
-  const activeWorkspaceId = activeMembership?.workspace.id ?? "";
+  const cookieStore = await cookies();
+  const activeWorkspaceId =
+    (await resolveActiveWorkspaceId({
+      memberships: row.workspaceMemberships.map((m) => ({ workspaceId: m.workspace.id })),
+      cookieCandidate: cookieStore.get(ACTIVE_WORKSPACE_COOKIE)?.value ?? null,
+      storedWorkspaceId:
+        row.sessions.find((s) => s.id === session.session.id)?.activeWorkspaceId ?? null,
+    })) ?? "";
+  const activeMembership =
+    row.workspaceMemberships.find((m) => m.workspace.id === activeWorkspaceId) ??
+    row.workspaceMemberships[0];
   const effectiveRole: Role =
     row.isSuperAdmin || isOrgAdmin ? "admin" : ((activeMembership?.role ?? "agent") as Role);
 
@@ -112,13 +169,30 @@ export const getSession = cache(async (): Promise<Session> => {
         : {}),
     },
     workspaceId: activeWorkspaceId,
+    organizationId: row.organizationId,
+    orgRole: row.orgRole as OrgRole,
     orgStatus: (row.organization?.status ?? "active") as OrgStatus,
     permissions: resolvePermissions(effectiveRole, activeMembership?.workspace.rolePermissions ?? {}),
     organizationName: row.organization?.name ?? "",
-    workspaces: row.workspaceMemberships.map((m) => ({
-      id: m.workspace.id,
-      name: m.workspace.name,
-      role: m.role as Role,
-    })),
+    // Every workspace this person may OPEN, which for an org owner/admin is the
+    // whole organization — not just the ones they hold a membership row in.
+    // `GET /api/workspaces` applies the same rule; if this list were narrower
+    // the rail would omit a workspace the Organization page offers to open, and
+    // an org admin sitting in a non-membership workspace would see no entry
+    // marked active.
+    workspaces: isOrgAdmin
+      ? row.organization.workspaces.map((w) => ({
+          id: w.id,
+          name: w.name,
+          // No membership row → they are here by org authority, which resolves
+          // to admin everywhere in the org.
+          role: (row.workspaceMemberships.find((m) => m.workspace.id === w.id)?.role ??
+            "admin") as Role,
+        }))
+      : row.workspaceMemberships.map((m) => ({
+          id: m.workspace.id,
+          name: m.workspace.name,
+          role: m.role as Role,
+        })),
   };
 });

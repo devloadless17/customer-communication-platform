@@ -123,6 +123,13 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          # Mail is a PRODUCTION BOOT GATE (packages/config validateEnv): with
+          # it missing the containers exit instead of starting, so catching it
+          # here turns a failed deploy + rollback into a 5-second CI failure.
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_SMTP_HOST: ${{ secrets.MAIL_SMTP_HOST }}
+          MAIL_SMTP_USER: ${{ secrets.MAIL_SMTP_USER }}
+          MAIL_SMTP_PASSWORD: ${{ secrets.MAIL_SMTP_PASSWORD }}
         run: |
           set -euo pipefail
           missing=()
@@ -130,6 +137,7 @@ jobs:
                    R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET \
                    APP_DOMAIN ADMIN_EMAIL HEALTHCHECK_URL DOCKER_USERNAME DOCKER_PASSWORD \
                    POSTGRES_DB POSTGRES_USER \
+                   MAIL_FROM MAIL_SMTP_HOST MAIL_SMTP_USER MAIL_SMTP_PASSWORD \
                    VPS_HOST VPS_USER VPS_SSH_KEY; do
             [ -z "${!v:-}" ] && missing+=("$v")
           done
@@ -603,11 +611,28 @@ jobs:
           AZURE_SPEECH_REGION: ${{ secrets.AZURE_SPEECH_REGION }}
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          # Outbound email. Production sends over SMTP rather than the HTTP API
+          # deliberately: a Brevo SMTP key can only SEND, while a Brevo API key
+          # cannot be scoped and grants full account access (contacts,
+          # campaigns, settings). Requires the VPS's static IP to be allowlisted
+          # under Brevo -> Settings -> Security -> Authorized IPs, and outbound
+          # 587 open. validateEnv hard-fails the boot if these are missing, so a
+          # deploy without them rolls back instead of silently sending nothing.
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
+          MAIL_SMTP_HOST: ${{ secrets.MAIL_SMTP_HOST }}
+          MAIL_SMTP_PORT: ${{ secrets.MAIL_SMTP_PORT }}
+          MAIL_SMTP_USER: ${{ secrets.MAIL_SMTP_USER }}
+          MAIL_SMTP_PASSWORD: ${{ secrets.MAIL_SMTP_PASSWORD }}
+          # Google sign-in (web process only). Both empty = the button is simply
+          # not rendered, so this degrades to password-only rather than breaking.
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,OPENAI_API_KEY,ANTHROPIC_API_KEY,AI_ANTHROPIC_MODEL_REPLY,AZURE_SPEECH_KEY,AZURE_SPEECH_REGION,DOCKER_USERNAME,DOCKER_PASSWORD
+          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,OPENAI_API_KEY,ANTHROPIC_API_KEY,AI_ANTHROPIC_MODEL_REPLY,AZURE_SPEECH_KEY,AZURE_SPEECH_REGION,DOCKER_USERNAME,DOCKER_PASSWORD,MAIL_FROM,MAIL_FROM_NAME,MAIL_SMTP_HOST,MAIL_SMTP_PORT,MAIL_SMTP_USER,MAIL_SMTP_PASSWORD,GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET
           script: |
             set -euo pipefail
             rm -rf /tmp/ccp-deploy
@@ -640,6 +665,23 @@ jobs:
             R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
             R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
             R2_BUCKET=${R2_BUCKET}
+            # Outbound email — signup + password-reset codes (web) and invite
+            # links (api). SMTP, not the HTTP API: an SMTP key can only send,
+            # whereas a Brevo API key grants full account access. Verify from
+            # the VPS with \`pnpm mail:check\` if sends fail; \`525 5.7.1
+            # Unauthorized IP address\` means this server's IP is not on the
+            # Brevo allowlist.
+            MAIL_FROM=${MAIL_FROM}
+            MAIL_FROM_NAME=${MAIL_FROM_NAME}
+            MAIL_SMTP_HOST=${MAIL_SMTP_HOST}
+            MAIL_SMTP_PORT=${MAIL_SMTP_PORT}
+            MAIL_SMTP_USER=${MAIL_SMTP_USER}
+            MAIL_SMTP_PASSWORD=${MAIL_SMTP_PASSWORD}
+            # Google sign-in (web only). The authorized redirect URI in the
+            # Google console must be exactly
+            # https://${APP_DOMAIN}/api/auth/callback/google.
+            GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+            GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
             META_GRAPH_VERSION=v25.0
             # Raw webhook-body retention (days). Message.rawPayload keeps the
             # ORIGINAL provider payload for debugging; the sweeper that clears it

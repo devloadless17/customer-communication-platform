@@ -31,11 +31,24 @@ different times and for different reasons:
 
 ---
 
-## Policies
+## Policies — called **Teams** in the UI
 
-A policy is a named strategy: *"Support — weighted"*, *"Escalations — senior
-pool"*. Every team has exactly one **default** (the fallback when no rule
-matches) and may have up to 50.
+A policy is a named group of people plus the strategy for picking among them:
+*"Support — weighted"*, *"Escalations — senior pool"*. Every workspace has
+exactly one **default** (the fallback when no rule matches) and may have up to 50.
+
+**The name is `AssignmentPolicy` in the schema and "Team" everywhere a user can
+see it** — the settings section, the ticket board's queue filter, the handoff
+picker. That is deliberate: a policy IS the routable team (a named set of members
+with weights and capacity), and inventing a second `Team` entity beside it would
+give one concept two homes that could disagree about who is on it. See CLAUDE.md
+§2 for why a *team* (soft grouping inside a workspace) is not a *workspace* (hard
+isolation boundary).
+
+Keep the vocabulary split clean when touching this area: **"policy" may appear in
+code, table names and API paths; "team" is the only word the UI shows.** They had
+drifted — the settings page was headed "Teams" while every button and toast under
+it said "policy", so creating a team told you "Policy created".
 
 **Strategy** — how to pick among eligible, under-limit candidates:
 

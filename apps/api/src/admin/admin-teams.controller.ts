@@ -1,44 +1,22 @@
 import {
-  BadRequestException,
   Body,
   Controller,
-  Delete,
   Get,
-  HttpCode,
   NotFoundException,
   Param,
   Patch,
-  Post,
 } from "@nestjs/common";
 import { z } from "zod";
 
 import {
   getTeamDetailForSuperAdmin,
-  invalidateSuperAdminAggregates,
   listAllOrgsForSuperAdmin,
   listAllTeamsForSuperAdmin,
 } from "@/lib/queries";
 
-import { CurrentSession } from "../auth/current-session.decorator";
 import { RequireRole } from "../auth/role.guard";
-import { type ApiSession } from "../auth/session.guard";
-import { SessionInvalidationService } from "../auth/session-invalidation.service";
 import { zBody } from "../common/zod-validation.pipe";
 import { DbService } from "../db/db.service";
-import { WorkspaceRootService } from "../workspace-settings/workspace-root.service";
-import { ResetUserPasswordSchema } from "../users/users.schemas";
-import type { ResetUserPasswordInput } from "../users/users.schemas";
-import { UsersService } from "../users/users.service";
-
-// Approve (→ active), reactivate (→ active), or suspend (→ suspended). `reason`
-// is an operator note surfaced on the suspended org's gate screen; ignored for
-// `active`. One endpoint, status in the body — fewer routes than verb-per-action
-// and trivially Zod-validated.
-const SetStatusSchema = z.object({
-  status: z.enum(["active", "suspended"]),
-  reason: z.string().trim().max(500).optional(),
-});
-type SetStatusInput = z.infer<typeof SetStatusSchema>;
 
 // Per-WORKSPACE seat cap. Min 1 (a workspace always has at least its founder);
 // a generous upper bound keeps a typo from creating a nonsensical value.
@@ -56,12 +34,20 @@ const SetMaxWorkspacesSchema = z.object({
 type SetMaxWorkspacesInput = z.infer<typeof SetMaxWorkspacesSchema>;
 
 /**
- * superAdmin cross-team admin surface.
+ * superAdmin cross-team admin surface — the WORKSPACE-keyed half.
  *
- *   GET    /api/admin/teams            — list every team on the platform + counts
- *   GET    /api/admin/teams/:id        — one team's detail (aggregates + members)
- *   PATCH  /api/admin/teams/:id/status — approve / suspend / reactivate an org
- *   DELETE /api/admin/teams/:id        — hard-delete (refuses operator's own team)
+ *   GET    /api/admin/teams                   — every workspace + counts
+ *   GET    /api/admin/teams/:id               — one workspace's detail
+ *   PATCH  /api/admin/teams/:id/max-members   — seat cap for THIS workspace
+ *   PATCH  /api/admin/teams/:id/max-workspaces— how many the owning ORG may have
+ *
+ * Anything that acts on the ORGANISATION (approve / suspend / delete) lives in
+ * `admin-organizations.controller.ts` and is keyed by the organisation id. The
+ * two used to be mixed here, org-level writes reached through a workspace id,
+ * and that cost twice: the self-guards compared the wrong id (an operator could
+ * suspend or delete their own org via a sibling workspace), and an org with no
+ * workspaces had no id to address it by, so it could not be approved or deleted
+ * at all. Keep each write keyed by the thing it actually mutates.
  *
  * Visibility ends at aggregate counts + the member roster — never customer
  * message bodies or contact names (see super-admin.ts query comment).
@@ -71,9 +57,6 @@ type SetMaxWorkspacesInput = z.infer<typeof SetMaxWorkspacesSchema>;
 export class AdminTeamsController {
   constructor(
     private readonly db: DbService,
-    private readonly teamRoot: WorkspaceRootService,
-    private readonly users: UsersService,
-    private readonly sessionInvalidator: SessionInvalidationService,
   ) {}
 
   /**
@@ -96,76 +79,6 @@ export class AdminTeamsController {
     const detail = await getTeamDetailForSuperAdmin(workspaceId);
     if (!detail) throw new NotFoundException({ error: "team not found" });
     return detail;
-  }
-
-  @Patch(":id/status")
-  async setStatus(
-    @CurrentSession() session: ApiSession,
-    @Param("id") workspaceId: string,
-    @Body(zBody(SetStatusSchema)) body: SetStatusInput,
-  ) {
-    // Never let an operator lock themselves out of their own org. (superAdmins
-    // bypass the gate anyway, but a `suspended` self-status is still confusing
-    // and pointless — refuse it like the self-delete guard does.)
-    if (workspaceId === session.workspaceId) {
-      throw new BadRequestException({
-        error: "cannot change your own organization's status",
-      });
-    }
-    const team = await this.db.workspace.findUnique({
-      where: { id: workspaceId },
-      select: { id: true, organizationId: true },
-    });
-    if (!team) throw new NotFoundException({ error: "team not found" });
-
-    await this.db.organization.update({
-      where: { id: team.organizationId },
-      data: {
-        status: body.status,
-        // Reason is only meaningful while suspended; clear it on (re)activation.
-        statusReason: body.status === "suspended" ? body.reason ?? null : null,
-        statusUpdatedAt: new Date(),
-        statusUpdatedById: session.userId,
-      },
-    });
-
-    // Land the change immediately for every member of the target org (their
-    // team, not the operator's, so the operator's own session is untouched).
-    const members = await this.db.user.findMany({
-      where: { workspaceMemberships: { some: { workspaceId } } },
-      select: { id: true },
-    });
-
-    if (body.status === "suspended") {
-      // A suspend is a hard access-cut (non-payment / abuse / TOS), so it must
-      // drop LIVE connections — busting the 15s cache alone only gates the next
-      // HTTP request and leaves any already-open Socket.io tab streaming the
-      // org's inbound WhatsApp + realtime team data until it reconnects.
-      // `revoke` busts the cache AND kicks every socket, and socket-auth's
-      // team-status gate refuses any re-handshake. We deliberately do NOT
-      // delete the Better Auth Session rows: org suspension ≠ user
-      // deactivation. The member is still a valid user whose ORG is suspended,
-      // so their persisted session must survive for the (app) layout to render
-      // the "/pending → suspended" explanation screen (with statusReason). The
-      // SessionGuard 403s every API call and the layout redirects to /pending
-      // on that still-valid session — access is fully cut without dumping the
-      // member onto a context-free /login. (Deleting sessions added nothing
-      // security-wise — the gate already blocks everything — but broke the
-      // suspended-org UX; regression caught by platform.spec.ts 2026-06-11.)
-      for (const m of members) this.sessionInvalidator.revoke(m.id, "suspension");
-    } else {
-      // Approve / reactivate: only bust the cache so a re-approved member is let
-      // in on their next request without waiting out the TTL — don't needlessly
-      // kick their live sockets or force a re-login.
-      for (const m of members) this.sessionInvalidator.bustCache(m.id);
-    }
-
-    // The roster + overview aggregates are memoized for 60s. An admin who just
-    // approved or suspended an org will look straight at that list, so a stale
-    // status there would read as "the action didn't work".
-    invalidateSuperAdminAggregates();
-
-    return { ok: true };
   }
 
   /**
@@ -239,50 +152,4 @@ export class AdminTeamsController {
     return { ok: true, maxWorkspaces: body.maxWorkspaces, workspaceCount };
   }
 
-  /**
-   * Reset a member's password from the platform org-detail view. The
-   * cross-team analog of `POST /api/users/:id/reset-password` (which is
-   * scoped to the caller's own org). The superAdmin sets a new password and
-   * hands it to the locked-out user out-of-band — same recovery story, just
-   * reachable for any org the operator manages. The service scopes the lookup
-   * to `workspaceId`, so a userId from another org 404s rather than leaking.
-   */
-  @Post(":id/members/:userId/reset-password")
-  @HttpCode(200)
-  async resetMemberPassword(
-    @CurrentSession() session: ApiSession,
-    @Param("id") workspaceId: string,
-    @Param("userId") userId: string,
-    @Body(zBody(ResetUserPasswordSchema)) body: ResetUserPasswordInput,
-  ) {
-    // Resetting your own credentials would sign you out mid-request — the
-    // superAdmin uses change-password for their own account.
-    if (userId === session.userId) {
-      throw new BadRequestException({
-        error: "Use change password to update your own account",
-      });
-    }
-    await this.users.resetPassword(workspaceId, { role: session.role, isSuperAdmin: session.isSuperAdmin }, userId, body.newPassword);
-    return { ok: true };
-  }
-
-  @Delete(":id")
-  async remove(
-    @CurrentSession() session: ApiSession,
-    @Param("id") workspaceId: string,
-  ) {
-    if (workspaceId === session.workspaceId) {
-      throw new BadRequestException({
-        error: "use /api/workspace to delete your own organization",
-      });
-    }
-    const team = await this.db.workspace.findUnique({
-      where: { id: workspaceId },
-      select: { id: true },
-    });
-    if (!team) throw new NotFoundException({ error: "team not found" });
-    await this.teamRoot.destroy(workspaceId, `api/admin/teams ${workspaceId}`);
-    invalidateSuperAdminAggregates();
-    return { ok: true };
-  }
 }

@@ -45,6 +45,14 @@ export const ListTicketsQuerySchema = z.object({
    * teammate.
    */
   assignee: z.string().optional(),
+  /**
+   * The TEAM queue. `none` means "owned by no team" (a real filter, distinct
+   * from omitting the param); a raw AssignmentPolicy id filters to that team.
+   *
+   * Independent of `assignee`, and both together is the useful query: "in
+   * Sales' queue AND still unclaimed" is how a team finds work handed to them.
+   */
+  team: z.string().optional(),
   contactId: z.string().optional(),
   conversationId: z.string().optional(),
   channel: z.string().optional(),
@@ -64,6 +72,8 @@ export const CreateTicketSchema = z.object({
   subject: z.string().trim().max(200).nullable().optional(),
   priority: PrioritySchema.optional(),
   assignedUserId: z.string().nullable().optional(),
+  /** Hand it straight to a team's queue — no person named yet. */
+  assignedTeamId: z.string().nullable().optional(),
   tagIds: z.array(z.string()).max(50).optional(),
   customFields: z.record(z.string(), z.string().max(2000)).optional(),
 });
@@ -77,6 +87,15 @@ export const UpdateTicketSchema = z
     status: StatusSchema.optional(),
     priority: PrioritySchema.optional(),
     assignedUserId: z.string().nullable().optional(),
+    /**
+     * Hand the ticket to another team (or `null` to take it out of every
+     * queue). Independent of `assignedUserId` — see the schema comment on
+     * `Ticket.assignedTeamId` for why both exist.
+     */
+    assignedTeamId: z.string().nullable().optional(),
+    /** Why it is being handed over — stored on the `team_changed` event so the
+     *  receiving team doesn't have to re-read the thread to find out. */
+    handoffReason: z.string().trim().max(2000).optional(),
     subject: z.string().trim().max(200).nullable().optional(),
     resolutionCode: z.string().trim().max(80).nullable().optional(),
     resolutionNote: z.string().trim().max(2000).nullable().optional(),
@@ -124,3 +143,9 @@ export const TicketSettingsSchema = z.object({
   ticketCloseConversationOnLastSolved: z.boolean().optional(),
 });
 export type TicketSettingsInput = z.infer<typeof TicketSettingsSchema>;
+
+/** An internal note on a ticket. Never reaches the customer. */
+export const AddTicketNoteSchema = z.object({
+  body: z.string().trim().min(1).max(5000),
+});
+export type AddTicketNoteInput = z.infer<typeof AddTicketNoteSchema>;

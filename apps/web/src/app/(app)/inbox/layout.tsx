@@ -10,10 +10,13 @@ import {
   INBOX_FILTER_COOKIE,
   parseInboxFilter,
 } from "@/features/inbox/contexts/inbox-filter";
+import { ChannelAccountsProvider } from "@/features/inbox/contexts/channel-accounts-context";
+import { soft } from "@/lib/api/soft";
 import type { Filter } from "@/features/inbox/components/inbox-controls";
 import { getSession } from "@/lib/auth/current-user";
 import {
   listContactStages,
+  listChannelAccountDirectory,
   listConversations,
   listInboxViews,
   listTags,
@@ -51,6 +54,7 @@ export default async function InboxLayout({
     conversationsPage,
     savedViews,
     tags,
+    channelAccounts,
     cookieStore,
   ] = await Promise.all([
     getSession(),
@@ -59,6 +63,11 @@ export default async function InboxLayout({
     listConversations(),
     listInboxViews(),
     listTags(),
+    // Which WhatsApp number / Page / IG handle each thread is on. Display
+    // fields only, member-readable. Degrades to [] — attribution is a nicety
+    // and must never be able to blank the inbox — but the failure is LOGGED:
+    // swallowing it silently is exactly how this endpoint shipped 401-ing.
+    soft("channel-account directory", [], () => listChannelAccountDirectory()),
     cookies(),
   ]);
 
@@ -96,6 +105,7 @@ export default async function InboxLayout({
   return (
     <InboxFilterProvider initialFilter={initialFilter}>
       <InboxViewsProvider initialViews={savedViews}>
+        <ChannelAccountsProvider accounts={channelAccounts}>
         <SectionShell
           mainClassName="min-w-0 overflow-hidden"
           subSidebar={
@@ -111,6 +121,7 @@ export default async function InboxLayout({
         >
           {children}
         </SectionShell>
+        </ChannelAccountsProvider>
       </InboxViewsProvider>
     </InboxFilterProvider>
   );

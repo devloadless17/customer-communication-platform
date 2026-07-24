@@ -76,6 +76,10 @@ export type TicketEventKind =
   | "created"
   | "assigned"
   | "unassigned"
+  /** Handed to a different TEAM — distinct from `assigned`, which is a person. */
+  | "team_changed"
+  /** An internal note. The customer never sees it. */
+  | "note"
   | "status_changed"
   | "priority_changed"
   | "subject_changed"
@@ -138,6 +142,14 @@ export interface Ticket {
   priority: TicketPriority;
   assignedUserId: string | null;
   assignedUserName: string | null;
+  /**
+   * The TEAM that currently owns this ticket (an AssignmentPolicy id), or null.
+   *
+   * Independent of `assignedUserId`: a ticket handed to Sales sits in their
+   * queue with no person on it until someone claims it. Both set means someone
+   * on that team took it.
+   */
+  assignedTeamId: string | null;
   tags: TicketTag[];
   sla: TicketSlaState;
   /** ISO. Null until it reaches `solved`. */
@@ -165,6 +177,8 @@ export interface Ticket {
 export interface TicketEvent {
   id: string;
   kind: TicketEventKind;
+  /** Note text, or the "why" on a handoff. Null on every other kind. */
+  body?: string | null;
   before: Record<string, unknown> | null;
   after: Record<string, unknown> | null;
   actorUserId: string | null;

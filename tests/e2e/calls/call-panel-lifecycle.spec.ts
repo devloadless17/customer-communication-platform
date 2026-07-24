@@ -175,36 +175,51 @@ test.beforeAll(async () => {
 
   // A WhatsApp connection has to exist for the webhook to resolve this team,
   // and its phoneNumberId has to match what the payload carries.
-  await db().channelConnection.upsert({
-    where: {
-      workspaceId_channel_externalAccountId: {
+  //
+  // Clear any OTHER default before claiming it: a partial unique
+  // (`ChannelConnection_one_default_per_channel`) allows exactly one default per
+  // (workspace, channel), so an account left as default by an earlier spec makes
+  // this create a P2002 — which surfaces as a beforeAll failure and takes every
+  // test in the file with it. Same order the product's `setDefaultAccount` uses.
+  const connectionConfig = {
+    phoneNumberId,
+    displayPhoneNumber: "+33600000000",
+    verifyToken: "e2e-ui-verify",
+  };
+  await db().$transaction(async (tx) => {
+    await tx.channelConnection.updateMany({
+      where: {
+        workspaceId,
+        channel: "whatsapp",
+        isDefault: true,
+        NOT: { externalAccountId: phoneNumberId },
+      },
+      data: { isDefault: false },
+    });
+    await tx.channelConnection.upsert({
+      where: {
+        workspaceId_channel_externalAccountId: {
+          workspaceId,
+          channel: "whatsapp",
+          externalAccountId: phoneNumberId,
+        },
+      },
+      create: {
         workspaceId,
         channel: "whatsapp",
         externalAccountId: phoneNumberId,
+        isDefault: true,
+        config: connectionConfig,
+        secrets: { appSecret: encryptSecret(APP_SECRET) },
+        isActive: true,
       },
-    },
-    create: {
-      workspaceId,
-      channel: "whatsapp",
-      externalAccountId: phoneNumberId,
-      isDefault: true,
-      config: {
-        phoneNumberId,
-        displayPhoneNumber: "+33600000000",
-        verifyToken: "e2e-ui-verify",
+      update: {
+        isDefault: true,
+        config: connectionConfig,
+        secrets: { appSecret: encryptSecret(APP_SECRET) },
+        isActive: true,
       },
-      secrets: { appSecret: encryptSecret(APP_SECRET) },
-      isActive: true,
-    },
-    update: {
-      config: {
-        phoneNumberId,
-        displayPhoneNumber: "+33600000000",
-        verifyToken: "e2e-ui-verify",
-      },
-      secrets: { appSecret: encryptSecret(APP_SECRET) },
-      isActive: true,
-    },
+    });
   });
 });
 

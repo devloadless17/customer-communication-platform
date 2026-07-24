@@ -13,7 +13,6 @@ import { cn, formatPhone, initials } from "@ccp/shared/utils";
 
 import { DeleteTeamButton } from "./delete-team-button";
 import { LimitControl } from "./limit-control";
-import { MemberResetPasswordButton } from "./member-reset-password-button";
 
 export const metadata = { title: "Organization · Platform" };
 export const dynamic = "force-dynamic";
@@ -37,13 +36,21 @@ export default async function PlatformOrganizationDetailPage({
   if (!detail) notFound();
 
   const { team, members } = detail;
-  const isOwnTeam = team.id === session.workspaceId;
+  // Compared on the ORGANIZATION, not the workspace: both controls it gates
+  // (delete, approve/suspend) act on the whole org, and the API refuses them
+  // org-wide. Matching on workspace id offered an operator a Delete button for
+  // a SIBLING workspace of their own org that the server then rejected.
+  const isOwnTeam = team.organizationId === session.organizationId;
   const activeMembers = members.filter((m) => !m.deactivatedAt);
   const deactivatedMembers = members.filter((m) => m.deactivatedAt);
-  // Member-cap seats = active, non-superAdmin users (a platform operator
-  // co-located into an org doesn't consume a seat — mirrors the API count).
+  // Member-cap seats = active, non-superAdmin users IN THIS WORKSPACE (a
+  // platform operator co-located into an org doesn't consume a seat — mirrors
+  // the API count). `inWorkspace` is load-bearing here: the roster is now
+  // org-wide, so without it an org member who hasn't joined this workspace
+  // would be counted against a cap they don't consume, and the "N / max"
+  // display would read as full while invites still succeed.
   const memberSeatCount = activeMembers.filter(
-    (m) => !m.isSuperAdmin,
+    (m) => m.inWorkspace && !m.isSuperAdmin,
   ).length;
 
   return (
@@ -57,7 +64,7 @@ export default async function PlatformOrganizationDetailPage({
           All organizations
         </Link>
         <DeleteTeamButton
-          workspaceId={team.id}
+          organizationId={team.organizationId}
           teamName={team.name}
           isOwnTeam={isOwnTeam}
         />
@@ -129,7 +136,7 @@ export default async function PlatformOrganizationDetailPage({
           )}
         </div>
         <TeamStatusControls
-          workspaceId={team.id}
+          organizationId={team.organizationId}
           status={team.status}
           isOwnTeam={isOwnTeam}
         />
@@ -187,9 +194,22 @@ export default async function PlatformOrganizationDetailPage({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="truncate text-sm font-medium">{m.name}</span>
-                    <span className="rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-3xs uppercase text-muted-foreground">
-                      {roleLabel(m.role)}
-                    </span>
+                    {/* The roster is ORG-wide, so it includes people who belong
+                        to no workspace (a half-finished signup, an unaccepted
+                        invite). Showing a workspace role for them would assert
+                        access they don't have — show the org role and say so. */}
+                    {m.inWorkspace ? (
+                      <span className="rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-3xs uppercase text-muted-foreground">
+                        {roleLabel(m.role)}
+                      </span>
+                    ) : (
+                      <span
+                        className="rounded-full border border-dashed border-border px-1.5 py-0.5 text-3xs uppercase text-muted-foreground"
+                        title="In the organization, but not a member of this workspace"
+                      >
+                        Org {m.orgRole} · no workspace access
+                      </span>
+                    )}
                     {m.deactivatedAt && (
                       <span className="inline-flex items-center gap-1 rounded-full border border-warning-border bg-warning-bg px-1.5 py-0.5 text-3xs text-warning-fg">
                         <ShieldX className="size-2.5" />
@@ -205,13 +225,6 @@ export default async function PlatformOrganizationDetailPage({
                   <span className="hidden text-2xs text-muted-foreground sm:inline">
                     Joined <LocalTime iso={m.createdAt} format="listTime" />
                   </span>
-                  {m.id !== session.user.id && (
-                    <MemberResetPasswordButton
-                      workspaceId={team.id}
-                      userId={m.id}
-                      name={m.name}
-                    />
-                  )}
                 </div>
               </li>
             ))}

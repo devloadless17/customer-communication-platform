@@ -86,11 +86,19 @@ export interface ExternalConversation {
   id: string;
   contactId: string;
   /**
-   * Channel the thread lives on — "whatsapp", "instagram", "telegram", …. A
-   * conversation is bound to one contact and therefore one channel; route /
-   * filter threads on this. Today always "whatsapp".
+   * Channel the thread lives on — "whatsapp", "instagram", "messenger",
+   * "webchatwidget", …. A conversation is bound to one contact and therefore
+   * one channel; route / filter threads on this.
    */
   channel: string;
+  /**
+   * Which ACCOUNT on that channel — a workspace may connect several WhatsApp
+   * numbers, Pages or handles, and this names the one the customer is talking
+   * to (and therefore the one a reply goes out from). Re-stamped on every
+   * inbound. Resolve the id against `GET /v1/channel-accounts`. Null when the
+   * thread has never been bound, or its account was disconnected.
+   */
+  channelConnectionId: string | null;
   status: "open" | "pending" | "closed";
   /** Per-thread assignee. Hydrated; null when unassigned. */
   assignee: ExternalAssignee | null;
@@ -257,6 +265,11 @@ export function toExternalConversation(
     unreadCount: c.unreadCount,
     lastMessageAt: c.lastMessageAt.toISOString(),
     lastMessagePreview: c.lastMessagePreview,
+    // Which of the workspace's accounts this thread is on — the WhatsApp
+    // number / Page / IG handle a reply goes out from. Resolve it against
+    // `GET /v1/channel-accounts`. Null on a thread that has never been bound to
+    // an account (or whose account was disconnected).
+    channelConnectionId: c.channelConnectionId ?? null,
     contact,
   };
 }
@@ -324,3 +337,83 @@ export function toExternalMessage(m: MessageWireColumns): ExternalMessage {
   };
 }
 
+
+/**
+ * A WhatsApp template on the `/v1` wire.
+ *
+ * `id` is OURS — it is what `POST /messages/template` and
+ * `GET /templates/:id/analytics` take. `externalId` is Meta's, exposed because
+ * anyone reconciling against WhatsApp Manager needs it.
+ */
+export interface ExternalTemplate {
+  id: string;
+  externalId: string | null;
+  wabaId: string;
+  name: string;
+  language: string;
+  category: string;
+  /** The category Meta will move this to next month, when it disagrees. */
+  correctCategory: string | null;
+  status: string;
+  statusReason: string | null;
+  /** "positional" (`{{1}}`) or "named" (`{{order_id}}`) — decides the send shape. */
+  parameterFormat: string;
+  messageSendTtlSeconds: number | null;
+  bodyText: string;
+  components: unknown;
+  /**
+   * Meta's quality band: GREEN | YELLOW | RED | UNKNOWN, verbatim. Null when
+   * never reported. This is the signal worth alerting on — quality drives
+   * Meta's template pausing, so RED is a template about to stop sending.
+   */
+  qualityScore: string | null;
+  qualityScoreAt: string | null;
+  archivedAt: string | null;
+  lastUsedAt: string | null;
+  syncedAt: string;
+}
+
+export function externalTemplate(t: {
+  id: string;
+  externalId: string | null;
+  wabaId: string;
+  name: string;
+  language: string;
+  category: string;
+  correctCategory: string | null;
+  status: string;
+  statusReason: string | null;
+  parameterFormat: string;
+  messageSendTtlSeconds: number | null;
+  bodyText: string;
+  components: unknown;
+  qualityScore: string | null;
+  qualityScoreAt: Date | null;
+  archivedAt: Date | null;
+  lastUsedAt: Date | null;
+  syncedAt: Date;
+}): ExternalTemplate {
+  return {
+    id: t.id,
+    externalId: t.externalId,
+    wabaId: t.wabaId,
+    name: t.name,
+    language: t.language,
+    category: t.category,
+    // Only a category that DIFFERS is a pending move — same rule the internal
+    // DTO applies, so the two surfaces can't disagree about what's pending.
+    correctCategory:
+      t.correctCategory && t.correctCategory !== t.category ? t.correctCategory : null,
+    status: t.status,
+    statusReason: t.statusReason,
+    parameterFormat: t.parameterFormat,
+    messageSendTtlSeconds: t.messageSendTtlSeconds,
+    bodyText: t.bodyText,
+    components: t.components,
+    qualityScore: t.qualityScore,
+    qualityScoreAt: t.qualityScoreAt?.toISOString() ?? null,
+    archivedAt: t.archivedAt?.toISOString() ?? null,
+    lastUsedAt: t.lastUsedAt?.toISOString() ?? null,
+    syncedAt: t.syncedAt.toISOString(),
+  };
+}

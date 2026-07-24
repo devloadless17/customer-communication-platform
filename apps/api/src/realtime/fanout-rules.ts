@@ -387,7 +387,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // (CLAUDE.md §10). Note there is no audit/analytics/workflow/webhook
   // subscriber for this event — see the type's docblock.
   "contact.transfer_updated": (e, emitter) => {
-    emitter.emitToUser(e.userId, "contacts:transfer_progress", {
+    emitter.emitToUser(e.workspaceId, e.userId, "contacts:transfer_progress", {
       workspaceId: e.workspaceId,
       job: e.job,
     });
@@ -659,7 +659,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
     );
     if (e.action === "removed") {
       for (const uid of e.userIds) {
-        emitter.emitToUser(uid, "team:channel:members:changed", payload);
+        emitter.emitToUser(e.workspaceId, uid, "team:channel:members:changed", payload);
       }
     }
     // Catalog tick so the channel list (memberCount, visibility) refreshes
@@ -679,7 +679,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // member of the team refetch whenever any two people start a DM; here the
     // audience is exactly known, so we address it directly.
     for (const uid of e.memberUserIds) {
-      emitter.emitToUser(uid, "team:dm:created", {
+      emitter.emitToUser(e.workspaceId, uid, "team:dm:created", {
         workspaceId: e.workspaceId,
         channelId: e.channelId,
         createdByUserId: e.createdByUserId,
@@ -717,7 +717,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // client-side `if (userId !== me) return` keeping it off screen — it was
     // still on the wire and readable in any teammate's devtools.
     if (e.manual !== undefined || e.until !== undefined) {
-      emitter.emitToUser(e.userId, "user:availability:updated", {
+      emitter.emitToUser(e.workspaceId, e.userId, "user:availability:updated", {
         workspaceId: e.workspaceId,
         userId: e.userId,
         status: e.status as "available" | "busy" | "away" | "offline",

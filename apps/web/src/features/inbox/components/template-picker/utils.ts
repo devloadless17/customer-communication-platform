@@ -33,3 +33,15 @@ export function extractExample(arr: string[] | undefined, i: number): string | u
   const v = arr[i];
   return v && v.length > 0 ? v : undefined;
 }
+
+/**
+ * A button's `example` as an array.
+ *
+ * Meta writes the URL button's example as an ARRAY (`["summer2023"]`) and the
+ * copy-code button's as a bare STRING (`"250FF"`). Both really occur on the
+ * wire, so every reader has to accept either rather than assume one.
+ */
+export function asArray(example: string | string[] | undefined): string[] | undefined {
+  if (example === undefined) return undefined;
+  return Array.isArray(example) ? example : [example];
+}

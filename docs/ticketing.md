@@ -47,8 +47,76 @@ At ingest, in the same transaction as the message write:
 
 1. An **active** (non-terminal) ticket on the thread → attach to it.
 2. Otherwise a ticket **solved inside `Workspace.ticketReopenWindowHours`** (default **72h**) → reopen it.
-3. Otherwise **auto-open** a new ticket — unless `Workspace.ticketAutoOpen` is off, in which case the
+3. Otherwise **auto-open** a new ticket — but only if `Workspace.ticketAutoOpen` is on, which it is
+   **not by default** (changed 2026-07-23). With it off — the normal case — the
    message simply carries no `ticketId`.
+
+## Handing a ticket to another team
+
+The reason ticketing exists in this product: a customer messages Support, the issue turns
+out to belong to Sales, and Support needs to hand it over — so Sales either takes the
+customer on, or just tells Support what to answer.
+
+A ticket therefore has **two independent owners**, and every combination is meaningful:
+
+| `assignedTeamId` | `assignedUserId` | means |
+|---|---|---|
+| Sales | — | **in Sales' queue, unclaimed** |
+| Sales | Omar | claimed by someone on Sales |
+| — | Omar | assigned directly, no queue |
+| — | — | unassigned backlog |
+
+That first row is the whole point. Modelling ownership only as a PERSON forced the
+handing-over agent to pick *which individual* on the other team should own it — the one
+decision they are least qualified to make.
+
+A "team" is an `AssignmentPolicy` — the existing per-workspace group with membership,
+capacity and routing strategy. No new entity.
+
+Rules worth knowing:
+- Handing over **clears the assignee** unless the caller names one in the same write.
+  Keeping the old one leaves the ticket looking claimed by the team that just handed it
+  away, so it sits in nobody's queue and nobody's list.
+- The team is validated against **this** workspace and must not be archived — on create
+  *and* update. The FK alone only proves the row exists; without the check you could hand
+  work to another tenant's queue whose members cannot open the conversation behind it.
+- `policyId` is **provenance** ("which queue did this arrive through") and never changes on
+  a handoff. `assignedTeamId` is who owns it now. Collapsing them would make "where did
+  this come from" unanswerable the moment work moves.
+- The timeline event is **`team_changed`**, not `assigned` — a handoff and a claim are
+  different things, and conflating them makes "how long did Sales sit on this"
+  unanswerable. Both team ids are snapshotted so it still reads "Support → Sales" after a
+  rename, and "a removed team" after a delete.
+- Deleting a team is `SetNull`: its tickets fall back to the visible backlog rather than
+  disappearing with it.
+
+### Internal notes
+
+`TicketEvent.kind = "note"` with the text in `body`. This is the other half of a handoff —
+the receiving team answers *what to say* without messaging the customer themselves. Without
+it their only options are silence or contacting the customer directly, and a handoff that
+forces the second one is a transfer, not a handoff.
+
+Notes live on the ticket **timeline**, not a separate table, because that is where they
+have to be read: the question ("handed to you because…") and the answer belong on one
+screen. Adding one is its own route (`POST /tickets/:id/notes`) rather than a field on the
+update — a note changes nothing about the ticket, so it must not bump `version` (which
+would 409 a colleague's open editor) or move the SLA clock.
+
+### Why not across workspaces
+
+Handing a ticket to a different **workspace** cannot deliver "so they continue with the
+customer", and the reason is WhatsApp, not our isolation model: the customer messaged **one
+number**, and Meta's 24-hour window and thread affinity belong to that number. Another
+workspace has a different number, so it can only start a *new* conversation needing an
+approved template — which reads to the customer as a different business.
+
+If two groups serve the same customer, they are **teams in one workspace**. Separate
+workspaces are for genuinely separate businesses. (A cross-workspace *referral* — a linked
+ticket carrying a deliberate contact snapshot, so the other business can start their own
+conversation — is a coherent but different feature, and is not built.)
+
+---
 
 **The reopen window is the single most-debatable rule in ticketing.** Too short and one issue becomes
 three tickets; too long and a genuinely new question gets buried in resolved work. That is exactly why

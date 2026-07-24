@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, NotFoundException, Patch, Put, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, ForbiddenException, Get, NotFoundException, Patch, Put, UseGuards } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
@@ -164,10 +164,31 @@ export class WorkspaceRootController {
     return { team: { id: session.workspaceId, name } };
   }
 
+  /**
+   * Delete the whole ORGANIZATION — every workspace in it, then the org row
+   * and its user directory.
+   *
+   * This used to destroy only `session.workspaceId`, which did not match what
+   * the one UI that calls it promises ("removes the organization and EVERYTHING
+   * in it — every teammate's account") and left the caller signed out into an
+   * org with no workspace: unusable, invisible to the platform list (which
+   * enumerates workspaces), and still holding every member's globally-unique
+   * email. There is no per-workspace delete surface, so this is unambiguously
+   * the tenant-level action.
+   *
+   * OWNER only, not workspace-admin. Now that it spans every workspace in the
+   * org, a workspace-scoped `admin` would otherwise be able to destroy sibling
+   * workspaces they are not even a member of.
+   */
   @RequireRole("admin")
   @Delete()
   async remove(@CurrentSession() session: ApiSession) {
-    await this.teamRoot.destroy(session.workspaceId, "api/workspace");
+    if (session.orgRole !== "owner") {
+      throw new ForbiddenException({
+        error: "only the organization owner can delete the organization",
+      });
+    }
+    await this.teamRoot.destroyOrganization(session.organizationId, "api/workspace");
     return { ok: true };
   }
 }

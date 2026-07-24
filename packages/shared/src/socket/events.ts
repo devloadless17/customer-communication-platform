@@ -165,6 +165,8 @@ export interface ServerToClientEvents {
     action:
       | "created"
       | "assigned"
+      /** Handed to a different TEAM — the board must re-render both queues. */
+      | "team_changed"
       | "status_changed"
       | "priority_changed"
       | "reopened"

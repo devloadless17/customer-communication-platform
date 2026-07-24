@@ -142,7 +142,7 @@ test("contact panel mounts clean — Assignee/Stage sections removed (they live 
 
 test.describe("swept surfaces stay clean in a real build", () => {
   for (const path of [
-    "/settings/notifications", // Switch primitive
+    "/account/notifications", // Switch primitive — per-PERSON page, moved from /settings/* in the workspace restructure
     "/settings/permissions", // Switch + sticky matrix
     "/contacts", // live regions + EmptyState
     "/broadcasts/new", // SSR-seeded templates

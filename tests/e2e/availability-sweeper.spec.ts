@@ -202,9 +202,24 @@ test("the flip reaches connected clients as exactly ONE realtime frame", async (
   await page.waitForTimeout(65_000);
 
   const mine = frames.filter((f) => f.includes(adminUserId) && f.includes('"away"'));
-  // Exactly one: `applyAvailability` no-ops when nothing changed, so a member
-  // sitting off-shift must NOT be re-announced every 60s for the rest of the
-  // night. This is the guard against a slow team-room frame leak.
-  expect(mine.length, `frames: ${JSON.stringify(frames)}`).toBe(1);
-  expect(mine[0]).toContain("schedule");
+
+  // ONE ANNOUNCEMENT — which is two frames, deliberately.
+  //
+  // Each `user.availability_changed` fans out as a pair: a TEAM badge frame
+  // (`emitToTeam`) that every teammate sees, and a PRIVATE frame to the user's
+  // own room carrying `manual` — the note THEY typed. That split is a privacy
+  // fix, not an accident: putting "Doctor's appointment — back later" on the
+  // team frame shipped the text to every teammate's socket. And `manual` is
+  // published unconditionally, so the private frame always accompanies the
+  // team one; asserting a raw count of 1 could never pass.
+  //
+  // What actually matters — and what this test is for — is that the flip is
+  // announced ONCE and not re-announced every 60s for the rest of the night
+  // (`applyAvailability` no-ops when nothing changed). So count ANNOUNCEMENTS:
+  // exactly one team frame, i.e. the one without the private `manual` payload.
+  const announcements = mine.filter((f) => !f.includes('"manual"'));
+  const privateFrames = mine.filter((f) => f.includes('"manual"'));
+  expect(announcements.length, `frames: ${JSON.stringify(frames)}`).toBe(1);
+  expect(privateFrames.length, `frames: ${JSON.stringify(frames)}`).toBe(1);
+  expect(announcements[0]).toContain("schedule");
 });

@@ -8,8 +8,12 @@ import {
   FileText,
   Loader2,
   Plus,
+  Pencil,
   RefreshCw,
+  ShieldCheck,
+  Sparkles,
   Search,
+  Play,
   Trash2,
   X,
 } from "lucide-react";
@@ -26,6 +30,12 @@ import type { ContactFieldDefinition, TemplateDto } from "@ccp/shared/types";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import { parseVariableBindings, type VariableBindings } from "@ccp/shared/template-bindings";
 import { TemplateInsights } from "@/features/broadcasts/charts/template-insights";
+import { TemplateComparison } from "@/features/templates/components/template-comparison";
+import {
+  TEMPLATE_AUTO_ARCHIVE_MONTHS,
+  templateArchivalRisk,
+  templateDeletionDaysLeft,
+} from "@ccp/shared/template-render";
 import { cn } from "@ccp/shared/utils";
 
 /**
@@ -180,9 +190,22 @@ export function TemplatesView({
 
   const askDelete = useCallback(
     async (target: TemplateDto) => {
+      // Meta blocks reusing an APPROVED template's NAME for 30 days after
+      // deletion, so "delete and recreate" — which this app used to recommend —
+      // strands the operator for a month. Say so before they commit, and point
+      // at editing, which has no such penalty.
+      const nameLocked = target.status === "approved";
       const ok = await confirm({
         title: `Delete “${target.name}”?`,
-        description: `The “${target.language}” variant will be removed from your WhatsApp Business Account and from this app. This can’t be undone.`,
+        description:
+          `The “${target.language}” variant will be removed from your WhatsApp ` +
+          `Business Account and from this app. This can’t be undone.` +
+          (nameLocked
+            ? `\n\nBecause it’s approved, Meta won’t let you create another template ` +
+              `called “${target.name}” for 30 days. If you only need to change its ` +
+              `content or category, edit it instead — an edit re-enters review ` +
+              `without losing the name.`
+            : ""),
         confirmLabel: "Delete template",
         destructive: true,
       });
@@ -211,6 +234,49 @@ export function TemplatesView({
     },
     [confirm, selectedId],
   );
+
+  const [unpausing, setUnpausing] = useState<string | null>(null);
+  const [unpauseError, setUnpauseError] = useState<string | null>(null);
+
+  /**
+   * Lift a quality pause.
+   *
+   * Meta lifts a quality pause itself (3h, then 6h, then it DISABLES the
+   * template), so this is not the normal recovery path — it is for a template
+   * paused by Template Pacing, which never unpauses on its own.
+   */
+  const onUnpause = useCallback(async (target: TemplateDto) => {
+    setUnpauseError(null);
+    setUnpausing(target.id);
+    try {
+      const res = await apiFetch(
+        `/api/workspace/whatsapp/templates/${target.id}/unpause`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as
+          | { error?: string; detail?: string }
+          | null;
+        throw new Error(
+          [data?.error, data?.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`,
+        );
+      }
+      // Meta re-derives the band from recent feedback on unpause, so the RED
+      // that caused the pause is cleared server-side — mirror that here rather
+      // than leaving a stale band next to an active status.
+      setTemplates((cur) =>
+        cur.map((t) =>
+          t.id === target.id
+            ? { ...t, status: "approved", qualityScore: null, qualityScoreAt: null }
+            : t,
+        ),
+      );
+    } catch (err) {
+      setUnpauseError(err instanceof Error ? err.message : "Unpause failed");
+    } finally {
+      setUnpausing(null);
+    }
+  }, []);
 
   const onBindingsSaved = useCallback((id: string, bindings: VariableBindings) => {
     setTemplates((cur) =>
@@ -283,6 +349,28 @@ export function TemplatesView({
             {syncing ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
             Refresh from Meta
           </Button>
+          {/* The library is the FASTER path — an unchanged blueprint is approved
+              immediately, where an authored template waits for review — so it
+              sits beside "New template" rather than buried inside it. */}
+          {canManage && connected && hasWabaId && (
+            <Button asChild variant="outline">
+              <Link href="/templates/library" className="gap-1.5">
+                <Sparkles className="size-4" />
+                Browse library
+              </Link>
+            </Button>
+          )}
+          {/* Its own entry point because an authentication template has nothing
+              to author — the wording is Meta's. Sending people through the
+              composer would offer an editor for copy that can't be edited. */}
+          {canManage && connected && hasWabaId && (
+            <Button asChild variant="outline">
+              <Link href="/templates/authentication" className="gap-1.5">
+                <ShieldCheck className="size-4" />
+                Authentication
+              </Link>
+            </Button>
+          )}
           {canManage &&
             (!connected || !hasWabaId ? (
               // Render a REAL disabled button (not asChild→<a>, which ignores
@@ -344,6 +432,7 @@ export function TemplatesView({
 
       <DetailDrawer
         template={selected}
+        allTemplates={templates}
         fieldDefinitions={fieldDefinitions}
         deleting={deleting}
         deleteError={deleteError}
@@ -352,6 +441,9 @@ export function TemplatesView({
         canManage={canManage}
         onClose={() => setSelectedId(null)}
         onDelete={() => selected && askDelete(selected)}
+        unpausing={unpausing === selected?.id}
+        unpauseError={unpauseError}
+        onUnpause={() => selected && void onUnpause(selected)}
         onBindingsSaved={onBindingsSaved}
         onReload={reload}
       />
@@ -406,10 +498,27 @@ function TemplateCard({
               <span className="font-mono">{template.language}</span>
               <span aria-hidden="true">·</span>
               <CategoryPill category={template.category} />
+              {/* Pricing is about to change for this template — worth seeing
+                  without opening the drawer. */}
+              {template.correctCategory && (
+                <span
+                  className="text-warning-fg"
+                  title={`Meta will move this template to ${template.correctCategory}`}
+                >
+                  → {template.correctCategory}
+                </span>
+              )}
             </div>
           </div>
         </div>
-        <StatusPill status={template.status} />
+        <div className="flex shrink-0 items-center gap-1.5">
+          <QualityDot
+            score={template.qualityScore}
+            at={template.qualityScoreAt}
+            status={template.status}
+          />
+          <StatusPill status={template.status} />
+        </div>
       </div>
 
       <p className="line-clamp-3 text-[12.5px] leading-relaxed text-muted-foreground">
@@ -482,6 +591,10 @@ function StatusFilterTabs({
     { key: "rejected", label: "Rejected" },
     { key: "paused", label: "Paused" },
     { key: "disabled", label: "Disabled" },
+    // Last, and only rendered when non-empty (the tab strip hides zero-count
+    // tabs) — but the tab has to EXIST or an archived template is invisible
+    // except under "All", which is where the 28-day window gets missed.
+    { key: "archived", label: "Archived" },
   ];
 
   return (
@@ -513,6 +626,101 @@ function StatusFilterTabs({
   );
 }
 
+/** Compact TTL, e.g. `30d` / `12h` / `600s`. */
+function formatTtl(seconds: number): string {
+  if (seconds % 86_400 === 0) return `${seconds / 86_400}d`;
+  if (seconds % 3_600 === 0) return `${seconds / 3_600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
+}
+
+/** WhatsApp Manager's own wording for a band, so the surfaces agree. */
+function qualityLabel(score: string): string {
+  const band = score.toUpperCase();
+  return band === "GREEN"
+    ? "High quality"
+    : band === "YELLOW"
+      ? "Medium quality"
+      : band === "RED"
+        ? "Low quality"
+        : band === "UNKNOWN"
+          ? "Quality pending"
+          : band;
+}
+
+/** What the band means for the operator — i.e. what to DO about it. */
+function qualityExplanation(score: string): string {
+  const band = score.toUpperCase();
+  if (band === "GREEN") {
+    return "Little to no negative feedback from recipients.";
+  }
+  if (band === "YELLOW") {
+    return "Several recipients gave negative feedback, or read rates are low. Still sending, but it may be paused if this continues.";
+  }
+  if (band === "RED") {
+    return "Repeated negative feedback or low read rates. It still sends, but it is in danger of being paused — rewrite the copy or tighten who receives it.";
+  }
+  if (band === "UNKNOWN") {
+    return "Not enough recipient feedback yet. Every new template starts here.";
+  }
+  return "Reported by Meta.";
+}
+
+/**
+ * Meta's template quality band, as a dot beside the status.
+ *
+ * Deliberately small: quality is a WARNING SIGNAL, not a state — it never
+ * changes whether a template can be sent (all four bands send). What it
+ * predicts is a PAUSE: quality drives Meta's template pacing and pausing, so a
+ * red dot is a template about to stop working, which is worth catching before
+ * the status flips.
+ *
+ * Only shown on approved templates, matching WhatsApp Manager — a rejected
+ * template's band is noise. GREEN is shown too (a quiet confirmation), but
+ * UNKNOWN is not: "we have no data yet" is the default state of every new
+ * template and a dot for it would just be clutter.
+ */
+function QualityDot({
+  score,
+  at,
+  status,
+}: {
+  score: string | null;
+  at: string | null;
+  status: string;
+}) {
+  if (status !== "approved" || !score) return null;
+  const band = score.toUpperCase();
+  if (band === "UNKNOWN") return null;
+  const tone =
+    band === "GREEN"
+      ? "bg-success-fg"
+      : band === "YELLOW"
+        ? "bg-warning-fg"
+        : band === "RED"
+          ? "bg-destructive"
+          : "bg-muted-foreground";
+  // Manager's own wording, so the two surfaces agree at a glance.
+  const label =
+    band === "GREEN"
+      ? "High quality"
+      : band === "YELLOW"
+        ? "Medium quality"
+        : band === "RED"
+          ? "Low quality — at risk of being paused"
+          : band;
+  return (
+    <span
+      className={cn("size-2 shrink-0 rounded-full", tone)}
+      // A title attribute can't render a component, so this one date is
+      // formatted inline. It's a tooltip, not page content — nothing for
+      // hydration to compare.
+      title={at ? `${label} (as of ${new Date(at).toLocaleDateString()})` : label}
+      aria-label={label}
+    />
+  );
+}
+
 function StatusPill({ status }: { status: string }) {
   const tone =
     status === "approved"
@@ -521,7 +729,11 @@ function StatusPill({ status }: { status: string }) {
         ? "border-warning-border bg-warning-bg text-warning-fg"
         : status === "rejected"
           ? "border-destructive/30 bg-destructive/10 text-destructive"
-          : "border-border bg-muted/40 text-muted-foreground";
+          : // Archived is a DEADLINE, not a dead end — it reads as a warning
+            // because there are 28 days to act, unlike disabled/paused.
+            status === "archived"
+            ? "border-warning-border bg-warning-bg text-warning-fg"
+            : "border-border bg-muted/40 text-muted-foreground";
   return (
     <span
       className={cn(
@@ -550,6 +762,7 @@ function CategoryPill({ category }: { category: string }) {
 
 function DetailDrawer({
   template,
+  allTemplates,
   fieldDefinitions,
   deleting,
   deleteError,
@@ -558,10 +771,15 @@ function DetailDrawer({
   canManage,
   onClose,
   onDelete,
+  unpausing,
+  unpauseError,
+  onUnpause,
   onBindingsSaved,
   onReload,
 }: {
   template: TemplateDto | null;
+  /** The workspace's whole catalog — the comparison picker's candidate pool. */
+  allTemplates: TemplateDto[];
   fieldDefinitions: ContactFieldDefinition[];
   deleting: boolean;
   deleteError: string | null;
@@ -570,6 +788,9 @@ function DetailDrawer({
   canManage: boolean;
   onClose: () => void;
   onDelete: () => void;
+  unpausing: boolean;
+  unpauseError: string | null;
+  onUnpause: () => void;
   onBindingsSaved: (id: string, bindings: VariableBindings) => void;
   onReload: () => void;
 }) {
@@ -603,6 +824,14 @@ function DetailDrawer({
                   <span className="font-mono">{template.language}</span>
                   <span aria-hidden="true">·</span>
                   <CategoryPill category={template.category} />
+                  {template.messageSendTtlSeconds != null && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span title="Meta retries delivery for this long before giving up">
+                        TTL {formatTtl(template.messageSendTtlSeconds)}
+                      </span>
+                    </>
+                  )}
                   {template.externalId && (
                     <>
                       <span aria-hidden="true">·</span>
@@ -625,6 +854,77 @@ function DetailDrawer({
 
             <div className="flex-1 overflow-y-auto">
               <div className="flex flex-col gap-6 px-5 py-5">
+                {/* The 28-day rescue window. Meta gives no way back through the
+                    API, so the only honest action is a pointer to WhatsApp
+                    Manager — with the clock, because it runs out silently. */}
+                {template.status === "archived" && (
+                  <div className="rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-xs">
+                    <span className="font-medium text-warning-fg">
+                      Archived after {TEMPLATE_AUTO_ARCHIVE_MONTHS} months without use.
+                    </span>{" "}
+                    <span className="text-muted-foreground">
+                      {(() => {
+                        const days = templateDeletionDaysLeft(template.archivedAt);
+                        return days === null
+                          ? "Meta deletes archived templates permanently after 28 days."
+                          : days === 0
+                            ? "Meta may delete it permanently at any moment."
+                            : `Meta deletes it permanently in about ${days} day${days === 1 ? "" : "s"}.`;
+                      })()}{" "}
+                      Unarchive it in{" "}
+                      <a
+                        href="https://business.facebook.com/latest/whatsapp_manager/message_templates"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-primary hover:underline"
+                      >
+                        WhatsApp Manager
+                      </a>{" "}
+                      to restore it to its previous status and cancel the deletion.
+                      Meta also exposes bulk archive/unarchive endpoints; wiring
+                      them here is pending their published request shape.
+                    </span>
+                  </div>
+                )}
+
+                {/* Better than reporting archival after the fact: sending the
+                    template even once resets Meta's clock entirely. */}
+                {template.status !== "archived" &&
+                  (() => {
+                    const risk = templateArchivalRisk(template.lastUsedAt);
+                    if (!risk?.atRisk) return null;
+                    return (
+                      <div className="rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-xs">
+                        <span className="font-medium text-warning-fg">
+                          Nearly inactive for {TEMPLATE_AUTO_ARCHIVE_MONTHS} months.
+                        </span>{" "}
+                        <span className="text-muted-foreground">
+                          Meta auto-archives it in about{" "}
+                          {Math.max(0, risk.daysLeft)} day
+                          {risk.daysLeft === 1 ? "" : "s"}. Sending it once resets
+                          the clock.
+                        </span>
+                      </div>
+                    );
+                  })()}
+
+                {/* Advance notice, NOT a state change: Meta bills this template
+                    at its current category until the move actually lands. */}
+                {template.correctCategory && (
+                  <div className="rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-xs">
+                    <span className="font-medium text-warning-fg">
+                      Category change scheduled.
+                    </span>{" "}
+                    <span className="text-muted-foreground">
+                      Meta will move this template from{" "}
+                      <span className="font-medium">{template.category}</span> to{" "}
+                      <span className="font-medium">{template.correctCategory}</span>,
+                      typically on the first of next month — which changes what it
+                      costs to send. You can request a review in WhatsApp Manager
+                      before then.
+                    </span>
+                  </div>
+                )}
                 <section>
                   <SectionLabel>Preview</SectionLabel>
                   <div className="mt-2 rounded-xl border border-border bg-muted/30 p-4">
@@ -637,6 +937,71 @@ function DetailDrawer({
                     />
                   </div>
                 </section>
+
+                {/* What a pause actually means, and what happens next. The
+                    escalation ladder is the part nobody knows: the third
+                    instance doesn't pause, it DISABLES the template. */}
+                {template.status === "paused" && (
+                  <section>
+                    <SectionLabel>Paused</SectionLabel>
+                    <div className="mt-2 rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-xs leading-relaxed text-warning-fg">
+                      <p>
+                        WhatsApp pauses a template when its quality hits{" "}
+                        <strong>low</strong>, to protect the numbers that send
+                        it. It can&apos;t be sent while paused — the API rejects
+                        the attempts, though they aren&apos;t charged and
+                        don&apos;t count against your messaging limit. Any
+                        campaigns using it have been paused too.
+                      </p>
+                      <p className="mt-1.5">
+                        A quality pause lifts itself after <strong>3 hours</strong>
+                        , then <strong>6 hours</strong> on the second instance —
+                        and on the <strong>third, Meta disables the template</strong>{" "}
+                        instead. A template paused by Template Pacing never lifts
+                        on its own; use Unpause for that one.
+                      </p>
+                      <p className="mt-1.5">
+                        Editing the copy re-enters review, so it can&apos;t be
+                        sent until it&apos;s approved again — worth it if the
+                        content is what&apos;s drawing the negative feedback.
+                        Tightening who receives it often matters more.
+                      </p>
+                    </div>
+                  </section>
+                )}
+
+                {/* Quality band. Above Performance because it is the ACTIONABLE
+                    signal — the daily figures tell you how a template did, this
+                    tells you whether it is about to stop working. */}
+                {template.status === "approved" &&
+                  template.qualityScore &&
+                  template.qualityScore.toUpperCase() !== "UNKNOWN" && (
+                    <section>
+                      <SectionLabel>Quality</SectionLabel>
+                      <div className="mt-2 flex items-start gap-2">
+                        <QualityDot
+                          score={template.qualityScore}
+                          at={template.qualityScoreAt}
+                          status={template.status}
+                        />
+                        <div className="min-w-0 text-xs leading-relaxed">
+                          <div className="font-medium text-foreground">
+                            {qualityLabel(template.qualityScore)}
+                          </div>
+                          <p className="mt-0.5 text-muted-foreground">
+                            {qualityExplanation(template.qualityScore)}
+                            {template.qualityScoreAt && (
+                              <>
+                                {" "}
+                                Last updated{" "}
+                                <LocalTime iso={template.qualityScoreAt} format="localeDate" />.
+                              </>
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                    </section>
+                  )}
 
                 {/* Meta's own figures for this template. Placed under the
                     preview because "is this template working" is the question
@@ -656,6 +1021,23 @@ function DetailDrawer({
                   </section>
                 )}
 
+                {/* Head-to-head. Sits under Performance because "is this one
+                    working" naturally leads to "is the other one better" —
+                    which is the question a second template exists to answer. */}
+                {template.externalId && (
+                  <section>
+                    <SectionLabel>Compare</SectionLabel>
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                      Which of two templates customers block less. Meta requires
+                      both to be on the same WhatsApp Business Account and each to
+                      have been sent at least 1,000 times in the window.
+                    </p>
+                    <div className="mt-3">
+                      <TemplateComparison template={template} candidates={allTemplates} />
+                    </div>
+                  </section>
+                )}
+
                 <section>
                   <SectionLabel>Variable bindings</SectionLabel>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
@@ -668,6 +1050,7 @@ function DetailDrawer({
                     {canManage ? (
                       <VariableBindingsEditor
                         templateId={template.id}
+                        parameterFormat={template.parameterFormat}
                         components={
                           Array.isArray(template.components)
                             ? (template.components as TemplateComponent[])
@@ -691,9 +1074,28 @@ function DetailDrawer({
                   <section>
                     <SectionLabel>Rejection details</SectionLabel>
                     <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
-                      Meta rejected this template. WhatsApp Manager has the
-                      specific reason — once fixed, delete this and submit a
-                      new one with the corrected content.
+                      {template.statusReason === "INCORRECT_CATEGORY" ? (
+                        <>
+                          Meta rejected this template because it disagrees with the
+                          category you chose — the content doesn&apos;t match{" "}
+                          <span className="font-medium">{template.category}</span>.
+                          Resubmit under a different category, or request a review
+                          in WhatsApp Manager. Rewriting the copy isn&apos;t
+                          necessarily what&apos;s needed here.
+                        </>
+                      ) : (
+                        <>
+                          Meta rejected this template
+                          {template.statusReason ? (
+                            <>
+                              {" "}
+                              (<code className="font-mono">{template.statusReason}</code>)
+                            </>
+                          ) : null}
+                          . Once fixed, delete this and submit a new one with the
+                          corrected content.
+                        </>
+                      )}
                     </div>
                   </section>
                 )}
@@ -712,6 +1114,12 @@ function DetailDrawer({
                 <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                   <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                   <span className="wrap-break-word">{deleteError}</span>
+                </div>
+              )}
+              {unpauseError && (
+                <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                  <span className="wrap-break-word">{unpauseError}</span>
                 </div>
               )}
               {reloadError && (
@@ -740,6 +1148,28 @@ function DetailDrawer({
                     )}
                     Reload
                   </Button>
+                  {/* Unpause. A QUALITY pause lifts itself (3h, then 6h, then
+                      Meta disables the template), so this is really for one
+                      paused by Template Pacing — those never unpause on their
+                      own. Harmless on either, and it also releases the campaigns
+                      we parked when the pause arrived. */}
+                  {canManage && template.status === "paused" && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={onUnpause}
+                      disabled={unpausing}
+                      className="gap-1.5"
+                    >
+                      {unpausing ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <Play className="size-3.5" />
+                      )}
+                      Unpause
+                    </Button>
+                  )}
                   {canManage && (
                     <Button
                       type="button"
@@ -757,6 +1187,19 @@ function DetailDrawer({
                       Delete
                     </Button>
                   )}
+                  {/* Editing keeps the name and the history, and — unlike
+                      delete+recreate — costs no 30-day name lock. Offered only
+                      from the states Meta actually accepts an edit from, so the
+                      button is never a guaranteed 409. */}
+                  {canManage &&
+                    ["approved", "rejected", "paused"].includes(template.status) && (
+                      <Button asChild variant="outline" size="sm">
+                        <Link href={`/templates/${template.id}/edit`} className="gap-1.5">
+                          <Pencil className="size-3.5" />
+                          Edit
+                        </Link>
+                      </Button>
+                    )}
                 </div>
               </div>
             </footer>

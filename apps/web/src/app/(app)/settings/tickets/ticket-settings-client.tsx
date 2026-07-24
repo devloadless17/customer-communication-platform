@@ -79,8 +79,8 @@ function Behaviour({ settings, onSave }: { settings: TicketSettingsView; onSave:
       <h2 className="mb-3 text-sm font-semibold">How tickets open</h2>
 
       <Row
-        title="Open a ticket automatically"
-        hint="When a customer messages and there's no active ticket on the thread, open one. Off means tickets only exist when someone creates them — and there's no backlog to report on."
+        title="Open a ticket automatically for every incoming message"
+        hint="Off by default, and that is usually right: the inbox already tracks every conversation, so auto-opening makes a ticket mean the same thing and fills the board with work nobody raised. Leave it off and a ticket means someone decided this needs work — with a subject, a priority and an assignee. Turn it on only for a high-volume desk that genuinely wants one ticket per incoming message."
       >
         <Switch
           checked={settings.ticketAutoOpen}

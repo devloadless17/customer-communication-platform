@@ -14,6 +14,7 @@ import { ChannelAccountsModule } from "@/workspace-settings/channel-accounts/cha
 import { TicketsModule } from "@/tickets/tickets.module";
 import { MessageFlagsCatalogModule } from "@/workspace-settings/message-flags/message-flags-catalog.module";
 import { InboxViewsModule } from "@/inbox-views/inbox-views.module";
+import { WhatsappModule } from "@/workspace-settings/whatsapp/whatsapp.module";
 
 @Module({
   // ContactsModule exports ContactTransferService — /v1 import/export runs the
@@ -48,6 +49,10 @@ import { InboxViewsModule } from "@/inbox-views/inbox-views.module";
     // second implementation here would mean a view could select different
     // conversations through the API than it shows in the product.
     InboxViewsModule,
+    // Same service the templates page calls — an unpause has to do the same
+    // three things either way (Meta call, local status, resume the campaigns we
+    // parked), and a second copy of that would drift.
+    WhatsappModule,
   ],
   controllers: [ExternalV1Controller],
   providers: [

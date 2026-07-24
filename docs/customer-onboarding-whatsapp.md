@@ -86,9 +86,22 @@ The temporary token shown on the API Setup page expires in 24 hours. You need a 
 2. Click **Add**, name it (e.g. "Platform Bot"), set role to **Admin**
 3. Click **Generate Token**
 4. Select your Developer App
-5. Enable both permissions:
-   - `whatsapp_business_messaging`
-   - `whatsapp_business_management`
+5. Enable these permissions:
+   - `whatsapp_business_messaging` — **required** (sending)
+   - `whatsapp_business_management` — **required** (templates, phone-number node)
+   - `business_management` — **grant this too.** Meta lists it as *optional*,
+     and it is, for sending. But it is what lets us read the **business
+     portfolio** — and since 2025-10-07 the portfolio is what owns the 24-hour
+     messaging limit (shared by every number under it) and the template limit
+     (250 unverified, up to 6,000 verified). Without it the Channels →
+     WhatsApp panel shows "Business portfolio not resolved", the shared 24h
+     budget and template headroom are blank, and large broadcasts go out
+     **ungated** — Meta still enforces the real limit, so the failure mode is a
+     refused send rather than an overcharge, but you lose the warning that
+     would have prevented it.
+
+   You do **not** need `whatsapp_business_manage_events` (Marketing Messages
+   Lite API + Conversions API only) or `email`.
 6. Set expiration to **Never**
 7. Copy and save the token — Meta only shows it once
 

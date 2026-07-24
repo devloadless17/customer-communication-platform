@@ -228,7 +228,7 @@ export class UsersController {
     const user = await this.users.setUserAvailability(
       session.workspaceId,
       session.userId,
-      { role: session.role, isSuperAdmin: session.isSuperAdmin },
+      { role: session.role, isSuperAdmin: session.isSuperAdmin, orgRole: session.orgRole },
       id,
       body,
     );
@@ -263,7 +263,7 @@ export class UsersController {
   ) {
     const user = await this.users.setUserWorkHours(
       session.workspaceId,
-      { role: session.role, isSuperAdmin: session.isSuperAdmin },
+      { role: session.role, isSuperAdmin: session.isSuperAdmin, orgRole: session.orgRole },
       id,
       body,
     );
@@ -279,7 +279,7 @@ export class UsersController {
   ) {
     const user = await this.users.update(
       session.workspaceId,
-      { role: session.role, isSuperAdmin: session.isSuperAdmin },
+      { role: session.role, isSuperAdmin: session.isSuperAdmin, orgRole: session.orgRole },
       session.userId,
       id,
       body,
@@ -313,7 +313,7 @@ export class UsersController {
     }
     await this.users.resetPassword(
       session.workspaceId,
-      { role: session.role, isSuperAdmin: session.isSuperAdmin },
+      { role: session.role, isSuperAdmin: session.isSuperAdmin, orgRole: session.orgRole },
       id,
       body.newPassword,
     );
@@ -326,7 +326,7 @@ export class UsersController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.users.remove(session.workspaceId, { role: session.role, isSuperAdmin: session.isSuperAdmin }, session.userId, id);
+    await this.users.remove(session.workspaceId, { role: session.role, isSuperAdmin: session.isSuperAdmin, orgRole: session.orgRole }, session.userId, id);
     return { ok: true };
   }
 }

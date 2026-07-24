@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { invalidateSessionCache } from "@/auth/session.guard";
 import { db } from "@/lib/db";
 import { AVAILABILITY_SELECT, applyAvailability } from "@/lib/availability/apply";
-import { teamScheduleOf } from "@/lib/availability/schedule";
+import { loadAvailabilityScope } from "@/lib/availability/schedule";
 import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
@@ -80,61 +80,64 @@ export function stopWorkHoursSweeper(): void {
 }
 
 async function sweepOnce(): Promise<void> {
-  // Only teams that could possibly have a schedule in force: one on the team
-  // itself, or at least one member with their own. Teams with neither are the
-  // common case pre-adoption and are skipped entirely.
-  const teams = await db.workspace.findMany({
+  // Iterate PEOPLE, once each — not workspace × member.
+  //
+  // This used to loop workspaces and, inside each, every member. Availability
+  // columns live on the shared `User` row, so a person in two workspaces was
+  // resolved twice per tick against two different `Workspace.workHours` grids,
+  // each write clobbering the last. With a 09:00–17:00 workspace and a
+  // 17:00–01:00 one that is a status flip, a socket frame and a session-cache
+  // bust EVERY 60 SECONDS, landing on whichever workspace sorted last. Resolving
+  // each person once against their single governing schedule is what makes the
+  // stored effective status a fact rather than a race.
+  //
+  // Only people who could possibly have a schedule in force: their own custom
+  // grid, or membership of a workspace that has a default. Everyone else is the
+  // common pre-adoption case and is filtered out in SQL, so this stays free
+  // until someone opts in.
+  const users = await db.user.findMany({
     where: {
+      deactivatedAt: null,
       OR: [
-        { workHours: { not: Prisma.DbNull } },
-        // Membership is `WorkspaceMember` since the tenancy restructure —
-        // `Workspace.users` no longer exists, and filtering on it threw on
-        // EVERY tick, so no scheduled availability transition ever fired.
+        { workHoursMode: "custom", workHours: { not: Prisma.DbNull } },
         {
-          members: {
-            some: {
-              user: { workHoursMode: "custom", workHours: { not: Prisma.DbNull } },
-            },
+          workspaceMemberships: {
+            some: { workspace: { workHours: { not: Prisma.DbNull } } },
           },
         },
       ],
     },
-    select: { id: true, workHours: true },
+    select: AVAILABILITY_SELECT,
   });
-  if (teams.length === 0) return;
+  if (users.length === 0) return;
 
   const nowMs = Date.now();
   let transitions = 0;
 
-  for (const team of teams) {
-    // Per-team isolation: one tenant's failure must not skip every later team.
+  for (const user of users) {
+    // Per-user isolation: one failure must not skip everyone after it.
     try {
-      const teamSchedule = teamScheduleOf(team);
-      const members = await db.user.findMany({
-        where: { workspaceMemberships: { some: { workspaceId: team.id } }, deactivatedAt: null },
-        select: AVAILABILITY_SELECT,
+      const { workspaceIds, teamSchedule } = await loadAvailabilityScope(db, user.id);
+      if (workspaceIds.length === 0) continue;
+      const result = await applyAvailability({
+        db,
+        user,
+        workspaceIds,
+        teamSchedule,
+        intent: { kind: "sync" },
+        nowMs,
+        // Every other caller of applyAvailability busts the 15s ApiSession
+        // cache; the sweeper is the one path where NOBODY triggered the
+        // change, which is exactly where a stale read is most likely. Without
+        // this, an RSC render in the 15s after a shift boundary seeds the
+        // availability picker with the pre-boundary status while the socket
+        // frame has already said otherwise.
+        bustSessionCache: invalidateSessionCache,
       });
-      for (const member of members) {
-        const result = await applyAvailability({
-          db,
-          user: member,
-          workspaceId: team.id,
-          teamSchedule,
-          intent: { kind: "sync" },
-          nowMs,
-          // Every other caller of applyAvailability busts the 15s ApiSession
-          // cache; the sweeper is the one path where NOBODY triggered the
-          // change, which is exactly where a stale read is most likely. Without
-          // this, an RSC render in the 15s after a shift boundary seeds the
-          // availability picker with the pre-boundary status while the socket
-          // frame has already said otherwise.
-          bustSessionCache: invalidateSessionCache,
-        });
-        if (result.changed) transitions++;
-      }
+      if (result.changed) transitions++;
     } catch (err) {
       console.warn(
-        `[sweeper.work-hours] tick failed for team=${team.id}; continuing`,
+        `[sweeper.work-hours] tick failed for user=${user.id}; continuing`,
         err instanceof Error ? err.message : err,
       );
     }
@@ -142,7 +145,7 @@ async function sweepOnce(): Promise<void> {
 
   if (transitions > 0) {
     console.log(
-      `[sweeper.work-hours] applied ${transitions} availability transition(s) across ${teams.length} scheduled team(s)`,
+      `[sweeper.work-hours] applied ${transitions} availability transition(s) across ${users.length} scheduled member(s)`,
     );
   }
 }

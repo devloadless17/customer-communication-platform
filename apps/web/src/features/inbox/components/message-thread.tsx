@@ -1729,6 +1729,7 @@ function MessageThreadImpl({
       </p>
       <ThreadHeader
         channel={conversation.channel ?? undefined}
+        channelConnectionId={conversation.channelConnectionId ?? null}
         visitorPresent={visitorPresent}
         visitorLeftAt={visitorLeftAt}
         workspaceId={conversation.workspaceId}

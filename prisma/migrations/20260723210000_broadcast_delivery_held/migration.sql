@@ -1,0 +1,11 @@
+-- Business-portfolio pacing holds template messages for a quality assessment.
+--
+-- Meta accepts the send and issues a wamid, but sets `message_status` to
+-- `held_for_quality_assessment` in the response: the message is NOT en route.
+-- It is released in a later batch, or dropped outright (a `failed` webhook with
+-- code 135000) if the review finds suspicious activity.
+--
+-- Without a state for it the recipient sits at `sent` and is counted a success
+-- while nothing has left Meta's queue — the exact failure `undelivered` was
+-- added to fix.
+ALTER TYPE "BroadcastDeliveryState" ADD VALUE 'held';

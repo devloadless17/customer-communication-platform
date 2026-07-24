@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 
+import { OAuthProvisionController } from "./oauth-provision.controller";
 import { RegisterController } from "./register.controller";
 
 /**
@@ -13,6 +14,6 @@ import { RegisterController } from "./register.controller";
  * a follow-up sweep.
  */
 @Module({
-  controllers: [RegisterController],
+  controllers: [RegisterController, OAuthProvisionController],
 })
 export class TeamsModule {}

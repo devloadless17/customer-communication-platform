@@ -104,12 +104,20 @@ test.afterAll(async () => {
 // ---------------------------------------------------------------------------
 // 1. ROUTE SMOKE — every (app) route mounts clean (no console/page/5xx errors)
 // ---------------------------------------------------------------------------
+// Kept in step with the real route tree. `/settings/account` and
+// `/settings/notifications` used to be here and are NOT typos to restore: the
+// account page moved to `/account` (it is about the PERSON, not the workspace)
+// and the notifications page no longer exists. Both were 404ing this smoke —
+// which is exactly what it is for, except it was reporting the test's own stale
+// list rather than a broken product route. Nothing in the UI links to either.
 const ROUTES = [
   "/inbox", "/contacts", "/broadcasts", "/broadcasts/new", "/broadcasts/groups", "/broadcasts/groups/new",
-  "/templates", "/templates/new", "/workflows", "/workflows/new", "/team",
-  "/settings", "/settings/account", "/settings/activity", "/settings/contact-fields", "/settings/integrations",
-  "/settings/integrations/webhooks", "/settings/notifications", "/settings/permissions", "/settings/snippets",
+  "/templates", "/templates/new", "/workflows", "/workflows/new", "/team", "/tickets", "/flags",
+  "/account", "/organization", "/organization/members", "/organization/workspaces",
+  "/settings", "/settings/activity", "/settings/contact-fields", "/settings/integrations",
+  "/settings/integrations/webhooks", "/settings/permissions", "/settings/snippets",
   "/settings/stages", "/settings/tags", "/settings/team", "/settings/whatsapp",
+  "/settings/assignment", "/settings/channels", "/settings/message-flags", "/settings/tickets",
 ];
 for (const route of ROUTES) {
   test(`route mounts clean: ${route}`, async ({ page }) => {

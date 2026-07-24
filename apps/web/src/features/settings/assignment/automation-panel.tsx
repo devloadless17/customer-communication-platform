@@ -70,7 +70,7 @@ export function AutomationPanel({
       >
         <Toggle
           label="Assign new conversations automatically"
-          hint="A brand-new conversation is routed through your policies as soon as the first message arrives. Off means every new chat waits in the Unassigned queue for someone to claim it."
+          hint="A brand-new conversation is routed through your teams as soon as the first message arrives. Off means every new chat waits in the Unassigned queue for someone to claim it."
           checked={settings.autoAssignOnNewConversation}
           onChange={(v) => void patch({ autoAssignOnNewConversation: v })}
         />
@@ -126,7 +126,7 @@ export function AutomationPanel({
 
       <Group
         title="AI handoff"
-        description="Which policy decides who a conversation goes to when the AI hands it to a human."
+        description="Which team a conversation goes to when the AI hands it to a human."
       >
         <div className="space-y-1.5">
           <Select
