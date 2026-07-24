@@ -54,6 +54,8 @@ async function activeTicketId(
 
 export interface CreateTicketStepConfig {
   subject?: string | null;
+  /** The cause, so a workflow-raised ticket carries context like a hand-raised one. */
+  description?: string | null;
   priority?: TicketPriority;
   /**
    * Skip when the thread already has live work (the default). Off by default
@@ -75,8 +77,10 @@ export const createTicketStepHandler: StepHandler<CreateTicketStepConfig> = {
       );
     }
     const subject = typeof r.subject === "string" ? r.subject.slice(0, 200) : null;
+    const description = typeof r.description === "string" ? r.description.slice(0, 5000) : null;
     return {
       subject,
+      description,
       ...(priority ? { priority } : {}),
       // Default ON: see the config comment.
       onlyIfNoActiveTicket: r.onlyIfNoActiveTicket !== false,
@@ -100,6 +104,7 @@ export const createTicketStepHandler: StepHandler<CreateTicketStepConfig> = {
       actor: {},
       source: "workflow",
       subject: config.subject ?? null,
+      description: config.description ?? null,
       ...(config.priority ? { priority: config.priority } : {}),
       silent: true,
     });

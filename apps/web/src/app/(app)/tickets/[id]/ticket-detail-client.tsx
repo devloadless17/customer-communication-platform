@@ -63,6 +63,7 @@ const EVENT_LABELS: Record<string, string> = {
   status_changed: "changed the status",
   priority_changed: "changed the priority",
   subject_changed: "renamed it",
+  description_changed: "edited the cause",
   tag_added: "added a tag",
   tag_removed: "removed a tag",
   field_changed: "edited a field",
@@ -91,6 +92,9 @@ export function TicketDetailClient({
   const [events, setEvents] = useState(seedEvents);
   const [busy, setBusy] = useState(false);
   const [subject, setSubject] = useState(seed.subject ?? "");
+  // The cause — why this ticket exists. Seeded once and saved on blur when it
+  // actually changed, same posture as the subject field above.
+  const [description, setDescription] = useState(seed.description ?? "");
   // The handoff is a two-field action (team + why), so it gets a small inline
   // form rather than a bare <select>. The reason is the whole point: a handoff
   // without one makes the receiving team re-read the thread to work out what
@@ -224,6 +228,33 @@ export function TicketDetailClient({
             Open the conversation
           </Link>
         </p>
+
+        {/* The cause. What a team receiving the handoff reads first — kept right
+            under the title so it's the first thing on the ticket, not buried in
+            the timeline. Saved on blur when it actually changed. */}
+        <div className="mt-3">
+          <label
+            htmlFor="ticket-cause"
+            className="text-2xs font-medium uppercase tracking-wider text-muted-foreground"
+          >
+            Cause
+          </label>
+          <textarea
+            id="ticket-cause"
+            value={description}
+            disabled={busy}
+            onChange={(e) => setDescription(e.target.value)}
+            onBlur={() => {
+              const next = description.trim();
+              if (next === (ticket.description ?? "")) return;
+              void patch({ description: next || null });
+            }}
+            rows={3}
+            maxLength={5000}
+            placeholder="Why does this need work? What should the team that picks it up know?"
+            className="mt-1 w-full resize-y rounded-md border bg-background px-2.5 py-1.5 text-xs leading-relaxed shadow-none focus-visible:border-input focus-visible:outline-none"
+          />
+        </div>
       </div>
 
       <section className="grid gap-3 rounded-xl border bg-card p-4 sm:grid-cols-2">

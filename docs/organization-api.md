@@ -766,14 +766,14 @@ curl -s "$CCP_BASE_URL/api/external/v1/tickets?status=new,open&priority=urgent&b
 ```bash
 curl -s -X POST "$CCP_BASE_URL/api/external/v1/tickets" \
   -H "Authorization: Bearer $CCP_API_KEY" -H "Content-Type: application/json" \
-  -d '{"conversationId":"cnv_9","subject":"Also: wrong invoice","priority":"high","tagIds":["tag_1"]}'
+  -d '{"conversationId":"cnv_9","subject":"Also: wrong invoice","description":"Customer was double-charged on the 3rd; billing to confirm.","priority":"high","tagIds":["tag_1"]}'
 ```
 
-Fields: `conversationId` (required), `subject`, `priority`, `assignedUserId`, `tagIds`, `customFields`. A ticket created with an assignee starts `open`; without one it starts `new`, which is what makes an untriaged backlog reportable.
+Fields: `conversationId` (required), `subject`, `description` (the cause — free text, ≤5000, read by whoever the ticket is handed to), `priority`, `assignedUserId`, `assignedTeamId`, `tagIds`, `customFields`. A ticket created with an assignee starts `open`; without one it starts `new`, which is what makes an untriaged backlog reportable.
 
 ### Updating
 
-**`PATCH /tickets/:id`** · `write:tickets` — status, priority, assignee, **team**, subject, tags, custom fields, resolution.
+**`PATCH /tickets/:id`** · `write:tickets` — status, priority, assignee, **team**, subject, **description (the cause)**, tags, custom fields, resolution.
 
 ```bash
 curl -s -X PATCH "$CCP_BASE_URL/api/external/v1/tickets/tkt_123" \

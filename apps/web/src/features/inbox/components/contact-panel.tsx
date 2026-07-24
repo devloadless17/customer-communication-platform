@@ -13,6 +13,7 @@ import {
 } from "@/features/contacts/components/field-controls";
 import { TagChip, TagAddButton } from "@/features/tags/components/tag-chip";
 import { TagMultiPicker } from "@/features/tags/components/tag-multi-picker";
+import { RaiseTicketButton } from "@/features/inbox/components/raise-ticket-button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1239,6 +1240,16 @@ function ContactPanelImpl({
             </Button>
           </div>
         )}
+
+        {/* Raise a ticket on this conversation — the deliberate-creation surface
+            (auto-open is off by default). Files a subject + cause and can hand it
+            straight to a team. */}
+        <div className="px-5 pb-4">
+          <RaiseTicketButton
+            conversationId={conversation.id}
+            contactName={name || contact.name}
+          />
+        </div>
 
         {/* Unified customer: the same person's other channel-contacts + link/split. */}
         <div className="border-t">

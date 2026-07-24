@@ -3029,6 +3029,7 @@ enum TicketEventKind {
   status_changed
   priority_changed
   subject_changed
+  description_changed
   tag_added
   tag_removed
   field_changed
@@ -3059,6 +3060,12 @@ model Ticket {
   // auto-filled into the column, so a real subject is distinguishable from a
   // guess.
   subject  String?
+  // The CAUSE — why this ticket exists, in the raising agent's words. Distinct
+  // from `subject` (a one-line title) and from a `team_changed` handoff reason
+  // (which is per-handoff): this is the ticket's defining context, set when it
+  // is raised and read by whoever the ticket is handed to so they understand the
+  // issue without re-reading the whole thread. Free-form, so @db.Text.
+  description String?        @db.Text
   status   TicketStatus   @default(new)
   priority TicketPriority @default(normal)
 

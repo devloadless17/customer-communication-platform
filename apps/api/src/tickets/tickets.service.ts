@@ -165,6 +165,7 @@ export class TicketsService {
       actor,
       source: actor.apiKeyId ? "api" : "human",
       ...(body.subject !== undefined ? { subject: body.subject } : {}),
+      ...(body.description !== undefined ? { description: body.description } : {}),
       ...(body.priority ? { priority: body.priority } : {}),
       ...(body.assignedUserId !== undefined ? { assignedUserId: body.assignedUserId } : {}),
       ...(body.assignedTeamId !== undefined ? { assignedTeamId: body.assignedTeamId } : {}),

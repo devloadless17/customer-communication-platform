@@ -1040,14 +1040,17 @@ export default function ApiDocsPage() {
           body={{
             conversationId: "cnv_9",
             subject: "Also: wrong invoice",
+            description: "Customer double-charged on the 3rd; billing to confirm.",
             priority: "high",
           }}
         >
           Open a ticket manually — a second issue raised in the same breath, or work
-          created from your own system. Also accepts <code>assignedUserId</code>,{" "}
-          <code>tagIds</code>, <code>customFields</code>. With an assignee it starts{" "}
-          <code>open</code>; without one it starts <code>new</code>, which is what makes
-          an untriaged backlog reportable. Scope <code>write:tickets</code>.
+          created from your own system. <code>description</code> is the cause — free text a
+          receiving team reads first. Also accepts <code>assignedUserId</code>,{" "}
+          <code>assignedTeamId</code>, <code>tagIds</code>, <code>customFields</code>. With
+          an assignee it starts <code>open</code>; without one it starts <code>new</code>,
+          which is what makes an untriaged backlog reportable. Scope{" "}
+          <code>write:tickets</code>.
         </Endpoint>
         <Endpoint
           method="PATCH"

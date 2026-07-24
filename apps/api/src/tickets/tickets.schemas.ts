@@ -70,6 +70,8 @@ export type ListTicketsQuery = z.infer<typeof ListTicketsQuerySchema>;
 export const CreateTicketSchema = z.object({
   conversationId: z.string().min(1),
   subject: z.string().trim().max(200).nullable().optional(),
+  /** The cause — why the ticket is raised, for whoever it's handed to. */
+  description: z.string().trim().max(5000).nullable().optional(),
   priority: PrioritySchema.optional(),
   assignedUserId: z.string().nullable().optional(),
   /** Hand it straight to a team's queue — no person named yet. */
@@ -97,6 +99,8 @@ export const UpdateTicketSchema = z
      *  receiving team doesn't have to re-read the thread to find out. */
     handoffReason: z.string().trim().max(2000).optional(),
     subject: z.string().trim().max(200).nullable().optional(),
+    /** Edit the cause. */
+    description: z.string().trim().max(5000).nullable().optional(),
     resolutionCode: z.string().trim().max(80).nullable().optional(),
     resolutionNote: z.string().trim().max(2000).nullable().optional(),
     tagIds: z.array(z.string()).max(50).optional(),

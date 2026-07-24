@@ -83,6 +83,8 @@ export type TicketEventKind =
   | "status_changed"
   | "priority_changed"
   | "subject_changed"
+  /** The cause was edited. */
+  | "description_changed"
   | "tag_added"
   | "tag_removed"
   | "field_changed"
@@ -138,6 +140,9 @@ export interface Ticket {
   contactName: string;
   channel: string;
   subject: string | null;
+  /** The cause — why the ticket was raised, in the agent's words. Set at
+   *  creation, editable, read by whoever the ticket is handed to. */
+  description: string | null;
   status: TicketStatus;
   priority: TicketPriority;
   assignedUserId: string | null;

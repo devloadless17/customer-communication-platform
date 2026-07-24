@@ -85,6 +85,8 @@ export interface CreateTicketArgs extends EventGates {
   conversationId: string;
   actor: TicketActor;
   subject?: string | null;
+  /** The cause — why the ticket is being raised, for the team that receives it. */
+  description?: string | null;
   priority?: TicketPriority;
   assignedUserId?: string | null;
   /** Hand it straight to a team's queue (an AssignmentPolicy id). */
@@ -181,6 +183,7 @@ async function createTicketInTx(
       contactId: conversation.contactId,
       channel: conversation.channel as Prisma.TicketCreateInput["channel"],
       subject: args.subject ?? null,
+      description: args.description ?? null,
       priority,
       // An assigned-at-birth ticket is already being worked; only a genuinely
       // untouched one sits in `new`, which is what makes the untriaged backlog
@@ -210,6 +213,7 @@ async function createTicketInTx(
   await writeTicketEvent(tx, args.workspaceId, row.id, "created", args.actor, null, {
     number: ticket.number,
     subject: ticket.subject,
+    description: ticket.description,
     priority: ticket.priority,
   });
   await writeConversationPill(tx, args.workspaceId, conversation.id, "ticket_opened", args.actor, ticket);
@@ -381,6 +385,8 @@ export interface UpdateTicketArgs extends EventGates {
   /** Why the ticket is being handed over. Stored on the `team_changed` event. */
   handoffReason?: string | null;
   subject?: string | null;
+  /** Edit the cause. Emits `description_changed` on the timeline. */
+  description?: string | null;
   resolutionCode?: string | null;
   resolutionNote?: string | null;
   tagIds?: string[];
@@ -438,6 +444,7 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
 
     const data: Prisma.TicketUncheckedUpdateInput = {
       ...(args.subject !== undefined ? { subject: args.subject } : {}),
+      ...(args.description !== undefined ? { description: args.description } : {}),
       ...(args.resolutionCode !== undefined ? { resolutionCode: args.resolutionCode } : {}),
       ...(args.resolutionNote !== undefined ? { resolutionNote: args.resolutionNote } : {}),
       ...(args.customFields !== undefined
@@ -904,7 +911,12 @@ function ticketEventKindFor(
     case "closed":
       return "status_changed";
     default:
-      return args.subject !== undefined ? "subject_changed" : "field_changed";
+      // Subject and the cause each get their own timeline verb; a change to
+      // both at once (or to custom fields) falls back to the generic
+      // `field_changed`. Subject wins the tie because it is the ticket's title.
+      if (args.subject !== undefined) return "subject_changed";
+      if (args.description !== undefined) return "description_changed";
+      return "field_changed";
   }
 }
 

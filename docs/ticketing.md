@@ -24,6 +24,12 @@ Contact ──1:1── Conversation ──1:N── Ticket
 | Column | Why it exists |
 |---|---|
 | `Ticket.number` | The human-facing id people quote (`#1042`), unique per workspace. Allocated from `TicketNumberCounter` inside the create transaction — the row lock serializes concurrent allocations, `@@unique([workspaceId, number])` is the backstop, and the create path retries on P2002. Gaps are fine; collisions are not. |
+| `Ticket.subject` / `Ticket.description` | `subject` is the one-line title; `description` is the **cause** — why the ticket exists, in the raising agent's words. Distinct from a `team_changed` handoff reason (which is per-handoff): the cause is the ticket's defining context, set when raised and read by whoever it is handed to so they understand the issue without re-reading the thread. Editing it writes a `description_changed` timeline event. |
+
+### Raising one
+
+A ticket is created deliberately from the inbox — the **Raise a ticket** button in the contact panel (`raise-ticket-button.tsx`) collects a subject, the cause, a priority, and an optional team to hand it to, then `POST /api/tickets`. Auto-open (`Workspace.ticketAutoOpen`, off by default) and workflows (`create_ticket`, which also carries a `description`) are the non-manual paths. All three converge on `createTicket`, so a ticket means the same thing however it was raised. The customer is always attached (`contactId`) — the detail view shows the contact and links back to the conversation.
+
 | `Conversation.activeTicketId` | The ticket new messages attach to. A single column read on the ingest hot path instead of an ordered scan of the thread's ticket history per message. |
 | `Conversation.openTicketCount` | Denormalized non-terminal count, so the inbox badge and filter are a plain column predicate — same rationale as `openFlagCount`, and bumped only on ticket writes (rare), never per message. |
 | `Message.ticketId` | **Explicit**, never derived from timestamps against a ticket's open/close range: ticket boundaries move (reopen, merge) and a derived answer would silently rewrite which work a past message belonged to. |

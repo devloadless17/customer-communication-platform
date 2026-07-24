@@ -325,6 +325,64 @@ describe("optimistic concurrency", () => {
   });
 });
 
+describe("cause / description", () => {
+  it("persists the cause set at creation and returns it on read", async () => {
+    const conversationId = await makeConversation();
+    const opened = await createTicket(db, {
+      workspaceId,
+      conversationId,
+      actor: { userId },
+      subject: "Refund not received",
+      description: "Customer paid twice on the 3rd; billing to confirm.",
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    expect(opened.ticket.description).toBe("Customer paid twice on the 3rd; billing to confirm.");
+  });
+
+  it("edits the cause and files a description_changed timeline event", async () => {
+    const conversationId = await makeConversation();
+    const opened = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
+    const ticketId = opened.ok ? opened.ticket.id : "";
+
+    const edited = await updateTicket(db, {
+      workspaceId,
+      ticketId,
+      actor: { userId },
+      expectedVersion: opened.ok ? opened.ticket.version : 0,
+      description: "Now with the real reason.",
+    });
+    expect(edited.ok).toBe(true);
+    if (edited.ok) expect(edited.ticket.description).toBe("Now with the real reason.");
+
+    const events = await prisma.ticketEvent.findMany({
+      where: { ticketId, kind: "description_changed" },
+      select: { id: true },
+    });
+    expect(events.length).toBe(1);
+  });
+
+  it("clears the cause when set to null", async () => {
+    const conversationId = await makeConversation();
+    const opened = await createTicket(db, {
+      workspaceId,
+      conversationId,
+      actor: { userId },
+      description: "temporary",
+    });
+    const ticketId = opened.ok ? opened.ticket.id : "";
+    const cleared = await updateTicket(db, {
+      workspaceId,
+      ticketId,
+      actor: { userId },
+      expectedVersion: opened.ok ? opened.ticket.version : 0,
+      description: null,
+    });
+    expect(cleared.ok).toBe(true);
+    if (cleared.ok) expect(cleared.ticket.description).toBeNull();
+  });
+});
+
 describe("SLA", () => {
   it("computes due dates from the priority's policy", async () => {
     await prisma.ticketSlaPolicy.create({
