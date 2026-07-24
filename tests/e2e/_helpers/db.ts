@@ -127,14 +127,30 @@ export async function ensureAppAdmin(): Promise<{
   const passwordHash = await bcrypt.hash(APP_ADMIN_PASSWORD, 10);
   const user = await db().user.upsert({
     where: { email: APP_ADMIN_EMAIL },
-    create: { organizationId: ws.organizationId, name: "E2E Admin", email: APP_ADMIN_EMAIL },
+    create: {
+      organizationId: ws.organizationId,
+      name: "E2E Admin",
+      email: APP_ADMIN_EMAIL,
+      // Fixtures are created directly in the database, which is the same
+      // proof-of-control the invite flow relies on. `emailVerified` defaults to
+      // FALSE and `resolveSession` refuses an unverified user, so without this
+      // every API call from this fixture 403s `email_not_verified`.
+      emailVerified: true,
+    },
     // Clear any avatarUrl a prior avatar-upload spec left on this fixture. Dev/CI
     // R2 blobs don't persist across runs, so a lingering
     // `/api/users/<id>/avatar?v=…` URL 404s on every surface that renders the
     // member — which made `/team` (and any member-list page) fail the predeploy
     // "no console errors" gate with a handful of identical avatar 404s. The
     // fixture should carry no avatar; real UI falls back to initials.
-    update: { organizationId: ws.organizationId, deactivatedAt: null, avatarUrl: null },
+    update: {
+      organizationId: ws.organizationId,
+      deactivatedAt: null,
+      avatarUrl: null,
+      // Re-assert on update: an existing fixture row predating the
+      // email-verification gate would otherwise stay unverified forever.
+      emailVerified: true,
+    },
   });
   await db().workspaceMember.upsert({
     where: { userId_workspaceId: { userId: user.id, workspaceId } },
@@ -287,6 +303,13 @@ export async function createTestUser(opts: {
       organizationId: ws.organizationId,
       name: opts.name,
       email: opts.email,
+      // `User.emailVerified` defaults to FALSE, and `resolveSession` refuses to
+      // act for an unverified user — so a fixture minted without this is
+      // rejected by every API call with 403 `email_not_verified`, and the spec
+      // fails somewhere far from the cause. These users are created directly in
+      // the database, which is the same proof-of-control the invite flow relies
+      // on when it sets this itself.
+      emailVerified: true,
       ...(opts.availabilityStatus ? { availabilityStatus: opts.availabilityStatus } : {}),
       ...(opts.availabilityManualStatus
         ? { availabilityManualStatus: opts.availabilityManualStatus }

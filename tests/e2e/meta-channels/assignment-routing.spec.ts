@@ -107,6 +107,10 @@ async function makeUser(name: string): Promise<string> {
       name: `${PREFIX}${name}`,
       email: `${PREFIX}${name}.${Date.now()}@loadless.test`,
       availabilityStatus: "available",
+      // Created directly in the DB, so it is verified by construction — the
+      // column defaults to FALSE and `resolveSession` refuses an unverified
+      // user, which surfaces as a 403 `email_not_verified` far from the cause.
+      emailVerified: true,
     },
     select: { id: true },
   });

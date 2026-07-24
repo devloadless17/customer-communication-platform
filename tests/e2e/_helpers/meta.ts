@@ -98,6 +98,11 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
       orgRole: "admin",
       name: "E2E Meta User",
       email: "e2e-meta-user@loadless.test",
+      // Fixtures are created directly in the database, which is the same
+      // proof-of-control the invite flow relies on. `emailVerified` defaults to
+      // FALSE and `resolveSession` refuses an unverified user, so without this
+      // every API call from this fixture 403s `email_not_verified`.
+      emailVerified: true,
     },
     update: { organizationId: orgId },
   });
