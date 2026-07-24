@@ -172,10 +172,21 @@ export async function applyAvailability(
 
     source = intent.actorUserId === user.id ? "manual" : "admin";
     setByUserId = source === "admin" ? intent.actorUserId : null;
+    // Only a STATUS pick creates or refreshes an override. A message-only edit
+    // (intent.status === undefined) must NOT mint one: otherwise an off-shift
+    // agent editing their status note would create a live override carrying the
+    // stored manual status — usually "available" — and silently flip themselves
+    // back on, defeating the working-hours schedule and re-entering routing.
+    // Leaving overrideUntil as the carried-over value means a message-only edit
+    // keeps an EXISTING override (they were already manually away) but never
+    // manufactures one over a schedule that was governing.
+    //
     // The override lives until the schedule next flips — never longer. With no
     // schedule there's nothing to expire back to, so it holds indefinitely,
     // exactly as availability behaved before working hours existed.
-    overrideUntil = overrideExpiryFor(schedule, nowMs);
+    if (intent.status !== undefined) {
+      overrideUntil = overrideExpiryFor(schedule, nowMs);
+    }
   } else if (intent.kind === "followSchedule") {
     // Handing control back RELEASES the manual pick, not just its expiry.
     // Dropping only the expiry isn't enough: the resolver deliberately treats a
@@ -187,6 +198,11 @@ export async function applyAvailability(
     manualMessage = null;
     overrideUntil = null;
     setByUserId = null;
+    // Also drop a stale attribution: without this, releasing an ADMIN-set pick
+    // to follow the schedule would leave source="admin" and the resolver would
+    // render "set by <admin>" next to a schedule- (or default-) derived status
+    // the admin had nothing to do with. Reachable via /v1 (no live schedule).
+    source = "manual";
   } else if (intent.kind === "rescheduled" && overrideUntil !== null) {
     // Only a LIVE override needs re-anchoring; an expired one is about to be
     // dropped by the resolver anyway.

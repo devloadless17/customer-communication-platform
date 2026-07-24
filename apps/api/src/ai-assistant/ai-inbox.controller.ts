@@ -88,6 +88,7 @@ export class AiInboxController {
       body.action,
       body.editedText,
       body.sendAs,
+      session,
     );
     return { suggestion };
   }
@@ -98,7 +99,7 @@ export class AiInboxController {
     @Param("id") id: string,
     @Res() res: Response,
   ) {
-    const obj = await this.svc.getSuggestionAudio(session.workspaceId, id);
+    const obj = await this.svc.getSuggestionAudio(session.workspaceId, id, session);
     if (!obj) {
       res.status(404).json({ error: "no_audio" });
       return;
@@ -110,7 +111,7 @@ export class AiInboxController {
 
   @Post("suggestions/:id/regenerate")
   async regenerateSuggestion(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    const suggestion = await this.svc.regenerateSuggestion(session.workspaceId, session.userId, id);
+    const suggestion = await this.svc.regenerateSuggestion(session.workspaceId, session.userId, id, session);
     return { suggestion };
   }
 
@@ -158,6 +159,10 @@ export class AiInboxController {
       session.userId,
       messageId,
       body.correctedText,
+      // Pass the viewer — the sibling read `getTranscription` does. Without it
+      // `assertMessageVisible` returns true for `viewer === undefined`, so a
+      // restricted agent could read + overwrite a colleague's voice transcript.
+      session,
     );
     return { transcription };
   }

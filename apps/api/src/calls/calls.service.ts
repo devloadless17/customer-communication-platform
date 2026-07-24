@@ -1833,9 +1833,13 @@ export class CallsService {
     // The team call log joins through to contact name + phone for every call
     // in the org, so it carries the same PII weight as the conversation list
     // and gets the same boundary.
+    // The restricted-agent boundary, expressed as a nested `conversation`
+    // filter. Kept as its own value so the search branch below can MERGE it
+    // rather than clobber it.
+    const visibility = conversationRelationWhere(session);
     const baseWhere: Prisma.CallWhereInput = {
       workspaceId: session.workspaceId,
-      ...conversationRelationWhere(session),
+      ...visibility,
     };
 
     // Free-text filter: substring on the contact's NAME or PHONE, reached
@@ -1843,7 +1847,13 @@ export class CallsService {
     // name is case-insensitive; phone is a raw substring (digits + leading +).
     const q = filters.q?.trim();
     if (q) {
-      baseWhere.conversation = {
+      // MERGE, never REASSIGN: overwriting `baseWhere.conversation` outright
+      // would delete `visibility.conversation.assignedUserId` and leak every
+      // agent's call log to a restricted agent the moment they type in the
+      // search box. Build one `conversation` filter carrying BOTH the
+      // visibility restriction and the contact search, so they AND.
+      const conversation: Prisma.ConversationWhereInput = {
+        ...(visibility.conversation ?? {}),
         contact: {
           OR: [
             { name: { contains: q, mode: "insensitive" } },
@@ -1851,6 +1861,7 @@ export class CallsService {
           ],
         },
       };
+      baseWhere.conversation = conversation;
     }
 
     // Date range on ringingAt (the user-visible "when the call happened" time).
@@ -1935,6 +1946,10 @@ export class CallsService {
       where: {
         workspaceId: session.workspaceId,
         status: { in: [CallStatus.ringing, CallStatus.in_progress] },
+        // A restricted agent must not infer colleagues' live-call volume from
+        // the badge — scope the count to conversations they can see, same as
+        // the list above.
+        ...conversationRelationWhere(session),
       },
     });
     return { count };

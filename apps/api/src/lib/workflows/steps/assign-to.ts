@@ -43,7 +43,7 @@ import {
  */
 
 export type AssignToStepConfig =
-  | { mode: "user"; userId: string }
+  | { mode: "user"; userId: string; overwrite?: boolean }
   | { mode: "unassign" }
   | { mode: "round_robin"; overwrite?: boolean }
   | { mode: "policy"; policyId: string; overwrite?: boolean };
@@ -69,7 +69,7 @@ export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
       if (typeof r.userId !== "string" || !r.userId) {
         throw new StepConfigError("assign_to.userId required when mode=user");
       }
-      return { mode: "user", userId: r.userId };
+      return { mode: "user", userId: r.userId, overwrite };
     }
     throw new StepConfigError(
       "assign_to.mode must be 'user', 'unassign', 'round_robin', or 'policy'",
@@ -149,6 +149,14 @@ export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
       changedByUserId: null,
       // Attribute the assignment to the running workflow on the audit row.
       changedByWorkflowId: ctx.workflowId,
+      // §18 "automation never overrides a human": a fixed-user assign fills an
+      // empty slot only, unless the workflow author explicitly set overwrite
+      // (a deliberate re-route). Without this a keyword rule could silently yank
+      // an active thread from the agent working it — the exact thing the
+      // policy/round_robin modes already guard and this branch used not to.
+      // `unassign` (targetUserId null) is unaffected: the guard only applies to
+      // assigning a named user onto an already-owned thread.
+      onlyIfUnassigned: config.mode === "user" ? config.overwrite !== true : false,
       silent: true,
     });
 

@@ -64,7 +64,16 @@ export function AvailabilityPicker({
   /** ISO instant a manual pick hands back to the schedule. */
   seedUntil?: string | null;
 }) {
-  const initialMessage = seedMessage ?? "";
+  // Seed the EDITABLE note only when the user's OWN manual pick is what's
+  // showing (source === "manual"): then `seedMessage` really is their note. When
+  // the schedule or an admin governs, `seedMessage` is the effective text
+  // ("Outside working hours · back Mon 09:00") — NOT the user's note — so start
+  // the input empty rather than pre-filling schedule text the user would then
+  // save as their personal note (`availabilityManualMessage`). A `payload.manual`
+  // socket frame refines it after mount; this only fixes the first paint. The
+  // user's own stored note isn't on the wire, so empty is the honest seed.
+  const initialMessage =
+    (seedSource ?? "manual") === "manual" ? (seedMessage ?? "") : "";
   const [status, setStatus] = useState<UserAvailabilityStatus>(seedStatus);
   // Schedule context. `source` tells the user WHY they look the way they do —
   // an unexplained grey dot after a shift ends is the confusing part, not the

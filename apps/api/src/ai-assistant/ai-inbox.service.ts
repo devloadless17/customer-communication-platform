@@ -168,9 +168,13 @@ export class AiInboxService {
     action: "accept" | "reject",
     editedText?: string,
     sendAs: "text" | "voice" = "text",
+    viewer?: ConversationViewer,
   ) {
     const s = await this.db.aiReplySuggestion.findFirst({ where: { id, workspaceId } });
     if (!s) throw new NotFoundException({ error: "suggestion_not_found" });
+    // Visibility boundary: keyed by suggestionId, so a restricted agent must not
+    // read the draft, regenerate it, or SEND it on a colleague's conversation.
+    await this.assertConversation(workspaceId, s.conversationId, viewer);
     if (s.state !== "pending") {
       throw new ConflictException({ error: "suggestion_already_decided", state: s.state });
     }
@@ -307,9 +311,16 @@ export class AiInboxService {
    * deterministic `attempt` number and keeps the prior draft as history. Never
    * auto-sends — the new draft is `pending` and still requires an explicit send.
    */
-  async regenerateSuggestion(workspaceId: string, _userId: string, suggestionId: string) {
+  async regenerateSuggestion(
+    workspaceId: string,
+    _userId: string,
+    suggestionId: string,
+    viewer?: ConversationViewer,
+  ) {
     const s = await this.db.aiReplySuggestion.findFirst({ where: { id: suggestionId, workspaceId } });
     if (!s) throw new NotFoundException({ error: "suggestion_not_found" });
+    // Visibility boundary — see decideSuggestion.
+    await this.assertConversation(workspaceId, s.conversationId, viewer);
 
     const config = await loadAiConfig(workspaceId);
     if (!configEnabled(config)) throw new BadRequestException({ error: "ai_disabled" });
@@ -423,12 +434,16 @@ export class AiInboxService {
   }
 
   /** Stream a draft suggestion's pre-rendered voice preview (workspaceId-scoped). */
-  async getSuggestionAudio(workspaceId: string, id: string) {
+  async getSuggestionAudio(workspaceId: string, id: string, viewer?: ConversationViewer) {
     const s = await this.db.aiReplySuggestion.findFirst({
       where: { id, workspaceId },
-      select: { audioR2Key: true },
+      select: { audioR2Key: true, conversationId: true },
     });
-    if (!s?.audioR2Key) return null;
+    if (!s) return null;
+    // Visibility boundary — a restricted agent must not stream the voice audio
+    // of a draft on a colleague's conversation.
+    await this.assertConversation(workspaceId, s.conversationId, viewer);
+    if (!s.audioR2Key) return null;
     return blobStorage.getObject(s.audioR2Key);
   }
 }

@@ -57,6 +57,7 @@ import { loadReplySnapshotById, mediaPreview } from "@/lib/providers/ingest";
 import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta";
 import {
   isRestrictedViewer,
+  conversationRelationWhere,
   type ConversationViewer,
 } from "@/lib/conversations/visibility";
 import { getConversationWithRefs } from "@/lib/queries";
@@ -2204,6 +2205,7 @@ export class MessagesService {
     workspaceId: string,
     userId: string,
     input: ForwardMessagesInput,
+    viewer: ConversationViewer,
   ): Promise<{ results: ForwardResult[] }> {
     return runWithSendIdempotency(
       {
@@ -2212,7 +2214,7 @@ export class MessagesService {
         conversationId: "forward",
         clientTempId: input.clientTempId,
       },
-      () => this.forwardImpl(workspaceId, userId, input),
+      () => this.forwardImpl(workspaceId, userId, input, viewer),
     );
   }
 
@@ -2220,6 +2222,7 @@ export class MessagesService {
     workspaceId: string,
     userId: string,
     input: ForwardMessagesInput,
+    viewer: ConversationViewer,
   ): Promise<{ results: ForwardResult[] }> {
     // De-dupe input lists — Zod doesn't strip dupes; preserves prior behavior.
     const messageIds = [...new Set(input.messageIds)];
@@ -2231,7 +2234,17 @@ export class MessagesService {
     // pulling the full Meta webhook payload (5-20 KB each) for N×M forward
     // wastes a lot of wire bytes.
     const sourceRows = await this.db.message.findMany({
-      where: { id: { in: messageIds }, workspaceId, status: { not: "failed" } },
+      // Visibility boundary: a restricted agent may only forward FROM a
+      // conversation they can see. Without this the forward route (whose body
+      // carries no conversationId, so the class-level @ScopedByConversation
+      // guard no-ops) let a restricted agent replay a colleague's messages by
+      // id into their own thread — and out to a customer.
+      where: {
+        id: { in: messageIds },
+        workspaceId,
+        status: { not: "failed" },
+        ...conversationRelationWhere(viewer),
+      },
       orderBy: { timestamp: "asc" },
       omit: { rawPayload: true },
     });
@@ -3151,9 +3164,16 @@ export class MessagesService {
    * the customer's behalf) — it just clears our stored `reaction` and fans out
    * `message.reaction_changed` (customer side) so every agent sees it cleared.
    */
-  async dismissReaction(workspaceId: string, messageId: string): Promise<{ ok: true }> {
+  async dismissReaction(
+    workspaceId: string,
+    messageId: string,
+    viewer: ConversationViewer,
+  ): Promise<{ ok: true }> {
     const target = await this.db.message.findFirst({
-      where: { id: messageId, workspaceId },
+      // Visibility boundary: the route body carries only messageId, so the class
+      // guard no-ops. Without this a restricted agent could clear reactions on
+      // (and probe the existence of) messages in colleagues' conversations.
+      where: { id: messageId, workspaceId, ...conversationRelationWhere(viewer) },
       select: { id: true, conversationId: true, reaction: true },
     });
     if (!target) {

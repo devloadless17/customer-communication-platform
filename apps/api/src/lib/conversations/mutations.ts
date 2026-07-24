@@ -127,6 +127,13 @@ export async function assignConversation(args: {
   /** When true, workflow-dispatch + outbound-webhooks skip their reactions
    *  (loop avoidance / no echo). Socket fanout + audit still fire. */
   silent?: boolean;
+  /** Fill-empty-only. When true, do NOT reassign a conversation that already
+   *  has a DIFFERENT human assignee — the §18 "automation never overrides a
+   *  human" guard. Automated callers (workflow `assign_to user` without
+   *  `overwrite`) pass it; a manual UI/API assign omits it and stays
+   *  authoritative. The check is co-committed with the CAS below, so it can't
+   *  race a human claiming the thread. */
+  onlyIfUnassigned?: boolean;
 }): Promise<
   ConversationMutationOutcome<{
     changed: boolean;
@@ -161,6 +168,27 @@ export async function assignConversation(args: {
 
   const previousAssignedUserId = conversation.assignedUserId;
   const previousStatus = conversation.status;
+
+  // Fill-empty-only guard (§18): an automated caller must never take a thread
+  // away from the human working it. Skip silently — same shape as the
+  // idempotent no-op below — when a DIFFERENT assignee already owns it. A manual
+  // assign omits `onlyIfUnassigned` and remains authoritative.
+  if (
+    args.onlyIfUnassigned &&
+    targetUserId !== null &&
+    previousAssignedUserId !== null &&
+    previousAssignedUserId !== targetUserId
+  ) {
+    return {
+      ok: true,
+      changed: false,
+      statusChanged: false,
+      assignedUser: null,
+      previousAssignedUserId,
+      previousStatus,
+      newStatus: previousStatus,
+    };
+  }
 
   if (targetUserId !== null) {
     // Reject deactivated assignees — a soft-deleted agent shouldn't be

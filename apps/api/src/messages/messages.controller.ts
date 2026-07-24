@@ -306,7 +306,7 @@ export class MessagesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(DismissReactionSchema)) body: DismissReactionInput,
   ) {
-    return this.messages.dismissReaction(session.workspaceId, body.messageId);
+    return this.messages.dismissReaction(session.workspaceId, body.messageId, session);
   }
 
   @Post("forward")
@@ -314,7 +314,7 @@ export class MessagesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(ForwardMessagesSchema)) body: ForwardMessagesInput,
   ) {
-    return this.messages.forward(session.workspaceId, session.userId, body);
+    return this.messages.forward(session.workspaceId, session.userId, body, session);
   }
 }
 
