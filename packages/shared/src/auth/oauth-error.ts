@@ -34,6 +34,15 @@ const MESSAGES: Record<string, string> = {
   unable_to_create_user:
     "We couldn't finish creating your account. Try again, or sign up with an email and password instead.",
 
+  // Raised by design when someone clicks "Continue with Google" on the LOGIN
+  // page with a Google account that has no user here yet. Account creation is a
+  // signup-only act (it provisions an organization), so we refuse rather than
+  // silently mint one — the exact mis-click this guards against. The login page
+  // already shows a "New here? Create a workspace" link right below, which is
+  // where this sentence points them.
+  signup_disabled:
+    "No account is linked to that Google account yet. Create a workspace first — then Continue with Google will sign you straight in.",
+
   // The provider rejected or never issued a code — usually a cancelled consent
   // screen or a stale/expired callback.
   invalid_code: "Google sign-in didn't complete. Please try again.",

@@ -187,7 +187,27 @@ export function buildSharedAuthOptions(p: SharedAuthOptionsParams): BetterAuthOp
     // deployment that hasn't set up a Google OAuth client should lose the
     // button, not fail to boot.
     ...(p.google
-      ? { socialProviders: { google: p.google } }
+      ? {
+          socialProviders: {
+            google: {
+              ...p.google,
+              // "Continue with Google" must NEVER create an account on its own.
+              // Account creation provisions a whole Organization (the create
+              // hook), and a returning user who mis-clicks the button on the
+              // LOGIN page was silently minting a second org they never asked
+              // for. With implicit sign-up off, a Google identity with no
+              // existing user is refused BEFORE anything is written, and Better
+              // Auth bounces to /login?error=signup_disabled.
+              //
+              // The signup page opts a creation IN per-request by passing
+              // `requestSignUp: true` to signInSocial (see login/google-actions).
+              // So: signup page → creates; login page → sign-in only. One flag,
+              // enforced by Better Auth's own callback, no intent-guessing in the
+              // create hook.
+              disableImplicitSignUp: true,
+            },
+          },
+        }
       : {}),
 
     account: {

@@ -58,7 +58,7 @@ export default async function LoginPage({ searchParams }: PageProps) {
               below the fold of a password field. */}
           {googleSignInEnabled() && (
             <>
-              <GoogleButton next={nextPath} label="Continue with Google" />
+              <GoogleButton next={nextPath} label="Continue with Google" intent="login" />
               <div className="my-4 flex items-center gap-3">
                 <span className="h-px flex-1 bg-border" />
                 <span className="text-2xs text-muted-foreground">Or</span>

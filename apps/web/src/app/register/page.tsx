@@ -45,7 +45,7 @@ export default async function RegisterPage() {
               user doesn't actually have to make. */}
           {googleSignInEnabled() && (
             <>
-              <GoogleButton next="/inbox" label="Continue with Google" />
+              <GoogleButton next="/inbox" label="Continue with Google" intent="signup" />
               <div className="my-4 flex items-center gap-3">
                 <span className="h-px flex-1 bg-border" />
                 <span className="text-2xs text-muted-foreground">Or</span>

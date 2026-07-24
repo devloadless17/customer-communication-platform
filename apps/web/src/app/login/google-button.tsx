@@ -12,15 +12,27 @@ import { startGoogleSignIn } from "./google-actions";
  * that starts a handshake nobody can finish is worse than no button at all, so
  * the decision is made server-side (`googleSignInEnabled()`) and passed down.
  *
- * Serves BOTH sign-in and sign-up: Google is the same handshake either way, and
- * the org is provisioned on first arrival (see the database hook in
- * `lib/auth/better-auth.ts`). Presenting it as two different buttons would
- * imply a choice the user doesn't have to make.
+ * Same handshake on both pages, but NOT the same outcome for a new Google user:
+ * `intent` decides. On the signup page (`intent="signup"`) a first-time Google
+ * user creates an account + organization; on the login page (`intent="login"`)
+ * they are refused and sent back with `?error=signup_disabled`, because account
+ * creation is a signup-only act (see `startGoogleSignIn` + the provider's
+ * `disableImplicitSignUp`). A RETURNING user signs in identically from either
+ * page — the intent only gates the create path.
  */
-export function GoogleButton({ next, label }: { next: string; label: string }) {
+export function GoogleButton({
+  next,
+  label,
+  intent,
+}: {
+  next: string;
+  label: string;
+  intent: "login" | "signup";
+}) {
   return (
     <form action={startGoogleSignIn}>
       <input type="hidden" name="next" value={next} />
+      <input type="hidden" name="intent" value={intent} />
       <SubmitButton label={label} />
     </form>
   );

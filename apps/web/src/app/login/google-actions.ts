@@ -24,8 +24,20 @@ export async function startGoogleSignIn(formData: FormData): Promise<void> {
   const next =
     raw.startsWith("/") && !raw.startsWith("//") && raw !== "/" ? raw : "/inbox";
 
+  // Only the SIGNUP page may create a new account (and, with it, an
+  // Organization). The provider has `disableImplicitSignUp: true`, so a
+  // brand-new Google user is refused unless this request explicitly asks to
+  // sign up. The login page omits it: a returning user signs in, and a
+  // never-seen Google account bounces back as ?error=signup_disabled instead
+  // of silently minting an org — the mis-click that started this.
+  const isSignup = formData.get("intent") === "signup";
+
   const result = await auth.api.signInSocial({
-    body: { provider: "google", callbackURL: next },
+    body: {
+      provider: "google",
+      callbackURL: next,
+      ...(isSignup ? { requestSignUp: true } : {}),
+    },
   });
 
   if (!result?.url) {
