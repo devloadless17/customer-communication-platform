@@ -1,0 +1,106 @@
+# DESTRUCTIVE — manual only. Drops the production database and Redis, then lets
+# the api re-migrate from zero.
+#
+# Why this exists: a migration that fails MID-APPLY writes a FAILED row into
+# `_prisma_migrations`, and from then on every `prisma migrate deploy` — including
+# the one in the api's boot CMD, and including the one the ROLLED-BACK image runs
+# — exits with P3009 and the container crash-loops. An image rollback cannot clear
+# it (deploy.yml documents this). The two ways out are (a) `migrate resolve` the
+# failed row and fix whatever data broke it, or (b) start the data over. This is
+# (b), for a pre-launch deployment whose data is disposable.
+#
+# It is NOT wired into deploy.yml on purpose: nothing about a normal push should
+# ever be able to reach `down -v`.
+name: Reset production data (DESTRUCTIVE)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type RESET-PRODUCTION-DATA to confirm PERMANENT deletion of the production database'
+        required: true
+        default: ''
+
+concurrency:
+  # Never let this interleave with a deploy touching the same stack.
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      # Gate FIRST, before the SSH key is ever handed to an action.
+      - name: Verify confirmation phrase
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event.inputs.confirm }}" != "RESET-PRODUCTION-DATA" ]; then
+            echo "✗ confirmation phrase not matched — nothing was touched."
+            exit 1
+          fi
+          echo "✓ confirmed"
+
+      - name: Wipe database + Redis, then re-migrate from zero
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 15m
+          script: |
+            set -euo pipefail
+            cd /opt/ccp
+
+            # Best-effort final dump. The data is declared disposable, but a
+            # snapshot costs seconds and is the only copy that will ever exist
+            # after the next command. Non-fatal: postgres may already be down.
+            mkdir -p /opt/ccp/backups
+            STAMP="$(date -u +%Y%m%d-%H%M%S)"
+            OUT="/opt/ccp/backups/pre-reset-${STAMP}.sql.gz"
+            if docker compose --env-file .env exec -T postgres \
+                 pg_dumpall -U "$(grep -E '^POSTGRES_USER=' .env | cut -d= -f2-)" 2>/dev/null \
+                 | gzip > "$OUT.tmp" && [ -s "$OUT.tmp" ]; then
+              mv "$OUT.tmp" "$OUT"
+              echo "✓ pre-reset dump: $OUT"
+            else
+              rm -f "$OUT.tmp"
+              echo "⚠ pre-reset dump failed (postgres likely already down) — continuing, data is disposable"
+            fi
+
+            # -v is the whole point: it removes the named volumes, which is what
+            # takes the poisoned _prisma_migrations table with it.
+            docker compose --env-file .env down -v --remove-orphans
+
+            # Fresh volumes. api's boot CMD runs `prisma migrate deploy` against
+            # an empty database, so all migrations apply in order with no rows to
+            # violate the UNIQUE partial indexes that the restructure introduces.
+            if ! docker compose --env-file .env up -d; then
+              echo "::error::stack failed to come up after reset — logs follow"
+              docker compose --env-file .env ps -a || true
+              docker compose --env-file .env logs --no-color --tail=200 api || true
+              exit 1
+            fi
+
+            echo "==> waiting for api to report healthy (<=180s)"
+            for i in $(seq 1 90); do
+              cid="$(docker compose --env-file .env ps -q api)"
+              health="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo none)"
+              if [ "$health" = "healthy" ]; then echo "✓ api healthy after $((i*2))s"; break; fi
+              sleep 2
+            done
+            if [ "$health" != "healthy" ]; then
+              echo "::error::api never became healthy after reset"
+              docker compose --env-file .env logs --no-color --tail=200 api || true
+              exit 1
+            fi
+
+            echo "==> migrate status (expect: all applied, none failed)"
+            docker compose --env-file .env run --rm --entrypoint sh api \
+              -c 'cd /app && pnpm prisma migrate status' 2>&1 | tail -20 || true
+
+      # The database is empty now, including the user table — re-run Deploy
+      # afterwards so its idempotent "Bootstrap superadmin" step recreates the
+      # only account that can log in.
+      - name: Next step
+        run: |
+          echo "Database reset. Re-run the Deploy workflow on production to bootstrap the superadmin account."
