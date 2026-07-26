@@ -260,7 +260,18 @@ function ChannelThreadImpl({
       const gap = Date.parse(cur.createdAt) - Date.parse(prev.createdAt);
       // NaN (unparseable) or negative (clock skew between optimistic and
       // server timestamps) → don't group; a wrong group is worse than none.
-      if (!(gap >= 0 && gap <= GROUP_WINDOW_MS)) continue;
+      //
+      // ONE exception: a PENDING row whose local timestamp sits a beat behind
+      // the server stamp its predecessor just adopted. Chained optimistic
+      // sends hit this every time the first POST confirms before the second:
+      // head swaps to server time (newer), cont still carries local time →
+      // small negative gap. Un-grouping here made the row sprout a full
+      // author header for ~a round-trip and then collapse again — a visible
+      // height flicker. The row's own confirm restores true order, so treat
+      // the small negative gap as groupable while the row is pending.
+      const transientOptimisticSkew =
+        Boolean(cur.pending) && gap < 0 && gap >= -30_000;
+      if (!(gap >= 0 && gap <= GROUP_WINDOW_MS) && !transientOptimisticSkew) continue;
       flags[i] = true;
     }
     return flags;

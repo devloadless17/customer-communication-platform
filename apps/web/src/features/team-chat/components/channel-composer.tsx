@@ -89,7 +89,16 @@ export function ChannelComposer({
   const [trigger, setTrigger] = useState<{ query: string; length: number } | null>(null);
   const [activeMentionIndex, setActiveMentionIndex] = useState(0);
   const [popupPos, setPopupPos] = useState<{ left: number; top: number } | null>(null);
-  const [busy, setBusy] = useState(false);
+  // In-order dispatch chain for rapid consecutive sends. The composer clears
+  // OPTIMISTICALLY (synchronously, before the POST resolves), so a fast typer
+  // — or an e2e test — can legitimately submit again while the previous POST
+  // is in flight. This used to be a `busy` flag that silently ATE the second
+  // Enter: the typed message just sat in the box with no send, no error, and
+  // the Send button greyed out mid-flight. Each submission has its own
+  // clientTempId + optimistic row (which renders its own pending state), so
+  // concurrency is safe; the chain only exists to keep server-side arrival
+  // order matching the order the user pressed Enter.
+  const sendChain = useRef<Promise<void>>(Promise.resolve());
   // Staged file from the paperclip picker. We hold it locally and show a
   // preview chip until the user clicks Send — matches the inbox composer's
   // UX. Previously the picker fired the upload immediately, which made
@@ -325,12 +334,13 @@ export function ChannelComposer({
   };
 
   const submit = async () => {
-    if (busy) return;
     // Pending file takes the media path; text-only takes the text path.
     // The user is allowed to have both (file + caption); we route through
     // handleFile in that case since it already accepts the caption from
     // `body`. Send is disabled when there's neither — see the button's
-    // `disabled` prop.
+    // `disabled` prop. (Double-submit of the SAME content is impossible
+    // without a busy guard: both `pendingFile` and `body` are cleared
+    // synchronously below, so a repeat Enter finds nothing to send.)
     if (pendingFile) {
       const file = pendingFile;
       setPendingFile(null);
@@ -366,34 +376,37 @@ export function ChannelComposer({
     clearDraft();
     setTrigger(null);
     setPopupPos(null);
-    setBusy(true);
     const url = threadRootId
       ? `/api/team-chat/channels/${channelId}/messages/${threadRootId}/thread`
       : `/api/team-chat/channels/${channelId}/messages`;
-    try {
-      const res = await fetchWithSessionGuard(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ body: trimmed, clientTempId }),
-      });
-      if (!res.ok) {
+    const dispatch = async () => {
+      try {
+        const res = await fetchWithSessionGuard(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: trimmed, clientTempId }),
+        });
+        if (!res.ok) {
+          onOptimisticFail(clientTempId);
+        } else {
+          // Confirm from the POST response instead of relying solely on the
+          // `team:channel:message` echo — if the socket dropped after the send,
+          // the echo never arrives and the bubble would stay pending forever
+          // (then double-render on the next reconnect converge). Idempotent with
+          // the echo: whichever lands first reconciles, the other dedupes.
+          const { message } = (await res.json()) as {
+            message: TeamChannelMessageDto;
+          };
+          onOptimisticConfirm?.(message, clientTempId);
+        }
+      } catch {
         onOptimisticFail(clientTempId);
-      } else {
-        // Confirm from the POST response instead of relying solely on the
-        // `team:channel:message` echo — if the socket dropped after the send,
-        // the echo never arrives and the bubble would stay pending forever
-        // (then double-render on the next reconnect converge). Idempotent with
-        // the echo: whichever lands first reconciles, the other dedupes.
-        const { message } = (await res.json()) as {
-          message: TeamChannelMessageDto;
-        };
-        onOptimisticConfirm?.(message, clientTempId);
       }
-    } catch {
-      onOptimisticFail(clientTempId);
-    } finally {
-      setBusy(false);
-    }
+    };
+    // Chain, don't drop: rapid consecutive sends run in submit order.
+    const chained = sendChain.current.then(dispatch);
+    sendChain.current = chained;
+    await chained;
   };
 
   const handleFile = async (file: File) => {
@@ -428,24 +441,29 @@ export function ChannelComposer({
     const captionAtStart = body.trim();
     setBody("");
     clearDraft();
-    setBusy(true);
     const fd = new FormData();
     fd.append("file", file);
     fd.append("body", captionAtStart);
     fd.append("clientTempId", clientTempId);
     if (threadRootId) fd.append("threadRootId", threadRootId);
-    try {
-      const res = await fetchWithSessionGuard(
-        `/api/team-chat/channels/${channelId}/media`,
-        { method: "POST", body: fd },
-      );
-      if (!res.ok) onOptimisticFail(clientTempId);
-    } catch {
-      onOptimisticFail(clientTempId);
-    } finally {
-      setBusy(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
+    const dispatch = async () => {
+      try {
+        const res = await fetchWithSessionGuard(
+          `/api/team-chat/channels/${channelId}/media`,
+          { method: "POST", body: fd },
+        );
+        if (!res.ok) onOptimisticFail(clientTempId);
+      } catch {
+        onOptimisticFail(clientTempId);
+      } finally {
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    };
+    // Same in-order chain as text sends — a text message typed right after a
+    // slow upload lands AFTER it, matching what the user saw locally.
+    const chained = sendChain.current.then(dispatch);
+    sendChain.current = chained;
+    await chained;
   };
 
   return (
@@ -588,7 +606,12 @@ export function ChannelComposer({
           size="icon"
           aria-label="Send message"
           onClick={() => void submit()}
-          disabled={(!body.trim() && !pendingFile) || busy}
+          // NOT gated on the POST being in flight: sends chain in order (see
+          // sendChain), so a new message typed while the previous POST is in
+          // flight is sendable immediately — the button greying out mid-flight
+          // read as "the app is slow" and, worse, the Enter path silently
+          // dropped the keystroke.
+          disabled={!body.trim() && !pendingFile}
           className="size-9 shrink-0"
         >
           <SendHorizontal className="size-4" />

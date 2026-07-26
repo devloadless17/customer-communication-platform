@@ -1952,12 +1952,20 @@ export class ChannelsService {
       select: { isDefault: true },
     });
     const isDefault = channel?.isDefault ?? false;
+    // Users are ORG-scoped since the restructure — "on the team" means a
+    // WorkspaceMember row, not a User.workspaceId column. The old filter kept
+    // the dropped column and turned EVERY mention-carrying send into a 400
+    // (PrismaClientValidationError → invalid_request) until 2026-07-26.
     const where: {
-      workspaceId: string;
       id: { in: string[] };
       deactivatedAt: null;
+      workspaceMemberships: { some: { workspaceId: string } };
       channelMemberships?: { some: { channelId: string } };
-    } = { workspaceId, id: { in: ids }, deactivatedAt: null };
+    } = {
+      id: { in: ids },
+      deactivatedAt: null,
+      workspaceMemberships: { some: { workspaceId } },
+    };
     if (!isDefault) {
       where.channelMemberships = { some: { channelId } };
     }

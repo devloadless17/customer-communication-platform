@@ -69,7 +69,8 @@ export class AiInboxService {
       where: { id: conv.contactId },
       select: { customerId: true },
     });
-    const [state, suggestion, summary, memory, hallucination] = await Promise.all([
+    const [cfg, state, suggestion, summary, memory, hallucination] = await Promise.all([
+      loadAiConfig(workspaceId),
       this.db.aiConversationState.findUnique({ where: { conversationId } }),
       this.db.aiReplySuggestion.findFirst({
         where: { workspaceId, conversationId, state: "pending" },
@@ -90,7 +91,13 @@ export class AiInboxService {
       getConversationHallucinationSummary(workspaceId, conversationId),
     ]);
     return {
-      state: state?.state ?? "ai_active",
+      // The per-conversation state machine defaults to ai_active, but that is
+      // only meaningful when the WORKSPACE's assistant is actually enabled.
+      // Without this gate every thread in an AI-less workspace rendered an
+      // "AI Active" badge and an assignee reading "Handled by the AI Agent" —
+      // pure fiction (the reply subscriber checks configEnabled and never
+      // fires there). "disabled" makes the web hide the AI chrome entirely.
+      state: configEnabled(cfg) ? (state?.state ?? "ai_active") : "disabled",
       suggestion,
       summary,
       memory,

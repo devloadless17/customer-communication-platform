@@ -263,8 +263,10 @@ export interface RouteMessageResult {
  *      one issue becomes three tickets; too long and a genuinely new question
  *      gets buried in resolved work), which is exactly why the window is a
  *      per-workspace setting rather than a constant.
- *   3. Otherwise, auto-open a new ticket — unless the workspace turned auto-open
- *      off, in which case the message simply carries no ticketId.
+ *   3. Otherwise, the message carries no ticketId. There is NO auto-open
+ *      (removed 2026-07-25): a ticket is a deliberate act — raised by an agent
+ *      or a workflow's `create_ticket` step, never minted just because a
+ *      customer messaged.
  *
  * Returns the ticket id to stamp on the message. Never throws for a
  * missing conversation: ingest must not fail because ticketing had a bad day.

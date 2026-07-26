@@ -1056,9 +1056,12 @@ export async function uploadSocialMedia(
   );
   // Meta reads the bytes from the `filedata` part. Blob carries the mime type;
   // the filename helps Meta render document names on the recipient side.
+  // The assertion narrows Uint8Array<ArrayBufferLike> → <ArrayBuffer> for the
+  // DOM lib's BlobPart: these bytes come from Node fetch/R2 reads, which never
+  // wrap a SharedArrayBuffer.
   form.append(
     "filedata",
-    new Blob([args.bytes], { type: args.mimeType }),
+    new Blob([args.bytes as Uint8Array<ArrayBuffer>], { type: args.mimeType }),
     args.filename,
   );
   const res = await graphPostForm(url, opts.accessToken, form, opts.appSecret);
