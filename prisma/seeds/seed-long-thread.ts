@@ -70,7 +70,9 @@ async function main() {
   const conversation = await db.conversation.findFirst({
     where: { status: { not: "closed" } },
     orderBy: { id: "asc" },
-    include: { team: true, contact: true },
+    // (`team` was included here until the Team → Workspace rename; the row's
+    // scalar `workspaceId` is all the seed actually uses.)
+    include: { contact: true },
   });
   if (!conversation) {
     console.error("no open conversation found — run `npm run db:seed` first");

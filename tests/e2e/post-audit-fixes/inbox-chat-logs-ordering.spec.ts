@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 
-import { db, superadminTeam, wipeTestData } from "../_helpers/db";
+import { db, appAdmin, wipeTestData } from "../_helpers/db";
 
 /**
  * Inbox chat + activity-log smoothness / ordering verification.
@@ -235,7 +235,7 @@ async function injectInbound(body: string, atMs: number): Promise<string> {
 // ── fixtures ────────────────────────────────────────────────────────────────
 
 test.beforeAll(async () => {
-  const su = await superadminTeam();
+  const su = await appAdmin();
   workspaceId = su.workspaceId;
   userId = su.userId;
   const u = await db().user.findUnique({

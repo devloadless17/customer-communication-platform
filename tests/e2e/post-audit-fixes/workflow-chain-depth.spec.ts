@@ -28,14 +28,14 @@ import {
   createWorkflow,
   publishWorkflow,
 } from "../_helpers/api";
-import { db, superadminTeam, wipeTestData, pollUntil } from "../_helpers/db";
+import { db, appAdmin, wipeTestData, pollUntil } from "../_helpers/db";
 
 let workspaceId: string;
 let contactId: string;
 
 test.beforeAll(async () => {
   await wipeTestData();
-  const su = await superadminTeam();
+  const su = await appAdmin();
   workspaceId = su.workspaceId;
   const contact = await db().contact.create({
     data: {

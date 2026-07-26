@@ -355,8 +355,8 @@ test.beforeAll(async () => {
   // the app-admin — not the platform super-admin. Optimistic own-action pills
   // are authored as `currentUser` (the app-admin), so any reconcile that pairs a
   // stub to a server audit row (symptom 4) needs the injected actor to match.
-  // appAdmin().workspaceId === superadminTeam().workspaceId (same seeded team), so this
-  // doesn't move the team the fixtures live in.
+  // Fixtures are keyed by the dedicated e2e workspace (`e2e-app-ws`) the
+  // app-admin lives in, so actor and tenant always agree.
   const admin = await appAdmin();
   workspaceId = admin.workspaceId;
   userId = admin.userId;

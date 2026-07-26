@@ -224,6 +224,12 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  // Self-cleanup: `wipeTestData` does not cover channelConnection, and a
+  // leftover WhatsApp row breaks later specs that assert the workspace is
+  // unconfigured (see calls.spec.ts afterAll for the same rule).
+  await db().channelConnection.deleteMany({
+    where: { workspaceId, channel: "whatsapp", externalAccountId: phoneNumberId },
+  });
   await wipeTestData();
   await db().$disconnect();
 });
@@ -354,7 +360,11 @@ test("a reload during a live call releases the customer instead of stranding the
         });
         return row?.status;
       },
-      { timeout: 15_000, message: "reload should have terminated the live call" },
+      // 30s, not 15: the reclaim fires from a mount effect, i.e. only after
+      // hydration — which on a LOADED dev server (mid-suite) can exceed 15s.
+      // The assertion is about the behavior, not dev-compile speed; prod
+      // hydrates in milliseconds and the stale-call sweeper backstops anyway.
+      { timeout: 30_000, message: "reload should have terminated the live call" },
     )
     .toBe("completed");
 });

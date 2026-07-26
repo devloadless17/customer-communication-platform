@@ -373,7 +373,7 @@ test.describe("selectAssignee — capacity and overflow", () => {
         member("c", { hasOverride: true, weight: 1, served: 1 }),
       ],
       onlineUserIds: null,
-    } as const;
+    };
     const first = selectAssignee(args);
     for (let i = 0; i < 20; i++) expect(selectAssignee(args)).toEqual(first);
   });
@@ -491,7 +491,7 @@ test.describe("routing rules", () => {
   });
 
   test("clauses AND together; values within a clause OR", () => {
-    const conditions = { channels: ["whatsapp", "messenger"], tagIds: ["vip"] };
+    const conditions = parseConditions({ channels: ["whatsapp", "messenger"], tagIds: ["vip"] });
     expect(
       matchesConditions(conditions, { source: "inbound", channel: "messenger", tagIds: ["vip"] }),
     ).toBe(true);

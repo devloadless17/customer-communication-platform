@@ -14,7 +14,7 @@
 import { test, expect } from "@playwright/test";
 
 import { generateApiKey } from "../../../apps/api/src/auth/api-key";
-import { db, superadminTeam, wipeTestData } from "../_helpers/db";
+import { db, appAdmin, wipeTestData } from "../_helpers/db";
 
 let workspaceId: string;
 let userId: string;
@@ -26,7 +26,7 @@ let customerStageId: string;
 
 test.beforeAll(async () => {
   await wipeTestData();
-  const su = await superadminTeam();
+  const su = await appAdmin();
   workspaceId = su.workspaceId;
   userId = su.userId;
 

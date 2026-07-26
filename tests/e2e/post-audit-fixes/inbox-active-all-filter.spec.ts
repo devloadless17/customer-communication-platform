@@ -15,7 +15,7 @@
  * the right subset + the counts endpoint shape.
  */
 import { test, expect } from "@playwright/test";
-import { db, superadminTeam, wipeTestData } from "../_helpers/db";
+import { db, appAdmin, wipeTestData } from "../_helpers/db";
 
 let workspaceId: string;
 let openId: string;
@@ -24,7 +24,7 @@ let closedId: string;
 
 test.beforeAll(async () => {
   await wipeTestData();
-  const su = await superadminTeam();
+  const su = await appAdmin();
   workspaceId = su.workspaceId;
 
   // Three contacts (uniqueness is per-team on phoneNumber for WhatsApp) +

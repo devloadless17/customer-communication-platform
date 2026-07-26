@@ -443,11 +443,21 @@ test("opening a DM does not notify or ding the person who opened it", async ({
   await openTeam(page);
 
   await page.getByRole("button", { name: "New direct message" }).click();
-  await page.getByText(`${PREFIX}Peer Person`).last().click();
+  // Scope the pick to the DIALOG: when the DM already exists (earlier tests
+  // in this file create it), the SIDEBAR also shows the peer's name, and a
+  // bare `.last()` raced the dialog mount — clicking the sidebar row instead,
+  // which navigated but left the dialog open.
+  const dialog = page.getByRole("dialog", { name: "New direct message" });
+  await dialog.getByText(`${PREFIX}Peer Person`).click();
 
-  // Land in the DM…
+  // Land in the DM, dialog gone…
   await expect(composer(page)).toBeVisible({ timeout: 30_000 });
+  await expect(dialog).toBeHidden();
   // …with no self-addressed alert. The frame fans to BOTH participants, and
   // the starter's tab used to lose the race against its own POST response.
-  await expect(page.getByText("New direct message", { exact: true })).toHaveCount(0);
+  // Scoped to the sonner toast region: the dialog TITLE is the same string,
+  // so an unscoped getByText can't tell "toast fired" from "dialog visible".
+  await expect(
+    page.locator("[data-sonner-toast]").getByText("New direct message"),
+  ).toHaveCount(0);
 });

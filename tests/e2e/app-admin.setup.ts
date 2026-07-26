@@ -8,9 +8,11 @@ import { ensureAppAdmin } from "./_helpers/db";
  *
  * Why this exists (2026-06-10): the org-approval gate redirects super-admins
  * out of the customer app to the platform shell, so the superadmin can no
- * longer drive /inbox, /contacts, etc. This admin lives in the SAME (active)
- * team as the superadmin, so every fixture keyed by `superadminTeam().workspaceId`
- * is visible to it. Platform specs still use the superadmin storageState.
+ * longer drive /inbox, /contacts, etc. This admin lives in the DEDICATED e2e
+ * workspace (`e2e-app-ws` — see _helpers/db.ts), so every fixture keyed by
+ * `appAdmin().workspaceId` is visible to it and no spec ever touches the
+ * maintainer's real workspace. Platform specs still use the superadmin
+ * storageState.
  */
 const AUTH_FILE = "tests/e2e/.auth/app-admin.json";
 

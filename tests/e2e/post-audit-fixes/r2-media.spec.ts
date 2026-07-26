@@ -12,7 +12,7 @@
  */
 import { test, expect } from "@playwright/test";
 
-import { db, superadminTeam } from "../_helpers/db";
+import { db, appAdmin } from "../_helpers/db";
 
 // --- tiny valid fixtures (pass the magic-byte sniff in mime-guard.ts) --------
 // 1×1 transparent PNG.
@@ -44,10 +44,24 @@ let workspaceId: string;
 let channelId: string;
 
 test.beforeAll(async ({ request }) => {
-  workspaceId = (await superadminTeam()).workspaceId;
+  workspaceId = (await appAdmin()).workspaceId;
   const r = await request.get("/api/team-chat/channels/default");
   expect(r.ok(), `default channel lookup failed: ${r.status()}`).toBeTruthy();
   channelId = (await r.json()).channel.id;
+});
+
+test.afterAll(async () => {
+  // Remove the media messages this file uploaded into #general. Without this
+  // they accumulate across runs, and once the R2 blob is gone every later
+  // /team render fires media 404s — which failed predeploy's "no console
+  // errors" gate with errors that look nothing like an R2 problem.
+  await db().teamChannelMessage.deleteMany({
+    where: { workspaceId, clientTempId: { startsWith: "e2e-r2-" } },
+  });
+  await db().message.deleteMany({
+    where: { workspaceId, externalId: { startsWith: "e2e-r2-" } },
+  });
+  await db().$disconnect();
 });
 
 test.describe("R2 media serving — streaming proxy, all kinds", () => {

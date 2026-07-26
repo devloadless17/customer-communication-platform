@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 
 import { test, expect, type APIRequestContext } from "@playwright/test";
 
-import { createTestUser, db, superadminTeam, pollUntil } from "../_helpers/db";
+import { createTestUser, db, appAdmin, pollUntil } from "../_helpers/db";
 
 /**
  * AI customer-handoff policy — edge cases.
@@ -107,7 +107,7 @@ async function readConvo(id: string) {
 
 test.describe("AI customer-handoff policy", () => {
   test.beforeAll(async () => {
-    const sa = await superadminTeam();
+    const sa = await appAdmin();
     workspaceId = sa.workspaceId;
     const key = newApiKey();
     const row = await db().workspaceApiKey.create({

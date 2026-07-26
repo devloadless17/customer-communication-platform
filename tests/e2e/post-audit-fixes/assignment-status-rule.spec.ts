@@ -21,14 +21,14 @@
  * (and its mirror doc on conversations.service.ts:assign) must change with it.
  */
 import { test, expect } from "@playwright/test";
-import { db, superadminTeam, wipeTestData } from "../_helpers/db";
+import { db, appAdmin, wipeTestData } from "../_helpers/db";
 
 let workspaceId: string;
 let userId: string;
 
 test.beforeAll(async () => {
   await wipeTestData();
-  const su = await superadminTeam();
+  const su = await appAdmin();
   workspaceId = su.workspaceId;
   userId = su.userId;
 });

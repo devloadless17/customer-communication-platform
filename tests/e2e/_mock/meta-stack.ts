@@ -15,6 +15,8 @@ import { spawn } from "node:child_process";
 import { existsSync, openSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { ensureCanary, canaryFingerprint, writeFingerprint } from "../_helpers/canary";
+
 const MOCK_PORT = 4100;
 const API_PORT = 4001;
 const REPO_ROOT = resolve(__dirname, "../../..");
@@ -47,6 +49,12 @@ export default async function globalSetup(): Promise<void> {
   const { mkdirSync } = await import("node:fs");
   if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
 
+  // Isolation canary: plant + fingerprint the sentinel NON-e2e tenant so the
+  // teardown can prove this suite never wrote outside its `e2e-meta-team`
+  // scope. Same tripwire as the main config (see tests/e2e/_helpers/canary.ts).
+  await ensureCanary();
+  writeFingerprint(await canaryFingerprint());
+
   // ---- Mock Graph server ------------------------------------------------
   if (!(await isUp(`http://127.0.0.1:${MOCK_PORT}/__mock/health`))) {
     const out = logFile("graph-mock.log");
@@ -66,7 +74,10 @@ export default async function globalSetup(): Promise<void> {
     const out = logFile("test-api.log");
     const api = spawn(
       "node",
-      ["--env-file=../../.env", "-r", "@swc-node/register", "./src/main.ts"],
+      // `--env-file-if-exists`: locally the root .env feeds the boot exactly as
+      // before; in CI there is no .env (services + job env provide everything)
+      // and a plain `--env-file` would refuse to start Node at all.
+      ["--env-file-if-exists=../../.env", "-r", "@swc-node/register", "./src/main.ts"],
       {
         cwd: resolve(REPO_ROOT, "apps/api"),
         env: {

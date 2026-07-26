@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-import { db, superadminTeam } from "./_helpers/db";
+import { db, appAdmin } from "./_helpers/db";
 
 /**
  * Saved inbox views, driven through the real UI.
@@ -32,7 +32,7 @@ test.afterAll(async () => {
 
 test("create a view, filter by it, and survive a reload", async ({ page }) => {
   test.setTimeout(120_000);
-  await superadminTeam();
+  await appAdmin();
 
   await page.goto("/inbox");
 
@@ -85,7 +85,7 @@ test("create a view, filter by it, and survive a reload", async ({ page }) => {
 
 test("deleting the active view falls back instead of stranding the list", async ({ page }) => {
   test.setTimeout(120_000);
-  await superadminTeam();
+  await appAdmin();
 
   const name = `E2E Unassigned del ${Date.now().toString().slice(-6)}`;
   await page.goto("/inbox");

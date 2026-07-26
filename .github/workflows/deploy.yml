@@ -77,6 +77,12 @@ jobs:
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm exec prisma generate
       - run: pnpm run typecheck
+      # The dark corners `turbo run typecheck` never covered: tests/ (79 spec
+      # files with their own tsconfig), prisma/seeds and scripts/. A fixture
+      # written against a renamed field is exactly how a "green" suite silently
+      # stops testing reality.
+      - run: pnpm run typecheck:tests
+      - run: pnpm run typecheck:root
       - run: pnpm run lint
       # Prisma select/include/_count keys are NOT typechecked — the generated
       # XOR unions defeat excess-property checking, so a field that does not
@@ -84,6 +90,124 @@ jobs:
       # it (400 invalid_request / P2022). Three outages traced to exactly this
       # (see scripts/check-prisma-fields.mjs). One second, catches them all.
       - run: pnpm run check:prisma-fields
+      # No unfiltered deleteMany/updateMany in tests/ — the suites share the
+      # maintainer's dev DB, and an unscoped wipe destroyed real tenant data
+      # once (2026-07-26). See scripts/check-test-isolation.mjs.
+      - run: node scripts/check-test-isolation.mjs
+      # `as unknown as` may only go DOWN (scripts/check-double-assertions.mjs).
+      - run: node scripts/check-double-assertions.mjs
+
+  # The Vitest suite (apps/api/test — 36 files, ~500 tests) against a REAL
+  # throwaway Postgres + Redis. `migrate deploy` on the empty DB also proves
+  # the migration chain (including the hand-maintained partial-index section,
+  # which partial-indexes.spec.ts then asserts against pg_indexes) on every
+  # push — deployment-shaped coverage the shared dev DB can never give.
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16.6-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci" --health-interval 5s
+          --health-timeout 3s --health-retries 12
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 12
+    env:
+      DATABASE_URL: postgres://ci:ci@localhost:5432/ci?schema=public
+      REDIS_URL: redis://localhost:6379
+      BETTER_AUTH_SECRET: ci-placeholder
+      BETTER_AUTH_URL: http://localhost:3000
+      # Must base64-decode to exactly 32 bytes or the api env gate refuses to
+      # boot (verified by local rehearsal). This is base64("ci-0123…abc").
+      ENCRYPTION_KEY: Y2ktMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmM=
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: pnpm/action-setup@d15e628ca66d93ee5f352c71671a7bc6a97af5c9  # v6.0.8
+        with:
+          version: 10.34.4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm exec prisma generate
+      - run: pnpm exec prisma migrate deploy
+      # Several specs resolve the seeded superadmin row; idempotent, and the
+      # fresh CI database always passes its single-tenant guard.
+      - run: pnpm exec tsx prisma/seeds/seed-superadmin.ts
+      - run: pnpm test
+
+  # The Meta-channels backend e2e suite — hermetic by design: mock Graph on
+  # :4100, its own api on :4001 (spawned by the suite's globalSetup with
+  # `--env-file-if-exists`, so the job env below is the whole boot config —
+  # rehearsed locally 2026-07-26), all rows scoped to the throwaway
+  # `e2e-meta-team`, Redis DB index 5. No browser: the specs are node fetch +
+  # Prisma, so no `playwright install` step.
+  e2e-meta:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/production' || github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16.6-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci" --health-interval 5s
+          --health-timeout 3s --health-retries 12
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 12
+    env:
+      DATABASE_URL: postgres://ci:ci@localhost:5432/ci?schema=public
+      # Base URL only — the meta stack appends `/5` itself for its isolated DB.
+      REDIS_URL: redis://localhost:6379
+      BETTER_AUTH_SECRET: ci-placeholder
+      BETTER_AUTH_URL: http://localhost:3000
+      ENCRYPTION_KEY: Y2ktMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmM=
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: pnpm/action-setup@d15e628ca66d93ee5f352c71671a7bc6a97af5c9  # v6.0.8
+        with:
+          version: 10.34.4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm exec prisma generate
+      - run: pnpm exec prisma migrate deploy
+      - run: pnpm test:e2e:meta
+      - name: Upload meta-stack logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: meta-stack-logs
+          path: tests/e2e/.meta-logs/
+          retention-days: 3
 
   changes:
     # Runs on a push to `production`, a push to `main`, or workflow_dispatch.
@@ -228,7 +352,11 @@ jobs:
 
   build-web:
     if: needs.changes.outputs.web == 'true'
-    needs: changes
+    # typecheck in `needs`: images used to be pushed to the registry BEFORE
+    # typecheck's result was known — only the VPS ship was blocked, so a
+    # type-broken push still published :latest-* tags the next deploy could
+    # pull. ~4 min of serial latency buys pushed-image integrity.
+    needs: [changes, typecheck]
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -277,7 +405,8 @@ jobs:
 
   build-api:
     if: needs.changes.outputs.api == 'true'
-    needs: changes
+    # See build-web: typecheck gates the registry push, not just the ship.
+    needs: [changes, typecheck]
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -595,8 +724,10 @@ jobs:
       always() && !cancelled() &&
       needs.smoke.result == 'success' &&
       needs.typecheck.result == 'success' &&
+      needs.unit.result == 'success' &&
+      needs.e2e-meta.result == 'success' &&
       (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/production')
-    needs: [typecheck, smoke]
+    needs: [typecheck, unit, e2e-meta, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

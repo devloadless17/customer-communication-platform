@@ -120,5 +120,16 @@ test.describe("Security: MIME magic-byte sniff on team-chat media upload", () =>
     // What's NOT acceptable is a 400-class signature refusal, which would
     // mean the sniffer rejected valid PNG bytes — the actual concern.
     expect([200, 201, 500, 502, 503]).toContain(resp.status());
+
+    // Self-cleanup: a successful upload mints a real media message in
+    // #general. Left behind, it 404s on every later /team render once the
+    // blob ages out — which failed predeploy's "no console errors" gate.
+    if (resp.ok()) {
+      const { messageId } = (await resp.json()) as { messageId?: string };
+      if (messageId) {
+        const { db } = await import("../_helpers/db");
+        await db().teamChannelMessage.deleteMany({ where: { id: messageId } });
+      }
+    }
   });
 });

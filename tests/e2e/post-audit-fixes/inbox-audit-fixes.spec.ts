@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 
-import { db, superadminTeam, wipeTestData } from "../_helpers/db";
+import { db, appAdmin, wipeTestData } from "../_helpers/db";
 
 /**
  * Verifies the inbox-audit fixes shipped 2026-06-09 that the existing suite
@@ -31,7 +31,7 @@ async function openThread(page: Page): Promise<void> {
 }
 
 test.beforeAll(async () => {
-  const su = await superadminTeam();
+  const su = await appAdmin();
   workspaceId = su.workspaceId;
   await wipeTestData();
 

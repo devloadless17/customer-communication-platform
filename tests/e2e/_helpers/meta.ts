@@ -79,15 +79,11 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
       id: META_TEST_TEAM_ID,
       name: "E2E Meta Test Team",
       organizationId: orgId,
-      // EXPLICIT, not inherited. Auto-open is OFF by default (a ticket means
-      // someone decided this needs work, not "a message arrived"), but the
-      // ingest→ticket routing specs exercise the auto-open path specifically.
-      // Pinning it here keeps them testing what they claim to test, and the
-      // specs that assert the OFF behaviour flip it through the real settings
-      // endpoint rather than relying on the default.
-      ticketAutoOpen: true,
     },
-    update: { organizationId: orgId, ticketAutoOpen: true },
+    // Tickets are raised deliberately (auto-open was removed 2026-07-25);
+    // ingest only ATTACHES an inbound to the thread's active ticket or reopens
+    // a recently-solved one — ticket-routing.spec.ts seeds its tickets via /v1.
+    update: { organizationId: orgId },
   });
 
   await d.user.upsert({

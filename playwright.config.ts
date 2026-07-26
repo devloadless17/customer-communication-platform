@@ -30,6 +30,9 @@ export default defineConfig({
   // The Meta backend suite (tests/e2e/meta-channels) needs its own mock-Graph
   // stack + isolated api — it runs via playwright.meta.config.ts, never here.
   testIgnore: "**/meta-channels/**",
+  // Isolation canary: verifies the sentinel NON-e2e tenant survived the run
+  // untouched (see tests/e2e/_helpers/canary.ts). Planted by the setup project.
+  globalTeardown: "./tests/e2e/isolation-canary.teardown.ts",
   // Most paths are sequential because they share login state + a single
   // superadmin account. Sharding across workers would require a per-worker
   // user, not worth it at this scale.
@@ -58,7 +61,12 @@ export default defineConfig({
     // Realistic UA so any user-agent-gated paths (rare here, but
     // future-proofing) don't take a fallback branch.
     actionTimeout: 8_000,
-    navigationTimeout: 15_000,
+    // 30s, not 15: a ceiling, not a wait — green runs never feel it. On this
+    // box the suite runs against the DEV stack (see e2e memory), where a
+    // full-page nav mid-suite can legitimately exceed 15s while Next compiles;
+    // that manifested as spurious one-off failures at a different spec each
+    // run. prod:local navigations complete in well under a second either way.
+    navigationTimeout: 30_000,
   },
   projects: [
     // One-time auth: drives the real login flow ONCE per role and writes the
@@ -69,7 +77,7 @@ export default defineConfig({
     // Every other spec depends on these and reuses the saved state.
     {
       name: "setup",
-      testMatch: /(auth|app-admin)\.setup\.ts/,
+      testMatch: /(auth|app-admin|isolation-canary)\.setup\.ts/,
     },
     {
       name: "chromium",

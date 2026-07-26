@@ -44,6 +44,13 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  // Remove the WhatsApp connection this file upserted — `wipeTestData` does
+  // not cover channelConnection, and a leftover row makes the workspace look
+  // "WhatsApp-configured" to later specs (the audience-group gate test
+  // asserts the UNCONFIGURED redirect and failed on exactly this leak).
+  await db().channelConnection.deleteMany({
+    where: { workspaceId, channel: "whatsapp", externalAccountId: "e2e_calls_wa" },
+  });
   await wipeTestData();
   await db().$disconnect();
 });

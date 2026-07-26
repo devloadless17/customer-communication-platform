@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Static check: every Prisma `select` / `include` / `_count` key must exist on
- * the model it is written against.
+ * Static check: every Prisma `select` / `include` / `_count` / `where` /
+ * `data` / `orderBy` key must exist on the model it is written against.
  *
  * WHY THIS EXISTS. Prisma's generated types are XOR unions, which defeat
  * TypeScript's excess-property checking — a key that does not exist on the
@@ -36,7 +36,11 @@ import path from "node:path";
 
 const ROOT = process.cwd();
 const SCHEMA = path.join(ROOT, "prisma", "schema.prisma");
-const SCAN_DIRS = ["apps/api/src", "apps/web/src"];
+// tests/, prisma/seeds and scripts/ scan too (2026-07-26): a fixture or seed
+// written against a renamed field is exactly how a "green" suite silently
+// stops testing reality — the meta harness carried a dropped column
+// (`Workspace.ticketAutoOpen`) for a day and broke every meta spec at seed.
+const SCAN_DIRS = ["apps/api/src", "apps/web/src", "tests", "prisma/seeds", "scripts"];
 
 /** Prisma operators that may appear inside a select/include object. */
 const PASSTHROUGH_KEYS = new Set([
@@ -196,6 +200,13 @@ function topLevelEntries(objSrc, { shorthand = false } = {}) {
       // out of an object literal (ternaries, types, labels) — skip rather than
       // report something we are not sure about.
       if (!key || !/^[A-Za-z_$][\w$]*$/.test(key)) continue;
+      // A REAL key is preceded by `{`, `,` or nothing. Anything else means the
+      // colon belongs to a ternary (`cond ? null : x`, `y as const : z`) or a
+      // type annotation — the exact shapes that made the data-walker report
+      // `null` / `const` / `never` as fields. Skip, don't guess.
+      let p = j;
+      while (p >= 0 && /\s/.test(objSrc[p])) p--;
+      if (p >= 0 && objSrc[p] !== "{" && objSrc[p] !== ",") continue;
       // Walk forward to the value.
       let k = i + 1;
       while (k < objSrc.length && /\s/.test(objSrc[k])) k++;
@@ -218,11 +229,14 @@ function collectShorthand(objSrc, endIdx, out) {
   while (j >= 0 && /[\w$]/.test(objSrc[j])) j--;
   const key = objSrc.slice(j + 1, end);
   if (!key || !/^[A-Za-z_$][\w$]*$/.test(key)) return;
-  // A preceding `:` `.` or `?` means this identifier is a VALUE, not a key
-  // (`{ a: b }`, `{ ...x.y }`) — skip rather than guess.
+  // A genuine shorthand key is preceded by `{` or `,` (or nothing). Anything
+  // else — `:` `.` `?` of a value expression, but also the `|` of `x || null`,
+  // the `+` of `a + index`, the `s` of `as const` — means this identifier is
+  // the TAIL OF A VALUE, not a key. That class produced phantom `null` /
+  // `index` / `const` fields on the first data-walker run. Skip, don't guess.
   let k = j;
   while (k >= 0 && /\s/.test(objSrc[k])) k--;
-  if (k >= 0 && (objSrc[k] === ":" || objSrc[k] === "." || objSrc[k] === "?")) return;
+  if (k >= 0 && objSrc[k] !== "{" && objSrc[k] !== ",") return;
   out.push({ key, valueStart: -1 });
 }
 
@@ -280,9 +294,9 @@ const RELATION_FILTERS = new Set(["some", "every", "none", "is", "isNot"]);
  * Workspace tenancy rename in the realtime gateway and only surfaced as a
  * runtime PrismaClientValidationError on every socket connect.
  *
- * `data` is deliberately NOT checked — nested writes (connect/create/set/
- * increment/disconnect) are a second grammar, and half-modelling it would cry
- * wolf.
+ * (`data` has its own walker now — see checkData — after the blind spot bit
+ * twice: the `User.role` nested-write prod crash, and the e2e harness seeding
+ * a dropped `Workspace.ticketAutoOpen` for a day.)
  */
 function checkWhere(file, src, absOffset, objSrc, model, ctx) {
   if (!MODELS.has(model)) return;
@@ -316,6 +330,136 @@ function checkWhere(file, src, absOffset, objSrc, model, ctx) {
         if (nested) checkWhere(file, src, absOffset + valueStart + opStart, nested, target, ctx);
       }
     }
+  }
+}
+
+/**
+ * Nested-write operators that may appear under a RELATION field inside `data`,
+ * mapped to how their payload is routed. Anything not listed is SKIPPED (the
+ * file's false-positive discipline): `connect`/`disconnect`/`set` take
+ * where-unique shapes already covered by checkWhere's key registry.
+ */
+const NESTED_WRITE_OPS = new Set([
+  "create", "createMany", "connectOrCreate", "update", "updateMany",
+  "upsert", "delete", "deleteMany", "connect", "disconnect", "set",
+]);
+
+/**
+ * Validate a `data` object's keys against the model's fields, descending into
+ * nested writes on relation fields.
+ *
+ * WHY (2026-07-26): `data` was the checker's last blind spot, and it bit twice
+ * — a `User.role` nested write crashed every role change in prod, and the e2e
+ * meta harness kept seeding a DROPPED column (`Workspace.ticketAutoOpen`),
+ * which compiled clean and failed only when the suite ran. Same XOR-union
+ * story as select/where: tsc proves nothing here.
+ *
+ * Discipline: judge the KEYS; never judge values. A scalar field's value may
+ * be an operator object (`{ increment: 1 }`, `{ set: [...] }`) — the key was
+ * already validated, so we do NOT descend into it. Only a RELATION field's
+ * value is entered, and only through the unambiguous operator routes below.
+ */
+function checkData(file, src, absOffset, objSrc, model, ctx) {
+  if (!MODELS.has(model)) return;
+  const fields = MODELS.get(model);
+  for (const { key, valueStart } of topLevelEntries(objSrc, { shorthand: true })) {
+    if (!fields.has(key)) {
+      const line = src.slice(0, absOffset).split("\n").length;
+      problems.push({ file, line, model, key, ctx: `${ctx} data` });
+      continue;
+    }
+    const target = relationTarget(model, key);
+    if (!target || valueStart === -1) continue; // scalar (or non-object value) — done
+    const inner = block(objSrc, valueStart);
+    if (!inner) continue;
+    for (const { key: op, valueStart: opStart } of topLevelEntries(inner)) {
+      if (!NESTED_WRITE_OPS.has(op)) continue;
+      const route = (payloadAt, payloadSrc) =>
+        routeNestedWrite(file, src, payloadAt, payloadSrc, target, op, ctx);
+      if (opStart !== -1) {
+        const payload = block(inner, opStart);
+        if (payload) route(absOffset + valueStart + opStart, payload);
+      } else {
+        // Array form: `create: [ {…}, {…} ]`, `connect: [ {…} ]`, …
+        for (const b of arrayObjects(inner, op)) {
+          route(absOffset + valueStart + b.at, b.src);
+        }
+      }
+    }
+  }
+}
+
+/** Route one nested-write payload object to data/where checking on `model`. */
+function routeNestedWrite(file, src, absOffset, objSrc, model, op, ctx) {
+  const entries = topLevelEntries(objSrc, { shorthand: true });
+  const keys = new Set(entries.map((e) => e.key));
+  const sub = (name, fn) => {
+    for (const e of entries) {
+      if (e.key !== name || e.valueStart === -1) continue;
+      const inner = block(objSrc, e.valueStart);
+      if (inner) fn(absOffset + e.valueStart, inner);
+    }
+  };
+  switch (op) {
+    case "create":
+      return checkData(file, src, absOffset, objSrc, model, ctx);
+    case "createMany":
+      // `{ data: {…} | [{…}] }`
+      sub("data", (at, inner) => checkData(file, src, at, inner, model, ctx));
+      for (const b of arrayObjects(objSrc, "data")) {
+        checkData(file, src, absOffset + b.at, b.src, model, ctx);
+      }
+      return;
+    case "connectOrCreate":
+    case "upsert":
+      sub("where", (at, inner) => checkWhere(file, src, at, inner, model, ctx));
+      sub("create", (at, inner) => checkData(file, src, at, inner, model, ctx));
+      sub("update", (at, inner) => checkData(file, src, at, inner, model, ctx));
+      return;
+    case "updateMany":
+      sub("where", (at, inner) => checkWhere(file, src, at, inner, model, ctx));
+      sub("data", (at, inner) => checkData(file, src, at, inner, model, ctx));
+      return;
+    case "update":
+      // To-many: `{ where, data }`. To-one: the object IS the data.
+      if (keys.has("where") || keys.has("data")) {
+        sub("where", (at, inner) => checkWhere(file, src, at, inner, model, ctx));
+        sub("data", (at, inner) => checkData(file, src, at, inner, model, ctx));
+        return;
+      }
+      return checkData(file, src, absOffset, objSrc, model, ctx);
+    case "connect":
+    case "disconnect":
+    case "set":
+    case "delete":
+    case "deleteMany":
+      // Where(-unique) shapes; composite keys are registered as synthetic
+      // fields, so checkWhere judges them correctly.
+      return checkWhere(file, src, absOffset, objSrc, model, ctx);
+  }
+}
+
+/**
+ * Validate `orderBy` keys. Shapes: `{ field: "asc" }`, `{ relation: { field:
+ * "desc" } }`, `{ field: { sort: "asc", nulls: "last" } }`, `{ _count: … }`,
+ * or an array of these. Judge the keys; descend only into relations.
+ */
+function checkOrderBy(file, src, absOffset, objSrc, model, ctx) {
+  if (!MODELS.has(model)) return;
+  const fields = MODELS.get(model);
+  for (const { key, valueStart } of topLevelEntries(objSrc)) {
+    if (key === "_count" || key === "_relevance") continue;
+    if (!fields.has(key)) {
+      const line = src.slice(0, absOffset).split("\n").length;
+      problems.push({ file, line, model, key, ctx: `${ctx} orderBy` });
+      continue;
+    }
+    const target = relationTarget(model, key);
+    if (target && valueStart !== -1) {
+      const inner = block(objSrc, valueStart);
+      if (inner) checkOrderBy(file, src, absOffset + valueStart, inner, target, ctx);
+    }
+    // Scalar with an object value = `{ sort, nulls }` — key already judged.
   }
 }
 
@@ -360,18 +504,35 @@ for (const dir of SCAN_DIRS) {
       const args = block(src, braceAt);
       if (!args) continue;
       // `select` / `include` / `_count` name model fields directly; `where`
-      // names them too, but its values are a filter grammar — see checkWhere.
-      // `data` and `orderBy` are deliberately left alone.
+      // names them too, but its values are a filter grammar — see checkWhere;
+      // `data` is the write grammar — see checkData; `orderBy` the sort one.
+      // In an `upsert`, the top-level `create` and `update` args are data.
       for (const { key, valueStart } of topLevelEntries(args)) {
-        if (valueStart === -1) continue;
-        const inner = block(args, valueStart);
-        if (!inner) continue;
         const rel = path.relative(ROOT, file);
         const ctx = `${m[1]}.${m[2]}`;
+        if (valueStart === -1) {
+          // Array-valued args: `data: [ {…} ]` (createMany), `orderBy: [ {…} ]`.
+          if (key === "data") {
+            for (const b of arrayObjects(args, "data")) {
+              checkData(rel, src, braceAt + b.at, b.src, model, ctx);
+            }
+          } else if (key === "orderBy") {
+            for (const b of arrayObjects(args, "orderBy")) {
+              checkOrderBy(rel, src, braceAt + b.at, b.src, model, ctx);
+            }
+          }
+          continue;
+        }
+        const inner = block(args, valueStart);
+        if (!inner) continue;
         if (key === "select" || key === "include") {
           checkObject(rel, src, braceAt + valueStart, inner, model, ctx);
         } else if (key === "where") {
           checkWhere(rel, src, braceAt + valueStart, inner, model, ctx);
+        } else if (key === "data" || (m[2] === "upsert" && (key === "create" || key === "update"))) {
+          checkData(rel, src, braceAt + valueStart, inner, model, ctx);
+        } else if (key === "orderBy") {
+          checkOrderBy(rel, src, braceAt + valueStart, inner, model, ctx);
         }
       }
     }

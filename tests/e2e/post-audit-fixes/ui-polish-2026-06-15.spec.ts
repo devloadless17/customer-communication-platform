@@ -1,6 +1,6 @@
 import { test, expect, type Page, type ConsoleMessage } from "@playwright/test";
 
-import { db, superadminTeam } from "../_helpers/db";
+import { db, appAdmin } from "../_helpers/db";
 
 /**
  * Positive e2e for the 2026-06-15 UI/UX polish waves. Runs against the
@@ -52,7 +52,7 @@ let contactId: string;
 let conversationId: string;
 
 test.beforeAll(async () => {
-  workspaceId = (await superadminTeam()).workspaceId;
+  workspaceId = (await appAdmin()).workspaceId;
   const now = Date.now();
   // Idempotent: clear any leftover from a prior run of THIS spec (by its unique
   // phone) without touching anything else.

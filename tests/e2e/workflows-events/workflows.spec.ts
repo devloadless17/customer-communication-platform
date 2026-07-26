@@ -22,7 +22,7 @@ import {
   setConversationStatus,
   createOutboundWebhook,
 } from "../_helpers/api";
-import { db, superadminTeam, wipeTestData, pollUntil } from "../_helpers/db";
+import { db, appAdmin, wipeTestData, pollUntil } from "../_helpers/db";
 
 // ─── Fixture: one contact + one conversation for the suite ───────────────
 let workspaceId: string;
@@ -35,7 +35,7 @@ test.beforeAll(async () => {
   // Doesn't touch the superadmin User / Team / ContactStage rows.
   await wipeTestData();
 
-  const su = await superadminTeam();
+  const su = await appAdmin();
   workspaceId = su.workspaceId;
   userId = su.userId;
 

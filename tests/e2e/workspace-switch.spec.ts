@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-import { db, superadminTeam } from "./_helpers/db";
+import { db, appAdmin } from "./_helpers/db";
 
 /**
  * The workspace switcher, driven through the real UI.
@@ -21,7 +21,7 @@ const SECOND_WORKSPACE = "E2E Switch Target";
 let secondWorkspaceId = "";
 
 test.beforeAll(async () => {
-  const { workspaceId } = await superadminTeam();
+  const { workspaceId } = await appAdmin();
   const base = await db().workspace.findUniqueOrThrow({
     where: { id: workspaceId },
     select: { organizationId: true },
@@ -37,7 +37,9 @@ test.beforeAll(async () => {
     existing?.id ??
     (
       await db().workspace.create({
-        data: { name: SECOND_WORKSPACE, organizationId: base.organizationId },
+        // e2e- id: keeps the throwaway workspace inside the isolation
+        // namespace wipeTestData/createTestWorkspace enforce.
+        data: { id: "e2e-switch-target", name: SECOND_WORKSPACE, organizationId: base.organizationId },
         select: { id: true },
       })
     ).id;
@@ -58,7 +60,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   // Put every session back on the original workspace so later specs aren't
   // silently scoped to the throwaway one.
-  const { workspaceId } = await superadminTeam();
+  const { workspaceId } = await appAdmin();
   await db().session.updateMany({
     where: { activeWorkspaceId: secondWorkspaceId },
     data: { activeWorkspaceId: workspaceId },

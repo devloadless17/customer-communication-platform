@@ -4,7 +4,13 @@
  * already-running stack is left alone.
  */
 
+import verifyCanary from "../isolation-canary.teardown";
+
 export default async function globalTeardown(): Promise<void> {
+  // Isolation canary first (while the DB client is still healthy): the
+  // sentinel tenant must be byte-identical to the setup's fingerprint.
+  await verifyCanary();
+
   for (const key of ["__META_API_PID", "__META_MOCK_PID"]) {
     const pid = Number(process.env[key]);
     if (!pid) continue;

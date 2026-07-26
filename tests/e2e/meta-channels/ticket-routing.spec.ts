@@ -89,7 +89,7 @@ async function messageWithTicket(externalId: string) {
   });
 }
 
-test("an inbound message auto-opens a ticket and stamps it on the message", async () => {
+test("an inbound message does NOT open a ticket — tickets are raised deliberately", async () => {
   const psid = "6009900001111";
   const mid = "m.ticket.in.1";
   const res = await inbound(psid, mid, "my order never arrived");
@@ -97,38 +97,41 @@ test("an inbound message auto-opens a ticket and stamps it on the message", asyn
 
   const message = await messageWithTicket(mid);
   expect(message).not.toBeNull();
-  // The wiring assertion: ingest routed this message to a ticket.
-  expect(message!.ticketId).toBeTruthy();
-
-  const ticket = await db().ticket.findUniqueOrThrow({
-    where: { id: message!.ticketId! },
-    select: { status: true, source: true, number: true, workspaceId: true, channel: true },
+  // Auto-open was removed 2026-07-25: the message lands ticket-free — the
+  // inbox already tracks the thread; a ticket means someone decided this
+  // needs work, not "a message arrived".
+  expect(message!.ticketId).toBeNull();
+  const tickets = await db().ticket.count({
+    where: { workspaceId: META_TEST_TEAM_ID, conversationId: message!.conversationId },
   });
-  expect(ticket.status).toBe("new");
-  // Opened by the message, not by a person.
-  expect(ticket.source).toBe("auto");
-  expect(ticket.workspaceId).toBe(META_TEST_TEAM_ID);
-  expect(ticket.channel).toBe("messenger");
-  expect(ticket.number).toBeGreaterThan(0);
+  expect(tickets).toBe(0);
 
-  // The conversation points at it, and the inbox badge counter agrees.
   const convo = await db().conversation.findUniqueOrThrow({
     where: { id: message!.conversationId },
     select: { activeTicketId: true, openTicketCount: true },
   });
-  expect(convo.activeTicketId).toBe(message!.ticketId);
-  expect(convo.openTicketCount).toBe(1);
+  expect(convo.activeTicketId).toBeNull();
+  expect(convo.openTicketCount).toBe(0);
 });
 
-test("a follow-up message joins the SAME ticket — one issue, not two", async () => {
+test("a follow-up message ATTACHES to the thread's raised ticket — the wiring assertion", async () => {
   const psid = "6009900002222";
   await inbound(psid, "m.ticket.in.2a", "hello");
-  await inbound(psid, "m.ticket.in.2b", "still waiting");
-
   const first = await messageWithTicket("m.ticket.in.2a");
+  expect(first!.ticketId).toBeNull();
+
+  // Raise the ticket deliberately (as an agent or workflow would).
+  const raised = await apiJson<{ ticket: { id: string } }>("/tickets", {
+    method: "POST",
+    body: JSON.stringify({ conversationId: first!.conversationId, subject: "Order missing" }),
+  });
+
+  // The follow-up inbound, through the REAL signed-webhook path, must come out
+  // the other side attached to that ticket — this is what only THIS suite can
+  // prove: the routing is wired into ingest, not just correct in the domain.
+  await inbound(psid, "m.ticket.in.2b", "still waiting");
   const second = await messageWithTicket("m.ticket.in.2b");
-  expect(first!.ticketId).toBeTruthy();
-  expect(second!.ticketId).toBe(first!.ticketId);
+  expect(second!.ticketId).toBe(raised.ticket.id);
 
   const tickets = await db().ticket.count({
     where: { workspaceId: META_TEST_TEAM_ID, conversationId: first!.conversationId },
@@ -136,17 +139,29 @@ test("a follow-up message joins the SAME ticket — one issue, not two", async (
   expect(tickets).toBe(1);
 });
 
-test("a redelivered webhook does not open a second ticket", async () => {
+test("a redelivered webhook attaches nothing twice — dedupe stops the whole tail", async () => {
   const psid = "6009900003333";
-  const mid = "m.ticket.in.3";
+  await inbound(psid, "m.ticket.in.3a", "first contact");
+  const seed = await messageWithTicket("m.ticket.in.3a");
+  const raised = await apiJson<{ ticket: { id: string } }>("/tickets", {
+    method: "POST",
+    body: JSON.stringify({ conversationId: seed!.conversationId }),
+  });
+
+  const mid = "m.ticket.in.3b";
   await inbound(psid, mid, "duplicate me");
   // Meta delivers at-least-once; the dedupe gate must stop the whole tail of
-  // the pipeline, ticket routing included.
+  // the pipeline, ticket routing included — one message row, one attach.
   await inbound(psid, mid, "duplicate me");
 
+  const copies = await db().message.count({
+    where: { workspaceId: META_TEST_TEAM_ID, channel: "messenger", externalId: mid },
+  });
+  expect(copies).toBe(1);
   const message = await messageWithTicket(mid);
+  expect(message!.ticketId).toBe(raised.ticket.id);
   const tickets = await db().ticket.count({
-    where: { workspaceId: META_TEST_TEAM_ID, conversationId: message!.conversationId },
+    where: { workspaceId: META_TEST_TEAM_ID, conversationId: seed!.conversationId },
   });
   expect(tickets).toBe(1);
 });
@@ -168,13 +183,13 @@ interface TicketDto {
   sla: { firstResponseDueAt: string | null; resolutionDueAt: string | null; paused: boolean };
 }
 
-test("/v1 lists the tickets ingest opened, filtered by status", async () => {
+test("/v1 lists the raised tickets, filtered by status", async () => {
   const all = await apiJson<{ tickets: TicketDto[] }>("/tickets");
   expect(all.tickets.length).toBeGreaterThan(0);
 
   // The status filter is a real filter, not decoration: every row it returns
   // carries the status asked for. Asserting on the WHOLE board's status would
-  // be wrong — a ticket auto-opened on an already-assigned thread inherits its
+  // be wrong — a ticket raised on an already-assigned thread inherits its
   // owner and starts `open`, not `new`.
   const newOnly = await apiJson<{ tickets: TicketDto[] }>("/tickets?status=new");
   expect(newOnly.tickets.length).toBeGreaterThan(0);
@@ -196,9 +211,13 @@ test("/v1 opens, works and solves a ticket end to end", async () => {
   await inbound(psid, "m.ticket.v1.1", "the lamp is broken");
   const message = await messageWithTicket("m.ticket.v1.1");
 
-  // A SECOND ticket on the same thread, created deliberately — a person can
-  // raise two issues at once, and that is the whole reason tickets are a
+  // TWO tickets on one thread, each raised deliberately — a person can have
+  // two live issues at once, and that is the whole reason tickets are a
   // separate entity from the conversation.
+  await apiJson<{ ticket: TicketDto }>("/tickets", {
+    method: "POST",
+    body: JSON.stringify({ conversationId: message!.conversationId, subject: "Broken lamp" }),
+  });
   const created = await apiJson<{ ticket: TicketDto; openTicketCount: number }>("/tickets", {
     method: "POST",
     body: JSON.stringify({
@@ -278,38 +297,67 @@ test("/v1 SLA policy drives the due dates of tickets opened after it", async () 
   expect(due - Date.now()).toBeLessThan(16 * 60_000);
 });
 
-test("/v1 ticket settings turn auto-open off, and inbound stops opening tickets", async () => {
-  await apiJson("/tickets-settings", {
+test("the reopen window is wired: a fresh inbound reopens a just-solved ticket, and a zero window disables that", async () => {
+  const psid = "6009900007777";
+  await inbound(psid, "m.ticket.v1.4a", "first issue");
+  const seed = await messageWithTicket("m.ticket.v1.4a");
+  const raised = await apiJson<{ ticket: TicketDto }>("/tickets", {
+    method: "POST",
+    body: JSON.stringify({ conversationId: seed!.conversationId }),
+  });
+  await apiJson(`/tickets/${raised.ticket.id}`, {
     method: "PATCH",
-    body: JSON.stringify({ ticketAutoOpen: false }),
+    body: JSON.stringify({ status: "solved", resolutionCode: "fixed" }),
   });
 
-  const psid = "6009900007777";
-  await inbound(psid, "m.ticket.v1.4", "no ticket for me");
-  const message = await messageWithTicket("m.ticket.v1.4");
-  expect(message).not.toBeNull();
-  // The message still lands — ticketing is off, not broken.
-  expect(message!.ticketId).toBeNull();
+  // Inside the (default 72h) window: the follow-up REOPENS the solved ticket
+  // rather than leaving the thread ticket-free — one issue, not two records.
+  await inbound(psid, "m.ticket.v1.4b", "it broke again");
+  const reopened = await messageWithTicket("m.ticket.v1.4b");
+  expect(reopened!.ticketId).toBe(raised.ticket.id);
+  const afterReopen = await db().ticket.findUniqueOrThrow({
+    where: { id: raised.ticket.id },
+    select: { status: true },
+  });
+  expect(afterReopen.status).not.toBe("solved");
+
+  // Solve again, then turn the window OFF through the real settings endpoint —
+  // the next inbound must leave the solved ticket alone AND open nothing.
+  await apiJson(`/tickets/${raised.ticket.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status: "solved", resolutionCode: "fixed" }),
+  });
+  await apiJson("/tickets-settings", {
+    method: "PATCH",
+    body: JSON.stringify({ ticketReopenWindowHours: 0 }),
+  });
+  await inbound(psid, "m.ticket.v1.4c", "unrelated new thing");
+  const afterOff = await messageWithTicket("m.ticket.v1.4c");
+  expect(afterOff!.ticketId).toBeNull();
 
   // Restore, so this spec leaves the shared team as it found it.
   await apiJson("/tickets-settings", {
     method: "PATCH",
-    body: JSON.stringify({ ticketAutoOpen: true }),
+    body: JSON.stringify({ ticketReopenWindowHours: 72 }),
   });
 });
 
 // ---------------------------------------------------------------------------
-// Auto-assignment follow-through. The ordering here is the whole point:
-// auto-assign runs DETACHED in the background tier, so it lands AFTER ingest
-// has already opened the ticket. Without the follow-through, every auto-opened
-// ticket on an auto-assigned thread stays unassigned forever.
+// Assignment follow-through. Assigning a conversation must give the thread's
+// ACTIVE ticket the same owner when the ticket has none — without it, every
+// ticket raised before the thread found its agent would sit unassigned
+// forever while the conversation itself is owned.
 // ---------------------------------------------------------------------------
 
-test("assigning the conversation gives its auto-opened ticket the same owner", async () => {
+test("assigning the conversation gives its unowned active ticket the same owner", async () => {
   const psid = "6009900008888";
   await inbound(psid, "m.ticket.assign.1", "who owns this");
   const message = await messageWithTicket("m.ticket.assign.1");
-  expect(message!.ticketId).toBeTruthy();
+  const raised = await apiJson<{ ticket: TicketDto }>("/tickets", {
+    method: "POST",
+    body: JSON.stringify({ conversationId: message!.conversationId, subject: "Needs an owner" }),
+  });
+  message!.ticketId = raised.ticket.id;
 
   const ticketBefore = await db().ticket.findUniqueOrThrow({
     where: { id: message!.ticketId! },
