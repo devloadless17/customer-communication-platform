@@ -2647,9 +2647,21 @@ ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_B_fk
 CREATE INDEX "AiContextChunk_content_fts_idx" ON public."AiContextChunk" USING gin (to_tsvector('simple'::regconfig, content));
 CREATE UNIQUE INDEX "AiReplySuggestion_one_pending_per_inbound" ON public."AiReplySuggestion" USING btree ("workspaceId", "inboundMessageId") WHERE (state = 'pending'::"AiSuggestionState");
 CREATE UNIQUE INDEX "ChannelConnection_one_default_per_channel" ON public."ChannelConnection" USING btree ("workspaceId", channel) WHERE "isDefault";
-CREATE UNIQUE INDEX "ConversationEvent_event_key_uniq" ON public."ConversationEvent" USING btree ("eventKey") WHERE ("eventKey" IS NOT NULL);
-CREATE UNIQUE INDEX "OutboundWebhookDelivery_event_key_uniq" ON public."OutboundWebhookDelivery" USING btree ("eventKey") WHERE ("eventKey" IS NOT NULL);
-CREATE UNIQUE INDEX "WorkflowRun_event_key_uniq" ON public."WorkflowRun" USING btree ("eventKey") WHERE ("eventKey" IS NOT NULL);
+-- NOTE — post-baseline partial indexes do NOT belong in this section.
+-- The three `*_event_key_uniq` indexes were briefly listed here and broke
+-- 0_init on every FRESH database: they key on `eventKey`, a column this
+-- baseline's CREATE TABLEs do not have because it is added by
+-- 20260727060000_outbox_redelivery_dedupe. An existing database never noticed
+-- (0_init was already applied); a new one failed at
+-- `column "eventKey" does not exist`, which is CI's unit job and any future
+-- environment rebuild.
+--
+-- The rule: a partial index introduced AFTER the squash lives in its own
+-- migration, which creates it after the column exists. This section carries
+-- only the indexes that the BASELINE itself must recreate — it exists because
+-- `migrate diff` cannot see them, not because every partial index must be
+-- listed twice. Fold post-baseline ones in only when the baseline is next
+-- re-squashed, together with their columns.
 CREATE UNIQUE INDEX "ContactStage_workspaceId_isDefault_key" ON public."ContactStage" USING btree ("workspaceId") WHERE ("isDefault" = true);
 CREATE UNIQUE INDEX "ContactTransferJob_workspaceId_active_key" ON public."ContactTransferJob" USING btree ("workspaceId") WHERE (status = ANY (ARRAY['pending'::"ContactTransferStatus", 'running'::"ContactTransferStatus"]));
 CREATE INDEX "Contact_phoneNumber_trgm_idx" ON public."Contact" USING gin ("phoneNumber" gin_trgm_ops) WHERE ("phoneNumber" IS NOT NULL);
