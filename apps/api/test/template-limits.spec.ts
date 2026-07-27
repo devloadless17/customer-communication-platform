@@ -101,7 +101,11 @@ describe("name", () => {
 describe("supported languages", () => {
   it("carries Meta's full table, not a hand-picked subset", () => {
     // The dropdown IS this list; a short list silently blocks templates.
-    expect(TEMPLATE_LANGUAGES.length).toBeGreaterThan(100);
+    // Exactly the 111 codes in Meta's "Supported Languages" doc, verified
+    // 1:1 (both directions) on 2026-07-27. A count drift means either Meta
+    // added/removed a language (update the list AND this number) or someone
+    // dropped an entry by accident (the case `> 100` silently waved through).
+    expect(TEMPLATE_LANGUAGES.length).toBe(111);
     for (const code of ["zh_CN", "he", "ru", "nl", "pl", "ur", "prs_AF", "rw_RW", "fil"]) {
       expect(TEMPLATE_LANGUAGES.some((l) => l.code === code)).toBe(true);
     }
