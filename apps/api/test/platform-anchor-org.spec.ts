@@ -77,11 +77,24 @@ describe("the platform anchor is not a customer organization", () => {
   it("is excluded from the platform's own totals", async () => {
     // Counting the anchor inflates "how many organizations are on the platform"
     // by one, permanently — the operator would always see one phantom customer.
+    //
+    // Scoped to THIS SPEC'S OWN ROWS. The earlier form counted the whole table
+    // (`all - scoped === 1`), which asserts a global property of the database:
+    // "exactly one platform org exists anywhere". That is true only on a
+    // database with no seeded anchor and no debris — it passed locally and went
+    // red in CI, where `db:seed` creates the real anchor, and it had already
+    // flaked once against a suite that OOM'd and left `pa*` rows behind. The
+    // property under test is the FILTER, not the table's contents: among the two
+    // rows this spec created, exactly the anchor must be excluded. That still
+    // catches the real defect (a `where` that compiles but doesn't filter would
+    // make `scoped` 2), and it no longer depends on what else lives in the DB.
+    const ours = { id: { in: [anchorOrgId, customerOrgId] } };
     const [scoped, all] = await Promise.all([
-      prisma.organization.count({ where: { isPlatform: false } }),
-      prisma.organization.count(),
+      prisma.organization.count({ where: { isPlatform: false, ...ours } }),
+      prisma.organization.count({ where: ours }),
     ]);
-    expect(all - scoped).toBe(1);
+    expect(all, "both of this spec's orgs must exist").toBe(2);
+    expect(scoped, "the anchor must be filtered out, the customer kept").toBe(1);
   });
 
   it("has no reachable workspace detail page", async () => {
