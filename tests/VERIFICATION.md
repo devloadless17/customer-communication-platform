@@ -72,16 +72,16 @@ table/queue/cache/socket-room that references the dying entity.
 | realtime layer | 1 | R (adversarial) + E (144 e2e two-tab) | ✅ 2026-07-27 |
 | auth / org / workspaces / members | 1 | R (adversarial) + E (45 e2e) | ✅ 2026-07-27 |
 | external /v1 API | 1 | R (adversarial, all 111 routes) + E (180 e2e) | ✅ 2026-07-27 |
-| contacts (+import/export/transfer) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 6 findings open (bulk-tag event storm HIGH) |
-| customers / identity | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 3 open (profile visibility leak MED-HIGH) |
+| contacts (+import/export/transfer) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — bulk-tag event storm FIXED a2b6de83; 5 open (export pagination, unknownStages, resume report) |
+| customers / identity | 2 | R (adversarial) + N (visibility spec) | ◐ reviewed 2026-07-27 — profile visibility leak FIXED 3e137336; 2 low open |
 | inbox-views | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — THE and-not-spread invariant VERIFIED HELD across all 3 callers; 1 open (unvalidated `channels`) |
 | channels / multi-account | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 4 open (batched-webhook account misattribution HIGH) |
-| outbound-webhooks (delivery/retry) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — SSRF/HMAC/dedupe VERIFIED HELD; 1 HIGH open (unbounded retention DELETE) |
-| calls (WhatsApp calling) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 2 open (uncaught throw after CAS strands the row) |
-| media / R2 | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — tenancy + XSS defenses VERIFIED HELD; media-download regression FIXED 37c0a2b9; 3 open |
+| outbound-webhooks (delivery/retry) | 2 | R (adversarial) | ✅ 2026-07-27 — SSRF/HMAC/dedupe VERIFIED HELD; unbounded retention DELETE FIXED 29deb9c8 |
+| calls (WhatsApp calling) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — post-CAS throw FIXED 29deb9c8; 1 open (call-id routes bypass visibility) |
+| media / R2 | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — tenancy + XSS VERIFIED HELD; download regression FIXED 37c0a2b9, recovery sweeper + mime + parked echo FIXED a2b6de83; 1 open (SSRF fetchUrlBytes) |
 | queues / workers | 2 | R (adversarial, all 7 workers) | ◐ reviewed 2026-07-27 — jobId/lockDuration/backpressure VERIFIED HELD; 1 open (transfer worker maxStalledCount) |
 | sweepers | 2 | R (adversarial, all 30 enumerated) | ◐ reviewed 2026-07-27 — mutex/bounds/pool-close VERIFIED HELD; 3 open (unreadCount has NO drift sweeper) |
-| coexistence | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 4 open (direction detection fails OPEN, poison event loses a chunk) |
+| coexistence | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — direction fail-open + poison chunk FIXED 3e137336; 2 open (no account binding, PII in failed-job Redis) |
 | tags / stages / fields / snippets / flags | 3 | | ☐ |
 | notes | 3 | mandatory-N | ☐ |
 | team-chat (+DMs) | 3 | | ☐ |
