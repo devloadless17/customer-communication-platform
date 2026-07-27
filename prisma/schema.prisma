@@ -863,6 +863,18 @@ model ChannelConnection {
   // it these webhooks were warn-logged at info severity and lost.
   lastAccountAlert Json?
 
+  // Template-categorization enforcement (Meta's "restrictions on businesses
+  // misusing the template categorization system"). When Meta detects utility
+  // templates that should be marketing, it escalates: rate-limiting utility
+  // sends on the WABA, then recategorizing + blocking new utility templates.
+  // Raw `restriction_type` (RATE_LIMITED_UTILITY_TEMPLATE_MESSAGING |
+  // RESTRICTED_UTILITY_TEMPLATES) + Meta's own expiry. WABA-scoped like the
+  // calling enforcement above; cleared by the *_UNBAN / *_RECOVERY webhook.
+  // First-class (not just `lastAccountAlert`) because the composer must WARN
+  // before an operator fires a utility campaign into a rate-limited WABA.
+  utilityRestrictionType  String?
+  utilityRestrictedUntil  DateTime?
+
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
   workspace     Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)

@@ -42,6 +42,10 @@ interface Health {
    *  precedes an account restriction. */
   policyViolationType: string | null;
   policyViolationAt: string | null;
+  /** ACTIVE utility-template enforcement (server filters expired): utility
+   *  sends rate-limited, or utility templates restricted/recategorized. */
+  utilityRestrictionType: string | null;
+  utilityRestrictedUntil: string | null;
   messagingHealthUpdatedAt: string | null;
 }
 
@@ -188,6 +192,32 @@ export function MessagingHealthPanel({
             Meta restricts accounts that don&apos;t address a violation. Review the
             WhatsApp Business Messaging Policy and your recent campaigns — Meta
             Business Suite and email carry the details and any appeal.
+          </p>
+        </div>
+      )}
+
+      {/* Utility-template enforcement: Meta's escalation for utility templates
+          that read as marketing. Same rank as a policy violation — an active
+          restriction rejects sends the operator believes are fine. */}
+      {health.utilityRestrictionType && (
+        <div className="mt-4 rounded-lg border border-warning-border bg-warning-bg px-3 py-2.5">
+          <p className="text-xs font-medium text-warning-fg">
+            {health.utilityRestrictionType === "RATE_LIMITED_UTILITY_TEMPLATE_MESSAGING"
+              ? "Utility sends are rate-limited on this WhatsApp Business Account"
+              : "Utility templates are restricted on this WhatsApp Business Account"}
+          </p>
+          <p className="mt-1 text-2xs text-muted-foreground">
+            Meta applies this when utility templates read as marketing.{" "}
+            {health.utilityRestrictionType === "RATE_LIMITED_UTILITY_TEMPLATE_MESSAGING"
+              ? "Utility messages beyond Meta's rolling-24h cap are rejected; marketing and authentication sends are unaffected."
+              : "Approved utility templates were recategorized to marketing (billed differently), and new utility template creation is blocked."}{" "}
+            {health.utilityRestrictedUntil && (
+              <>
+                Lifts <LocalTime iso={health.utilityRestrictedUntil} format="localeString" />.{" "}
+              </>
+            )}
+            You can appeal per-template in Meta&apos;s Business Support (Template
+            Category Updates → Request Review).
           </p>
         </div>
       )}

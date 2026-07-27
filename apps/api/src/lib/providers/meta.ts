@@ -1448,6 +1448,40 @@ function parseChannelHealthUpdate(
   // unexplained errors.
   if (field === "account_update") {
     if (value.event === "ACCOUNT_RESTRICTION") {
+      // Template-categorization enforcement rides ACCOUNT_RESTRICTION too.
+      // The recovery events (*_UNBAN / *_RECOVERY) arrive with NO
+      // restriction_info — the violation_type is the whole signal — so they
+      // are checked first and CLEAR the stored state.
+      const violation = value.violation_info?.violation_type ?? "";
+      if (
+        violation === "UTILITY_TEMPLATE_ABUSE_UNBAN" ||
+        violation === "UTILITY_TEMPLATE_ABUSE_RATE_LIMIT_RECOVERY"
+      ) {
+        return {
+          kind: "channel_health",
+          utilityRestrictionType: null,
+          utilityRestrictedUntil: null,
+          rawPayload,
+        };
+      }
+      const utility = (value.restriction_info ?? []).find((r) =>
+        r.restriction_type?.includes("UTILITY"),
+      );
+      if (utility) {
+        // RATE_LIMITED_UTILITY_TEMPLATE_MESSAGING: utility sends over the
+        // rolling-24h cap are REJECTED — the composer must warn before an
+        // operator fires a utility campaign into it.
+        // RESTRICTED_UTILITY_TEMPLATES: utility templates recategorized,
+        // new utility creation + category reviews disabled.
+        return {
+          kind: "channel_health",
+          utilityRestrictionType: utility.restriction_type ?? null,
+          utilityRestrictedUntil: utility.expiration
+            ? new Date(utility.expiration * 1000)
+            : null,
+          rawPayload,
+        };
+      }
       const calling = (value.restriction_info ?? []).find((r) =>
         r.restriction_type?.includes("CALLING"),
       );

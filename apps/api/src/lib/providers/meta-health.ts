@@ -94,6 +94,10 @@ export interface WhatsappHealthSnapshot {
   /** A WhatsApp Business policy violation Meta reported, and when we saw it. */
   policyViolationType?: string | null;
   policyViolationAt?: Date | null;
+  /** Template-categorization enforcement on this number's WABA (utility sends
+   *  rate-limited / utility templates restricted), with Meta's own expiry. */
+  utilityRestrictionType?: string | null;
+  utilityRestrictedUntil?: Date | null;
 }
 
 /**
@@ -129,6 +133,12 @@ export interface WhatsappHealthUpdate {
   callingRestrictionReason?: string | null;
   callingQualityWarning?: string | null;
   policyViolationType?: string | null;
+  /**
+   * Template-categorization enforcement. `null` clears (the *_UNBAN /
+   * *_RECOVERY webhook); `undefined` untouched. WABA-scoped.
+   */
+  utilityRestrictionType?: string | null;
+  utilityRestrictedUntil?: Date | null;
   /**
    * An account-level alert with no dedicated field (unparsed `account_update`
    * events, `account_alerts` envelopes). One slot, last-writer-wins,
@@ -309,6 +319,8 @@ export async function persistWhatsappHealth(
     callingQualityWarning?: string | null;
     policyViolationType?: string | null;
     policyViolationAt?: Date | null;
+    utilityRestrictionType?: string | null;
+    utilityRestrictedUntil?: Date | null;
     lastAccountAlert?: Prisma.InputJsonValue;
   } = {};
 
@@ -343,6 +355,10 @@ export async function persistWhatsappHealth(
     // Meta's violation payload carries no timestamp, so observation time is
     // what we have — and "when did this land" is the question an operator asks.
     wabaScoped.policyViolationAt = update.policyViolationType ? new Date() : null;
+  }
+  if (update.utilityRestrictionType !== undefined) {
+    wabaScoped.utilityRestrictionType = update.utilityRestrictionType;
+    wabaScoped.utilityRestrictedUntil = update.utilityRestrictedUntil ?? null;
   }
   if (update.accountAlert !== undefined) {
     wabaScoped.lastAccountAlert = {
@@ -769,6 +785,8 @@ export async function getWhatsappHealth(
       messagingHealthUpdatedAt: true,
       policyViolationType: true,
       policyViolationAt: true,
+      utilityRestrictionType: true,
+      utilityRestrictedUntil: true,
       portfolioId: true,
       // The 24h messaging limit is PORTFOLIO-scoped since 2025-10-07 (shared by
       // every number in the portfolio), so tier + cap come off the portfolio,
@@ -792,6 +810,8 @@ export async function getWhatsappHealth(
     throughputLevel: row.throughputLevel,
     policyViolationType: row.policyViolationType,
     policyViolationAt: row.policyViolationAt,
+    utilityRestrictionType: row.utilityRestrictionType,
+    utilityRestrictedUntil: row.utilityRestrictedUntil,
     messagingHealthUpdatedAt: row.messagingHealthUpdatedAt,
     portfolioId: row.portfolioId,
     externalPortfolioId: row.portfolio?.externalPortfolioId ?? null,
@@ -1040,6 +1060,11 @@ export interface MessagingHealthSummary {
    */
   policyViolationType: string | null;
   policyViolationAt: string | null;
+  /** ACTIVE template-categorization enforcement on this number's WABA (expired
+   *  restrictions are filtered server-side): utility sends rate-limited or
+   *  utility templates restricted. Null = none active. */
+  utilityRestrictionType: string | null;
+  utilityRestrictedUntil: string | null;
   messagingHealthUpdatedAt: string | null;
 }
 
@@ -1078,6 +1103,18 @@ export async function getMessagingHealthSummary(
     // exactly what dropping this used to produce.
     policyViolationType: health?.policyViolationType ?? null,
     policyViolationAt: health?.policyViolationAt?.toISOString() ?? null,
+    // Template-categorization enforcement. Expired restrictions are filtered
+    // HERE so no reader has to re-implement the expiry check (Meta also sends
+    // the recovery webhook, but a missed webhook must not warn forever).
+    utilityRestrictionType:
+      health?.utilityRestrictionType &&
+      (!health.utilityRestrictedUntil || health.utilityRestrictedUntil > new Date())
+        ? health.utilityRestrictionType
+        : null,
+    utilityRestrictedUntil:
+      health?.utilityRestrictedUntil && health.utilityRestrictedUntil > new Date()
+        ? health.utilityRestrictedUntil.toISOString()
+        : null,
     messagingHealthUpdatedAt: health?.messagingHealthUpdatedAt?.toISOString() ?? null,
   };
 }

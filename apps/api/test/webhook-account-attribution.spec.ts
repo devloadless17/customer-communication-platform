@@ -232,6 +232,55 @@ describe("channel-health attribution", () => {
   });
 });
 
+describe("utility-template enforcement", () => {
+  it("a rate-limit restriction lands on the WABA's connection with Meta's expiry", async () => {
+    const expiry = Math.floor(Date.now() / 1000) + 7 * 86_400;
+    await deliver(
+      webhook(WABA_B, "account_update", {
+        event: "ACCOUNT_RESTRICTION",
+        violation_info: { violation_type: "UTILITY_TEMPLATE_ABUSE_RATE_LIMIT" },
+        restriction_info: [
+          {
+            restriction_type: "RATE_LIMITED_UTILITY_TEMPLATE_MESSAGING",
+            expiration: expiry,
+          },
+        ],
+      }),
+    );
+    const [a, b] = await Promise.all([
+      prisma.channelConnection.findUniqueOrThrow({
+        where: { id: connA },
+        select: { utilityRestrictionType: true },
+      }),
+      prisma.channelConnection.findUniqueOrThrow({
+        where: { id: connB },
+        select: { utilityRestrictionType: true, utilityRestrictedUntil: true },
+      }),
+    ]);
+    expect(b.utilityRestrictionType).toBe("RATE_LIMITED_UTILITY_TEMPLATE_MESSAGING");
+    expect(b.utilityRestrictedUntil?.getTime()).toBe(expiry * 1000);
+    // Enforcement is WABA-scoped — the other WABA's number is untouched.
+    expect(a.utilityRestrictionType).toBeNull();
+  });
+
+  it("the recovery webhook clears the stored restriction", async () => {
+    await deliver(
+      webhook(WABA_B, "account_update", {
+        event: "ACCOUNT_RESTRICTION",
+        violation_info: {
+          violation_type: "UTILITY_TEMPLATE_ABUSE_RATE_LIMIT_RECOVERY",
+        },
+      }),
+    );
+    const b = await prisma.channelConnection.findUniqueOrThrow({
+      where: { id: connB },
+      select: { utilityRestrictionType: true, utilityRestrictedUntil: true },
+    });
+    expect(b.utilityRestrictionType).toBeNull();
+    expect(b.utilityRestrictedUntil).toBeNull();
+  });
+});
+
 describe("account alerts (W8)", () => {
   it("persists an unparsed account_update event on the WABA's connections", async () => {
     // The class where "app removed from WABA" will land — used to be a warn

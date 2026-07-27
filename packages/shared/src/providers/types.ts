@@ -760,6 +760,17 @@ export interface NormalizedChannelHealth {
    */
   policyViolationType?: string | null;
   /**
+   * Template-categorization enforcement (utility-template abuse). Raw
+   * `restriction_type` — RATE_LIMITED_UTILITY_TEMPLATE_MESSAGING (utility
+   * sends over a rolling-24h cap are rejected) or
+   * RESTRICTED_UTILITY_TEMPLATES (utility templates recategorized, new ones
+   * blocked). `null` explicitly CLEARS (the *_UNBAN / *_RECOVERY webhook);
+   * `undefined` leaves it untouched. WABA-scoped, like calling enforcement.
+   */
+  utilityRestrictionType?: string | null;
+  /** Meta's own expiry for the restriction, when it sent one. */
+  utilityRestrictedUntil?: Date | null;
+  /**
    * An account-level alert we have no dedicated field for: an `account_update`
    * event outside the parsed set (the class where "app removed from WABA"
    * lands — the one that makes an integration go permanently dark) or an

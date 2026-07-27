@@ -259,6 +259,12 @@ export async function ingestEvents(
           ...(evt.throughputLevel !== undefined
             ? { throughputLevel: evt.throughputLevel }
             : {}),
+          ...(evt.utilityRestrictionType !== undefined
+            ? {
+                utilityRestrictionType: evt.utilityRestrictionType,
+                utilityRestrictedUntil: evt.utilityRestrictedUntil ?? null,
+              }
+            : {}),
           ...(evt.accountAlert !== undefined ? { accountAlert: evt.accountAlert } : {}),
         },
         // Attribute the signal to the account whose webhook delivered it.

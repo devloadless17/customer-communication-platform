@@ -879,6 +879,10 @@ export function NewBroadcastForm({
     remainingDailyBudget: number | null;
     /** How many numbers share this budget — drives the copy's framing. */
     portfolioAccountCount?: number;
+    /** ACTIVE utility-template enforcement on the WABA (server filters
+     *  expired): sends of UTILITY templates over Meta's cap are rejected. */
+    utilityRestrictionType?: string | null;
+    utilityRestrictedUntil?: string | null;
   } | null>(null);
   useEffect(() => {
     // Only WhatsApp campaigns are tier-gated; don't burn a request per social
@@ -948,6 +952,29 @@ export function NewBroadcastForm({
           `the window to roll over, or reduce the audience.`,
       };
     }
+    // Template-categorization enforcement: Meta rejects UTILITY sends over a
+    // cap we can't see (rate-limit) or has recategorized the WABA's utility
+    // templates outright. Marketing/authentication sends are unaffected, so
+    // this only fires when the SELECTED template is a utility one.
+    if (
+      messagingHealth.utilityRestrictionType &&
+      selectedTemplate?.category === "utility"
+    ) {
+      const until = messagingHealth.utilityRestrictedUntil
+        ? ` (until ${new Date(messagingHealth.utilityRestrictedUntil).toLocaleDateString()})`
+        : "";
+      return {
+        level: "warn",
+        text:
+          messagingHealth.utilityRestrictionType === "RATE_LIMITED_UTILITY_TEMPLATE_MESSAGING"
+            ? `Meta has rate-limited UTILITY sends on this WhatsApp Business Account${until} ` +
+              `over template-categorization issues — utility messages beyond Meta's cap will be ` +
+              `rejected. Marketing and authentication sends are unaffected.`
+            : `Meta has restricted UTILITY templates on this WhatsApp Business Account${until} ` +
+              `over template-categorization issues — this template may have been recategorized ` +
+              `to marketing (billed differently), and new utility templates are blocked.`,
+      };
+    }
     if (messagingHealth.qualityRating === "RED") {
       return {
         level: "warn",
@@ -957,7 +984,7 @@ export function NewBroadcastForm({
       };
     }
     return null;
-  }, [messageKind, messagingHealth, audienceCount]);
+  }, [messageKind, messagingHealth, audienceCount, selectedTemplate?.category]);
 
   const filteredTemplates = useMemo(() => {
     const q = templateQuery.trim().toLowerCase();
