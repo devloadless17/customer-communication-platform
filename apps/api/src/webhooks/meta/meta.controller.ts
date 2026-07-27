@@ -295,7 +295,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     // chunk is safe.
     if (containsHistory(payload)) {
       try {
-        await enqueueHistoryChunk(workspaceId, payload);
+        await enqueueHistoryChunk(workspaceId, payload, inboundAccountId);
         return { ok: true, ingested: 0 };
       } catch (err) {
         // Redis down / enqueue failed → 503 so Meta redelivers the chunk (the

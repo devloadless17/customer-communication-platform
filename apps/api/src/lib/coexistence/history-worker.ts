@@ -53,7 +53,7 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
   const worker = new Worker<HistoryJobData>(
     COEXISTENCE_HISTORY_QUEUE_NAME,
     async (job: Job<HistoryJobData>) => {
-      const { workspaceId, payload } = job.data;
+      const { workspaceId, payload, channelConnectionId } = job.data;
       let events: NormalizedEvent[];
       try {
         events = getMetaProvider().parseWebhook(payload);
@@ -94,6 +94,7 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
             timestamp: evt.timestamp,
             direction: "in",
             rawPayload: evt.rawPayload,
+            channelConnectionId,
           });
           landed++;
         } else if (evt.kind === "echo") {
@@ -108,6 +109,7 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
             timestamp: evt.timestamp,
             direction: "out",
             rawPayload: evt.rawPayload,
+            channelConnectionId,
           });
           landed++;
         }

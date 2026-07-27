@@ -18,6 +18,8 @@ export interface HistoryJobData {
   workspaceId: string;
   /** The raw Meta `history` webhook body — re-parsed by the worker. */
   payload: unknown;
+  /** Account the chunk arrived on; stamped on threads this backfill creates. */
+  channelConnectionId?: string | null;
 }
 
 export const COEXISTENCE_HISTORY_QUEUE_NAME = "coexistence-history";
@@ -59,8 +61,20 @@ export function getHistoryQueue(): Queue<HistoryJobData> {
 export async function enqueueHistoryChunk(
   workspaceId: string,
   payload: unknown,
+  /**
+   * The account the history webhook arrived on. Carried so backfilled threads
+   * are BOUND to a number: without it they land with a null
+   * `channelConnectionId`, which (since the account-unresolved guard) makes
+   * them unsendable from the inbox in a multi-account workspace until the
+   * customer sends an inbound.
+   */
+  channelConnectionId?: string | null,
 ): Promise<string> {
-  const job = await getHistoryQueue().add("chunk", { workspaceId, payload });
+  const job = await getHistoryQueue().add("chunk", {
+    workspaceId,
+    payload,
+    ...(channelConnectionId ? { channelConnectionId } : {}),
+  });
   return job.id as string;
 }
 

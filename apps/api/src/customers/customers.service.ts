@@ -448,8 +448,14 @@ export class CustomersService {
       // Drop the previous customer if it's now empty (the contact was its only
       // member). Guarded so we never delete a customer that still has contacts.
       if (previousCustomerId && previousCustomerId !== customerId) {
+          // `deletedAt: null` — a TOMBSTONED contact keeps its `customerId`, so
+          // counting it left an emptied Customer alive forever: `loadProfile`
+          // filters tombstones, so it rendered as a person with zero contacts,
+          // and the rows accumulate unbounded. `workspaceId` for the §18 letter
+          // (a cuid implies the workspace, but the sibling deleteMany on the
+          // next line carries it and these should not disagree).
         const remaining = await tx.contact.count({
-          where: { customerId: previousCustomerId },
+          where: { customerId: previousCustomerId, workspaceId, deletedAt: null },
         });
         if (remaining === 0) {
           await tx.customer.deleteMany({ where: { id: previousCustomerId, workspaceId } });
@@ -517,7 +523,11 @@ export class CustomersService {
       });
 
       if (previousCustomerId && previousCustomerId !== fresh.id) {
-        const remaining = await tx.contact.count({ where: { customerId: previousCustomerId } });
+        // Same rule as the link path above: tombstones don't keep a Customer
+        // alive, and the count carries workspaceId like its sibling delete.
+        const remaining = await tx.contact.count({
+          where: { customerId: previousCustomerId, workspaceId, deletedAt: null },
+        });
         if (remaining === 0) {
           await tx.customer.deleteMany({ where: { id: previousCustomerId, workspaceId } });
         }

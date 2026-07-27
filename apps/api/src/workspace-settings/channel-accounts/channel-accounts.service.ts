@@ -280,8 +280,21 @@ export class ChannelAccountsService {
     await this.db.$transaction(async (tx) => {
       await tx.channelConnection.delete({ where: { id } });
       if (!target.isDefault) return;
+      // Promote only a VIABLE successor. `setDefault` requires `isActive`, and
+      // `normalizeDefaultAccount` additionally hunts for a real
+      // `externalAccountId` — this path had neither guard, so if the oldest row
+      // happened to be an inactive account or a credential-less `""`
+      // placeholder it became the channel default. `getMetaWebhookConfig`
+      // reads `isDefault: true` and returns null on `!isActive`, so that ends
+      // in a 403 on every webhook and ALL INBOUND SILENTLY LOST — the exact
+      // failure the `""`-placeholder bug caused once already.
       const next = await tx.channelConnection.findFirst({
-        where: { workspaceId, channel },
+        where: {
+          workspaceId,
+          channel,
+          isActive: true,
+          externalAccountId: { not: "" },
+        },
         orderBy: { createdAt: "asc" },
         select: { id: true },
       });

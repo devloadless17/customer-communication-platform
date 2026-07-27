@@ -20,6 +20,8 @@ import { randomUUID } from "node:crypto";
 
 import { Prisma } from "@prisma/client";
 
+import { directoryContactWhere } from "@/lib/queries/contacts";
+
 import {
   TRANSFER_MAX_EXPORT_ROWS,
   type TransferFormat,
@@ -262,7 +264,22 @@ async function hydrate(workspaceId: string, ids: string[]): Promise<ExportContac
   const rows = await db.contact.findMany({
     // workspaceId in the where even though the ids came from a team-scoped query —
     // tenant isolation is manual here and defense in depth is free.
-    where: { workspaceId, id: { in: ids }, deletedAt: null },
+    //
+    // `directoryContactWhere` too, and it is NOT redundant here. The FILTER
+    // branch gets it via `buildContactFilterWhere`; this explicit-ids branch
+    // had no such gate, so a client could pass visitor ids — obtainable from
+    // the sanctioned `?channel=webchatwidget` view — and export anonymous
+    // EPHEMERAL contacts into a CSV. docs/contact-import-export.md states the
+    // opposite ("directoryContactWhere still applies, so anonymous webchat
+    // visitors stay out"), and §6 makes directory membership a DERIVED
+    // property, not a per-call-site choice. Same tenant either way, so this is
+    // a promise-keeping fix, not a cross-tenant one.
+    where: {
+      AND: [
+        { workspaceId, id: { in: ids }, deletedAt: null },
+        directoryContactWhere,
+      ],
+    },
     select: {
       id: true,
       phoneNumber: true,

@@ -151,7 +151,13 @@ export async function ingestEvents(
         await ingestInboundMessage(workspaceId, channel, evt, channelConnectionId);
       } else if (evt.kind === "echo") {
         // WhatsApp Coexistence: a message the owner sent from the phone app.
-        await ingestOutboundEcho(workspaceId, channel, evt);
+        // The account is threaded through: a thread this creates would
+        // otherwise carry NO `channelConnectionId`, and since the
+        // account-unresolved guard landed that makes it unsendable from the
+        // inbox in any multi-account workspace until the customer happens to
+        // send an inbound. The owner starting a brand-new chat on their phone
+        // is exactly when that bites.
+        await ingestOutboundEcho(workspaceId, channel, evt, channelConnectionId);
       } else if (evt.kind === "contact_sync") {
         // WhatsApp Coexistence: the owner's phone address book changed.
         await ingestContactSync(workspaceId, channel, evt);
@@ -2596,6 +2602,8 @@ async function ingestOutboundEcho(
   workspaceId: string,
   channel: Channel,
   evt: NormalizedOutboundEcho,
+  /** The account this echo arrived on — stamped on a thread it creates. */
+  channelConnectionId?: string | null,
 ): Promise<void> {
   // Rule #3 dedupe. The outbound idempotent-create below is the race backstop;
   // this cheap pre-check short-circuits the common re-delivery / echo-of-our-
@@ -2698,6 +2706,7 @@ async function ingestOutboundEcho(
             workspaceId,
             contactId: contact!.id,
             channel,
+            ...(channelConnectionId ? { channelConnectionId } : {}),
             // A phone-initiated thread lands in triage like any other new
             // conversation until an agent claims it.
             status: "pending",
@@ -3255,6 +3264,13 @@ export interface HistoricalMessageInput {
   timestamp: Date;
   direction: "in" | "out";
   rawPayload: Record<string, unknown>;
+  /**
+   * The account this backfill arrived on. Without it a backfilled thread has
+   * no `channelConnectionId`, and since the account-unresolved guard that
+   * makes it unsendable from the inbox in a multi-account workspace until the
+   * customer sends an inbound of their own.
+   */
+  channelConnectionId?: string | null;
 }
 
 export async function ingestHistoricalMessage(
@@ -3324,6 +3340,7 @@ export async function ingestHistoricalMessage(
         workspaceId,
         contactId,
         channel,
+        ...(msg.channelConnectionId ? { channelConnectionId: msg.channelConnectionId } : {}),
         status: "closed",
         lastMessageAt: msg.timestamp,
         lastMessagePreview: "",
