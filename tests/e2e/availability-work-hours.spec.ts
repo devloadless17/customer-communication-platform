@@ -474,7 +474,7 @@ test.describe("Settings → Team UI", () => {
   }) => {
     const errors = guard(page);
     await setTeamWorkHours(request, null);
-    await page.goto("/settings/team");
+    await page.goto("/settings/members");
     await hideDevChrome(page);
 
     await expect(page.getByText("Working hours", { exact: true })).toBeVisible();
@@ -516,7 +516,7 @@ test.describe("Settings → Team UI", () => {
   }) => {
     guard(page);
     await setTeamWorkHours(request, null);
-    await page.goto("/settings/team");
+    await page.goto("/settings/members");
     await hideDevChrome(page);
     await page.getByLabel("Enable org working hours").click();
 
@@ -538,7 +538,7 @@ test.describe("Settings → Team UI", () => {
     });
 
     guard(page);
-    await page.goto("/settings/team");
+    await page.goto("/settings/members");
     await hideDevChrome(page);
     // The row surfaces the note next to a status dot.
     await expect(page.getByText("On a call").first()).toBeVisible();
@@ -579,7 +579,7 @@ test.describe("Settings → Team UI", () => {
         availabilityManualStatus: "available" });
     try {
       await request.patch("/api/users/me/availability", { data: { status: "available" } });
-      await page.goto("/settings/team");
+      await page.goto("/settings/members");
       await hideDevChrome(page);
 
       const ghostRow = page.locator("li").filter({ hasText: ghost.name });

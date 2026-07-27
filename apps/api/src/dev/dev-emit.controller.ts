@@ -196,7 +196,7 @@ export class DevEmitController {
 
     // Single team-room emit. Subscribers in conversation rooms also see
     // it (same socket is in both rooms) and filter by conversationId.
-    this.emitter.emitToTeam(workspaceId, "message:new", {
+    this.emitter.emitToWorkspace(workspaceId, "message:new", {
       workspaceId,
       conversationId,
       message,
@@ -234,7 +234,7 @@ export class DevEmitController {
       data: { status: next },
     });
 
-    this.emitter.emitToTeam(workspaceId, "message:status", {
+    this.emitter.emitToWorkspace(workspaceId, "message:status", {
       workspaceId,
       conversationId,
       messageId: lastOutbound.id,
@@ -265,7 +265,7 @@ export class DevEmitController {
       timestamp: created.timestamp.toISOString(),
     };
 
-    this.emitter.emitToTeam(workspaceId, "note:new", {
+    this.emitter.emitToWorkspace(workspaceId, "note:new", {
       workspaceId,
       conversationId,
       note,
@@ -286,7 +286,7 @@ export class DevEmitController {
       data: { status },
     });
 
-    this.emitter.emitToTeam(workspaceId, "conversation:status", {
+    this.emitter.emitToWorkspace(workspaceId, "conversation:status", {
       workspaceId,
       conversationId,
       status,
@@ -330,7 +330,7 @@ export class DevEmitController {
         }
       : null;
 
-    this.emitter.emitToTeam(workspaceId, "conversation:assigned", {
+    this.emitter.emitToWorkspace(workspaceId, "conversation:assigned", {
       workspaceId,
       conversationId,
       assignedUser,

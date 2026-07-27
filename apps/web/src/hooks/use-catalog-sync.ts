@@ -57,7 +57,7 @@ const SCOPE_AFFINITY: Partial<Record<CatalogScope, readonly string[]>> = {
   // Audience groups are only used inside the broadcasts flow.
   "audience-groups": ["/broadcasts"],
   // Pending invites are admin-only and only shown on team settings.
-  invites: ["/settings/team"],
+  invites: ["/settings/members"],
   // API keys live on the integrations settings page only.
   "api-keys": ["/settings/integrations"],
 };

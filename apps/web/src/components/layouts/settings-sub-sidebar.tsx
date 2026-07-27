@@ -63,10 +63,10 @@ export function SettingsSubSidebar({
     <SubSidebar title="Workspace settings">
       <SubSidebarSection label="People & teams">
         <SubSidebarItem
-          href="/settings/team"
+          href="/settings/members"
           label="Members"
           leading={<Users className="size-4" />}
-          active={isActive("/settings/team")}
+          active={isActive("/settings/members")}
         />
         {isAdmin && (
           <SubSidebarItem

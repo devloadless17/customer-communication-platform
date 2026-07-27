@@ -11,7 +11,7 @@ import { apiErrorMessage } from "@ccp/shared/api/error-message";
 
 /**
  * superAdmin-only inline delete button for a foreign team. Renders nothing
- * when `isOwnTeam` is true — admins delete their own org via /settings/team
+ * when `isOwnTeam` is true — admins delete their own org via /settings/members
  * so the operator's last action stays reversible (signout) rather than
  * self-destruct.
  */

@@ -21,7 +21,7 @@ export const dynamic = "force-dynamic";
  */
 export default async function PermissionsSettingsPage() {
   const { user } = await getSession();
-  if (!canManageUsers(user.role)) redirect("/settings/team");
+  if (!canManageUsers(user.role)) redirect("/settings/members");
 
   return <PermissionsSettings />;
 }

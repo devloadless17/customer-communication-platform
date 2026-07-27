@@ -18,6 +18,20 @@ import { NextResponse } from "next/server";
  *
  * ---
  *
+ * BROKEN 2026-07-22 → 2026-07-27, and that is EVIDENCE. The org→workspace
+ * rename (f59696a9) renamed the variable inside this file — including the
+ * `ctx.params` destructure — but left the DIRECTORY named `[teamId]`. In the
+ * App Router the params key comes from the directory segment, so
+ * `const { workspaceId } = await ctx.params` was `undefined` and every legacy
+ * delivery forwarded to `/webhooks/meta/undefined`, which NestJS rejects.
+ *
+ * Five days of that with nobody reporting missing Meta messages is the
+ * strongest signal yet that NO live subscription still points at this legacy
+ * URL — which is exactly what step 1 of the checklist below is trying to
+ * establish. The directory is now `[workspaceId]` so the proxy works again;
+ * treat the outage as a data point for the deletion decision, not as a reason
+ * to skip the log check.
+ *
  * DELETION DEADLINE: 2026-08-03  (extended 2026-07-03 from 2026-06-19)
  *
  * Extension note (2026-07-03): the original 2026-06-19 deadline lapsed

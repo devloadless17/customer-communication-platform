@@ -106,7 +106,7 @@ export class RealtimeEmitter {
   // an unrestricted team (still in the team room) never receives a frame twice.
   //
   // Cost discipline: teams that haven't turned scoping on take a purely
-  // synchronous path identical to `emitToTeam` — no lookup, no await, no
+  // synchronous path identical to `emitToWorkspace` — no lookup, no await, no
   // ordering change. Only opted-in teams pay, and even they hit an in-process
   // cache rather than the database on the hot path.
 
@@ -226,15 +226,15 @@ export class RealtimeEmitter {
   }
 
   /** Called when an admin flips the team setting. */
-  invalidateTeamScope(workspaceId: string): void {
+  invalidateWorkspaceScope(workspaceId: string): void {
     this.restrictedTeams.delete(workspaceId);
   }
 
   /**
    * Emit a frame that is ABOUT one conversation.
    *
-   * Use this — never `emitToTeam` — for anything carrying a message, a note, a
-   * call, or a conversation's state. `emitToTeam` remains correct for genuinely
+   * Use this — never `emitToWorkspace` — for anything carrying a message, a note, a
+   * call, or a conversation's state. `emitToWorkspace` remains correct for genuinely
    * team-wide, non-conversation frames (catalog changes, presence, broadcasts).
    */
   emitAboutConversation<E extends keyof ServerToClientEvents>(
@@ -358,14 +358,14 @@ export class RealtimeEmitter {
     }
   }
 
-  emitToTeam<E extends keyof ServerToClientEvents>(
+  emitToWorkspace<E extends keyof ServerToClientEvents>(
     workspaceId: string,
     event: E,
     ...args: Parameters<ServerToClientEvents[E]>
   ): void {
     const io = this.server;
     if (!io) {
-      this.logger.warn(`emitToTeam("${String(event)}") dropped — IO not ready yet`);
+      this.logger.warn(`emitToWorkspace("${String(event)}") dropped — IO not ready yet`);
       return;
     }
     io.to(workspaceRoom(workspaceId)).emit(event, ...args);

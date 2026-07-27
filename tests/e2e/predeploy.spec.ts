@@ -179,7 +179,7 @@ const PAGES = [
   "/templates",
   "/workflows",
   "/team",
-  "/settings/team",
+  "/settings/members",
   "/settings/whatsapp",
   "/settings/tags",
   "/settings/stages",

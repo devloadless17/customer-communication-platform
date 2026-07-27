@@ -38,7 +38,7 @@ function stripForWire(m: Message): Message {
  * Room-scoping rules — DO NOT REGRESS (this is the "two tabs disagree" /
  * "broadcast storm" decision-tree class):
  *
- *   - emitToTeam        → use when EVERY agent on the team needs to know.
+ *   - emitToWorkspace        → use when EVERY agent on the team needs to know.
  *                          Examples: message:new (list ordering), conversation
  *                          status / assigned / read (badges), contact:updated
  *                          (panel + filter pruning), team-wide presence.
@@ -175,7 +175,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // `ticket:changed` contract comment: the board is a workspace-wide view of
   // work across threads whose conversation rooms nobody has joined.
   "ticket.changed": (e, emitter) => {
-    emitter.emitToTeam(e.workspaceId, "ticket:changed", {
+    emitter.emitToWorkspace(e.workspaceId, "ticket:changed", {
       workspaceId: e.workspaceId,
       ticketId: e.ticketId,
       conversationId: e.conversationId,
@@ -382,7 +382,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // One socket frame for an N-contact bulk mutation. Frontend invalidates
   // the affected rows in one query rather than receiving N patches.
   "contact.bulk_updated": (e, emitter) => {
-    emitter.emitToTeam(e.workspaceId, "contacts:bulk_updated", {
+    emitter.emitToWorkspace(e.workspaceId, "contacts:bulk_updated", {
       workspaceId: e.workspaceId,
       contactIds: e.contactIds,
       changeKind: e.changeKind,
@@ -436,7 +436,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
 
   // ---- broadcasts -------------------------------------------------------
   "broadcast.status_changed": (e, emitter) => {
-    emitter.emitToTeam(e.workspaceId, "broadcast:status", {
+    emitter.emitToWorkspace(e.workspaceId, "broadcast:status", {
       workspaceId: e.workspaceId,
       broadcastId: e.broadcastId,
       status: e.status,
@@ -445,7 +445,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "broadcast.progress": (e, emitter) => {
-    emitter.emitToTeam(e.workspaceId, "broadcast:progress", {
+    emitter.emitToWorkspace(e.workspaceId, "broadcast:progress", {
       workspaceId: e.workspaceId,
       broadcastId: e.broadcastId,
       sentCount: e.sentCount,
@@ -673,7 +673,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // Catalog tick so the channel list (memberCount, visibility) refreshes
     // for everyone — including the just-added users who need to start seeing
     // this channel and the just-removed users who need to stop seeing it.
-    emitter.emitToTeam(e.workspaceId, "team:catalog:changed", {
+    emitter.emitToWorkspace(e.workspaceId, "team:catalog:changed", {
       workspaceId: e.workspaceId,
       scope: "team-channels",
     });
@@ -698,7 +698,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   "user.availability_changed": (e, emitter) => {
     // Per-user badge update — teammates' sidebar dots + user-menu reflect the
     // new status in the same frame.
-    emitter.emitToTeam(e.workspaceId, "user:availability:updated", {
+    emitter.emitToWorkspace(e.workspaceId, "user:availability:updated", {
       workspaceId: e.workspaceId,
       userId: e.userId,
       status: e.status as
@@ -767,7 +767,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // The members list (assignment dropdown, contact-panel "assigned to", etc.)
     // already refreshes off this `team:catalog:changed { scope: members }`
     // frame, which IS consumed — so a name/avatar change still propagates.
-    emitter.emitToTeam(e.workspaceId, "team:catalog:changed", {
+    emitter.emitToWorkspace(e.workspaceId, "team:catalog:changed", {
       workspaceId: e.workspaceId,
       scope: "members",
     });
@@ -775,7 +775,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
 
   // ---- team-wide --------------------------------------------------------
   "team.catalog_changed": (e, emitter) => {
-    emitter.emitToTeam(e.workspaceId, "team:catalog:changed", {
+    emitter.emitToWorkspace(e.workspaceId, "team:catalog:changed", {
       workspaceId: e.workspaceId,
       scope: e.scope,
     });
@@ -784,7 +784,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // Org name was changed by an admin. Sidebar chrome + settings header
   // listen and patch the displayed name in place — no router.refresh().
   "team.renamed": (e, emitter) => {
-    emitter.emitToTeam(e.workspaceId, "team:renamed", {
+    emitter.emitToWorkspace(e.workspaceId, "team:renamed", {
       workspaceId: e.workspaceId,
       name: e.name,
       renamedByUserId: e.renamedByUserId,
@@ -794,7 +794,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // Outbound-webhook circuit breaker tripped → toast the settings page so an
   // admin watching the integrations panel sees the failure in real time.
   "webhook.subscription_disabled": (e, emitter) => {
-    emitter.emitToTeam(e.workspaceId, "webhook:subscription_disabled", {
+    emitter.emitToWorkspace(e.workspaceId, "webhook:subscription_disabled", {
       workspaceId: e.workspaceId,
       webhookId: e.webhookId,
       reason: e.reason,
@@ -804,7 +804,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // Counterpart: a previously-failing webhook recovered. UI clears the
   // unhealthy badge so the operator doesn't have to refresh manually.
   "webhook.subscription_recovered": (e, emitter) => {
-    emitter.emitToTeam(e.workspaceId, "webhook:subscription_recovered", {
+    emitter.emitToWorkspace(e.workspaceId, "webhook:subscription_recovered", {
       workspaceId: e.workspaceId,
       webhookId: e.webhookId,
     });

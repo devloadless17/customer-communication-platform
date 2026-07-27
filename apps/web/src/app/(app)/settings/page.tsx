@@ -72,7 +72,7 @@ export default async function SettingsIndex() {
       label: "People & teams",
       cards: [
         {
-          href: "/settings/team",
+          href: "/settings/members",
           icon: Users,
           title: "Members",
           description: isAdmin

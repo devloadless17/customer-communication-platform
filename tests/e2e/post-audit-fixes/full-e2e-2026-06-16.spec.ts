@@ -116,7 +116,7 @@ const ROUTES = [
   "/account", "/organization", "/organization/members", "/organization/workspaces",
   "/settings", "/settings/activity", "/settings/contact-fields", "/settings/integrations",
   "/settings/integrations/webhooks", "/settings/permissions", "/settings/snippets",
-  "/settings/stages", "/settings/tags", "/settings/team", "/settings/whatsapp",
+  "/settings/stages", "/settings/tags", "/settings/members", "/settings/whatsapp",
   "/settings/assignment", "/settings/channels", "/settings/message-flags", "/settings/tickets",
 ];
 for (const route of ROUTES) {

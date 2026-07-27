@@ -115,7 +115,7 @@ interface InviteResult {
   email: string;
 }
 
-export function TeamSettings({
+export function MembersSettings({
   currentUserId,
   currentUserRole,
   currentUserIsSuperAdmin = false,

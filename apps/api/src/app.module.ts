@@ -28,7 +28,7 @@ import { DbModule } from "./db/db.module";
 import { RealtimeModule } from "./realtime/realtime.module";
 import { WorkspaceSettingsModule } from "./workspace-settings/workspace-settings.module";
 import { TeamChatModule } from "./team-chat/team-chat.module";
-import { TeamsModule } from "./registration/teams.module";
+import { RegistrationModule } from "./registration/registration.module";
 import { UsersModule } from "./users/users.module";
 import { WebchatwidgetModule } from "./webchatwidget/webchatwidget.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
@@ -53,7 +53,7 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     WorkflowsModule,
     // Feature modules
     WorkspaceSettingsModule,
-    TeamsModule,
+    RegistrationModule,
     InvitesModule,
     WorkspacesModule,
     ChannelAccountsModule,

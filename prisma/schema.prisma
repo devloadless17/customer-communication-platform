@@ -515,13 +515,14 @@ model Organization {
   // wired up yet. See packages/shared/src/auth/plans.ts. UI hidden.
   plan Plan @default(starter)
 
-  // Hard cap on ACTIVE member accounts across the ORG (deactivated members
-  // don't count). Enforced at the authoritative chokepoint — invite-accept,
-  // under a row lock on THIS org row — with a soft pre-check at invite-create.
   // How many WORKSPACES this organization may create. Set by a super admin per
-  // org; the seat cap now lives on each Workspace (`Workspace.maxMembers`)
-  // rather than being pooled across the org, because a member belongs to a
-  // workspace, not to the organization as a whole.
+  // org; enforced under a row lock on THIS org row at workspace-create.
+  //
+  // The SEAT cap is NOT here — it lives on each `Workspace.maxMembers`,
+  // because a member belongs to a workspace rather than to the organization
+  // as a whole. (The first three lines of this comment used to describe that
+  // org-pooled member cap and were left stranded by the move; a reader
+  // following them looked for enforcement on this field that never existed.)
   maxWorkspaces Int @default(2)
 
   // Org-approval gate (see `OrgStatus`). A new self-signup is `pending` until a

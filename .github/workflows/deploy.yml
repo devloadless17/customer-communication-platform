@@ -97,6 +97,14 @@ jobs:
       # `as unknown as` may only go DOWN (scripts/check-double-assertions.mjs).
       - run: node scripts/check-double-assertions.mjs
 
+      # A Next.js route handler must destructure the param names its DIRECTORY
+      # declares. Typecheck cannot see this — the route's own params interface
+      # declares whatever the author typed, so a rename that misses the folder
+      # is self-consistent and silently yields `undefined` (this shipped once:
+      # the legacy Meta webhook proxy forwarded to /webhooks/meta/undefined for
+      # five days after the org→workspace rename).
+      - run: node scripts/check-route-params.mjs
+
   # The Vitest suite (apps/api/test — 36 files, ~500 tests) against a REAL
   # throwaway Postgres + Redis. `migrate deploy` on the empty DB also proves
   # the migration chain (including the hand-maintained partial-index section,

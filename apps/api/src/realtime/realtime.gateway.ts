@@ -301,7 +301,7 @@ export class RealtimeGateway
     // re-handshake re-derives both under the new setting; reconnect is
     // automatic and converges via the standard recovery paths.
     registerVisibilityInvalidator((workspaceId) => {
-      this.emitter.invalidateTeamScope(workspaceId);
+      this.emitter.invalidateWorkspaceScope(workspaceId);
       this.disconnectWorkspaceSockets(workspaceId);
     });
 
