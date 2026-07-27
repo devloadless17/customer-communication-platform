@@ -81,15 +81,48 @@ export function stopOutboundWebhookDeliveryCleanup(): void {
   }
 }
 
+/** Rows per DELETE. Small enough that one statement never approaches the
+ *  pool's 30s `statement_timeout`, even on a slow disk. */
+const MAX_PER_SWEEP = 2_000;
+/** Runaway backstop only — normal draining stops at the first short page. */
+const MAX_BATCHES = 2_000;
+
 async function sweepOnce(): Promise<void> {
   const cutoff = new Date(Date.now() - retentionDays() * 24 * 60 * 60 * 1000);
-  const { count } = await db.outboundWebhookDelivery.deleteMany({
-    where: { createdAt: { lt: cutoff } },
-  });
 
-  if (count > 0) {
+  // BATCHED, like every sibling retention sweeper. This was a single
+  // unbounded `deleteMany` — the only one in the directory — under the shared
+  // pool's `statement_timeout: 30_000`.
+  //
+  // That is self-perpetuating, not merely slow: once the backlog exceeds 30s
+  // of DELETE throughput (a few days of downtime, an operator lowering the
+  // retention window, or simply an existing database where this never ran),
+  // Postgres cancels the statement, the whole DELETE rolls back, ZERO rows go,
+  // and the sweeper retries in 24h always further behind. The table — which
+  // carries a full JSON payload per row and is measured in "millions of rows
+  // over a year" by this file's own docblock — then grows without bound, and
+  // the `(webhookId, createdAt)` index behind the delivery-log UI degrades
+  // with it. A backlog could never be worked off.
+  let totalDeleted = 0;
+  for (let i = 0; i < MAX_BATCHES; i++) {
+    const stale = await db.outboundWebhookDelivery.findMany({
+      where: { createdAt: { lt: cutoff } },
+      select: { id: true },
+      take: MAX_PER_SWEEP,
+    });
+    if (stale.length === 0) break;
+    const { count } = await db.outboundWebhookDelivery.deleteMany({
+      where: { id: { in: stale.map((r) => r.id) } },
+    });
+    totalDeleted += count;
+    // A short page means the backlog is drained; stop rather than pay for a
+    // final empty round-trip.
+    if (stale.length < MAX_PER_SWEEP) break;
+  }
+
+  if (totalDeleted > 0) {
     console.log(
-      `[sweeper.webhook-delivery-cleanup] removed ${count} rows older than ${retentionDays()}d`,
+      `[sweeper.webhook-delivery-cleanup] removed ${totalDeleted} rows older than ${retentionDays()}d`,
     );
   }
 }

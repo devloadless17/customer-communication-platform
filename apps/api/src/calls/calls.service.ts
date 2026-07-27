@@ -1231,7 +1231,6 @@ export class CallsService {
     // Roll back to `failed` (terminal) so the agent gets a clear UI state
     // and the row reflects the truth.
     const binding = getProviderBinding(call.channel);
-    const config = await binding.getSendConfig(session.workspaceId);
     // WhatsApp: pre_accept only, carrying the browser's SDP ANSWER — the real
     // accept follows from completeAccept once media is up. Messenger: a single
     // accept carrying the browser's SDP OFFER, returning the answer (+
@@ -1243,6 +1242,13 @@ export class CallsService {
       acceptPending: boolean;
     };
     try {
+      // Resolved INSIDE the try. The CAS above already flipped the row to
+      // `in_progress`, and this call throws on missing/expired credentials or
+      // an unresolved account in a multi-account workspace — which used to
+      // escape uncaught, skipping the rollback block below and stranding the
+      // row `in_progress` for the full 2h stale-call horizon while the whole
+      // team saw a live call that never existed.
+      const config = await binding.getSendConfig(session.workspaceId);
       answerResult = await providerAnswerCall(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
         sdp: sdpAnswer,
@@ -1354,8 +1360,11 @@ export class CallsService {
     if (call.status !== CallStatus.in_progress) return { ok: true };
 
     const binding = getProviderBinding(call.channel);
-    const config = await binding.getSendConfig(session.workspaceId);
     try {
+      // Resolved INSIDE the try — the state CAS above has already committed,
+      // so a credential/account-resolution throw here must degrade through
+      // this catch rather than escape and strand the row (see answerCall).
+      const config = await binding.getSendConfig(session.workspaceId);
       await providerCompleteAccept(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
         sdp: sdpAnswer,
@@ -1419,9 +1428,12 @@ export class CallsService {
       throw new BadRequestException({ error: "call_not_in_progress" });
     }
     const binding = getProviderBinding(call.channel);
-    const config = await binding.getSendConfig(session.workspaceId);
     let result: { sdpAnswer?: string; sdpRenegotiation?: string };
     try {
+      // Resolved INSIDE the try — the state CAS above has already committed,
+      // so a credential/account-resolution throw here must degrade through
+      // this catch rather than escape and strand the row (see answerCall).
+      const config = await binding.getSendConfig(session.workspaceId);
       result = await providerMediaUpdate(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
         sdp,
@@ -1486,8 +1498,11 @@ export class CallsService {
     }
 
     const binding = getProviderBinding(call.channel);
-    const config = await binding.getSendConfig(session.workspaceId);
     try {
+      // Resolved INSIDE the try — the state CAS above has already committed,
+      // so a credential/account-resolution throw here must degrade through
+      // this catch rather than escape and strand the row (see answerCall).
+      const config = await binding.getSendConfig(session.workspaceId);
       await providerRejectCall(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
         ...(reason ? { reason } : {}),
@@ -1654,8 +1669,17 @@ export class CallsService {
     }
 
     const binding = getProviderBinding(call.channel);
-    const config = await binding.getSendConfig(session.workspaceId);
     try {
+      // INSIDE the try. The terminal CAS above has already committed, so a
+      // throw here used to skip the `call.ended` / `call.missed` publish
+      // below entirely — row terminal in the DB, no terminal frame, so the
+      // panel and the live badge never cleared until a manual refetch.
+      // `getSendConfig` throws on missing or expired credentials, on a cache
+      // blip, and (since the account-unresolved guard) whenever a
+      // multi-account workspace resolves no account — none of which should
+      // cost the operator a stuck call. The existing catch is already the
+      // right handling: non-fatal, local state is what matters.
+      const config = await binding.getSendConfig(session.workspaceId);
       await providerEndCall(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
       });
