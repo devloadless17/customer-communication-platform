@@ -2082,6 +2082,20 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           continue;
         }
 
+        // MM-API click events ride the SAME `messages` field as everything
+        // else, as a `user_actions` array. This platform doesn't use MM API
+        // (maintainer decision), so they're dropped — but their PRESENCE means
+        // a tenant signed the MM ToS in WhatsApp Manager out-of-band, which is
+        // worth an ops trace instead of a silent vanish.
+        if (Array.isArray((value as { user_actions?: unknown }).user_actions)) {
+          console.warn(
+            JSON.stringify({
+              event: "meta.mm_api_user_action_dropped",
+              note: "MM-API click webhook received — a tenant WABA appears to be onboarded to MM API; this platform sends via Cloud API only",
+            }),
+          );
+        }
+
         // `contacts[]` — not `messages[]` — is where Meta puts the customer's
         // identity: display name, the business-scoped user id (`user_id`, the
         // BSUID) and the optional WhatsApp `username`. Index by BOTH keys: since
