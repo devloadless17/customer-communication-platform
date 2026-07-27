@@ -341,6 +341,17 @@ export function AuthTemplateForm() {
             ))}
           </div>
 
+          {/* Device-side, zero integration — but the DIGITS decision is the
+              tenant's, made in whatever system generates their codes, and this
+              form is the only place they think about their OTP setup. */}
+          <p className="text-2xs leading-relaxed text-muted-foreground">
+            Tip: from June 2026, iPhones (iOS 26+) offer native keyboard autofill
+            for codes arriving on WhatsApp — but only for <span className="font-medium">
+            numeric codes of 3–8 digits</span>. Alphanumeric codes still deliver,
+            without the autofill prompt. Opting a template out is done in WhatsApp
+            Manager (Meta exposes no API for it).
+          </p>
+
           {/* Not a nicety: Meta will NOT create a zero-tap template without this
               acknowledgement, and the obligation it describes (telling customers
               the code is filled in for them) is a real one. */}
