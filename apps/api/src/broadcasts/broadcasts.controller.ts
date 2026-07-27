@@ -87,8 +87,16 @@ export class BroadcastsController {
   // credentials (unlike GET /api/workspace/whatsapp, which is admin-only), so any
   // broadcast user can read it.
   @Get("messaging-health")
-  async messagingHealth(@CurrentSession() session: ApiSession) {
-    return this.broadcasts.getMessagingHealth(session.workspaceId);
+  async messagingHealth(
+    @CurrentSession() session: ApiSession,
+    // `?accountId=` scopes the figures to ONE number — the account the composer
+    // is about to send from. Omitted = the channel default. Without this the
+    // composer gated a "Send from: second number" campaign against the DEFAULT
+    // number's tier/quality (the budget is portfolio-shared, but quality and
+    // tier are per-number).
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.broadcasts.getMessagingHealth(session.workspaceId, accountId || null);
   }
 
   @Get()

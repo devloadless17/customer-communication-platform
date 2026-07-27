@@ -78,9 +78,17 @@ export class WhatsappTemplatesController {
     return this.whatsapp.listTemplates(session.workspaceId, accountId);
   }
 
+  /**
+   * `?accountId=` mirrors the GET: an account-scoped sync answers with that
+   * account's catalogue (the sync itself still refreshes every WABA — the
+   * reconciliation is whole-workspace and fail-soft per account).
+   */
   @Post()
-  async sync(@CurrentSession() session: ApiSession) {
-    return this.whatsapp.syncTemplates(session.workspaceId);
+  async sync(
+    @CurrentSession() session: ApiSession,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.syncTemplates(session.workspaceId, accountId || null);
   }
 
   /**

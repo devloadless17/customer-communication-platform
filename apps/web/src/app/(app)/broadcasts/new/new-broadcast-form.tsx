@@ -323,7 +323,14 @@ export function NewBroadcastForm({
     setTemplatesSyncing(true);
     setTemplatesError(null);
     try {
-      const res = await apiFetch("/api/workspace/whatsapp/templates", { method: "POST" });
+      // Scoped like the GET below: the response feeds the picker directly, so
+      // an unscoped sync would swap in another WABA's catalogue after refresh.
+      const res = await apiFetch(
+        `/api/workspace/whatsapp/templates${
+          accountId ? `?accountId=${encodeURIComponent(accountId)}` : ""
+        }`,
+        { method: "POST" },
+      );
       const data = (await res.json()) as {
         templates?: TemplateDto[];
         error?: string;
@@ -341,7 +348,7 @@ export function NewBroadcastForm({
     } finally {
       setTemplatesSyncing(false);
     }
-  }, []);
+  }, [accountId]);
 
   // `background` skips the loading spinner — used for the mount refresh when a
   // server-seeded list is already on screen, so it freshens silently instead of
@@ -819,10 +826,12 @@ export function NewBroadcastForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTemplate?.id, audiencePayload, bodyVars, headerVar, bodyVarCount, headerVarCount]);
 
-  // WhatsApp messaging-limit snapshot for the pre-send eligibility hint. Fetched
-  // once (secret-free endpoint); the composer compares the audience size against
-  // the number's REMAINING rolling-24h budget locally. The hard gate lives
-  // server-side in create() and uses the same numbers.
+  // WhatsApp messaging-limit snapshot for the pre-send eligibility hint,
+  // scoped to the SELECTED "Send from" account and refetched when it changes —
+  // quality and tier are per-number, so the default number's figures would
+  // pass/fail the gate against the wrong account. (The 24h budget itself is
+  // portfolio-shared: two numbers in one portfolio show the same budget, by
+  // design.) The hard gate lives server-side in create() with the same numbers.
   const [messagingHealth, setMessagingHealth] = useState<{
     messagingTier: string | null;
     messagingDailyCap: number | null;
@@ -830,22 +839,32 @@ export function NewBroadcastForm({
     hasSnapshot: boolean;
     recentUniqueRecipients: number | null;
     remainingDailyBudget: number | null;
+    /** How many numbers share this budget — drives the copy's framing. */
+    portfolioAccountCount?: number;
   } | null>(null);
   useEffect(() => {
-    let alive = true;
+    // Only WhatsApp campaigns are tier-gated; don't burn a request per social
+    // account switch for a hint that never renders.
+    if (selectedChannel !== "whatsapp") return;
+    const controller = new AbortController();
     void (async () => {
       try {
-        const res = await apiFetch("/api/broadcasts/messaging-health");
+        const res = await apiFetch(
+          `/api/broadcasts/messaging-health${
+            accountId ? `?accountId=${encodeURIComponent(accountId)}` : ""
+          }`,
+          { signal: controller.signal },
+        );
         if (!res.ok) return;
-        if (alive) setMessagingHealth(await res.json());
+        if (!controller.signal.aborted) setMessagingHealth(await res.json());
       } catch {
         // Advisory only — a fetch failure just hides the hint.
       }
     })();
     return () => {
-      alive = false;
+      controller.abort();
     };
-  }, []);
+  }, [selectedChannel, accountId]);
 
   // Eligibility hint: template sends only (WhatsApp tier is a template concept).
   // Over-cap → a blocking-styled warning (server enforces); RED quality → advisory.
@@ -855,27 +874,37 @@ export function NewBroadcastForm({
     if (messageKind !== "template" || !messagingHealth) return null;
     const cap = messagingHealth.messagingDailyCap;
     const tier = messagingHealth.messagingTier ?? "current";
+    // The 24h budget is BUSINESS-PORTFOLIO-scoped (shared by every number in
+    // it, per Meta's 2025-10-07 change) — with several numbers in the
+    // portfolio, "this number has already messaged…" would imply a per-number
+    // budget that doesn't exist and send the operator to switch numbers for
+    // relief they won't get.
+    const shared = (messagingHealth.portfolioAccountCount ?? 1) > 1;
+    const subject = shared ? "Your WhatsApp numbers' shared business portfolio" : "This number";
     if (cap !== null && audienceCount > cap) {
       return {
         level: "error",
         text:
-          `This number can message ${cap.toLocaleString()} unique customers per 24h ` +
+          `${subject} can message ${cap.toLocaleString()} unique customers per 24h ` +
           `(${tier} tier), but this audience is ` +
           `${audienceCount.toLocaleString()}. Meta will reject the excess — split the send ` +
           `across days or raise your messaging limit with Meta first.`,
       };
     }
-    // The audience fits the cap outright but not what's LEFT of it. The cap is a
-    // rolling-24h budget shared across every send from this number, so earlier
-    // campaigns today can leave a perfectly reasonable audience unsendable.
+    // The audience fits the cap outright but not what's LEFT of it. The cap is
+    // a rolling-24h budget shared across every send from the portfolio's
+    // numbers, so earlier campaigns today can leave a perfectly reasonable
+    // audience unsendable.
     const remaining = messagingHealth.remainingDailyBudget;
     const used = messagingHealth.recentUniqueRecipients;
     if (cap !== null && remaining !== null && used !== null && audienceCount > remaining) {
       return {
         level: "error",
         text:
-          `This number has already messaged ${used.toLocaleString()} unique customers in the ` +
-          `last 24h, leaving ${remaining.toLocaleString()} of its ${cap.toLocaleString()} ` +
+          `${subject} has already messaged ${used.toLocaleString()} unique customers in the ` +
+          `last 24h, leaving ${remaining.toLocaleString()} of ${
+            shared ? "the shared" : "its"
+          } ${cap.toLocaleString()} ` +
           `${tier}-tier allowance. This audience is ${audienceCount.toLocaleString()}, so Meta ` +
           `would reject about ${(audienceCount - remaining).toLocaleString()} of them. Wait for ` +
           `the window to roll over, or reduce the audience.`,

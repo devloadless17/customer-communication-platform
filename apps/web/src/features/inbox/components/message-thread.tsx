@@ -2004,6 +2004,7 @@ function MessageThreadImpl({
             currentUser={currentUser}
             contact={contact}
             channel={conversation.channel ?? "whatsapp"}
+            channelConnectionId={conversation.channelConnectionId ?? null}
             stageCatalog={stageCatalog}
             tags={tags}
             fieldDefinitions={fieldDefinitions}

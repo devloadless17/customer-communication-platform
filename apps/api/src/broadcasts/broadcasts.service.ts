@@ -1297,8 +1297,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * refuses the send — the composer said there was budget and the runner said
    * there wasn't.
    */
-  async getMessagingHealth(workspaceId: string): Promise<MessagingHealthSummary> {
-    return getMessagingHealthSummary(workspaceId);
+  async getMessagingHealth(
+    workspaceId: string,
+    channelConnectionId?: string | null,
+  ): Promise<MessagingHealthSummary> {
+    return getMessagingHealthSummary(workspaceId, channelConnectionId);
   }
 
   /**

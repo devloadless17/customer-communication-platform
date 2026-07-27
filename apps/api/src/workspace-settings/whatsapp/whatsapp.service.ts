@@ -1013,13 +1013,28 @@ export class WhatsappService {
    * stale rows left behind when a connection's wabaId is corrected — e.g. the
    * shared `jaspers_market_*` sample templates imported under an old test WABA.
    */
-  async syncTemplates(workspaceId: string): Promise<{
+  async syncTemplates(
+    workspaceId: string,
+    accountId?: string | null,
+  ): Promise<{
     templates: TemplateDto[];
     syncedCount: number;
   }> {
     // Fail fast with the actionable message when nothing is connected at all;
     // the sync itself is per-account and fail-soft inside syncTemplateCatalog.
-    const config = await this.requireSendConfig(workspaceId);
+    // The target account must be resolved EXPLICITLY: with several active
+    // numbers a workspace-only credential load refuses (account-unresolved),
+    // which turned the Sync button into a guaranteed 409 on every
+    // multi-account workspace.
+    const target =
+      accountId ??
+      (
+        await this.db.channelConnection.findFirst({
+          where: { workspaceId, channel: META_PROVIDER, isDefault: true },
+          select: { id: true },
+        })
+      )?.id;
+    const config = await this.requireSendConfig(workspaceId, target);
     if (!config.wabaId) {
       throw new ConflictException({
         error: "waba_id_missing",
@@ -1054,7 +1069,14 @@ export class WhatsappService {
       );
     }
     const rows = await this.db.messageTemplate.findMany({
-      where: { workspaceId },
+      where: {
+        workspaceId,
+        // An account-scoped sync answers with that account's catalogue — the
+        // caller (reply box, composer) feeds this straight into its picker, so
+        // an unscoped list would suddenly show another WABA's templates. `""`
+        // is the legacy/unknown-WABA sentinel, matchable as everywhere else.
+        ...(accountId && config.wabaId ? { wabaId: { in: [config.wabaId, ""] } } : {}),
+      },
       orderBy: [{ status: "asc" }, { name: "asc" }, { language: "asc" }],
     });
 

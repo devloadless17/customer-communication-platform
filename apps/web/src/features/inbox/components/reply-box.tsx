@@ -173,6 +173,7 @@ function ReplyBoxImpl({
   currentUser,
   contact,
   channel = "whatsapp",
+  channelConnectionId = null,
   stageCatalog,
   tags,
   fieldDefinitions,
@@ -205,6 +206,15 @@ function ReplyBoxImpl({
    * reproduce the previous hardcoded 24h + templates-on constants).
    */
   channel?: Channel;
+  /**
+   * The ACCOUNT this thread lives on (`Conversation.channelConnectionId`).
+   * Scopes the template picker to that number's WABA — templates belong to a
+   * WhatsApp Business Account, and an unscoped list offered another WABA's
+   * templates that Meta rejects at send time on a non-default number. Null
+   * (legacy thread / account removed) falls back to the default account's
+   * catalogue, matching the send path's own fallback.
+   */
+  channelConnectionId?: string | null;
   /** Team stage + tag catalogs — used to resolve the derived
    *  `$var.contact.stage_name` / `$var.contact.tag_names` tokens when an
    *  agent inserts a snippet (the contact carries only ids). */
@@ -736,11 +746,17 @@ function ReplyBoxImpl({
 
   const syncTemplatesRef = useRef<() => Promise<void>>(async () => {});
 
+  // Scope both the list and the first-open sync to THIS thread's account —
+  // see the channelConnectionId prop doc.
+  const templatesAccountQuery = channelConnectionId
+    ? `?accountId=${encodeURIComponent(channelConnectionId)}`
+    : "";
+
   const loadTemplates = useCallback(async () => {
     setTemplatesLoading(true);
     setTemplatesError(null);
     try {
-      const res = await apiFetch("/api/workspace/whatsapp/templates");
+      const res = await apiFetch(`/api/workspace/whatsapp/templates${templatesAccountQuery}`);
       if (!res.ok) throw new Error(await safeReadError(res));
       const data = (await res.json()) as {
         templates?: TemplateDto[];
@@ -762,13 +778,15 @@ function ReplyBoxImpl({
     } finally {
       setTemplatesLoading(false);
     }
-  }, []);
+  }, [templatesAccountQuery]);
 
   const syncTemplates = useCallback(async () => {
     setTemplatesSyncing(true);
     setTemplatesError(null);
     try {
-      const res = await apiFetch("/api/workspace/whatsapp/templates", { method: "POST" });
+      const res = await apiFetch(`/api/workspace/whatsapp/templates${templatesAccountQuery}`, {
+        method: "POST",
+      });
       const data = (await res.json()) as {
         templates?: TemplateDto[];
         error?: string;
@@ -795,7 +813,7 @@ function ReplyBoxImpl({
     } finally {
       setTemplatesSyncing(false);
     }
-  }, []);
+  }, [templatesAccountQuery]);
   // Keep the ref pointing at the latest sync function so the loader effect
   // can invoke it without depending on a forward declaration.
   useEffect(() => {
@@ -810,6 +828,14 @@ function ReplyBoxImpl({
       void loadTemplates();
     }
   }, [pickerOpen, templatesLoaded, loadTemplates]);
+
+  // The composer instance survives a thread switch, and the catalogue is
+  // per-ACCOUNT — without this reset, opening the picker on a thread bound to
+  // a different number would serve the previous account's cached list.
+  useEffect(() => {
+    setTemplates([]);
+    setTemplatesLoaded(false);
+  }, [templatesAccountQuery]);
 
   const sendTemplate = useCallback(
     async (args: {
