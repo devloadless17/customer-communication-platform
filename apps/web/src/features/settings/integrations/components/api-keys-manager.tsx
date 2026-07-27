@@ -52,6 +52,11 @@ const SCOPE_LABELS: Record<string, string> = {
   "read:calls": "Read call history + calling permission",
   "write:calls": "Request calling permission / send call buttons",
   "write:users": "Set teammates' availability + working hours",
+  "read:tickets": "Read tickets + SLA state",
+  "write:tickets": "Create / update / resolve tickets",
+  "read:channels": "Read connected channel accounts",
+  "admin:settings":
+    "Admin: assignment rules, ticket settings + SLA, WhatsApp profile & QR",
 };
 
 interface Props {

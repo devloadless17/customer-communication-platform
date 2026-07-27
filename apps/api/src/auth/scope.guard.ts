@@ -18,12 +18,17 @@ import { SCOPE_META_KEY } from "./scope.decorator";
  * Behavior:
  *   - No `@RequireScope` on the route → allow (open per the controller
  *     gate above, which already required an api key OR a session).
- *   - Has `@RequireScope` AND request authenticated by api key:
- *     check `req.apiKey.scopes` includes the required scope (or `"*"`).
- *   - Has `@RequireScope` AND request authenticated by SESSION (the
- *     agent UI calling the same controller): allow — scopes are an
- *     API-key concept, not an RBAC concept. Session-based routes use
- *     `RoleGuard` for permission enforcement instead.
+ *   - Has `@RequireScope` → the request MUST be api-key-authenticated and
+ *     the key must hold the scope (or `"*"`).
+ *
+ * A scope-gated route is API-KEY-ONLY. There used to be a session
+ * passthrough here ("scopes are an API-key concept; session routes use
+ * RoleGuard instead") — which was dead code on the only mounted controller
+ * (`ApiKeyGuard` rejects sessionless-keyless requests first), but fail-OPEN
+ * the moment anyone reused this guard on a controller that also accepts
+ * sessions without a RoleGuard behind it. A surface that should serve
+ * browser sessions gets its own controller with role/capability guards; it
+ * does not ride through here.
  */
 @Injectable()
 export class ScopeGuard implements CanActivate {
@@ -37,8 +42,6 @@ export class ScopeGuard implements CanActivate {
     if (!required) return true;
 
     const req = ctx.switchToHttp().getRequest<Request>();
-    // Session-authenticated request — out of scope for this guard.
-    if (!req.apiKey && req.session) return true;
     if (!req.apiKey) {
       throw new ForbiddenException({
         error: "no_credentials",

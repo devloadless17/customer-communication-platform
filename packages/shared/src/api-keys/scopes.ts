@@ -56,10 +56,10 @@ export const API_KEY_SCOPES = [
 
   // Tickets — the unit of WORK on a conversation. Their own scope for the same
   // reason flags have one: a helpdesk or BI system that should read and resolve
-  // work items must not thereby gain the ability to send billed messages. The
-  // ticket CONFIGURATION (SLA promises, custom fields, auto-open behaviour)
-  // sits behind `write:tickets` rather than `write:catalog`, because editing an
-  // SLA changes what every future ticket in the workspace promises.
+  // work items must not thereby gain the ability to send billed messages.
+  // (Ticket CONFIGURATION — SLA promises, custom fields, the reopen window —
+  // moved to `admin:settings` 2026-07-27: editing an SLA changes what every
+  // future ticket promises, which is admin authority, not work-item authority.)
   "read:tickets",
   "write:tickets",
 
@@ -100,6 +100,19 @@ export const API_KEY_SCOPES = [
   // silently changes which number a customer hears from, so it stays a
   // deliberate action in Settings rather than something an integration can do.
   "read:channels",
+
+  // Admin-grade workspace CONFIGURATION (2026-07-27) — the routes whose
+  // internal twin is gated on the admin role or a manager+ capability:
+  // assignment policies/rules/settings, ticket settings + SLA policies +
+  // ticket field definitions, the WhatsApp business profile + QR codes, and
+  // setting OTHER teammates' availability/working hours. These used to ride on
+  // the generic write scopes (`write:catalog` / `write:tickets` /
+  // `write:users`), which meant an api key minted for ordinary integration
+  // work could silently rewrite routing rules or SLA promises no agent-role
+  // session ever could. Existing keys holding any of those three scopes were
+  // grandfathered this scope by migration, so no partner integration broke;
+  // NEW keys ask for it explicitly.
+  "admin:settings",
 ] as const;
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];

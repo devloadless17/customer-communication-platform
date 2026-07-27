@@ -778,7 +778,7 @@ export class ExternalV1Controller {
    * billing side effect, so a retried call converges rather than duplicating.
    */
   @Patch("users/:id/availability")
-  @RequireScope("write:users")
+  @RequireScope("admin:settings")
   async setUserAvailability(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
@@ -789,7 +789,7 @@ export class ExternalV1Controller {
 
   /** Set a teammate's working-hours mode/schedule (inherit | custom | off). */
   @Put("users/:id/work-hours")
-  @RequireScope("write:users")
+  @RequireScope("admin:settings")
   async setUserWorkHours(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
@@ -822,7 +822,7 @@ export class ExternalV1Controller {
   }
 
   @Post("assignment/policies")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async createAssignmentPolicy(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(CreatePolicySchema)) body: CreatePolicyInput,
@@ -833,7 +833,7 @@ export class ExternalV1Controller {
   }
 
   @Put("assignment/policies/:id")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async updateAssignmentPolicy(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
@@ -845,7 +845,7 @@ export class ExternalV1Controller {
   }
 
   @Post("assignment/policies/:id/default")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async setDefaultAssignmentPolicy(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
@@ -854,7 +854,7 @@ export class ExternalV1Controller {
   }
 
   @Delete("assignment/policies/:id")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async archiveAssignmentPolicy(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
@@ -863,7 +863,7 @@ export class ExternalV1Controller {
   }
 
   @Post("assignment/rules")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async createAssignmentRule(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(CreateRuleSchema)) body: CreateRuleInput,
@@ -873,7 +873,7 @@ export class ExternalV1Controller {
 
   // Before `rules/:id` — Nest matches in declaration order.
   @Put("assignment/rules/order")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async reorderAssignmentRules(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ReorderRulesSchema)) body: ReorderRulesInput,
@@ -882,7 +882,7 @@ export class ExternalV1Controller {
   }
 
   @Patch("assignment/rules/:id")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async updateAssignmentRule(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
@@ -892,7 +892,7 @@ export class ExternalV1Controller {
   }
 
   @Delete("assignment/rules/:id")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async deleteAssignmentRule(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
@@ -901,7 +901,7 @@ export class ExternalV1Controller {
   }
 
   @Patch("assignment/settings")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async updateAssignmentSettings(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(UpdateAssignmentSettingsSchema)) body: UpdateAssignmentSettingsInput,
@@ -1021,7 +1021,7 @@ export class ExternalV1Controller {
   }
 
   @Patch("tickets-settings")
-  @RequireScope("write:tickets")
+  @RequireScope("admin:settings")
   async updateTicketSettings(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(TicketSettingsSchema)) body: TicketSettingsInput,
@@ -1037,7 +1037,7 @@ export class ExternalV1Controller {
   }
 
   @Post("ticket-sla")
-  @RequireScope("write:tickets")
+  @RequireScope("admin:settings")
   async upsertTicketSla(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(UpsertSlaPolicySchema)) body: UpsertSlaPolicyInput,
@@ -1054,7 +1054,7 @@ export class ExternalV1Controller {
   }
 
   @Post("ticket-fields")
-  @RequireScope("write:tickets")
+  @RequireScope("admin:settings")
   async createTicketField(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(CreateTicketFieldSchema)) body: CreateTicketFieldInput,
@@ -1064,7 +1064,7 @@ export class ExternalV1Controller {
   }
 
   @Patch("ticket-fields/:id")
-  @RequireScope("write:tickets")
+  @RequireScope("admin:settings")
   async updateTicketField(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
@@ -1075,7 +1075,7 @@ export class ExternalV1Controller {
   }
 
   @Delete("ticket-fields/:id")
-  @RequireScope("write:tickets")
+  @RequireScope("admin:settings")
   async deleteTicketField(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
     await this.tickets.deleteField(auth.workspaceId, id);
     return { ok: true };
@@ -1715,7 +1715,7 @@ export class ExternalV1Controller {
   }
 
   @Post("whatsapp/profile")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async updateBusinessProfile(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(UpdateBusinessProfileSchema)) body: UpdateBusinessProfileInput,
@@ -1738,7 +1738,7 @@ export class ExternalV1Controller {
   }
 
   @Post("whatsapp/qr-codes")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async createQrCode(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(CreateQrCodeSchema)) body: CreateQrCodeInput,
@@ -1748,7 +1748,7 @@ export class ExternalV1Controller {
   }
 
   @Post("whatsapp/qr-codes/:code")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async updateQrCode(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("code") code: string,
@@ -1761,7 +1761,7 @@ export class ExternalV1Controller {
   /** Deleting a code breaks any signage printed with it — Meta shows the
    *  customer "this QR code has expired". */
   @Delete("whatsapp/qr-codes/:code")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async deleteQrCode(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("code") code: string,

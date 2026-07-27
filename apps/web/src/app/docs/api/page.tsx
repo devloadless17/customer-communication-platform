@@ -31,7 +31,7 @@ const SCOPES: ReadonlyArray<{ scope: string; grants: string }> = [
   { scope: "write:notes", grants: "add internal notes" },
   { scope: "read:flags", grants: "read message triage flags + the flag queue" },
   { scope: "read:tickets", grants: "read tickets, SLA policies + ticket fields" },
-  { scope: "write:tickets", grants: "open / assign / solve tickets · edit SLA + fields" },
+  { scope: "write:tickets", grants: "open / assign / solve tickets" },
   { scope: "write:flags", grants: "raise / resolve / dismiss / remove message flags" },
   { scope: "read:catalog", grants: "read tags · fields · stages · channels · users" },
   { scope: "read:channels", grants: "read the accounts connected under each channel" },
@@ -40,6 +40,11 @@ const SCOPES: ReadonlyArray<{ scope: string; grants: string }> = [
   { scope: "read:calls", grants: "read call history + calling-permission state" },
   { scope: "write:calls", grants: "request calling permission · send call buttons" },
   { scope: "write:users", grants: "set a teammate's availability · working hours" },
+  {
+    scope: "admin:settings",
+    grants:
+      "admin-grade configuration: assignment policies/rules · ticket settings + SLA + fields · WhatsApp profile + QR codes · teammates' availability (keys created before 2026-07-27 with the older write scopes were grandfathered)",
+  },
 ];
 
 /**
@@ -446,14 +451,14 @@ export default function ApiDocsPage() {
           re-anchored if their schedule changes) — so a status set mid-shift can&apos;t
           outlive the day. With no schedule it holds until changed. Send{" "}
           <code>{`{ "followSchedule": true }`}</code> to drop the override immediately and
-          hand them back to their schedule. Needs <code>write:users</code>.
+          hand them back to their schedule. Needs <code>admin:settings</code> (pre-2026-07-27 <code>write:users</code> keys were grandfathered).
         </Endpoint>
         <Endpoint method="PUT" path="/api/external/v1/users/:id/work-hours">
           Set a member&apos;s schedule:{" "}
           <code>{`{ "mode": "inherit" | "custom" | "off", "workHours": { "timezone": "Asia/Beirut", "weekly": { "mon": [{ "open": "09:00", "close": "17:00" }] } } }`}</code>.
           <code>custom</code> requires <code>workHours</code>; the other modes ignore it.
           Outside their hours a member shows as away and is skipped by round-robin
-          assignment. Needs <code>write:users</code>.
+          assignment. Needs <code>admin:settings</code>.
         </Endpoint>
       </Section>
 
@@ -609,7 +614,9 @@ export default function ApiDocsPage() {
           aggregate that barely moves minute to minute.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/whatsapp/qr-codes">
-          QR codes and short links on the number. A <code>code</code> is both the
+          QR codes and short links on the number (reads <code>read:catalog</code>;
+          creating / renaming / deleting codes and updating the business profile
+          below need <code>admin:settings</code>). A <code>code</code> is both the
           identity and the short-link slug (
           <code>https://wa.me/message/&lt;code&gt;</code>).
         </Endpoint>
@@ -781,7 +788,7 @@ export default function ApiDocsPage() {
           policy applies (top to bottom, first match wins, default policy as the
           fallback); <strong>settings</strong> decide when routing runs at all.
           Read needs <code>read:catalog</code>, writes need{" "}
-          <code>write:catalog</code>.
+          <code>admin:settings</code> — routing rules are admin authority, same as in the app.
         </p>
         <Endpoint method="GET" path="/api/external/v1/assignment">
           Everything at once: <code>{`{ policies, rules, settings, members }`}</code>.
@@ -1107,7 +1114,7 @@ export default function ApiDocsPage() {
         <Endpoint method="GET" path="/api/external/v1/tickets-settings">
           <code>ticketReopenWindowHours</code>,{" "}
           <code>ticketCloseConversationOnLastSolved</code>. <code>PATCH</code> the same
-          path to change them (<code>write:tickets</code>). Scope{" "}
+          path to change them (<code>admin:settings</code>). Scope{" "}
           <code>read:tickets</code>.
         </Endpoint>
         <Endpoint
@@ -1120,7 +1127,7 @@ export default function ApiDocsPage() {
           zero, so nothing is due and nothing breaches. Due dates are computed when a
           ticket is created and then stored, so editing a policy never retroactively
           breaches open work. <code>GET</code> the same path to read them. Scope{" "}
-          <code>write:tickets</code> / <code>read:tickets</code>.
+          <code>admin:settings</code> / <code>read:tickets</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/ticket-fields">
           Custom fields on a ticket. <code>POST</code> to create,{" "}
@@ -1128,7 +1135,7 @@ export default function ApiDocsPage() {
           <code>key</code> is derived from the label once and is immutable — stored values
           are keyed by it. Deleting a definition leaves its values in place (history on
           closed work); they just stop rendering. Scope <code>read:tickets</code> /{" "}
-          <code>write:tickets</code>.
+          <code>admin:settings</code>.
         </Endpoint>
       </Section>
 

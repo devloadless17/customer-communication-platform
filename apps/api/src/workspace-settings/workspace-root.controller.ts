@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { CurrentSession } from "../auth/current-session.decorator";
-import { RequireRole } from "../auth/role.guard";
+import { RequireOrgRole, RequireRole } from "../auth/role.guard";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { zBody } from "../common/zod-validation.pipe";
@@ -180,12 +180,16 @@ export class WorkspaceRootController {
    * org, a workspace-scoped `admin` would otherwise be able to destroy sibling
    * workspaces they are not even a member of.
    */
-  @RequireRole("admin")
+  @RequireOrgRole("owner")
   @Delete()
   async remove(@CurrentSession() session: ApiSession) {
+    // Belt-and-braces behind the decorator: the guard above is the gate, but
+    // an org-destroying route keeps its own inline check so a future guard
+    // refactor can't silently widen it.
     if (session.orgRole !== "owner") {
       throw new ForbiddenException({
-        error: "only the organization owner can delete the organization",
+        error: "org_owner_required",
+        detail: "only the organization owner can delete the organization",
       });
     }
     await this.teamRoot.destroyOrganization(session.organizationId, "api/workspace");

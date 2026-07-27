@@ -17,6 +17,7 @@ import type { Role } from "@ccp/shared/types";
 import { SessionGuard } from "./session.guard";
 
 const ROLES_KEY = "ccp:required-roles";
+const ORG_ROLES_KEY = "ccp:required-org-role";
 
 type RoleRequirement = "admin" | "superAdmin";
 
@@ -34,6 +35,54 @@ export function RequireRole(role: RoleRequirement): MethodDecorator & ClassDecor
     SetMetadata(ROLES_KEY, role),
     UseGuards(SessionGuard, RoleGuard),
   );
+}
+
+/**
+ * Method/class decorator that gates by ORG role — the tenant-level authority
+ * axis, orthogonal to the workspace role RequireRole checks.
+ *
+ *   @RequireOrgRole("owner") → the org OWNER, strictly. Deliberately NO
+ *   superAdmin bypass: routes behind this act on the CALLER'S OWN org
+ *   (session.organizationId), so a bypass would let a platform operator
+ *   destroy the anchor org by accident — operating on TENANT orgs has its own
+ *   surface (admin/admin-organizations) with its own gates.
+ *
+ * Exists because `resolveSession` collapses a superAdmin, an org owner/admin
+ * AND a plain member who admins one workspace all to the effective workspace
+ * role "admin" — so an org-destroying route decorated `@RequireRole("admin")`
+ * READS as workspace-scoped while actually needing tenant authority. The
+ * decorator now says what the route means (§18: org-wide actions need ORG
+ * authority).
+ */
+export function RequireOrgRole(role: "owner"): MethodDecorator & ClassDecorator {
+  return applyDecorators(
+    SetMetadata(ORG_ROLES_KEY, role),
+    UseGuards(SessionGuard, OrgRoleGuard),
+  );
+}
+
+@Injectable()
+export class OrgRoleGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const required = this.reflector.getAllAndOverride<"owner" | undefined>(
+      ORG_ROLES_KEY,
+      [context.getHandler(), context.getClass()],
+    );
+    if (!required) return true;
+
+    const req = context.switchToHttp().getRequest<Request>();
+    const session = req.session;
+    if (!session) throw new UnauthorizedException();
+    if (session.orgRole !== required) {
+      throw new ForbiddenException({
+        error: "org_owner_required",
+        detail: "only the organization owner can do this",
+      });
+    }
+    return true;
+  }
 }
 
 @Injectable()
