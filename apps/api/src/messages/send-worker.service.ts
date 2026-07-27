@@ -11,6 +11,7 @@ import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { recordJobFailure } from "@/common/job-failure-metrics";
 import type IORedis from "ioredis";
 
+import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta";
 import { flagChannelNeedsReconnect, clearChannelNeedsReconnect } from "@/lib/providers/channel-health";
@@ -360,11 +361,26 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
       const { reason, detail, recoverable } = categorizeSendError(err);
 
       if (!recoverable) {
-        // Access token expired/revoked (Graph 190) → flag the channel so Settings
-        // surfaces a "reconnect" banner. Meta's best practice: notify admins to
-        // re-issue the token rather than silently retrying a dead credential.
+        // Access token expired/revoked (Graph 190) → flag the ACCOUNT so
+        // Settings surfaces a "reconnect" banner. Meta's best practice: notify
+        // admins to re-issue the token rather than silently retrying a dead
+        // credential. The conversation names which account's token failed —
+        // flagging the whole channel marked every sibling number as dead over
+        // one credential. One extra read, on the rare auth-failure path only.
         if (reason === "auth_expired") {
-          void flagChannelNeedsReconnect(data.workspaceId, data.channel ?? "whatsapp");
+          void db.conversation
+            .findFirst({
+              where: { id: data.conversationId, workspaceId: data.workspaceId },
+              select: { channelConnectionId: true },
+            })
+            .then((conv) =>
+              flagChannelNeedsReconnect(
+                data.workspaceId,
+                data.channel ?? "whatsapp",
+                conv?.channelConnectionId ?? null,
+              ),
+            )
+            .catch(() => undefined);
         }
         // Permanent failure — no retry is coming, so publish the actionable
         // "Failed · Retry" bubble now and stop. (worker.on("failed") skips

@@ -26,7 +26,11 @@ import {
   ProviderNotConfiguredError,
 } from "@/lib/providers/config";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
-import { fetchWhatsappHealthFromGraph, getWhatsappHealth } from "@/lib/providers/meta-health";
+import {
+  fetchWhatsappHealthFromGraph,
+  gcOrphanWhatsappPortfolios,
+  getWhatsappHealth,
+} from "@/lib/providers/meta-health";
 import { normalizeDefaultAccount } from "@/lib/providers/normalize-default-account";
 import {
   readTemplateAnalytics,
@@ -771,6 +775,10 @@ export class WhatsappService {
     await this.db.channelConnection.deleteMany({
       where: { workspaceId, channel: META_PROVIDER },
     });
+    // Every portfolio row just lost all its connections (SetNull FK) — GC them
+    // so a later reconnect starts clean instead of self-healing onto a stale
+    // container.
+    await gcOrphanWhatsappPortfolios(workspaceId);
     invalidateProviderConfig(workspaceId);
 
     // Deleting the row leaves a stale id in the outbound-webhooks subscriber's

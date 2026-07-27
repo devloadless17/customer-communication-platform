@@ -1570,6 +1570,8 @@ async function processOneRecipient(
     // rows up front (mode removed 2026-07-27); the type keeps the DB row shape.
     targetMode: "contact" | "customer";
     channel: Channel;
+    /** The account this campaign sends from (permanent-breaker reconnect flag). */
+    channelConnectionId: string | null;
     templateId: string | null;
     templateName: string | null;
     templateLanguage: string | null;
@@ -2579,7 +2581,13 @@ function isFatalTemplateError(err: unknown): boolean {
  * keeps resume double-send-safe.
  */
 async function maybeTripPermanentBreaker(
-  broadcast: { id: string; workspaceId: string; channel: Channel },
+  broadcast: {
+    id: string;
+    workspaceId: string;
+    channel: Channel;
+    /** The account this campaign sends from — the one whose token failed. */
+    channelConnectionId?: string | null;
+  },
   err: unknown,
 ): Promise<void> {
   const credentialFatal = isPermanentCredentialError(err);
@@ -2593,9 +2601,14 @@ async function maybeTripPermanentBreaker(
   // Light the Settings "reconnect" banner on the FIRST expired-token hit — a
   // broadcast bypasses the send-worker's flag, so otherwise a token dying
   // mid-broadcast pauses the broadcast but leaves the reconnect CTA dark. (Not
-  // for a template fault — that's not a connection problem.)
+  // for a template fault — that's not a connection problem.) Scoped to the
+  // SENDING account: its token failed, not its siblings'.
   if (normalizeMetaSendError(err)?.code === "auth_expired") {
-    void flagChannelNeedsReconnect(broadcast.workspaceId, broadcast.channel);
+    void flagChannelNeedsReconnect(
+      broadcast.workspaceId,
+      broadcast.channel,
+      broadcast.channelConnectionId ?? null,
+    );
   }
   const streak = trackPermanentHit(broadcast.id);
   if (streak < PERMANENT_ERROR_PAUSE_THRESHOLD) return;

@@ -368,16 +368,44 @@ export async function persistWhatsappHealth(
     // Self-healing: a workspace whose WhatsApp account predates the portfolio
     // table (or was connected without one) has nothing to update, and silently
     // dropping the tier here would leave the pre-send gate permanently ungated.
-    // Mint the portfolio and attach every WhatsApp account to it.
+    // Mint a local container — but ONLY for rows this event can be attributed
+    // to. The old attach ("every WhatsApp connection with portfolioId null")
+    // merged numbers from genuinely DIFFERENT Meta portfolios into one shared
+    // budget: over-blocking both, and letting one portfolio's tier clobber the
+    // other's. Attribution order: the event's own connection → the WABA's
+    // connections → the sole connection. With none, drop the tier: the next
+    // per-connection Graph poll resolves the REAL portfolio id and
+    // `linkWhatsappPortfolio`'s upsert converges siblings onto it.
     if (updated.count === 0) {
-      const created = await db.whatsappPortfolio.create({
-        data: { workspaceId, ...portfolioData },
-        select: { id: true },
-      });
-      await db.channelConnection.updateMany({
-        where: { workspaceId, channel: "whatsapp", portfolioId: null },
-        data: { portfolioId: created.id },
-      });
+      const attachWhere = channelConnectionId
+        ? { workspaceId, channel: "whatsapp" as const, id: channelConnectionId, portfolioId: null }
+        : wabaId
+          ? { workspaceId, channel: "whatsapp" as const, wabaId, portfolioId: null }
+          : soleConnection
+            ? { workspaceId, channel: "whatsapp" as const, portfolioId: null }
+            : null;
+      if (attachWhere) {
+        const created = await db.whatsappPortfolio.create({
+          data: { workspaceId, ...portfolioData },
+          select: { id: true },
+        });
+        const attached = await db.channelConnection.updateMany({
+          where: attachWhere,
+          data: { portfolioId: created.id },
+        });
+        // A race (another writer attached the rows first) would leave this
+        // container connection-less — delete it rather than strand an orphan.
+        if (attached.count === 0) {
+          await db.whatsappPortfolio
+            .delete({ where: { id: created.id } })
+            .catch(() => undefined);
+        }
+      } else {
+        console.warn(
+          `[whatsapp-health] dropped unattributable tier for team=${workspaceId} — ` +
+            `several numbers, no connection/WABA in payload; next Graph poll links the real portfolio`,
+        );
+      }
     }
   }
 
@@ -852,7 +880,25 @@ export async function linkWhatsappPortfolio(
   });
   invalidateProviderConfig(workspaceId);
 
+  // Re-pointing a connection onto its REAL portfolio can orphan the local
+  // null-id container the self-heal minted before the id was known. Orphans
+  // aren't just clutter: the settings panel's "shared by N numbers" framing
+  // reads their stale counts.
+  await gcOrphanWhatsappPortfolios(workspaceId);
+
   return { portfolioId: portfolio.id, externalPortfolioId };
+}
+
+/**
+ * Delete portfolio rows no connection points at anymore. Called after a
+ * portfolio re-point and from the account-removal paths (`Conversation`-style
+ * SetNull FKs mean deleting the last connection strands the row silently).
+ * Workspace-scoped, idempotent, best-effort.
+ */
+export async function gcOrphanWhatsappPortfolios(workspaceId: string): Promise<void> {
+  await db.whatsappPortfolio
+    .deleteMany({ where: { workspaceId, connections: { none: {} } } })
+    .catch(() => undefined);
 }
 
 /**

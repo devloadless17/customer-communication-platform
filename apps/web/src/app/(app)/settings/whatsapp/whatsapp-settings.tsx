@@ -117,8 +117,11 @@ export function WhatsappSettings({
     const ok = await confirm({
       title: "Disconnect WhatsApp?",
       description:
-        "Your conversations will stay, but no new messages will flow until you reconnect.",
-      confirmLabel: "Disconnect",
+        "This disconnects EVERY WhatsApp number in this workspace, not just one. " +
+        "Your conversations will stay, but no new messages will flow until you " +
+        "reconnect. To remove a single number, use its row in the connected-numbers " +
+        "list instead.",
+      confirmLabel: "Disconnect all",
       destructive: true,
     });
     if (!ok) return;

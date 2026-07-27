@@ -1,7 +1,10 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 
 import { invalidateProviderConfig } from "@/lib/providers/config";
-import { portfolioTemplateLimit } from "@/lib/providers/meta-health";
+import {
+  gcOrphanWhatsappPortfolios,
+  portfolioTemplateLimit,
+} from "@/lib/providers/meta-health";
 import { invalidateMessengerConfig } from "@/lib/providers/messenger-config";
 import { invalidateInstagramConfig } from "@/lib/providers/instagram-config";
 import type { Channel } from "@ccp/shared/types";
@@ -277,6 +280,10 @@ export class ChannelAccountsService {
         });
       }
     });
+    // The portfolio FK is SetNull — removing the last number under a
+    // WhatsApp portfolio strands its row (and the panel's "shared by N
+    // numbers" framing reads the stale count). GC any now-orphaned rows.
+    if (channel === "whatsapp") await gcOrphanWhatsappPortfolios(workspaceId);
     this.bustCache(workspaceId, channel);
   }
 
