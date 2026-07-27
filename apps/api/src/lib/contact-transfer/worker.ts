@@ -69,6 +69,24 @@ export function startContactTransferWorker(): void {
       connection,
       concurrency: MAX_CONCURRENT_TRANSFERS,
       lockDuration: LOCK_DURATION_MS,
+      // Explicit stalled-check tuning — this was the ONLY worker of the seven
+      // left on BullMQ's defaults (`maxStalledCount: 1`), and the default is
+      // actively wrong here.
+      //
+      // A stall re-executes the job while the ORIGINAL handler is still alive,
+      // and `handleTransfer`'s claim CAS is `pending|running → running` —
+      // deliberately admitting `running → running` so a crashed run can
+      // resume. So both copies proceed, both read the same stale
+      // `processedRows`, and both resume from it: in `create_and_update` that
+      // re-applies every row from the cursor and re-fires every per-row
+      // workflow and outbound webhook. A synchronous XLSX parse or a long GC
+      // blocking the event loop past `lockRenewTime` is enough to trigger it.
+      //
+      // Same posture as every sibling: renew at a third of the lock, and let a
+      // transient renewal blip cost a retry rather than a duplicate run.
+      lockRenewTime: Math.floor(LOCK_DURATION_MS / 3),
+      stalledInterval: 30_000,
+      maxStalledCount: 3,
     },
   );
   worker.on("failed", (job, err) => {
@@ -76,9 +94,40 @@ export function startContactTransferWorker(): void {
   });
 }
 
+/**
+ * Hard ceiling on `worker.close()` during graceful shutdown.
+ *
+ * Above `LOCK_DURATION_MS` (5min) is not affordable here: Nest's
+ * onModuleDestroy hooks run SEQUENTIALLY, so every worker's drain is additive
+ * toward `APP_CLOSE_BUDGET_MS` (90s) and compose's `stop_grace_period` (100s).
+ * This worker was the only one with NO cap at all, so a 100k import in flight
+ * could consume the entire budget and every later hook — the outbox drainer's
+ * 60s shutdown flush, the send-worker drain — would be skipped by the
+ * fallthrough. A transfer is resumable by construction (persisted cursor +
+ * counters), so abandoning its drain is cheap; starving the outbox flush is
+ * not.
+ */
+const CLOSE_TIMEOUT_MS = 20_000;
+
 export async function stopContactTransferWorker(): Promise<void> {
   if (worker) {
-    await worker.close();
+    await Promise.race([
+      worker.close(),
+      new Promise<void>((_resolve, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `[contact-transfer] worker.close() exceeded ${CLOSE_TIMEOUT_MS}ms — abandoning drain so the process can exit before SIGKILL (the job resumes from its persisted cursor)`,
+              ),
+            ),
+          CLOSE_TIMEOUT_MS,
+        ).unref(),
+      ),
+    ]).catch((err) => {
+      // Log, don't re-throw — the connection close below must still run.
+      console.error(err instanceof Error ? err.message : err);
+    });
     worker = null;
   }
   if (connection) {

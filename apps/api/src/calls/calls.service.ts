@@ -1176,6 +1176,27 @@ export class CallsService {
     sdpAnswer?: string;
     sdpRenegotiation?: string;
   }> {
+    // WORKSPACE-scoped, NOT conversation-visibility-scoped, and that is
+    // deliberate — but it was only documented on `endCall`, which made the
+    // other call-id routes read like an oversight to a reviewer (it was
+    // flagged as one). Writing the rule down at the entry point:
+    //
+    //   LIVE call handling is TEAM-WIDE. A ringing call fans out to the team
+    //   room precisely because anyone free should be able to pick it up —
+    //   that is how a phone works, and scoping it to the assignee would mean
+    //   an unassigned or offline-owner call rings for nobody. Answer, reject,
+    //   accept-media and hang-up therefore key on the workspace only.
+    //
+    //   Call HISTORY is visibility-scoped (`list`, `listTeamCalls`,
+    //   `liveCount` all apply `conversationRelationWhere`) because that IS
+    //   thread data, and a restricted agent must not read the call log of a
+    //   thread they can't open.
+    //
+    // The one genuinely open question this leaves is the `call.incoming`
+    // TOAST, which carries the contact's name and phone to the whole team
+    // under `agentConversationVisibility: "assigned"`. Narrowing that is a
+    // product decision (a call nobody can identify is hard to answer well),
+    // so it is recorded in the ledger rather than changed here.
     const call = await this.db.call.findFirst({
       where: { id: callId, workspaceId: session.workspaceId },
       select: {

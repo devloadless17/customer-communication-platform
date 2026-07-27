@@ -208,11 +208,25 @@ export async function runContactImport(opts: {
         await db.contactStage.findMany({ where: { workspaceId }, select: { id: true, name: true } })
       ).map((s) => [s.name.toLowerCase(), s.id]),
     );
+    // Cap mirrors the `newTagNames` guard below, for the same reason and
+    // because the failure is identical: a mismapped column (an Order ID, a
+    // Notes field) yields a UNIQUE value per row, so an unbounded Set grows to
+    // one entry per row — up to TRANSFER_MAX_IMPORT_ROWS (200k) strings of up
+    // to MAX_TEXT chars, then `[...unknownStages].sort()` materializes a
+    // second copy, then the worker persists the whole array into
+    // `ContactTransferJob.errorSample` and ships it to the browser on every
+    // status poll. The tag path already refused to do this; the stage path
+    // didn't. Past the cap we stop COLLECTING (the import continues — every
+    // unmatched value still falls back to the default stage), so the report
+    // stays representative without becoming a multi-megabyte JSON column.
+    const MAX_UNKNOWN_STAGES = 200;
+    let unknownStagesTruncated = false;
     const resolveStage = (name: string): string => {
       if (!name) return defaultStageId;
       const hit = stageIdByName.get(name.toLowerCase());
       if (hit) return hit;
-      unknownStages.add(name);
+      if (unknownStages.size < MAX_UNKNOWN_STAGES) unknownStages.add(name);
+      else unknownStagesTruncated = true;
       return defaultStageId;
     };
 
@@ -326,16 +340,45 @@ export async function runContactImport(opts: {
 
     await flush();
 
+    // The error report covers only the rows THIS attempt parsed. On a resumed
+    // run (`resumeFrom > 0`) the counters carry the earlier attempt's failures
+    // forward but `errorRows` starts empty and rows below the cursor are
+    // skipped without re-parsing — so the operator saw "failed: 1,247" beside
+    // a downloadable report containing twelve, with nothing saying why.
+    //
+    // The rows themselves are genuinely unrecoverable (re-parsing them would
+    // mean re-reading the whole file and re-applying nothing), so the honest
+    // move is to say so IN the report rather than let the download imply it is
+    // complete. A marker row costs nothing and turns a silently wrong artifact
+    // into an explained partial one.
+    const resumed = opts.resumeFrom > 0;
+    const reportRows =
+      resumed && errorRows.length > 0
+        ? [
+            {
+              rowNumber: 0,
+              reason: `This import resumed after an interruption at row ${opts.resumeFrom}. Failures from before that point are counted in the summary but are NOT listed below — re-run the import on the original file for a complete report.`,
+              raw: {} as Row,
+            },
+            ...errorRows,
+          ]
+        : errorRows;
+
     const errorArtifactKey =
-      errorRows.length > 0
-        ? await writeErrorReport({ workspaceId, jobId, format, headers, errorRows })
+      reportRows.length > 0
+        ? await writeErrorReport({ workspaceId, jobId, format, headers, errorRows: reportRows })
         : null;
 
     return {
       ...counters,
       totalRows: rowsSeen,
       unknownColumns,
-      unknownStages: [...unknownStages].sort(),
+      // Truncation is SURFACED, not silent: a mismapped Stage column is the
+      // thing the operator most needs told, and "here are 200 unknown stages"
+      // with no marker reads as the complete list.
+      unknownStages: unknownStagesTruncated
+        ? [...unknownStages].sort().concat("… (more values omitted — is the Stage column mapped correctly?)")
+        : [...unknownStages].sort(),
       extraSheets: hasExtraSheets(source) ? source.extraSheets() : [],
       // Above the cap we deliberately send none rather than a truncated,
       // misleading subset.
