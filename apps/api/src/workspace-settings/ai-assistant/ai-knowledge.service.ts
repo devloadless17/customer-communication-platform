@@ -140,10 +140,22 @@ export class AiKnowledgeService {
 
   private async process(id: string, workspaceId: string, bytes: Uint8Array, mimeType: string) {
     try {
-      const raw = await withTimeout(
-        extractText(bytes, mimeType),
-        EXTRACT_TIMEOUT_MS,
-        "extraction_timeout",
+      // SERIALIZED process-wide. `pdf-parse` / `mammoth` are CPU-bound and
+      // synchronous inside their promises, so `withTimeout` — a Promise.race —
+      // resolves the WRAPPER but cannot interrupt the work: the 20s ceiling is
+      // not the bound it looks like. This is the same process that hosts
+      // Socket.io, Meta webhook ingest and every BullMQ worker for every tenant
+      // on the box, and `process()` is detached (the caller already got its
+      // 200), so N concurrent uploads would otherwise stack N stalls.
+      //
+      // One at a time bounds that to a single document's parse. It does NOT
+      // eliminate the stall for one pathological 10MB file — the real fix is a
+      // worker thread, which is deliberately NOT built here: the trigger is a
+      // measured stall from a real upload, and the uploader is an authenticated
+      // workspace admin (10MB cap, 50 docs), not an anonymous caller. Recorded
+      // in tests/VERIFICATION.md so it isn't rediscovered as unknown.
+      const raw = await extractionGate(() =>
+        withTimeout(extractText(bytes, mimeType), EXTRACT_TIMEOUT_MS, "extraction_timeout"),
       );
       const text = raw.split("\u0000").join("").trim().slice(0, MAX_EXTRACT_CHARS);
       if (!text) {
@@ -151,19 +163,20 @@ export class AiKnowledgeService {
         return;
       }
       const chunks = chunkText(text);
+      // ONE createMany, not up to 2000 individual `create`s in the array form
+      // of $transaction — that shipped 2001 round-trips and held the write
+      // transaction open for all of them on a pool this whole process shares.
       await this.db.$transaction([
         this.db.aiContextChunk.deleteMany({ where: { documentId: id } }),
-        ...chunks.map((content, ordinal) =>
-          this.db.aiContextChunk.create({
-            data: {
-              workspaceId,
-              documentId: id,
-              ordinal,
-              content,
-              tokenCount: approxTokens(content),
-            },
-          }),
-        ),
+        this.db.aiContextChunk.createMany({
+          data: chunks.map((content, ordinal) => ({
+            workspaceId,
+            documentId: id,
+            ordinal,
+            content,
+            tokenCount: approxTokens(content),
+          })),
+        }),
         this.db.aiContextDocument.update({
           where: { id },
           data: {
@@ -299,6 +312,19 @@ function extractErrorCode(err: unknown): string {
     "no_text_extracted",
   ];
   return known.find((k) => msg.includes(k)) ?? "extraction_failed";
+}
+
+/**
+ * Process-wide serialization for document extraction. See `process()` — the
+ * parsers are synchronous CPU work that the timeout cannot preempt, so the
+ * only real lever is how many can be in flight at once. One.
+ */
+let extractionChain: Promise<unknown> = Promise.resolve();
+function extractionGate<T>(fn: () => Promise<T>): Promise<T> {
+  const next = extractionChain.then(fn, fn);
+  // Keep the chain alive regardless of outcome; the caller owns the rejection.
+  extractionChain = next.catch(() => undefined);
+  return next;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {

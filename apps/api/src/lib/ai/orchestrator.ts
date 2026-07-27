@@ -223,29 +223,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       //
       // NOT silent: an escalation is a real business event, so workflows and
       // outbound webhooks watching `conversation.assigned` see it.
-      let agentId: string | null = null;
-      try {
-        const settings = await loadAssignmentSettings(db, workspaceId);
-        const outcome = await assignByPolicy({
-          db,
-          publish,
-          workspaceId,
-          conversationId,
-          source: "ai_handoff",
-          policyId: settings.aiHandoffPolicyId,
-          onlyIfUnassigned: false,
-          changedByUserId: null,
-          context: { messageText: job.text },
-        });
-        agentId = outcome.applied ? outcome.userId : null;
-      } catch {
-        // The agent can still take over manually.
-      }
-      try {
-        await handoffToHuman(workspaceId, conversationId, agentId);
-      } catch {
-        // Pause bookkeeping only — the assignment (if any) already committed.
-      }
+      await routeEscalation(workspaceId, conversationId, job.text);
       await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
         ...auditBase,
         decision: "escalated",
@@ -274,15 +252,71 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       channelMode: config.replyChannelMode,
       audioR2Key,
     });
+    // An escalation the mode wouldn't let us SEND is still an escalation: the
+    // routing and the sticky pause are what get a human onto the thread, and
+    // neither is customer-visible. Only the hand-off LINE waits for approval.
+    if (mode === "escalate_draft") {
+      await routeEscalation(workspaceId, conversationId, job.text);
+    }
     await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
       ...auditBase,
-      decision: "suggested",
+      decision: mode === "escalate_draft" ? "escalated" : "suggested",
       suggestionId: suggestion.id,
     });
   }
 
   // Post-reply jobs — separate + idempotent, must never block the reply (#14).
   await enqueueAiPost(conversationId, inboundMessageId).catch(() => {});
+}
+
+/**
+ * Route an escalated thread to a human and pin the sticky assistant pause.
+ *
+ * Shared by both escalation paths (sent hand-off line, and the drafted one a
+ * `draft`/in-hours-`hybrid` workspace gets) so "escalate" means exactly one
+ * thing regardless of whether the acknowledgment could be auto-sent.
+ *
+ * Which human is entirely admin-controlled (settings → Assignment): strategy,
+ * weights, capacity, eligibility and routing rules all apply, and escalations
+ * can be pinned to a dedicated policy via `AssignmentSettings.aiHandoffPolicyId`
+ * ("escalations go to the senior pool"). A policy with strategy `manual` is the
+ * supported way to say "escalate, but leave it in the triage queue".
+ *
+ * `onlyIfUnassigned: false` because an escalation is a deliberate re-route: a
+ * thread still carrying a stale owner from an earlier session must land on
+ * someone available now. NOT silent — an escalation is a real business event,
+ * so workflows and outbound webhooks watching `conversation.assigned` see it.
+ *
+ * Best-effort throughout: a failure here must not lose the reply or the audit.
+ */
+async function routeEscalation(
+  workspaceId: string,
+  conversationId: string,
+  messageText: string,
+): Promise<void> {
+  let agentId: string | null = null;
+  try {
+    const settings = await loadAssignmentSettings(db, workspaceId);
+    const outcome = await assignByPolicy({
+      db,
+      publish,
+      workspaceId,
+      conversationId,
+      source: "ai_handoff",
+      policyId: settings.aiHandoffPolicyId,
+      onlyIfUnassigned: false,
+      changedByUserId: null,
+      context: { messageText },
+    });
+    agentId = outcome.applied ? outcome.userId : null;
+  } catch {
+    // The agent can still take over manually.
+  }
+  try {
+    await handoffToHuman(workspaceId, conversationId, agentId);
+  } catch {
+    // Pause bookkeeping only — the assignment (if any) already committed.
+  }
 }
 
 interface AuditExtra {

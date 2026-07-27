@@ -151,6 +151,11 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
     const caption = (e.media?.caption ?? "").trim();
     if (caption) {
       const config = await loadAiConfig(e.workspaceId);
+      // Gate on configEnabled like every other entry point. The audio branch
+      // above re-checks it inside `ensureTranscription`; this one didn't, so an
+      // AI-disabled workspace paid a queue round-trip per captioned media just
+      // for `runAiReply` to bail. Not an unauthorized model call — a wasted one.
+      if (!config?.enabled) return;
       await enqueueAiReply({
         workspaceId: e.workspaceId,
         conversationId: e.conversationId,

@@ -76,7 +76,8 @@ export class StagesService {
     });
     if (existing.length >= MAX_STAGES_PER_TEAM) {
       throw new BadRequestException({
-        error: `at most ${MAX_STAGES_PER_TEAM} stages per team`,
+        error: "stage_limit_reached",
+        detail: `This workspace has reached its limit of ${MAX_STAGES_PER_TEAM} stages.`,
       });
     }
     const nextPosition = (existing[0]?.position ?? -1) + 1;
@@ -300,6 +301,25 @@ function throwIfUniqueViolation(err: unknown, detail: string): void {
     "code" in err &&
     (err as { code?: string }).code === "P2002"
   ) {
-    throw new ConflictException({ error: detail });
+    // WHICH unique fired matters. `isDefault` is decided non-transactionally
+    // in create() (`existing.length === 0`), so two concurrent creates on a
+    // fresh workspace both compute isDefault=true and the loser trips the
+    // PARTIAL unique ContactStage_workspaceId_isDefault_key — reporting that
+    // as "a stage with this name already exists" told the operator two
+    // differently-named stages had collided on name, which is nonsense. The
+    // index is what keeps the data correct; this just names the real cause.
+    const target = (err as { meta?: { target?: unknown } }).meta?.target;
+    const onDefault =
+      typeof target === "string"
+        ? target.includes("isDefault")
+        : Array.isArray(target) && target.some((t) => String(t).includes("isDefault"));
+    if (onDefault) {
+      throw new ConflictException({
+        error: "default_stage_race",
+        detail:
+          "Another default stage was created at the same moment. Try again — this one just needs a different position in the list.",
+      });
+    }
+    throw new ConflictException({ error: "stage_name_taken", detail });
   }
 }

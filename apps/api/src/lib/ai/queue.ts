@@ -68,7 +68,28 @@ export async function enqueueAiReply(data: {
     // claim (claimInbound, per inboundMessageId) still guards against any
     // double-reply if a remove races a job that just started.
     const jobId = `ai-reply-conv-${data.conversationId}`;
-    await q.remove(jobId).catch(() => {});
+    const existing = await q.getJob(jobId).catch(() => null);
+    if (existing) {
+      const state = await existing.getState().catch(() => "unknown");
+      if (state === "delayed" || state === "waiting") {
+        await existing.remove().catch(() => {});
+      } else {
+        // The debounce slot is occupied by a job we CANNOT replace: an active
+        // job is locked (remove is a no-op), and a completed/failed one still
+        // holds the id, so `add` with the same jobId is silently ignored by
+        // BullMQ and returns the OLD job. That silently DROPPED this message —
+        // the assistant simply never answered it, and never would unless a
+        // third message arrived after the job finished. Fall back to the
+        // per-message id so the message is answered instead of lost. Not a
+        // double-reply risk: `claimInbound` is keyed per inboundMessageId, and
+        // these are two different inbound messages.
+        await q.add("reply", jobData, {
+          jobId: `ai-reply-${data.inboundMessageId}`,
+          delay: wait * 1000,
+        });
+        return;
+      }
+    }
     await q.add("reply", jobData, { jobId, delay: wait * 1000 });
     return;
   }
