@@ -65,7 +65,7 @@ table/queue/cache/socket-room that references the dying entity.
 | webhooks ingest | 1 | R (controller + core, adversarial) + E (meta 165) | ✅ 2026-07-27 |
 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ 2026-07-27 |
 | event bus / outbox | 1 | R (adversarial) + E + N (dedupe spec) | ✅ 2026-07-27 |
-| workflows (~22 step types) | 1 | | ☐ |
+| workflows (~22 step types) | 1 | R (adversarial) + E (144 e2e) | ✅ 2026-07-27 |
 | assignment (policies/rules/capacity) | 1 | | ☐ |
 | broadcasts (+audience/templates/analytics) | 1 | | ☐ |
 | tickets (+SLA+numbering) | 1 | | ☐ |
@@ -230,6 +230,39 @@ and can drift on a crash-window replay (documented, sweeper-excluded).
 Webhook payloads are rebuilt from CURRENT state on replay, so a duplicate
 delivery can disagree with the original — bounded by the dedupe key now
 preventing the duplicate in the first place.
+
+### workflows engine (B-M3 session 4, 2026-07-27)
+
+Independent verification of the redelivery dedupe I added in session 3 —
+ALS token confirmed present at every run-create site (including inside
+`runWithConcurrency` lanes and `$transaction` callbacks), all four
+run-creating paths accounted for, P2002 unambiguous, crash-window covered by
+the `queued` sweeper backstop. It found the key too NARROW twice (fixed):
+per-trigger fan-out, then per-field/per-tag fan-out.
+
+FIXED: contact locked out permanently by a throwing ledger-rollback scan;
+runaway jump loops reporting `completed`; assign_ticket overriding a human
+(status-only CAS); two replies claiming one ask_question; `listRuns`
+ternary-built where without workspaceId; 8 stale comments incl. two README
+blocks describing prevented behavior.
+
+Verdicts CLEAN: loop/recursion guards TERMINATE (MAX_STEPS_PER_RUN =
+MAX_WORKFLOW_NODES = 200; jumpsUsed persisted+monotonic; TRIGGER_DEPTH_MAX
+survives non-manual hops; X-CCP-Depth fails closed; no `message_sent`
+trigger exists so send_message cannot self-retrigger); step side-effect
+safety under retry (lockDuration 90s > step timeout 60s, boot-asserted; the
+in_progress journal turns a half-completed send into `skipped_after_crash`,
+NOT a re-send); §18 assignment for conversations; wait/ask_question resume
+(terminal guard, not-due guard, per-run lock, graphSnapshot pinning,
+graceful contact/conversation deletion); conditions validated on both save
+and publish; step-target tenancy fully scoped.
+
+ACCEPTED: send_message/send_template/ask_question bypass the
+OutboundSendAttempt ledger (journal-protected only — a crash in the narrow
+pre-journal window can re-send); branch presets read LIVE contact state
+while generic conditions read the frozen trigger snapshot (documented split,
+not unified); manual trigger returns 500 if the Redis enqueue fails though
+the sweeper will still run it.
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
