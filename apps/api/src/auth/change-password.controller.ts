@@ -122,12 +122,12 @@ export class ChangePasswordController {
       select: { id: true, password: true },
     });
     if (!account?.password) {
-      throw new BadRequestException({ error: "no password set" });
+      throw new BadRequestException({ error: "no_password_set" });
     }
 
     const ok = await verifyPassword(currentPassword, account.password);
     if (!ok) {
-      throw new BadRequestException({ error: "current password is incorrect" });
+      throw new BadRequestException({ error: "current_password_is_incorrect" });
     }
     // Verified — drop the attempt bucket so a legitimate user who fumbled
     // once isn't penalized on their next intentional change.

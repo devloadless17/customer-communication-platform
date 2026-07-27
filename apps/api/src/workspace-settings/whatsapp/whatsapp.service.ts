@@ -292,7 +292,7 @@ export class WhatsappService {
       if (!res.ok) {
         const body = await res.text();
         throw new BadRequestException({
-          error: "meta rejected credentials",
+          error: "meta_rejected_credentials",
           status: res.status,
           detail: body.slice(0, 500),
         });
@@ -303,7 +303,7 @@ export class WhatsappService {
       if (err instanceof HttpException) throw err;
       this.logger.error("meta validation failed", err);
       throw new BadGatewayException({
-        error: "could not reach meta to validate",
+        error: "could_not_reach_meta_to_validate",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -652,7 +652,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.compareTemplates) {
-      throw new HttpException({ error: "provider does not support comparison" }, 501);
+      throw new HttpException({ error: "provider_does_not_support_comparison" }, 501);
     }
 
     const end = new Date();
@@ -673,7 +673,7 @@ export class WhatsappService {
       this.throwIfMetaSendError(err);
       this.logger.error("template comparison failed", err);
       throw new BadGatewayException({
-        error: "comparison failed",
+        error: "comparison_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -732,7 +732,7 @@ export class WhatsappService {
     }
     if (!numbers.some((n) => n.id === phoneNumberId)) {
       throw new BadRequestException({
-        error: "waba id does not own this phone number",
+        error: "waba_id_does_not_own_this_phone_number",
         detail:
           "This WhatsApp Business Account ID doesn't contain the phone number you connected — you've likely pasted the WABA ID of a different (e.g. test) account. In WhatsApp Manager → Account tools → Phone numbers, copy the WABA ID that owns this number.",
       });
@@ -850,7 +850,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId);
     if (!config.wabaId) {
       throw new ConflictException({
-        error: "waba id missing",
+        error: "waba_id_missing",
         detail:
           "Add your WhatsApp Business Account ID in Settings \u2192 WhatsApp to load templates.",
       });
@@ -871,7 +871,7 @@ export class WhatsappService {
       // Say so, rather than returning a cheerful "0 synced".
       if (outcome.syncedCount === 0) {
         throw new BadGatewayException({
-          error: "sync failed",
+          error: "sync_failed",
           detail: outcome.failed[0]!.error.slice(0, 500),
         });
       }
@@ -923,33 +923,33 @@ export class WhatsappService {
 
     if (!/^[a-z0-9_]{1,512}$/.test(name)) {
       throw new BadRequestException({
-        error: "invalid name",
+        error: "invalid_name",
         detail:
           "Template name must be lowercase letters, digits and underscores only.",
       });
     }
     if (!language || !/^[a-z]{2,3}(?:_[A-Z]{2})?$/.test(language)) {
       throw new BadRequestException({
-        error: "invalid language",
+        error: "invalid_language",
         detail: "Use a Meta language code like en_US, fr, pt_BR.",
       });
     }
     if (!category) {
       throw new BadRequestException({
-        error: "invalid category",
+        error: "invalid_category",
         detail: "Pick marketing, utility or authentication.",
       });
     }
     if (components.length === 0) {
       throw new BadRequestException({
-        error: "components required",
+        error: "components_required",
         detail: "At least a BODY component is required.",
       });
     }
     const body = components.find((c) => c.type === "BODY");
     if (!body || !body.text || body.text.trim().length === 0) {
       throw new BadRequestException({
-        error: "body required",
+        error: "body_required",
         detail: "Add a body — it's the only required component.",
       });
     }
@@ -981,7 +981,7 @@ export class WhatsappService {
     const provider = getMetaProvider();
     if (!provider.createTemplate) {
       throw new HttpException(
-        { error: "provider cannot create templates" },
+        { error: "provider_cannot_create_templates" },
         501,
       );
     }
@@ -1016,7 +1016,7 @@ export class WhatsappService {
       this.throwIfMetaSendError(err, 1000);
       this.logger.error("template create failed", err);
       throw new BadGatewayException({
-        error: "create failed",
+        error: "create_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1098,7 +1098,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.previewAuthTemplates) {
-      throw new HttpException({ error: "provider has no auth previews" }, 501);
+      throw new HttpException({ error: "provider_has_no_auth_previews" }, 501);
     }
     try {
       return {
@@ -1117,7 +1117,7 @@ export class WhatsappService {
       this.throwIfMissingWaba(err);
       this.throwIfMetaSendError(err);
       throw new BadGatewayException({
-        error: "preview failed",
+        error: "preview_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1137,7 +1137,7 @@ export class WhatsappService {
     const name = typeof obj.name === "string" ? obj.name.trim() : "";
     if (!TEMPLATE_NAME_PATTERN.test(name)) {
       throw new BadRequestException({
-        error: "invalid name",
+        error: "invalid_name",
         detail: "Template name must be lowercase letters, digits and underscores only.",
       });
     }
@@ -1153,7 +1153,7 @@ export class WhatsappService {
     const bad = languages.filter((l) => !/^[a-z]{2,3}(?:_[A-Z]{2})?$/.test(l));
     if (bad.length > 0) {
       throw new BadRequestException({
-        error: "invalid language",
+        error: "invalid_language",
         detail: `Not a Meta language code: ${bad.join(", ")}.`,
       });
     }
@@ -1235,7 +1235,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.upsertAuthTemplate) {
-      throw new HttpException({ error: "provider cannot upsert auth templates" }, 501);
+      throw new HttpException({ error: "provider_cannot_upsert_auth_templates" }, 501);
     }
 
     let result;
@@ -1257,7 +1257,7 @@ export class WhatsappService {
       this.throwIfMetaSendError(err, 1000);
       this.logger.error("auth template upsert failed", err);
       throw new BadGatewayException({
-        error: "create failed",
+        error: "create_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1299,7 +1299,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.fetchTemplateLibrary) {
-      throw new HttpException({ error: "provider has no template library" }, 501);
+      throw new HttpException({ error: "provider_has_no_template_library" }, 501);
     }
     try {
       return { templates: await provider.fetchTemplateLibrary(filters, config) };
@@ -1307,7 +1307,7 @@ export class WhatsappService {
       this.throwIfMetaSendError(err);
       this.logger.error("template library browse failed", err);
       throw new BadGatewayException({
-        error: "library browse failed",
+        error: "library_browse_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1340,7 +1340,7 @@ export class WhatsappService {
 
     if (!TEMPLATE_NAME_PATTERN.test(name)) {
       throw new BadRequestException({
-        error: "invalid name",
+        error: "invalid_name",
         detail: "Template name must be lowercase letters, digits and underscores only.",
       });
     }
@@ -1352,7 +1352,7 @@ export class WhatsappService {
     }
     if (!language || !/^[a-z]{2,3}(?:_[A-Z]{2})?$/.test(language)) {
       throw new BadRequestException({
-        error: "invalid language",
+        error: "invalid_language",
         detail: "Use a Meta language code like en_US, fr, pt_BR.",
       });
     }
@@ -1360,7 +1360,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.createFromLibrary || !provider.fetchTemplateLibrary) {
-      throw new HttpException({ error: "provider has no template library" }, 501);
+      throw new HttpException({ error: "provider_has_no_template_library" }, 501);
     }
 
     // Re-read the blueprint rather than trusting the client's copy of it: the
@@ -1399,7 +1399,7 @@ export class WhatsappService {
       this.throwIfMetaSendError(err, 1000);
       this.logger.error("library template create failed", err);
       throw new BadGatewayException({
-        error: "create failed",
+        error: "create_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1472,7 +1472,7 @@ export class WhatsappService {
     const template = await this.db.messageTemplate.findFirst({
       where: { id, workspaceId },
     });
-    if (!template) throw new NotFoundException({ error: "template not found" });
+    if (!template) throw new NotFoundException({ error: "template_not_found" });
     if (!template.externalId) {
       throw new BadRequestException({
         error: "template_not_synced",
@@ -1502,7 +1502,7 @@ export class WhatsappService {
     const category = obj.category === undefined ? undefined : parseCategory(obj.category);
     if (obj.category !== undefined && !category) {
       throw new BadRequestException({
-        error: "invalid category",
+        error: "invalid_category",
         detail: "Pick marketing, utility or authentication.",
       });
     }
@@ -1524,7 +1524,7 @@ export class WhatsappService {
     if (components) {
       if (components.length === 0) {
         throw new BadRequestException({
-          error: "components required",
+          error: "components_required",
           detail: "At least a BODY component is required.",
         });
       }
@@ -1568,7 +1568,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.editTemplate) {
-      throw new HttpException({ error: "provider cannot edit templates" }, 501);
+      throw new HttpException({ error: "provider_cannot_edit_templates" }, 501);
     }
 
     try {
@@ -1586,7 +1586,7 @@ export class WhatsappService {
       this.throwIfMetaSendError(err, 1000);
       this.logger.error("template edit failed", err);
       throw new BadGatewayException({
-        error: "edit failed",
+        error: "edit_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1632,7 +1632,7 @@ export class WhatsappService {
     const template = await this.db.messageTemplate.findFirst({
       where: { id, workspaceId },
     });
-    if (!template) throw new NotFoundException({ error: "template not found" });
+    if (!template) throw new NotFoundException({ error: "template_not_found" });
     // Meta refuses to delete a template in a disabled state. Say which state,
     // rather than surfacing its generic rejection as a 502.
     if (template.status === "disabled") {
@@ -1648,7 +1648,7 @@ export class WhatsappService {
     const provider = getMetaProvider();
     if (!provider.deleteTemplate) {
       throw new HttpException(
-        { error: "provider does not support template delete" },
+        { error: "provider_does_not_support_template_delete" },
         501,
       );
     }
@@ -1666,7 +1666,7 @@ export class WhatsappService {
       this.throwIfMetaSendError(err);
       this.logger.error("template delete on Meta failed", err);
       throw new BadGatewayException({
-        error: "delete failed",
+        error: "delete_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1698,7 +1698,7 @@ export class WhatsappService {
       where: { id, workspaceId },
       select: { id: true, externalId: true, status: true, name: true },
     });
-    if (!template) throw new NotFoundException({ error: "template not found" });
+    if (!template) throw new NotFoundException({ error: "template_not_found" });
     if (template.status !== "paused") {
       throw new ConflictException({
         error: "template_not_paused",
@@ -1716,7 +1716,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.unpauseTemplate) {
-      throw new HttpException({ error: "provider does not support unpause" }, 501);
+      throw new HttpException({ error: "provider_does_not_support_unpause" }, 501);
     }
 
     try {
@@ -1726,7 +1726,7 @@ export class WhatsappService {
       this.throwIfMetaSendError(err);
       this.logger.error("template unpause on Meta failed", err);
       throw new BadGatewayException({
-        error: "unpause failed",
+        error: "unpause_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1768,7 +1768,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId, accountId);
     const provider = getMetaProvider();
     if (!provider.getBusinessProfile) {
-      throw new HttpException({ error: "provider does not support profiles" }, 501);
+      throw new HttpException({ error: "provider_does_not_support_profiles" }, 501);
     }
     try {
       return { profile: await provider.getBusinessProfile(config) };
@@ -1776,7 +1776,7 @@ export class WhatsappService {
       this.throwIfMetaSendError(err);
       this.logger.error("business profile read failed", err);
       throw new BadGatewayException({
-        error: "profile read failed",
+        error: "profile_read_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1793,7 +1793,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId, accountId);
     const provider = getMetaProvider();
     if (!provider.getAccountStatus) {
-      throw new HttpException({ error: "provider does not support account status" }, 501);
+      throw new HttpException({ error: "provider_does_not_support_account_status" }, 501);
     }
     try {
       return await provider.getAccountStatus(config);
@@ -1801,7 +1801,7 @@ export class WhatsappService {
       this.throwIfMetaSendError(err);
       this.logger.error("account status read failed", err);
       throw new BadGatewayException({
-        error: "account status failed",
+        error: "account_status_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1815,7 +1815,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId, accountId);
     const provider = getMetaProvider();
     if (!provider.updateBusinessProfile) {
-      throw new HttpException({ error: "provider does not support profiles" }, 501);
+      throw new HttpException({ error: "provider_does_not_support_profiles" }, 501);
     }
     try {
       await provider.updateBusinessProfile(input, config);
@@ -1823,7 +1823,7 @@ export class WhatsappService {
       this.throwIfMetaSendError(err);
       this.logger.error("business profile update failed", err);
       throw new BadGatewayException({
-        error: "profile update failed",
+        error: "profile_update_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1849,14 +1849,14 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId, accountId);
     const provider = getMetaProvider();
     if (!provider.listQrCodes) {
-      throw new HttpException({ error: "provider does not support qr codes" }, 501);
+      throw new HttpException({ error: "provider_does_not_support_qr_codes" }, 501);
     }
     try {
       return { codes: await provider.listQrCodes(config) };
     } catch (err) {
       this.throwIfMetaSendError(err);
       throw new BadGatewayException({
-        error: "qr list failed",
+        error: "qr_list_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1870,7 +1870,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId, accountId);
     const provider = getMetaProvider();
     if (!provider.createQrCode) {
-      throw new HttpException({ error: "provider does not support qr codes" }, 501);
+      throw new HttpException({ error: "provider_does_not_support_qr_codes" }, 501);
     }
     try {
       return {
@@ -1882,7 +1882,7 @@ export class WhatsappService {
     } catch (err) {
       this.throwIfMetaSendError(err);
       throw new BadGatewayException({
-        error: "qr create failed",
+        error: "qr_create_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1897,7 +1897,7 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId, accountId);
     const provider = getMetaProvider();
     if (!provider.updateQrCode) {
-      throw new HttpException({ error: "provider does not support qr codes" }, 501);
+      throw new HttpException({ error: "provider_does_not_support_qr_codes" }, 501);
     }
     try {
       return {
@@ -1909,7 +1909,7 @@ export class WhatsappService {
     } catch (err) {
       this.throwIfMetaSendError(err);
       throw new BadGatewayException({
-        error: "qr update failed",
+        error: "qr_update_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1919,14 +1919,14 @@ export class WhatsappService {
     const config = await this.requireSendConfig(workspaceId, accountId);
     const provider = getMetaProvider();
     if (!provider.deleteQrCode) {
-      throw new HttpException({ error: "provider does not support qr codes" }, 501);
+      throw new HttpException({ error: "provider_does_not_support_qr_codes" }, 501);
     }
     try {
       await provider.deleteQrCode(code, config);
     } catch (err) {
       this.throwIfMetaSendError(err);
       throw new BadGatewayException({
-        error: "qr delete failed",
+        error: "qr_delete_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1945,7 +1945,7 @@ export class WhatsappService {
       },
     });
     if (updated.count === 0) {
-      throw new NotFoundException({ error: "template not found" });
+      throw new NotFoundException({ error: "template_not_found" });
     }
     await this.bus.publish({
       type: "team.catalog_changed",
@@ -1971,14 +1971,14 @@ export class WhatsappService {
   ): Promise<{ headerHandle: string }> {
     if (file.size > UPLOAD_MAX_BYTES) {
       throw new PayloadTooLargeException({
-        error: "file too large",
+        error: "file_too_large",
         detail: `Header media must be under ${Math.floor(UPLOAD_MAX_BYTES / 1024 / 1024)} MB.`,
       });
     }
     const mimeType = file.mimetype || "application/octet-stream";
     if (!UPLOAD_ALLOWED_MIME.has(mimeType)) {
       throw new UnsupportedMediaTypeException({
-        error: "unsupported media type",
+        error: "unsupported_media_type",
         detail: `Got ${mimeType}. Supported: ${Array.from(UPLOAD_ALLOWED_MIME).join(", ")}.`,
       });
     }
@@ -1988,7 +1988,7 @@ export class WhatsappService {
     const provider = getMetaProvider();
     if (!provider.uploadHeaderMedia) {
       throw new HttpException(
-        { error: "provider does not support template media uploads" },
+        { error: "provider_does_not_support_template_media_uploads" },
         501,
       );
     }
@@ -2003,7 +2003,7 @@ export class WhatsappService {
     } catch (err) {
       if (err instanceof MissingAppIdError) {
         throw new ConflictException({
-          error: "app id missing",
+          error: "app_id_missing",
           detail:
             "Add your Meta App ID in Settings → WhatsApp before uploading template media.",
         });
@@ -2011,7 +2011,7 @@ export class WhatsappService {
       this.throwIfMetaSendError(err);
       this.logger.error("template media upload failed", err);
       throw new BadGatewayException({
-        error: "upload failed",
+        error: "upload_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -2032,7 +2032,7 @@ export class WhatsappService {
     } catch (err) {
       if (err instanceof ProviderNotConfiguredError) {
         throw new ConflictException({
-          error: "whatsapp not connected",
+          error: "whatsapp_not_connected",
           detail: err.message,
         });
       }
@@ -2043,7 +2043,7 @@ export class WhatsappService {
   private throwIfMissingWaba(err: unknown): void {
     if (err instanceof MissingWabaIdError) {
       throw new ConflictException({
-        error: "waba id missing",
+        error: "waba_id_missing",
         detail:
           "Add your WhatsApp Business Account ID in Settings → WhatsApp to load templates.",
       });
@@ -2053,7 +2053,7 @@ export class WhatsappService {
   private throwIfMetaSendError(err: unknown, detailLimit = 500): void {
     if (err instanceof MetaSendError) {
       throw new UnprocessableEntityException({
-        error: "meta rejected request",
+        error: "meta_rejected_request",
         status: err.httpStatus,
         detail: err.body.slice(0, detailLimit),
       });

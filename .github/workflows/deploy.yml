@@ -105,6 +105,11 @@ jobs:
       # five days after the org→workspace rename).
       - run: node scripts/check-route-params.mjs
 
+      # API error keys stay snake_case machine identifiers — `error` is a wire
+      # contract clients branch on, `detail` is where the human sentence goes.
+      # Before 2026-07-27 both spellings coexisted for the same condition.
+      - run: node scripts/check-error-keys.mjs
+
   # The Vitest suite (apps/api/test — 36 files, ~500 tests) against a REAL
   # throwaway Postgres + Redis. `migrate deploy` on the empty DB also proves
   # the migration chain (including the hand-maintained partial-index section,

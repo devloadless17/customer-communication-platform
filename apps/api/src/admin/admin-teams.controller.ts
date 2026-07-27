@@ -77,7 +77,7 @@ export class AdminTeamsController {
   @Get(":id")
   async get(@Param("id") workspaceId: string) {
     const detail = await getTeamDetailForSuperAdmin(workspaceId);
-    if (!detail) throw new NotFoundException({ error: "team not found" });
+    if (!detail) throw new NotFoundException({ error: "team_not_found" });
     return detail;
   }
 
@@ -107,7 +107,7 @@ export class AdminTeamsController {
       data: { maxMembers: body.maxMembers },
     });
     if (updated.count === 0) {
-      throw new NotFoundException({ error: "team not found" });
+      throw new NotFoundException({ error: "team_not_found" });
     }
     const activeMembers = await this.db.user.count({
       where: { workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null, isSuperAdmin: false },
@@ -138,7 +138,7 @@ export class AdminTeamsController {
       data: { maxWorkspaces: body.maxWorkspaces },
     });
     if (updated.count === 0) {
-      throw new NotFoundException({ error: "team not found" });
+      throw new NotFoundException({ error: "team_not_found" });
     }
     const workspace = await this.db.workspace.findUnique({
       where: { id: workspaceId },

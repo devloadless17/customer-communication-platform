@@ -775,9 +775,11 @@ function ReplyBoxImpl({
         detail?: string;
       };
       if (!res.ok) {
-        // 409 with "waba id missing" → flag the picker so it renders the
-        // setup nudge instead of a generic error.
-        if (res.status === 409 && data.error === "waba id missing") {
+        // 409 with `waba_id_missing` → flag the picker so it renders the
+        // setup nudge instead of a generic error. This key is a WIRE CONTRACT:
+        // renaming it server-side without this line silently degrades the
+        // nudge into a generic toast, which is why the two move together.
+        if (res.status === 409 && data.error === "waba_id_missing") {
           setWabaMissing(true);
           return;
         }

@@ -418,7 +418,7 @@ export class ChannelsController {
     @Query(zQuery(ChannelListQuerySchema)) query: ChannelListQuery,
   ) {
     if (!query.messageId) {
-      throw new BadRequestException({ error: "messageId required" });
+      throw new BadRequestException({ error: "message_id_required" });
     }
     return this.channels.getMessagesAround(
       session.workspaceId,
@@ -506,7 +506,7 @@ export class ChannelsController {
     @UploadedFile() file: Express.Multer.File | undefined,
     @Body() form: Record<string, string>,
   ) {
-    if (!file) throw new BadRequestException({ error: "file required" });
+    if (!file) throw new BadRequestException({ error: "file_required" });
     const body = (form.body ?? "").trim().slice(0, 4000);
     const clientTempId =
       typeof form.clientTempId === "string" && form.clientTempId

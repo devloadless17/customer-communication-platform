@@ -426,7 +426,7 @@ function buildRow(
     }
   }
 
-  if (!phoneRaw.trim()) return { error: "missing phone number" };
+  if (!phoneRaw.trim()) return { error: "missing_phone_number" };
   const phone = normalizePhoneE164(phoneRaw);
   if (!phone) {
     return {

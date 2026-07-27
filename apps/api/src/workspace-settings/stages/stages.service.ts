@@ -114,14 +114,14 @@ export class StagesService {
       where: { id, workspaceId },
       select: { id: true, isDefault: true },
     });
-    if (!existing) throw new NotFoundException({ error: "not found" });
+    if (!existing) throw new NotFoundException({ error: "not_found" });
 
     // Demoting the current default is not allowed — admins promote a
     // different stage instead. Otherwise the team would have no default
     // and contact creation would have nowhere to park new rows.
     if (input.isDefault === false && existing.isDefault) {
       throw new BadRequestException({
-        error: "can't unset isDefault directly — promote another stage to default instead",
+        error: "cannot_unset_default_stage", detail: "Promote another stage to default instead of unsetting this one.",
       });
     }
 
@@ -157,7 +157,7 @@ export class StagesService {
       where: { id, workspaceId },
       select: { id: true, isDefault: true },
     });
-    if (!stage) throw new NotFoundException({ error: "not found" });
+    if (!stage) throw new NotFoundException({ error: "not_found" });
 
     // Refuse delete-while-in-use; carry the count back so the UI can
     // render "12 contacts still here — move them first". (Fast pre-check for a
@@ -169,7 +169,7 @@ export class StagesService {
     });
     if (contactCount > 0) {
       throw new ConflictException({
-        error: "stage in use",
+        error: "stage_in_use",
         detail: `${contactCount} contact${contactCount === 1 ? " is" : "s are"} still in this stage. Move them to another stage first.`,
         contactCount,
       });
@@ -189,7 +189,7 @@ export class StagesService {
         });
         if (liveInStage > 0) {
           throw new ConflictException({
-            error: "stage in use",
+            error: "stage_in_use",
             detail: `${liveInStage} contact${liveInStage === 1 ? " is" : "s are"} still in this stage. Move them to another stage first.`,
             contactCount: liveInStage,
           });
@@ -203,7 +203,7 @@ export class StagesService {
           });
           if (otherCount > 0) {
             throw new ConflictException({
-              error: "default stage",
+              error: "default_stage",
               detail:
                 "This is the default stage. Promote another stage to default before deleting.",
             });
@@ -241,7 +241,7 @@ export class StagesService {
       select: { id: true },
     });
     if (owned.length !== ids.length) {
-      throw new BadRequestException({ error: "one or more ids are not in this team" });
+      throw new BadRequestException({ error: "one_or_more_ids_are_not_in_this_team" });
     }
 
     await this.db.$transaction(

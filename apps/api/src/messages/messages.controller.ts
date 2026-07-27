@@ -162,7 +162,7 @@ export class MessagesController {
   ) {
     if (!file) {
       throw new BadRequestException({
-        error: "conversationId and file are required",
+        error: "conversation_id_and_file_required", detail: "Send both a conversationId and a file.",
       });
     }
     try {
@@ -237,7 +237,7 @@ export class MessagesController {
     @UploadedFile() file: Express.Multer.File | undefined,
   ) {
     if (!file) {
-      throw new BadRequestException({ error: "file is required" });
+      throw new BadRequestException({ error: "file_is_required" });
     }
     try {
       const out = await this.messages.uploadTemplateHeaderMedia(session.workspaceId, file);

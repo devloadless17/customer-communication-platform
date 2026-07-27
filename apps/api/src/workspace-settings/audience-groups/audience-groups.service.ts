@@ -26,7 +26,7 @@ export class AudienceGroupsService {
 
   async get(workspaceId: string, id: string) {
     const group = await getAudienceGroup(workspaceId, id);
-    if (!group) throw new NotFoundException({ error: "not found" });
+    if (!group) throw new NotFoundException({ error: "not_found" });
     return group;
   }
 
@@ -68,7 +68,7 @@ export class AudienceGroupsService {
 
   async update(workspaceId: string, id: string, input: UpdateAudienceGroupInput) {
     const existing = await this.db.audienceGroup.findFirst({ where: { id, workspaceId } });
-    if (!existing) throw new NotFoundException({ error: "not found" });
+    if (!existing) throw new NotFoundException({ error: "not_found" });
 
     // Build the update payload incrementally so unset fields stay untouched.
     // tagIds / contactIds use full-replace ("set") semantics when sent.
@@ -107,7 +107,7 @@ export class AudienceGroupsService {
 
   async remove(workspaceId: string, id: string): Promise<void> {
     const existing = await this.db.audienceGroup.findFirst({ where: { id, workspaceId } });
-    if (!existing) throw new NotFoundException({ error: "not found" });
+    if (!existing) throw new NotFoundException({ error: "not_found" });
     // Broadcasts that referenced this group keep their `audienceGroupName`
     // snapshot for the audit trail — only the join row goes.
     await this.db.audienceGroup.delete({ where: { id } });
@@ -146,6 +146,6 @@ function throwIfUniqueViolation(err: unknown, detail: string): void {
     "code" in err &&
     (err as { code?: string }).code === "P2002"
   ) {
-    throw new ConflictException({ error: "name taken", detail });
+    throw new ConflictException({ error: "name_taken", detail });
   }
 }

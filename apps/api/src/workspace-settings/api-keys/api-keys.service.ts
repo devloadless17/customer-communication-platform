@@ -103,7 +103,7 @@ export class ApiKeysService {
       where: { id, workspaceId },
       select: { id: true, revokedAt: true },
     });
-    if (!key) throw new NotFoundException({ error: "key not found" });
+    if (!key) throw new NotFoundException({ error: "key_not_found" });
     if (key.revokedAt) return; // Idempotent — revoking twice is fine.
     await this.db.workspaceApiKey.update({
       where: { id },
@@ -130,7 +130,7 @@ export class ApiKeysService {
       where: { id, workspaceId },
       select: { id: true, name: true, scopes: true, revokedAt: true },
     });
-    if (!existing) throw new NotFoundException({ error: "key not found" });
+    if (!existing) throw new NotFoundException({ error: "key_not_found" });
     // Rotating an ALREADY-REVOKED key re-granted exactly what was revoked: a
     // leaked key that an admin killed could be brought back (new secret, same
     // scopes, active again) by anyone who could reach this route. Rotation

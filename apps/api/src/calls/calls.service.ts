@@ -171,9 +171,9 @@ export class CallsService {
         },
       },
     });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
     const contact = conversation.contact;
-    if (!contact) throw new BadRequestException({ error: "conversation has no contact" });
+    if (!contact) throw new BadRequestException({ error: "conversation_has_no_contact" });
 
     // Channel-aware calling. WhatsApp uses method-per-action + a phone number +
     // our own permission-request ledger; Messenger uses the unified `callAction`
@@ -557,7 +557,7 @@ export class CallsService {
     const fn = binding.provider.getPhoneNumberSettings;
     if (!fn) {
       throw new BadRequestException({
-        error: "provider does not support getPhoneNumberSettings",
+        error: "calling_not_supported", detail: "This channel's provider can't report phone-number calling settings.",
       });
     }
     const config = await binding.getSendConfig(session.workspaceId);
@@ -587,7 +587,7 @@ export class CallsService {
     // API Calling; Messenger: route inbound calls to us + show the call icon).
     if (!getProviderBinding(channel).provider.capabilities.calling) {
       throw new BadRequestException({
-        error: "channel does not support calling",
+        error: "channel_does_not_support_calling",
         detail: `${channel} has no calling capability.`,
       });
     }
@@ -595,7 +595,7 @@ export class CallsService {
     const fn = binding.provider.enableCalling;
     if (!fn) {
       throw new BadRequestException({
-        error: "provider does not support enableCalling",
+        error: "calling_not_supported", detail: "This channel's provider can't enable calling.",
       });
     }
     const config = await binding.getSendConfig(session.workspaceId);
@@ -829,11 +829,11 @@ export class CallsService {
         contact: { select: { id: true, phoneNumber: true, bsuid: true } },
       },
     });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
     const contact = conversation.contact;
     if (!contact?.phoneNumber && !contact?.bsuid) {
       throw new BadRequestException({
-        error: "contact has no phone number or user id",
+        error: "contact_has_no_phone_number_or_user_id",
       });
     }
     const identity = {
@@ -910,11 +910,11 @@ export class CallsService {
         contact: { select: { id: true, phoneNumber: true, bsuid: true } },
       },
     });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
     const contact = conversation.contact;
     if (!contact?.phoneNumber && !contact?.bsuid) {
       throw new BadRequestException({
-        error: "contact has no phone number or user id",
+        error: "contact_has_no_phone_number_or_user_id",
       });
     }
     const identity = {
@@ -988,7 +988,7 @@ export class CallsService {
       where: { id: conversationId, workspaceId },
       select: { channel: true },
     });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
     const binding = getProviderBinding(conversation.channel);
     if (!binding.provider.capabilities.calling) {
       throw new BadRequestException({
@@ -1188,7 +1188,7 @@ export class CallsService {
         answeredByUserId: true,
       },
     });
-    if (!call) throw new NotFoundException({ error: "call not found" });
+    if (!call) throw new NotFoundException({ error: "call_not_found" });
 
     // Defense-in-depth: the controller's @RequireCapability("calls:receive")
     // already gated this. Re-checking the SAME capability here (not a second
@@ -1344,7 +1344,7 @@ export class CallsService {
         answeredByUserId: true,
       },
     });
-    if (!call) throw new NotFoundException({ error: "call not found" });
+    if (!call) throw new NotFoundException({ error: "call_not_found" });
     // Only the agent who won the answer race may complete it — the SDP belongs
     // to their peer connection, and accepting with someone else's would break
     // the media leg.
@@ -1414,7 +1414,7 @@ export class CallsService {
         status: true,
       },
     });
-    if (!call) throw new NotFoundException({ error: "call not found" });
+    if (!call) throw new NotFoundException({ error: "call_not_found" });
     if (call.status !== CallStatus.in_progress) {
       throw new BadRequestException({ error: "call_not_in_progress" });
     }
@@ -1464,7 +1464,7 @@ export class CallsService {
         status: true,
       },
     });
-    if (!call) throw new NotFoundException({ error: "call not found" });
+    if (!call) throw new NotFoundException({ error: "call_not_found" });
 
     const rejectedAt = new Date();
     const cas = await this.db.call.updateMany({
@@ -1568,7 +1568,7 @@ export class CallsService {
         answeredAt: true,
       },
     });
-    if (!call) throw new NotFoundException({ error: "call not found" });
+    if (!call) throw new NotFoundException({ error: "call_not_found" });
 
     // Already terminal — idempotent OK.
     if (
@@ -1748,7 +1748,7 @@ export class CallsService {
       },
       select: { id: true },
     });
-    if (!conv) throw new NotFoundException({ error: "conversation not found" });
+    if (!conv) throw new NotFoundException({ error: "conversation_not_found" });
 
     // Keyset pagination on (ringingAt DESC, id DESC). A COMPOSITE cursor is
     // required: ringingAt is not unique — two calls can share a timestamp

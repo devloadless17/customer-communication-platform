@@ -110,7 +110,7 @@ async function failStalledRuns(): Promise<void> {
     },
     data: {
       status: "failed",
-      error: "The transfer stopped unexpectedly. Its progress was saved — start it again to continue.",
+      error: "transfer_interrupted", detail: "The transfer stopped unexpectedly. Its progress was saved — start it again to continue.",
       finishedAt: new Date(),
     },
   });

@@ -474,7 +474,7 @@ export class ConversationsService {
       });
     }
     if (!opts.before) {
-      throw new BadRequestException({ error: "before or after cursor required" });
+      throw new BadRequestException({ error: "before_or_after_cursor_required" });
     }
     return listOlderMessages(workspaceId, conversationId, {
       take: opts.take,
@@ -493,7 +493,7 @@ export class ConversationsService {
       before: opts.before,
       after: opts.after,
     });
-    if (!window) throw new NotFoundException({ error: "not found" });
+    if (!window) throw new NotFoundException({ error: "not_found" });
     return window;
   }
 
@@ -642,7 +642,7 @@ export class ConversationsService {
       select: { id: true },
     });
     if (owned.length === 0) {
-      throw new NotFoundException({ error: "no matching conversations in this team" });
+      throw new NotFoundException({ error: "no_matching_conversations_in_this_team" });
     }
     const ownedIds = owned.map((c) => c.id);
 
@@ -751,13 +751,13 @@ export class ConversationsService {
     });
     if (!result.ok) {
       if (result.reason === "not_found") {
-        throw new NotFoundException({ error: "conversation not found" });
+        throw new NotFoundException({ error: "conversation_not_found" });
       }
       if (result.reason === "invalid_user") {
-        throw new BadRequestException({ error: "user not in team" });
+        throw new BadRequestException({ error: "user_not_in_team" });
       }
       throw new ConflictException({
-        error: "conversation was reassigned by someone else",
+        error: "conversation_was_reassigned_by_someone_else",
       });
     }
   }
@@ -798,10 +798,10 @@ export class ConversationsService {
     });
     if (!result.ok) {
       if (result.reason === "not_found") {
-        throw new NotFoundException({ error: "conversation not found" });
+        throw new NotFoundException({ error: "conversation_not_found" });
       }
       throw new ConflictException({
-        error: "conversation status changed by someone else",
+        error: "conversation_status_changed_by_someone_else",
       });
     }
   }
@@ -827,10 +827,10 @@ export class ConversationsService {
     });
     if (!result.ok) {
       if (result.reason === "not_found") {
-        throw new NotFoundException({ error: "conversation not found" });
+        throw new NotFoundException({ error: "conversation_not_found" });
       }
       throw new ConflictException({
-        error: "conversation ai setting changed by someone else",
+        error: "conversation_ai_setting_changed_by_someone_else",
       });
     }
   }
@@ -882,7 +882,7 @@ export class ConversationsService {
       const phone = normalizePhoneE164(input.phone ?? "");
       if (!phone) {
         throw new BadRequestException({
-          error: "a valid contactId or phone number is required",
+          error: "contact_id_or_phone_required", detail: "Pass either a contactId or a phone number to start a conversation.",
         });
       }
       const active = await this.db.contact.findFirst({
@@ -928,7 +928,7 @@ export class ConversationsService {
       where: { id: contactId, workspaceId, deletedAt: null },
       select: { id: true, phoneNumber: true, identityChannel: true, externalContactId: true },
     });
-    if (!contact) throw new NotFoundException({ error: "contact not found" });
+    if (!contact) throw new NotFoundException({ error: "contact_not_found" });
 
     const existing = await this.db.conversation.findFirst({
       where: { workspaceId, contactId: contact.id },
@@ -1017,7 +1017,7 @@ export class ConversationsService {
       where: { id: conversationId, workspaceId },
       select: { id: true },
     });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
 
     const mediaKeys = await this.collectMediaKeys(workspaceId, [conversationId]);
 
@@ -1099,7 +1099,7 @@ export class ConversationsService {
         where: { id: conversationId, workspaceId },
         select: { id: true },
       });
-      if (!exists) throw new NotFoundException({ error: "conversation not found" });
+      if (!exists) throw new NotFoundException({ error: "conversation_not_found" });
       return; // already-read fast path
     }
 
@@ -1156,7 +1156,7 @@ export class ConversationsService {
         contact: { select: { externalContactId: true, phoneNumber: true } },
       },
     });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
 
     const latestInbound = await this.db.message.findFirst({
       where: { conversationId, direction: "in" },

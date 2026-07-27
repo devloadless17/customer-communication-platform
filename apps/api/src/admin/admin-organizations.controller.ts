@@ -76,7 +76,7 @@ export class AdminOrganizationsController {
       select: { id: true, isPlatform: true },
     });
     if (!org || org.isPlatform) {
-      throw new NotFoundException({ error: "organization not found" });
+      throw new NotFoundException({ error: "organization_not_found" });
     }
   }
 

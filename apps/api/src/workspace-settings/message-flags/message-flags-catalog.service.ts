@@ -172,6 +172,6 @@ function throwIfUniqueViolation(err: unknown, detail: string): void {
     "code" in err &&
     (err as { code?: string }).code === "P2002"
   ) {
-    throw new ConflictException({ error: "name taken", detail });
+    throw new ConflictException({ error: "name_taken", detail });
   }
 }

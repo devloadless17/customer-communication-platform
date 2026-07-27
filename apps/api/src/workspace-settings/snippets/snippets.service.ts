@@ -75,7 +75,7 @@ export class SnippetsService {
         data: input,
       });
       if (result.count === 0) {
-        throw new NotFoundException({ error: "snippet not found" });
+        throw new NotFoundException({ error: "snippet_not_found" });
       }
       await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "snippets" });
     } catch (err) {
@@ -88,7 +88,7 @@ export class SnippetsService {
   async remove(workspaceId: string, id: string): Promise<void> {
     const result = await this.db.snippet.deleteMany({ where: { id, workspaceId } });
     if (result.count === 0) {
-      throw new NotFoundException({ error: "snippet not found" });
+      throw new NotFoundException({ error: "snippet_not_found" });
     }
     await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "snippets" });
   }
@@ -101,6 +101,6 @@ function throwIfUniqueViolation(err: unknown, detail: string): void {
     "code" in err &&
     (err as { code?: string }).code === "P2002"
   ) {
-    throw new ConflictException({ error: "name already in use", detail });
+    throw new ConflictException({ error: "name_already_in_use", detail });
   }
 }

@@ -197,8 +197,9 @@ export class ContactsController {
       Object.prototype.hasOwnProperty.call(rawBody, "phoneNumber")
     ) {
       throw new BadRequestException({
-        error:
-          "phoneNumber is not editable — it's the WhatsApp identity for this contact",
+        error: "phone_number_not_editable",
+        detail:
+          "phoneNumber is this contact's WhatsApp identity and can't be changed. Create a new contact instead.",
       });
     }
     const parsed = UpdateContactSchema.safeParse(rawBody);

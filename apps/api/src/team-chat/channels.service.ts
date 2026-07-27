@@ -431,7 +431,7 @@ export class ChannelsService {
       where: { id: channelId, workspaceId },
       select: { id: true, isDefault: true, kind: true, visibility: true },
     });
-    if (!channel) throw new NotFoundException({ error: "channel not found" });
+    if (!channel) throw new NotFoundException({ error: "channel_not_found" });
     return channel;
   }
 
@@ -449,7 +449,7 @@ export class ChannelsService {
    */
   private assertNotDm(channel: { kind: string }): void {
     if (channel.kind === "dm") {
-      throw new NotFoundException({ error: "channel not found" });
+      throw new NotFoundException({ error: "channel_not_found" });
     }
   }
 
@@ -466,7 +466,7 @@ export class ChannelsService {
     const existing = await this.db.teamChannel.findFirst({
       where: { id: channelId, workspaceId },
     });
-    if (!existing) throw new NotFoundException({ error: "channel not found" });
+    if (!existing) throw new NotFoundException({ error: "channel_not_found" });
     // A DM has no name, description, or visibility to edit.
     this.assertNotDm(existing);
 
@@ -521,7 +521,7 @@ export class ChannelsService {
         where: { id: channelId, workspaceId },
         data,
       });
-      if (res.count === 0) throw new NotFoundException({ error: "channel not found" });
+      if (res.count === 0) throw new NotFoundException({ error: "channel_not_found" });
       updated = await this.db.teamChannel.findFirstOrThrow({
         where: { id: channelId, workspaceId },
       });
@@ -544,7 +544,7 @@ export class ChannelsService {
     const existing = await this.db.teamChannel.findFirst({
       where: { id: channelId, workspaceId },
     });
-    if (!existing) throw new NotFoundException({ error: "channel not found" });
+    if (!existing) throw new NotFoundException({ error: "channel_not_found" });
     // A DM isn't an administrable channel — deleting one would destroy the
     // other party's history without their say.
     this.assertNotDm(existing);
@@ -675,7 +675,7 @@ export class ChannelsService {
     const channel = await this.requireChannelInTeam(workspaceId, channelId);
     this.assertNotDm(channel);
     if (channel.visibility === "private") {
-      throw new NotFoundException({ error: "channel not found" });
+      throw new NotFoundException({ error: "channel_not_found" });
     }
 
     const result = await this.db.teamChannelMember.createMany({
@@ -723,7 +723,7 @@ export class ChannelsService {
           ? { createdAt: opts.after, id: null }
           : null;
       if (!after) {
-        throw new BadRequestException({ error: "invalid after" });
+        throw new BadRequestException({ error: "invalid_after" });
       }
       // Now returns { items, nextCursor } symmetrically with the
       // ?before= path — client doesn't have to infer pagination state
@@ -733,7 +733,7 @@ export class ChannelsService {
 
     const before = opts.before ? decodeCursor(opts.before) : null;
     if (opts.before && !before) {
-      throw new BadRequestException({ error: "invalid cursor" });
+      throw new BadRequestException({ error: "invalid_cursor" });
     }
     return listChannelMessages(channelId, workspaceId, {
       take: opts.take,
@@ -936,7 +936,7 @@ export class ChannelsService {
         mediaKind: true,
       },
     });
-    if (!existing) throw new NotFoundException({ error: "message not found" });
+    if (!existing) throw new NotFoundException({ error: "message_not_found" });
 
     if (!canEditMessage(existing.authorUserId, userId, existing.createdAt)) {
       if (existing.authorUserId !== userId) {
@@ -1034,7 +1034,7 @@ export class ChannelsService {
       where: { id: messageId, channelId, workspaceId },
       select: { id: true, authorUserId: true, threadRootId: true },
     });
-    if (!existing) throw new NotFoundException({ error: "message not found" });
+    if (!existing) throw new NotFoundException({ error: "message_not_found" });
 
     if (!canDeleteMessage(role, existing.authorUserId, userId)) {
       throw new ForbiddenException({ error: "forbidden" });
@@ -1066,7 +1066,7 @@ export class ChannelsService {
         // (rolls the tx back cleanly) BEFORE the decrement — otherwise the root
         // counter would be double-decremented and drift negative with no sweeper.
         if (del.count === 0) {
-          throw new NotFoundException({ error: "message not found" });
+          throw new NotFoundException({ error: "message_not_found" });
         }
         const updated = await tx.teamChannelMessage.update({
           where: { id: rootId },
@@ -1173,7 +1173,7 @@ export class ChannelsService {
       where: { id: messageId, channelId, workspaceId },
       select: { id: true, threadRootId: true },
     });
-    if (!msg) throw new NotFoundException({ error: "message not found" });
+    if (!msg) throw new NotFoundException({ error: "message_not_found" });
     if (msg.threadRootId !== null) {
       throw new BadRequestException({
         error: "thread_reply_unpinnable",
@@ -1233,7 +1233,7 @@ export class ChannelsService {
       where: { id: messageId, channelId, workspaceId },
       select: { id: true },
     });
-    if (!msg) throw new NotFoundException({ error: "message not found" });
+    if (!msg) throw new NotFoundException({ error: "message_not_found" });
 
     await this.db.teamChannelPin.deleteMany({ where: { messageId } });
     await this.bus.publish({
@@ -1262,7 +1262,7 @@ export class ChannelsService {
       where: { id: messageId, channelId, workspaceId },
       select: { id: true },
     });
-    if (!message) throw new NotFoundException({ error: "message not found" });
+    if (!message) throw new NotFoundException({ error: "message_not_found" });
 
     const { emoji } = input;
 
@@ -1510,7 +1510,7 @@ export class ChannelsService {
       messageId,
       opts.take,
     );
-    if (!result) throw new NotFoundException({ error: "message not found" });
+    if (!result) throw new NotFoundException({ error: "message_not_found" });
     return result;
   }
 
@@ -1669,7 +1669,7 @@ export class ChannelsService {
         select: { id: true },
       });
       if (!root) {
-        throw new BadRequestException({ error: "invalid thread root" });
+        throw new BadRequestException({ error: "invalid_thread_root" });
       }
     }
 
@@ -1854,7 +1854,7 @@ export class ChannelsService {
       where: { id: rootMessageId, channelId, workspaceId },
       select: { id: true, threadRootId: true, threadReplyCount: true },
     });
-    if (!root) throw new NotFoundException({ error: "thread not found" });
+    if (!root) throw new NotFoundException({ error: "thread_not_found" });
     return root;
   }
 
@@ -1881,13 +1881,13 @@ export class ChannelsService {
       where: { id: channelId, workspaceId },
       select: { id: true, isDefault: true },
     });
-    if (!channel) throw new NotFoundException({ error: "channel not found" });
+    if (!channel) throw new NotFoundException({ error: "channel_not_found" });
     if (channel.isDefault) return; // Everyone is implicitly a member.
     const member = await this.db.teamChannelMember.findUnique({
       where: { channelId_userId: { channelId, userId } },
       select: { userId: true },
     });
-    if (!member) throw new NotFoundException({ error: "channel not found" });
+    if (!member) throw new NotFoundException({ error: "channel_not_found" });
   }
 
   /**

@@ -87,7 +87,7 @@ export class OutboundWebhooksService {
       where: { id, workspaceId },
       select: { id: true },
     });
-    if (!existing) throw new NotFoundException({ error: "webhook not found" });
+    if (!existing) throw new NotFoundException({ error: "webhook_not_found" });
 
     if (input.url !== undefined) this.assertUrlSafe(input.url);
 
@@ -172,7 +172,7 @@ export class OutboundWebhooksService {
       where: { id, workspaceId },
       select: { id: true },
     });
-    if (!existing) throw new NotFoundException({ error: "webhook not found" });
+    if (!existing) throw new NotFoundException({ error: "webhook_not_found" });
 
     const secret = generateWebhookSecret();
     const updated = await this.db.outboundWebhook.update({
@@ -188,7 +188,7 @@ export class OutboundWebhooksService {
       where: { id, workspaceId },
       select: { id: true },
     });
-    if (!existing) throw new NotFoundException({ error: "webhook not found" });
+    if (!existing) throw new NotFoundException({ error: "webhook_not_found" });
     // FK cascade clears OutboundWebhookDelivery rows.
     await this.db.outboundWebhook.delete({ where: { id } });
   }
@@ -202,7 +202,7 @@ export class OutboundWebhooksService {
       where: { id: webhookId, workspaceId },
       select: { id: true },
     });
-    if (!owned) throw new NotFoundException({ error: "webhook not found" });
+    if (!owned) throw new NotFoundException({ error: "webhook_not_found" });
 
     const rows = await this.db.outboundWebhookDelivery.findMany({
       where: { webhookId },
@@ -243,7 +243,7 @@ export class OutboundWebhooksService {
       where: { id, workspaceId },
       select: { id: true, eventTypes: true },
     });
-    if (!wh) throw new NotFoundException({ error: "webhook not found" });
+    if (!wh) throw new NotFoundException({ error: "webhook_not_found" });
     // Use the FIRST subscribed event type and build the body in THAT type's
     // real shape — a webhook subscribed only to e.g. `contact.tag_changed`
     // would otherwise get a message-shaped test body it can't parse against.

@@ -127,7 +127,7 @@ export class ContactFieldsService {
 
     const baseKey = slugifyKey(input.label);
     if (!baseKey) {
-      throw new BadRequestException({ error: "label must contain letters or digits" });
+      throw new BadRequestException({ error: "label_must_contain_letters_or_digits" });
     }
     // Block shadowing of built-in Contact columns ("location", "email",
     // "first_name", etc). Without this, the custom field saves to
@@ -186,7 +186,7 @@ export class ContactFieldsService {
       where: { id, workspaceId },
       select: { id: true },
     });
-    if (!existing) throw new NotFoundException({ error: "not found" });
+    if (!existing) throw new NotFoundException({ error: "not_found" });
 
     // Same shadow-built-in guard as create. Stops a rename loophole: if a
     // user couldn't create "Location" they shouldn't be able to rename
@@ -213,7 +213,7 @@ export class ContactFieldsService {
       where: { id, workspaceId },
       data: input,
     });
-    if (result.count === 0) throw new NotFoundException({ error: "not found" });
+    if (result.count === 0) throw new NotFoundException({ error: "not_found" });
 
     const updated = await this.db.contactFieldDefinition.findUniqueOrThrow({
       where: { id },
@@ -249,7 +249,7 @@ export class ContactFieldsService {
       select: { id: true },
     });
     if (owned.length !== ids.length) {
-      throw new BadRequestException({ error: "one or more ids are not in this team" });
+      throw new BadRequestException({ error: "one_or_more_ids_are_not_in_this_team" });
     }
 
     await this.db.$transaction(
@@ -270,7 +270,7 @@ export class ContactFieldsService {
     const def = await this.db.contactFieldDefinition.findFirst({
       where: { id, workspaceId },
     });
-    if (!def) throw new NotFoundException({ error: "not found" });
+    if (!def) throw new NotFoundException({ error: "not_found" });
 
     // Strip the key from every contact's customFields JSONB in the same
     // transaction as the definition delete. Without that strip, the column
@@ -292,7 +292,7 @@ export class ContactFieldsService {
       `,
       this.db.contactFieldDefinition.deleteMany({ where: { id, workspaceId } }),
     ]);
-    if (deleted.count === 0) throw new NotFoundException({ error: "not found" });
+    if (deleted.count === 0) throw new NotFoundException({ error: "not_found" });
 
     await this.bus.publish({
       type: "team.catalog_changed",

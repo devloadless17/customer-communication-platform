@@ -167,7 +167,7 @@ async function forward(
     const read = await readBodyCapped(req);
     if (read === null) {
       return NextResponse.json(
-        { error: "payload too large" },
+        { error: "payload_too_large" },
         { status: 413 },
       );
     }
@@ -199,7 +199,7 @@ async function forward(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
-      { error: "upstream unavailable", detail: message },
+      { error: "upstream_unavailable", detail: message },
       { status: 502 },
     );
   }

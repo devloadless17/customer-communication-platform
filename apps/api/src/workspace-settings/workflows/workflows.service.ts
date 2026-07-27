@@ -116,7 +116,7 @@ export class WorkflowsService {
     const parsed = parseWorkflowBody(body);
     if (parsed.errors.length > 0) {
       throw new BadRequestException({
-        error: "validation failed",
+        error: "validation_failed",
         details: parsed.errors,
         stepErrors: parsed.stepErrors,
       });
@@ -150,7 +150,7 @@ export class WorkflowsService {
     const row = await this.db.workflow.findFirst({
       where: { id, workspaceId },
     });
-    if (!row) throw new NotFoundException({ error: "not found" });
+    if (!row) throw new NotFoundException({ error: "not_found" });
     return this.toDto(row);
   }
 
@@ -167,7 +167,7 @@ export class WorkflowsService {
     const existing = await this.db.workflow.findFirst({
       where: { id, workspaceId },
     });
-    if (!existing) throw new NotFoundException({ error: "not found" });
+    if (!existing) throw new NotFoundException({ error: "not_found" });
 
     const body = (raw ?? {}) as WorkflowBody;
     const merged: WorkflowBody = {
@@ -236,7 +236,7 @@ export class WorkflowsService {
     const parsed = parseWorkflowBody(merged);
     if (parsed.errors.length > 0) {
       throw new BadRequestException({
-        error: "validation failed",
+        error: "validation_failed",
         details: parsed.errors,
         stepErrors: parsed.stepErrors,
       });
@@ -268,7 +268,7 @@ export class WorkflowsService {
       where: { id, workspaceId },
       select: { id: true },
     });
-    if (!existing) throw new NotFoundException({ error: "not found" });
+    if (!existing) throw new NotFoundException({ error: "not_found" });
 
     await this.db.workflow.delete({ where: { id } });
     await this.publishCatalogChange(workspaceId);
@@ -288,7 +288,7 @@ export class WorkflowsService {
     const existing = await this.db.workflow.findFirst({
       where: { id, workspaceId },
     });
-    if (!existing) throw new NotFoundException({ error: "not found" });
+    if (!existing) throw new NotFoundException({ error: "not_found" });
 
     if (publishFlag) {
       const validated = parseWorkflowBody(
@@ -304,7 +304,7 @@ export class WorkflowsService {
       );
       if (validated.errors.length > 0) {
         throw new BadRequestException({
-          error: "cannot publish — fix validation errors first",
+          error: "validation_failed",
           details: validated.errors,
           stepErrors: validated.stepErrors,
         });
@@ -324,7 +324,7 @@ export class WorkflowsService {
       );
       if (refErrors.length > 0) {
         throw new BadRequestException({
-          error: "cannot publish — referenced resources missing or in another team",
+          error: "referenced_resource_missing",
           details: refErrors,
         });
       }
@@ -491,15 +491,15 @@ export class WorkflowsService {
       where: { id, workspaceId },
       select: { id: true, trigger: true, published: true },
     });
-    if (!wf) throw new NotFoundException({ error: "workflow not found" });
+    if (!wf) throw new NotFoundException({ error: "workflow_not_found" });
     if (wf.trigger !== "manual_trigger") {
       throw new ConflictException({
-        error: "workflow trigger is not manual_trigger",
+        error: "trigger_not_manual", detail: "Only a workflow whose trigger is manual_trigger can be fired this way.",
       });
     }
     if (!wf.published) {
       throw new ConflictException({
-        error: "workflow is not published",
+        error: "workflow_is_not_published",
       });
     }
 
@@ -521,7 +521,7 @@ export class WorkflowsService {
         // dispatcher signature changes and this caller forgets to pass
         // the flag explicitly.
         throw new InternalServerErrorException({
-          error: "dispatcher returned no runId",
+          error: "dispatch_failed", detail: "The dispatcher returned no run id.",
         });
       }
       return { runId };
@@ -548,7 +548,7 @@ export class WorkflowsService {
       where: { id, workspaceId },
       select: { id: true, graph: true, trigger: true },
     });
-    if (!wf) throw new NotFoundException({ error: "not found" });
+    if (!wf) throw new NotFoundException({ error: "not_found" });
 
     const contactId = input.contactId ?? null;
     const conversationId = input.conversationId ?? null;
@@ -566,7 +566,7 @@ export class WorkflowsService {
             })
           : Promise.resolve(null),
       ]);
-      if (!contact) throw new NotFoundException({ error: "contact not found" });
+      if (!contact) throw new NotFoundException({ error: "contact_not_found" });
       eventPayload = {
         contact: {
           id: contact.id,
@@ -673,22 +673,22 @@ export class WorkflowsService {
         triggerConfig: true,
       },
     });
-    if (!wf) throw new NotFoundException({ error: "not found" });
+    if (!wf) throw new NotFoundException({ error: "not_found" });
     if (wf.trigger !== "incoming_webhook") {
       throw new NotFoundException({
-        error: "workflow trigger is not incoming_webhook",
+        error: "trigger_not_incoming_webhook", detail: "Only a workflow whose trigger is incoming_webhook accepts this call.",
       });
     }
     if (!wf.published) {
       throw new ConflictException({
-        error: "workflow is not published",
+        error: "workflow_is_not_published",
       });
     }
 
     const storedSecret = (wf.triggerConfig as { secret?: string })?.secret;
     if (!storedSecret) {
       throw new InternalServerErrorException({
-        error: "workflow not configured with a signature secret",
+        error: "workflow_not_configured_with_a_signature_secret",
       });
     }
     // The secret is stored envelope-encrypted at rest (see updateConfig
@@ -699,7 +699,7 @@ export class WorkflowsService {
       secret = decryptSecret(storedSecret);
     } catch {
       throw new InternalServerErrorException({
-        error: "workflow signature secret could not be decrypted (key rotated?)",
+        error: "signature_secret_undecryptable", detail: "The signing secret could not be decrypted — the encryption key may have rotated.",
       });
     }
 
@@ -715,14 +715,14 @@ export class WorkflowsService {
     if (timestampHeader) {
       const ts = Number.parseInt(timestampHeader, 10);
       if (!Number.isFinite(ts)) {
-        throw new ForbiddenException({ error: "invalid timestamp" });
+        throw new ForbiddenException({ error: "invalid_timestamp" });
       }
       // Accept timestamps in either seconds or milliseconds.
       const tsMs = ts > 1e12 ? ts : ts * 1000;
       const skew = Math.abs(Date.now() - tsMs);
       if (skew > REPLAY_WINDOW_MS) {
         throw new ForbiddenException({
-          error: "timestamp outside the ±5min replay window",
+          error: "timestamp_out_of_window", detail: "X-Workflow-Timestamp is outside the ±5 minute replay window.",
         });
       }
       payload = `${timestampHeader}.${rawBody}`;
@@ -736,7 +736,7 @@ export class WorkflowsService {
         flag === "1" || (process.env.NODE_ENV === "production" && flag !== "0");
       if (requireTimestamp) {
         throw new ForbiddenException({
-          error: "X-Workflow-Timestamp header required",
+          error: "timestamp_header_required", detail: "Send an X-Workflow-Timestamp header.",
         });
       }
       if (!loggedLegacyTimestampWarn.has(id)) {
@@ -758,7 +758,7 @@ export class WorkflowsService {
       ? signatureHeader.slice("sha256=".length)
       : signatureHeader;
     if (receivedHex.length !== expectedHex.length) {
-      throw new ForbiddenException({ error: "invalid signature" });
+      throw new ForbiddenException({ error: "invalid_signature" });
     }
     let expectedBuf: Buffer;
     let receivedBuf: Buffer;
@@ -766,7 +766,7 @@ export class WorkflowsService {
       expectedBuf = Buffer.from(expectedHex, "hex");
       receivedBuf = Buffer.from(receivedHex, "hex");
     } catch {
-      throw new ForbiddenException({ error: "invalid signature" });
+      throw new ForbiddenException({ error: "invalid_signature" });
     }
     // Non-hex characters silently produce a shorter buffer — re-check.
     if (
@@ -774,7 +774,7 @@ export class WorkflowsService {
       expectedBuf.length !== receivedBuf.length ||
       !timingSafeEqual(expectedBuf, receivedBuf)
     ) {
-      throw new ForbiddenException({ error: "invalid signature" });
+      throw new ForbiddenException({ error: "invalid_signature" });
     }
 
     // ---- Signature verified past this point. Loop + dedupe guards only run
@@ -949,7 +949,7 @@ export class WorkflowsService {
       where: { id, workspaceId },
       select: { id: true },
     });
-    if (!wf) throw new NotFoundException({ error: "not found" });
+    if (!wf) throw new NotFoundException({ error: "not_found" });
 
     // Keyset pagination on (startedAt DESC, id DESC) — rides the existing
     // (workflowId, startedAt DESC) index. Previously hard-capped at 50 with no
@@ -1012,7 +1012,7 @@ export class WorkflowsService {
     const run = await this.db.workflowRun.findFirst({
       where: { id: runId, workflowId: id, workspaceId },
     });
-    if (!run) throw new NotFoundException({ error: "not found" });
+    if (!run) throw new NotFoundException({ error: "not_found" });
 
     return {
       id: run.id,
@@ -1069,7 +1069,7 @@ export class WorkflowsService {
       err.code === "P2002"
     ) {
       throw new ConflictException({
-        error: "name already in use",
+        error: "name_already_in_use",
         details: [`A workflow named "${name}" already exists.`],
       });
     }

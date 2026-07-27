@@ -143,7 +143,7 @@ export class InvitesService {
         : null;
     const role: Role = requestedRole ?? "agent";
     if (!allowed.includes(role)) {
-      throw new ForbiddenException({ error: "role not assignable by you" });
+      throw new ForbiddenException({ error: "role_not_assignable_by_you" });
     }
 
     // Loaded once, up front: the org id gates the message below, `maxMembers`
@@ -178,7 +178,7 @@ export class InvitesService {
       // A user of ANOTHER organisation. Deliberately kept generic: naming them
       // would let any workspace admin probe whether an arbitrary address has an
       // account on the platform, and who it belongs to.
-      throw new ConflictException({ error: "email already in use" });
+      throw new ConflictException({ error: "email_already_in_use" });
     }
 
     // Wipe prior pending invites for this (team, email) so the new link
@@ -290,7 +290,7 @@ export class InvitesService {
     const result = await this.db.invite.deleteMany({
       where: { id, workspaceId, acceptedAt: null },
     });
-    if (result.count === 0) throw new NotFoundException({ error: "invite not found" });
+    if (result.count === 0) throw new NotFoundException({ error: "invite_not_found" });
     await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "invites" });
   }
 

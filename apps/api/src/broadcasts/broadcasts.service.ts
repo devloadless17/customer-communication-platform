@@ -405,7 +405,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         ? await this.db.messageTemplate.findFirst({ where: { id: templateId, workspaceId } })
         : null;
     if (effectiveKind === "template" && !template) {
-      throw new NotFoundException({ error: "template not found" });
+      throw new NotFoundException({ error: "template_not_found" });
     }
     if (template) {
       if (template.status !== "approved") {
@@ -418,7 +418,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
             ? templateDeletionDaysLeft(template.archivedAt)
             : null;
         throw new ConflictException({
-          error: "template not approved",
+          error: "template_not_approved",
           detail:
             template.status === "archived"
               ? `Template was archived after ${TEMPLATE_AUTO_ARCHIVE_MONTHS} months without use. ` +
@@ -438,7 +438,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       const namedBodyVars = templateNamedPlaceholders(template.bodyText);
       if (namedBodyVars.length > 0) {
         throw new BadRequestException({
-          error: "template uses named variables",
+          error: "template_uses_named_variables",
           detail: `This template's body uses named variables (${namedBodyVars.join(", ")}). Broadcasts support numbered {{1}} placeholders only.`,
         });
       }
@@ -448,7 +448,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       );
       if (requiredButtons.length > 0) {
         throw new BadRequestException({
-          error: "template needs button parameters",
+          error: "template_needs_button_parameters",
           detail: `This template has button(s) that need a send-time value (${requiredButtons
             .map((b) => `#${b.index + 1} ${b.subType}`)
             .join(", ")}). Broadcasts can't supply them.`,
@@ -460,7 +460,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       const bodyVarCount = countTemplatePlaceholders(template.bodyText);
       if (variables.body.length !== bodyVarCount) {
         throw new BadRequestException({
-          error: "wrong variable count",
+          error: "wrong_variable_count",
           detail: `Template expects ${bodyVarCount} body variable(s), got ${variables.body.length}.`,
         });
       }
@@ -480,7 +480,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         templateNamedPlaceholders(headerComp.text).length > 0
       ) {
         throw new BadRequestException({
-          error: "template uses named variables",
+          error: "template_uses_named_variables",
           detail: `This template's header uses a named variable. Broadcasts support numbered {{1}} placeholders only.`,
         });
       }
@@ -490,7 +490,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           : 0;
       if (headerVarCount > 0 && (!variables.header || variables.header.length === 0)) {
         throw new BadRequestException({
-          error: "header variable required",
+          error: "header_variable_required",
           detail: "This template's header has a placeholder — fill it in.",
         });
       }
@@ -507,13 +507,13 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       if (headerMediaKind) {
         if (!variables.headerMedia?.link) {
           throw new BadRequestException({
-            error: "header media required",
+            error: "header_media_required",
             detail: `This template's header is a ${headerMediaKind} — attach one before scheduling.`,
           });
         }
         if (variables.headerMedia.kind !== headerMediaKind) {
           throw new BadRequestException({
-            error: "header media kind mismatch",
+            error: "header_media_kind_mismatch",
             detail: `This template's header expects a ${headerMediaKind}.`,
           });
         }
@@ -525,7 +525,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         const supplied = variables.cards ?? [];
         if (supplied.length !== cardRequirements.length) {
           throw new BadRequestException({
-            error: "carousel cards required",
+            error: "carousel_cards_required",
             detail: `This template was approved with ${cardRequirements.length} cards — supply all of them.`,
           });
         }
@@ -533,13 +533,13 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           const card = supplied[i]!;
           if (card.kind !== need.headerKind) {
             throw new BadRequestException({
-              error: "carousel cards required",
+              error: "carousel_cards_required",
               detail: `Card ${i + 1} of this template is a ${need.headerKind} — attach one.`,
             });
           }
           if ((card.body?.length ?? 0) !== need.bodyVarCount) {
             throw new BadRequestException({
-              error: "carousel cards required",
+              error: "carousel_cards_required",
               detail: `Card ${i + 1} needs ${need.bodyVarCount} value(s) filled in.`,
             });
           }
@@ -549,7 +549,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
             );
             if (!value || value.text.trim() === "") {
               throw new BadRequestException({
-                error: "carousel cards required",
+                error: "carousel_cards_required",
                 detail: `Card ${i + 1}'s button needs a value.`,
               });
             }
@@ -560,7 +560,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // per-message. Campaign-level here: one store opening, one venue.
       if (headerComp?.format === "LOCATION" && !variables.headerLocation) {
         throw new BadRequestException({
-          error: "header location required",
+          error: "header_location_required",
           detail: "This template shows a map — set the location before scheduling.",
         });
       }
@@ -571,7 +571,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         const expiresAt = variables.limitedTimeOfferExpiresAtMs;
         if (expiresAt === undefined) {
           throw new BadRequestException({
-            error: "offer expiry required",
+            error: "offer_expiry_required",
             detail: "This template shows a countdown — set when the offer expires.",
           });
         }
@@ -580,7 +580,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         // odd) choice, but one that has ALREADY expired is always a mistake.
         if (expiresAt <= Date.now()) {
           throw new BadRequestException({
-            error: "offer expiry required",
+            error: "offer_expiry_required",
             detail: "That offer expiry is in the past — pick a future time.",
           });
         }
@@ -654,7 +654,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     } else if (audience.mode === "by_tag") {
       if (audience.tagIds.length === 0) {
         throw new BadRequestException({
-          error: "no tags selected",
+          error: "no_tags_selected",
           detail: "Pick at least one tag.",
         });
       }
@@ -667,7 +667,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       validatedTagIds = tagRows.map((t) => t.id);
       if (validatedTagIds.length === 0) {
         throw new BadRequestException({
-          error: "no valid tags",
+          error: "no_valid_tags",
           detail: "None of the selected tags belong to this team.",
         });
       }
@@ -688,7 +688,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     } else if (audience.mode === "group") {
       if (!audience.groupId) {
         throw new BadRequestException({
-          error: "groupId required",
+          error: "group_id_required",
           detail: "Pick a saved group.",
         });
       }
@@ -701,7 +701,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       });
       if (!group) {
         throw new NotFoundException({
-          error: "group not found",
+          error: "group_not_found",
           detail: "This audience group no longer exists.",
         });
       }
@@ -811,7 +811,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // answered by the same list the cap describes.
     if (recipientIds.length > MAX_RECIPIENTS_IN_PROCESS) {
       throw new BadRequestException({
-        error: "audience too large",
+        error: "audience_too_large",
         detail:
           `This audience matches more than ${MAX_RECIPIENTS_IN_PROCESS.toLocaleString()} contacts; ` +
           `the limit is ${MAX_RECIPIENTS_IN_PROCESS.toLocaleString()}. Narrow the tags or split it ` +
@@ -882,7 +882,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
 
     if (recipientRows.length === 0) {
       throw new BadRequestException({
-        error: "empty audience",
+        error: "empty_audience",
         detail: isCustomerMode
           ? "None of the selected people are reachable on a live channel right now (no open messaging window)."
           : droppedByAccount > 0
@@ -966,7 +966,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // is enforced regardless.
     if (recipientRows.length > MAX_RECIPIENTS_IN_PROCESS) {
       throw new BadRequestException({
-        error: "audience too large",
+        error: "audience_too_large",
         detail: `This audience has ${recipientRows.length} recipients; the limit is ${MAX_RECIPIENTS_IN_PROCESS}. Split it into smaller broadcasts.`,
       });
     }
@@ -1577,7 +1577,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    */
   async getReport(workspaceId: string, id: string) {
     const report = await getBroadcastReport(workspaceId, id);
-    if (!report) throw new NotFoundException({ error: "not found" });
+    if (!report) throw new NotFoundException({ error: "not_found" });
     return report;
   }
 
@@ -1609,7 +1609,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       where: { id, workspaceId },
       select: { id: true, templateName: true, name: true },
     });
-    if (!broadcast) throw new NotFoundException({ error: "not found" });
+    if (!broadcast) throw new NotFoundException({ error: "not_found" });
 
     const columns = [
       "contact_name",
@@ -1735,7 +1735,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         },
       },
     });
-    if (!row) throw new NotFoundException({ error: "not found" });
+    if (!row) throw new NotFoundException({ error: "not_found" });
 
     const truncated = row.recipients.length > RECIPIENTS_INLINE_CAP;
     const recipients = truncated
@@ -1815,7 +1815,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       where: { id: broadcastId, workspaceId },
       select: { id: true },
     });
-    if (!broadcast) throw new NotFoundException({ error: "not found" });
+    if (!broadcast) throw new NotFoundException({ error: "not_found" });
 
     const where: Prisma.BroadcastRecipientWhereInput = {
       broadcastId,
@@ -1871,7 +1871,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       where: { id: broadcastId, workspaceId },
       select: { id: true },
     });
-    if (!broadcast) throw new NotFoundException({ error: "not found" });
+    if (!broadcast) throw new NotFoundException({ error: "not_found" });
     const rows = await this.db.broadcastRecipient.findMany({
       where: { broadcastId },
       select: { contactId: true },
@@ -1909,7 +1909,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       where: { id, workspaceId },
       select: { id: true, status: true },
     });
-    if (!row) throw new NotFoundException({ error: "not found" });
+    if (!row) throw new NotFoundException({ error: "not_found" });
     if (
       row.status !== "scheduled" &&
       row.status !== "materializing" &&
@@ -1918,7 +1918,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       row.status !== "paused"
     ) {
       throw new ConflictException({
-        error: "broadcast not cancelable",
+        error: "broadcast_not_cancelable",
         detail: `Broadcast is already ${row.status}; cancel is only valid while scheduled, materializing, queued, running, or paused.`,
       });
     }
@@ -2055,7 +2055,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       where: { id, workspaceId },
       select: { id: true, status: true, failedCount: true },
     });
-    if (!row) throw new NotFoundException({ error: "not found" });
+    if (!row) throw new NotFoundException({ error: "not_found" });
     if (
       row.status === "running" ||
       row.status === "queued" ||
@@ -2063,7 +2063,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       row.status === "materializing"
     ) {
       throw new ConflictException({
-        error: "broadcast in progress",
+        error: "broadcast_in_progress",
         detail: "Wait for the broadcast to finish before retrying failed recipients.",
       });
     }
@@ -2104,7 +2104,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       });
       if (failed.length === 0) {
         throw new ConflictException({
-          error: "nothing to retry",
+          error: "nothing_to_retry",
           detail: "This broadcast has no failed recipients.",
         });
       }
@@ -2161,7 +2161,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         // A concurrent retry/runner already moved this broadcast out of a
         // terminal state — abort so we don't double-process.
         throw new ConflictException({
-          error: "broadcast in progress",
+          error: "broadcast_in_progress",
           detail: "Another retry or run started for this broadcast.",
         });
       }
@@ -2189,7 +2189,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       where: { id, workspaceId },
       select: { id: true, status: true },
     });
-    if (!row) throw new NotFoundException({ error: "not found" });
+    if (!row) throw new NotFoundException({ error: "not_found" });
     // `paused` is in-progress too — it's the state graceful shutdown / reboot
     // leaves a running broadcast in for the boot reconciler to resume. Deleting
     // it races that resume and orphans the recipient send-progress, so refuse
@@ -2201,7 +2201,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       row.status === "materializing"
     ) {
       throw new ConflictException({
-        error: "broadcast in progress",
+        error: "broadcast_in_progress",
         detail: "Cancel the broadcast (or wait for it to finish) before deleting it.",
       });
     }
@@ -2233,7 +2233,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     const total = await countPromise;
     if (total > MAX_RECIPIENTS_IN_PROCESS) {
       throw new BadRequestException({
-        error: "audience too large",
+        error: "audience_too_large",
         detail: `This audience has ${total} recipients; the limit is ${MAX_RECIPIENTS_IN_PROCESS}. Split it into smaller broadcasts.`,
       });
     }

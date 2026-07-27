@@ -583,7 +583,7 @@ export class UsersService {
         workspaceMemberships: { select: { workspaceId: true, role: true } },
       },
     });
-    if (!target) throw new NotFoundException({ error: "user not found" });
+    if (!target) throw new NotFoundException({ error: "user_not_found" });
 
     const activeMembership = target.workspaceMemberships.find(
       (m) => m.workspaceId === workspaceId,
@@ -595,7 +595,7 @@ export class UsersService {
       orgRole: target.orgRole as OrgRole,
     };
     if (!canModifyUser(actor, targetActor)) {
-      throw new ForbiddenException({ error: "cannot modify this user" });
+      throw new ForbiddenException({ error: "cannot_modify_this_user" });
     }
 
     // Role now lives on `WorkspaceMember`, not `User` — the tenancy
@@ -610,7 +610,7 @@ export class UsersService {
     let nextRole: Role | undefined;
     if (typeof input.role === "string") {
       if (!(allowed as string[]).includes(input.role)) {
-        throw new ForbiddenException({ error: "role not assignable by you" });
+        throw new ForbiddenException({ error: "role_not_assignable_by_you" });
       }
       nextRole = input.role as Role;
     }
@@ -630,10 +630,10 @@ export class UsersService {
     // Self-edit safeguards.
     if (targetId === actorUserId) {
       if (nextRole && nextRole !== actor.role) {
-        throw new BadRequestException({ error: "cannot change your own role" });
+        throw new BadRequestException({ error: "cannot_change_your_own_role" });
       }
       if (userData.deactivatedAt) {
-        throw new BadRequestException({ error: "cannot deactivate yourself" });
+        throw new BadRequestException({ error: "cannot_deactivate_yourself" });
       }
     }
 
@@ -724,7 +724,7 @@ export class UsersService {
                         select: { name: true },
                       });
                 throw new BadRequestException({
-                  error: "cannot remove the last active admin",
+                  error: "cannot_remove_the_last_active_admin",
                   ...(ws
                     ? {
                         detail: `They are the only admin of ${ws.name}. Promote someone else there first — a workspace with no admin can't be configured or repaired.`,
@@ -874,7 +874,7 @@ export class UsersService {
       where: { id: targetId, workspaceMemberships: { some: { workspaceId } } },
       select: { id: true, isSuperAdmin: true, orgRole: true, workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
     });
-    if (!target) throw new NotFoundException({ error: "user not found" });
+    if (!target) throw new NotFoundException({ error: "user_not_found" });
 
     if (
       !canModifyUserAccount(actor, {
@@ -898,7 +898,7 @@ export class UsersService {
     // register both insert one). A missing row means the user never set a
     // password — nothing to reset, surface it rather than silently no-op.
     if (!account) {
-      throw new BadRequestException({ error: "user has no password to reset" });
+      throw new BadRequestException({ error: "user_has_no_password_to_reset" });
     }
 
     const newHash = await hashPassword(newPassword);
@@ -956,7 +956,7 @@ export class UsersService {
         workspaceMemberships: { select: { workspaceId: true, role: true } },
       },
     });
-    if (!target) throw new NotFoundException({ error: "user not found" });
+    if (!target) throw new NotFoundException({ error: "user_not_found" });
 
     const targetActor = {
       role: (target.workspaceMemberships.find((m) => m.workspaceId === workspaceId)?.role ??
@@ -1002,7 +1002,7 @@ export class UsersService {
     }
 
     if (targetId === actorUserId) {
-      throw new BadRequestException({ error: "cannot delete your own account" });
+      throw new BadRequestException({ error: "cannot_delete_your_own_account" });
     }
 
     // Every workspace this delete could strip of its last admin.
@@ -1042,7 +1042,7 @@ export class UsersService {
               select: { name: true },
             });
             throw new BadRequestException({
-              error: "cannot delete the last active admin",
+              error: "cannot_delete_the_last_active_admin",
               detail: `They are the only admin of ${ws?.name ?? "another workspace"}. Promote someone else there first — a workspace with no admin can't be configured or repaired.`,
             });
           }

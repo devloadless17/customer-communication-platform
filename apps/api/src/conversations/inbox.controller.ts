@@ -45,7 +45,7 @@ export class InboxConversationController {
       id,
       session,
     );
-    if (!page) throw new NotFoundException({ error: "Not found" });
+    if (!page) throw new NotFoundException({ error: "not_found" });
     return page;
   }
 }

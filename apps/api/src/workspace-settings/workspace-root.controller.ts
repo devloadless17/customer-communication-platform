@@ -78,7 +78,7 @@ export class WorkspaceRootController {
         agentConversationVisibility: true,
       },
     });
-    if (!team) throw new NotFoundException({ error: "team not found" });
+    if (!team) throw new NotFoundException({ error: "team_not_found" });
     // Whether this org may place business-initiated calls at all. Follows OUR
     // business number's country — a number registered in a market where
     // business-initiated calling isn't offered can't call anyone, while an

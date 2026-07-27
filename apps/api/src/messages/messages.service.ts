@@ -842,7 +842,7 @@ export class MessagesService {
           })
         : Promise.resolve(null),
     ]);
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
 
     // Resolve the destination ADDRESS from the contact identity. The PROVIDER
     // is conversation-owned (the row is the source of truth for which channel
@@ -1023,7 +1023,7 @@ export class MessagesService {
         contact: { select: { lastInboundAt: true } },
       },
     });
-    if (!exists) throw new NotFoundException({ error: "conversation not found" });
+    if (!exists) throw new NotFoundException({ error: "conversation_not_found" });
     const configOrErr = await binding
       .getSendConfig(workspaceId, exists.channelConnectionId ?? undefined)
       .catch((err: unknown) => {
@@ -1618,7 +1618,7 @@ export class MessagesService {
         },
       },
     });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
 
     let channel;
     try {
@@ -1896,7 +1896,7 @@ export class MessagesService {
       );
     } catch (err) {
       throw new ConflictException({
-        error: "WhatsApp is not connected for this team",
+        error: "whatsapp_not_connected",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -2329,7 +2329,7 @@ export class MessagesService {
     });
     if (sourceRows.length === 0) {
       throw new BadRequestException({
-        error: "none of those messages can be forwarded",
+        error: "none_of_those_messages_can_be_forwarded",
       });
     }
 
@@ -2343,7 +2343,7 @@ export class MessagesService {
       include: { tags: { select: { id: true } } },
     });
     if (contacts.length === 0) {
-      throw new NotFoundException({ error: "no such contacts" });
+      throw new NotFoundException({ error: "no_such_contacts" });
     }
 
     // Cache source-media bytes across recipients. Stored as a Promise so
@@ -2406,7 +2406,7 @@ export class MessagesService {
           ok: false,
           sent: 0,
           failed: sourceRows.length,
-          error: "contact has no reachable address",
+          error: "contact_has_no_reachable_address",
         };
       }
       const binding = getProviderBinding(channel.channel);
@@ -2894,7 +2894,7 @@ export class MessagesService {
             ok: false,
             sent: 0,
             failed: sourceRows.length,
-            error: "internal error",
+            error: "internal_error",
           });
         }
       }

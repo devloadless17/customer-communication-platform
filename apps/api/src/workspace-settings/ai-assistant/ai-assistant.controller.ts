@@ -158,7 +158,7 @@ export class AiAssistantController {
     @UploadedFile() file: Express.Multer.File | undefined,
   ) {
     this.assertManage(session);
-    if (!file) throw new BadRequestException({ error: "file required" });
+    if (!file) throw new BadRequestException({ error: "file_required" });
     try {
       const bytes = await readFile(file.path);
       const document = await this.knowledge.upload(session.workspaceId, {

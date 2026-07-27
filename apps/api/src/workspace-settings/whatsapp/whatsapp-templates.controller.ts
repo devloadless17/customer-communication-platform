@@ -199,7 +199,7 @@ export class WhatsappTemplatesController {
     @UploadedFile() file: Express.Multer.File | undefined,
   ) {
     if (!file) {
-      throw new BadRequestException({ error: "file part missing" });
+      throw new BadRequestException({ error: "file_part_missing" });
     }
     try {
       const buffer = await readFile(file.path);

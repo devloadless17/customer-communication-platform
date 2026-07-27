@@ -135,8 +135,9 @@ export class ContactsService {
     const phone = normalizePhoneE164(input.phoneNumber);
     if (!phone) {
       throw new BadRequestException({
-        error:
-          "phoneNumber must be a valid international number (e.g. +1 555 555 0100)",
+        error: "invalid_phone_number",
+        detail:
+          "phoneNumber must be a valid international number (e.g. +1 555 555 0100).",
       });
     }
 
@@ -209,7 +210,7 @@ export class ContactsService {
         });
         if (revived) return revived;
         throw new ConflictException({
-          error: "a contact with this phone number already exists",
+          error: "a_contact_with_this_phone_number_already_exists",
         });
       }
       throw err;
@@ -358,7 +359,7 @@ export class ContactsService {
             select: { id: true },
           });
           if (!ok) {
-            throw new BadRequestException({ error: "stage not found" });
+            throw new BadRequestException({ error: "stage_not_found" });
           }
         }
 
@@ -408,13 +409,13 @@ export class ContactsService {
         // and write. Surface as 409 so the conflict-park UI in
         // contact-panel re-seeds and the agent can retry on fresh state.
         throw new ConflictException({
-          error: "contact was modified by another writer, retry",
+          error: "write_conflict", detail: "This contact was modified by someone else — re-read it and retry.",
         });
       }
       throw err;
     }
 
-    if (!result) throw new NotFoundException({ error: "contact not found" });
+    if (!result) throw new NotFoundException({ error: "contact_not_found" });
     const { existing, updated } = result;
 
     const tagIds = updated.tags.map((t) => t.id);
@@ -485,7 +486,7 @@ export class ContactsService {
       where: { id: contactId, workspaceId, deletedAt: null },
       select: { id: true },
     });
-    if (!contact) throw new NotFoundException({ error: "contact not found" });
+    if (!contact) throw new NotFoundException({ error: "contact_not_found" });
 
     // updateMany on (id, workspaceId) — the findFirst above already proves
     // ownership, but keeping the tenant scope on the mutation itself means a
@@ -562,7 +563,7 @@ export class ContactsService {
     }
     if (ownedIds.length === 0) {
       throw new NotFoundException({
-        error: "no matching contacts in this team",
+        error: "no_matching_contacts_in_this_team",
       });
     }
 
@@ -596,7 +597,7 @@ export class ContactsService {
     // ---- tag-add / tag-remove ----------------------------------------------
     const { action, tagId } = input;
     const tag = await this.db.tag.findFirst({ where: { id: tagId, workspaceId } });
-    if (!tag) throw new NotFoundException({ error: "tag not found" });
+    if (!tag) throw new NotFoundException({ error: "tag_not_found" });
 
     // Pre-snapshot so the per-contact tagChanges payload reflects the actual
     // membership delta, not the requested intent (a tag-add of a tag the
@@ -805,7 +806,7 @@ export class ContactsService {
       where: { workspaceId, id: contactId, deletedAt: null },
       include: { tags: { select: { id: true } } },
     });
-    if (!contact) throw new NotFoundException({ error: "contact not found" });
+    if (!contact) throw new NotFoundException({ error: "contact_not_found" });
 
     if (
       contact.identityChannel &&
@@ -861,7 +862,7 @@ export class ContactsService {
       where: { id: contactId, workspaceId, deletedAt: null },
       include: { tags: { select: { id: true } } },
     });
-    if (!contact) throw new NotFoundException({ error: "contact not found" });
+    if (!contact) throw new NotFoundException({ error: "contact_not_found" });
 
     // Cross-team defense: only keep tag ids that actually live on this team.
     const validIds =
@@ -892,7 +893,7 @@ export class ContactsService {
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
         throw new ConflictException({
-          error: "contact was modified by another writer, retry",
+          error: "write_conflict", detail: "This contact was modified by someone else — re-read it and retry.",
         });
       }
       throw err;

@@ -48,7 +48,7 @@ export class WorkspaceRootService {
       where: { id: workspaceId },
       select: { name: true },
     });
-    if (!team) throw new NotFoundException({ error: "team not found" });
+    if (!team) throw new NotFoundException({ error: "team_not_found" });
     if (team.name === name) return { name };
 
     const updated = await this.db.workspace.update({
@@ -90,7 +90,7 @@ export class WorkspaceRootService {
       where: { id: workspaceId },
       select: { aiHandoffAction: true, aiHandoffAssigneeId: true },
     });
-    if (!current) throw new NotFoundException({ error: "team not found" });
+    if (!current) throw new NotFoundException({ error: "team_not_found" });
 
     const nextAction = input.aiHandoffAction ?? current.aiHandoffAction;
     // The assignee after this write (explicit value wins, else keep current).
@@ -260,7 +260,7 @@ export class WorkspaceRootService {
     } catch (err) {
       this.logger.error(`[${label}] cascade delete failed`, err);
       throw new InternalServerErrorException({
-        error: "delete failed",
+        error: "delete_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
@@ -338,7 +338,7 @@ export class WorkspaceRootService {
     } catch (err) {
       this.logger.error(`[${label}] organization delete failed`, err);
       throw new InternalServerErrorException({
-        error: "delete failed",
+        error: "delete_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
     }

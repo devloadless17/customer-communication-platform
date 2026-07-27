@@ -194,7 +194,7 @@ export class UsersController {
     @CurrentSession() session: ApiSession,
     @UploadedFile() file: Express.Multer.File | undefined,
   ) {
-    if (!file) throw new BadRequestException({ error: "file required" });
+    if (!file) throw new BadRequestException({ error: "file_required" });
     try {
       const bytes = await readFile(file.path);
       const out = await this.users.uploadMyAvatar(session.workspaceId, session.userId, {
@@ -308,7 +308,7 @@ export class UsersController {
     // self case to change-password, which verifies the current password.
     if (id === session.userId) {
       throw new BadRequestException({
-        error: "Use change password to update your own account",
+        error: "use_change_password_for_self", detail: "Use the change-password flow to update your own account.",
       });
     }
     await this.users.resetPassword(

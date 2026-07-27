@@ -132,7 +132,7 @@ export class DevEmitController {
       default: {
         const _exhaustive: never = body;
         void _exhaustive;
-        throw new BadRequestException({ error: "unknown kind" });
+        throw new BadRequestException({ error: "unknown_kind" });
       }
     }
   }
@@ -150,7 +150,7 @@ export class DevEmitController {
     workspaceId: string,
   ) {
     const convo = await this.loadOwnedConversation(conversationId, workspaceId);
-    if (!convo) throw new NotFoundException({ error: "conversation not found" });
+    if (!convo) throw new NotFoundException({ error: "conversation_not_found" });
 
     const externalId = `fake_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date();
@@ -213,14 +213,14 @@ export class DevEmitController {
     workspaceId: string,
   ) {
     const convo = await this.loadOwnedConversation(conversationId, workspaceId);
-    if (!convo) throw new NotFoundException({ error: "conversation not found" });
+    if (!convo) throw new NotFoundException({ error: "conversation_not_found" });
 
     const lastOutbound = await this.db.message.findFirst({
       where: { conversationId, workspaceId, direction: "out" },
       orderBy: { timestamp: "desc" },
     });
     if (!lastOutbound) {
-      throw new NotFoundException({ error: "no outbound message" });
+      throw new NotFoundException({ error: "no_outbound_message" });
     }
     const next: MessageStatus =
       lastOutbound.status === "sent"
@@ -250,7 +250,7 @@ export class DevEmitController {
     userId: string,
   ) {
     const convo = await this.loadOwnedConversation(conversationId, workspaceId);
-    if (!convo) throw new NotFoundException({ error: "conversation not found" });
+    if (!convo) throw new NotFoundException({ error: "conversation_not_found" });
 
     const created = await this.db.internalNote.create({
       // Always attribute to the calling user — the request body has no say.
@@ -279,7 +279,7 @@ export class DevEmitController {
     workspaceId: string,
   ) {
     const convo = await this.loadOwnedConversation(conversationId, workspaceId);
-    if (!convo) throw new NotFoundException({ error: "conversation not found" });
+    if (!convo) throw new NotFoundException({ error: "conversation_not_found" });
 
     await this.db.conversation.update({
       where: { id: conversationId },
@@ -300,7 +300,7 @@ export class DevEmitController {
     workspaceId: string,
   ) {
     const convo = await this.loadOwnedConversation(conversationId, workspaceId);
-    if (!convo) throw new NotFoundException({ error: "conversation not found" });
+    if (!convo) throw new NotFoundException({ error: "conversation_not_found" });
 
     if (assignedUserId) {
       const assignee = await this.db.user.findFirst({
@@ -308,7 +308,7 @@ export class DevEmitController {
         select: { id: true },
       });
       if (!assignee) {
-        throw new BadRequestException({ error: "assignee not in team" });
+        throw new BadRequestException({ error: "assignee_not_in_team" });
       }
     }
 

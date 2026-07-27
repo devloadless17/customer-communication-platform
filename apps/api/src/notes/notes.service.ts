@@ -35,7 +35,7 @@ export class NotesService {
       },
       select: { id: true },
     });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
 
     // Insert + event commit atomically via publishInTx (same durability the
     // messages path uses). A bare create()-then-publish() dropped the audit row
@@ -91,7 +91,7 @@ export class NotesService {
       },
       select: { id: true, conversationId: true, authorUserId: true },
     });
-    if (!note) throw new NotFoundException({ error: "note not found" });
+    if (!note) throw new NotFoundException({ error: "note_not_found" });
 
     // Authorship check: the note's author can always delete it. Anyone else
     // needs admin-or-higher (admin / manager / superAdmin) — an agent

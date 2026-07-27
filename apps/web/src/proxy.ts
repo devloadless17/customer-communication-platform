@@ -285,7 +285,7 @@ export default function proxy(req: NextRequest): NextResponse {
       pathname === "/api/auth/sign-up/email" ||
       pathname === "/api/auth/sign-in/email-otp")
   ) {
-    return NextResponse.json({ error: "not found" }, { status: 404 });
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
 
   if (req.method === "POST" && pathname in RATE_LIMITED_POSTS) {
@@ -295,7 +295,7 @@ export default function proxy(req: NextRequest): NextResponse {
     // let one bad actor exhaust the bucket and DoS legitimate logins).
     if (pathname === "/login" && ip === "unknown") {
       return NextResponse.json(
-        { error: "could not identify client; refusing login" },
+        { error: "client_unidentified" },
         { status: 400 },
       );
     }
@@ -305,7 +305,7 @@ export default function proxy(req: NextRequest): NextResponse {
     const { ok, retryAfter } = rateLimit(`${pathname}:${ip}`, limit, window);
     if (!ok) {
       return NextResponse.json(
-        { error: "too many requests, slow down" },
+        { error: "rate_limited" },
         { status: 429, headers: { "retry-after": String(retryAfter) } },
       );
     }
@@ -322,7 +322,7 @@ export default function proxy(req: NextRequest): NextResponse {
     );
     if (!ok) {
       return NextResponse.json(
-        { error: "too many requests, slow down" },
+        { error: "rate_limited" },
         { status: 429, headers: { "retry-after": String(retryAfter) } },
       );
     }
@@ -342,7 +342,7 @@ export default function proxy(req: NextRequest): NextResponse {
     );
     if (!ok) {
       return NextResponse.json(
-        { error: "too many requests, slow down" },
+        { error: "rate_limited" },
         { status: 429, headers: { "retry-after": String(retryAfter) } },
       );
     }

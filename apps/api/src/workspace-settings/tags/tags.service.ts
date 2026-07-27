@@ -81,7 +81,7 @@ export class TagsService {
 
   async update(workspaceId: string, id: string, input: UpdateTagInput): Promise<Tag> {
     const existing = await this.db.tag.findFirst({ where: { id, workspaceId } });
-    if (!existing) throw new NotFoundException({ error: "tag not found" });
+    if (!existing) throw new NotFoundException({ error: "tag_not_found" });
 
     try {
       const updated = await this.db.tag.update({ where: { id }, data: input });
@@ -101,7 +101,7 @@ export class TagsService {
 
   async remove(workspaceId: string, id: string): Promise<void> {
     const existing = await this.db.tag.findFirst({ where: { id, workspaceId } });
-    if (!existing) throw new NotFoundException({ error: "tag not found" });
+    if (!existing) throw new NotFoundException({ error: "tag_not_found" });
     // Implicit M2M join rows go with the delete — contacts simply lose this tag.
     await this.db.tag.delete({ where: { id } });
     await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "tags" });
@@ -120,6 +120,6 @@ function throwIfUniqueViolation(err: unknown, detail: string): void {
     "code" in err &&
     (err as { code?: string }).code === "P2002"
   ) {
-    throw new ConflictException({ error: "name taken", detail });
+    throw new ConflictException({ error: "name_taken", detail });
   }
 }
