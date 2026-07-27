@@ -151,11 +151,12 @@ function buildPool(
  * deliberately CAN return empty, which is what makes `online_only` meaningful
  * (it hands the thread to the triage queue instead of an agent who's gone home).
  *
- * When `onlineUserIds` is null this process has no socket visibility (a
- * standalone worker, or presence lost across a restart). Presence-based tiers
- * then FAIL OPEN to availability rather than returning nobody — a routing
- * blackout because the picker is running in the wrong process would be a much
- * worse failure than briefly assigning to someone with no tab open.
+ * When `onlineUserIds` is null this process has no socket visibility at all
+ * (a standalone worker — in the api process the resolver is wired at boot and
+ * a restart yields an EMPTY set instead). Presence-based tiers then FAIL OPEN
+ * to availability rather than returning nobody — a routing blackout because
+ * the picker is running in the wrong process would be a much worse failure
+ * than briefly assigning to someone with no tab open.
  */
 function tierFor(
   pool: SelectableMember[],

@@ -96,6 +96,10 @@ const cacheGeneration = new Map<string, number>();
 export function invalidateAssignmentCache(workspaceId: string): void {
   configCache.delete(workspaceId);
   cacheGeneration.set(workspaceId, (cacheGeneration.get(workspaceId) ?? 0) + 1);
+  // Detach any in-flight single-flighted load: its waiters keep their (still
+  // consistent) read, but callers arriving AFTER this write start fresh
+  // instead of joining a load that may predate it.
+  configLoads.delete(workspaceId);
 }
 
 export interface AssignmentSettingsShape {
@@ -123,10 +127,31 @@ export const DEFAULT_ASSIGNMENT_SETTINGS: AssignmentSettingsShape = {
   aiHandoffPolicyId: null,
 };
 
+/**
+ * Single-flight guard for cache misses. Concurrent misses used to each run
+ * their own 3-query load and — worse — each get their OWN policy objects, so
+ * the pick lock's in-memory cursor mutation didn't propagate across a
+ * cold-cache burst and round_robin could still stampede on the first burst
+ * after boot/expiry/invalidation. Sharing the in-flight promise means every
+ * concurrent caller holds the SAME objects the lock then serializes over.
+ */
+const configLoads = new Map<string, Promise<CachedConfig>>();
+
 async function loadConfig(db: Db, workspaceId: string): Promise<CachedConfig> {
   const cached = configCache.get(workspaceId);
   if (cached && cached.expiresAt > Date.now()) return cached;
 
+  const inFlight = configLoads.get(workspaceId);
+  if (inFlight) return inFlight;
+
+  const load = loadConfigFresh(db, workspaceId).finally(() => {
+    configLoads.delete(workspaceId);
+  });
+  configLoads.set(workspaceId, load);
+  return load;
+}
+
+async function loadConfigFresh(db: Db, workspaceId: string): Promise<CachedConfig> {
   // Snapshot BEFORE the reads — see `cacheGeneration`.
   const generation = cacheGeneration.get(workspaceId) ?? 0;
 
@@ -200,6 +225,20 @@ function reserve(workspaceId: string, userId: string): void {
   reservations.set(workspaceId, byUser);
 }
 
+/**
+ * Drop ONE reservation for a pick whose write failed (member deactivated
+ * mid-flight, CAS lost to a human). Without this the phantom +1 makes the
+ * agent look busier than they are for the full TTL, skewing least-busy against
+ * whoever just lost a race. The cursor/`served` advance from the same failed
+ * pick is deliberately NOT rolled back — both are last-writer-wins fairness
+ * hints, and un-advancing a cursor another pick may already have moved past
+ * would corrupt the rotation it's trying to protect.
+ */
+export function releaseReservation(workspaceId: string, userId: string): void {
+  const list = reservations.get(workspaceId)?.get(userId);
+  if (list) list.pop();
+}
+
 /** Live reservation counts, pruning expired entries as it goes. */
 function reservedCounts(workspaceId: string): Map<string, number> {
   const out = new Map<string, number>();
@@ -223,6 +262,41 @@ export function __resetAssignmentRuntimeState(): void {
   reservations.clear();
   configCache.clear();
   cacheGeneration.clear();
+  pickLocks.clear();
+  configLoads.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Per-policy pick serialization
+// ---------------------------------------------------------------------------
+
+/**
+ * Reservations fix the least-busy stampede (they inflate `openCount`), but
+ * round_robin and weighted read the CURSOR and `served` — and a burst of
+ * simultaneous inbounds all read the same snapshot before any of them commits,
+ * so strict turn-taking handed the whole burst to one agent. Serializing the
+ * load→pick→commit window per (workspace, policy) makes a burst spread exactly
+ * the way a sequential stream would: each queued pick sees the previous pick's
+ * cursor mutation and committed `served` increment. Single-process by design,
+ * same Redis cliff as the reservations above. The held window is a few ms
+ * (one groupBy + one update), so this cannot back up under any realistic load.
+ */
+const pickLocks = new Map<string, Promise<void>>();
+
+async function withPickLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = pickLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const chained = prev.then(() => gate);
+  pickLocks.set(key, chained);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    // Only clean up if no later pick has chained onto us.
+    if (pickLocks.get(key) === chained) pickLocks.delete(key);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -476,48 +550,52 @@ export async function resolveAssignee(args: {
     };
   }
 
-  const members = await loadMembers(db, workspaceId, policy.id);
+  // The whole load→pick→commit window runs under the per-policy lock so a
+  // burst of concurrent picks rotates instead of stampeding (see pickLocks).
+  return withPickLock(`${workspaceId}:${policy.id || "implicit"}`, async () => {
+    const members = await loadMembers(db, workspaceId, policy.id);
 
-  // Continuity lookup only when the policy asks for it and the caller told us
-  // which conversation we're routing — the settings preview has no thread, so
-  // it simply previews the strategy without a relationship bias.
-  const previousUserId =
-    policy.preferPreviousAgent && conversationId
-      ? await previousAgentFor(db, workspaceId, conversationId, policy.previousAgentWindowDays)
-      : null;
+    // Continuity lookup only when the policy asks for it and the caller told us
+    // which conversation we're routing — the settings preview has no thread, so
+    // it simply previews the strategy without a relationship bias.
+    const previousUserId =
+      policy.preferPreviousAgent && conversationId
+        ? await previousAgentFor(db, workspaceId, conversationId, policy.previousAgentWindowDays)
+        : null;
 
-  const result = selectAssignee({
-    policy: toSelectable(policy),
-    members,
-    onlineUserIds: getOnlineUserIds(workspaceId),
-    excludeUserIds: ctx.excludeUserIds,
-    previousUserId,
-  });
-
-  const decision: AssignmentDecision = {
-    userId: result.userId,
-    reason: result.reason,
-    policyId: policy.id,
-    policyName: policy.name,
-    ruleId,
-    ruleName,
-  };
-
-  if (commit && result.userId) {
-    reserve(workspaceId, result.userId);
-    // Advance the cursor on the CACHED row too, not just in the DB. `loadConfig`
-    // hands back the cached policy object by reference for CONFIG_TTL_MS (15s),
-    // and `rotate()` (round_robin) depends on NOTHING but the cursor — so a
-    // DB-only write meant every pick in a TTL window saw the same stale cursor
-    // and returned the same agent. "Strict turn-taking" degenerated into
-    // 15-second shifts with the rest of the team idle. Mutating the shared
-    // object is what makes the next pick inside the window see this one.
-    policy.cursorUserId = result.userId;
-    await commitPick(db, policy, result.userId).catch(() => {
-      // Bookkeeping only — the assignment itself is already decided.
+    const result = selectAssignee({
+      policy: toSelectable(policy),
+      members,
+      onlineUserIds: getOnlineUserIds(workspaceId),
+      excludeUserIds: ctx.excludeUserIds,
+      previousUserId,
     });
-  }
-  return decision;
+
+    const decision: AssignmentDecision = {
+      userId: result.userId,
+      reason: result.reason,
+      policyId: policy.id,
+      policyName: policy.name,
+      ruleId,
+      ruleName,
+    };
+
+    if (commit && result.userId) {
+      reserve(workspaceId, result.userId);
+      // Advance the cursor on the CACHED row too, not just in the DB. `loadConfig`
+      // hands back the cached policy object by reference for CONFIG_TTL_MS (15s),
+      // and `rotate()` (round_robin) depends on NOTHING but the cursor — so a
+      // DB-only write meant every pick in a TTL window saw the same stale cursor
+      // and returned the same agent. "Strict turn-taking" degenerated into
+      // 15-second shifts with the rest of the team idle. Mutating the shared
+      // object is what makes the next pick inside the window see this one.
+      policy.cursorUserId = result.userId;
+      await commitPick(db, policy, result.userId).catch(() => {
+        // Bookkeeping only — the assignment itself is already decided.
+      });
+    }
+    return decision;
+  });
 }
 
 /**
@@ -535,8 +613,8 @@ async function commitPick(
 ): Promise<void> {
   // The implicit default (see implicitDefaultPolicy) has no row to write to.
   if (!policy.id) return;
-  await db.assignmentPolicy.update({
-    where: { id: policy.id },
+  await db.assignmentPolicy.updateMany({
+    where: { id: policy.id, workspaceId: policy.workspaceId },
     data: { cursorUserId: userId },
   });
   if (policy.strategy !== "weighted") return;

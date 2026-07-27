@@ -5001,8 +5001,10 @@ model AssignmentPolicyMember {
   enabled Boolean @default(true)
 
   // Deficit counter for weighted selection: how many conversations this policy
-  // has routed to this member. The picker compares `served / weight` ratios and
-  // renormalizes (subtracts the pool minimum) so this can't grow unbounded.
+  // has routed to this member. The picker compares `served / weight` ratios —
+  // never renormalized: ratios are scale-free and Int4 headroom is ample; the
+  // real hazard (a late joiner at 0 vacuuming traffic) is handled at write
+  // time by seeding newcomers at the pool's current ratio (syncMembers).
   served Int @default(0)
 
   createdAt DateTime @default(now())

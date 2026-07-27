@@ -268,8 +268,8 @@ export class AssignmentService {
         where: { workspaceId, isDefault: true, id: { not: policyId } },
         data: { isDefault: false },
       });
-      await tx.assignmentPolicy.update({
-        where: { id: policyId },
+      await tx.assignmentPolicy.updateMany({
+        where: { id: policyId, workspaceId },
         data: { isDefault: true },
       });
     });
@@ -296,8 +296,8 @@ export class AssignmentService {
 
     await this.db.$transaction(async (tx) => {
       await tx.assignmentRule.deleteMany({ where: { workspaceId, policyId } });
-      await tx.assignmentPolicy.update({
-        where: { id: policyId },
+      await tx.assignmentPolicy.updateMany({
+        where: { id: policyId, workspaceId },
         data: { archivedAt: new Date(), isDefault: false },
       });
       // Anything pointing at it degrades to the team default rather than
@@ -365,7 +365,11 @@ export class AssignmentService {
 
     await this.db.$transaction(async (tx) => {
       await tx.assignmentPolicyMember.deleteMany({
-        where: { policyId, userId: { notIn: submittedIds.length ? submittedIds : ["__none__"] } },
+        where: {
+          policyId,
+          workspaceId,
+          userId: { notIn: submittedIds.length ? submittedIds : ["__none__"] },
+        },
       });
       for (const m of members) {
         const prior = existingByUser.get(m.userId);

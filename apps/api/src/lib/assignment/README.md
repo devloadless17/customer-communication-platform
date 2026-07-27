@@ -77,9 +77,12 @@ feature changed nothing until an admin opted in.
 
 - **Presence-based eligibility fails OPEN when `getOnlineUserIds` returns null.**
   A process with no socket visibility must not conclude the whole team is
-  offline and stop routing. The offline rebalance sweeper does the opposite —
-  it does *nothing* when presence is unknown, because there the null reading
-  would cause reassignments rather than prevent them.
+  offline and stop routing. (In the api process the resolver is wired at boot,
+  so null only happens in a standalone worker — after a restart it returns an
+  EMPTY set.) The offline rebalance sweeper does the opposite — it does
+  *nothing* when presence is null OR empty, because concluding "everyone is
+  offline" from a fresh restart would reassign the inbox, and an empty floor
+  has nobody to hand work to anyway.
 - **Working hours aren't referenced anywhere here.** They already fold into
   `User.availabilityStatus`, which the availability tiers read. One source of
   truth, no second schedule evaluation.
@@ -94,6 +97,16 @@ feature changed nothing until an admin opted in.
   so a burst of simultaneous inbounds doesn't all read the same `openCount` and
   stampede one agent. Single-process by design; moving it to Redis is the named
   cliff at a second app instance (CLAUDE.md §16).
+- **Picks are serialized per (workspace, policy)** (`withPickLock` in
+  `resolve.ts`). Reservations only compensate least-busy; round_robin and
+  weighted read the cursor/`served`, so concurrent picks used to grab the same
+  snapshot and hand a whole burst to one agent. The lock makes a burst spread
+  like a sequential stream. Same Redis cliff as the reservations.
+- **A failed assignment write releases its reservation**
+  (`releaseReservation`, called from `apply.ts`); the cursor/`served` advance
+  is deliberately kept — both are last-writer-wins fairness hints, and
+  un-advancing a cursor another pick may already have passed would corrupt the
+  rotation. Cost: one slightly-unfair step on a lost race, never correctness.
 
 ## Scaling cliffs
 

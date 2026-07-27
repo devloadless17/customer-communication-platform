@@ -27,7 +27,6 @@ import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
  *   - `reassignOfflineOnlyPending` (default ON) limits it to threads where no
  *     agent has replied yet. A conversation mid-exchange stays with its agent;
  *     yanking it mid-sentence loses context and confuses the customer.
- *   - Conversations someone is actively VIEWING are never touched.
  *   - Closed conversations are never touched (they have no owner anyway).
  *   - A per-tick cap bounds the blast radius: a server restart that drops every
  *     socket must not reassign the entire inbox before presence recovers.
@@ -35,9 +34,14 @@ import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
  *     unassigning — "owned by someone offline" beats "owned by nobody" when
  *     nobody is available either.
  *
- * PRESENCE IS PROCESS-LOCAL. `getOnlineUserIds` returns null when this process
- * can't see sockets; the sweep then does NOTHING rather than concluding the
- * whole team is offline. That check is the single most important line here.
+ * PRESENCE IS PROCESS-LOCAL, AND AN EMPTY SET IS NOT KNOWLEDGE. The sweep
+ * requires at least one CONNECTED agent before it concludes anyone is offline:
+ * `getOnlineUserIds` is wired at boot and returns an EMPTY set both right
+ * after a restart (before anyone reconnects) and when the floor is genuinely
+ * empty — and in either case moving work is wrong. Empty-restart would
+ * reassign the whole inbox to agents who merely LOOK available in the DB;
+ * genuinely-empty has nobody to hand work to. That guard is the single most
+ * important line here.
  */
 
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -111,9 +115,12 @@ async function sweepOnce(): Promise<void> {
 
 async function rebalanceTeam(workspaceId: string): Promise<void> {
   const online = getOnlineUserIds(workspaceId);
-  // Presence unknown in this process → do nothing. Treating "I can't see
-  // sockets" as "everyone is offline" would reassign the entire inbox.
-  if (!online) return;
+  // No presence, or presence sees NOBODY → do nothing. The null branch covers
+  // an unwired resolver (standalone worker); the empty-set branch is the one
+  // that actually fires in-process — right after a restart every assignee
+  // "looks offline" and, with no online check on the pick side either, the
+  // sweep would re-route the inbox to agents who are just as gone.
+  if (!online || online.size === 0) return;
 
   const settings = await loadAssignmentSettings(db, workspaceId);
   if (!settings.reassignOnOffline) return; // raced a settings change
@@ -133,7 +140,17 @@ async function rebalanceTeam(workspaceId: string): Promise<void> {
       // be refreshing their browser at that instant.
       lastAssignedAt: { lt: graceCutoff },
       // Don't touch a thread the agent is mid-exchange on (default).
-      ...(settings.reassignOfflineOnlyPending ? { firstResponseAt: null } : {}),
+      // `firstResponseAt` is stamped by a fire-and-forget analytics write
+      // (trackOnOutboundMessage) with no reconciliation, so a transient error
+      // there would leave a LIVE exchange permanently eligible. The messages
+      // check is the ground truth backstop: any agent-authored outbound means
+      // this thread is not "pending", whatever the denormalized stamp says.
+      ...(settings.reassignOfflineOnlyPending
+        ? {
+            firstResponseAt: null,
+            messages: { none: { direction: "out", senderUserId: { not: null } } },
+          }
+        : {}),
     },
     select: { id: true, assignedUserId: true },
     orderBy: { lastAssignedAt: "asc" },

@@ -10,7 +10,7 @@ import type {
 import { assignConversation } from "@/lib/conversations/mutations";
 
 import { pendingCampaignAssignee } from "./campaign-reply";
-import { resolveAssignee } from "./resolve";
+import { releaseReservation, resolveAssignee } from "./resolve";
 
 /**
  * The WRITE path: resolve a policy decision and actually assign the
@@ -276,6 +276,12 @@ export async function assignByPolicy(args: {
         changed: result.changed,
       };
     }
+
+    // The pick reserved a least-busy slot for this user; the write didn't
+    // land, so give it back — otherwise the phantom +1 skews the next pick
+    // against them for the reservation TTL. (Cursor/`served` stay advanced —
+    // see releaseReservation's doc for why rolling those back would be worse.)
+    releaseReservation(workspaceId, decision.userId);
 
     switch (result.reason) {
       case "invalid_user":

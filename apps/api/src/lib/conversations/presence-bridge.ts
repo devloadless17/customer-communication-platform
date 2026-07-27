@@ -5,9 +5,11 @@
  * not the DB. The api wires the resolver on boot (see presence.service.ts);
  * same pattern as `setSharedDb`.
  *
- * Returns `null` when presence isn't wired or knowable in this process (e.g. a
- * standalone worker, or right after a restart before anyone reconnects), which
- * tells callers to fall back to the DB availabilityStatus only.
+ * Returns `null` ONLY when no resolver is wired in this process (a standalone
+ * worker) — callers then fall back to the DB availabilityStatus. In the api
+ * process the resolver is wired at boot, so right after a restart this returns
+ * an EMPTY set, not null: callers that would conclude "everyone is offline"
+ * from that (the rebalance sweeper) must treat empty as unknowable too.
  */
 type OnlineResolver = (workspaceId: string) => Set<string>;
 
