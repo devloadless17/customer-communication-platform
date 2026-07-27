@@ -1198,6 +1198,49 @@ export class WhatsappService {
     const authoredParameterFormat: TemplateParameterFormat =
       detectParameterFormat(components) === "named" ? "named" : "positional";
 
+    // Meta's review rejects a submission whose BODY and FOOTER wording
+    // duplicate an existing template on the WABA (documented as exempt for
+    // AUTHENTICATION templates) — but only after the 24-hour review, naming
+    // the twin in Business Support Home. The local catalog can answer the
+    // same question instantly. Same-name rows are excluded (language variants
+    // of one template are translations, not duplicates), and so are
+    // rejected/archived rows — a rejected twin never went live, and blocking
+    // on an archived one 28 days from deletion risks refusing a create Meta
+    // would accept. If the catalog is stale (twin deleted in WhatsApp Manager
+    // but not re-synced), a Sync clears the false positive — the error says so.
+    if (category !== "authentication") {
+      const footerOf = (comps: unknown): string => {
+        if (!Array.isArray(comps)) return "";
+        const f = comps.find(
+          (c) =>
+            typeof (c as { type?: unknown })?.type === "string" &&
+            ((c as { type: string }).type ?? "").toUpperCase() === "FOOTER",
+        ) as { text?: unknown } | undefined;
+        return typeof f?.text === "string" ? f.text.trim() : "";
+      };
+      const newFooter = footerOf(components);
+      const twins = await this.db.messageTemplate.findMany({
+        where: {
+          workspaceId,
+          wabaId: config.wabaId ?? "",
+          bodyText: body.text,
+          status: { notIn: ["rejected", "archived"] },
+          NOT: { name },
+        },
+        select: { name: true, language: true, components: true },
+      });
+      const twin = twins.find((t) => footerOf(t.components) === newFooter);
+      if (twin) {
+        throw new ConflictException({
+          error: "template_duplicate_content",
+          detail:
+            `Meta rejects templates whose body and footer wording duplicate an existing ` +
+            `template — this matches "${twin.name}" (${twin.language}). Change the wording, ` +
+            `or if that template no longer exists in WhatsApp Manager, click Sync first.`,
+        });
+      }
+    }
+
     let created;
     try {
       created = await provider.createTemplate(

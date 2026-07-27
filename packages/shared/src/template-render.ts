@@ -985,6 +985,83 @@ function validateButtons(comps: ValidatableComponent[], push: Push) {
 }
 
 /** Meta requires `{{1}}…{{N}}` with no gaps and no zero. */
+/**
+ * ADVISORY review-risk patterns, deliberately a separate function from
+ * `validateTemplateComponents`: these are Meta's documented "common rejection
+ * reasons" from the human/ML REVIEW, not wire-validity rules — and Meta's own
+ * presets break them (the authentication body "{{1}} is your verification
+ * code." starts with a parameter), so blocking on them would refuse templates
+ * Meta approves. The form renders these as warnings that never gate submit;
+ * the API ignores them entirely.
+ *
+ * Covered, per the template-review doc:
+ * - unbalanced `{{`/`}}` ("missing or mismatched curly braces");
+ * - `{{…}}` tokens that are a variable in NEITHER dialect ("variable
+ *   parameters contain special characters such as #, $, or %") — our
+ *   detectors pass these through as literal prose, so without this the author
+ *   learns of the typo only from a 24-hour review round-trip;
+ * - a body that starts or ends with a variable ("dangling parameters").
+ */
+export function templateReviewWarnings(
+  components: ReadonlyArray<unknown>,
+): TemplateValidationIssue[] {
+  const issues: TemplateValidationIssue[] = [];
+  const push = (field: string, message: string) => issues.push({ field, message });
+
+  const comps = asComponents(components);
+  const surfaces: Array<[string, string]> = [];
+  const body = comps.find((c) => c.type === "BODY");
+  if (body?.text) surfaces.push(["body", body.text]);
+  const header = comps.find((c) => c.type === "HEADER");
+  if ((header?.format ?? "TEXT").toUpperCase() === "TEXT" && header?.text) {
+    surfaces.push(["header", header.text]);
+  }
+
+  const token = /\{\{\s*(?:\d+|[A-Za-z_][A-Za-z0-9_]*)\s*\}\}/;
+  for (const [field, text] of surfaces) {
+    const open = (text.match(/\{\{/g) ?? []).length;
+    const close = (text.match(/\}\}/g) ?? []).length;
+    if (open !== close) {
+      push(
+        field,
+        `Found ${open} "{{" but ${close} "}}" — a variable needs matching double braces, ` +
+          `like {{1}} or {{order_id}}. Meta commonly rejects mismatched braces in review.`,
+      );
+    }
+    for (const match of text.matchAll(/\{\{([^{}]*)\}\}/g)) {
+      const raw = match[1] ?? "";
+      const inner = raw.trim();
+      if (/^\d+$/.test(inner) || /^[A-Za-z_][A-Za-z0-9_]*$/.test(inner)) continue;
+      push(
+        field,
+        `"{{${raw}}}" isn't a variable in either format — it will be sent as literal text. ` +
+          `If a variable was intended, use a number ({{1}}) or letters, digits and ` +
+          `underscores ({{order_id}}); Meta rejects variables with special characters.`,
+      );
+    }
+  }
+
+  // Dangling check applies to the message BODY only — a text header is a
+  // single short line where a lone variable (e.g. an order number) is a
+  // normal, approvable shape.
+  const bodyText = (body?.text ?? "").trim();
+  if (bodyText) {
+    const startsWith = new RegExp(`^${token.source}`).test(bodyText);
+    const endsWith = new RegExp(`${token.source}$`).test(bodyText);
+    if (startsWith || endsWith) {
+      push(
+        "body",
+        `The body ${
+          startsWith && endsWith ? "starts and ends" : startsWith ? "starts" : "ends"
+        } with a variable — Meta's review commonly rejects dangling parameters. ` +
+          `Consider adding text around it.`,
+      );
+    }
+  }
+
+  return issues;
+}
+
 function validateConsecutive(field: string, indices: number[], push: Push) {
   const seen = new Set(indices);
   const max = Math.max(...indices);

@@ -56,6 +56,7 @@ import {
   validateTemplateTtl,
   positionalPlaceholderIndices,
   templateNamedPlaceholders,
+  templateReviewWarnings,
   validateTemplateComponents,
 } from "@ccp/shared/template-render";
 import { TEMPLATE_LANGUAGES } from "@ccp/shared/template-languages";
@@ -394,6 +395,14 @@ export function TemplateForm({
   const issuesFor = useCallback(
     (field: string) => issues.filter((i) => i.field === field).map((i) => i.message),
     [issues],
+  );
+  // Advisory review-risk patterns (dangling parameters, invalid {{…}} tokens,
+  // mismatched braces). Meta's own presets break some of them, so these warn —
+  // amber, never part of `canSubmit` — rather than block.
+  const reviewWarnings = useMemo(() => templateReviewWarnings(components), [components]);
+  const warningsFor = useCallback(
+    (field: string) => reviewWarnings.filter((i) => i.field === field).map((i) => i.message),
+    [reviewWarnings],
   );
 
   // Meta refuses to change an approved template's category (it may recategorize
@@ -867,6 +876,11 @@ export function TemplateForm({
                     maxLength={TEMPLATE_LIMITS.headerMaxLength}
                   />
                 </Field>
+                {warningsFor("header").map((m) => (
+                  <p key={m} className="mt-1 text-2xs text-warning-fg">
+                    {m}
+                  </p>
+                ))}
               </div>
             )}
 
@@ -994,6 +1008,11 @@ export function TemplateForm({
             )}
             {issuesFor("body").map((m) => (
               <p key={m} className="mt-1 text-2xs text-destructive">
+                {m}
+              </p>
+            ))}
+            {warningsFor("body").map((m) => (
+              <p key={m} className="mt-1 text-2xs text-warning-fg">
                 {m}
               </p>
             ))}

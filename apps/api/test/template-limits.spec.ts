@@ -36,6 +36,7 @@ import {
   TEMPLATE_AUTO_ARCHIVE_MONTHS,
   templateArchivalRisk,
   templateDeletionDaysLeft,
+  templateReviewWarnings,
 } from "@ccp/shared/template-render";
 import { TEMPLATE_LANGUAGES } from "@ccp/shared/template-languages";
 import {
@@ -2335,5 +2336,72 @@ describe("messaging_account_id is opt-in", () => {
     // until they aren't — deriving one from the other would bill silently wrong
     // in exactly the multi-account setup the parameter exists for.
     expect(messagingAccountField({ ...base, wabaId: "waba_1" })).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// templateReviewWarnings — ADVISORY review-risk patterns from the template-
+// review doc's "common rejection reasons". Deliberately a separate function
+// from validateTemplateComponents: Meta's own presets break some of these
+// (the authentication body "{{1}} is your verification code." STARTS with a
+// parameter), so they warn and must never block a create.
+// ---------------------------------------------------------------------------
+describe("templateReviewWarnings", () => {
+  const bodyOf = (text: string) => [{ type: "BODY", text }];
+
+  it("returns nothing for an unremarkable body", () => {
+    expect(templateReviewWarnings(bodyOf("Hi {{1}}, your order has shipped."))).toEqual([]);
+  });
+
+  it("flags a body that starts or ends with a variable (dangling)", () => {
+    expect(templateReviewWarnings(bodyOf("{{1}} is your code."))).toHaveLength(1);
+    expect(templateReviewWarnings(bodyOf("Your code is {{1}}"))).toHaveLength(1);
+    // Both ends → still ONE dangling warning, naming both.
+    const both = templateReviewWarnings(bodyOf("{{1}} and then {{2}}"));
+    expect(both).toHaveLength(1);
+    expect(both[0]!.message).toContain("starts and ends");
+  });
+
+  it("flags a {{…}} token that is a variable in neither dialect", () => {
+    const issues = templateReviewWarnings(bodyOf("Get {{50%}} off today only."));
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.field).toBe("body");
+    expect(issues[0]!.message).toContain("{{50%}}");
+  });
+
+  it("flags mismatched double braces", () => {
+    const issues = templateReviewWarnings(bodyOf("Use code {{SAVE today."));
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('"{{"');
+  });
+
+  it("scans a TEXT header but never a media header", () => {
+    expect(
+      templateReviewWarnings([
+        { type: "HEADER", format: "TEXT", text: "Order {{#}}" },
+        { type: "BODY", text: "All good here." },
+      ]),
+    ).toHaveLength(1);
+    expect(
+      templateReviewWarnings([
+        { type: "HEADER", format: "IMAGE" },
+        { type: "BODY", text: "All good here." },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("a lone-variable HEADER is fine — dangling applies to the body only", () => {
+    expect(
+      templateReviewWarnings([
+        { type: "HEADER", format: "TEXT", text: "{{1}}" },
+        { type: "BODY", text: "Padded body text here." },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("never fires for valid tokens of either dialect", () => {
+    expect(
+      templateReviewWarnings(bodyOf("Hi {{first_name}}, order {{order_id}} is ready today.")),
+    ).toEqual([]);
   });
 });
