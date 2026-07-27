@@ -72,16 +72,16 @@ table/queue/cache/socket-room that references the dying entity.
 | realtime layer | 1 | R (adversarial) + E (144 e2e two-tab) | ✅ 2026-07-27 |
 | auth / org / workspaces / members | 1 | R (adversarial) + E (45 e2e) | ✅ 2026-07-27 |
 | external /v1 API | 1 | R (adversarial, all 111 routes) + E (180 e2e) | ✅ 2026-07-27 |
-| contacts (+import/export/transfer) | 2 | | ☐ |
-| customers / identity | 2 | | ☐ |
-| inbox-views | 2 | | ☐ |
-| channels / multi-account | 2 | | ☐ |
-| outbound-webhooks (delivery/retry) | 2 | mandatory-N | ☐ |
-| calls (WhatsApp calling) | 2 | | ☐ |
-| media / R2 | 2 | | ☐ |
-| queues / workers | 2 | | ☐ |
-| sweepers | 2 | mandatory-N | ☐ |
-| coexistence | 2 | mandatory-N | ☐ |
+| contacts (+import/export/transfer) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 6 findings open (bulk-tag event storm HIGH) |
+| customers / identity | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 3 open (profile visibility leak MED-HIGH) |
+| inbox-views | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — THE and-not-spread invariant VERIFIED HELD across all 3 callers; 1 open (unvalidated `channels`) |
+| channels / multi-account | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 4 open (batched-webhook account misattribution HIGH) |
+| outbound-webhooks (delivery/retry) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — SSRF/HMAC/dedupe VERIFIED HELD; 1 HIGH open (unbounded retention DELETE) |
+| calls (WhatsApp calling) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 2 open (uncaught throw after CAS strands the row) |
+| media / R2 | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — tenancy + XSS defenses VERIFIED HELD; media-download regression FIXED 37c0a2b9; 3 open |
+| queues / workers | 2 | R (adversarial, all 7 workers) | ◐ reviewed 2026-07-27 — jobId/lockDuration/backpressure VERIFIED HELD; 1 open (transfer worker maxStalledCount) |
+| sweepers | 2 | R (adversarial, all 30 enumerated) | ◐ reviewed 2026-07-27 — mutex/bounds/pool-close VERIFIED HELD; 3 open (unreadCount has NO drift sweeper) |
+| coexistence | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 4 open (direction detection fails OPEN, poison event loses a chunk) |
 | tags / stages / fields / snippets / flags | 3 | | ☐ |
 | notes | 3 | mandatory-N | ☐ |
 | team-chat (+DMs) | 3 | | ☐ |
@@ -765,6 +765,102 @@ globally-unique emails incl. membership-less users; the provider credential
 cache is correctly busted on delete/rename-default/setDefault; merge is
 genuinely non-destructive and reversible; 5 of 6 workers drop cleanly when
 their row is gone.
+
+### TIER-2 review (2026-07-27) — 3 clusters, ~40 findings, fixes IN PROGRESS
+
+**A REGRESSION I CAUSED, and the lesson.** The B-M4 `account-unresolved`
+guard (4e4925ec) was written for the five SEND paths. I did not audit every
+caller of the function I tightened. `downloadInboundMedia` is a READ path
+that also passed no account → it now threw → the catch marks every media
+event non-retriably failed → **inbound media silently destroyed in every
+multi-account workspace**, caption kept, binary never fetched, no error
+surfaced. FIXED 37c0a2b9 (the right account was already in scope 60 lines
+up). RULE: tightening a shared resolver means auditing EVERY caller, not the
+ones the change was written for.
+
+STILL OPEN from that same regression family (all pass no account):
+`lib/sweepers/inbound-media.ts:300` (the RECOVERY path for exactly this),
+`conversations.service.ts` typing + read receipts, `ingest.ts:3069` social
+contact enrichment, ~13 sites in `calls.service.ts`,
+`lib/analytics/template-analytics.ts:59`.
+
+OPEN — HIGH:
+- `outbound-webhook-delivery-cleanup.ts:86` is a single UNBOUNDED deleteMany
+  under a 30s statement_timeout. Every sibling retention sweeper batches.
+  Once the backlog exceeds 30s of DELETE throughput it cancels, rolls back,
+  deletes NOTHING, and retries every 24h always further behind —
+  self-perpetuating unbounded table growth.
+- Filter-mode bulk tag fans out up to ~80,000 domain events (one
+  `contact.updated` + one `contact.tag_changed` per contact, up to 50k) with
+  NO cap → outbox rows + workflow runs + webhook deliveries. The IMPORT path
+  caps the identical fan-out at `IMPORT_EVENT_FANOUT_CAP = 5_000`.
+- A batched multi-account webhook attributes the WHOLE batch to the first
+  account in the payload (`whatsappPayloadAccountId` returns on first match),
+  and ingest re-stamps `Conversation.channelConnectionId` — so the thread
+  MIGRATES to the wrong number permanently. Same wrong-account class, one
+  layer above where the send-side guard can see it.
+- Calls: every session-driven path resolves the workspace DEFAULT account,
+  and in `answerCall`/`endCall`/`rejectCall` the throw lands AFTER a
+  committed CAS and OUTSIDE the try → row stranded `in_progress` for 2h,
+  terminal event never published.
+
+OPEN — MED:
+- Customer-profile endpoints bypass agent conversation-visibility and leak
+  every thread's `lastMessagePreview` + unread + conversationId (the one
+  surface that returns the preview without a visibility clause).
+- Coexistence history direction detection FAILS OPEN: if
+  `display_phone_number` is absent, every business-sent historical message
+  becomes `direction: "in"`, which also sets `lastInboundAt` and so OPENS the
+  24h window in the UI when it is closed.
+- A poison event in a coexistence history chunk loses the remainder of that
+  chunk permanently (no per-event try/catch, unlike the live path).
+- `fetchUrlBytes` (social attachment download) uses raw `fetch`, not
+  `safeFetch` — a workspace admin who sets their own appSecret can sign a
+  payload pointing at an internal URL and read the response back via
+  `/api/media/:id`.
+- `reapAbandonedUploads` never paginates (no cursor) → once
+  `contact-imports/` exceeds 200 keys, no other workspace's staged 50MB
+  upload is ever reclaimed.
+- `Conversation.unreadCount` and `lastMessagePreview` have NO drift sweeper
+  despite CLAUDE.md §7 naming them as "each backed by a drift sweeper".
+  `openTicketCount` likewise (lower risk — single writer).
+- Media sweeper omits `reconcileInboundMediaMime`, so recovered voice notes
+  are deterministically destroyed; parked coexistence-echo media
+  (`direction: "out"`) is never retried NOR downgraded → permanent shimmer.
+- `customer-link-drift` batches 500/60s globally and is not workspace-
+  partitioned → a 100k import takes ~3.3h to get unified profiles; also no
+  `orderBy`, so a permanently-failing contact starves everything behind it.
+- Import: `unknownStages` unbounded (a mismapped column → 200k-element array
+  into a JSON column); a resumed import writes an INCOMPLETE error report.
+
+VERIFIED HELD (real coverage — the good news):
+- **THE inbox-view invariant**: `inboxViewWhereClauses` traced through ALL
+  THREE callers — no spread anywhere, visibility always a sibling AND
+  element. The class that bit 3+ times is genuinely closed.
+- **SSRF on outbound webhooks**: `safeFetch` resolves via dns.lookup, blocks
+  every v4 private range AND normalizes all IPv6 notations, then PINS the
+  validated address into a custom lookup — closing the DNS-rebinding TOCTOU.
+  A partner cannot reach 169.254.169.254 or localhost.
+- **Credentials**: cached as CIPHERTEXT, decrypted per call, never logged,
+  never in a response body; cache keyed per (workspace, account);
+  `workspaceId` stays in the WHERE even with an explicit account id.
+- **Media tenancy**: key-path traversal closed (WHATWG URL normalization
+  before the prefix check); every media surface checks a workspace-scoped ROW
+  first, and `/api/media/:id` additionally applies the conversation
+  visibility clause. Stored-XSS defense (allowlist + magic-byte sniff, SVG
+  excluded) intact on every upload.
+- **Identity**: `trustEmailAsStrongKey` defaults OFF with exactly one caller
+  (the self-asserted contact-share chip); no fuzzy/name matching exists
+  anywhere; ephemeral exclusion holds in BOTH directions.
+- **Queues**: stable jobId everywhere it matters, the "terminal job makes
+  add() a silent no-op" trap handled in all 5 places, lockDuration ≥ max
+  handler time boot-asserted, per-team + global concurrency caps, no worker
+  enqueues itself.
+- **Sweepers**: 22 of 30 mutexed with the 8 exemptions individually
+  justified; all 30 unref'd + staggered; all but one stop on a closed pool.
+- **Calls**: dedup unique key, terminal-state CAS genuinely idempotent under
+  redelivery, permission is a provider READ not a local ledger, SIP never
+  enabled, recording correctly unbuilt.
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
