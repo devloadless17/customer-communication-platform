@@ -7,6 +7,8 @@ import {
 } from "@ccp/shared/inbox-views/types";
 import { TAG_COLORS } from "@ccp/shared/types";
 
+import { zLiveChannel } from "../common/channel-schema";
+
 /**
  * Validation for saved inbox views.
  *
@@ -40,7 +42,16 @@ export const InboxViewFiltersSchema = z
     // Channel values are validated against the Prisma enum by the DB on read;
     // here we only bound the list. Kept as a plain string array so adding a
     // channel to the enum doesn't need a matching edit in this file.
-    channels: z.array(z.string().min(1)).max(20).optional(),
+    // Validated against the LIVE channel set — `zLiveChannel` exists for
+    // exactly this and its docblock says "use it for every request-level
+    // channel filter". As a bare string this stored anything, and one bogus
+    // value permanently 500'd `GET /api/inbox-views/counts` for its owner —
+    // or, saved SHARED by an admin or a write:catalog key, for EVERY member
+    // of the workspace (counts runs Promise.all over all visible views, so
+    // one rejection kills every sidebar badge). Recoverable only by deleting
+    // the view. Adding a channel to LIVE_CHANNELS keeps working with zero
+    // edits here, which was the reason the free-text shape was chosen.
+    channels: z.array(zLiveChannel()).max(20).optional(),
     // Which ACCOUNT (WhatsApp number / Page / handle) — ChannelConnection ids.
     // Bounded generously: a workspace's account count is small, but the cap
     // exists for the same reason every other list here has one.

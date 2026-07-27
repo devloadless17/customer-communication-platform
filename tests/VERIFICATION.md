@@ -74,7 +74,7 @@ table/queue/cache/socket-room that references the dying entity.
 | external /v1 API | 1 | R (adversarial, all 111 routes) + E (180 e2e) | ✅ 2026-07-27 |
 | contacts (+import/export/transfer) | 2 | R (adversarial) | ✅ 2026-07-27 — bulk-tag storm a2b6de83, reaper pagination 73317ffd, unknownStages + resume marker 112ac0c3, export directory filter f4f4318d (errorRows heap = ACCEPTED: bounded by the 50MB upload itself, only reachable on a fully-mismapped file) |
 | customers / identity | 2 | R (adversarial) + N (visibility spec) | ✅ 2026-07-27 — profile visibility 3e137336, tombstone reap + §18 scoping f4f4318d, drift-sweeper starvation 73317ffd |
-| inbox-views | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — THE and-not-spread invariant VERIFIED HELD across all 3 callers; 1 open (unvalidated `channels`) |
+| inbox-views | 2 | R (adversarial) | ✅ 2026-07-27 — and-not-spread invariant HELD across all 3 callers; `channels` now validated via zLiveChannel (was free-text: one bogus value permanently 500'd counts for every member seeing a shared view) |
 | channels / multi-account | 2 | R (adversarial) | ✅ 2026-07-27 — batched-webhook attribution fixed by the CONCURRENT SESSION (3ff49296); viable-default promotion f4f4318d; phone-claim check-then-act = ACCEPTED (needs a cross-workspace unique, migration-bearing, recorded for the next schema change) |
 | outbound-webhooks (delivery/retry) | 2 | R (adversarial) | ✅ 2026-07-27 — SSRF/HMAC/dedupe VERIFIED HELD; unbounded retention DELETE FIXED 29deb9c8 |
 | calls (WhatsApp calling) | 2 | R (adversarial) | ✅ 2026-07-27 — post-CAS throw 29deb9c8; live-vs-history scoping split DOCUMENTED 112ac0c3 (deliberate, was only noted on endCall) |
