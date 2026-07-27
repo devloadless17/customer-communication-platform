@@ -40,14 +40,15 @@ import { ProviderNotConfiguredError } from "./config";
  *     2,000) and upgrades land within ~6h instead of 24h.
  *
  *  2. **Limits are per business PORTFOLIO, shared by every phone number in it** —
- *     not per number, as they were before 2025-10-07. We store the cap on the
- *     per-team `ChannelConnection`, which is correct for the one-number-per-team
- *     shape we actually have, but it means the budget gate is OPTIMISTIC for a
- *     customer running several numbers inside one portfolio: their real
- *     remaining allowance is the portfolio's, and our per-number view can't see
- *     the other numbers' spend. Meta still enforces the true limit, so the
- *     failure mode is a rejected send, not an overcharge. Closing this needs the
- *     `whatsapp_business_manager_messaging_limit` field at portfolio scope.
+ *     not per number, as they were before 2025-10-07. We model exactly that:
+ *     the tier/cap live on `WhatsappPortfolio` (one row per Meta portfolio,
+ *     shared by every `ChannelConnection` under it), populated by
+ *     `linkWhatsappPortfolio` reading `owner_business_info` +
+ *     `whatsapp_business_manager_messaging_limit` at portfolio scope. The gate
+ *     remains OPTIMISTIC in one documented way: the usage counter only sees
+ *     BROADCAST sends (see `recentUniqueRecipientIds`), so workflow//v1/direct
+ *     template sends spend Meta budget uncounted. Meta still enforces the true
+ *     limit, so the failure mode is a rejected send, not an overcharge.
  *
  *  3. The **`FLAGGED` phone-number quality state no longer exists**, and a
  *     quality drop no longer downgrades a messaging limit. Quality still matters
@@ -757,11 +758,20 @@ export async function linkWhatsappPortfolio(
  * team that connected before the webhooks were subscribed still gets a snapshot.
  * Best-effort — throws are swallowed by callers; a not-configured team is a
  * silent no-op. Idempotent.
+ *
+ * `channelConnectionId` names WHICH number to poll. Every production caller
+ * passes it: with several active numbers, omitting it makes `getMetaSendConfig`
+ * refuse (`account-unresolved`) and this function silently no-ops — which is
+ * the correct fail-safe, but it means "poll the workspace" is only meaningful
+ * for single-account workspaces.
  */
-export async function fetchWhatsappHealthFromGraph(workspaceId: string): Promise<void> {
+export async function fetchWhatsappHealthFromGraph(
+  workspaceId: string,
+  channelConnectionId?: string | null,
+): Promise<void> {
   let config;
   try {
-    config = await getMetaSendConfig(workspaceId);
+    config = await getMetaSendConfig(workspaceId, channelConnectionId);
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) return; // not connected — nothing to poll
     throw err;
@@ -790,10 +800,14 @@ export async function fetchWhatsappHealthFromGraph(workspaceId: string): Promise
   // self-healing path last minted. Best-effort: a token without
   // `business_management` returns null and we fall through to the old
   // behaviour, which is correct for a single-portfolio workspace.
-  const connection = await db.channelConnection.findFirst({
-    where: { workspaceId, channel: "whatsapp", externalAccountId: config.phoneNumberId },
-    select: { id: true },
-  });
+  // When the caller named the connection, `getMetaSendConfig` already proved it
+  // belongs to this workspace+channel and is active — no re-lookup needed.
+  const connection = channelConnectionId
+    ? { id: channelConnectionId }
+    : await db.channelConnection.findFirst({
+        where: { workspaceId, channel: "whatsapp", externalAccountId: config.phoneNumberId },
+        select: { id: true },
+      });
   if (connection && config.wabaId) {
     await linkWhatsappPortfolio(
       workspaceId,

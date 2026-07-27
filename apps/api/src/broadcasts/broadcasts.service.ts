@@ -996,7 +996,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         // already upgraded) — hard-blocking on it would refuse a send Meta would
         // accept. Re-poll Graph ONCE (only on the block path, so it's rare) and
         // re-check before failing. A poll failure falls back to the stale block.
-        await fetchWhatsappHealthFromGraph(workspaceId).catch(() => undefined);
+        // Poll the SENDING account — the number this gate is measuring; a
+        // workspace-only poll resolves the default (or no-ops with 2+ numbers).
+        await fetchWhatsappHealthFromGraph(workspaceId, sendingAccountId).catch(
+          () => undefined,
+        );
         gate = await checkBroadcastEligibility(
           workspaceId,
           recipientRows.length,

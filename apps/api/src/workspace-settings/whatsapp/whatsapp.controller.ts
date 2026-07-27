@@ -87,8 +87,13 @@ export class WhatsappController {
   @Post("health/refresh")
   @HttpCode(200)
   @RateLimit({ perMinute: 6 })
-  async refreshHealth(@CurrentSession() session: ApiSession) {
-    return this.whatsapp.refreshHealth(session.workspaceId);
+  async refreshHealth(
+    @CurrentSession() session: ApiSession,
+    // `?accountId=` selects one of the workspace's numbers (same convention as
+    // profile/qr-codes below); omitted polls the default number.
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.refreshHealth(session.workspaceId, accountId || null);
   }
 
   /**

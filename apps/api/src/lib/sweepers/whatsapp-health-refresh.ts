@@ -38,7 +38,7 @@ export function startWhatsappHealthRefreshSweeper(): void {
   timer = setInterval(() => {
     if (inFlight) return;
     inFlight = true;
-    sweepOnce()
+    sweepWhatsappHealthOnce()
       .catch((err) => {
         // Pool already ended (dev hot-reload / graceful shutdown). The work
         // is simply over — stop the timer instead of logging a stack trace on
@@ -69,7 +69,9 @@ export function stopWhatsappHealthRefreshSweeper(): void {
   }
 }
 
-async function sweepOnce(): Promise<void> {
+// Exported for the per-account regression spec (same pattern as
+// sweepMessageFlagCountsOnce) — production entry is the interval above.
+export async function sweepWhatsappHealthOnce(): Promise<void> {
   const cutoff = new Date(Date.now() - STALE_MS);
   const stale = await db.channelConnection.findMany({
     where: {
@@ -82,7 +84,10 @@ async function sweepOnce(): Promise<void> {
     },
     // Oldest (and never-fetched) first so no connection is starved.
     orderBy: { messagingHealthUpdatedAt: { sort: "asc", nulls: "first" } },
-    select: { workspaceId: true },
+    // The id matters: polling by workspace alone resolves the DEFAULT account,
+    // so a stale NON-default number would be re-selected every tick and never
+    // actually refreshed (its own messagingHealthUpdatedAt never advances).
+    select: { id: true, workspaceId: true },
     take: MAX_PER_TICK,
   });
   if (stale.length === 0) return;
@@ -93,12 +98,12 @@ async function sweepOnce(): Promise<void> {
   const worker = async (): Promise<void> => {
     while (cursor < stale.length) {
       const idx = cursor++;
-      const workspaceId = stale[idx]!.workspaceId;
+      const { id, workspaceId } = stale[idx]!;
       try {
-        await fetchWhatsappHealthFromGraph(workspaceId);
+        await fetchWhatsappHealthFromGraph(workspaceId, id);
       } catch (err) {
         console.warn(
-          `[whatsapp-health-refresh-sweeper] fetch failed for team=${workspaceId}:`,
+          `[whatsapp-health-refresh-sweeper] fetch failed for team=${workspaceId} account=${id}:`,
           err instanceof Error ? err.message : err,
         );
       }

@@ -406,7 +406,7 @@ export class WhatsappService {
     // Keyed on the ACCOUNT (phone-number id), not just the channel: a workspace
     // may now hold several WhatsApp numbers, so re-pasting credentials for one
     // number must update THAT row rather than overwrite a sibling number.
-    await this.db.channelConnection.upsert({
+    const savedConnection = await this.db.channelConnection.upsert({
       where: {
         workspaceId_channel_externalAccountId: {
           workspaceId,
@@ -436,6 +436,7 @@ export class WhatsappService {
         needsReconnect: false,
         lastAuthErrorAt: null,
       },
+      select: { id: true },
     });
 
     // Clean up the verify-token placeholder getConfig pre-minted (keyed on
@@ -474,7 +475,10 @@ export class WhatsappService {
     // large template broadcast can be gated on real capacity immediately after
     // connecting (before the first quality webhook arrives). Fire-and-forget +
     // best-effort — a fetch failure just leaves the snapshot null (ungated).
-    void fetchWhatsappHealthFromGraph(workspaceId).catch((err) => {
+    // Poll THE ROW JUST SAVED: by workspace alone this resolved the default
+    // account, so connecting a second number polled the first one and the new
+    // number never got a snapshot (or a portfolio link) until the sweeper.
+    void fetchWhatsappHealthFromGraph(workspaceId, savedConnection.id).catch((err) => {
       this.logger.warn(
         `failed to fetch WhatsApp messaging health after settings save for team ${workspaceId}: ${
           err instanceof Error ? err.message : String(err)
@@ -515,18 +519,34 @@ export class WhatsappService {
    * than an error page — the stored numbers are still the truth we have, and
    * blanking them would be a worse answer than an honest "couldn't refresh".
    */
-  async refreshHealth(workspaceId: string): Promise<{
+  async refreshHealth(
+    workspaceId: string,
+    accountId?: string | null,
+  ): Promise<{
     refreshed: boolean;
     messagingHealthUpdatedAt: string | null;
   }> {
+    // Resolve WHICH number to poll up front. With several active numbers a
+    // workspace-only poll refuses (`account-unresolved`) and silently no-ops —
+    // the admin's button would "work" while refreshing nothing. No accountId
+    // means the default number (the panel's headline figures).
+    const target = await this.db.channelConnection.findFirst({
+      where: accountId
+        ? { id: accountId, workspaceId, channel: META_PROVIDER }
+        : { workspaceId, channel: META_PROVIDER, isDefault: true },
+      select: { id: true },
+    });
+    if (accountId && !target) {
+      throw new NotFoundException({ error: "account_not_found" });
+    }
     let refreshed = true;
     try {
-      await fetchWhatsappHealthFromGraph(workspaceId);
+      await fetchWhatsappHealthFromGraph(workspaceId, target?.id ?? null);
     } catch (err) {
       this.logger.warn(`whatsapp health refresh failed for ${workspaceId}: ${err}`);
       refreshed = false;
     }
-    const health = await getWhatsappHealth(workspaceId);
+    const health = await getWhatsappHealth(workspaceId, target?.id ?? null);
     return {
       refreshed,
       messagingHealthUpdatedAt: health?.messagingHealthUpdatedAt?.toISOString() ?? null,
