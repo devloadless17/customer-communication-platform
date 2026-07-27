@@ -273,12 +273,16 @@ export async function listTicketEvents(
   workspaceId: string,
   ticketId: string,
 ): Promise<TicketEvent[]> {
+  // Bounded: a years-old ticket bounced through many hands must not ship its
+  // entire history on every detail open. 500 covers any realistic timeline;
+  // newest-first fetch + reverse keeps the LATEST events when it doesn't.
   const rows = await db.ticketEvent.findMany({
     where: { workspaceId, ticketId },
-    orderBy: { createdAt: "asc" },
+    orderBy: { createdAt: "desc" },
+    take: 500,
     select: TICKET_EVENT_SELECT,
   });
-  return rows.map(mapTicketEvent);
+  return rows.reverse().map(mapTicketEvent);
 }
 
 /**

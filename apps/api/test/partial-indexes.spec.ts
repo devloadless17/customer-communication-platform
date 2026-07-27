@@ -43,6 +43,20 @@ afterAll(async () => {
 /** Every raw partial index the product depends on, and what it protects. */
 const REQUIRED_PARTIAL_INDEXES: { name: string; unique: boolean; protects: string }[] = [
   {
+    name: "Ticket_first_response_due_idx",
+    unique: false,
+    protects:
+      "the SLA sweeper's minutely first-response scan — without it the scan " +
+      "is a full Ticket table walk every 60s, with no failing test to say so",
+  },
+  {
+    name: "Ticket_resolution_due_idx",
+    unique: false,
+    protects:
+      "the SLA sweeper's minutely resolution scan — same full-table-walk " +
+      "regression as the first-response leg if a baseline regen drops it",
+  },
+  {
     name: "WorkflowRun_event_key_uniq",
     unique: true,
     protects:

@@ -14,6 +14,7 @@ import type {
   TicketSlaPolicy,
 } from "@ccp/shared/tickets/types";
 import {
+  assertCanViewConversation,
   conversationRelationWhere,
   isRestrictedViewer,
   type ConversationViewer,
@@ -169,7 +170,20 @@ export class TicketsService {
     workspaceId: string,
     actor: TicketActor,
     body: CreateTicketInput,
+    viewer?: ConversationViewer,
   ): Promise<{ ticket: Ticket; openTicketCount: number }> {
+    // Same boundary as get/update/addNote, applied to the CONVERSATION the
+    // ticket is being raised on: without it a visibility-restricted agent
+    // could probe conversation ids and, on a hit, receive the full ticket
+    // payload (contact name included) for a thread they must not see.
+    if (viewer && isRestrictedViewer(viewer)) {
+      try {
+        await assertCanViewConversation(this.db, viewer, body.conversationId);
+      } catch {
+        // 404, never 403 — same reasoning as assertVisible above.
+        throw new NotFoundException({ error: "conversation_not_found" });
+      }
+    }
     const outcome = await createTicket(this.db, {
       workspaceId,
       conversationId: body.conversationId,

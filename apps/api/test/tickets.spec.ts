@@ -484,6 +484,13 @@ describe("SLA", () => {
       priority: "urgent",
     });
     if (!opened.ok) throw new Error("setup failed");
+    // Make it GENUINELY overdue: markSlaBreached now re-checks the whole scan
+    // predicate in its CAS (still active, unpaused, unanswered, due date past),
+    // so a not-yet-late ticket correctly refuses the flag.
+    await db.ticket.update({
+      where: { id: opened.ticket.id },
+      data: { firstResponseDueAt: new Date(Date.now() - 60_000) },
+    });
 
     const first = await markSlaBreached(db, {
       workspaceId,

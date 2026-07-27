@@ -298,12 +298,34 @@ export async function routeMessageToTicket(
       where: { id: conversation.activeTicketId, workspaceId: args.workspaceId },
       select: { id: true, status: true },
     });
-    // The pointer is only trusted while it points at live work. A ticket that
-    // was solved leaves the pointer in place deliberately — that is what makes
-    // the reopen window cheap to evaluate.
+    // The pointer is only trusted while it points at live work.
     if (active && isTicketActive(active.status)) {
       return { ticketId: active.id, opened: null };
     }
+  }
+
+  // Pointer null or stale — but the ROUTING RULE is "an active ticket on the
+  // thread → attach" (docs/ticketing.md §2 rule 1), and the pointer is only a
+  // hot-path cache of it. With two tickets raised on one thread, solving the
+  // pointer-holder left the OTHER active ticket invisible here: the fall-
+  // through went straight to the reopen query and resurrected the solved one
+  // while live work sat unroutable until its SLA breached. Scan, attach to the
+  // newest active, and repair the pointer.
+  const fallbackActive = await tx.ticket.findFirst({
+    where: {
+      workspaceId: args.workspaceId,
+      conversationId: conversation.id,
+      status: { in: TICKET_ACTIVE_STATUSES as TicketStatus[] },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { id: true },
+  });
+  if (fallbackActive) {
+    await tx.conversation.update({
+      where: { id: conversation.id },
+      data: { activeTicketId: fallbackActive.id },
+    });
+    return { ticketId: fallbackActive.id, opened: null };
   }
 
   const now = args.nowMs ?? Date.now();
@@ -375,6 +397,14 @@ export interface UpdateTicketArgs extends EventGates {
   priority?: TicketPriority;
   /** `null` unassigns. Omitted leaves the assignee alone. */
   assignedUserId?: string | null;
+  /**
+   * Only land the write if the ticket is UNASSIGNED at write time — in the
+   * CAS where, not a pre-read. Set by `fillActiveTicketAssignee`: fill-empty-
+   * only is §18's "automation never overrides a human" applied to the ticket,
+   * and a pre-read alone left a window in which a human handing the ticket to
+   * a specialist was silently overwritten by the thread-owner fill.
+   */
+  onlyIfUnassigned?: boolean;
   /**
    * Hand the ticket to another TEAM; `null` takes it out of every queue.
    * Omitted leaves the team alone.
@@ -515,15 +545,21 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       data.slaPausedAt = new Date(now);
     }
 
-    if (policyChanged) {
+    if (policyChanged && isTicketActive(finalStatus)) {
       // A priority change is a NEW commitment measured from now — that is what
       // escalating a ticket means. The already-banked pause time stays banked.
+      // Gated on an active final status: recomputing deadlines "from now" on a
+      // solved/closed ticket would arm the sweeper against finished work.
       const schedule = await loadSchedule(tx, args.workspaceId);
       const recomputed = computeDueDates(now, policy, schedule);
       data.slaPolicyId = policy?.id ?? null;
-      // Preserve the resume-shift we may have just applied above.
       data.firstResponseDueAt = recomputed.firstResponseDueAt;
       data.resolutionDueAt = recomputed.resolutionDueAt;
+      // If the ticket is currently paused (escalated while on_hold), the new
+      // commitment starts NOW — re-anchor the pause marker, or the eventual
+      // resume would shift the fresh deadlines by hold time that predates the
+      // escalation (deadlines pushed out by the entire pre-escalation park).
+      if (wasPaused && shouldPause) data.slaPausedAt = new Date(now);
     }
 
     // ---- Lifecycle ----
@@ -533,6 +569,10 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
         data.resolvedAt = new Date(now);
         data.lastSolvedAt = new Date(now);
         data.resolvedById = args.actor.userId ?? null;
+        // closed → solved is a correction, not a second life: without this the
+        // ticket reported as BOTH closed and solved (closedAt kept) while
+        // becoming ingest-reopenable via the fresh lastSolvedAt.
+        if (existing.status === "closed") data.closedAt = null;
       } else if (nextStatus === "closed") {
         data.closedAt = new Date(now);
         // Closing straight from an active state is still a resolution — without
@@ -549,6 +589,15 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
         data.closedAt = null;
         data.resolvedById = null;
         data.reopenCount = { increment: 1 };
+        // A reopen is a FRESH commitment measured from now. The stored due
+        // dates belong to the previous life: a ticket solved on time and
+        // reopened past its old `resolutionDueAt` was instantly (and
+        // permanently) breach-flagged for a promise that was kept. Breach
+        // flags that genuinely fired before stay set — history, not state.
+        const schedule = await loadSchedule(tx, args.workspaceId);
+        const recomputed = computeDueDates(now, policy, schedule);
+        data.firstResponseDueAt = recomputed.firstResponseDueAt;
+        data.resolutionDueAt = recomputed.resolutionDueAt;
       }
     }
 
@@ -558,9 +607,19 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
     // the CAS has proven we own the transition.
 
     // CAS on the status we read: the write only lands if nobody moved the
-    // lifecycle in between, so the counter below can't drift.
+    // lifecycle in between, so the counter below can't drift. When the caller
+    // supplied `expectedVersion`, it goes IN the where too — the JS pre-check
+    // above is only a fast path, and without the version here two concurrent
+    // non-status writes (assign vs re-prioritize, or two customFields edits —
+    // a whole-map replace) both passed the pre-check and the last writer
+    // silently erased the first, defeating the documented 409 contract.
     const written = await tx.ticket.updateMany({
-      where: { id: existing.id, status: existing.status },
+      where: {
+        id: existing.id,
+        status: existing.status,
+        ...(args.expectedVersion !== undefined ? { version: args.expectedVersion } : {}),
+        ...(args.onlyIfUnassigned ? { assignedUserId: null } : {}),
+      },
       data: data as Prisma.TicketUncheckedUpdateManyInput,
     });
     if (written.count === 0) {
@@ -637,6 +696,39 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
 
   if (result.conflict) return { ok: false, reason: "version_conflict" };
   kickOutbox();
+
+  // `Workspace.ticketCloseConversationOnLastSolved`: solving the LAST active
+  // ticket closes the thread. Detached, best-effort, and AFTER the ticket tx
+  // (a close failure must not fail the solve). Applies to every solve path —
+  // agent, workflow set_ticket_status, /v1 — because this is the one write
+  // path they all share. Dynamic import: conversations/mutations already
+  // imports this module (fillActiveTicketAssignee), so a static back-import
+  // would be a cycle.
+  if (result.action === "solved" && result.openTicketCount === 0) {
+    void (async () => {
+      const ws = await sharedDb.workspace.findUnique({
+        where: { id: args.workspaceId },
+        select: { ticketCloseConversationOnLastSolved: true },
+      });
+      if (!ws?.ticketCloseConversationOnLastSolved) return;
+      const { setConversationStatus } = await import("@/lib/conversations/mutations");
+      const { publish } = await import("@/lib/events/bus");
+      await setConversationStatus({
+        db: sharedDb,
+        publish,
+        workspaceId: args.workspaceId,
+        conversationId: result.ticket.conversationId,
+        status: "closed",
+        changedByUserId: args.actor.userId ?? null,
+      });
+    })().catch((err) => {
+      console.warn(
+        `[tickets] close-on-last-solved failed for conversation ${result.ticket.conversationId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    });
+  }
+
   return {
     ok: true,
     ticket: result.ticket,
@@ -663,6 +755,19 @@ async function reopenTicketInTx(
     nowMs: number;
   },
 ): Promise<Extract<TicketOutcome, { ok: true }> | null> {
+  // Fresh SLA commitment for the reopened life — same reasoning as the
+  // updateTicket reopen branch: the stored due dates belong to the previous
+  // life, and a reopen past the old `resolutionDueAt` instantly breach-flagged
+  // a promise that was kept.
+  const row = await tx.ticket.findFirst({
+    where: { id: args.ticketId, workspaceId: args.workspaceId, status: "solved" },
+    select: { priority: true },
+  });
+  if (!row) return null;
+  const policy = await loadPolicyForPriority(tx, args.workspaceId, row.priority);
+  const schedule = await loadSchedule(tx, args.workspaceId);
+  const recomputed = computeDueDates(args.nowMs, policy, schedule);
+
   const written = await tx.ticket.updateMany({
     where: { id: args.ticketId, workspaceId: args.workspaceId, status: "solved" },
     data: {
@@ -671,6 +776,8 @@ async function reopenTicketInTx(
       resolvedById: null,
       reopenCount: { increment: 1 },
       version: { increment: 1 },
+      firstResponseDueAt: recomputed.firstResponseDueAt,
+      resolutionDueAt: recomputed.resolutionDueAt,
     },
   });
   // Lost the race — another inbound reopened it a moment earlier. Not an error:
@@ -722,11 +829,28 @@ export async function markSlaBreached(
   },
 ): Promise<TicketOutcome> {
   const result = await db.$transaction(async (tx) => {
+    // The CAS repeats the sweeper's FULL scan predicate, not just the flag:
+    // between the scan and this write (a per-row loop over up to 200 rows) an
+    // agent can reply, solve, or pause the ticket — and a flag-only CAS still
+    // stamped a permanent breach + partner webhook for a promise that was
+    // kept. `now` is re-read here so the due date must STILL be past.
+    const now = new Date();
+    const stillLate =
+      args.leg === "first_response"
+        ? {
+            firstResponseBreached: false,
+            firstResponseAt: null,
+            firstResponseDueAt: { lt: now },
+          }
+        : { resolutionBreached: false, resolutionDueAt: { lt: now } };
     const written = await tx.ticket.updateMany({
-      where:
-        args.leg === "first_response"
-          ? { id: args.ticketId, workspaceId: args.workspaceId, firstResponseBreached: false }
-          : { id: args.ticketId, workspaceId: args.workspaceId, resolutionBreached: false },
+      where: {
+        id: args.ticketId,
+        workspaceId: args.workspaceId,
+        status: { in: TICKET_ACTIVE_STATUSES as TicketStatus[] },
+        slaPausedAt: null,
+        ...stillLate,
+      },
       data:
         args.leg === "first_response"
           ? { firstResponseBreached: true }
@@ -823,9 +947,13 @@ export async function deleteTicket(
   await db.$transaction(async (tx) => {
     // Snapshot BEFORE the delete — the `deleted` frame carries it so subscribers
     // know which card to drop without re-reading a row that's about to vanish.
+    // The snapshot is also the counter authority: deciding the decrement from
+    // the PRE-transaction read let a concurrent solve double-decrement
+    // `openTicketCount` (solve −1, delete −1 on the stale "active"), and no
+    // drift sweeper exists for this counter.
     const snapshot = await readTicket(tx, existing.id);
 
-    const openTicketCount = isTicketActive(existing.status)
+    const openTicketCount = isTicketActive(snapshot.status)
       ? await bumpOpenTicketCount(tx, existing.conversationId, -1)
       : await bumpOpenTicketCount(tx, existing.conversationId, 0);
 
@@ -1233,6 +1361,10 @@ export async function fillActiveTicketAssignee(
     ticketId: ticket.id,
     actor: {},
     assignedUserId: userId,
+    // Race-proof fill-empty-only: the null-assignee read above is only a fast
+    // path — this puts the emptiness check in the write's own CAS, so a human
+    // assigning the ticket mid-flight wins and the fill becomes a no-op (§18).
+    onlyIfUnassigned: true,
     // Loop safety: this write is a CONSEQUENCE of an assignment that already
     // published its own events. Letting it chain-trigger workflows or echo a
     // partner webhook would announce one human action twice (§9).

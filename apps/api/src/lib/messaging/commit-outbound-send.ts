@@ -81,7 +81,14 @@ export async function commitOutboundSend(args: {
         where: { id: args.event.message.id },
         data: { ticketId: routed.ticketId },
       });
-      await markFirstResponse(tx, args.event.workspaceId, routed.ticketId, effectiveBump);
+      // First response means someone RESPONDED — an agent, or a partner acting
+      // through /v1. A workflow's auto-acknowledgment (senderUserId AND
+      // senderApiKeyId both null) must not stamp it: a workspace with an
+      // auto-reply workflow would never measure — or breach — human first
+      // response on any ticket.
+      if (args.event.senderUserId || args.event.senderApiKeyId) {
+        await markFirstResponse(tx, args.event.workspaceId, routed.ticketId, effectiveBump);
+      }
     }
 
     await publishInTx(tx, {

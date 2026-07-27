@@ -938,7 +938,15 @@ export class ExternalV1Controller {
     @Query(zQuery(ListTicketsQuerySchema)) query: ListTicketsQuery,
   ) {
     // No viewer → no conversation-visibility restriction. An API key is
-    // workspace-scoped by construction and has no agent identity to narrow to.
+    // workspace-scoped by construction and has no agent identity to narrow to
+    // — which also means `assignee=me` is unanswerable: it used to resolve to
+    // an empty viewer id and silently match nothing. Reject it instead.
+    if (query.assignee === "me") {
+      throw new BadRequestException({
+        error: "assignee_me_requires_session",
+        detail: "An API key has no agent identity — pass an explicit user id or 'none'.",
+      });
+    }
     return this.tickets.list(auth.workspaceId, "", query);
   }
 

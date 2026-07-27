@@ -75,7 +75,6 @@ export interface RemoveMemberOptions {
  *  request. The remainder stays visible in the inbox and is picked up by
  *  manual triage or the offline sweeper. */
 const MAX_CONVERSATIONS = 500;
-const MAX_TICKETS = 500;
 
 /**
  * The Prisma surface this needs. Taken as an ARGUMENT rather than imported as
@@ -176,15 +175,35 @@ async function rehomeTickets(
   workspaceId: string,
   userId: string,
 ): Promise<number> {
-  const { count } = await db.ticket.updateMany({
+  // Bulk write, but with the domain bookkeeping the boards depend on: the
+  // version bump keeps open editors' CAS honest, and the TicketEvent rows keep
+  // the audit timeline from silently losing the unassignment. A per-ticket
+  // `updateTicket` loop (with its per-ticket realtime event) is deliberately
+  // NOT used — member removal is rare and boards refresh on it, and 500
+  // individual `ticket.changed` publishes is the storm §9 warns about.
+  const ids = await db.ticket.findMany({
     where: {
       workspaceId,
       assignedUserId: userId,
       status: { notIn: ["solved", "closed"] },
     },
-    data: { assignedUserId: null },
+    select: { id: true },
   });
-  return Math.min(count, MAX_TICKETS);
+  if (ids.length === 0) return 0;
+  await db.ticket.updateMany({
+    where: { id: { in: ids.map((t) => t.id) }, workspaceId },
+    data: { assignedUserId: null, version: { increment: 1 } },
+  });
+  await db.ticketEvent.createMany({
+    data: ids.map((t) => ({
+      workspaceId,
+      ticketId: t.id,
+      kind: "unassigned" as const,
+      before: { assignedUserId: userId },
+      after: { assignedUserId: null },
+    })),
+  });
+  return ids.length;
 }
 
 /** Drop every grant + pointer this workspace holds for the user. */

@@ -71,7 +71,7 @@ export class TicketsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateTicketSchema)) body: CreateTicketInput,
   ) {
-    return this.tickets.create(session.workspaceId, { userId: session.userId }, body);
+    return this.tickets.create(session.workspaceId, { userId: session.userId }, body, session);
   }
 
   /**
