@@ -12,6 +12,10 @@ import { toContactWire } from "@/lib/queries/_shared";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import { EventBus } from "../events/event-bus.module";
+import {
+  visibilityWhere,
+  type ConversationViewer,
+} from "@/lib/conversations/visibility";
 import { DbService } from "../db/db.service";
 
 /**
@@ -131,7 +135,25 @@ export class CustomersService {
     }
   }
 
-  private async loadProfile(workspaceId: string, customerId: string): Promise<CustomerProfile> {
+  private async loadProfile(
+    workspaceId: string,
+    customerId: string,
+    /**
+     * The agent asking. A RESTRICTED viewer must not learn anything about a
+     * thread they can't open — and this method returns
+     * `lastMessagePreview`, `unreadCount` and `conversationId` for EVERY
+     * contact linked to the person.
+     *
+     * That made it the one hole in an otherwise complete boundary: the
+     * conversation list, in-thread search, global search and the contacts
+     * list all apply the visibility clause (and the contacts list
+     * deliberately returns no preview at all). A restricted agent could list
+     * contacts — which is workspace-wide by design — and then read the last
+     * message of every thread in the workspace, one `by-contact` call at a
+     * time.
+     */
+    viewer?: ConversationViewer,
+  ): Promise<CustomerProfile> {
     const customer = await this.db.customer.findFirst({
       where: { id: customerId, workspaceId },
       select: {
@@ -154,6 +176,10 @@ export class CustomersService {
             username: true,
             lastInboundAt: true,
             conversations: {
+              // Restricted agents see only their own threads here. An
+              // unrestricted viewer (and an internal caller passing none)
+              // gets `{}`, i.e. no change.
+              ...(viewer ? { where: visibilityWhere(viewer) } : {}),
               select: {
                 id: true,
                 lastMessagePreview: true,
@@ -273,8 +299,12 @@ export class CustomersService {
     return this.loadProfile(workspaceId, customerId);
   }
 
-  getProfile(workspaceId: string, customerId: string): Promise<CustomerProfile> {
-    return this.loadProfile(workspaceId, customerId);
+  getProfile(
+    workspaceId: string,
+    customerId: string,
+    viewer?: ConversationViewer,
+  ): Promise<CustomerProfile> {
+    return this.loadProfile(workspaceId, customerId, viewer);
   }
 
   /**
@@ -286,6 +316,7 @@ export class CustomersService {
   async getProfileByContact(
     workspaceId: string,
     contactId: string,
+    viewer?: ConversationViewer,
   ): Promise<CustomerProfile | null> {
     const contact = await this.db.contact.findFirst({
       where: { id: contactId, workspaceId, deletedAt: null },
@@ -293,7 +324,7 @@ export class CustomersService {
     });
     if (!contact) throw new NotFoundException({ error: "contact_not_found" });
     if (!contact.customerId) return null;
-    return this.loadProfile(workspaceId, contact.customerId);
+    return this.loadProfile(workspaceId, contact.customerId, viewer);
   }
 
   /**

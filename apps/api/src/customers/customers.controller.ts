@@ -35,7 +35,13 @@ export class CustomersController {
     @CurrentSession() session: ApiSession,
     @Param("contactId") contactId: string,
   ) {
-    const customer = await this.customers.getProfileByContact(session.workspaceId, contactId);
+    // `session` is the viewer — a restricted agent must not read the last
+    // message of a thread they can't open (see loadProfile).
+    const customer = await this.customers.getProfileByContact(
+      session.workspaceId,
+      contactId,
+      session,
+    );
     return { customer };
   }
 
@@ -54,7 +60,7 @@ export class CustomersController {
 
   @Get(":id")
   async get(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    const customer = await this.customers.getProfile(session.workspaceId, id);
+    const customer = await this.customers.getProfile(session.workspaceId, id, session);
     return { customer };
   }
 

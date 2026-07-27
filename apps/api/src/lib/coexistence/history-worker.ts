@@ -13,7 +13,7 @@ import type IORedis from "ioredis";
 
 import { recordJobFailure } from "@/common/job-failure-metrics";
 import { getMetaProvider } from "@/lib/providers";
-import { ingestHistoricalMessage } from "@/lib/providers/ingest";
+import { ingestHistoricalMessage, isTransientDbError } from "@/lib/providers/ingest";
 import { createWorkerConnection } from "@/lib/workflows/queue";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
 
@@ -68,7 +68,20 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
       }
 
       let landed = 0;
+      let poisoned = 0;
       for (const evt of events) {
+        // PER-EVENT ISOLATION, like the live ingest path (`runOne`).
+        //
+        // Without it, one throw rejected the whole job: BullMQ replayed the
+        // chunk from index 0, re-hit the same event, burned all 5 attempts and
+        // dead-lettered — so EVERY message after the poison event in that
+        // chunk was lost permanently. This is history the customer can never
+        // re-fetch (the controller's own comment says exactly that), which
+        // makes "skip the one bad event" strictly better than "lose the tail".
+        //
+        // Transient DB errors are the exception: those SHOULD fail the job so
+        // BullMQ retries the chunk, exactly as the live path re-throws them.
+        try {
         // The history parser only ever emits inbound messages + business echoes.
         // Coexistence history is WhatsApp-only, so contactPhone is always set;
         // the guard just satisfies the now-optional identity type.
@@ -98,6 +111,25 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
           });
           landed++;
         }
+        } catch (err) {
+          if (isTransientDbError(err)) throw err;
+          poisoned++;
+          console.warn(
+            JSON.stringify({
+              event: "coexistence.history_event_skipped",
+              severity: "warn",
+              // `externalId` isn't on every NormalizedEvent variant; the two
+              // this loop handles both carry it.
+              externalId: "externalId" in evt ? evt.externalId : null,
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        }
+      }
+      if (poisoned > 0) {
+        console.warn(
+          `[coexistence-history] skipped ${poisoned} unprocessable event(s); ${landed} landed`,
+        );
       }
       console.log(
         JSON.stringify({

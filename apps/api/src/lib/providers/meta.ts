@@ -1886,7 +1886,40 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                 if (!content) continue;
                 const ts = tsFromMeta(m.timestamp);
                 const fromDigits = digitsOnly(m.from);
-                const isBusinessSent = !!businessNumber && fromDigits === businessNumber;
+                // DIRECTION, and it must not fail open.
+                //
+                // `metadata.display_phone_number` is OPTIONAL in the payload
+                // type. When it was absent, `isBusinessSent` was false for
+                // every message in the backfill — so the owner's own replies
+                // were ingested as INBOUND. That is not merely a cosmetic
+                // mislabel: `direction: "in"` stamps `Contact.lastInboundAt`,
+                // which OPENS the 24h customer-service window in the UI when
+                // it is actually closed. The composer then accepts a
+                // free-form reply that Meta rejects.
+                //
+                // The thread id IS the customer's number, so direction is
+                // inferable without the metadata at all: anything not from
+                // the customer came from us. Use the business number when we
+                // have it (most precise), else fall back to the thread.
+                const isBusinessSent = businessNumber
+                  ? fromDigits === businessNumber
+                  : threadPhone
+                    ? fromDigits !== threadPhone
+                    : null;
+                if (isBusinessSent === null) {
+                  // Neither signal available — we genuinely cannot tell who
+                  // sent this. DROP it rather than guess: a wrong guess
+                  // corrupts the send window, while a missing history message
+                  // is merely missing.
+                  console.warn(
+                    JSON.stringify({
+                      event: "coexistence.history_direction_unknown",
+                      severity: "warn",
+                      externalId,
+                    }),
+                  );
+                  continue;
+                }
                 // Customer number: prefer the thread id; else the non-business
                 // endpoint of the message (`to` for echoes, `from` for inbound).
                 const contactPhone =
