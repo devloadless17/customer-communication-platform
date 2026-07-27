@@ -76,6 +76,21 @@ export function WhatsappSettings({
   // SUCCEEDED — these are the "will bite later" list, and the admin at this
   // form is the one person who can act on them.
   const [warnings, setWarnings] = useState<string[]>([]);
+  // Which number the per-number panels (health / profile / QR) describe.
+  // Null = untouched → the default account. Only meaningful with >1 number;
+  // a single-number workspace keeps the legacy "no accountId" requests.
+  const [settingsAccountId, setSettingsAccountId] = useState<string | null>(null);
+  const defaultAccountId =
+    accounts.find((a) => a.isDefault)?.id ?? accounts[0]?.id ?? null;
+  const activeSettingsAccountId =
+    accounts.length > 1
+      ? // A stale selection (number since removed) falls back to the default.
+        (accounts.some((a) => a.id === settingsAccountId)
+          ? settingsAccountId
+          : defaultAccountId)
+      : null;
+  const activeSettingsAccount =
+    accounts.find((a) => a.id === activeSettingsAccountId) ?? null;
   // Open the form by default when there are no creds yet, OR when the stored
   // creds couldn't be decrypted (key rotated / different env), OR when
   // ?expand=advanced sent us here from the templates page.
@@ -270,16 +285,72 @@ export function WhatsappSettings({
         />
       )}
 
+      {/* Per-number panel scope. Health, profile and QR codes all belong to ONE
+          number; with several connected, these chips pick which one the three
+          panels below describe. Hidden for the single-number workspace (the
+          only account is the scope). */}
+      {accounts.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+            Showing
+          </span>
+          {accounts.map((a) => {
+            const active = a.id === (settingsAccountId ?? defaultAccountId);
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => setSettingsAccountId(a.id)}
+                className={
+                  "rounded-full border px-3 py-1 text-xs transition " +
+                  (active
+                    ? "border-primary bg-primary/10 font-medium text-foreground"
+                    : "border-border text-muted-foreground hover:text-foreground")
+                }
+              >
+                {a.label ?? a.displayPhoneNumber ?? a.externalAccountId}
+                {a.isDefault ? " · default" : ""}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* Only meaningful once connected — an unconnected number has no tier,
-          no quality rating and no budget to report. */}
-      <MessagingHealthPanel canManage={canManage} accountCount={accounts.length} />
+          no quality rating and no budget to report. `key` remounts the panels
+          on switch so no stale figures linger while the next account loads. */}
+      <MessagingHealthPanel
+        key={`health-${activeSettingsAccountId ?? "default"}`}
+        canManage={canManage}
+        accountCount={accounts.length}
+        accountId={activeSettingsAccountId}
+        accountName={
+          activeSettingsAccount
+            ? activeSettingsAccount.label ??
+              activeSettingsAccount.displayPhoneNumber ??
+              activeSettingsAccount.externalAccountId
+            : null
+        }
+      />
 
       {/* The number's public profile. Only shown once connected — there is no
           profile to read before Meta knows the number. */}
-      {current.connected && <BusinessProfilePanel canManage={canManage} />}
+      {current.connected && (
+        <BusinessProfilePanel
+          key={`profile-${activeSettingsAccountId ?? "default"}`}
+          canManage={canManage}
+          accountId={activeSettingsAccountId ?? undefined}
+        />
+      )}
 
       {/* Also connected-only: the codes live on the phone number. */}
-      {current.connected && <QrCodesPanel canManage={canManage} />}
+      {current.connected && (
+        <QrCodesPanel
+          key={`qr-${activeSettingsAccountId ?? "default"}`}
+          canManage={canManage}
+          accountId={activeSettingsAccountId ?? undefined}
+        />
+      )}
 
       {canManage && !showForm && (
         <div className="flex gap-2">

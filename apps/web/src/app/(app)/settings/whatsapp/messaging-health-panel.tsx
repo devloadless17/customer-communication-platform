@@ -54,25 +54,32 @@ const THROUGHPUT_LABEL: Record<string, string> = {
 export function MessagingHealthPanel({
   canManage,
   accountCount = 1,
+  accountId = null,
+  accountName = null,
 }: {
   canManage: boolean;
   /**
-   * How many WhatsApp numbers this workspace has. Purely a HONESTY input: this
-   * panel reads `/api/broadcasts/messaging-health`, which describes the channel
-   * DEFAULT account. With one number that is the whole truth; with several it is
-   * one number's quality and throughput presented as if it were the channel's.
-   * Rather than silently mislead, say which account these figures describe and
-   * point at the per-account breakdown above.
+   * How many WhatsApp numbers this workspace has. With one number the default
+   * figures are the whole truth; with several, the subtitle names WHICH
+   * account the figures describe (the switcher above drives `accountId`).
    */
   accountCount?: number;
+  /** The account these figures describe; null = the channel default. */
+  accountId?: string | null;
+  /** Its display name, for the subtitle. */
+  accountName?: string | null;
 }) {
   const [health, setHealth] = useState<Health | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, startTransition] = useTransition();
 
+  const accountQuery = accountId
+    ? `?accountId=${encodeURIComponent(accountId)}`
+    : "";
+
   const load = useCallback(async () => {
     try {
-      const res = await apiFetch("/api/broadcasts/messaging-health");
+      const res = await apiFetch(`/api/broadcasts/messaging-health${accountQuery}`);
       if (!res.ok) return;
       setHealth((await res.json()) as Health);
     } catch {
@@ -81,7 +88,7 @@ export function MessagingHealthPanel({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [accountQuery]);
 
   useEffect(() => {
     void load();
@@ -89,7 +96,10 @@ export function MessagingHealthPanel({
 
   function resync() {
     startTransition(async () => {
-      const res = await apiFetch("/api/workspace/whatsapp/health/refresh", { method: "POST" });
+      const res = await apiFetch(
+        `/api/workspace/whatsapp/health/refresh${accountQuery}`,
+        { method: "POST" },
+      );
       if (!res.ok) {
         toast.error(
           res.status === 429
@@ -128,9 +138,11 @@ export function MessagingHealthPanel({
           <p className="mt-0.5 text-xs text-muted-foreground">
             {accountCount > 1 ? (
               <>
-                What Meta allows your <strong>default</strong> number to send. Quality and
-                throughput are per number — see the list above for the others. The 24-hour
-                budget below is shared across the whole business portfolio.
+                What Meta allows{" "}
+                <strong>{accountName ?? "your default number"}</strong> to send.
+                Quality and throughput are per number — switch above for the
+                others. The 24-hour budget below is shared across the whole
+                business portfolio.
               </>
             ) : (
               <>
