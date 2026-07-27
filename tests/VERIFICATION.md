@@ -690,11 +690,86 @@ its own pass — those sites currently show a bare key where a sentence exists.
    names its DIRECTORY declares (caught a 5-day live outage).
 6. `check-error-keys` — API error keys stay snake_case identifiers.
 
+### B-M4 seam traces (2026-07-27) — 19 findings, 2 HIGH fixed (4e4925ec)
+
+FIXED:
+- **HIGH — wrong-account sends after a disconnect.** Conversation AND
+  Broadcast `channelConnectionId` are `onDelete: SetNull`, so disconnecting a
+  number nulled every thread/campaign bound to it — and a null resolved to
+  `isDefault: true`. Replies went out from a number the customer never
+  messaged (no 24h window there); a scheduled campaign sent its whole
+  audience from the wrong sender. This SILENTLY UNDID the §2 session-2 fix at
+  the FK layer, and the service docstring + `removalImpact` both promised the
+  opposite. Guard: refuse an unresolved account when >1 active account exists
+  on that channel; single-account fallback unchanged; self-healing via
+  ingest's re-stamp. NEGATIVE-TESTED.
+- **HIGH — two implementations of workspace delete; the UI called the unsafe
+  one.** `WorkspacesService.remove` cascaded inside the org-lock transaction
+  with no message pre-drain, no R2 blob cleanup, no provider-cache bust —
+  a lock storm that also blocked every other org-level write and would hit
+  Prisma's 5s tx timeout. Now delegates to `WorkspaceRootService.destroy`.
+
+STILL OPEN (severity order — all CONFIRMED by code trace, none fixed):
+- HIGH: customer-mode broadcast bills the same PERSON twice when a merge
+  lands between create and send (dedupe runs once, at create;
+  `@@unique(broadcastId, contactId)` is per-CONTACT so it can't see it; the
+  merge needs no human — ingest strong-key adoption and the drift sweeper
+  both re-point automatically, and a scheduled campaign's window is days).
+  `BroadcastRecipient.customerId` is written but never read, so it can't even
+  audit the claim.
+- MED: contact-EXPORT artifacts (a full address-book PII dump) orphaned in
+  R2 forever by workspace/org delete — the only reaper walks job rows, which
+  cascade; the blob sweeper deliberately skips that prefix.
+- MED: after removal the surviving side's DM renders as a SELF-DM showing
+  their own name (`mapDmPeer` only anticipates hard-delete); remove→re-add
+  destroys a DM permanently and unrecoverably (`createOrGetDm` returns the
+  existing row without repairing membership, and the unique key blocks a
+  replacement).
+- MED: `ai-knowledge/`, `ai-voice-draft/`, `tpl-hdr-` blobs orphaned by
+  workspace delete.
+- MED: hard-deleting a user re-homes nothing through the domain path — no
+  version bump, no TicketEvent, no `conversation.assigned` publish (the
+  removal path does all three deliberately).
+- MED: closing a conversation does not stop/pause its ticket's SLA →
+  permanent false breach on work finished on time. NEEDS A PRODUCT DECISION
+  (auto-solve, auto-pause, or documented as independent).
+- MED: `shiftDueDates` adds WALL-CLOCK pause time to a deadline computed in
+  BUSINESS hours — a Friday-17:00→Monday-09:00 hold credits ~64h of
+  commitment never owed.
+- MED (PLAUSIBLE): the platform anchor org is deletable via the self-delete
+  route (`DELETE /api/workspace` has no `isPlatform` check; the admin route
+  does).
+- LOW: add/re-role doesn't invalidate the assignment config cache (15s stale
+  eligibleRoles); a workflow `assign_to` naming a removed user is never
+  cleared and silently no-ops forever; superadmin aggregates stale on the two
+  customer-reachable delete paths; in-flight broadcast page still sends after
+  its workspace is deleted; deleting an account orphans its MessageTemplate
+  rows and can orphan a WhatsappPortfolio; §18 letter violation in the
+  merge/split reap (`contact.count` without workspaceId, upstream-scoped);
+  coexistence history worker retry-storms on a deleted workspace (the only
+  worker of 6 without a clean row-gone drop).
+
+SEAM VERIFIED CLEAN (real coverage, not absence of evidence): member removal
+re-homes conversations AND bumps ticket version + writes TicketEvents,
+clears all three no-FK policy pointers then invalidates the cache in
+lockstep, and needs no Session cleanup because resolution re-validates; the
+workspace cascade was MACHINE-CHECKED to reach all 72 models (56 direct, 2
+via parent, 14 documented exceptions) including the outbox; org delete frees
+globally-unique emails incl. membership-less users; the provider credential
+cache is correctly busted on delete/rename-default/setDefault; merge is
+genuinely non-destructive and reversible; 5 of 6 workers drop cleanly when
+their row is gone.
+
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
 | Seam | Status |
 |---|---|
-| Member removal → assignments, tickets, views, policies, team-chat DMs, awaiting-reply, socket rooms, session pointer | ☐ |
+| Member removal → assignments, tickets, views, policies, team-chat DMs, awaiting-reply, socket rooms, session pointer | ✅ 2026-07-27 (clean; 2 DM defects found) |
+| Workspace delete → every workspaceId model, queued jobs, blobs, caches, sockets | ✅ 2026-07-27 (cascade proven complete; delete path unified 4e4925ec) |
+| Channel-connection delete → threads, campaigns, caches, templates, portfolio | ✅ 2026-07-27 (HIGH wrong-account fixed 4e4925ec) |
+| Contact merge mid customer-mode broadcast | ✅ 2026-07-27 (double-bill OPEN, see below) |
+| Org delete → workspaces, users, globally-unique emails, sessions, keys | ✅ 2026-07-27 (clean; emails freed) |
+| Queued job whose target row was deleted | ✅ 2026-07-27 (5 of 6 workers clean) |
 | Workspace delete → everything under it (cascade audit) | ☐ |
 | Contact merge/split during in-flight customer-mode broadcast | ☐ |
 | Channel-connection delete → threads, sends, webhooks, broadcasts | ☐ |
