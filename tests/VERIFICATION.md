@@ -66,7 +66,7 @@ table/queue/cache/socket-room that references the dying entity.
 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ 2026-07-27 |
 | event bus / outbox | 1 | R (adversarial) + E + N (dedupe spec) | ✅ 2026-07-27 |
 | workflows (~22 step types) | 1 | R (adversarial) + E (144 e2e) | ✅ 2026-07-27 |
-| assignment (policies/rules/capacity) | 1 | | ☐ |
+| assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ◐ fixes committed 79b2597; e2e re-run pending |
 | broadcasts (+audience/templates/analytics) | 1 | | ☐ |
 | tickets (+SLA+numbering) | 1 | | ☐ |
 | realtime layer | 1 | | ☐ |
@@ -263,6 +263,39 @@ pre-journal window can re-send); branch presets read LIVE contact state
 while generic conditions read the frozen trigger snapshot (documented split,
 not unified); manual trigger returns 500 if the Redis enqueue fails though
 the sweeper will still run it.
+
+### assignment + availability (B-M3 session 5, 2026-07-27) — fixes committed, e2e pending
+
+FIXED (79b2597): §18 was structurally unenforced for automated routing —
+`assignByPolicy` never forwarded `onlyIfUnassigned` into the CAS (TOCTOU
+window of tens of ms), and two more paths (broadcast-runner on_send,
+campaign-reply) pre-read instead of passing the flag. Round-robin collapsed
+into 15-second shifts (cached policy row's cursor never advanced in-memory).
+`excludeUserIds` from callers was overwritten by the retry loop, defeating
+the offline rebalance. Campaign draw ignored `assignmentOverwrite`. No-op
+writes reported as applied (phantom "moved" counts; skipped unassign).
+Work-hours sweeper reverted an override set mid-sweep.
+
+STILL OPEN (next session):
+- F4: `getOnlineUserIds` can never return null in-process, so the offline
+  rebalance's "presence unknown → do nothing" guard is DEAD CODE. After an
+  api restart with no sockets, a tick can re-route up to 50 conversations per
+  workspace to other offline agents. Only affects workspaces with
+  `reassignOnOffline` enabled (default off). Fix: require `online.size > 0`,
+  or have the resolver return null until the gateway reports a connection.
+- F6: reservations only compensate `least_busy`; round_robin/weighted still
+  stampede within a burst (weighted self-corrects, round_robin does not).
+- F10: a failed write still advances the cursor / increments `served` /
+  holds a reservation (commit before the write succeeds).
+- F11: `AssignmentPolicyMember`/`AssignmentPolicy` writes keyed on
+  id/policyId without workspaceId (upstream-scoped, not exploitable).
+- F12: 4 stale doc claims — incl. `assignment-rebalance.ts:30` promising
+  "conversations someone is actively VIEWING are never touched" (NOT
+  implemented) and a schema comment claiming `served` is renormalized (it
+  isn't).
+- F14: `reassignOfflineOnlyPending` gates on `firstResponseAt`, which is
+  fire-and-forget and deliberately unreconciled — a transient error leaves a
+  live exchange permanently eligible for rebalance.
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
