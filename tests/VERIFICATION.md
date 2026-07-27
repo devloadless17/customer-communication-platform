@@ -66,7 +66,7 @@ table/queue/cache/socket-room that references the dying entity.
 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ 2026-07-27 |
 | event bus / outbox | 1 | R (adversarial) + E + N (dedupe spec) | ✅ 2026-07-27 |
 | workflows (~22 step types) | 1 | R (adversarial) + E (144 e2e) | ✅ 2026-07-27 |
-| assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ◐ fixes committed 79b2597; e2e re-run pending |
+| assignment (policies/rules/capacity) | 1 | R (adversarial) + E + N (pick-burst spec) | ✅ 2026-07-27 |
 | broadcasts (+audience/templates/analytics) | 1 | | ☐ |
 | tickets (+SLA+numbering) | 1 | | ☐ |
 | realtime layer | 1 | | ☐ |
@@ -264,7 +264,7 @@ while generic conditions read the frozen trigger snapshot (documented split,
 not unified); manual trigger returns 500 if the Redis enqueue fails though
 the sweeper will still run it.
 
-### assignment + availability (B-M3 session 5, 2026-07-27) — fixes committed, e2e pending
+### assignment + availability (B-M3 session 5, 2026-07-27) — ✅ CLOSED
 
 FIXED (79b2597): §18 was structurally unenforced for automated routing —
 `assignByPolicy` never forwarded `onlyIfUnassigned` into the CAS (TOCTOU
@@ -276,26 +276,36 @@ the offline rebalance. Campaign draw ignored `assignmentOverwrite`. No-op
 writes reported as applied (phantom "moved" counts; skipped unassign).
 Work-hours sweeper reverted an override set mid-sweep.
 
-STILL OPEN (next session):
-- F4: `getOnlineUserIds` can never return null in-process, so the offline
-  rebalance's "presence unknown → do nothing" guard is DEAD CODE. After an
-  api restart with no sockets, a tick can re-route up to 50 conversations per
-  workspace to other offline agents. Only affects workspaces with
-  `reassignOnOffline` enabled (default off). Fix: require `online.size > 0`,
-  or have the resolver return null until the gateway reports a connection.
-- F6: reservations only compensate `least_busy`; round_robin/weighted still
-  stampede within a burst (weighted self-corrects, round_robin does not).
-- F10: a failed write still advances the cursor / increments `served` /
-  holds a reservation (commit before the write succeeds).
-- F11: `AssignmentPolicyMember`/`AssignmentPolicy` writes keyed on
-  id/policyId without workspaceId (upstream-scoped, not exploitable).
-- F12: 4 stale doc claims — incl. `assignment-rebalance.ts:30` promising
-  "conversations someone is actively VIEWING are never touched" (NOT
-  implemented) and a schema comment claiming `served` is renormalized (it
-  isn't).
-- F14: `reassignOfflineOnlyPending` gates on `firstResponseAt`, which is
-  fire-and-forget and deliberately unreconciled — a transient error leaves a
-  live exchange permanently eligible for rebalance.
+CLOSED (704717b): the whole open list.
+- F4: the null presence guard was dead code (resolver wired at boot; a restart
+  yields an EMPTY set, and tierFor then fails open to DB availabilityStatus,
+  so the sweep really could move 50 threads/ws to merely-DB-available agents).
+  Sweep now also skips on `online.size === 0` — restart and genuinely-empty
+  floor both mean "do nothing".
+- F6: picks serialized per (workspace, policy) (`withPickLock`) + loadConfig
+  single-flighted. The single-flight matters: on a COLD cache each concurrent
+  miss got its OWN policy object, so the in-cache cursor mutation from
+  79b2597 didn't propagate and a boot/expiry burst still stampeded. Pinned by
+  `apps/api/test/assignment-pick-burst.spec.ts`; the weighted-unequal-served
+  case is the one the LOCK carries (round_robin is saved by the synchronous
+  select+mutate on the shared object) — negative-tested: disabling the lock
+  fails the spec 3-0-0 vs 2-1-0.
+- F10: failed write → `releaseReservation`. Cursor/`served` stay advanced —
+  ACCEPTED: both are last-writer-wins fairness hints; un-advancing a cursor a
+  later pick already passed would corrupt the rotation (documented at the fn).
+- F11: policy/member writes carry workspaceId (`updateMany` where update
+  couldn't). The `policyId_userId` upserts keep the parent-scoped pattern
+  (compound unique can't carry the column).
+- F12: 4 stale claims fixed — the unimplemented "actively VIEWING" bullet
+  removed; the schema `served`-renormalization claim corrected; the
+  "returns null right after a restart" claim in presence-bridge.ts AND
+  select.ts corrected (the false premise that made F4's guard look alive).
+- F14: the pending-only rebalance filter now backstops `firstResponseAt`
+  with `messages: none (direction out, senderUserId not null)` — ground
+  truth over the fire-and-forget analytics stamp.
+
+Evidence: vitest 512/512 twice, workflows-events 144/144 (on final code),
+meta 165/165, typecheck + all 4 checkers green.
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
