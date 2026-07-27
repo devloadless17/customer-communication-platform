@@ -78,9 +78,9 @@ table/queue/cache/socket-room that references the dying entity.
 | channels / multi-account | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 4 open (batched-webhook account misattribution HIGH) |
 | outbound-webhooks (delivery/retry) | 2 | R (adversarial) | ✅ 2026-07-27 — SSRF/HMAC/dedupe VERIFIED HELD; unbounded retention DELETE FIXED 29deb9c8 |
 | calls (WhatsApp calling) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — post-CAS throw FIXED 29deb9c8; 1 open (call-id routes bypass visibility) |
-| media / R2 | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — tenancy + XSS VERIFIED HELD; download regression FIXED 37c0a2b9, recovery sweeper + mime + parked echo FIXED a2b6de83; 1 open (SSRF fetchUrlBytes) |
+| media / R2 | 2 | R (adversarial) | ✅ 2026-07-27 — tenancy + XSS VERIFIED HELD; download regression 37c0a2b9, recovery sweeper + mime + parked echo a2b6de83, SSRF fetchUrlBytes 73317ffd |
 | queues / workers | 2 | R (adversarial, all 7 workers) | ◐ reviewed 2026-07-27 — jobId/lockDuration/backpressure VERIFIED HELD; 1 open (transfer worker maxStalledCount) |
-| sweepers | 2 | R (adversarial, all 30 enumerated) | ◐ reviewed 2026-07-27 — mutex/bounds/pool-close VERIFIED HELD; 3 open (unreadCount has NO drift sweeper) |
+| sweepers | 2 | R (adversarial, all 30 enumerated) | ◐ reviewed 2026-07-27 — mutex/bounds/pool-close VERIFIED HELD; retention batching 29deb9c8, upload-reaper pagination + drift starvation 73317ffd; 1 open (unreadCount has NO drift sweeper) |
 | coexistence | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — direction fail-open + poison chunk FIXED 3e137336; 2 open (no account binding, PII in failed-job Redis) |
 | tags / stages / fields / snippets / flags | 3 | | ☐ |
 | notes | 3 | mandatory-N | ☐ |
@@ -765,6 +765,31 @@ globally-unique emails incl. membership-less users; the provider credential
 cache is correctly busted on delete/rename-default/setDefault; merge is
 genuinely non-destructive and reversible; 5 of 6 workers drop cleanly when
 their row is gone.
+
+### TIER-2 fixes — running tally (2026-07-27)
+
+37c0a2b9 media download (my regression) · 29deb9c8 webhook retention +
+calls post-CAS · a2b6de83 media recovery + mime + parked echo + bulk-tag
+storm · 3e137336 customer-profile visibility + coexistence direction +
+poison chunk · 73317ffd SSRF fetchUrlBytes + upload-reaper pagination +
+drift-sweeper starvation.
+
+DOMAINS NOW ✅: outbound-webhooks, media/R2.
+
+CHECKER LESSON (2nd time this program): `check-error-keys` over-matched an
+internal `{ ok: false, error }` Result as if it were the HTTP envelope, and
+caught the CONCURRENT session's brand-new file to prove it. Narrowed to
+discriminate on `ok:` in the same object literal, then negative-tested again.
+A checker that has never been shown a false POSITIVE is as unproven as one
+that has never been shown a true negative.
+
+CONCURRENT-SESSION DISCIPLINE that held all afternoon: the maintainer ran a
+second session (multi-account channel/onboarding work) in the SAME tree.
+Rules that worked — never `git add` a whole file without checking whose
+hunks are in it (`meta.ts` needed `git apply --cached`); never stash in a
+shared tree; re-run a suspicious suite in isolation before believing a
+failure (several were files read mid-write); settle-gate on load before a
+full run (one was OOM-killed).
 
 ### TIER-2 review (2026-07-27) — 3 clusters, ~40 findings, fixes IN PROGRESS
 
