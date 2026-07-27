@@ -53,6 +53,10 @@ import {
   stopContactDriftSweeper,
 } from "@/lib/sweepers/contact-last-inbound-drift";
 import {
+  startOpenTicketCountDriftSweeper,
+  stopOpenTicketCountDriftSweeper,
+} from "@/lib/sweepers/open-ticket-count-drift";
+import {
   startMessageFlagCountDriftSweeper,
   stopMessageFlagCountDriftSweeper,
 } from "@/lib/sweepers/message-flag-count-drift";
@@ -162,6 +166,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private assignmentRebalanceSweeperStarted = false;
   private analyticsDriftSweeperStarted = false;
   private messageFlagCountDriftSweeperStarted = false;
+  private openTicketCountDriftSweeperStarted = false;
   private broadcastDeliveryDriftSweeperStarted = false;
   private authCleanupSweeperStarted = false;
   private webhookDeliveryCleanupStarted = false;
@@ -287,6 +292,17 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log("Message-flag count drift sweeper started");
     } catch (err) {
       this.logger.error("Failed to start message-flag-count-drift sweeper", err);
+    }
+    try {
+      // Same shape, for `Conversation.openTicketCount` — which CLAUDE.md §7
+      // also lists as sweeper-backed and, until now, wasn't. Catches a Ticket
+      // cascade (Conversation/Contact delete) that takes rows without
+      // decrementing the parent's counter.
+      startOpenTicketCountDriftSweeper();
+      this.openTicketCountDriftSweeperStarted = true;
+      this.logger.log("Open-ticket count drift sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start open-ticket-count-drift sweeper", err);
     }
     try {
       // Backstop for the campaign delivery denormalization: the live
@@ -586,6 +602,13 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(
         `stopMessageFlagCountDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.openTicketCountDriftSweeperStarted) stopOpenTicketCountDriftSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopOpenTicketCountDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {
