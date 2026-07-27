@@ -993,7 +993,9 @@ acceptance**, three objective checks each.
 | axe serious/critical, all 7 surfaces | ✅ 0 violations (was: 5 surfaces failing) |
 | Horizontal overflow @ 1280 / 1024 / 390 | ✅ 0 across all 7 surfaces — the body never scrolls sideways at any viewport |
 | Renders in dark + light | ✅ 0 error boundaries on either theme |
-| **Total** | **23/23** |
+| Keyboard: operable, focus advances, indicator on every focused control | ✅ 0 failures across all 7 |
+| Cumulative layout shift (PerformanceObserver, observed from before navigation) | ✅ **0.0000 on all 7** vs Google's 0.1 "good" bar — measured on the DEV server, the pessimistic case |
+| **Total** | **37/37** (`2b0de46a`) |
 
 Fixed to get there: (1) every small uppercase section label used
 `text-muted-foreground` at 60-80% opacity and failed AA — one token decision
@@ -1017,10 +1019,23 @@ The gate is now the narrow thing that is true everywhere (lang + title, both
 from the root layout), and the report carries axe's own measured ratio and both
 colors so a contrast fix is informed rather than guessed.
 
+**The keyboard check was wrong THREE times before it was right** (`2b0de46a`),
+and every one would have shipped as a false finding about the app: it called
+focus reaching `<body>` "stranded" (that is the browser wrapping its tab order);
+it compared identity by a truncated className label, so buttons sharing classes
+looked like one stuck element; and it inspected only the focused element's own
+style, so it called the inbox resize handle indicator-less when that handle is
+one of the better-built controls in the app (`aria-valuemin/max/now`, a key
+handler, and a ring painted on a CHILD via `group-focus-visible:`). **The tell
+every time: a check that fails IDENTICALLY on every surface is almost always the
+check.** Identity is now compared by DOM reference in page context; Next's
+dev-only `nextjs-portal` is excluded; a descendant-declared focus style counts
+(a documented heuristic — it proves a style was DECLARED; screenshot-diffing
+focused-vs-blurred is the named upgrade path).
+
 **Not automated, deliberately** — the subjective half of the rubric (visual
 hierarchy, copy tone, motion, empty-state helpfulness) is a reading task and
-does not belong in a fake assertion. Keyboard/focus and CLS screenshot-diffing
-remain open.
+does not belong in a fake assertion.
 
 ## B-M6 / deploy backlog (found outside the rubric pass — carry into it)
 
