@@ -1,4 +1,5 @@
 import type { MediaKind } from "@ccp/shared/types";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 
 // Cheap unique id; doesn't need crypto-strength because it's only matched
 // against ourselves within a few seconds.
@@ -22,7 +23,7 @@ export async function safeReadError(res: Response): Promise<string> {
   try {
     const json = (await res.json()) as { error?: string; detail?: string };
     if (json.detail) return `${json.error ?? "error"}: ${json.detail}`;
-    return json.error ?? `HTTP ${res.status}`;
+    return apiErrorMessageFrom(json, `HTTP ${res.status}`);
   } catch {
     return `HTTP ${res.status}`;
   }

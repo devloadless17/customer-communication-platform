@@ -26,6 +26,7 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import { dispatchLocalSocketEvent } from "@/lib/socket-client";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { formatPhone, initials } from "@ccp/shared/utils";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import type {
   Contact,
   ContactFieldDefinition,
@@ -115,7 +116,7 @@ export function ContactDetailDrawer({
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(body.error ?? "Couldn't start chat");
+        setError(apiErrorMessageFrom(body, "Couldn't start chat"));
         setStarting(false);
         return;
       }
@@ -210,7 +211,7 @@ export function ContactDetailDrawer({
     });
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(body.error ?? "Couldn't save");
+      setError(apiErrorMessageFrom(body, "Couldn't save"));
       dispatchLocalSocketEvent("contact:updated", {
         workspaceId: contact.workspaceId,
         contact,
@@ -510,7 +511,7 @@ export function ContactDetailDrawer({
                 });
                 if (!res.ok) {
                   const body = (await res.json().catch(() => ({}))) as { error?: string };
-                  setError(body.error ?? "Couldn't add field");
+                  setError(apiErrorMessageFrom(body, "Couldn't add field"));
                   return false;
                 }
                 const { definition } = (await res.json()) as {

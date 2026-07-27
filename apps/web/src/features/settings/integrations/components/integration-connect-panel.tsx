@@ -11,6 +11,7 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import type { ApiKeyListItem } from "@/lib/api/queries";
 
 import type { CurlExample, IntegrationPreset } from "../presets";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 
 interface Props {
   preset: IntegrationPreset;
@@ -87,7 +88,7 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
         error?: string;
       };
       if (!res.ok || !json.id || !json.token) {
-        setError(json.error ?? `error ${res.status}`);
+        setError(apiErrorMessageFrom(json, `Request failed (HTTP ${res.status})`));
         return;
       }
       setConnected({
@@ -139,7 +140,7 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
         error?: string;
       };
       if (!res.ok || !json.id || !json.token) {
-        setError(json.error ?? `error ${res.status}`);
+        setError(apiErrorMessageFrom(json, `Request failed (HTTP ${res.status})`));
         return;
       }
       setConnected({

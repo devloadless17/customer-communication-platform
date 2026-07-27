@@ -38,6 +38,7 @@ import { usePanelResize } from "@/features/inbox/hooks/use-panel-resize";
 import { INBOX_DETAILS_WIDTH_COOKIE } from "@/features/inbox/lib/panel-cookies";
 import { emitOpenTemplatePicker } from "@/features/inbox/lib/open-template-picker";
 import { CHANNEL_LABEL } from "./channel-badge";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import { LinkedChannels } from "./linked-channels";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
@@ -882,7 +883,7 @@ function ContactPanelImpl({
       // (the value flickers back with no explanation). Toast is visible,
       // auto-dismissing, and consistent with the stage/tag failure path.
       toast.error("Couldn't save contact", {
-        description: body.error ?? "Please try again.",
+        description: apiErrorMessageFrom(body, "Please try again."),
       });
       // Roll back to the state the app believed BEFORE this patch: keep the
       // current local mirrors (which carry any prior committed-but-not-yet-
@@ -1533,7 +1534,7 @@ function ContactPanelImpl({
               });
               if (!res.ok) {
                 const body = (await res.json().catch(() => ({}))) as { error?: string };
-                setError(body.error ?? "Couldn't add field");
+                setError(apiErrorMessageFrom(body, "Couldn't add field"));
                 return false;
               }
               startSaving(() => router.refresh());

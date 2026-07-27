@@ -38,6 +38,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 
 interface Webhook {
   id: string;
@@ -417,7 +418,7 @@ function WebhookForm({
         });
         const json = (await res.json()) as { webhook?: Webhook; error?: string };
         if (!res.ok || !json.webhook) {
-          setError(json.error ?? `error ${res.status}`);
+          setError(apiErrorMessageFrom(json, `Request failed (HTTP ${res.status})`));
           return;
         }
         onUpdated?.(json.webhook);
@@ -436,7 +437,7 @@ function WebhookForm({
         issues?: unknown;
       } & Partial<Webhook>;
       if (!res.ok || !json.id || !json.secret) {
-        setError(json.error ?? `error ${res.status}`);
+        setError(apiErrorMessageFrom(json, `Request failed (HTTP ${res.status})`));
         return;
       }
       onCreated?.(

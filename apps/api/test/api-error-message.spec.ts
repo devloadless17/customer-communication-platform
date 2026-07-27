@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  apiErrorMessageFrom,
   apiErrorMessage,
   humanizeErrorKey,
   NETWORK_ERROR_MESSAGE,
@@ -90,5 +91,42 @@ describe("NETWORK_ERROR_MESSAGE", () => {
     // catch; an unguarded one leaves a spinner running forever with nothing on
     // screen — the exact bug the platform delete button shipped with.
     expect(NETWORK_ERROR_MESSAGE).toMatch(/couldn't reach the server/i);
+  });
+});
+
+describe("apiErrorMessageFrom (already-parsed body)", () => {
+  // Same order as apiErrorMessage, for the ~17 call sites that read the JSON
+  // themselves (they need another field from it) and used to fall back to
+  // `body.error` alone — which since the key normalization renders a bare
+  // snake_case identifier on screen.
+  it("prefers the human sentence the server already wrote", () => {
+    expect(
+      apiErrorMessageFrom(
+        { error: "member_limit_reached", detail: "This workspace is at its member limit (2)." },
+        "fallback",
+      ),
+    ).toBe("This workspace is at its member limit (2).");
+  });
+
+  it("humanizes the key when there is no detail — the common case", () => {
+    // Most endpoints send no detail, so this rung is what makes the whole
+    // migration worth doing: "Invalid phone number" beats
+    // "invalid_phone_number" everywhere, for free.
+    expect(apiErrorMessageFrom({ error: "invalid_phone_number" }, "fallback")).toBe(
+      "Invalid phone number",
+    );
+  });
+
+  it("falls back when the body is null, empty, or not an envelope", () => {
+    expect(apiErrorMessageFrom(null, "fallback")).toBe("fallback");
+    expect(apiErrorMessageFrom(undefined, "fallback")).toBe("fallback");
+    expect(apiErrorMessageFrom({}, "fallback")).toBe("fallback");
+    expect(apiErrorMessageFrom({ error: "   " }, "fallback")).toBe("fallback");
+  });
+
+  it("ignores non-string error/detail rather than rendering [object Object]", () => {
+    expect(apiErrorMessageFrom({ error: { code: 1 }, detail: 42 }, "fallback")).toBe(
+      "fallback",
+    );
   });
 });

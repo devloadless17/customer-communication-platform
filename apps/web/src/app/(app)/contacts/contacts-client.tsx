@@ -38,6 +38,7 @@ import { WindowBadge } from "@/features/inbox/components/window-badge";
 import { ChannelBadge } from "@/features/inbox/components/channel-badge";
 import { LocalTime } from "@/components/local-time";
 import type { Channel } from "@ccp/shared/types";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import { TagChip, TagAddButton } from "@/features/tags/components/tag-chip";
@@ -1330,7 +1331,7 @@ async function safeReadError(res: Response): Promise<string> {
   try {
     const json = (await res.json()) as { error?: string; detail?: string };
     if (json.detail) return `${json.error ?? "error"}: ${json.detail}`;
-    return json.error ?? `HTTP ${res.status}`;
+    return apiErrorMessageFrom(json, `HTTP ${res.status}`);
   } catch {
     return `HTTP ${res.status}`;
   }

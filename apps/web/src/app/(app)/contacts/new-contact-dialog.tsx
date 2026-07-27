@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import type {
   Contact,
   ContactFieldDefinition,
@@ -125,7 +126,7 @@ export function NewContactDialog({
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(body.error ?? "Couldn't create contact");
+        setError(apiErrorMessageFrom(body, "Couldn't create contact"));
         return;
       }
       const data = (await res.json()) as { contact: Contact };
@@ -325,7 +326,7 @@ export function NewContactDialog({
               });
               if (!res.ok) {
                 const body = (await res.json().catch(() => ({}))) as { error?: string };
-                setError(body.error ?? "Couldn't add field");
+                setError(apiErrorMessageFrom(body, "Couldn't add field"));
                 return false;
               }
               const { definition } = (await res.json()) as {

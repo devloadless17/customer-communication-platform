@@ -45,7 +45,23 @@ export async function apiErrorMessage(
   const data = (await res.json().catch(() => null)) as
     | { error?: unknown; detail?: unknown }
     | null;
+  return apiErrorMessageFrom(data, fallback);
+}
 
+/**
+ * Same rule, for a body the caller has ALREADY parsed.
+ *
+ * Plenty of call sites read the JSON themselves (they need another field from
+ * it too) and then reached for `body.error` alone — which since the 2026-07-27
+ * key normalization renders a bare snake_case identifier like
+ * `invalid_phone_number` on screen. This exists so those sites get the same
+ * detail → humanized-key → fallback order without re-reading the response,
+ * and so there is exactly ONE definition of that order.
+ */
+export function apiErrorMessageFrom(
+  data: { error?: unknown; detail?: unknown } | null | undefined,
+  fallback: string,
+): string {
   if (typeof data?.detail === "string" && data.detail.trim()) {
     return data.detail;
   }

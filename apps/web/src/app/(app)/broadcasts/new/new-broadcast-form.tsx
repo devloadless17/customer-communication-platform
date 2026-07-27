@@ -38,6 +38,7 @@ import { CHANNEL_CAPABILITIES, LIVE_CHANNELS } from "@ccp/shared/providers/capab
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import {
   findUnknownTokens,
   resolveFieldTokens,
@@ -2203,7 +2204,7 @@ async function safeReadError(res: Response): Promise<string> {
   try {
     const json = (await res.json()) as { error?: string; detail?: string };
     if (json.detail) return `${json.error ?? "error"}: ${json.detail}`;
-    return json.error ?? `HTTP ${res.status}`;
+    return apiErrorMessageFrom(json, `HTTP ${res.status}`);
   } catch {
     return `HTTP ${res.status}`;
   }

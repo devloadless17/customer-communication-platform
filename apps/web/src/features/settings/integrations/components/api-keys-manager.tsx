@@ -22,6 +22,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { toast } from "@/lib/toast";
 import { apiFetch } from "@/lib/api/client-fetch";
 import type { ApiKeyListItem } from "@/lib/api/queries";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 
 /**
  * General-purpose API key manager — the org-wide counterpart to the
@@ -122,7 +123,7 @@ export function ApiKeysManager({ initialKeys }: Props) {
       });
       const json = (await res.json()) as Partial<ApiKeyListItem> & { token?: string; error?: string };
       if (!res.ok || !json.id || !json.token) {
-        setError(json.error ?? `error ${res.status}`);
+        setError(apiErrorMessageFrom(json, `Request failed (HTTP ${res.status})`));
         return;
       }
       const row: ApiKeyListItem = {
@@ -158,7 +159,7 @@ export function ApiKeysManager({ initialKeys }: Props) {
       const res = await apiFetch(`/api/workspace/api-keys/${key.id}/rotate`, { method: "POST" });
       const json = (await res.json()) as Partial<ApiKeyListItem> & { token?: string; error?: string };
       if (!res.ok || !json.id || !json.token) {
-        setError(json.error ?? `error ${res.status}`);
+        setError(apiErrorMessageFrom(json, `Request failed (HTTP ${res.status})`));
         return;
       }
       const row: ApiKeyListItem = {
@@ -195,7 +196,7 @@ export function ApiKeysManager({ initialKeys }: Props) {
       const res = await apiFetch(`/api/workspace/api-keys/${key.id}`, { method: "DELETE" });
       if (!res.ok) {
         const json = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(json.error ?? `error ${res.status}`);
+        setError(apiErrorMessageFrom(json, `Request failed (HTTP ${res.status})`));
         return;
       }
       setKeys((prev) => prev.filter((k) => k.id !== key.id));
