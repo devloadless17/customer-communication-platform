@@ -48,7 +48,8 @@ export class SnippetsService {
 
   async create(
     workspaceId: string,
-    userId: string,
+    /** Null when an API key created it — an integration is not a person. */
+    userId: string | null,
     input: CreateSnippetInput,
   ): Promise<{ id: string }> {
     try {

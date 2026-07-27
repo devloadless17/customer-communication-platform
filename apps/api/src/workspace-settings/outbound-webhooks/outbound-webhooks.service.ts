@@ -57,7 +57,8 @@ export class OutboundWebhooksService {
 
   async create(
     workspaceId: string,
-    userId: string,
+    /** Null when an API key created it — an integration is not a person. */
+    userId: string | null,
     input: CreateOutboundWebhookInput,
   ): Promise<OutboundWebhookCreatedDto> {
     this.assertUrlSafe(input.url);

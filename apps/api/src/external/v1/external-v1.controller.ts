@@ -44,6 +44,29 @@ import { AssignmentService } from "@/assignment/assignment.service";
 import { ChannelAccountsService } from "@/workspace-settings/channel-accounts/channel-accounts.service";
 import { WhatsappService } from "@/workspace-settings/whatsapp/whatsapp.service";
 import { BroadcastsService } from "@/broadcasts/broadcasts.service";
+import { OutboundWebhooksService } from "@/workspace-settings/outbound-webhooks/outbound-webhooks.service";
+import {
+  CreateOutboundWebhookSchema,
+  ListDeliveriesQuerySchema,
+  UpdateOutboundWebhookSchema,
+  type CreateOutboundWebhookInput,
+  type ListDeliveriesQueryInput,
+  type UpdateOutboundWebhookInput,
+} from "@/workspace-settings/outbound-webhooks/outbound-webhooks.schemas";
+import { AudienceGroupsService } from "@/workspace-settings/audience-groups/audience-groups.service";
+import {
+  CreateAudienceGroupSchema,
+  UpdateAudienceGroupSchema,
+  type CreateAudienceGroupInput,
+  type UpdateAudienceGroupInput,
+} from "@/workspace-settings/audience-groups/audience-groups.schemas";
+import { SnippetsService } from "@/workspace-settings/snippets/snippets.service";
+import {
+  CreateSnippetSchema,
+  UpdateSnippetSchema,
+  type CreateSnippetInput,
+  type UpdateSnippetInput,
+} from "@/workspace-settings/snippets/snippets.schemas";
 import {
   CreateQrCodeSchema,
   UpdateBusinessProfileSchema,
@@ -256,6 +279,9 @@ export class ExternalV1Controller {
     private readonly tickets: TicketsService,
     private readonly whatsapp: WhatsappService,
     private readonly broadcasts: BroadcastsService,
+    private readonly outboundWebhooks: OutboundWebhooksService,
+    private readonly audienceGroups: AudienceGroupsService,
+    private readonly snippets: SnippetsService,
   ) {}
 
   /**
@@ -1977,6 +2003,221 @@ export class ExternalV1Controller {
       body,
       this.idemKeyRequired(idempotencyKey),
     );
+  }
+
+  // ===========================================================================
+  // OUTBOUND WEBHOOKS (management)
+  // ===========================================================================
+  //
+  // Parity build, phase 1. Registering a webhook was UI-only, so a partner
+  // could not receive a single event until a human clicked through Settings —
+  // the biggest self-serve onboarding blocker in the API.
+  //
+  // `admin:settings` on every route, including the reads: a webhook endpoint is
+  // a standing DATA-EGRESS grant (every subscribed event body leaves the
+  // system), and the secret it returns signs that traffic. The internal twin is
+  // admin-only for the same reason.
+
+  @Get("outbound-webhooks")
+  @RequireScope("admin:settings")
+  async listOutboundWebhooksV1(@CurrentApiKey() auth: ApiKeyContext) {
+    const webhooks = await this.outboundWebhooks.list(auth.workspaceId);
+    return { webhooks };
+  }
+
+  /** The signing secret is returned ONCE here and never again — same contract
+   *  as an API key. Store it before you acknowledge the response. */
+  @Post("outbound-webhooks")
+  @RequireScope("admin:settings")
+  @RateLimit({ perMinute: 10 })
+  async createOutboundWebhookV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(CreateOutboundWebhookSchema)) body: CreateOutboundWebhookInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    // `createdById: null` — an API key is not a person. The service already
+    // treats a null creator as "created by an integration".
+    return this.outboundWebhooks.create(auth.workspaceId, null, body);
+  }
+
+  @Patch("outbound-webhooks/:id")
+  @RequireScope("admin:settings")
+  async updateOutboundWebhookV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(UpdateOutboundWebhookSchema)) body: UpdateOutboundWebhookInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    const webhook = await this.outboundWebhooks.update(auth.workspaceId, id, body);
+    return { webhook };
+  }
+
+  /** Rotate the signing secret. Returns the new one ONCE; the old one stops
+   *  validating immediately, so swap it on your side in the same deploy. */
+  @Post("outbound-webhooks/:id/rotate-secret")
+  @RequireScope("admin:settings")
+  @RateLimit({ perMinute: 10 })
+  async rotateOutboundWebhookSecretV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    return this.outboundWebhooks.rotateSecret(auth.workspaceId, id);
+  }
+
+  @Delete("outbound-webhooks/:id")
+  @RequireScope("admin:settings")
+  async deleteOutboundWebhookV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    await this.outboundWebhooks.remove(auth.workspaceId, id);
+    return { ok: true };
+  }
+
+  /**
+   * Delivery log for one webhook — what we sent, the response code, and the
+   * retry state. `OutboundWebhookDelivery` carries no `workspaceId` of its own
+   * (documented parent-scoped tenancy exception), so the service proves
+   * ownership of the PARENT webhook before reading any delivery row.
+   */
+  @Get("outbound-webhooks/:id/deliveries")
+  @RequireScope("admin:settings")
+  async listOutboundWebhookDeliveriesV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Query(zQuery(ListDeliveriesQuerySchema)) query: ListDeliveriesQueryInput,
+  ) {
+    return this.outboundWebhooks.listDeliveries(auth.workspaceId, id, query);
+  }
+
+  /** Fire a signed sample delivery so an integration can verify its endpoint +
+   *  signature check before real traffic depends on it. */
+  @Post("outbound-webhooks/:id/test")
+  @RequireScope("admin:settings")
+  @RateLimit({ perMinute: 10 })
+  async testOutboundWebhookV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    return this.outboundWebhooks.test(auth.workspaceId, id);
+  }
+
+  // ===========================================================================
+  // AUDIENCE GROUPS
+  // ===========================================================================
+  //
+  // Parity build, phase 1. A saved audience is what a broadcast targets, so
+  // without these a partner could read campaigns but never build the list one
+  // sends to. `write:catalog` matches the internal capability
+  // (`audienceGroups:manage`, an admin/manager-grade catalog write).
+
+  @Get("audience-groups")
+  @RequireScope("read:catalog")
+  async listAudienceGroupsV1(@CurrentApiKey() auth: ApiKeyContext) {
+    const groups = await this.audienceGroups.list(auth.workspaceId);
+    return { groups };
+  }
+
+  @Get("audience-groups/:id")
+  @RequireScope("read:catalog")
+  async getAudienceGroupV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    const group = await this.audienceGroups.get(auth.workspaceId, id);
+    return { group };
+  }
+
+  @Post("audience-groups")
+  @RequireScope("write:catalog")
+  async createAudienceGroupV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(CreateAudienceGroupSchema)) body: CreateAudienceGroupInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    const group = await this.audienceGroups.create(auth.workspaceId, null, body);
+    return { group };
+  }
+
+  @Patch("audience-groups/:id")
+  @RequireScope("write:catalog")
+  async updateAudienceGroupV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(UpdateAudienceGroupSchema)) body: UpdateAudienceGroupInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    const group = await this.audienceGroups.update(auth.workspaceId, id, body);
+    return { group };
+  }
+
+  @Delete("audience-groups/:id")
+  @RequireScope("write:catalog")
+  async deleteAudienceGroupV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    await this.audienceGroups.remove(auth.workspaceId, id);
+    return { ok: true };
+  }
+
+  // ===========================================================================
+  // SNIPPETS
+  // ===========================================================================
+  //
+  // Parity build, phase 1. `read/write:catalog` already ADVERTISED snippets
+  // (see the scope descriptions) while no route existed.
+
+  @Get("snippets")
+  @RequireScope("read:catalog")
+  async listSnippetsV1(@CurrentApiKey() auth: ApiKeyContext) {
+    const snippets = await this.snippets.list(auth.workspaceId);
+    return { snippets };
+  }
+
+  @Post("snippets")
+  @RequireScope("write:catalog")
+  async createSnippetV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(CreateSnippetSchema)) body: CreateSnippetInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    const created = await this.snippets.create(auth.workspaceId, null, body);
+    return { ok: true, id: created.id };
+  }
+
+  @Patch("snippets/:id")
+  @RequireScope("write:catalog")
+  async updateSnippetV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(UpdateSnippetSchema)) body: UpdateSnippetInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    await this.snippets.update(auth.workspaceId, id, body);
+    return { ok: true };
+  }
+
+  @Delete("snippets/:id")
+  @RequireScope("write:catalog")
+  async deleteSnippetV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    await this.snippets.remove(auth.workspaceId, id);
+    return { ok: true };
   }
 }
 

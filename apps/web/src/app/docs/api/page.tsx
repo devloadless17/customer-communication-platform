@@ -1230,6 +1230,131 @@ export default function ApiDocsPage() {
         </Endpoint>
       </Section>
 
+      <Section title="Outbound webhooks (register your own)">
+        <p className="mb-4 text-sm text-muted-foreground">
+          Register the endpoint we POST events to — <strong>without anyone opening
+          Settings</strong>. Until these existed an integration could not receive a single
+          event until a human clicked through the app, which is the one step a self-serve
+          install cannot do for itself.
+          <br />
+          <br />
+          Every route needs <code>admin:settings</code>, including the reads: a webhook is
+          a standing <strong>data-egress grant</strong> — every subscribed event body
+          leaves the system — and the secret returned here is what signs that traffic.
+          Delivery is signed (<code>X-CCP-Signature</code>), idempotent (a stable delivery
+          id header), and retried with backoff before auto-disabling.
+        </p>
+        <Endpoint method="GET" path="/api/external/v1/outbound-webhooks">
+          <strong>List your registered webhooks</strong> — url, subscribed event types,
+          enabled state, last delivery outcome. The signing secret is never returned here
+          (see create/rotate). Scope <code>admin:settings</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/outbound-webhooks"
+          body={{
+            name: "Ops receiver",
+            url: "https://example.com/hooks/ccp",
+            eventTypes: ["message.received", "ticket.changed"],
+          }}
+        >
+          <strong>Register an endpoint.</strong> The response carries the signing{" "}
+          <code>secret</code> <strong>once and never again</strong> — same contract as an
+          API key, so store it before you acknowledge the response. Subscribe only to what
+          you act on: every extra event type is more traffic to verify and more data
+          leaving the system. Scope <code>admin:settings</code>.
+        </Endpoint>
+        <Endpoint
+          method="PATCH"
+          path="/api/external/v1/outbound-webhooks/:id"
+          body={{ enabled: false }}
+        >
+          <strong>Change the url, the subscription set, or pause it.</strong> Pausing with{" "}
+          <code>enabled: false</code> is the safe move during your own maintenance —
+          deleting loses the delivery history. Scope <code>admin:settings</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/outbound-webhooks/:id/rotate-secret">
+          <strong>Rotate the signing secret.</strong> Returns the new one once; the old one
+          stops validating <em>immediately</em>, so swap it on your side in the same deploy
+          rather than rotating and hoping. Scope <code>admin:settings</code>.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/outbound-webhooks/:id">
+          <strong>Delete a webhook</strong> and its delivery history. Prefer{" "}
+          <code>enabled: false</code> unless you mean it. Scope{" "}
+          <code>admin:settings</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/outbound-webhooks/:id/deliveries">
+          <strong>The delivery log</strong> — what we sent, your response code, and the
+          retry state. This is the first place to look when your receiver says it never got
+          an event. Scope <code>admin:settings</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/outbound-webhooks/:id/test">
+          <strong>Fire a signed sample delivery.</strong> Verify your endpoint and your
+          signature check <em>before</em> real traffic depends on them. Scope{" "}
+          <code>admin:settings</code>.
+        </Endpoint>
+      </Section>
+
+      <Section title="Audience groups">
+        <p className="mb-4 text-sm text-muted-foreground">
+          A saved audience is what a broadcast targets. Without these an integration could
+          read campaign results but never build the list a campaign sends to.
+        </p>
+        <Endpoint method="GET" path="/api/external/v1/audience-groups">
+          <strong>List saved audiences.</strong> Scope <code>read:catalog</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/audience-groups/:id">
+          <strong>One audience</strong> with its full definition. Scope{" "}
+          <code>read:catalog</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/audience-groups"
+          body={{ name: "Lapsed customers", contactIds: ["cnt_123", "cnt_456"] }}
+        >
+          <strong>Create an audience.</strong> Contact ids from another workspace are
+          silently dropped rather than rejected — the audience is always a subset of what
+          you can actually reach. Scope <code>write:catalog</code>.
+        </Endpoint>
+        <Endpoint method="PATCH" path="/api/external/v1/audience-groups/:id" body={{ name: "Lapsed — Q3" }}>
+          <strong>Rename or re-populate an audience.</strong> Scope{" "}
+          <code>write:catalog</code>.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/audience-groups/:id">
+          <strong>Delete an audience.</strong> Campaigns already sent keep their recipient
+          records — an audience is the list you targeted <em>with</em>, not the record of
+          who you reached. Scope <code>write:catalog</code>.
+        </Endpoint>
+      </Section>
+
+      <Section title="Snippets (canned replies)">
+        <p className="mb-4 text-sm text-muted-foreground">
+          Reusable reply text agents insert in the composer. Keep them in sync from
+          whatever system owns your support copy.
+        </p>
+        <Endpoint method="GET" path="/api/external/v1/snippets">
+          <strong>List snippets.</strong> Scope <code>read:catalog</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/snippets"
+          body={{
+            name: "shipping_times",
+            label: "Shipping times",
+            body: "Orders ship within 2 business days.",
+          }}
+        >
+          <strong>Create a snippet.</strong> Scope <code>write:catalog</code>.
+        </Endpoint>
+        <Endpoint method="PATCH" path="/api/external/v1/snippets/:id" body={{ body: "Orders ship next business day." }}>
+          <strong>Edit a snippet.</strong> Scope <code>write:catalog</code>.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/snippets/:id">
+          <strong>Delete a snippet.</strong> Scope <code>write:catalog</code>.
+        </Endpoint>
+      </Section>
+
+
       <hr className="my-10 border-border" />
 
       <header className="mb-4">

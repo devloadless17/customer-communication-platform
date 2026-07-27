@@ -16,6 +16,9 @@ import { MessageFlagsCatalogModule } from "@/workspace-settings/message-flags/me
 import { InboxViewsModule } from "@/inbox-views/inbox-views.module";
 import { WhatsappModule } from "@/workspace-settings/whatsapp/whatsapp.module";
 import { BroadcastsModule } from "@/broadcasts/broadcasts.module";
+import { OutboundWebhooksAdminModule } from "@/workspace-settings/outbound-webhooks/outbound-webhooks.module";
+import { AudienceGroupsModule } from "@/workspace-settings/audience-groups/audience-groups.module";
+import { SnippetsModule } from "@/workspace-settings/snippets/snippets.module";
 
 @Module({
   // ContactsModule exports ContactTransferService — /v1 import/export runs the
@@ -41,6 +44,12 @@ import { BroadcastsModule } from "@/broadcasts/broadcasts.module";
     // must hit the identical Meta fetch + COALESCE upsert, or the API and the
     // dashboard would disagree about a campaign's cost.
     BroadcastsModule,
+    // Parity build phase 1 — each exposes the SAME service the settings UI
+    // calls, so /v1 and the UI can never disagree about a webhook's secret,
+    // an audience definition or a snippet body.
+    OutboundWebhooksAdminModule,
+    AudienceGroupsModule,
+    SnippetsModule,
     AssignmentModule,
     UsersModule,
     MessageFlagsCatalogModule,

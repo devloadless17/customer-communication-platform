@@ -3607,7 +3607,11 @@ model OutboundWebhook {
   /// Allowlisted public event type names (e.g. ["message.received", "contact.updated"]).
   eventTypes          String[]
   enabled             Boolean   @default(true)
-  createdById         String
+  /// Nullable since the /v1 parity build: an integration registering its own
+  /// webhook through the external API has no human creator, and forcing one
+  /// would mean inventing an author for an action no person took. Plain id, no
+  /// relation — same audit-trail discipline as the rest of the schema.
+  createdById         String?
   createdAt           DateTime  @default(now())
   /// Last successful delivery (2xx response) — surfaced in the UI as "Last delivered".
   lastDeliveredAt     DateTime?

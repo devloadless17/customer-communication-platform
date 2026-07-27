@@ -30,7 +30,8 @@ export class AudienceGroupsService {
     return group;
   }
 
-  async create(workspaceId: string, userId: string, input: CreateAudienceGroupInput) {
+  /** `userId` is null when an API key created it — an integration is not a person. */
+  async create(workspaceId: string, userId: string | null, input: CreateAudienceGroupInput) {
     const description = input.description?.length ? input.description : null;
 
     // Cross-team id stuffing defense: filter to ids that actually belong
