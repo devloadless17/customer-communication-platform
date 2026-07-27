@@ -23,6 +23,7 @@ import {
   LIMITED_TIME_OFFER_LIMITS,
   TEMPLATE_AUTO_ARCHIVE_MONTHS,
   TEMPLATE_LIMITS,
+  encodeUrlButtonValue,
   renderTemplateBodyNamed,
   requiredCarouselCards,
   requiredTemplateButtonParams,
@@ -285,15 +286,6 @@ export async function sendTemplateInternal(
     .filter((b) => b.text.length > 0);
   const effectiveButtonsRaw = [...(args.variables.buttons ?? []), ...autofilledButtons];
 
-  function encodeUrlButtonValue(value: string): string {
-    try {
-      const decoded = decodeURIComponent(value);
-      if (encodeURIComponent(decoded) === value) return value;
-    } catch {
-      // Malformed percent sequence (e.g. a literal "100%") — encode the raw value.
-    }
-    return encodeURIComponent(value);
-  }
   // NAMED-format templates: Meta requires `parameter_name` on a URL button's
   // parameter. The name lives only in the template's stored URL, so it is
   // resolved HERE from `requiredButtons` (server truth) rather than trusted

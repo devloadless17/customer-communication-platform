@@ -1010,6 +1010,30 @@ function validateButtons(comps: ValidatableComponent[], push: Push) {
 
 /** Meta requires `{{1}}…{{N}}` with no gaps and no zero. */
 /**
+ * Percent-encode a dynamic URL-button suffix for the wire.
+ *
+ * Meta's components doc: unencoded special characters (spaces, `:`, `|`, `ç`,
+ * `ñ`, …) in a URL parameter make the generated URL fail validation and the
+ * send error. Already-encoded input passes through untouched — a value that
+ * decodes cleanly AND re-encodes to itself is already in wire form, and
+ * re-encoding it would turn %20 into %2520.
+ *
+ * Shared by the single-send path and the broadcast runner so a suffix that
+ * works in the reply box can't fail in a campaign. NOT for authentication
+ * codes: they ride the same `url` sub_type but go verbatim (Meta's own example
+ * sends the code raw; encoding `J$FpnYnP` breaks autofill).
+ */
+export function encodeUrlButtonValue(value: string): string {
+  try {
+    const decoded = decodeURIComponent(value);
+    if (encodeURIComponent(decoded) === value) return value;
+  } catch {
+    // Malformed percent sequence (e.g. a literal "100%") — encode the raw value.
+  }
+  return encodeURIComponent(value);
+}
+
+/**
  * Does this template need a commerce feature the platform can't supply?
  *
  * Catalog / MPM / SPM / order-details / product-card templates are legal on

@@ -24,6 +24,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@ccp/shared/utils";
 import {
   requiredCarouselCards,
+  requiredTemplateButtonParams,
   templateNamedPlaceholders,
   templateNeedsOfferExpiry,
   unsupportedTemplateFeature,
@@ -290,6 +291,8 @@ export function NewBroadcastForm({
   });
   // `datetime-local` wall-clock string; converted to UNIX ms on submit.
   const [offerExpiresAt, setOfferExpiresAt] = useState("");
+  // Values for TOP-LEVEL buttons, keyed `${index}:${subType}`.
+  const [buttonVals, setButtonVals] = useState<Record<string, string>>({});
   const [headerMediaUploading, setHeaderMediaUploading] = useState(false);
   const [headerMediaError, setHeaderMediaError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -489,6 +492,12 @@ export function NewBroadcastForm({
   // A LOCATION header carries its whole pin at send time — campaign-level,
   // since a location template promotes one place to the whole audience.
   const needsLocation = headerComp?.format === "LOCATION";
+  // TOP-LEVEL buttons that demand a send-time value (coupon code, URL suffix)
+  // — campaign-level: one code / one suffix for every recipient.
+  const buttonRequirements = useMemo(
+    () => requiredTemplateButtonParams(components, selectedTemplate?.category),
+    [components, selectedTemplate?.category],
+  );
   // A countdown template needs ONE campaign-level expiry — the whole point of a
   // limited-time offer is a single shared deadline.
   const needsOfferExpiry = templateNeedsOfferExpiry(components);
@@ -544,6 +553,7 @@ export function NewBroadcastForm({
     setCards(emptyCarouselCards(cardRequirements));
     setLocation({ latitude: "", longitude: "", name: "", address: "" });
     setOfferExpiresAt("");
+    setButtonVals({});
     if (!selectedTemplate) {
       setBodyVars(Array.from({ length: bodyVarCount }, () => ""));
       setHeaderVar("");
@@ -780,6 +790,9 @@ export function NewBroadcastForm({
     (!needsOfferExpiry || offerExpiryMs !== null) &&
     (cardRequirements.length === 0 ||
       carouselCardsComplete(cardRequirements, cards)) &&
+    buttonRequirements.every(
+      (b) => (buttonVals[`${b.index}:${b.subType}`] ?? "").trim() !== "",
+    ) &&
     // Don't let the broadcast fire while the header media is still uploading —
     // otherwise it sends with a stale/empty link the moment a prior upload
     // populated `headerMedia` but the current pick hasn't finished.
@@ -1132,6 +1145,16 @@ export function NewBroadcastForm({
                       : {}),
                     ...(offerExpiryMs !== null
                       ? { limitedTimeOfferExpiresAtMs: offerExpiryMs }
+                      : {}),
+                    // Campaign-level button values (coupon code / URL suffix).
+                    ...(buttonRequirements.length > 0
+                      ? {
+                          buttons: buttonRequirements.map((b) => ({
+                            index: b.index,
+                            subType: b.subType,
+                            text: (buttonVals[`${b.index}:${b.subType}`] ?? "").trim(),
+                          })),
+                        }
                       : {}),
                   },
                 }),
@@ -1532,6 +1555,36 @@ export function NewBroadcastForm({
                   )}
                 </div>
               )}
+              {/* Campaign-level button values — one coupon code / URL suffix
+                  every recipient gets. An LTO's code caps at 15, a plain
+                  coupon at 20 (mirrored server-side). */}
+              {buttonRequirements.map((b) => {
+                const key = `${b.index}:${b.subType}`;
+                const isCode = b.subType === "copy_code";
+                const codeMax = isCode ? (needsOfferExpiry ? 15 : 20) : undefined;
+                return (
+                  <div key={key}>
+                    <label
+                      htmlFor={`broadcast-btn-${key}`}
+                      className="mb-1.5 block text-2xs font-medium uppercase tracking-wide text-muted-foreground"
+                    >
+                      {isCode
+                        ? `Coupon code — button #${b.index + 1}, same for every recipient`
+                        : `URL button #${b.index + 1} value — appended to the button's link`}
+                    </label>
+                    <input
+                      id={`broadcast-btn-${key}`}
+                      value={buttonVals[key] ?? ""}
+                      maxLength={codeMax}
+                      onChange={(e) =>
+                        setButtonVals((cur) => ({ ...cur, [key]: e.target.value }))
+                      }
+                      placeholder={isCode ? "e.g. WINTER25" : "e.g. summer-sale"}
+                      className="w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-sm outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/25"
+                    />
+                  </div>
+                );
+              })}
               {bodyVarCount + headerVarCount > 0 && (
                 <p className="text-xs leading-relaxed text-muted-foreground">
                   Type a value or insert a{" "}

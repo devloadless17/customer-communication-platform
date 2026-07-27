@@ -82,6 +82,23 @@ export const BroadcastVariablesSchema = z.object({
     })
     .optional(),
   /**
+   * TOP-LEVEL button values, campaign-level: the coupon code every recipient
+   * gets, or the shared URL suffix. The 4th instance of the "a send-time value
+   * the inbox collects but the broadcast path couldn't carry" class — before
+   * this, a coupon-code template (the classic marketing campaign) was refused
+   * at create. Validated against `requiredTemplateButtonParams` in the service.
+   */
+  buttons: z
+    .array(
+      z.object({
+        index: z.number().int().min(0).max(9),
+        subType: z.enum(["url", "quick_reply", "copy_code"]),
+        text: z.string().min(1).max(2048),
+      }),
+    )
+    .max(10)
+    .optional(),
+  /**
    * Carousel cards, campaign-level: every recipient sees the same strip. The
    * count is fixed by the approved template, so this is validated against it
    * rather than bounded here alone.

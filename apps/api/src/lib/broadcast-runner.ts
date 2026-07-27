@@ -14,6 +14,7 @@ import {
   renderTemplateBody,
 } from "@/lib/providers/meta";
 import {
+  encodeUrlButtonValue,
   requiredTemplateButtonParams,
   templateNamedPlaceholders,
 } from "@ccp/shared/template-render";
@@ -401,6 +402,16 @@ interface BroadcastVariables {
   limitedTimeOfferExpiresAtMs?: number;
   /** Tap-target CTA override — one destination/title for the campaign. */
   tapTarget?: { url: string; title: string };
+  /**
+   * TOP-LEVEL button values — the campaign's coupon code / shared URL suffix.
+   * One value per button for every recipient, validated against
+   * `requiredTemplateButtonParams` at create.
+   */
+  buttons?: Array<{
+    index: number;
+    subType: "url" | "quick_reply" | "copy_code";
+    text: string;
+  }>;
 }
 
 /**
@@ -1992,6 +2003,20 @@ async function processOneRecipient(
         : {};
       // Campaign-level too: one tap-target destination for every recipient.
       const tapTarget = variables.tapTarget ? { tapTarget: variables.tapTarget } : {};
+      // Top-level button values — the campaign's coupon code / URL suffix.
+      // URL suffixes are percent-encoded with the same identity-passthrough
+      // encoder the single-send path uses, so a suffix that works in the reply
+      // box can't fail in a campaign. (Auth OTP buttons never appear here —
+      // broadcast creation demands explicit values and the composer doesn't
+      // offer auth templates for campaigns.)
+      const topButtons =
+        variables.buttons && variables.buttons.length > 0
+          ? {
+              buttons: variables.buttons.map((b) =>
+                b.subType === "url" ? { ...b, text: encodeUrlButtonValue(b.text) } : b,
+              ),
+            }
+          : {};
 
     // The template variables in Meta's wire shape, built ONCE and reused by
       // both the initial send and the 429 retry below. Two inline copies is
@@ -2021,6 +2046,7 @@ async function processOneRecipient(
               ...headerLocation,
               ...offerExpiry,
               ...tapTarget,
+              ...topButtons,
               ...cardsVar,
             }
           : {
@@ -2030,6 +2056,7 @@ async function processOneRecipient(
               ...headerLocation,
               ...offerExpiry,
               ...tapTarget,
+              ...topButtons,
               ...cardsVar,
             };
 
@@ -4008,7 +4035,9 @@ function parseVariables(v: Prisma.JsonValue): BroadcastVariables {
     headerMedia?: unknown;
     headerLocation?: unknown;
     cards?: unknown;
+    buttons?: unknown;
     limitedTimeOfferExpiresAtMs?: unknown;
+    tapTarget?: unknown;
   };
   const body = Array.isArray(obj.body)
     ? obj.body.filter((x): x is string => typeof x === "string")
@@ -4089,13 +4118,41 @@ function parseVariables(v: Prisma.JsonValue): BroadcastVariables {
     Number.isFinite(obj.limitedTimeOfferExpiresAtMs)
       ? obj.limitedTimeOfferExpiresAtMs
       : undefined;
+  // Was MISSING when tapTarget shipped: the schema accepted it, the row stored
+  // it, and this parse silently dropped it — the campaign sent without its CTA
+  // and nothing errored. Every field the create path stores must be read back
+  // here, or it never reaches the wire.
+  const tt = obj.tapTarget as { url?: unknown; title?: unknown } | undefined;
+  const tapTarget =
+    tt && typeof tt.url === "string" && typeof tt.title === "string"
+      ? { url: tt.url, title: tt.title }
+      : undefined;
+  // Top-level button values (coupon code / URL suffix), same keep-the-well-
+  // formed-ones stance as cards.
+  const topButtons = Array.isArray(obj.buttons)
+    ? (obj.buttons as Array<Record<string, unknown>>).flatMap((b) =>
+        typeof b?.index === "number" &&
+        (b.subType === "url" || b.subType === "quick_reply" || b.subType === "copy_code") &&
+        typeof b.text === "string"
+          ? [
+              {
+                index: b.index,
+                subType: b.subType as "url" | "quick_reply" | "copy_code",
+                text: b.text,
+              },
+            ]
+          : [],
+      )
+    : [];
   return {
     body,
     ...(header ? { header } : {}),
     ...(headerMedia ? { headerMedia } : {}),
     ...(headerLocation ? { headerLocation } : {}),
     ...(cards.length > 0 ? { cards } : {}),
+    ...(topButtons.length > 0 ? { buttons: topButtons } : {}),
     ...(ltoExpiry !== undefined ? { limitedTimeOfferExpiresAtMs: ltoExpiry } : {}),
+    ...(tapTarget ? { tapTarget } : {}),
   };
 }
 

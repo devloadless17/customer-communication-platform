@@ -44,7 +44,9 @@ import { csvHeader, csvRows } from "@/lib/csv";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import {
+  LIMITED_TIME_OFFER_LIMITS,
   TEMPLATE_AUTO_ARCHIVE_MONTHS,
+  TEMPLATE_LIMITS,
   templateDeletionDaysLeft,
   requiredCarouselCards,
   requiredTemplateButtonParams,
@@ -333,17 +335,57 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           detail: `This template's body uses named variables (${namedBodyVars.join(", ")}). Broadcasts support numbered {{1}} placeholders only.`,
         });
       }
+      // Button values are CAMPAIGN-LEVEL (one coupon code / URL suffix for
+      // every recipient — same shape as the location pin and the LTO expiry).
+      // Every button the template demands must be covered, or Meta rejects
+      // every recipient.
       const requiredButtons = requiredTemplateButtonParams(
         template.components,
         template.category,
       );
       if (requiredButtons.length > 0) {
-        throw new BadRequestException({
-          error: "template_needs_button_parameters",
-          detail: `This template has button(s) that need a send-time value (${requiredButtons
-            .map((b) => `#${b.index + 1} ${b.subType}`)
-            .join(", ")}). Broadcasts can't supply them.`,
-        });
+        const suppliedButtons = variables.buttons ?? [];
+        const missing = requiredButtons.filter(
+          (need) =>
+            !suppliedButtons.some(
+              (b) =>
+                b.index === need.index &&
+                b.subType === need.subType &&
+                b.text.trim() !== "",
+            ),
+        );
+        if (missing.length > 0) {
+          throw new BadRequestException({
+            error: "template_needs_button_parameters",
+            detail:
+              `This template's button(s) need a send-time value: ${missing
+                .map((b) => `#${b.index + 1} (${b.subType})`)
+                .join(", ")}. Supply them as \`variables.buttons\` — one value ` +
+              `for the whole campaign.`,
+          });
+        }
+        // Same caps as the single-send path: a plain coupon code caps at 20,
+        // a limited-time-offer code at 15 — over either, Meta fails every
+        // recipient without naming the field.
+        const hasLto = (template.components as Array<{ type?: unknown }>).some(
+          (c) =>
+            typeof c?.type === "string" &&
+            c.type.toUpperCase() === "LIMITED_TIME_OFFER",
+        );
+        const codeMax = hasLto
+          ? LIMITED_TIME_OFFER_LIMITS.offerCodeMaxLength
+          : TEMPLATE_LIMITS.copyCodeExampleMaxLength;
+        for (const b of suppliedButtons) {
+          if (b.subType === "copy_code" && b.text.length > codeMax) {
+            throw new BadRequestException({
+              error: "coupon_code_too_long",
+              detail:
+                `${hasLto ? "A limited-time offer code" : "Coupon codes"} ` +
+                `${hasLto ? "is" : "are"} limited to ${codeMax} characters — ` +
+                `button #${b.index + 1}'s is ${b.text.length}.`,
+            });
+          }
+        }
       }
 
       // Variable count sanity check — fire BEFORE creating the row so the UI
