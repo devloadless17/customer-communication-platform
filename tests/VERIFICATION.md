@@ -709,24 +709,30 @@ FIXED:
   a lock storm that also blocked every other org-level write and would hit
   Prisma's 5s tx timeout. Now delegates to `WorkspaceRootService.destroy`.
 
-STILL OPEN (severity order — all CONFIRMED by code trace, none fixed):
-- HIGH: customer-mode broadcast bills the same PERSON twice when a merge
-  lands between create and send (dedupe runs once, at create;
-  `@@unique(broadcastId, contactId)` is per-CONTACT so it can't see it; the
-  merge needs no human — ingest strong-key adoption and the drift sweeper
-  both re-point automatically, and a scheduled campaign's window is days).
-  `BroadcastRecipient.customerId` is written but never read, so it can't even
-  audit the claim.
-- MED: contact-EXPORT artifacts (a full address-book PII dump) orphaned in
-  R2 forever by workspace/org delete — the only reaper walks job rows, which
-  cascade; the blob sweeper deliberately skips that prefix.
-- MED: after removal the surviving side's DM renders as a SELF-DM showing
-  their own name (`mapDmPeer` only anticipates hard-delete); remove→re-add
-  destroys a DM permanently and unrecoverably (`createOrGetDm` returns the
-  existing row without repairing membership, and the unique key blocks a
-  replacement).
+FIXED IN THE FOLLOW-UP (7d9149e7):
+- **The four-run "flaky" ticket test was a real 5s TRANSACTION CEILING.**
+  Raising its timeout let it fail honestly: P2028, "the timeout for this
+  transaction was 5000 ms". `transactionOptions` was set NOWHERE while the
+  pool allowed `statement_timeout: 30_000` — a query could run 30s inside a
+  transaction that died at 5. Ticket creation holds one interactive tx across
+  a row-locked number allocation, so 8 concurrent creates queue and the ones
+  at the back FAIL. Now 15s (under the statement timeout). Also removes the
+  timeout half of the workspace-delete finding. The spec built its own bare
+  client, so it was testing a config that doesn't exist in prod — aligned.
+- HIGH: customer-mode person-dedupe at FIRE time, using the previously-unread
+  `BroadcastRecipient.customerId` snapshot as a merge detector (unchanged
+  owner short-circuits with no query). New `duplicate_person` code in the
+  union + ALL_ list + suppress bucket + report label.
+- MED: DM peer resolution — `dmKey` ("u:u" for a real self-DM) now
+  distinguishes a self-DM from a departed peer, failing SAFE when absent;
+  `createOrGetDm` repairs missing membership so remove→re-add no longer
+  destroys a DM permanently.
+- MED: contact import/export artifacts snapshotted before the cascade.
+
+STILL OPEN (severity order — all CONFIRMED by code trace):
 - MED: `ai-knowledge/`, `ai-voice-draft/`, `tpl-hdr-` blobs orphaned by
-  workspace delete.
+  workspace delete (same class as the transfer artifacts just fixed —
+  collect their keys in `destroy()`).
 - MED: hard-deleting a user re-homes nothing through the domain path — no
   version bump, no TicketEvent, no `conversation.assigned` publish (the
   removal path does all three deliberately).
