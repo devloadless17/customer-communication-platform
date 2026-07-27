@@ -12,7 +12,11 @@ import { Reflector } from "@nestjs/core";
 import type { Request } from "express";
 
 import { DbService } from "../db/db.service";
-import { isRestrictedViewer } from "@/lib/conversations/visibility";
+import {
+  assertCanViewConversation,
+  ConversationNotVisibleError,
+  isRestrictedViewer,
+} from "@/lib/conversations/visibility";
 import { SessionGuard } from "./session.guard";
 
 const PARAM_KEY = "ccp:conversation-visibility-param";
@@ -86,15 +90,18 @@ export class ConversationVisibilityGuard implements CanActivate {
     // inside their own query.
     if (!conversationId) return true;
 
-    const row = await this.db.conversation.findFirst({
-      where: {
-        id: conversationId,
-        workspaceId: session.workspaceId,
-        assignedUserId: session.userId,
-      },
-      select: { id: true },
-    });
-    if (!row) throw new NotFoundException({ error: "conversation_not_found" });
+    // THE visibility rule — lib/conversations/visibility.ts is the single
+    // authority ("everything funnels through this file on purpose"); this
+    // guard used to hand-roll the same where-fragment, which is exactly the
+    // copy-drift §18 warns about. Identical wire shape: 404, never 403.
+    try {
+      await assertCanViewConversation(this.db, session, conversationId);
+    } catch (err) {
+      if (err instanceof ConversationNotVisibleError) {
+        throw new NotFoundException({ error: "conversation_not_found" });
+      }
+      throw err;
+    }
     return true;
   }
 }

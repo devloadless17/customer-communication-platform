@@ -13,6 +13,7 @@ import type {
 } from "@ccp/shared/message-flags/types";
 
 import {
+  conversationRelationWhere,
   isRestrictedViewer,
   visibilityWhere,
   type ConversationViewer,
@@ -57,13 +58,16 @@ export class MessageFlagsService {
     where: { messageId?: string; flagId?: string },
   ): Promise<void> {
     if (!viewer || !isRestrictedViewer(viewer)) return;
-    const conversationWhere = { assignedUserId: viewer.userId };
+    // THE visibility rule, via the canonical builder — never a hand-written
+    // `{ assignedUserId }` fragment (lib/conversations/visibility.ts is the
+    // single authority; hand copies are how the boundary drifted before).
+    const relation = conversationRelationWhere(viewer);
     const ok = where.messageId
       ? await this.db.message.findFirst({
           where: {
             id: where.messageId,
             workspaceId: viewer.workspaceId,
-            conversation: conversationWhere,
+            ...relation,
           },
           select: { id: true },
         })
@@ -71,7 +75,7 @@ export class MessageFlagsService {
           where: {
             id: where.flagId,
             workspaceId: viewer.workspaceId,
-            conversation: conversationWhere,
+            ...relation,
           },
           select: { id: true },
         });

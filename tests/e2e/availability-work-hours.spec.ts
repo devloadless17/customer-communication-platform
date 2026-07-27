@@ -627,10 +627,15 @@ test.describe("Settings → Team UI", () => {
 });
 
 test.describe("/v1 parity", () => {
-  /** A key with the scopes these routes need. */
-  async function apiKey(request: APIRequestContext): Promise<string> {
+  /** A key with the scopes these routes need. Availability/work-hours WRITES
+   *  moved to `admin:settings` (2026-07-27) — the internal twin is a
+   *  manager+ capability, so the generic `write:users` no longer reaches it. */
+  async function apiKey(
+    request: APIRequestContext,
+    scopes: string[] = ["read:catalog", "admin:settings"],
+  ): Promise<string> {
     const res = await request.post("/api/workspace/api-keys", {
-      data: { name: `wh-e2e-${Date.now()}`, scopes: ["read:catalog", "write:users"] },
+      data: { name: `wh-e2e-${Date.now()}`, scopes },
     });
     expect(res.status(), await res.text()).toBeLessThan(300);
     const body = (await res.json()) as { token?: string; apiKey?: { token?: string } };
@@ -696,6 +701,22 @@ test.describe("/v1 parity", () => {
     expect(user.workHoursMode).toBe("custom");
 
     await v1.dispose();
+
+    // The boundary itself: a key holding only the OLD generic write scope
+    // must be refused — these are admin-grade writes (pins the 2026-07-27
+    // scope split; grandfathering applies to pre-existing keys only, and this
+    // key is new).
+    const legacyToken = await apiKey(request, ["read:catalog", "write:users"]);
+    const legacy = await playwright.request.newContext({
+      baseURL: test.info().project.use.baseURL,
+      extraHTTPHeaders: { Authorization: `Bearer ${legacyToken}` },
+    });
+    const refused = await legacy.patch(`/api/external/v1/users/${adminUserId}/availability`, {
+      data: { status: "busy" },
+    });
+    expect(refused.status(), await refused.text()).toBe(403);
+    expect(((await refused.json()) as { error?: string }).error).toBe("insufficient_scope");
+    await legacy.dispose();
   });
 
   test("a key WITHOUT write:users is refused", async ({ request, playwright }) => {

@@ -659,3 +659,42 @@ export async function setConversationAiEnabled(args: {
 }
 
 
+
+/**
+ * THE team-wide mark-read: conditional CAS-zero of `unreadCount` + a
+ * `conversation.read` publish only when THIS call cleared it.
+ *
+ * One definition for the two agent-side readers — thread mount
+ * (`ConversationsService.markRead`, which adds its own 404 probe + Meta read
+ * receipt around this core) and reply-send
+ * (`MessagesService.markReadOnAgentSend`, fire-and-forget). They were two
+ * hand-mirrored copies that cited each other by line number; this is the
+ * intended end-state. The WHERE predicate IS the gate: `unreadCount > 0`
+ * makes the common already-read case one no-op round-trip, and the CAS
+ * protects against the read-vs-incoming-bump race — the loser skips the
+ * publish and the next `message.received` re-syncs the badge.
+ */
+export async function markConversationRead(args: {
+  db: Pick<PrismaClient, "conversation">;
+  publish: Publish;
+  workspaceId: string;
+  conversationId: string;
+  readByUserId: string;
+}): Promise<{ cleared: boolean }> {
+  const result = await args.db.conversation.updateMany({
+    where: {
+      id: args.conversationId,
+      workspaceId: args.workspaceId,
+      unreadCount: { gt: 0 },
+    },
+    data: { unreadCount: 0 },
+  });
+  if (result.count === 0) return { cleared: false };
+  await args.publish({
+    type: "conversation.read",
+    workspaceId: args.workspaceId,
+    conversationId: args.conversationId,
+    readByUserId: args.readByUserId,
+  } as DomainEventOf<"conversation.read">);
+  return { cleared: true };
+}

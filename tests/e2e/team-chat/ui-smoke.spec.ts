@@ -84,7 +84,12 @@ test("the Browse channels dialog opens and lists public channels", async ({
   await expect(page.getByText("Browse channels")).toBeVisible();
   // The copy that explains WHY a private channel isn't listed.
   await expect(page.getByText(/Private channels are/i)).toBeVisible();
-  await expect(page.getByText(`${CHAN_PREFIX}browsable`)).toBeVisible();
+  // Scoped to the DIALOG: the creator auto-joins the channel, so its name
+  // also renders as a sidebar link — a bare getByText is a strict-mode
+  // violation whenever both are on screen.
+  await expect(
+    page.getByRole("dialog").getByText(`${CHAN_PREFIX}browsable`),
+  ).toBeVisible();
 
   await page.screenshot({ path: "test-results/teamchat-browse.png" });
 });

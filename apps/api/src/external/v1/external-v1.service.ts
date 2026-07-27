@@ -861,8 +861,14 @@ export class ExternalV1Service {
     });
     if (!existing) return null;
 
-    const updated = await this.db.contact.update({
-      where: { id: existing.id },
+    // CAS on deletedAt — byte-mirror of ContactsService.reviveSoftDeletedByPhone:
+    // a concurrent revive (an inbound WhatsApp webhook on the same phone) may
+    // have flipped this row live between the findFirst above and here. This
+    // used to be a plain `update`, which CLOBBERED that winner's directory
+    // fields + tag set with this API payload and published a second
+    // created/updated pair for a contact the winner already announced.
+    const revived = await this.db.contact.updateMany({
+      where: { id: existing.id, deletedAt: { not: null } },
       data: {
         name: data.name,
         firstName: data.firstName,
@@ -876,42 +882,61 @@ export class ExternalV1Service {
         source: "manual",
         deletedAt: null,
         version: { increment: 1 },
-        tags: { set: data.tagIds.map((id) => ({ id })) },
       },
+    });
+    const won = revived.count > 0;
+    if (won) {
+      // Tag `set` is a relation write, so it can't ride the updateMany above;
+      // applied only on a WON race for the same reason the scalars are CAS'd —
+      // a lost race must not overwrite the winner's tag set.
+      await this.db.contact.update({
+        where: { id: existing.id },
+        data: { tags: { set: data.tagIds.map((id) => ({ id })) } },
+        select: { id: true },
+      });
+    }
+
+    const updated = await this.db.contact.findFirst({
+      where: { id: existing.id, workspaceId },
       include: EXTERNAL_CONTACT_INCLUDE,
     });
+    if (!updated) return null;
 
     const tagIds = updated.tags.map((t) => t.id);
     const contact: DomainContact = toContactWire(updated, { tagIds });
 
-    await this.bus.publish({
-      type: "contact.created",
-      workspaceId,
-      contact,
-      source: "api",
-      createdByUserId: null,
-      createdByApiKeyId: apiKeyId,
-    });
+    // Only announce the (re)creation when THIS call performed the revive — a
+    // concurrent winner already published its own pair for the live row.
+    if (won) {
+      await this.bus.publish({
+        type: "contact.created",
+        workspaceId,
+        contact,
+        source: "api",
+        createdByUserId: null,
+        createdByApiKeyId: apiKeyId,
+      });
 
-    await this.bus.publish({
-      type: "contact.updated",
-      workspaceId,
-      contact,
-      previousStageId: null,
-      fieldChanges: Object.entries(contact.customFields).map(([key, next]) => ({
-        key,
-        previous: null,
-        next,
-      })),
-      tagChanges: tagIds.length > 0 ? { added: tagIds, removed: [] } : undefined,
-      changedByUserId: null,
-      changedByApiKeyId: apiKeyId,
-      kind: "created",
-      workflowContact: workflowContactSnapshot(updated),
-      // contact.created above already fans out the `contact:updated` socket
-      // frame; suppress the duplicate here (non-socket subscribers still fire).
-      suppressSocketFanout: true,
-    });
+      await this.bus.publish({
+        type: "contact.updated",
+        workspaceId,
+        contact,
+        previousStageId: null,
+        fieldChanges: Object.entries(contact.customFields).map(([key, next]) => ({
+          key,
+          previous: null,
+          next,
+        })),
+        tagChanges: tagIds.length > 0 ? { added: tagIds, removed: [] } : undefined,
+        changedByUserId: null,
+        changedByApiKeyId: apiKeyId,
+        kind: "created",
+        workflowContact: workflowContactSnapshot(updated),
+        // contact.created above already fans out the `contact:updated` socket
+        // frame; suppress the duplicate here (non-socket subscribers still fire).
+        suppressSocketFanout: true,
+      });
+    }
 
     return toExternalContact(updated, tagIds);
   }

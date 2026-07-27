@@ -39,6 +39,7 @@ import {
 } from "@/lib/queries";
 import {
   assignConversation,
+  markConversationRead,
   setConversationStatus,
   setConversationAiEnabled,
 } from "@/lib/conversations/mutations";
@@ -1056,14 +1057,19 @@ export class ConversationsService {
     // conversations); a follow-up cheap PK probe only fires for that
     // ambiguous branch so the 99% case is one round-trip.
     //
-    // Mirrors the markReadOnAgentSend helper at messages.service.ts:200-211
-    // (the 2026-05-26 P1 batch's markRead-1-RTT fix); was previously
-    // applied there but missed this call site.
-    const result = await this.db.conversation.updateMany({
-      where: { id: conversationId, workspaceId, unreadCount: { gt: 0 } },
-      data: { unreadCount: 0 },
+    // The CAS + publish core is THE shared markConversationRead
+    // (lib/conversations/mutations.ts) — this and messages.service's
+    // markReadOnAgentSend were two hand-mirrored copies citing each other by
+    // line number. The 404 probe + Meta read receipt below stay here: they
+    // are this route's concerns, not the mark-read rule's.
+    const { cleared } = await markConversationRead({
+      db: this.db,
+      publish: (e) => this.bus.publish(e),
+      workspaceId,
+      conversationId,
+      readByUserId: userId,
     });
-    if (result.count === 0) {
+    if (!cleared) {
       // Either already-read OR missing. Probe to distinguish so callers
       // still see 404 when the conversation truly vanished.
       const exists = await this.db.conversation.findFirst({
@@ -1073,12 +1079,6 @@ export class ConversationsService {
       if (!exists) throw new NotFoundException({ error: "conversation not found" });
       return; // already-read fast path
     }
-    await this.bus.publish({
-      type: "conversation.read",
-      workspaceId,
-      conversationId,
-      readByUserId: userId,
-    });
 
     // Meta read receipt (best-effort) — only when there was unread to clear.
     // A CAS that lost (a concurrent inbound bumped the counter between the

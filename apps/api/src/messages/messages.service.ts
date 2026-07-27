@@ -37,7 +37,8 @@ import {
 import { checkTextCap } from "@/lib/messaging/text-cap";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
-import { setConversationAiEnabled } from "@/lib/conversations/mutations";
+import { markConversationRead, setConversationAiEnabled } from "@/lib/conversations/mutations";
+import { fillActiveTicketAssignee } from "@/lib/tickets/mutations";
 import { SendTextValidationError } from "@/lib/messaging/send-text-internal";
 import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
 import { sendStructuredInternal } from "@/lib/messaging/send-structured-internal";
@@ -56,7 +57,8 @@ import type { Channel } from "@ccp/shared/types";
 import { loadReplySnapshotById, mediaPreview } from "@/lib/providers/ingest";
 import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta";
 import {
-  isRestrictedViewer,
+  assertCanViewConversation,
+  ConversationNotVisibleError,
   conversationRelationWhere,
   type ConversationViewer,
 } from "@/lib/conversations/visibility";
@@ -361,24 +363,16 @@ export class MessagesService {
   private markReadOnAgentSend(workspaceId: string, userId: string, conversationId: string): void {
     void (async () => {
       try {
-        // Single conditional updateMany — the WHERE predicate IS the gate.
-        // `unreadCount > 0` ensures no work when the thread is already
-        // zeroed (common: the agent already opened the thread, which
-        // marked it read on mount). result.count is 0 when nothing
-        // matched → skip the publish. Was 2 round-trips (findFirst then
-        // CAS); the CAS itself can also serve as the read.
-        const result = await this.db.conversation.updateMany({
-          where: { id: conversationId, workspaceId, unreadCount: { gt: 0 } },
-          data: { unreadCount: 0 },
+        // THE shared CAS mark-read (lib/conversations/mutations.ts) — this
+        // and ConversationsService.markRead used to be two hand-mirrored
+        // copies citing each other by line number.
+        await markConversationRead({
+          db: this.db,
+          publish: (e) => this.bus.publish(e),
+          workspaceId,
+          conversationId,
+          readByUserId: userId,
         });
-        if (result.count > 0) {
-          await this.bus.publish({
-            type: "conversation.read",
-            workspaceId,
-            conversationId,
-            readByUserId: userId,
-          });
-        }
       } catch (err) {
         this.logger.debug(
           `markReadOnAgentSend failed for ${conversationId}: ${String(err)}`,
@@ -570,6 +564,7 @@ export class MessagesService {
             }
           : null;
 
+        let claimWon = false;
         await this.db.$transaction(async (tx) => {
           const result = await tx.conversation.updateMany({
             where: { id: conversationId, workspaceId, assignedUserId: null, status: previousStatus },
@@ -589,6 +584,7 @@ export class MessagesService {
             },
           });
           if (result.count === 0) return; // lost the CAS race — someone else claimed/closed first
+          claimWon = true;
 
           // Snapshots reflect the row state AFTER the CAS update with
           // predicted analytics writes applied (assignmentsCount++,
@@ -636,6 +632,25 @@ export class MessagesService {
             });
           }
         });
+
+        // Ticket follow-through — the one observable divergence this path had
+        // from the shared `assignConversation` (which this method is the §18-
+        // sanctioned exception to; see mutations.ts:100). A reply-claim now
+        // also fills the thread's active ticket's EMPTY owner, exactly like a
+        // manual claim: fill-empty-only, so it can never take a ticket from
+        // someone already on it. Deliberately AFTER the transaction — same
+        // reasoning as mutations.ts: the claim must not fail because
+        // ticketing did, and an unassigned ticket is visible and fixable,
+        // never corrupt.
+        if (claimWon) {
+          await fillActiveTicketAssignee(workspaceId, conversationId, userId).catch(
+            (err: unknown) => {
+              this.logger.debug(
+                `reply-claim ticket follow-through failed for ${conversationId}: ${String(err)}`,
+              );
+            },
+          );
+        }
       } catch (err) {
         this.logger.debug(
           `autoAssignOnAgentSend failed for ${conversationId}: ${String(err)}`,
@@ -1377,12 +1392,19 @@ export class MessagesService {
      *  `req.body.conversationId` is not yet populated when the guard runs. */
     viewer?: ConversationViewer,
   ): Promise<{ messageId: string | null; warning?: string }> {
-    if (viewer && isRestrictedViewer(viewer)) {
-      const visible = await this.db.conversation.findFirst({
-        where: { id: form.conversationId, workspaceId, assignedUserId: viewer.userId },
-        select: { id: true },
-      });
-      if (!visible) throw new NotFoundException({ error: "conversation not found" });
+    if (viewer) {
+      // THE visibility rule (lib/conversations/visibility.ts) — this was the
+      // fourth hand-rolled copy of the assigned-only fragment. Also fixes the
+      // one prose error key on this path ("conversation not found" → the
+      // canonical snake_case; no web/test matcher referenced the old string).
+      try {
+        await assertCanViewConversation(this.db, viewer, form.conversationId);
+      } catch (err) {
+        if (err instanceof ConversationNotVisibleError) {
+          throw new NotFoundException({ error: "conversation_not_found" });
+        }
+        throw err;
+      }
     }
     return runWithSendIdempotency(
       {

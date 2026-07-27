@@ -13,7 +13,11 @@ import type {
   TicketFieldDefinition,
   TicketSlaPolicy,
 } from "@ccp/shared/tickets/types";
-import { isRestrictedViewer, type ConversationViewer } from "@/lib/conversations/visibility";
+import {
+  conversationRelationWhere,
+  isRestrictedViewer,
+  type ConversationViewer,
+} from "@/lib/conversations/visibility";
 import {
   addTicketNote,
   createTicket,
@@ -66,7 +70,11 @@ export class TicketsService {
    */
   private restriction(viewer?: ConversationViewer) {
     if (!viewer || !isRestrictedViewer(viewer)) return null;
-    return { conversation: { assignedUserId: viewer.userId } } as const;
+    // Via the canonical builder (lib/conversations/visibility.ts) — a
+    // hand-written fragment here is the copy-drift this file's own comment
+    // warns about. The null-sentinel + AND-array composition stay unchanged.
+    const relation = conversationRelationWhere(viewer);
+    return relation.conversation ? relation : null;
   }
 
   private async assertVisible(viewer: ConversationViewer | undefined, ticketId: string) {
