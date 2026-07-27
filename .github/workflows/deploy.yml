@@ -1112,6 +1112,52 @@ jobs:
               echo "⚠ pre-migration snapshot FAILED — proceeding (nightly dump is the fallback). If this deploy's migration misbehaves, a manual restore decision is required."
             fi
 
+            # MIGRATE BEFORE THE SWAP, not during it.
+            #
+            # The api container runs `prisma migrate deploy` as the first step
+            # of its CMD, and `app` is gated on `api: service_healthy`. So the
+            # old sequence was: stop api → migrate (minutes, on a batch) → api
+            # listens → app recreated. For that whole window the API is ABSENT
+            # while the PREVIOUS app container is still taking user traffic, and
+            # every server-side render fails — users get the "Something broke."
+            # digest page, not a retry. Measured on the 2026-07-27 deploy: api
+            # was created ~3 minutes before it bound port 4000 (6 migrations).
+            # The smoke gate structurally cannot see this; it only runs once
+            # everything is already healthy.
+            #
+            # Running the migration as a one-shot against the NEWLY PULLED image
+            # collapses that hole to the container swap itself (seconds): the
+            # old api keeps serving throughout, and the `up -d` below finds
+            # nothing pending and boots straight into node.
+            #
+            # It also FAILS EARLIER and more safely. A bad migration now aborts
+            # here, with the running stack untouched and the pre-migration
+            # snapshot above still the newest thing on disk — instead of being
+            # discovered by an api that applied it, crash-looped, and left the
+            # health gate to trip the rollback.
+            #
+            # CONSTRAINT, stated explicitly: for the duration of the migration
+            # the OUTGOING api code runs against the NEW schema, so every
+            # migration must be backward-compatible with the previous release
+            # (expand-contract). That is NOT a new rule — the auto-rollback
+            # below already depends on exactly this property (it swaps code
+            # images only, never the schema), which is why the snapshot comment
+            # above already says to prefer expand-contract. This just makes the
+            # requirement load-bearing in one more place.
+            echo "==> Applying migrations (one-shot, old api still serving)"
+            if ! docker compose --env-file .env run --rm --entrypoint sh api \
+                 -c 'cd /app && pnpm prisma migrate deploy'; then
+              echo "::error::migration FAILED — the running stack was NOT touched."
+              echo "::error::No container was recreated; the previous release is still serving."
+              echo "----- migrate status -----"
+              docker compose --env-file .env run --rm --entrypoint sh api \
+                -c 'cd /app && pnpm prisma migrate status' 2>&1 | tail -40 || true
+              echo "::error::A migration that failed mid-apply poisons _prisma_migrations and"
+              echo "::error::every later deploy fails with P3009. To clear it:"
+              echo "::error::  docker compose --env-file .env run --rm --entrypoint sh api -c 'cd /app && pnpm prisma migrate resolve --rolled-back <FAILED_MIGRATION_NAME>'"
+              exit 1
+            fi
+
             # Same reasoning as the smoke step: `app` depends_on api with
             # condition service_healthy, so compose blocks here and exits
             # non-zero the moment api fails — and under `set -e` the step ended
@@ -1147,9 +1193,12 @@ jobs:
           APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
         run: |
           # 150s budget (75 × 2s). MUST exceed the api container's compose
-          # start_period (120s) — that window exists precisely because a
-          # stack-of-migrations `prisma migrate deploy` can take ~60-120s on a
-          # meaty schema change. The old 60s budget timed out WHILE a healthy
+          # start_period (120s). NOTE: since migrations moved to a one-shot
+          # BEFORE the swap (see the ship step), api's CMD `migrate deploy` is
+          # normally a no-op and boot is seconds — this budget is now margin,
+          # not a migration window. Deliberately NOT tightened: the margin is
+          # free, and it still covers the case where someone brings the stack
+          # up by hand without the pre-migrate step. The old 60s budget timed out WHILE a healthy
           # deploy's migration was still running → tripped the auto-rollback
           # below → retagged :previous against the ALREADY-migrated schema →
           # Prisma threw on the now-mismatched client. The safety net created
