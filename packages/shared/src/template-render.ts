@@ -1280,6 +1280,12 @@ export function templateArchivalRisk(
 export const TEMPLATE_TTL_RULES = {
   authentication: { min: 30, max: 900, defaultSeconds: 600 },
   utility: { min: 30, max: 43_200, defaultSeconds: 2_592_000 },
+  // KEEP marketing here despite the MM-API "Features" comparison table claiming
+  // Cloud API TTL "only supports Authentication and Utility" — the dedicated
+  // Cloud API TTL reference documents this exact marketing range (12h–30d),
+  // and a comparison table selling a different product is not the authority on
+  // this one. (Same reliability class as the utility page's footer-variables
+  // claim.)
   marketing: { min: 43_200, max: 2_592_000, defaultSeconds: 2_592_000 },
 } as const;
 
