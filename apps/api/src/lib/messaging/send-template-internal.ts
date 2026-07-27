@@ -570,6 +570,14 @@ export async function sendTemplateInternal(
     sendConfig,
   );
 
+  if (send.heldForQualityAssessment) {
+    console.warn(
+      `[send-template] Meta HELD message ${send.externalId} for a pacing quality ` +
+        `assessment (workspace ${args.workspaceId}, template "${template.name}") — ` +
+        `it will be released in a later batch or dropped with code 132015/135000.`,
+    );
+  }
+
   // Store the rendered preview ("Hi John, your order is ready") not the raw
   // template ("Hi {{1}}, your order is {{2}}"), so the inbox shows what the
   // customer actually got. Named bodies render by name, positional by index.
@@ -599,6 +607,12 @@ export async function sendTemplateInternal(
     status: "sent",
     rawPayload: {
       sentVia: args.sentVia,
+      // Portfolio/template pacing: Meta accepted this send but is HOLDING it
+      // for a quality assessment — it releases in a later batch (normal sent/
+      // delivered webhooks follow) or is dropped (failed webhook, 132015/
+      // 135000), so `status` self-corrects either way. Recorded here so a
+      // "sent an hour ago, still no receipt" investigation has its answer.
+      ...(send.heldForQualityAssessment ? { heldForQualityAssessment: true } : {}),
       templateId: template.id,
       templateName: template.name,
       templateLanguage: template.language,

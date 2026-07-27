@@ -195,6 +195,17 @@ export async function sendTextInternal(
     sendConfig,
   );
 
+  if (send.heldForQualityAssessment) {
+    // Pacing is documented for template sends, but the provider reads the
+    // field on every send response — if a freeform send is ever held, record
+    // it instead of reporting delivered-and-fine. Self-corrects via the
+    // release (sent/delivered) or drop (failed) webhooks.
+    console.warn(
+      `[send-text] Meta HELD message ${send.externalId} for a pacing quality ` +
+        `assessment (workspace ${args.workspaceId}).`,
+    );
+  }
+
   // Force the outbound's timestamp to be strictly later than the most
   // recent message on the conversation. Without this, a workflow that
   // replies inside the same wall-clock second as the inbound it's
@@ -223,7 +234,10 @@ export async function sendTextInternal(
     direction: "out",
     channel: provider,
     status: "sent",
-    rawPayload: { sentVia: args.sentVia } as Prisma.InputJsonValue,
+    rawPayload: {
+      sentVia: args.sentVia,
+      ...(send.heldForQualityAssessment ? { heldForQualityAssessment: true } : {}),
+    } as Prisma.InputJsonValue,
     timestamp: messageTimestamp,
   });
 
