@@ -92,6 +92,54 @@ function parseSchema(text) {
 const schemaText = fs.readFileSync(SCHEMA, "utf8");
 const MODELS = parseSchema(schemaText);
 
+// ---------------------------------------------------------- tenancy gate ----
+//
+// "workspaceId on every table" (CLAUDE.md §7) has EXPLICIT exceptions, each
+// annotated with a TENANCY EXCEPTION note in schema.prisma: tenant-root /
+// auth tables, and child tables reachable only through a workspace-carrying
+// parent (parent-first query pattern). This gate turns that convention into
+// a tripwire — a NEW model without workspaceId fails CI until it's either
+// given the column or deliberately allowlisted here WITH the schema note.
+const TENANTLESS_ALLOWLIST = new Set([
+  // Tenant roots + org-scoped directory
+  "Organization", "Workspace", "User",
+  // Better Auth-owned tables (Session.activeWorkspaceId is candidate data,
+  // validated on every read — see resolveActiveWorkspaceId)
+  "Session", "Account", "Verification",
+  // Deliberately platform-level (pre-tenant, keyed by email)
+  "LoginAttempt",
+  // Parent-scoped children (see each model's TENANCY EXCEPTION note)
+  "BroadcastRecipient", "OutboundWebhookDelivery",
+  "TeamChannelMember", "TeamChannelMention", "TeamChannelReaction",
+  "TeamChannelPin", "TeamChannelReadReceipt",
+]);
+{
+  const missing = [];
+  for (const [name, fields] of MODELS) {
+    if (!fields.has("workspaceId") && !TENANTLESS_ALLOWLIST.has(name)) {
+      missing.push(name);
+    }
+  }
+  const stale = [...TENANTLESS_ALLOWLIST].filter(
+    (name) => MODELS.has(name) && MODELS.get(name).has("workspaceId"),
+  );
+  if (missing.length > 0 || stale.length > 0) {
+    for (const name of missing) {
+      console.error(
+        `✖ tenancy gate: model \`${name}\` has no workspaceId and is not in ` +
+          "the TENANTLESS_ALLOWLIST (scripts/check-prisma-fields.mjs). Give it " +
+          "the column, or allowlist it WITH a TENANCY EXCEPTION note in schema.prisma.",
+      );
+    }
+    for (const name of stale) {
+      console.error(
+        `✖ tenancy gate: \`${name}\` is allowlisted but HAS workspaceId — remove it from TENANTLESS_ALLOWLIST.`,
+      );
+    }
+    process.exit(1);
+  }
+}
+
 /** `db.workspace` -> `Workspace`. Prisma lowercases the first letter. */
 const BY_DELEGATE = new Map();
 for (const name of MODELS.keys()) {

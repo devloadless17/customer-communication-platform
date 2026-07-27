@@ -1127,6 +1127,11 @@ model Session {
   // falls back to this column (then to the user's first membership). The
   // switch endpoint writes here so a workspace choice survives a cookie wipe
   // and stays per-device rather than global to the user.
+  // NO FK on purpose: this is CANDIDATE data, validated on every read by
+  // `resolveActiveWorkspaceId` + the beyond-membership rule — a dangling id
+  // can never widen access, it just falls through to the next candidate.
+  // Better Auth owns this hot table; dangling ids are re-pointed manually on
+  // workspace delete (workspaces.service.ts).
   activeWorkspaceId String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -2546,6 +2551,11 @@ model Broadcast {
   @@index([channelConnectionId])
 }
 
+// TENANCY EXCEPTION — no workspaceId by design. Reach these rows ONLY
+// through their workspace-carrying parent, resolved with a workspaceId-scoped
+// query FIRST; never query by a bare child id taken from request input. The
+// checker (scripts/check-prisma-fields.mjs) allowlists this model — adding a
+// new tenant-less model without updating the allowlist fails CI.
 model BroadcastRecipient {
   id             String                   @id @default(cuid())
   broadcastId    String
@@ -2934,6 +2944,8 @@ model MessageFlag {
   // AI job) upserts instead of duplicating. Two DIFFERENT definitions on the
   // same message are fine — a message can be both a complaint and a refund
   // request.
+  // workspaceId deliberately absent from this unique: the leading cuid FK
+  // already implies exactly one workspace (Batch D, 2026-07-27).
   @@unique([messageId, definitionId])
   // The triage queue: WHERE workspaceId = $1 AND status = 'open'
   // ORDER BY createdAt DESC, id DESC — keyset-paginated, so the sort key rides
@@ -3493,6 +3505,8 @@ model WorkflowContactState {
   workflow  Workflow  @relation(fields: [workflowId], references: [id], onDelete: Cascade)
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
+  // workspaceId deliberately absent from this unique: the leading cuid FK
+  // already implies exactly one workspace (Batch D, 2026-07-27).
   @@unique([workflowId, contactId])
   @@index([workspaceId])
   // The (workflowId, contactId) unique leads with workflowId, so a
@@ -3613,6 +3627,11 @@ model OutboundWebhook {
 /// huge payloads). Nightly sweeper
 /// (apps/api/src/lib/sweepers/outbound-webhook-delivery-cleanup.ts) drops
 /// rows older than 30 days; override via WEBHOOK_DELIVERY_RETENTION_DAYS.
+// TENANCY EXCEPTION — no workspaceId by design. Reach these rows ONLY
+// through their workspace-carrying parent, resolved with a workspaceId-scoped
+// query FIRST; never query by a bare child id taken from request input. The
+// checker (scripts/check-prisma-fields.mjs) allowlists this model — adding a
+// new tenant-less model without updating the allowlist fails CI.
 model OutboundWebhookDelivery {
   id             String    @id @default(cuid())
   webhookId      String
@@ -3844,6 +3863,11 @@ model TeamChannel {
 // Cascade on both sides: deleting a channel or a user purges the rows; no
 // orphan memberships. `addedById` is SetNull so removing an admin doesn't
 // destroy attribution on the rows they added.
+// TENANCY EXCEPTION — no workspaceId by design. Reach these rows ONLY
+// through their workspace-carrying parent, resolved with a workspaceId-scoped
+// query FIRST; never query by a bare child id taken from request input. The
+// checker (scripts/check-prisma-fields.mjs) allowlists this model — adding a
+// new tenant-less model without updating the allowlist fails CI.
 model TeamChannelMember {
   channelId String
   userId    String
@@ -3939,6 +3963,8 @@ model TeamChannelMessage {
   // with P2002 instead of inserting a duplicate (see channels.service.ts
   // dedupCommittedSend). NULL clientTempId rows (legacy/system) are distinct in
   // Postgres so they never collide.
+  // workspaceId deliberately absent from this unique: the leading cuid FK
+  // already implies exactly one workspace (Batch D, 2026-07-27).
   @@unique([channelId, authorUserId, clientTempId], map: "TeamChannelMessage_send_idem_key")
   // Keyset on the main feed: WHERE channelId = ? AND threadRootId IS NULL
   // ORDER BY createdAt DESC, id DESC. The partial index for top-level rows
@@ -3962,6 +3988,11 @@ model TeamChannelMessage {
 // is also encoded inline in the body as `@[Display Name](userId)` so plain-
 // text previews keep working — these rows are the structured index, not the
 // source of truth for the display string.
+// TENANCY EXCEPTION — no workspaceId by design. Reach these rows ONLY
+// through their workspace-carrying parent, resolved with a workspaceId-scoped
+// query FIRST; never query by a bare child id taken from request input. The
+// checker (scripts/check-prisma-fields.mjs) allowlists this model — adding a
+// new tenant-less model without updating the allowlist fails CI.
 model TeamChannelMention {
   id              String @id @default(cuid())
   messageId       String
@@ -3977,6 +4008,11 @@ model TeamChannelMention {
 // Emoji reaction on a channel message. `emoji` is the raw Unicode codepoint
 // (e.g. "👍"), NOT a shortcode — simpler render path, no shortcode→unicode
 // map to maintain. Each user can apply each emoji at most once per message.
+// TENANCY EXCEPTION — no workspaceId by design. Reach these rows ONLY
+// through their workspace-carrying parent, resolved with a workspaceId-scoped
+// query FIRST; never query by a bare child id taken from request input. The
+// checker (scripts/check-prisma-fields.mjs) allowlists this model — adding a
+// new tenant-less model without updating the allowlist fails CI.
 model TeamChannelReaction {
   id        String   @id @default(cuid())
   messageId String
@@ -3998,6 +4034,11 @@ model TeamChannelReaction {
 // Pinned message bar. Separate table (not a boolean on the message) so we
 // retain who pinned, when. A message can be pinned at most once per channel;
 // pin permission is admin/manager — enforced at the route, not by the model.
+// TENANCY EXCEPTION — no workspaceId by design. Reach these rows ONLY
+// through their workspace-carrying parent, resolved with a workspaceId-scoped
+// query FIRST; never query by a bare child id taken from request input. The
+// checker (scripts/check-prisma-fields.mjs) allowlists this model — adding a
+// new tenant-less model without updating the allowlist fails CI.
 model TeamChannelPin {
   id         String   @id @default(cuid())
   channelId  String
@@ -4018,6 +4059,11 @@ model TeamChannelPin {
 // unread is a JOIN against TeamChannelMention. Workspace chat is the ONLY surface
 // with per-user read state — the customer inbox is team-wide (see the
 // "Inbox unread = team-wide ONLY" note above Conversation's audit log).
+// TENANCY EXCEPTION — no workspaceId by design. Reach these rows ONLY
+// through their workspace-carrying parent, resolved with a workspaceId-scoped
+// query FIRST; never query by a bare child id taken from request input. The
+// checker (scripts/check-prisma-fields.mjs) allowlists this model — adding a
+// new tenant-less model without updating the allowlist fails CI.
 model TeamChannelReadReceipt {
   id         String   @id @default(cuid())
   userId     String
@@ -4944,6 +4990,8 @@ model AssignmentPolicyMember {
   policy AssignmentPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
   user   User             @relation("AssignmentPolicyMemberships", fields: [userId], references: [id], onDelete: Cascade)
 
+  // workspaceId deliberately absent from this unique: the leading cuid FK
+  // already implies exactly one workspace (Batch D, 2026-07-27).
   @@unique([policyId, userId])
   @@index([workspaceId])
 }
