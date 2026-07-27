@@ -64,7 +64,7 @@ table/queue/cache/socket-room that references the dying entity.
 |---|---|---|---|
 | webhooks ingest | 1 | R (controller + core, adversarial) + E (meta 165) | ✅ 2026-07-27 |
 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ 2026-07-27 |
-| event bus / outbox | 1 | | ☐ |
+| event bus / outbox | 1 | R (adversarial) + E + N (dedupe spec) | ✅ 2026-07-27 |
 | workflows (~22 step types) | 1 | | ☐ |
 | assignment (policies/rules/capacity) | 1 | | ☐ |
 | broadcasts (+audience/templates/analytics) | 1 | | ☐ |
@@ -195,6 +195,41 @@ ACCEPTED (documented):
 - Sync paths (media/template/interactive/forward) keep only the in-process
   idempotency map: an api restart between Meta-accept and the HTTP response
   can let a human Retry re-send. Pre-existing, documented tradeoff.
+
+### event bus / outbox subscribers (B-M3 session 3, 2026-07-27)
+
+The at-least-once conversion (17c0501) was verified against the SUBSCRIBERS,
+and three were not replay-safe. Fixed in 631c3a2:
+
+- CRITICAL: workflow-dispatch created a WorkflowRun with no dedup key (the
+  once-per-contact ledger only covers `triggerOncePerContact` workflows), so a
+  redelivery re-executed every step — including a second billed Meta send.
+  Now keyed per (outbox row, workflow) with a partial unique.
+- HIGH: outbound-webhook deliveries minted `randomUUID()` per dispatch; that
+  id is BOTH our BullMQ jobId and the partner's X-CCP-Delivery header, so a
+  replay defeated dedupe on both sides. Now keyed per (outbox row, webhook).
+- MED: audit pills had no dedup key → duplicate identical rows on replay
+  (the messy-timeline class). Keyed with a per-tag discriminator.
+- HIGH (ordering): auto-assign + the 4 ai-reply handlers returned `void`, so
+  they resolved synchronously — tier 25's whole purpose (routing decided
+  before workflow dispatch) was fiction, and they ran outside the timeout,
+  the lastError sink and the lease. Now awaited.
+- MED: two subscribers registered at REALTIME while only list[0] runs in the
+  critical tier — the winner was AppModule.imports order. Widget delivery
+  moved to REALTIME_SECONDARY + a boot assertion pins one-per-type.
+- MED: publish()'s background tier had no per-subscriber timeout (bounded at
+  30s); markDispatched now retries (a pool blip redelivered a successful
+  batch); shutdown flush 25s → 60s (a SIGKILL mid-dispatch guarantees
+  redelivery, and one row can legitimately take ~150s).
+
+Verdicts CLEAN: §18 broadcast.* exclusion (verified against the registries,
+not comments), no recursive chains, error isolation, registration hygiene.
+Analytics counters remain non-idempotent by design — `outgoingMessagesCount`
+self-heals via the drift sweeper; `responsesCount`/`assignmentsCount` do not
+and can drift on a crash-window replay (documented, sweeper-excluded).
+Webhook payloads are rebuilt from CURRENT state on replay, so a duplicate
+delivery can disagree with the original — bounded by the dedupe key now
+preventing the duplicate in the first place.
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
