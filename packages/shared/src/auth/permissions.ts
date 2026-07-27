@@ -156,7 +156,13 @@ export function canModifyUserAccount(actor: UserActor, target: UserActor): boole
  */
 export function canDeleteMember(actor: UserActor, target: UserActor): boolean {
   if (canModifyUserAccount(actor, target)) return true;
-  return actor.role === "admin" && !target.isSuperAdmin && target.orgRole !== "owner";
+  // A workspace admin may not delete anyone holding ORG authority. Excluding
+  // only `owner` was a latent privilege inversion: an org ADMIN outranks a
+  // plain member who happens to administer an inbox, so the day org-admin
+  // grants ship (no write path exists today) a workspace admin could have
+  // deleted them org-wide. Gate on org authority, not just ownership.
+  const targetHasOrgAuthority = target.orgRole === "owner" || target.orgRole === "admin";
+  return actor.role === "admin" && !target.isSuperAdmin && !targetHasOrgAuthority;
 }
 
 /**

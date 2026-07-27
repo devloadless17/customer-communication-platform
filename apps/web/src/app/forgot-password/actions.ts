@@ -96,7 +96,10 @@ export async function resetPasswordAction(
   }
 
   // Deliberately NOT auto-signed-in. Better Auth revokes the account's other
-  // sessions on a password reset, and sending them to /login with the new
+  // sessions on a password reset (via `revokeSessionsOnPasswordReset` in
+  // better-auth-config.ts — the flag is load-bearing, not a default: without
+  // it a stolen session survives the reset that exists to kill it), and
+  // sending them to /login with the new
   // password fresh in mind is the standard, least-surprising ending — it also
   // proves the reset worked rather than asserting it.
   redirect("/login?reset=1");

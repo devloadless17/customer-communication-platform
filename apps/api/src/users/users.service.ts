@@ -570,12 +570,27 @@ export class UsersService {
   ) {
     const target = await this.db.user.findFirst({
       where: { id: targetId, workspaceMemberships: { some: { workspaceId } } },
-      select: { id: true, isSuperAdmin: true, orgRole: true, deactivatedAt: true, workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 } },
+      select: {
+        id: true,
+        isSuperAdmin: true,
+        orgRole: true,
+        organizationId: true,
+        deactivatedAt: true,
+        // ALL memberships, not just the acting workspace's: deactivation is an
+        // ORG-wide action, so its last-admin guard has to span every workspace
+        // the target administers (see the guard below). The acting workspace's
+        // row is picked out of this list for the role checks.
+        workspaceMemberships: { select: { workspaceId: true, role: true } },
+      },
     });
     if (!target) throw new NotFoundException({ error: "user not found" });
 
+    const activeMembership = target.workspaceMemberships.find(
+      (m) => m.workspaceId === workspaceId,
+    );
+
     const targetActor: UserActor = {
-      role: (target.workspaceMemberships[0]?.role ?? "agent") as Role,
+      role: (activeMembership?.role ?? "agent") as Role,
       isSuperAdmin: target.isSuperAdmin,
       orgRole: target.orgRole as OrgRole,
     };
@@ -590,7 +605,7 @@ export class UsersService {
     // changes go to two tables: the per-workspace ROLE to WorkspaceMember, and
     // DEACTIVATION (a user-global fact) to User.
     const allowed = assignableRoles(actor);
-    const currentRole = (target.workspaceMemberships[0]?.role ?? "agent") as Role;
+    const currentRole = (activeMembership?.role ?? "agent") as Role;
 
     let nextRole: Role | undefined;
     if (typeof input.role === "string") {
@@ -626,7 +641,7 @@ export class UsersService {
     const willLoseManagerPowers =
       (nextRole && nextRole !== "admin") || Boolean(userData.deactivatedAt);
     const targetCurrentlyManages =
-      (target.workspaceMemberships[0]?.role === "admin" || target.isSuperAdmin) &&
+      (activeMembership?.role === "admin" || target.isSuperAdmin) &&
       !target.deactivatedAt;
 
     const userSelect = {
@@ -657,24 +672,66 @@ export class UsersService {
     // zero managers (check-then-write TOCTOU). A `SELECT ... FOR UPDATE` on the
     // team row serializes them so the second waits and re-reads. Same pattern
     // as invites.accept()'s member-cap enforcement.
+    // DEACTIVATION is org-wide (it blocks sign-in everywhere), so its
+    // last-admin guard must span every workspace the target administers — not
+    // just the one the actor happens to be acting in. Checking only the acting
+    // workspace let an admin deactivate someone who was an agent here and the
+    // SOLE admin of another workspace, leaving that workspace unconfigurable:
+    // exactly the state `remove()`'s guard was rewritten to prevent. A pure
+    // ROLE change stays workspace-scoped (it only affects this workspace).
+    const deactivating = Boolean(userData.deactivatedAt);
+    const guardedWorkspaceIds =
+      deactivating && !target.deactivatedAt
+        ? target.isSuperAdmin
+          ? target.workspaceMemberships.map((m) => m.workspaceId)
+          : target.workspaceMemberships
+              .filter((m) => m.role === "admin")
+              .map((m) => m.workspaceId)
+        : targetCurrentlyManages
+          ? [workspaceId]
+          : [];
+
     const updated =
-      willLoseManagerPowers && targetCurrentlyManages
+      willLoseManagerPowers && guardedWorkspaceIds.length > 0
         ? await this.db.$transaction(async (tx) => {
-            await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
-            // "Another active admin exists" = an admin MEMBERSHIP in this
-            // workspace, or a platform operator. Role lives on WorkspaceMember.
-            const otherManagers = await tx.user.count({
-              where: {
-                OR: [
-                  { workspaceMemberships: { some: { workspaceId, role: "admin" } } },
-                  { isSuperAdmin: true, workspaceMemberships: { some: { workspaceId } } },
-                ],
-                deactivatedAt: null,
-                NOT: { id: targetId },
-              },
-            });
-            if (otherManagers === 0) {
-              throw new BadRequestException({ error: "cannot remove the last active admin" });
+            // Lock the ORG when the guard spans several workspaces (same
+            // pattern as remove()); the single-workspace case keeps its
+            // narrower workspace-row lock.
+            if (guardedWorkspaceIds.length > 1 || deactivating) {
+              await tx.$queryRaw`SELECT id FROM "Organization" WHERE id = ${target.organizationId} FOR UPDATE`;
+            } else {
+              await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
+            }
+            for (const wsId of guardedWorkspaceIds) {
+              // "Another active admin exists" = an admin MEMBERSHIP in that
+              // workspace, or a platform operator. Role lives on WorkspaceMember.
+              const otherManagers = await tx.user.count({
+                where: {
+                  OR: [
+                    { workspaceMemberships: { some: { workspaceId: wsId, role: "admin" } } },
+                    { isSuperAdmin: true, workspaceMemberships: { some: { workspaceId: wsId } } },
+                  ],
+                  deactivatedAt: null,
+                  NOT: { id: targetId },
+                },
+              });
+              if (otherManagers === 0) {
+                const ws =
+                  wsId === workspaceId
+                    ? null
+                    : await tx.workspace.findUnique({
+                        where: { id: wsId },
+                        select: { name: true },
+                      });
+                throw new BadRequestException({
+                  error: "cannot remove the last active admin",
+                  ...(ws
+                    ? {
+                        detail: `They are the only admin of ${ws.name}. Promote someone else there first — a workspace with no admin can't be configured or repaired.`,
+                      }
+                    : {}),
+                });
+              }
             }
             return applyWrites(tx);
           })

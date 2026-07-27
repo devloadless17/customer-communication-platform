@@ -265,6 +265,20 @@ export class SocketAuthService {
       cookieCandidate,
       storedWorkspaceId: stored?.activeWorkspaceId ?? null,
       canAccessBeyondMembership: canAccess,
+      // Zero-membership org owner / superAdmin — same fallback the HTTP guard
+      // applies, so the two can't disagree about who has a workspace to act
+      // in. Each candidate is DB-verified by `canAccess`.
+      beyondMembershipFallbacks:
+        dbUser.isSuperAdmin || isOrgAdmin
+          ? (
+              await this.db.workspace.findMany({
+                where: dbUser.isSuperAdmin ? {} : { organizationId: dbUser.organizationId },
+                select: { id: true },
+                orderBy: { createdAt: "asc" },
+                take: 1,
+              })
+            ).map((w) => w.id)
+          : [],
     });
     // Zero resolvable workspaces (removed from all of them, org still active)
     // is a GATE, not a dead session: `unauthenticated` makes the client

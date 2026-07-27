@@ -96,6 +96,15 @@ export function buildSharedAuthOptions(p: SharedAuthOptionsParams): BetterAuthOp
       // one place. Letting Better Auth auto-sign-in would skip the lockout
       // bookkeeping on the immediately-following page load.
       autoSignIn: false,
+      // Kill every existing session when a password is reset. This is the ONE
+      // flow that exists for the compromised-account case ("someone else has
+      // my session"), and without this flag Better Auth leaves those sessions
+      // alive for their full 90-day life — the reset changes the lock but
+      // leaves the intruder inside. Every other credential-rotation path
+      // (change-password, admin reset) already deletes Session rows; this
+      // makes the self-serve path match. The user is sent to /login
+      // afterwards, so their own re-auth is immediate.
+      revokeSessionsOnPasswordReset: true,
       // Match the existing local policy — see MIN_PASSWORD_LENGTH in
       // apps/web/src/lib/auth/password.ts. The structure check still runs in
       // our server actions before the call here — this is the second-line

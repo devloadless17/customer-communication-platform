@@ -208,6 +208,18 @@ export const auth = betterAuth({
     emailOTP({
       otpLength: 6,
       expiresIn: OTP_EXPIRY_MINUTES * 60,
+      // This app uses OTP for exactly two things: verifying an email
+      // (`/verify`) and resetting a password (`/forgot-password`). It has NO
+      // passwordless sign-in flow — but the plugin ships one enabled, and on
+      // an unknown email it CREATES the user, which fires our
+      // `user.create.before` hook and mints an Organization with
+      // `orgRole: "owner"`. That made `POST /api/auth/sign-in/email-otp` an
+      // open account+org signup channel for anyone with a mailbox, bypassing
+      // the register rate limit, the disposable-domain policy, the password
+      // requirement and the account-lockout wrapper (the proxy blocks only
+      // the two `/email` paths). Existing users could also sign in through it
+      // and skip the lockout pre-checks. Disable the whole sign-in type.
+      disableSignUp: true,
       // Burn the code after a handful of wrong guesses. 6 digits is a million
       // combinations, which sounds like plenty until you remember an attacker
       // can try them as fast as the endpoint answers.

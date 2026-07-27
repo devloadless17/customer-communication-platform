@@ -271,9 +271,19 @@ export default function proxy(req: NextRequest): NextResponse {
   // attacker could brute-force passwords without ever tripping the lockout.
   // The IP-based rate limit below isn't a substitute — it's per-IP, not
   // per-account, and a botnet defeats it.
+  //
+  // `sign-in/email-otp` is blocked for the same reason: this app has no
+  // passwordless sign-in flow (OTP is used only for email verification and
+  // password reset, both via server-side `auth.api.*` calls that never touch
+  // this proxy), but the plugin ships the route enabled — it would let an
+  // existing user authenticate with a mailed code, skipping the lockout and
+  // deactivation pre-checks the wrapper owns. `disableSignUp: true` in
+  // better-auth.ts closes the account-creation half; this closes the rest.
   if (
     req.method === "POST" &&
-    (pathname === "/api/auth/sign-in/email" || pathname === "/api/auth/sign-up/email")
+    (pathname === "/api/auth/sign-in/email" ||
+      pathname === "/api/auth/sign-up/email" ||
+      pathname === "/api/auth/sign-in/email-otp")
   ) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }

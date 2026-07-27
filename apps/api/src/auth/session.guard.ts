@@ -511,6 +511,23 @@ export async function resolveSession(
     cookieCandidate,
     storedWorkspaceId: stored?.activeWorkspaceId ?? null,
     canAccessBeyondMembership: canAccess,
+    // Zero-membership org owner / superAdmin: without a fallback they resolve
+    // to null and the RSC redirect to /logout clears the cookie, looping
+    // login -> logout with no way back. Each candidate is still DB-verified
+    // by `canAccess`, so this selects, never widens.
+    beyondMembershipFallbacks:
+      user.isSuperAdmin || isOrgAdmin
+        ? (
+            await prisma.workspace.findMany({
+              where: user.isSuperAdmin
+                ? {}
+                : { organizationId: user.organizationId },
+              select: { id: true },
+              orderBy: { createdAt: "asc" },
+              take: 1,
+            })
+          ).map((w) => w.id)
+        : [],
   });
   // Nothing resolvable means "no workspace to act in", and the guard treats
   // that as unauthenticated rather than silently picking someone else's.

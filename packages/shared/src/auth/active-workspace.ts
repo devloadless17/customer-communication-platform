@@ -39,6 +39,20 @@ export interface ActiveWorkspaceCandidateInput {
    * membership rows. Omit for a membership-only resolution.
    */
   canAccessBeyondMembership?: (workspaceId: string) => Promise<boolean>;
+  /**
+   * Last-resort candidates for a user with ZERO membership rows whose reach
+   * still exceeds membership — an org owner who removed themselves from every
+   * workspace, or a superAdmin. Each is still put through
+   * `canAccessBeyondMembership`, so this can only SELECT among workspaces the
+   * caller already proved; it never widens access.
+   *
+   * Without it, `memberships[0]` was the only fallback and such a user
+   * resolved to null on any request without a valid `ccp.ws` cookie: HTTP
+   * 401, and the RSC session redirects to /logout, which clears the cookie —
+   * so the next login loops login → logout with no way back in short of DB
+   * surgery when the locked-out user is the org's only owner.
+   */
+  beyondMembershipFallbacks?: readonly string[];
 }
 
 /**
@@ -65,7 +79,15 @@ export async function resolveActiveWorkspaceId(
   if (input.storedWorkspaceId && (await canAccess(input.storedWorkspaceId))) {
     return input.storedWorkspaceId;
   }
-  return input.memberships[0]?.workspaceId ?? null;
+  const firstMembership = input.memberships[0]?.workspaceId;
+  if (firstMembership) return firstMembership;
+  // Zero memberships: fall back to a workspace this caller may reach beyond
+  // membership (org owner / superAdmin). Each candidate is DB-verified by the
+  // same injected rule the cookie goes through.
+  for (const candidate of input.beyondMembershipFallbacks ?? []) {
+    if (await canAccess(candidate)) return candidate;
+  }
+  return null;
 }
 
 /**

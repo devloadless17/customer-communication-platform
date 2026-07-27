@@ -425,6 +425,25 @@ export class InvitesService {
         if (!organizationId) {
           throw new InviteAcceptError("invalid", "This invite is no longer valid.");
         }
+        // The invited org must still be ACTIVE. An invite minted before a
+        // suspension kept working: it created a User + credential Account into
+        // a suspended (or still-pending) org, burned a seat, and handed the
+        // person a session that every downstream gate then refuses — a
+        // confusing dead end, and a way to grow a suspended tenant's
+        // directory. Read inside the same transaction that holds the
+        // workspace lock, so a suspension racing an accept can't slip through.
+        const org = await tx.organization.findUnique({
+          where: { id: organizationId },
+          select: { status: true },
+        });
+        if (org?.status !== "active") {
+          throw new InviteAcceptError(
+            "invalid",
+            org?.status === "pending"
+              ? "This organization is still awaiting approval. Ask whoever invited you to try again once it's approved."
+              : "This organization isn't active. Contact whoever invited you.",
+          );
+        }
         const memberCount = await tx.workspaceMember.count({
           where: {
             workspaceId: invite.workspaceId,

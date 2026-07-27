@@ -11,6 +11,8 @@ import { Prisma } from "@prisma/client";
 import type { Request } from "express";
 import { z } from "zod";
 
+import { checkEmailPolicy } from "@ccp/shared/auth/email-policy";
+
 import { hashPassword } from "@/auth/password";
 import { invalidateSuperAdminAggregates } from "@/lib/queries";
 import {
@@ -72,6 +74,20 @@ export class RegisterController {
         { error: "rate_limited", detail: "Too many registrations from this IP.", retryAfter: r.retryAfter },
         429,
       );
+    }
+
+    // Server-side EMAIL policy, for the same reason as the password check
+    // below: the web action runs it, a direct POST to /api/register did not,
+    // so the disposable-domain list was advisory for anyone using curl.
+    const emailProblem = checkEmailPolicy(body.email);
+    if (emailProblem) {
+      throw new BadRequestException({
+        error: "email_not_allowed",
+        detail:
+          emailProblem === "disposable"
+            ? "That looks like a temporary email address. Use a permanent one so you don't lose access to your account."
+            : "That email address doesn't look valid.",
+      });
     }
 
     // Server-side password policy. The web form runs the same check, but a

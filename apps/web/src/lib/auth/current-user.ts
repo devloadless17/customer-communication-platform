@@ -153,6 +153,14 @@ export const getSession = cache(async (): Promise<Session> => {
     storedWorkspaceId:
       row.sessions.find((s) => s.id === session.session.id)?.activeWorkspaceId ?? null,
     canAccessBeyondMembership: canAccess,
+    // Zero-membership org owner (they removed themselves from every
+    // workspace): without a fallback this resolves null and the redirect
+    // below clears the cookie, so the next login loops straight back here.
+    // Answered from the already-loaded org workspace list — no extra query —
+    // and still DB/list-verified through `canAccess`.
+    beyondMembershipFallbacks: isOrgAdmin
+      ? (row.organization?.workspaces ?? []).map((w) => w.id).slice(0, 1)
+      : [],
   });
   // No workspace to act in = unauthenticated, exactly like the API guard's
   // null → 401. This used to fall through as `?? ""` and render the whole app

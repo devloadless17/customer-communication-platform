@@ -296,6 +296,36 @@ export class WorkspacesService {
       select: { role: true },
     });
 
+    // Seat cap on the DIRECT add path. It was enforced only at invite-accept,
+    // while the invite flow's own conflict message tells admins to add an
+    // existing org user "from Organization → Members instead" — i.e. it
+    // routed them at the uncapped door, making the superadmin-controlled
+    // `maxMembers` meaningless for any org with more than one workspace.
+    // Same locked-row shape as accept: `FOR UPDATE` serializes two concurrent
+    // adds onto the last seat. Only a NEW membership consumes a seat — a
+    // re-role of an existing member must never be blocked by the cap.
+    if (role !== null && !existing) {
+      await this.db.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw<{ maxMembers: number }[]>`
+          SELECT "maxMembers" FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE
+        `;
+        const maxMembers = locked[0]?.maxMembers ?? 2;
+        const memberCount = await tx.workspaceMember.count({
+          where: { workspaceId, user: { deactivatedAt: null, isSuperAdmin: false } },
+        });
+        if (memberCount >= maxMembers) {
+          throw new BadRequestException({
+            error: "workspace_full",
+            detail: `This workspace has reached its member limit (${maxMembers} member${maxMembers === 1 ? "" : "s"}). Ask the organization's admin to request a higher limit.`,
+          });
+        }
+        await tx.workspaceMember.create({ data: { userId, workspaceId, role } });
+      });
+      invalidateSessionCache(userId);
+      this.sessionInvalidator.revoke(userId, "workspace-membership-added");
+      return;
+    }
+
     const applyWrite = async (client: Prisma.TransactionClient | DbService) => {
       if (role === null) {
         await client.workspaceMember.deleteMany({ where: { userId, workspaceId } });
