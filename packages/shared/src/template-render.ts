@@ -739,6 +739,24 @@ function validateCallPermissionRequest(
         "already renders its own Allow and Deny options.",
     );
   }
+  // Meta's limitation is wider than buttons: "cannot be combined with other
+  // interactive components". A carousel's cards carry buttons and a
+  // limited-time offer renders its own tappable code chip — both are
+  // interactive surfaces competing with the Allow/Deny prompt.
+  if (comps.some((c) => c.type === "CAROUSEL")) {
+    push(
+      "call_permission_request",
+      "A call-permission request can't be combined with a carousel — Meta allows " +
+        "no other interactive components alongside it.",
+    );
+  }
+  if (comps.some((c) => c.type === "LIMITED_TIME_OFFER")) {
+    push(
+      "call_permission_request",
+      "A call-permission request can't be combined with a limited-time offer — " +
+        "Meta allows no other interactive components alongside it.",
+    );
+  }
   const body = comps.find((c) => c.type === "BODY");
   if (!body?.text?.trim()) {
     push(

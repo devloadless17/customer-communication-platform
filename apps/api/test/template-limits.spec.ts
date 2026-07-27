@@ -851,6 +851,33 @@ describe("call permission request templates", () => {
     expect(fields(issues)).toContain("call_permission_request");
   });
 
+  it("cannot be combined with a carousel or a limited-time offer either", () => {
+    // Meta's limitation is "no other INTERACTIVE components", not just buttons —
+    // a carousel's cards carry buttons and an LTO renders its own tappable code
+    // chip, both competing with the Allow/Deny prompt.
+    const withCarousel = validateTemplateComponents(
+      "call_req",
+      [body("Can we call?", []), cpr, { type: "CAROUSEL", cards: [] }],
+      { category: "marketing" },
+    );
+    expect(
+      withCarousel.filter((i) => i.field === "call_permission_request"),
+    ).toHaveLength(1);
+
+    const withLto = validateTemplateComponents(
+      "call_req",
+      [
+        body("Can we call?", []),
+        cpr,
+        { type: "LIMITED_TIME_OFFER", limited_time_offer: { text: "Ends soon!" } },
+      ],
+      { category: "marketing" },
+    );
+    expect(
+      withLto.filter((i) => i.field === "call_permission_request"),
+    ).toHaveLength(1);
+  });
+
   it("requires body text explaining the call", () => {
     const issues = validateTemplateComponents(
       "call_req",
