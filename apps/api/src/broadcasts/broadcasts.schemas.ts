@@ -290,7 +290,12 @@ export const BroadcastListQuerySchema = z.object({
   take: z.coerce.number().int().min(1).max(200).optional(),
   /** 1-based page for numbered (offset) pagination. When present the query runs
    *  in offset mode (cursor ignored, totalCount returned). */
-  page: z.coerce.number().int().min(1).optional(),
+  // Bounded like its two siblings (contacts, calls) — the only one that wasn't.
+  // `page` becomes a literal SQL OFFSET (see BroadcastsService.list), so an
+  // unbounded value is an unbounded-cost query: `?page=999999999` asks Postgres
+  // to walk and discard ~25 billion rows' worth of offset before returning
+  // nothing. Any authenticated member could issue it.
+  page: z.coerce.number().int().min(1).max(10_000).optional(),
 });
 export type BroadcastListQuery = z.infer<typeof BroadcastListQuerySchema>;
 
