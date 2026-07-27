@@ -55,7 +55,9 @@ const PRIORITY_CLASSES: Record<TicketPriority, string> = {
   low: "text-muted-foreground",
   normal: "text-foreground",
   high: "text-warning-fg",
-  urgent: "text-destructive",
+  // text-danger-fg, not text-destructive: the latter is a button BACKGROUND
+  // token and measured 3.88:1 as 11px text here (AA needs 4.5).
+  urgent: "text-danger-fg",
 };
 
 export function TicketsBoardClient({
@@ -488,7 +490,7 @@ function SlaLine({ ticket }: { ticket: Ticket }) {
 
   if (breached) {
     return (
-      <Badge variant="muted" className="mt-1.5 gap-1 px-1.5 py-0 text-3xs text-destructive">
+      <Badge variant="destructive" className="mt-1.5 gap-1 px-1.5 py-0 text-3xs">
         <AlertTriangle aria-hidden className="size-3" />
         {sla.firstResponseBreached ? "First reply overdue" : "Resolution overdue"}
       </Badge>

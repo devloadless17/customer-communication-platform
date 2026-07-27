@@ -110,7 +110,7 @@ export function InboxViewsSection({
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
-          className="flex flex-1 cursor-pointer items-center gap-1.5 text-left text-2xs font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:text-foreground"
+          className="flex flex-1 cursor-pointer items-center gap-1.5 text-left text-2xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
         >
           {open ? (
             <ChevronDown className="size-3" />

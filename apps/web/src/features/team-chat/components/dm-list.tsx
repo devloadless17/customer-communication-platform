@@ -42,7 +42,7 @@ export function DmList({
   return (
     <>
       <div className="flex items-center justify-between px-4 pb-1 pt-3">
-        <div className="text-3xs font-semibold uppercase tracking-wider text-muted-foreground/80">
+        <div className="text-3xs font-semibold uppercase tracking-wider text-muted-foreground">
           Direct messages
         </div>
         <Button

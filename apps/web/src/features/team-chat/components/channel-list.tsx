@@ -180,7 +180,7 @@ export function ChannelList({
       {/* Both section headers live INSIDE the scroller so Channels and Direct
           messages scroll together as one list, the way Slack's sidebar does. */}
       <ScrollArea viewportRef={viewportRef} className="flex-1">
-        <div className="px-4 pb-1 text-3xs font-semibold uppercase tracking-wider text-muted-foreground/80">
+        <div className="px-4 pb-1 text-3xs font-semibold uppercase tracking-wider text-muted-foreground">
           Channels
         </div>
 

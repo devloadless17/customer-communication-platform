@@ -322,7 +322,7 @@ export function InboxSubSidebar({
           type="button"
           onClick={() => setStagesOpen((v) => !v)}
           aria-expanded={stagesOpen}
-          className="flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1 text-left text-2xs font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:text-foreground"
+          className="flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1 text-left text-2xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
         >
           {stagesOpen ? (
             <ChevronDown className="size-3" />
@@ -369,7 +369,7 @@ export function InboxSubSidebar({
                     <span className="flex-1 truncate text-left">{stage.name}</span>
                     {stage.isDefault && (
                       <span
-                        className="text-4xs uppercase tracking-wider text-muted-foreground/70"
+                        className="text-4xs uppercase tracking-wider text-muted-foreground"
                         aria-label="Default stage"
                       >
                         def
@@ -399,7 +399,7 @@ export function InboxSubSidebar({
             type="button"
             onClick={() => setTeammatesOpen((v) => !v)}
             aria-expanded={teammatesOpen}
-            className="flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1 text-left text-2xs font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:text-foreground"
+            className="flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1 text-left text-2xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
           >
             {teammatesOpen ? (
               <ChevronDown className="size-3" />
@@ -468,6 +468,7 @@ export function InboxSubSidebar({
                             "absolute -bottom-0.5 -right-0.5 size-2 rounded-full ring-2 ring-sidebar transition-colors",
                             dotClass,
                           )}
+                          role="img"
                           aria-label={dotLabel}
                         />
                       )}

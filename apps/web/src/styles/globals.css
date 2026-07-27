@@ -79,6 +79,17 @@
   --success-bg: oklch(0.965 0.03 164);
   --success-fg: oklch(0.508 0.118 165);
   --success-border: oklch(0.875 0.055 164);
+  /* The TEXT-safe red, and the missing member of the *-fg family.
+     `--destructive` (L 0.62) is a BUTTON BACKGROUND — it is paired with
+     `--destructive-foreground` (near-white) and was never meant to be small
+     text on a light surface. Used that way it measured 3.88:1 on the tickets
+     board (#ea3c3f on #fafbfd, 11px), against the 4.5:1 WCAG AA needs. Same
+     lightness band as its siblings above, so danger now reads as one hue
+     app-wide exactly like success/warning/info do.
+     NAMED `danger-fg`, not `destructive-fg`, deliberately: sitting next to the
+     existing `--destructive-foreground` (which means the opposite — the color
+     ON destructive) those two would be misread for each other forever. */
+  --danger-fg: oklch(0.505 0.19 25);
   --info-bg: oklch(0.965 0.025 235);
   --info-fg: oklch(0.50 0.118 240);
   --info-border: oklch(0.88 0.045 235);
@@ -180,6 +191,8 @@
   --success-bg: oklch(0.30 0.035 164);
   --success-fg: oklch(0.765 0.155 163);
   --success-border: oklch(0.44 0.05 164);
+  /* Inverts like its siblings: light text on the dark surfaces. */
+  --danger-fg: oklch(0.775 0.16 25);
   --info-bg: oklch(0.30 0.035 235);
   --info-fg: oklch(0.746 0.13 233);
   --info-border: oklch(0.44 0.05 235);
@@ -241,6 +254,7 @@
   --color-warning-border: var(--warning-border);
   --color-success-bg: var(--success-bg);
   --color-success-fg: var(--success-fg);
+  --color-danger-fg: var(--danger-fg);
   --color-success-border: var(--success-border);
   --color-info-bg: var(--info-bg);
   --color-info-fg: var(--info-fg);

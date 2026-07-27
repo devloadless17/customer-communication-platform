@@ -355,7 +355,7 @@ function DetailBlock({
 }) {
   return (
     <div>
-      <div className="pb-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+      <div className="pb-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
         {label}
       </div>
       <pre

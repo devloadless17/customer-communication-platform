@@ -118,7 +118,7 @@ export function SubSidebarSection({
   return (
     <div className="mt-2 first:mt-0">
       {label && (
-        <div className="px-4 pb-1 text-3xs font-semibold uppercase tracking-wider text-muted-foreground/80">
+        <div className="px-4 pb-1 text-3xs font-semibold uppercase tracking-wider text-muted-foreground">
           {label}
         </div>
       )}
@@ -144,7 +144,7 @@ export function SubSidebarGroup({
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1 text-left text-2xs font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:text-foreground"
+        className="flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1 text-left text-2xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
       >
         {open ? (
           <ChevronDown className="size-3.5" />
@@ -161,7 +161,7 @@ export function SubSidebarGroup({
 /** Sub-label inside a group — e.g. "Lifecycle Stages" / "Lost Stages". */
 export function SubSidebarSubLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="px-2.5 pt-2 pb-0.5 text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
+    <div className="px-2.5 pt-2 pb-0.5 text-3xs font-medium uppercase tracking-wide text-muted-foreground">
       {children}
     </div>
   );

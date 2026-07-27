@@ -255,7 +255,7 @@ function ShapeTree({
           {groups.map((grp) => (
             <div key={grp.name ?? "_flat"} className="flex flex-col">
               {grp.name && (
-                <div className="px-1.5 pb-0.5 pt-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+                <div className="px-1.5 pb-0.5 pt-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
                   {grp.name}
                 </div>
               )}

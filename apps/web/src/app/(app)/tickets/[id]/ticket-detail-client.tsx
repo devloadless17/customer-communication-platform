@@ -229,7 +229,7 @@ export function TicketDetailClient({
           <span className="text-sm tabular-nums text-muted-foreground">#{ticket.number}</span>
           <ChannelBadge channel={ticket.channel as Channel} />
           {breached && (
-            <Badge variant="muted" className="gap-1 px-1.5 py-0 text-3xs text-destructive">
+            <Badge variant="destructive" className="gap-1 px-1.5 py-0 text-3xs">
               <AlertTriangle aria-hidden className="size-3" />
               {ticket.sla.firstResponseBreached ? "First reply overdue" : "Resolution overdue"}
             </Badge>

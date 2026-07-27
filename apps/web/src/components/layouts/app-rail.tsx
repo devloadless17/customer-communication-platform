@@ -388,6 +388,7 @@ export function AppRail({
                       "absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-sidebar transition-colors",
                       connected ? "bg-success-fg" : "bg-muted-foreground/40",
                     )}
+                    role="img"
                     aria-label={connected ? "Realtime connected" : "Realtime disconnected"}
                   />
                 )}
@@ -501,6 +502,7 @@ export function AppRail({
                       ? AVAILABILITY_DOT_CLASSES[liveAvailability.status]
                       : AVAILABILITY_DOT_CLASSES.offline,
                   )}
+                  role="img"
                   aria-label={
                     isOnline
                       ? AVAILABILITY_LABELS[liveAvailability.status]
