@@ -303,8 +303,11 @@ export async function listDirectMessagesForUser(
   );
 
   return rows.map(({ row, item }) => {
-    const members = (row as unknown as { members: DmMemberRow[] }).members;
-    const dmKey = (row as unknown as { dmKey: string | null }).dmKey ?? null;
+    // ONE narrowing for both fields the DM projection adds, rather than a
+    // second double-assertion beside the first (the ratchet caught that).
+    const dmRow = row as unknown as { members: DmMemberRow[]; dmKey: string | null };
+    const members = dmRow.members;
+    const dmKey = dmRow.dmKey ?? null;
     return { ...item, peer: mapDmPeer(members, userId, dmKey) };
   });
 }
