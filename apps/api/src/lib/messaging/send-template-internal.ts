@@ -341,6 +341,24 @@ export async function sendTemplateInternal(
     }
   }
 
+  // A MARKETING coupon's send-time code shares the create-example's 20-char cap
+  // (coupon-templates reference) — a longer one fails at Meta without naming
+  // the field. Auth copy-code buttons never reach this: their sub_type is
+  // `url` (otpKeys) and their cap is the 15-char authentication guard above.
+  for (const b of effectiveButtons) {
+    if (
+      b.subType === "copy_code" &&
+      b.text.length > TEMPLATE_LIMITS.copyCodeExampleMaxLength
+    ) {
+      throw new SendTemplateValidationError(
+        "param_type_mismatch",
+        "coupon code too long",
+        `Coupon codes are limited to ${TEMPLATE_LIMITS.copyCodeExampleMaxLength} ` +
+          `characters — button #${b.index + 1}'s is ${b.text.length}.`,
+      );
+    }
+  }
+
   const components = Array.isArray(template.components)
     ? (template.components as unknown as TemplateComponent[])
     : [];
