@@ -62,6 +62,8 @@ export function AudiencePicker({
   onCustomCountChange,
   onGroupSaved,
   channel,
+  accountId,
+  includeOtherAccounts,
 }: {
   tags: Tag[];
   fieldDefinitions?: ContactFieldDefinition[];
@@ -82,6 +84,10 @@ export function AudiencePicker({
   /** Broadcast's target channel — scopes the custom-audience recipient count so
    *  it matches what actually gets sent (a broadcast sends on one channel). */
   channel?: string;
+  /** The broadcast's "Send from" account + the include-other-accounts opt-in —
+   *  scope the custom count exactly like the send's own audience scoping. */
+  accountId?: string | null;
+  includeOtherAccounts?: boolean;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -117,6 +123,8 @@ export function AudiencePicker({
               showPreview={false}
               onCountChange={onCustomCountChange}
               channel={channel}
+              accountId={accountId}
+              includeOtherAccounts={includeOtherAccounts}
             />
             <SaveAudienceAsGroup
               tagIds={value.selectedTagIds}

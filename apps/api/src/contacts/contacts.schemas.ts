@@ -27,6 +27,12 @@ export const AudienceCountSchema = z
      *  optionally scoped to `channel`. Distinct from the empty tags+ids case, which
      *  deliberately counts 0 so an unset custom audience never targets everyone. */
     all: z.boolean().optional(),
+    /** The "Send from" account — scopes the count to that account's own
+     *  contacts exactly like the send does (see BroadcastsService.create's
+     *  account scoping), so the composer's numbers move when the checkbox
+     *  below does. */
+    accountId: z.string().min(1).optional(),
+    includeOtherAccounts: z.boolean().optional(),
   })
   // `all` IGNORES tagIds/contactIds server-side, so accepting both would silently
   // answer a different question than the caller asked ("all contacts tagged VIP"
@@ -45,6 +51,10 @@ export const AudiencePreviewSchema = z.object({
    *  broadcast sends on a single channel, so "who am I sending to" must show the
    *  same set the count and the send resolve. Omit = all channels. */
   channel: zLiveChannel().optional(),
+  /** Mirrors `AudienceCountSchema` — the preview answers "who am I sending
+   *  to", so it must resolve the same account-scoped set the send does. */
+  accountId: z.string().min(1).optional(),
+  includeOtherAccounts: z.boolean().optional(),
 });
 export type AudiencePreviewInput = z.infer<typeof AudiencePreviewSchema>;
 

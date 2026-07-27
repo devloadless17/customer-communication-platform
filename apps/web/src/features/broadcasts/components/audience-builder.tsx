@@ -45,6 +45,8 @@ export function AudienceBuilder({
   showPreview = true,
   onCountChange,
   channel,
+  accountId,
+  includeOtherAccounts,
 }: {
   value: AudienceValue;
   onChange: (next: AudienceValue) => void;
@@ -68,11 +70,17 @@ export function AudienceBuilder({
    *  Messenger broadcast counts only Messenger contacts). Omit = all channels
    *  (the audience-group form, which is channel-agnostic). */
   channel?: string;
+  /** Scope the count to the broadcast's "Send from" account, mirroring the
+   *  send's own audience scoping — see use-audience-count. */
+  accountId?: string | null;
+  includeOtherAccounts?: boolean;
 }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const { count, loading } = useAudienceCount(value.tagIds, value.contactIds, {
     initial: initialCount,
     channel,
+    accountId,
+    includeOtherAccounts,
   });
 
   useEffect(() => {

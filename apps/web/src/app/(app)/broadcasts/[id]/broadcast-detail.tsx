@@ -22,6 +22,7 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
 import { cn, formatPhone } from "@ccp/shared/utils";
 import { BroadcastStatusBadge } from "../broadcast-status-badge";
+import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
 import { BroadcastReport, type BroadcastReportDto } from "./broadcast-report";
 
 /**
@@ -151,7 +152,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
     const ok = await confirm({
       title: "Stop this broadcast?",
       description:
-        "Sending stops immediately. Recipients already delivered to stay sent — WhatsApp can't unsend them. The rest won't receive the message.",
+        `Sending stops immediately. Recipients already delivered to stay sent — ${(CHANNEL_LABEL as Record<string, string>)[data.channel] ?? "the channel"} can't unsend them. The rest won't receive the message.`,
       confirmLabel: "Stop broadcast",
       destructive: true,
     });
@@ -418,7 +419,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
   const fallbackTitle =
     data.targetMode === "customer"
       ? "Best channel (legacy)"
-      : `Free-form · ${data.channel}`;
+      : `Free-form · ${(CHANNEL_LABEL as Record<string, string>)[data.channel] ?? data.channel}`;
   const title = data.name || data.templateName || fallbackTitle;
   const remaining = data.totalCount - data.sentCount - data.failedCount;
   const progressPct =
@@ -490,8 +491,14 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          <span>Language: {data.templateLanguage}</span>
-          <span>·</span>
+          {/* Free-form and legacy rows have no template language — omitting
+              beats a dangling "Language: ·". */}
+          {data.templateLanguage && (
+            <>
+              <span>Language: {data.templateLanguage}</span>
+              <span>·</span>
+            </>
+          )}
           {/* Sender identity. Absent for legacy rows (pre-account-stamping,
               removed best-channel campaigns) and numbers since disconnected —
               omitting beats guessing there. */}
@@ -596,7 +603,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
         {(data.status === "queued" || data.status === "running") && " · updates live"}
         {data.status === "paused" &&
           (data.lastError
-            ? " · paused — WhatsApp connection error; fix the connection and it will auto-resume"
+            ? ` · paused — ${(CHANNEL_LABEL as Record<string, string>)[data.channel] ?? "channel"} connection error; fix the connection and it will auto-resume`
             : " · paused for server restart, will auto-resume")}
       </div>
 

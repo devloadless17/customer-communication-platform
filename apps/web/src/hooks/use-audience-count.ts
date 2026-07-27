@@ -22,7 +22,19 @@ export function useAudienceCount(
     debounceMs = 300,
     channel,
     all = false,
-  }: { initial?: number; debounceMs?: number; channel?: string; all?: boolean } = {},
+    accountId,
+    includeOtherAccounts,
+  }: {
+    initial?: number;
+    debounceMs?: number;
+    channel?: string;
+    all?: boolean;
+    /** The "Send from" account — the server scopes the count to its own
+     *  contacts exactly like the send does, so the number on screen moves
+     *  when the include-other-accounts checkbox does. */
+    accountId?: string | null;
+    includeOtherAccounts?: boolean;
+  } = {},
 ): { count: number; loading: boolean; resolved: boolean } {
   const [count, setCount] = useState(initial);
   const [loading, setLoading] = useState(false);
@@ -60,6 +72,8 @@ export function useAudienceCount(
             contactIds,
             ...(channel ? { channel } : {}),
             ...(all ? { all: true } : {}),
+            ...(accountId ? { accountId } : {}),
+            ...(includeOtherAccounts ? { includeOtherAccounts: true } : {}),
           }),
           signal: controller.signal,
         });
@@ -89,7 +103,7 @@ export function useAudienceCount(
       window.clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tagKey, contactKey, channel, all]);
+  }, [tagKey, contactKey, channel, all, accountId, includeOtherAccounts]);
 
   return { count, loading, resolved };
 }

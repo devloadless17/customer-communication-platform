@@ -2,7 +2,6 @@ import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/current-user";
 import {
-  getTeamWhatsappConfig,
   listContactFieldDefinitions,
   listContactStages,
   listTags,
@@ -17,18 +16,15 @@ export default async function NewGroupPage() {
   const { permissions } = await getSession();
   if (!permissions["audienceGroups:manage"]) redirect("/broadcasts/groups");
 
-  const [config, tags, fieldDefinitions, stages] = await Promise.all([
-    getTeamWhatsappConfig(),
+  const [tags, fieldDefinitions, stages] = await Promise.all([
     listTags(),
     listContactFieldDefinitions(),
     listContactStages(),
   ]);
-
-  // Pre-flight: groups are only useful when WhatsApp is connected (you need
-  // it to send the broadcast eventually). If not, bounce to settings.
-  if (!config.phoneNumberId) {
-    redirect("/settings/whatsapp?from=audience-groups");
-  }
+  // No channel pre-flight: audience groups are channel-agnostic saved contact
+  // lists. The old gate required WHATSAPP specifically, so a Messenger-only
+  // team clicking "New group" was bounced to WhatsApp settings. The composer
+  // is where channel readiness is actually decided.
 
   return (
     <GroupForm tags={tags} fieldDefinitions={fieldDefinitions} stages={stages} />

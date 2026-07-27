@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -98,6 +98,55 @@ export function TemplatesView({
 }) {
   const { confirm, confirmDialog } = useConfirm();
   const [templates, setTemplates] = useState<TemplateDto[]>(initialTemplates);
+  // Multi-number scoping: templates belong to a WhatsApp Business Account, and
+  // the composer + reply box already fetch per-account — this page was the one
+  // surface still showing a single workspace-level list, so a template visible
+  // here could be absent in the composer with no explanation. With one number
+  // there is nothing to pick and the legacy unscoped requests stay.
+  const [whatsappAccounts, setWhatsappAccounts] = useState<
+    Array<{ id: string; name: string; isDefault: boolean }>
+  >([]);
+  const [templatesAccountId, setTemplatesAccountId] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiFetch("/api/workspace/channel-accounts");
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          accounts?: Array<{
+            id: string;
+            channel: string;
+            name: string;
+            isDefault: boolean;
+            isActive: boolean;
+          }>;
+        };
+        if (cancelled) return;
+        setWhatsappAccounts(
+          (data.accounts ?? [])
+            .filter((a) => a.channel === "whatsapp" && a.isActive)
+            .map((a) => ({ id: a.id, name: a.name, isDefault: a.isDefault })),
+        );
+      } catch {
+        // No switcher, unscoped list — the pre-multi-account behaviour.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const accountQuery = templatesAccountId
+    ? `?accountId=${encodeURIComponent(templatesAccountId)}`
+    : "";
+  // Switching the scope re-reads the catalogue for that account's WABA (via a
+  // ref so this effect doesn't also fire on every reload identity change).
+  // Skipped while unset — the SSR-seeded default-scope list is already right.
+  const reloadRef = useRef<() => Promise<void>>(async () => {});
+  useEffect(() => {
+    if (!templatesAccountId) return;
+    void reloadRef.current();
+  }, [templatesAccountId]);
   // Sync from SSR (router.refresh from useCatalogSync's
   // team:catalog:changed handler) so template sync / teammate edits
   // show up without a manual refresh.
@@ -148,7 +197,7 @@ export function TemplatesView({
     setReloadError(null);
     setReloading(true);
     try {
-      const res = await apiFetch("/api/workspace/whatsapp/templates");
+      const res = await apiFetch(`/api/workspace/whatsapp/templates${accountQuery}`);
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as
           | { error?: string; detail?: string }
@@ -165,13 +214,18 @@ export function TemplatesView({
     } finally {
       setReloading(false);
     }
-  }, []);
+  }, [accountQuery]);
+  useEffect(() => {
+    reloadRef.current = reload;
+  }, [reload]);
 
   const syncFromMeta = useCallback(async () => {
     setSyncError(null);
     setSyncing(true);
     try {
-      const res = await apiFetch("/api/workspace/whatsapp/templates", { method: "POST" });
+      const res = await apiFetch(`/api/workspace/whatsapp/templates${accountQuery}`, {
+        method: "POST",
+      });
       const data = (await res.json()) as {
         templates?: TemplateDto[];
         error?: string;
@@ -186,7 +240,7 @@ export function TemplatesView({
     } finally {
       setSyncing(false);
     }
-  }, []);
+  }, [accountQuery]);
 
   const askDelete = useCallback(
     async (target: TemplateDto) => {
@@ -336,6 +390,24 @@ export function TemplatesView({
             className="h-9 pl-8"
           />
         </div>
+        {/* Per-number catalogue scope, same convention as the composer's
+            "Send from". Hidden with one number — the whole list is its WABA's. */}
+        {whatsappAccounts.length > 1 && (
+          <select
+            value={templatesAccountId ?? ""}
+            onChange={(e) => setTemplatesAccountId(e.target.value || null)}
+            className="h-9 rounded-md border border-input bg-background px-2 text-xs"
+            aria-label="Which number's templates to show"
+          >
+            <option value="">Default account</option>
+            {whatsappAccounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+                {a.isDefault ? " · default" : ""}
+              </option>
+            ))}
+          </select>
+        )}
         <StatusFilterTabs value={statusFilter} onChange={setStatusFilter} templates={templates} />
         <div className="ml-auto flex items-center gap-2">
           <Button

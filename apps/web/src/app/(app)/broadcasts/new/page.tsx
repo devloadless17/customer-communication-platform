@@ -8,6 +8,7 @@ import {
   getTeamWhatsappConfig,
   listAssignmentPolicies,
   listAudienceGroups,
+  listChannelAccountDirectory,
   listContactFieldDefinitions,
   listContactStages,
   listTags,
@@ -144,10 +145,22 @@ export default async function NewBroadcastPage({
     .filter((m) => m.isActive)
     .map((m) => ({ id: m.id, name: m.name }));
 
-  // Pre-flight: if WhatsApp isn't even connected, bounce to the settings
-  // page so the user knows what to fix.
-  if (!config.phoneNumberId) {
-    redirect("/settings/whatsapp?from=broadcasts");
+  // Pre-flight: bounce to settings only when the channel this composer is
+  // OPENING ON has no account. The old gate required WhatsApp regardless of
+  // `?channel=`, so a Messenger-only workspace clicking "New broadcast" from
+  // the Messenger-scoped Outreach nav was dumped on WhatsApp settings with no
+  // explanation — directly against the channel-first doctrine.
+  const requestedChannelRaw = clone?.channel ?? (Array.isArray(sp.channel) ? sp.channel[0] : sp.channel);
+  const requestedChannel =
+    requestedChannelRaw === "messenger" || requestedChannelRaw === "instagram"
+      ? requestedChannelRaw
+      : "whatsapp";
+  const accountDirectory = await listChannelAccountDirectory().catch(() => []);
+  const channelHasAccount = accountDirectory.some(
+    (a) => a.channel === requestedChannel && a.isActive,
+  );
+  if (!channelHasAccount && !(requestedChannel === "whatsapp" && config.phoneNumberId)) {
+    redirect(`/settings/${requestedChannel}?from=broadcasts`);
   }
 
   return (

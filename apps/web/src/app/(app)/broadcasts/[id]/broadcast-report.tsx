@@ -274,7 +274,7 @@ export function BroadcastReport({
             // which, rather than leaving a number nobody can account for.
             title={
               funnel.suppressed > 0
-                ? "Excluded before sending: opted out of marketing, or hit WhatsApp's per-user marketing limit in the last 24 hours."
+                ? "Excluded before sending: opted out of marketing, or hit the channel's per-user marketing limit in the last 24 hours."
                 : undefined
             }
           >

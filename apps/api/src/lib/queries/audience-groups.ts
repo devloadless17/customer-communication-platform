@@ -244,13 +244,50 @@ async function resolveAudienceGroupMemberCount(
  * contact list to the browser (the old approach was a client-side filter over
  * every contact, which falls apart past a few thousand).
  */
+/**
+ * The sending-ACCOUNT exclusion, mirroring `BroadcastsService.create`'s
+ * scoping: contacts whose conversations belong to ANOTHER account on the
+ * channel are dropped unless the operator opted into reaching them. Contacts
+ * with no conversation at all — or conversations predating account stamping
+ * (`channelConnectionId` null) — stay reachable; they are the whole point of a
+ * cold broadcast. Without this the composer's count ignored the "include other
+ * accounts" checkbox entirely: ticking it changed the real audience while
+ * every number on screen stayed identical, and the messaging-cap warning was
+ * computed against the wrong figure.
+ */
+function audienceAccountFilter(
+  accountId?: string | null,
+  includeOtherAccounts?: boolean,
+): Prisma.ContactWhereInput {
+  if (!accountId || includeOtherAccounts) return {};
+  return {
+    NOT: {
+      conversations: {
+        some: {
+          channelConnectionId: { not: null },
+          NOT: { channelConnectionId: accountId },
+        },
+      },
+    },
+  };
+}
+
 export async function countAudienceContacts(
   workspaceId: string,
   {
     tagIds = [],
     contactIds = [],
     all = false,
-  }: { tagIds?: string[]; contactIds?: string[]; all?: boolean },
+    accountId,
+    includeOtherAccounts,
+  }: {
+    tagIds?: string[];
+    contactIds?: string[];
+    all?: boolean;
+    /** The "Send from" account — scopes the count like the send itself. */
+    accountId?: string | null;
+    includeOtherAccounts?: boolean;
+  },
   // A broadcast sends on ONE channel and drops contacts on other channels, so
   // the composer's recipient count must be scoped to the target channel — else a
   // freeform Messenger broadcast to a mixed-channel tag shows the whole audience
@@ -259,11 +296,14 @@ export async function countAudienceContacts(
   channel?: Channel,
 ): Promise<number> {
   const channelFilter = audienceChannelFilter(channel);
+  const accountFilter = audienceAccountFilter(accountId, includeOtherAccounts);
   // "All contacts" audience: every team contact (channel-scoped), tags/ids
   // ignored. Kept separate from the empty-selection case below, which returns 0
   // on purpose so an unconfigured custom audience never fans out to everyone.
   if (all) {
-    return db.contact.count({ where: { workspaceId, deletedAt: null, ...channelFilter } });
+    return db.contact.count({
+      where: { workspaceId, deletedAt: null, ...channelFilter, ...accountFilter },
+    });
   }
   const tags = tagIds.filter((s) => s.length > 0);
   const ids = contactIds.filter((s) => s.length > 0);
@@ -274,11 +314,18 @@ export async function countAudienceContacts(
           workspaceId,
           deletedAt: null,
           ...channelFilter,
+          ...accountFilter,
           OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }],
         }
       : tags.length > 0
-        ? { workspaceId, deletedAt: null, ...channelFilter, tags: { some: { id: { in: tags } } } }
-        : { workspaceId, deletedAt: null, ...channelFilter, id: { in: ids } };
+        ? {
+            workspaceId,
+            deletedAt: null,
+            ...channelFilter,
+            ...accountFilter,
+            tags: { some: { id: { in: tags } } },
+          }
+        : { workspaceId, deletedAt: null, ...channelFilter, ...accountFilter, id: { in: ids } };
   return db.contact.count({ where });
 }
 
@@ -290,7 +337,18 @@ export async function countAudienceContacts(
  */
 export async function previewAudienceContacts(
   workspaceId: string,
-  { tagIds = [], contactIds = [] }: { tagIds?: string[]; contactIds?: string[] },
+  {
+    tagIds = [],
+    contactIds = [],
+    accountId,
+    includeOtherAccounts,
+  }: {
+    tagIds?: string[];
+    contactIds?: string[];
+    /** Same sending-account scoping as the count — see audienceAccountFilter. */
+    accountId?: string | null;
+    includeOtherAccounts?: boolean;
+  },
   sampleLimit = 200,
   // Scoped exactly like `countAudienceContacts` — the preview answers "who am I
   // sending to", so it must resolve the same set the count shows and the runner
@@ -307,6 +365,7 @@ export async function previewAudienceContacts(
   }>;
 }> {
   const channelFilter = audienceChannelFilter(channel);
+  const accountFilter = audienceAccountFilter(accountId, includeOtherAccounts);
   const tags = tagIds.filter((s) => s.length > 0);
   const ids = contactIds.filter((s) => s.length > 0);
   if (tags.length === 0 && ids.length === 0) return { total: 0, sample: [] };
@@ -316,11 +375,18 @@ export async function previewAudienceContacts(
           workspaceId,
           deletedAt: null,
           ...channelFilter,
+          ...accountFilter,
           OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }],
         }
       : tags.length > 0
-        ? { workspaceId, deletedAt: null, ...channelFilter, tags: { some: { id: { in: tags } } } }
-        : { workspaceId, deletedAt: null, ...channelFilter, id: { in: ids } };
+        ? {
+            workspaceId,
+            deletedAt: null,
+            ...channelFilter,
+            ...accountFilter,
+            tags: { some: { id: { in: tags } } },
+          }
+        : { workspaceId, deletedAt: null, ...channelFilter, ...accountFilter, id: { in: ids } };
   const [total, sample] = await Promise.all([
     db.contact.count({ where }),
     db.contact.findMany({

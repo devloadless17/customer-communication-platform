@@ -13,8 +13,10 @@ export type BroadcastStatusFilter =
   | "scheduled"
   | "queued"
   | "running"
+  | "paused"
   | "completed"
-  | "failed";
+  | "failed"
+  | "canceled";
 
 export type BroadcastView = "table" | "calendar";
 
@@ -27,8 +29,10 @@ const VALID_STATUSES: ReadonlySet<BroadcastStatusFilter> = new Set([
   "scheduled",
   "queued",
   "running",
+  "paused",
   "completed",
   "failed",
+  "canceled",
 ]);
 
 /** Parse the persisted status cookie. Defaults to "all" on missing / invalid. */

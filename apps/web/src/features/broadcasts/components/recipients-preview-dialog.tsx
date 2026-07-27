@@ -34,11 +34,15 @@ export function RecipientsPreviewDialog({
   open: boolean;
   onClose: () => void;
   /** The audience to resolve. `null` while there's nothing to preview yet.
-   *  `channel` scopes it to the channel the broadcast will actually send on. */
+   *  `channel` scopes it to the channel the broadcast will actually send on;
+   *  `accountId`/`includeOtherAccounts` mirror the send's account scoping so
+   *  the preview shows the same set the campaign reaches. */
   payload: {
     tagIds: string[];
     contactIds: string[];
     channel?: "whatsapp" | "messenger" | "instagram";
+    accountId?: string | null;
+    includeOtherAccounts?: boolean;
   } | null;
   title?: string;
   subtitle?: string;
@@ -53,7 +57,7 @@ export function RecipientsPreviewDialog({
   // `channel` is part of the key: switching the broadcast's channel resolves a
   // different recipient set, so it has to re-POST rather than show the stale one.
   const payloadKey = payload
-    ? `${payload.tagIds.join(",")}|${payload.contactIds.join(",")}|${payload.channel ?? ""}`
+    ? `${payload.tagIds.join(",")}|${payload.contactIds.join(",")}|${payload.channel ?? ""}|${payload.accountId ?? ""}|${payload.includeOtherAccounts ? 1 : 0}`
     : null;
 
   useEffect(() => {
@@ -67,7 +71,15 @@ export function RecipientsPreviewDialog({
         const res = await apiFetch("/api/contacts/preview", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload),
+          // Absent-vs-null matters: the schema takes `.optional()` strings, so
+          // a `accountId: null` would 400 — omit unset keys instead.
+          body: JSON.stringify({
+            tagIds: payload.tagIds,
+            contactIds: payload.contactIds,
+            ...(payload.channel ? { channel: payload.channel } : {}),
+            ...(payload.accountId ? { accountId: payload.accountId } : {}),
+            ...(payload.includeOtherAccounts ? { includeOtherAccounts: true } : {}),
+          }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as PreviewResult;

@@ -238,6 +238,11 @@ export function NewBroadcastForm({
    */
   const [includeOtherAccounts, setIncludeOtherAccounts] = useState(false);
   const [accounts, setAccounts] = useState<ChannelAccountDirectoryEntry[]>([]);
+  // Honest failure state: a swallowed accounts fetch used to be visually
+  // identical to a healthy single-account workspace (one channel button, no
+  // "Send from" select, no message) while the send fell back to whatever the
+  // server defaulted to. Say so instead.
+  const [accountsLoadFailed, setAccountsLoadFailed] = useState(false);
 
   // The workspace's connected accounts, once. Small (a handful per workspace),
   // member-readable, and needed before the first step can render.
@@ -246,12 +251,20 @@ export function NewBroadcastForm({
     void (async () => {
       try {
         const res = await apiFetch("/api/workspace/channel-accounts");
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (!cancelled) setAccountsLoadFailed(true);
+          return;
+        }
         const data = (await res.json()) as { accounts?: ChannelAccountDirectoryEntry[] };
-        if (!cancelled) setAccounts(data.accounts ?? []);
+        if (!cancelled) {
+          setAccounts(data.accounts ?? []);
+          setAccountsLoadFailed(false);
+        }
       } catch {
         // Non-fatal: the composer falls back to the channel's default account,
-        // which is exactly the pre-multi-account behaviour.
+        // which is exactly the pre-multi-account behaviour — but the note
+        // below tells the user that is what will happen.
+        if (!cancelled) setAccountsLoadFailed(true);
       }
     })();
     return () => {
@@ -656,17 +669,22 @@ export function NewBroadcastForm({
       ? groups.find((x) => x.id === audience.selectedGroupId) ?? null
       : null;
 
-  // Channel-scoped server counts for the all/group audiences (custom mode's
-  // count comes from the builder).
+  // Channel- AND account-scoped server counts for the all/group audiences
+  // (custom mode's count comes from the builder). The account dimension is
+  // what makes the include-other-accounts checkbox HONEST: ticking it widens
+  // the real audience, so the number on screen must widen with it — and the
+  // messaging-cap warning below compares against this same figure.
   const allCount = useAudienceCount([], [], {
     all: audience.mode === "all" && !!countChannel,
     channel: countChannel,
     initial: totalContactCount,
+    accountId,
+    includeOtherAccounts,
   });
   const groupCount = useAudienceCount(
     countChannel && scopedGroup ? scopedGroup.tagIds : [],
     countChannel && scopedGroup ? scopedGroup.contactIds : [],
-    { channel: countChannel },
+    { channel: countChannel, accountId, includeOtherAccounts },
   );
 
   // Recipient count for the active mode. Custom mode's count comes from the
@@ -703,13 +721,21 @@ export function NewBroadcastForm({
   // union the server expands. Null for "all" (no point) and for an empty
   // selection. Group mode reuses the group dto's tag + manual snapshot
   // (`scopedGroup`, resolved above for the recipient count).
-  // Scoped by `countChannel` for the same reason the count is: the send drops
-  // off-channel contacts, so previewing them as recipients is a lie.
+  // Scoped by `countChannel` + the "Send from" account for the same reason
+  // the count is: the send drops off-channel and other-account contacts, so
+  // previewing them as recipients is a lie.
   const previewPayload: {
     tagIds: string[];
     contactIds: string[];
     channel?: "whatsapp" | "messenger" | "instagram";
+    accountId?: string | null;
+    includeOtherAccounts?: boolean;
   } | null = (() => {
+    const scope = {
+      ...(countChannel ? { channel: countChannel } : {}),
+      ...(accountId ? { accountId } : {}),
+      ...(includeOtherAccounts ? { includeOtherAccounts: true } : {}),
+    };
     if (
       audience.mode === "custom" &&
       (audience.selectedTagIds.length > 0 || audience.selectedIds.length > 0)
@@ -717,14 +743,14 @@ export function NewBroadcastForm({
       return {
         tagIds: audience.selectedTagIds,
         contactIds: audience.selectedIds,
-        ...(countChannel ? { channel: countChannel } : {}),
+        ...scope,
       };
     }
     if (audience.mode === "group" && scopedGroup) {
       return {
         tagIds: scopedGroup.tagIds,
         contactIds: scopedGroup.contactIds,
-        ...(countChannel ? { channel: countChannel } : {}),
+        ...scope,
       };
     }
     return null;
@@ -761,6 +787,18 @@ export function NewBroadcastForm({
   const readyToSend =
     audienceDone &&
     (messageKind === "template" ? templateDone && variablesDone : freeformDone);
+  // The FIRST unmet gate, by step order, so the disabled Send button explains
+  // itself. "Complete every step" named nothing — and the Variables step is
+  // conditionally rendered, so its gap could be literally off-screen.
+  const nextGateHint = !audienceDone
+    ? "Pick an audience (step 2) to enable sending."
+    : messageKind === "template"
+      ? !templateDone
+        ? "Pick a template (step 3) to enable sending."
+        : "Fill every template variable (step 4) to enable sending."
+      : freeformOverCap
+        ? "Shorten the message to fit the channel's limit."
+        : "Write the message (step 3) to enable sending.";
 
   // ── Pre-send warning ──────────────────────────────────────────────────────
   // Ask the server (read-only) how many recipients would resolve a template
@@ -1123,13 +1161,122 @@ export function NewBroadcastForm({
           Send one message to many recipients at once — the same content and the
           same variable values for everyone.
         </p>
-        <p className="text-sm text-muted-foreground">
-          Only a pre-approved <strong>WhatsApp template</strong> can reach someone
-          outside the 24-hour customer service window. <strong>Free-form</strong>{" "}
-          messages on Messenger and Instagram reach only people whose window is
-          still open — anyone else is skipped.
-        </p>
       </header>
+
+      {/* Channel & sender. Deliberately the FIRST decision — rendered first,
+          numbered first: a campaign is WhatsApp OR Messenger OR Instagram,
+          never a mix, and everything after this — templates, audience counts,
+          message type, limits — derives from it. */}
+      <StepCard
+        index={1}
+        title="Channel"
+        summary={`${CHANNEL_LABEL[selectedChannel]}${
+          selectedAccount ? ` · ${selectedAccount.name}` : ""
+        }`}
+        // Done once the sender is actually resolved. Hardcoded `done` showed a
+        // green check from first paint — before accounts had even loaded — and
+        // the step numeral "1" never rendered at all. Empty directory (fetch
+        // failed / mid-onboarding) counts as done: there is nothing to pick.
+        done={channelAccounts.length === 0 || Boolean(selectedAccount)}
+      >
+        <div className="flex flex-col gap-3">
+          {/* One connected channel needs no picker — same reasoning as the
+              single-account "Send from" select below. The summary already
+              names it. */}
+          {connectedChannels.length > 1 && (
+            <div className="flex flex-wrap gap-2">
+              {connectedChannels.map((ch) => (
+                <button
+                  key={ch}
+                  type="button"
+                  onClick={() => setSelectedChannel(ch)}
+                  className={
+                    "flex-1 whitespace-nowrap rounded-md border px-3 py-2 text-sm font-medium transition " +
+                    (selectedChannel === ch
+                      ? "border-primary bg-primary/10 text-foreground"
+                      : "border-border bg-muted/20 text-muted-foreground hover:text-foreground")
+                  }
+                >
+                  {CHANNEL_LABEL[ch]}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {accountsLoadFailed && (
+            <p className="text-2xs leading-relaxed text-warning-fg">
+              Couldn&apos;t load your connected accounts — the campaign will go
+              out on {CHANNEL_LABEL[selectedChannel]}&apos;s default account.
+              Reload the page to pick a specific one.
+            </p>
+          )}
+
+          {/* A single-account channel needs no picker — showing one is
+              noise. The account is still bound on the wire. */}
+          {channelAccounts.length > 1 && (
+            <label className="flex flex-col gap-1">
+              <span className="text-2xs font-medium text-muted-foreground">
+                Send from
+              </span>
+              <select
+                value={accountId ?? ""}
+                onChange={(e) => {
+                  setAccountId(e.target.value || null);
+                  // The template catalogue is per-account; a template picked
+                  // for the old one may not exist on the new.
+                  setSelectedTemplateId(null);
+                  setIncludeOtherAccounts(false);
+                }}
+                className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+              >
+                {channelAccounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                    {a.providerName && a.providerName !== a.name
+                      ? ` — ${a.providerName}`
+                      : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          {channelAccounts.length > 1 && (
+            <label className="flex items-start gap-2 rounded-md border border-border bg-muted/20 px-3 py-2">
+              <input
+                type="checkbox"
+                checked={includeOtherAccounts}
+                onChange={(e) => setIncludeOtherAccounts(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span className="text-2xs leading-relaxed text-muted-foreground">
+                Also include contacts from your other{" "}
+                {CHANNEL_LABEL[selectedChannel]} accounts.
+                <br />
+                They haven&apos;t messaged this{" "}
+                {selectedChannel === "whatsapp" ? "number" : "account"} before,
+                so they&apos;ll see an unfamiliar sender and their reply opens
+                a new conversation here.
+              </span>
+            </label>
+          )}
+
+          {selectedChannel === "whatsapp" ? (
+            <p className="text-2xs leading-relaxed text-muted-foreground">
+              Only a pre-approved <strong>template</strong> reaches someone
+              outside the 24-hour customer service window. Templates belong to
+              this account&apos;s WhatsApp Business Account, so the list below
+              is scoped to it.
+            </p>
+          ) : (
+            <p className="text-2xs leading-relaxed text-muted-foreground">
+              {CHANNEL_LABEL[selectedChannel]} has no templates — free-form
+              messages reach only contacts whose messaging window is still
+              open. Everyone else is skipped.
+            </p>
+          )}
+        </div>
+      </StepCard>
 
       <StepCard
         index={2}
@@ -1160,109 +1307,12 @@ export function NewBroadcastForm({
           onChange={setAudience}
           onCustomCountChange={handleCustomCount}
           onGroupSaved={handleGroupSaved}
-          // Scope the custom-audience recipient count to the channel the
-          // broadcast will actually send on: templates → WhatsApp, freeform →
-          // the chosen social channel.
+          // Scope the custom-audience recipient count to the channel AND the
+          // "Send from" account the broadcast will actually use.
           channel={countChannel}
+          accountId={accountId}
+          includeOtherAccounts={includeOtherAccounts}
         />
-      </StepCard>
-
-      {/* Channel & sender. Deliberately the FIRST decision: a campaign is
-          WhatsApp OR Messenger OR Instagram, never a mix, and everything after
-          this — templates, audience counts, message type, limits — derives
-          from it. */}
-      <StepCard
-        index={1}
-        title="Channel"
-        summary={`${CHANNEL_LABEL[selectedChannel]}${
-          selectedAccount ? ` · ${selectedAccount.name}` : ""
-        }`}
-        done
-      >
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap gap-2">
-            {connectedChannels.map((ch) => (
-              <button
-                key={ch}
-                type="button"
-                onClick={() => setSelectedChannel(ch)}
-                className={
-                  "flex-1 whitespace-nowrap rounded-md border px-3 py-2 text-sm font-medium transition " +
-                  (selectedChannel === ch
-                    ? "border-primary bg-primary/10 text-foreground"
-                    : "border-border bg-muted/20 text-muted-foreground hover:text-foreground")
-                }
-              >
-                {CHANNEL_LABEL[ch]}
-              </button>
-            ))}
-          </div>
-
-          {/* A single-account channel needs no picker — showing one is
-              noise. The account is still bound on the wire. */}
-          {channelAccounts.length > 1 && (
-                <label className="flex flex-col gap-1">
-                  <span className="text-2xs font-medium text-muted-foreground">
-                    Send from
-                  </span>
-                  <select
-                    value={accountId ?? ""}
-                    onChange={(e) => {
-                      setAccountId(e.target.value || null);
-                      // The template catalogue is per-account; a template picked
-                      // for the old one may not exist on the new.
-                      setSelectedTemplateId(null);
-                      setIncludeOtherAccounts(false);
-                    }}
-                    className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
-                  >
-                    {channelAccounts.map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {a.name}
-                        {a.providerName && a.providerName !== a.name
-                          ? ` — ${a.providerName}`
-                          : ""}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-          )}
-
-          {channelAccounts.length > 1 && (
-                <label className="flex items-start gap-2 rounded-md border border-border bg-muted/20 px-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={includeOtherAccounts}
-                    onChange={(e) => setIncludeOtherAccounts(e.target.checked)}
-                    className="mt-0.5"
-                  />
-                  <span className="text-2xs leading-relaxed text-muted-foreground">
-                    Also include contacts from your other{" "}
-                    {CHANNEL_LABEL[selectedChannel]} accounts.
-                    <br />
-                    They haven&apos;t messaged this{" "}
-                    {selectedChannel === "whatsapp" ? "number" : "account"} before,
-                    so they&apos;ll see an unfamiliar sender and their reply opens
-                    a new conversation here.
-                  </span>
-                </label>
-          )}
-
-          {selectedChannel === "whatsapp" ? (
-            <p className="text-2xs leading-relaxed text-muted-foreground">
-              Only a pre-approved <strong>template</strong> reaches someone
-              outside the 24-hour customer service window. Templates belong to
-              this account&apos;s WhatsApp Business Account, so the list below
-              is scoped to it.
-            </p>
-          ) : (
-            <p className="text-2xs leading-relaxed text-muted-foreground">
-              {CHANNEL_LABEL[selectedChannel]} has no templates — free-form
-              messages reach only contacts whose messaging window is still
-              open. Everyone else is skipped.
-            </p>
-          )}
-        </div>
       </StepCard>
 
       {messageKind !== "template" ? (
@@ -1277,25 +1327,10 @@ export function NewBroadcastForm({
           done={freeformDone}
         >
           <div className="flex flex-col gap-3">
-            {(
-              <div className="flex gap-2">
-                {(["messenger", "instagram"] as const).map((ch) => (
-                  <button
-                    key={ch}
-                    type="button"
-                    onClick={() => setFreeformChannel(ch)}
-                    className={
-                      "rounded-md border px-3 py-1.5 text-sm capitalize transition " +
-                      (freeformChannel === ch
-                        ? "border-primary bg-primary/10 text-foreground"
-                        : "border-border text-muted-foreground hover:text-foreground")
-                    }
-                  >
-                    {ch}
-                  </button>
-                ))}
-              </div>
-            )}
+            {/* No channel toggle here: step 1 OWNS the channel. A second
+                picker in this step used to bypass setSelectedChannel — flipping
+                it silently rewrote step 1's summary while skipping the
+                account/template resets. */}
             <Textarea
               value={freeformBody}
               onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setFreeformBody(e.target.value)}
@@ -1664,7 +1699,7 @@ export function NewBroadcastForm({
                 recipient{audienceCount === 1 ? "" : "s"}.
               </span>
             ) : (
-              <span>Complete every step to enable sending.</span>
+              <span>{nextGateHint}</span>
             )}
             {previewPayload && audienceCount > 0 && (
               <button

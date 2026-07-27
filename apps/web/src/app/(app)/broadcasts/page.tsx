@@ -22,7 +22,10 @@ import {
 export const metadata = { title: "Broadcasts" };
 export const dynamic = "force-dynamic";
 
-const OUTREACH_CHANNELS = ["whatsapp", "messenger", "instagram", "people"] as const;
+// Strictly per-channel: `people` (the removed omnichannel mode's scope) is no
+// longer accepted — a legacy `?channel=people` link falls back to the
+// unscoped list rather than applying a silent, unclearable filter.
+const OUTREACH_CHANNELS = ["whatsapp", "messenger", "instagram"] as const;
 
 export default async function BroadcastsPage({
   searchParams,
@@ -82,9 +85,20 @@ export default async function BroadcastsPage({
     <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 md:py-8">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Broadcasts</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-semibold tracking-tight">Broadcasts</h1>
+            {/* Visible scope chip — without it a channel-filtered list is
+                indistinguishable from the full history. */}
+            {channel && (
+              <span className="rounded-full border border-border bg-muted/40 px-2.5 py-0.5 text-xs font-medium capitalize text-muted-foreground">
+                {channel}
+              </span>
+            )}
+          </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            Send a pre-approved WhatsApp template to many contacts in one go.
+            {channel === "messenger" || channel === "instagram"
+              ? `Send a free-form message to many ${channel === "messenger" ? "Messenger" : "Instagram"} contacts inside their messaging window.`
+              : "Send a pre-approved WhatsApp template to many contacts in one go."}{" "}
             Filter by status, search, or switch to the calendar to see scheduled
             sends.
           </p>
@@ -129,8 +143,9 @@ function EmptyState({ canManage }: { canManage: boolean }) {
       </div>
       <div className="text-base font-semibold text-foreground">No broadcasts yet</div>
       <p className="max-w-md text-sm leading-relaxed text-muted-foreground">
-        Reach out to many contacts at once with an approved WhatsApp template.
-        Each broadcast tracks per-recipient delivery so you can spot failures.
+        Reach many contacts at once on one channel — an approved template on
+        WhatsApp, or a free-form message on Messenger / Instagram. Each
+        broadcast tracks per-recipient delivery so you can spot failures.
       </p>
       {canManage && (
         <Button asChild className="mt-2">

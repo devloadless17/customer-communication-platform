@@ -21,7 +21,15 @@ export default async function BroadcastDetailPage({
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-6 px-4 py-6 sm:px-6 md:py-8">
       <Link
-        href="/broadcasts"
+        // Keep the channel scope on the way back — returning from a Messenger
+        // campaign should land on the Messenger-scoped list, not the unscoped
+        // one. Legacy customer-mode rows keep the bare list (their stored
+        // channel is an inert default).
+        href={
+          broadcast.targetMode === "customer"
+            ? "/broadcasts"
+            : `/broadcasts?channel=${broadcast.channel}`
+        }
         className="inline-flex w-fit items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="size-3.5" />

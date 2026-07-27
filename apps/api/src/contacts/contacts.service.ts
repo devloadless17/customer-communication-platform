@@ -869,7 +869,13 @@ export class ContactsService {
   countAudience(workspaceId: string, input: AudienceCountInput): Promise<number> {
     return countAudienceContacts(
       workspaceId,
-      { tagIds: input.tagIds, contactIds: input.contactIds, all: input.all },
+      {
+        tagIds: input.tagIds,
+        contactIds: input.contactIds,
+        all: input.all,
+        accountId: input.accountId ?? null,
+        includeOtherAccounts: input.includeOtherAccounts,
+      },
       input.channel,
     );
   }

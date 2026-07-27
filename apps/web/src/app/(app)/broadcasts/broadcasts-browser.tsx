@@ -21,6 +21,7 @@ import { getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
 import { cn } from "@ccp/shared/utils";
 import type { BroadcastListItem } from "@/lib/api/queries";
+import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
 
 import { BroadcastStatusBadge } from "./broadcast-status-badge";
 import { BroadcastDeleteButton } from "./broadcast-delete-button";
@@ -51,8 +52,13 @@ const FILTERS: { id: BroadcastStatusFilter; label: string; dot: string }[] = [
   { id: "scheduled", label: "Scheduled", dot: "bg-indigo-500" },
   { id: "queued", label: "Queued", dot: "bg-muted-foreground" },
   { id: "running", label: "In progress", dot: "bg-info-fg" },
+  // Both reachable states an operator PUT a campaign into (Stop button →
+  // canceled; connection/template fault → paused) — without chips, the
+  // campaign they just acted on was unfindable by status.
+  { id: "paused", label: "Paused", dot: "bg-warning-fg" },
   { id: "completed", label: "Completed", dot: "bg-success-fg" },
   { id: "failed", label: "Failed", dot: "bg-destructive" },
+  { id: "canceled", label: "Canceled", dot: "bg-muted-foreground" },
 ];
 
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
@@ -90,7 +96,7 @@ export function BroadcastsBrowser({
    *  (table vs calendar render of the same rows), so no refetch tied to it. */
   initialView?: BroadcastView;
   /**
-   * Scope the history to one channel (or `people` for omnichannel campaigns).
+   * Scope the history to one channel.
    * Read from the URL by the page so a shared link keeps its scope.
    */
   channel?: string | null;
@@ -301,7 +307,7 @@ export function BroadcastsBrowser({
             <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search name or template…"
+              placeholder="Search name, template, or account…"
               aria-label="Search broadcasts by name or template"
               className="h-9 pl-8"
             />
@@ -783,7 +789,7 @@ function broadcastTitle(b: BroadcastListItem): string {
   if (b.templateName) return b.templateName;
   return b.targetMode === "customer"
     ? "Best channel (legacy)"
-    : `Free-form · ${b.channel}`;
+    : `Free-form · ${(CHANNEL_LABEL as Record<string, string>)[b.channel] ?? b.channel}`;
 }
 
 function ProgressBar({
