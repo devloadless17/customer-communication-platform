@@ -207,7 +207,14 @@ function IntegrationTile({
 
   if (disabled || !href) {
     return (
-      <div className="rounded-lg border border-border bg-card p-4 opacity-60">
+      // NO blanket `opacity-60` here. Opacity composites EVERY child toward the
+      // background, and it dragged this card's description text from a healthy
+      // ~5.5:1 down to 2.58:1 — the least readable text in the app, and it is
+      // informational copy ("Add a generic HTTP module today; native app coming
+      // soon"), not a disabled CONTROL, so WCAG's disabled-control exemption
+      // does not cover it. The card already says "Coming soon" in its own pill;
+      // de-emphasize with the surface instead of by fading the words.
+      <div className="rounded-lg border border-dashed border-border bg-muted/40 p-4">
         {Inner}
       </div>
     );

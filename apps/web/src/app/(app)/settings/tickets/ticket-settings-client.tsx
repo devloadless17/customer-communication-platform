@@ -103,6 +103,10 @@ function Behaviour({ settings, onSave }: { settings: TicketSettingsView; onSave:
             value={reopenHours}
             onChange={(e) => setReopenHours(e.target.value)}
             inputMode="numeric"
+            // `Row` renders its title as plain text, so it gives sighted users
+            // context but is not programmatically associated with this control.
+            // Without a name a screen reader announces only "edit text, 72".
+            aria-label="Reopen window, in hours"
             className="h-8 w-20 text-xs"
           />
           <span className="text-2xs text-muted-foreground">hours</span>
@@ -119,6 +123,9 @@ function Behaviour({ settings, onSave }: { settings: TicketSettingsView; onSave:
         <Switch
           checked={settings.ticketCloseConversationOnLastSolved}
           onCheckedChange={(v) => void patch({ ticketCloseConversationOnLastSolved: v })}
+          // Same as the input above — the Row title is not associated, so this
+          // switch announced as an unnamed "switch, off".
+          aria-label="Close the conversation when its last ticket is solved"
         />
       </Row>
     </section>
@@ -290,6 +297,9 @@ function CustomFields({
           onChange={(e) => setLabel(e.target.value)}
           placeholder="e.g. Root cause"
           maxLength={80}
+          // A placeholder is not an accessible name: it vanishes as soon as the
+          // field has a value.
+          aria-label="Ticket field name"
           className="h-8 max-w-xs text-xs"
         />
         <Button type="submit" size="sm" variant="outline" className="h-8 px-2 text-2xs">

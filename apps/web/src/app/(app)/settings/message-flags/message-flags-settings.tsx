@@ -319,6 +319,10 @@ function DefinitionRow({
               else setName(def.name);
             }}
             maxLength={40}
+            // Inline row editor — there is no visible label by design (the input
+            // IS the row), so the accessible name has to be supplied. Without it
+            // a screen reader announces four identical unlabeled text fields.
+            aria-label="Flag name"
             className="h-7 border-transparent bg-transparent px-1 text-sm font-medium hover:border-border focus:border-border"
           />
         </div>
@@ -331,6 +335,10 @@ function DefinitionRow({
           }}
           placeholder="Add a description…"
           maxLength={200}
+          // Same reasoning as the name field above: inline editor, no visible
+          // label. A placeholder is NOT an accessible name — it disappears the
+          // moment the field has a value, which is most of the time here.
+          aria-label="Flag description"
           className="h-7 border-transparent bg-transparent px-1 text-xs text-muted-foreground hover:border-border focus:border-border"
         />
       </div>

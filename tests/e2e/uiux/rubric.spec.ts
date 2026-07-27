@@ -84,13 +84,31 @@ async function settle(page: Page): Promise<void> {
   // chrome collapses, so the workflows surface never satisfied it and the wait
   // burned its full timeout, turning a passing page into a fake failure. Assert
   // the narrow thing that is actually true everywhere.
-  await page.waitForFunction(
-    () =>
-      !!document.documentElement.getAttribute("lang") &&
-      document.title.trim().length > 0,
-    undefined,
-    { timeout: 45_000 },
-  );
+  try {
+    await page.waitForFunction(
+      () =>
+        !!document.documentElement.getAttribute("lang") &&
+        document.title.trim().length > 0,
+      undefined,
+      { timeout: 45_000 },
+    );
+  } catch (err) {
+    // Next's dev error overlay can take the document over, and then this wait
+    // dies after 45s with "Timeout exceeded" — which says nothing about the
+    // actual problem. Surface the overlay's own message instead: an opaque
+    // hang is the least actionable failure a harness can produce.
+    const overlay = await page
+      .locator("nextjs-portal")
+      .first()
+      .innerText()
+      .catch(() => "");
+    if (overlay.trim()) {
+      throw new Error(
+        `page did not settle — Next dev overlay is showing:\n${overlay.slice(0, 600)}`,
+      );
+    }
+    throw err;
+  }
   // One frame for layout/fonts to settle so overflow math is measured against
   // the final box model, not a mid-paint one.
   await page.waitForTimeout(800);
@@ -333,5 +351,69 @@ for (const surface of SURFACES) {
         ).toHaveCount(0);
       }
     });
+  });
+}
+
+/**
+ * DEEP SWEEP — the settings subpages.
+ *
+ * The seven surfaces above are the top-level ones the plan named, but /settings
+ * is a hub: the pages that actually carry the channel-connection warnings,
+ * destructive confirmations and provider callouts all live one level down, and
+ * scanning the hub never touched them. They are also where the hand-rolled
+ * `border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400`
+ * warning callout is duplicated — a trio that `--warning-bg/-fg/-border` exists
+ * to express, complete with a MANUAL dark: variant that cannot track the
+ * tokens' OKLCH dark-mode shifts.
+ *
+ * Axe-only here, deliberately: the goal is evidence about whether that pattern
+ * actually fails contrast before anyone refactors ~145 literal call sites.
+ * Re-running the full five-dimension rubric on 20 more routes would triple the
+ * runtime to re-prove things the hub already established.
+ */
+const SETTINGS_SUBPAGES = [
+  "ai-assistant",
+  "assignment",
+  "channels",
+  "contact-fields",
+  "instagram",
+  "integrations",
+  "members",
+  "message-flags",
+  "messenger",
+  "meta",
+  "permissions",
+  "snippets",
+  "stages",
+  "tags",
+  "tickets",
+  "whatsapp",
+] as const;
+
+for (const page_ of SETTINGS_SUBPAGES) {
+  test(`settings/${page_}: no serious or critical accessibility violations`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`/settings/${page_}`);
+    await settle(page);
+    const results = await new AxeBuilder({ page })
+      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+      .analyze();
+    const blocking = results.violations.filter(
+      (v) => v.impact === "serious" || v.impact === "critical",
+    );
+    const report = blocking.map(
+      (v) =>
+        `[${v.impact}] ${v.id} — ${v.help} (${v.nodes.length} node(s))\n` +
+        v.nodes
+          .slice(0, 4)
+          .map(
+            (n) =>
+              `      ${n.target.join(" ")}\n` +
+              `        ${(n.failureSummary ?? "").replace(/\n/g, "\n        ")}\n` +
+              `        html: ${n.html.slice(0, 160)}`,
+          )
+          .join("\n"),
+    );
+    expect(blocking.map((v) => `${v.impact}:${v.id}`), report.join("\n")).toEqual([]);
   });
 }

@@ -204,8 +204,24 @@ function Field({
     <div className="flex items-center gap-2">
       <span className="w-28 shrink-0 text-xs text-muted-foreground">{label}</span>
       <code className="flex-1 truncate rounded-md bg-muted px-2 py-1.5 text-xs">{value}</code>
-      <Button variant="ghost" size="icon" className="size-8" onClick={onCopy} type="button">
-        {copied ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
+      <Button
+        variant="ghost"
+        size="icon"
+        className="size-8"
+        onClick={onCopy}
+        type="button"
+        // Icon-only, so it had no accessible name at all — a screen reader
+        // announced two identical bare "button"s with no hint of what they
+        // copy. The label carries WHICH field, since there are several.
+        aria-label={copied ? `${label} copied` : `Copy ${label}`}
+      >
+        {copied ? (
+          // text-success-fg, not a raw emerald literal: the semantic trio is
+          // what tracks the OKLCH dark-mode shifts (see badge.tsx).
+          <Check aria-hidden className="size-3.5 text-success-fg" />
+        ) : (
+          <Copy aria-hidden className="size-3.5" />
+        )}
       </Button>
     </div>
   );

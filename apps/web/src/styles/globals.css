@@ -74,7 +74,12 @@
      bg values bake the alpha wash over the near-white page into an opaque oklch
      so they sit in the same chroma/hue family as the existing note bg. */
   --warning-bg: oklch(0.962 0.035 84);
-  --warning-fg: oklch(0.555 0.135 66);
+  /* L 0.555 measured 4.39:1 on --warning-bg — just under AA's 4.5, so every
+     warning pill and "Not connected" line in the app was a hair below the bar.
+     Nudged down to clear it with margin; the hue and chroma are untouched, so
+     the trio still reads as one amber family. Its success/info siblings sit at
+     L .508/.52 and already pass. */
+  --warning-fg: oklch(0.515 0.135 66);
   --warning-border: oklch(0.86 0.075 80);
   --success-bg: oklch(0.965 0.03 164);
   --success-fg: oklch(0.508 0.118 165);

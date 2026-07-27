@@ -349,10 +349,15 @@ function Grid({ children }: { children: ReactNode }) {
 }
 function Field({ label, full, children }: { label: string; full?: boolean; children: ReactNode }) {
   return (
-    <div className={full ? "col-span-2" : "col-span-2 sm:col-span-1"}>
-      <label className="mb-1 block text-sm font-medium text-foreground">{label}</label>
+    // The <label> WRAPS the control now. It used to sit beside it with no
+    // `htmlFor`, so it looked like a label and was one visually, but nothing
+    // associated the two — every field here announced as an unnamed text box.
+    // Wrapping gives implicit association without needing to thread ids through
+    // every call site, and the inner <span> preserves the original layout.
+    <label className={full ? "col-span-2 block" : "col-span-2 block sm:col-span-1"}>
+      <span className="mb-1 block text-sm font-medium text-foreground">{label}</span>
       {children}
-    </div>
+    </label>
   );
 }
 function TextInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
@@ -538,9 +543,22 @@ function WeeklySchedule({
         return (
           <div key={key} className="flex items-center gap-2">
             <span className="w-24 text-sm text-muted-foreground">{label}</span>
-            <Input type="time" value={r.open} onChange={(e) => setDay(key, { ...r, open: e.target.value })} />
+            {/* The day name is a sibling <span>, so each time field needs its
+                own name — otherwise a screen reader hears fourteen identical
+                unnamed time inputs with no way to tell Monday from Sunday. */}
+            <Input
+              type="time"
+              aria-label={`${label} — opening time`}
+              value={r.open}
+              onChange={(e) => setDay(key, { ...r, open: e.target.value })}
+            />
             <span className="text-muted-foreground">–</span>
-            <Input type="time" value={r.close} onChange={(e) => setDay(key, { ...r, close: e.target.value })} />
+            <Input
+              type="time"
+              aria-label={`${label} — closing time`}
+              value={r.close}
+              onChange={(e) => setDay(key, { ...r, close: e.target.value })}
+            />
           </div>
         );
       })}

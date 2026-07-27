@@ -160,8 +160,16 @@ export function ChannelAccountsPanel({
       <ul className="flex flex-col gap-1.5">
         {group.accounts.map((a) => {
           const busy = pendingId === a.id;
+          // `??` only falls back on null/undefined — NOT on "". An admin who
+          // clears the label field saves an empty string, and this rendered an
+          // EMPTY button: no visible text to click and no accessible name at
+          // all (axe: critical `button-name`). Treat blank as absent so the
+          // fallback chain actually does its job.
+          const firstNonBlank = (...vals: (string | null | undefined)[]): string | undefined =>
+            vals.find((v) => typeof v === "string" && v.trim().length > 0)?.trim();
           const name =
-            a.label ?? a.displayPhoneNumber ?? a.externalAccountId ?? "Unnamed account";
+            firstNonBlank(a.label, a.displayPhoneNumber, a.externalAccountId) ??
+            "Unnamed account";
           return (
             <li
               key={a.id}
