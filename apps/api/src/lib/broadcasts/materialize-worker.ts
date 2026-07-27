@@ -121,9 +121,18 @@ export async function materializeBroadcast(broadcastId: string): Promise<void> {
       assignmentSplit: row.assignmentSplit,
       assignmentLeftover: row.assignmentLeftover,
     },
-  }).catch((err) => {
-    // Assignment is a convenience on top of the send. If planning fails, the
-    // campaign must still go out — unassigned.
+  }).catch(async (err) => {
+    // Assignment is a convenience on top of the send: on a FIRST attempt, if
+    // planning fails, the campaign must still go out — unassigned.
+    //
+    // On a RETRY after a partial insert, degrading is wrong: attempt 1's rows
+    // already carry its draw (skipDuplicates freezes them), so an empty plan
+    // here would silently insert the entire REMAINDER unassigned — half a
+    // split with no operator signal. A transient planning error on a retry is
+    // exactly what BullMQ's bounded retries are for, so rethrow and let the
+    // next attempt re-plan.
+    const inserted = await db.broadcastRecipient.count({ where: { broadcastId } });
+    if (inserted > 0) throw err;
     console.error(`[broadcast-materialize] assignment planning failed for ${broadcastId}`, err);
     return { perRecipient: [] as (string | null)[], totals: [] };
   });

@@ -96,6 +96,18 @@ export async function attributeInboundToBroadcast(ctx: InboundContext): Promise<
   // CAS on `repliedAt: null` → FIRST reply wins. This counts unique recipients
   // who replied, not messages; the report labels it "recipients who replied" so
   // the denominator is honest.
+  // The opt-out stamp must NOT ride the reply CAS: a customer who replied
+  // "ok thanks" on day 1 (consuming `repliedAt: null`) and sent STOP on day 2
+  // still opted out — the contact-level applyOptOut above fired, but the
+  // recipient row was never stamped and the funnel's `optedOut` (documented as
+  // the only opt-out surface) silently missed them.
+  if (isOptOutKeyword(ctx.body)) {
+    await db.broadcastRecipient.updateMany({
+      where: { id: recipientId, optedOutAt: null },
+      data: { optedOutAt: ctx.timestamp },
+    });
+  }
+
   const credited = await db.broadcastRecipient.updateMany({
     where: { id: recipientId, repliedAt: null },
     data: {
@@ -105,7 +117,6 @@ export async function attributeInboundToBroadcast(ctx: InboundContext): Promise<
       ...(ctx.interactiveOptionId
         ? { clickedAt: ctx.timestamp, clickedOptionId: ctx.interactiveOptionId }
         : {}),
-      ...(isOptOutKeyword(ctx.body) ? { optedOutAt: ctx.timestamp } : {}),
     },
   });
 

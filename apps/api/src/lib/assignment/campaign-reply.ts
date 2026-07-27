@@ -117,6 +117,15 @@ export async function pendingCampaignAssignee(args: {
       // Only a message that actually reached the customer can earn a reply —
       // same gate attribution applies.
       deliveryState: { in: ["sent", "delivered", "read"] },
+      // IN the where, not a post-check on the single newest row: this is
+      // last-touch among ON_REPLY campaigns specifically. As a post-filter, a
+      // newer on_send campaign's recipient row (which always carries an
+      // assignee) masked an older still-pending on_reply draw and this
+      // returned null — the admin's split silently lost to generic routing.
+      broadcast: {
+        workspaceId: args.workspaceId,
+        assignmentTrigger: "on_reply",
+      },
     },
     // Backed by @@index([contactId, sentAt desc]).
     orderBy: { sentAt: "desc" },
@@ -124,8 +133,6 @@ export async function pendingCampaignAssignee(args: {
       assignedUserId: true,
       broadcast: {
         select: {
-          workspaceId: true,
-          assignmentTrigger: true,
           // Carried so the CALLER can honour it. `applyCampaignAssigneeOnReply`
           // below always did; the ai_handoff/inbound/reopen path in apply.ts
           // did not, so a campaign with the default `assignmentOverwrite:
@@ -137,10 +144,7 @@ export async function pendingCampaignAssignee(args: {
       },
     },
   });
-  if (!recipient) return null;
-  if (recipient.broadcast.workspaceId !== args.workspaceId) return null;
-  if (recipient.broadcast.assignmentTrigger !== "on_reply") return null;
-  if (!recipient.assignedUserId) return null;
+  if (!recipient?.assignedUserId) return null;
   return {
     userId: recipient.assignedUserId,
     overwrite: recipient.broadcast.assignmentOverwrite,

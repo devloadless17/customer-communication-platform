@@ -213,9 +213,15 @@ async function upsertRollup(
       ${row.currency}, NOW()
     )
     ON CONFLICT ("workspaceId", "templateExternalId", "date") DO UPDATE SET
-      -- Volume metrics are always reported, so the newest read wins.
-      "sent" = EXCLUDED."sent",
-      "delivered" = EXCLUDED."delivered",
+      -- Volume metrics: monotone, never newest-wins. A day's sent/delivered
+      -- count for a FIXED event day only ever grows, but two fetchers hit this
+      -- row with different windows (the sweeper's full-range vs a report
+      -- refresh narrowed to one campaign's send window) and an absent field
+      -- parses to 0 — plain overwrite let a later, narrower or emptier read
+      -- shrink a captured figure nondeterministically. GREATEST keeps the high
+      -- water mark and still tracks growth.
+      "sent" = GREATEST(EXCLUDED."sent", "TemplateAnalyticsDaily"."sent"),
+      "delivered" = GREATEST(EXCLUDED."delivered", "TemplateAnalyticsDaily"."delivered"),
       -- Volatile metrics: keep what we captured if Meta has stopped reporting.
       "read" = COALESCE(EXCLUDED."read", "TemplateAnalyticsDaily"."read"),
       "clicked" = COALESCE(EXCLUDED."clicked", "TemplateAnalyticsDaily"."clicked"),

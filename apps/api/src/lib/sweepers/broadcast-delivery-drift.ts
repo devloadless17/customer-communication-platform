@@ -137,11 +137,18 @@ async function sweepOnce(): Promise<void> {
           AND r."deliveryState" NOT IN ('failed_at_send','undelivered')
           AND (
             (m.status = 'read'      AND r."deliveryState" <> 'read')
+            -- Straight-to-read (delivered webhook lost): the row is already
+            -- 'read' but deliveredAt was never stamped, and the branch above
+            -- can no longer match it — backfill so the delivery curve's
+            -- delivered line can't sit below the read line.
+            OR (m.status = 'read'   AND r."deliveryState" = 'read' AND r."deliveredAt" IS NULL)
             OR (m.status = 'delivered' AND r."deliveryState" NOT IN ('delivered','read'))
             -- An accepted-then-failed message may only overwrite a state where
             -- delivery was never confirmed; if the handset acked, a late failure
-            -- is a Meta duplicate, not a regression.
-            OR (m.status = 'failed'  AND r."deliveryState" IN ('pending','sent'))
+            -- is a Meta duplicate, not a regression. 'held' belongs here too:
+            -- a portfolio-paced message the review DROPPED (135000) whose live
+            -- recipient write was lost must not stick as accepted/held forever.
+            OR (m.status = 'failed'  AND r."deliveryState" IN ('pending','sent','held'))
           )
       `;
       totalDrifted += Number(drifted);

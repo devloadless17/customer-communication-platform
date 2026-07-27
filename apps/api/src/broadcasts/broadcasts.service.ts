@@ -34,7 +34,11 @@ import {
   type MessagingHealthSummary,
 } from "@/lib/providers/meta-health";
 import { buildBroadcastAssignmentPlan } from "@/lib/assignment/broadcast-plan";
-import { getBroadcastReport, recipientOutcomeWhere } from "@/lib/broadcast-report";
+import {
+  analyticsWindowEnd,
+  getBroadcastReport,
+  recipientOutcomeWhere,
+} from "@/lib/broadcast-report";
 import { refreshTemplateAnalytics } from "@/lib/analytics/template-analytics";
 import { csvHeader, csvRows } from "@/lib/csv";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
@@ -1473,7 +1477,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     return refreshTemplateAnalytics(workspaceId, {
       templateExternalIds: [template.externalId],
       start: broadcast.startedAt ?? broadcast.createdAt,
-      end: broadcast.completedAt ?? new Date(),
+      // Through the engagement tail, not completedAt — reads/clicks land in
+      // Meta's day buckets for days AFTER completion (see analyticsWindowEnd).
+      end: analyticsWindowEnd(broadcast.completedAt),
       // Scope to the template's own WABA — see refreshTemplateAnalytics.
       wabaId: template.wabaId || null,
     });
@@ -1993,8 +1999,20 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           `removeBroadcastMaterialize(${id}) failed: ${err instanceof Error ? err.message : err}`,
         ),
       );
+      // `totalCount` was stamped as the FULL audience at create, but only the
+      // rows inserted before the cancel exist — recount from reality so
+      // sentCount + failedCount can sum to totalCount in the report. (The
+      // materialize worker's own canceled-branch reconcile does the same, but
+      // it only runs if a job attempt fires again; this path must not depend
+      // on that.)
+      const actualTotal = await this.db.broadcastRecipient.count({
+        where: { broadcastId: id },
+      });
       await this.db.broadcast
-        .update({ where: { id }, data: { materializeRecipients: Prisma.DbNull } })
+        .update({
+          where: { id },
+          data: { materializeRecipients: Prisma.DbNull, totalCount: actualTotal },
+        })
         .catch(() => undefined);
     }
     // Announce the cancel. The runner's canceled-exit branch deliberately skips

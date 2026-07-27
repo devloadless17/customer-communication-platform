@@ -325,15 +325,18 @@ export async function getBroadcastReport(
   // than a stored id, because a campaign records what it sent, not a foreign
   // key — and a re-synced template can change ids under us.
   //
-  // Scoped to the days the campaign actually ran (UTC, inclusive on both ends),
-  // so a template used by several campaigns doesn't attribute all of its
-  // history to whichever report you happen to open.
+  // Scoped to the days the campaign ran PLUS the ~7-day engagement tail (UTC,
+  // inclusive, clamped to now). Meta buckets reads/clicks by EVENT day, so a
+  // Tuesday read of a Monday campaign lives in Tuesday's row — cutting the
+  // window at completedAt excluded the tail where most reads and virtually all
+  // clicks land. Still bounded, so a template reused months later doesn't
+  // attribute its whole history to this report.
   const metaAnalytics = await loadMetaAnalytics(
     workspaceId,
     broadcast.templateName,
     broadcast.templateLanguage,
     startedAt,
-    broadcast.completedAt ?? new Date(),
+    analyticsWindowEnd(broadcast.completedAt),
   );
   const endedAt = broadcast.completedAt;
   const durationSec = endedAt ? Math.max(1, Math.round((endedAt.getTime() - startedAt.getTime()) / 1000)) : null;
@@ -435,13 +438,19 @@ export function deriveDiagnostics(
 
   const retryable = failures.filter((x) => x.bucket === "retryable");
   const retryableCount = retryable.reduce((s, x) => s + x.count, 0);
-  if (retryableCount > 0) {
+  // The card's promise is the Retry button's behaviour, and Retry re-queues
+  // ONLY send-stage failures (`status: 'failed'`). `errorCode` is also stamped
+  // on `undelivered` rows (post-accept webhook failures like a rate-limited
+  // 130429), which Retry cannot re-run — counting those made the card promise
+  // more than the button performs. Cap at the send-stage failure count.
+  const retryableActionable = Math.min(retryableCount, funnel.failedAtSend);
+  if (retryableActionable > 0) {
     out.push({
       severity: "warn",
       code: "retryable_failures",
-      title: `${retryableCount.toLocaleString()} failures were temporary`,
+      title: `${retryableActionable.toLocaleString()} failures were temporary`,
       detail: `Caused by ${retryable.map((r) => r.label.toLowerCase()).join(", ")}. These can be safely re-sent — nothing was delivered, so no one gets it twice.`,
-      action: { label: `Retry ${retryableCount.toLocaleString()} recipients`, filter: "outcome=failed" },
+      action: { label: `Retry ${retryableActionable.toLocaleString()} recipients`, filter: "outcome=failed" },
     });
   }
 
@@ -513,7 +522,10 @@ export function recipientOutcomeWhere(filter: {
       where.deliveryState = "failed_at_send";
       break;
     case "pending":
-      where.deliveryState = { in: ["pending", "sent"] };
+      // `held` (accepted, waiting on the portfolio's 24h budget) belongs here:
+      // without it the funnel could show a held count the operator had no
+      // filter to drill into.
+      where.deliveryState = { in: ["pending", "sent", "held"] };
       break;
     case "replied":
       where.repliedAt = { not: null };
@@ -535,6 +547,19 @@ export function recipientOutcomeWhere(filter: {
  * fetched this" and "this campaign cost nothing" must render differently, and
  * a zeroed block would assert the second while meaning the first.
  */
+/**
+ * End of a campaign's analytics window: completion + the ~7-day engagement
+ * tail Meta keeps reporting reads/clicks into, clamped to now. A still-running
+ * campaign (null completedAt) reads through now. Shared by the report read and
+ * the manual refresh so the two can never disagree about which days belong to
+ * the campaign.
+ */
+const ANALYTICS_TAIL_MS = 7 * 86_400_000;
+export function analyticsWindowEnd(completedAt: Date | null): Date {
+  if (!completedAt) return new Date();
+  return new Date(Math.min(completedAt.getTime() + ANALYTICS_TAIL_MS, Date.now()));
+}
+
 async function loadMetaAnalytics(
   workspaceId: string,
   templateName: string | null,

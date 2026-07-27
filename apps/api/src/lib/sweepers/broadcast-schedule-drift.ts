@@ -2,7 +2,11 @@
 // via @swc-node/register, outside the Next bundler context.
 
 import { db } from "@/lib/db";
-import { resumePausedBroadcasts, startBroadcast } from "@/lib/broadcast-runner";
+import {
+  reconcileCanceledMarkerRecipients,
+  resumePausedBroadcasts,
+  startBroadcast,
+} from "@/lib/broadcast-runner";
 import { enqueueScheduledBroadcast } from "@/lib/broadcasts/schedule-queue";
 import { isPoolClosedError } from "@/lib/sweepers/_mutex";
 
@@ -196,6 +200,19 @@ async function sweepOnce(): Promise<void> {
     // stop the scheduled/queued recoveries that already ran this tick.
     console.warn(
       "[broadcast-schedule-drift-sweeper] paused-resume failed:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  // 4) Cancel-race repair. Boot-only invocation raced the 7-day send-attempt
+  //    retention: a crash + cancel race on a box that stayed up a week lost the
+  //    completed-attempt evidence and a billed, delivered send stayed recorded
+  //    `failed` forever. The query is empty in the normal case — see the fn doc.
+  try {
+    await reconcileCanceledMarkerRecipients();
+  } catch (err) {
+    console.warn(
+      "[broadcast-schedule-drift-sweeper] cancel-race reconcile failed:",
       err instanceof Error ? err.message : err,
     );
   }

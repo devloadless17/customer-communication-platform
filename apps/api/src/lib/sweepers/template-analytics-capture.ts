@@ -40,7 +40,6 @@ const SWEEP_INTERVAL_MS = 6 * 60 * 60_000; // every 6h
 const CAPTURE_WINDOW_DAYS = 6;
 /** Bound per tick so a busy tenant can't burst Graph calls. */
 const MAX_WORKSPACES_PER_TICK = 10;
-const MAX_TEMPLATES_PER_WORKSPACE = 10;
 
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
@@ -89,8 +88,17 @@ async function sweepOnce(): Promise<void> {
     where: {
       channel: "whatsapp",
       kind: "template",
-      status: "completed",
-      completedAt: { gte: since },
+      // Not just `completed`: a campaign that ended `failed` at 90% or was
+      // canceled at 95% still has tens of thousands of BILLED sends whose
+      // read/click figures are exactly as perishable. `canceled` rows carry no
+      // completedAt, so they anchor on startedAt/createdAt — a canceled run
+      // whose sends are recent enough to still be capturable started recently.
+      status: { in: ["completed", "failed", "canceled"] },
+      OR: [
+        { completedAt: { gte: since } },
+        { startedAt: { gte: since } },
+        { startedAt: null, createdAt: { gte: since } },
+      ],
       templateName: { not: null },
     },
     select: {
@@ -99,9 +107,8 @@ async function sweepOnce(): Promise<void> {
       templateLanguage: true,
       startedAt: true,
       createdAt: true,
-      completedAt: true,
     },
-    orderBy: { completedAt: "desc" },
+    orderBy: { createdAt: "desc" },
     // Generous: this collapses to a handful of workspaces below.
     take: 500,
   });
@@ -129,21 +136,24 @@ async function sweepOnce(): Promise<void> {
   // covered. One Graph call per workspace instead of one per campaign — Meta
   // takes up to 10 template ids at a time and reports by day anyway, so
   // per-campaign calls would re-fetch the same days repeatedly.
-  const byWorkspace = new Map<
-    string,
-    { names: Set<string>; start: Date; end: Date }
-  >();
+  // The window END is always NOW, never the campaign's completion. Meta
+  // buckets `template_analytics` by EVENT day: a read that happens Tuesday
+  // lands in Tuesday's data point regardless of when the message was sent, and
+  // most reads — and virtually all URL clicks — land in the days AFTER a
+  // campaign completes. Fetching `start..completedAt` (the old shape) never
+  // requested those buckets, so the engagement tail this sweeper exists to
+  // preserve expired uncaptured at Meta's ~7-day horizon.
+  const end = new Date();
+  const byWorkspace = new Map<string, { names: Set<string>; start: Date }>();
   for (const b of recent) {
     if (!enabled.has(b.workspaceId) || !b.templateName) continue;
     const start = b.startedAt ?? b.createdAt;
-    const end = b.completedAt ?? new Date();
     const entry = byWorkspace.get(b.workspaceId);
     if (!entry) {
-      byWorkspace.set(b.workspaceId, { names: new Set([b.templateName]), start, end });
+      byWorkspace.set(b.workspaceId, { names: new Set([b.templateName]), start });
     } else {
       entry.names.add(b.templateName);
       if (start < entry.start) entry.start = start;
-      if (end > entry.end) entry.end = end;
     }
   }
 
@@ -152,6 +162,11 @@ async function sweepOnce(): Promise<void> {
     if (handled >= MAX_WORKSPACES_PER_TICK) break;
     handled++;
     try {
+      // No per-workspace template cap: the name set is already bounded by the
+      // campaigns of the last 6 days, and `refreshTemplateAnalytics` chunks
+      // ids to Meta's 10-per-call limit. The old `take: 10` (with NO orderBy)
+      // silently and PERMANENTLY dropped an arbitrary subset for any workspace
+      // that campaigned >10 templates in a week.
       const templates = await db.messageTemplate.findMany({
         where: {
           workspaceId,
@@ -159,7 +174,6 @@ async function sweepOnce(): Promise<void> {
           externalId: { not: null },
         },
         select: { externalId: true, wabaId: true },
-        take: MAX_TEMPLATES_PER_WORKSPACE,
       });
       if (templates.length === 0) continue;
 
@@ -180,12 +194,21 @@ async function sweepOnce(): Promise<void> {
       }
 
       for (const [wabaId, ids] of byWaba) {
-        await refreshTemplateAnalytics(workspaceId, {
-          templateExternalIds: ids,
-          start: entry.start,
-          end: entry.end,
-          wabaId: wabaId || null,
-        });
+        try {
+          await refreshTemplateAnalytics(workspaceId, {
+            templateExternalIds: ids,
+            start: entry.start,
+            end,
+            wabaId: wabaId || null,
+          });
+        } catch (err) {
+          // Isolated per WABA too: an expired token on WABA-1 must not abort
+          // WABA-2's capture this tick — its data is equally perishable.
+          console.warn(
+            `[template-analytics-capture] failed for workspace=${workspaceId} waba=${wabaId || "default"}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
       }
     } catch (err) {
       // Isolated per workspace: one tenant's expired token must not stop the

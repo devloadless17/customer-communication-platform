@@ -22,6 +22,7 @@ import type { Channel } from "@ccp/shared/types";
 import { CHANNEL_CAPABILITIES, LIVE_CHANNELS, isPhoneChannel } from "@ccp/shared/providers/capabilities";
 import { flagChannelNeedsReconnect } from "@/lib/providers/channel-health";
 import { enqueueBroadcastMaterialize } from "@/lib/broadcasts/materialize-queue";
+import { enqueueScheduledBroadcast } from "@/lib/broadcasts/schedule-queue";
 import {
   acquireSendToken,
   resolveSendRate,
@@ -202,13 +203,23 @@ export function lanesForRate(ratePerSec: number): number {
 /** Hard ceiling on lanes for a single run — a config typo can't uncap it. */
 const MAX_LANES_PER_RUN = 256;
 
-function resolveSendPacing(channel: Channel, throughputLevel: string | null): SendPacing {
+function resolveSendPacing(
+  channel: Channel,
+  throughputLevel: string | null,
+  limiterActive: boolean,
+): SendPacing {
   // When the token bucket is enforcing the rate, IT is the authority: lanes are
   // sized to sustain that rate and the fixed inter-send gap goes to zero (the
   // send loop already skips the gap in this mode). With the bucket off we keep
   // the historical static pacing byte-for-byte, so enabling the bucket is the
   // single switch that changes send behaviour.
-  if (sendRateLimiterEnabled() && channel === "whatsapp") {
+  //
+  // `limiterActive` is the RUN's authority, not the env flag alone: a
+  // customer-mode run never acquires tokens (its recipients span channels, so
+  // no single number's bucket applies), and taking this branch for it produced
+  // gapMs 0 with NO rate authority at all — full-speed unpaced lanes. Such a
+  // run must fall through to the static gap pacing below.
+  if (limiterActive && channel === "whatsapp") {
     return { lanes: lanesForRate(resolveSendRate(throughputLevel)), gapMs: 0 };
   }
   if (channel === "whatsapp" && throughputLevel === "HIGH") {
@@ -1224,11 +1235,21 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // Resolve send pacing from the number's throughput level (WhatsApp only; social
   // + customer-mode + never-polled numbers fall to the conservative baseline).
   // One health read per run — cheap, and the level rarely changes mid-run.
+  // The ACCOUNT id matters: throughput is per-number, and this run sends from
+  // the campaign's bound account — reading the workspace default would size
+  // lanes and the bucket's fill rate off a different number's tier (a HIGH
+  // default pacing a STANDARD second number at 900/s = sustained 130429s).
   const throughputLevel =
     !isCustomerMode && broadcast.channel === "whatsapp"
-      ? (await getWhatsappHealth(broadcast.workspaceId).catch(() => null))?.throughputLevel ?? null
+      ? (
+          await getWhatsappHealth(
+            broadcast.workspaceId,
+            broadcast.channelConnectionId,
+          ).catch(() => null)
+        )?.throughputLevel ?? null
       : null;
-  const pacing = resolveSendPacing(broadcast.channel, throughputLevel);
+  const rateLimited = sendRateLimiterEnabled() && !isCustomerMode;
+  const pacing = resolveSendPacing(broadcast.channel, throughputLevel, rateLimited);
   const lanes = Math.min(pacing.lanes, queue.length);
 
   // Per-NUMBER send-rate ceiling (dark unless BROADCAST_RATE_LIMITER_ENABLED=1).
@@ -1246,7 +1267,6 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   const rateKey =
     sendConfig?.phoneNumberId || `ws:${broadcast.workspaceId}:${broadcast.channel}`;
   const sendRate = resolveSendRate(throughputLevel);
-  const rateLimited = sendRateLimiterEnabled() && !isCustomerMode;
 
   // Cooperative cancel — operators flip the broadcast row to `canceled`
   // via POST /api/broadcasts/:id/cancel; the lanes check this flag at the
@@ -2339,7 +2359,7 @@ async function processOneRecipient(
         // the thread — and the campaign then took it from them, the exact
         // outcome `assignmentOverwrite: false` promises cannot happen.
         {
-          await assignConversation({
+          const assigned = await assignConversation({
             db,
             publish,
             workspaceId: broadcast.workspaceId,
@@ -2353,6 +2373,16 @@ async function processOneRecipient(
             // this publishes `conversation.assigned`, which is a per-thread
             // event and correctly fans out per assigned conversation only.
           });
+          // `invalid_user` = the drawn agent was deactivated/removed after the
+          // materialize-time draw. on_send has no reply-time second chance, so
+          // without this line their entire share lands unassigned with zero
+          // operator signal. Leaving it unassigned is correct (never route to
+          // a ghost); staying silent about it is not.
+          if (!assigned.ok && assigned.reason === "invalid_user") {
+            console.warn(
+              `[broadcast ${broadcast.id}] drawn assignee ${recipient.assignedUserId} is no longer assignable — conversation ${conversationId} left unassigned`,
+            );
+          }
         }
       } catch (err) {
         // Never fail a delivered send over assignment bookkeeping.
@@ -2909,15 +2939,42 @@ async function fail(broadcastId: string, message: string): Promise<void> {
   if (throttle?.pendingTimer) clearTimeout(throttle.pendingTimer);
   progressThrottles.delete(broadcastId);
 
-  const row = await db.broadcast.update({
-    where: { id: broadcastId },
+  // CAS, not a bare update: a cancel landing between the runner's status read
+  // and this fail() must not be overwritten canceled→failed (and a concurrently
+  // deleted row must not throw P2025 out of the runner).
+  const flipped = await db.broadcast.updateMany({
+    where: { id: broadcastId, status: { notIn: ["completed", "failed", "canceled"] } },
     data: {
       status: "failed",
       lastError: message.slice(0, 1000),
       completedAt: new Date(),
     },
+  });
+  if (flipped.count === 0) return;
+
+  // A pre-claim failure (template mismatch, unsupported provider, cap breach)
+  // reaches here with every recipient still `queued` — and `retryFailed` only
+  // re-queues `status: "failed"` rows, so without this flip the campaign was
+  // permanently unretryable ("nothing to retry"). Failing the queued rows with
+  // the run's error makes Retry the recovery path it claims to be. Recipients a
+  // lane already advanced (sent / failed-at-send) are untouched.
+  const failedNow = await db.broadcastRecipient.updateMany({
+    where: { broadcastId, status: "queued" },
+    data: { status: "failed", errorMessage: message.slice(0, 500) },
+  });
+  if (failedNow.count > 0) {
+    // Keep the denormalized counter honest with the rows just flipped.
+    await db.broadcast.updateMany({
+      where: { id: broadcastId },
+      data: { failedCount: { increment: failedNow.count } },
+    });
+  }
+
+  const row = await db.broadcast.findUnique({
+    where: { id: broadcastId },
     select: { workspaceId: true },
   });
+  if (!row) return;
   await publish({
     type: "broadcast.status_changed",
     workspaceId: row.workspaceId,
@@ -3139,12 +3196,47 @@ export async function resumePausedBroadcasts({
           : []),
       ],
     },
-    select: { id: true, workspaceId: true },
+    select: { id: true, workspaceId: true, scheduledAt: true },
     ...(limit !== undefined ? { take: limit } : {}),
   });
 
   let resumed = 0;
   for (const row of pausedRows) {
+    // A campaign whose fire time hasn't arrived goes back to `scheduled`, not
+    // `queued`: pauseBroadcastsForTemplate parks `scheduled` rows too, and
+    // resuming one as an immediate send (template re-approved, or the boot
+    // reconciler after any deploy) would blast the whole audience days early —
+    // billed and irreversible. Re-arming the delayed job is idempotent-safe
+    // (`bcast-<id>` jobId), and the schedule-drift sweeper backstops it.
+    if (row.scheduledAt && row.scheduledAt.getTime() > Date.now()) {
+      const rescheduled = await db.broadcast.updateMany({
+        where: { id: row.id, status: "paused" },
+        data: { status: "scheduled" },
+      });
+      if (rescheduled.count === 0) continue;
+      await enqueueScheduledBroadcast(
+        row.id,
+        row.scheduledAt.getTime() - Date.now(),
+      ).catch((err) => {
+        // The drift sweeper re-arms stranded `scheduled` rows — log, don't fail.
+        console.warn(
+          `[${label}] re-arming schedule for broadcast ${row.id} failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+      await publish({
+        type: "broadcast.status_changed",
+        workspaceId: row.workspaceId,
+        broadcastId: row.id,
+        status: "scheduled",
+      });
+      console.warn(
+        `[${label}] broadcast ${row.id} returned to scheduled (fires ${row.scheduledAt.toISOString()})`,
+      );
+      resumed += 1;
+      continue;
+    }
+
     const queuedRemaining = await db.broadcastRecipient.count({
       where: { broadcastId: row.id, status: "queued" },
     });
@@ -3296,7 +3388,13 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
  * (crash mid round-trip, delivery unprovable) → failed+marker, so a canceled
  * broadcast's counters ALWAYS sum to totalCount and retryFailed excludes them.
  */
-async function reconcileCanceledMarkerRecipients(): Promise<void> {
+// Exported for the broadcast-schedule-drift sweeper: boot-only invocation left
+// a >7-day gap — the send-attempt retention sweeper GC'd the completed-attempt
+// evidence this repair keys on, so a cancel-race crash on a box that didn't
+// restart within a week became a permanently mis-recorded billed send. The
+// query is one indexed join that is empty in the normal case, so a periodic
+// call costs nothing.
+export async function reconcileCanceledMarkerRecipients(): Promise<void> {
   // Query ONLY the recoverable set in ONE shot: a marker recipient in a
   // `canceled` broadcast whose OutboundSendAttempt DEFINITIVELY reached Meta
   // (completedAt + externalId set). This set is normally EMPTY — a genuine
