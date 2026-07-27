@@ -759,6 +759,20 @@ export interface NormalizedChannelHealth {
    * it isn't addressed, so this is the warning that arrives FIRST.
    */
   policyViolationType?: string | null;
+  /**
+   * An account-level alert we have no dedicated field for: an `account_update`
+   * event outside the parsed set (the class where "app removed from WABA"
+   * lands — the one that makes an integration go permanently dark) or an
+   * `account_alerts` envelope. Persisted as the connection's last-alert slot
+   * so the trace is queryable, not just a warn log at info severity.
+   */
+  accountAlert?: {
+    source: "account_update" | "account_alerts";
+    /** The provider's event/alert discriminator, when it sent one. */
+    event: string | null;
+    /** Compact raw detail for the operator/support — never parsed. */
+    detail: string | null;
+  };
   rawPayload: Record<string, unknown>;
 }
 

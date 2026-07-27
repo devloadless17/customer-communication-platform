@@ -2251,18 +2251,28 @@ describe("unknown account_update events are surfaced, not swallowed", () => {
     entry: [{ id: "waba", changes: [{ field: "account_update", value }] }],
   });
 
-  it("logs an event it doesn't recognise instead of dropping it silently", () => {
+  it("logs AND persists an event it doesn't recognise instead of dropping it", () => {
     // Meta's account-model evolution says an `account_update` fires when an app
     // is REMOVED from a WhatsApp Business Account — the event that makes an
     // integration go dark — and publishes no name or shape for it. Parsing a
     // shape we don't have would be guessing; going quiet would make it
-    // invisible. So: no event emitted, but a warning that carries the payload.
+    // invisible. So: a warning that carries the payload, PLUS a channel_health
+    // event whose `accountAlert` lands in the connection's last-alert slot
+    // (queryable, not just a log line at info severity).
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const events = metaProvider.parseWebhook(
         accountUpdate({ event: "SOME_FUTURE_EVENT", detail: { anything: true } }),
       );
-      expect(events).toEqual([]);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        kind: "channel_health",
+        wabaId: "waba",
+        accountAlert: {
+          source: "account_update",
+          event: "SOME_FUTURE_EVENT",
+        },
+      });
       expect(warn).toHaveBeenCalledTimes(1);
       const line = JSON.parse(String(warn.mock.calls[0]?.[0]));
       expect(line.event).toBe("meta.account_update_unhandled");

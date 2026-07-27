@@ -232,6 +232,37 @@ describe("channel-health attribution", () => {
   });
 });
 
+describe("account alerts (W8)", () => {
+  it("persists an unparsed account_update event on the WABA's connections", async () => {
+    // The class where "app removed from WABA" will land — used to be a warn
+    // log at info severity and nothing else.
+    await deliver(
+      webhook(WABA_B, "account_update", {
+        event: "SOME_FUTURE_EVENT",
+        detail_code: "X123",
+      }),
+    );
+    const b = await prisma.channelConnection.findUniqueOrThrow({
+      where: { id: connB },
+      select: { lastAccountAlert: true, qualityRating: true },
+    });
+    const alert = b.lastAccountAlert as {
+      source?: string;
+      event?: string;
+      observedAt?: string;
+    } | null;
+    expect(alert?.source).toBe("account_update");
+    expect(alert?.event).toBe("SOME_FUTURE_EVENT");
+    expect(alert?.observedAt).toBeTruthy();
+    // The sibling WABA's connection carries no alert.
+    const a = await prisma.channelConnection.findUniqueOrThrow({
+      where: { id: connA },
+      select: { lastAccountAlert: true },
+    });
+    expect(a.lastAccountAlert).toBeNull();
+  });
+});
+
 describe("phone_number_name_update", () => {
   it("writes the decision onto the number the payload names", async () => {
     // A rejection lands as DECLINED and keeps the previous verified name.

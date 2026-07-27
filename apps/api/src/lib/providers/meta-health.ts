@@ -17,6 +17,8 @@
  * snapshot (nulls) is simply ungated — never blocked.
  */
 
+import type { Prisma } from "@prisma/client";
+
 import { db } from "@/lib/db";
 import { GRAPH_BASE, graphGetJson } from "./meta-graph";
 import { getMetaSendConfig, invalidateProviderConfig } from "./config";
@@ -127,6 +129,16 @@ export interface WhatsappHealthUpdate {
   callingRestrictionReason?: string | null;
   callingQualityWarning?: string | null;
   policyViolationType?: string | null;
+  /**
+   * An account-level alert with no dedicated field (unparsed `account_update`
+   * events, `account_alerts` envelopes). One slot, last-writer-wins,
+   * WABA-scoped like the calling/policy fields. `undefined` untouched.
+   */
+  accountAlert?: {
+    source: "account_update" | "account_alerts";
+    event: string | null;
+    detail: string | null;
+  };
 }
 
 /**
@@ -297,6 +309,7 @@ export async function persistWhatsappHealth(
     callingQualityWarning?: string | null;
     policyViolationType?: string | null;
     policyViolationAt?: Date | null;
+    lastAccountAlert?: Prisma.InputJsonValue;
   } = {};
 
   let portfolioTier: string | null | undefined;
@@ -330,6 +343,12 @@ export async function persistWhatsappHealth(
     // Meta's violation payload carries no timestamp, so observation time is
     // what we have — and "when did this land" is the question an operator asks.
     wabaScoped.policyViolationAt = update.policyViolationType ? new Date() : null;
+  }
+  if (update.accountAlert !== undefined) {
+    wabaScoped.lastAccountAlert = {
+      ...update.accountAlert,
+      observedAt: new Date().toISOString(),
+    };
   }
   const hasPerNumber = Object.keys(perNumber).length > 0;
   const hasWabaScoped = Object.keys(wabaScoped).length > 0;

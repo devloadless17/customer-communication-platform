@@ -1463,11 +1463,20 @@ function parseChannelHealthUpdate(
         };
       }
       // A restriction on something OTHER than calling — leave calling state
-      // untouched rather than implying it was cleared. Logged, not dropped: the
-      // restriction types are not enumerated anywhere we can read, so the log
-      // line is how a new one becomes known instead of being invisible.
+      // untouched rather than implying it was cleared. Logged AND persisted as
+      // the connection's last-alert slot: the restriction types are not
+      // enumerated anywhere we can read, so the stored trace is how a new one
+      // becomes known instead of being invisible.
       logUnhandledAccountUpdate(value, rawPayload);
-      return null;
+      return {
+        kind: "channel_health",
+        accountAlert: {
+          source: "account_update",
+          event: value.event ?? null,
+          detail: JSON.stringify(value).slice(0, 500),
+        },
+        rawPayload,
+      };
     }
     if (value.event === "ACCOUNT_VIOLATION") {
       const type = value.violation_info?.violation_type;
@@ -1501,12 +1510,20 @@ function parseChannelHealthUpdate(
     // when an app is REMOVED from a WhatsApp Business Account — the event that
     // makes an integration go dark — and publishes no name or shape for it.
     //
-    // So the rule is: parse what Meta has documented, and make everything else
-    // LOUD rather than guessing at a payload. When Phase 1 lands, this line is
-    // what turns "sends mysteriously stopped" into a shape we can read and
-    // implement against.
+    // So the rule is: parse what Meta has documented, and persist everything
+    // else as the last-alert slot rather than guessing at a payload. When that
+    // event lands, this is what turns "sends mysteriously stopped" into a
+    // dated, queryable trace on the right WABA's connections.
     logUnhandledAccountUpdate(value, rawPayload);
-    return null;
+    return {
+      kind: "channel_health",
+      accountAlert: {
+        source: "account_update",
+        event: value.event ?? null,
+        detail: JSON.stringify(value).slice(0, 500),
+      },
+      rawPayload,
+    };
   }
   let messagingTier: string | undefined;
   // The portfolio limit, on whichever webhook delivered it, wins. Limits have
@@ -1530,7 +1547,23 @@ function parseChannelHealthUpdate(
     value.current_quality_rating.trim()
       ? value.current_quality_rating.trim().toUpperCase()
       : undefined;
-  if (messagingTier === undefined && qualityRating === undefined) return null;
+  if (messagingTier === undefined && qualityRating === undefined) {
+    // `account_alerts` with no tier rider: the alert BODY is the payload.
+    // Persist it as the last-alert slot instead of dropping it — this envelope
+    // exists to explain enforcement, and it left no trace before.
+    if (field === "account_alerts") {
+      return {
+        kind: "channel_health",
+        accountAlert: {
+          source: "account_alerts",
+          event: value.event ?? null,
+          detail: JSON.stringify(value).slice(0, 500),
+        },
+        rawPayload,
+      };
+    }
+    return null;
+  }
   return {
     kind: "channel_health",
     ...(messagingTier !== undefined ? { messagingTier } : {}),

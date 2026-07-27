@@ -853,6 +853,16 @@ model ChannelConnection {
   verifiedName String?
   nameStatus   String?
 
+  // The LAST account-level alert Meta sent that we have no dedicated field
+  // for: an `account_update` event outside the parsed set (the class where
+  // "app removed from WABA" will land) or an `account_alerts` envelope. One
+  // slot, last-writer-wins — an operator needs the latest reason the account
+  // went weird, not a ledger. Shape:
+  //   { source: "account_update"|"account_alerts", event, detail, observedAt }
+  // Written at WABA scope by ingest; cleared by a fresh connect save. Without
+  // it these webhooks were warn-logged at info severity and lost.
+  lastAccountAlert Json?
+
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
   workspace     Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)

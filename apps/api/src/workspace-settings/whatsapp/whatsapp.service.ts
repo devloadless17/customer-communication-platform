@@ -495,6 +495,9 @@ export class WhatsappService {
         // A fresh token clears any prior expired-token (Graph 190) flag.
         needsReconnect: false,
         lastAuthErrorAt: null,
+        // …and the last account-level alert: a deliberate re-connect is the
+        // operator saying "I've dealt with it" (policyViolation's posture).
+        lastAccountAlert: Prisma.DbNull,
       },
       select: { id: true },
     });
