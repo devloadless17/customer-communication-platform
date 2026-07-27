@@ -1957,7 +1957,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
   ): Promise<{ requeued: number }> {
     const row = await this.db.broadcast.findFirst({
       where: { id, workspaceId },
-      select: { id: true, status: true, failedCount: true },
+      select: { id: true, status: true, failedCount: true, templateId: true },
     });
     if (!row) throw new NotFoundException({ error: "not_found" });
     if (
@@ -1970,6 +1970,32 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         error: "broadcast_in_progress",
         detail: "Wait for the broadcast to finish before retrying failed recipients.",
       });
+    }
+
+    // The same per-user marketing-cap gate the CREATE path applies (see the
+    // suppression above `all_recipients_opted_out`), because retry is the
+    // likelier place to trip Meta's escalation: a campaign that just failed a
+    // batch with 131049 shows a tempting "Retry N failed" button, and Meta is
+    // explicit that resending to a capped user inside 24h earns the same error
+    // again — and that a WABA which repeatedly retries capped users can have
+    // delivery to them cut off for a further 24h. MARKETING templates only:
+    // the cap does not apply to utility/auth sends, and a freeform broadcast
+    // has no template at all. A deleted template row fails open — Meta
+    // enforces the real cap, we just avoid poking it.
+    let cappedContactIds: Set<string> | null = null;
+    if (row.templateId) {
+      const tpl = await this.db.messageTemplate.findFirst({
+        where: { id: row.templateId, workspaceId },
+        select: { category: true },
+      });
+      if (tpl?.category === "marketing") {
+        const cappedSince = new Date(Date.now() - PER_USER_MARKETING_CAP_COOLDOWN_MS);
+        const capped = await this.db.contact.findMany({
+          where: { workspaceId, marketingCapReachedAt: { gte: cappedSince } },
+          select: { id: true },
+        });
+        if (capped.length > 0) cappedContactIds = new Set(capped.map((c) => c.id));
+      }
     }
     // Reset recipients + re-open the broadcast atomically in ONE transaction.
     // Two separate writes could leave recipients `queued` while the parent
@@ -1997,6 +2023,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           // re-sends a cancelled audience.
           NOT: { errorMessage: CANCEL_RECIPIENT_MARKER },
           ...(opts?.errorCodes?.length ? { errorCode: { in: opts.errorCodes } } : {}),
+          // Still inside Meta's 24h per-user marketing cooldown — retrying them
+          // now is refused by Meta anyway and risks the escalated cutoff.
+          ...(cappedContactIds ? { contactId: { notIn: [...cappedContactIds] } } : {}),
         },
         select: { id: true },
         // Bounded so a 100k campaign that failed wholesale can't materialize an
@@ -2007,6 +2036,30 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         take: MAX_RECIPIENTS_IN_PROCESS,
       });
       if (failed.length === 0) {
+        // Distinguish "no failures at all" from "every failure is a contact
+        // still inside the marketing-cap cooldown" — the second has a fix the
+        // operator can actually apply (wait), and telling them there is
+        // nothing to retry when the button showed a count reads as a bug.
+        if (cappedContactIds) {
+          const suppressed = await tx.broadcastRecipient.count({
+            where: {
+              broadcastId: id,
+              status: "failed",
+              NOT: { errorMessage: CANCEL_RECIPIENT_MARKER },
+              ...(opts?.errorCodes?.length ? { errorCode: { in: opts.errorCodes } } : {}),
+              contactId: { in: [...cappedContactIds] },
+            },
+          });
+          if (suppressed > 0) {
+            throw new ConflictException({
+              error: "recipients_marketing_capped",
+              detail:
+                `All ${suppressed} retryable recipients recently hit WhatsApp's per-user ` +
+                `marketing limit. Try again in 24 hours — Meta refuses earlier resends and ` +
+                `may cut off delivery to these users entirely if retried repeatedly.`,
+            });
+          }
+        }
         throw new ConflictException({
           error: "nothing_to_retry",
           detail: "This broadcast has no failed recipients.",
