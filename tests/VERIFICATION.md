@@ -980,6 +980,48 @@ revocation immediacy.
 | Channel-connection delete → threads, sends, webhooks, broadcasts | ☐ |
 | Org delete → users, workspaces, sessions, globally-unique emails | ☐ |
 
+## B-M6 UI/UX rubric — measured
+
+Harness: `tests/e2e/uiux/rubric.spec.ts` (`pnpm test:e2e:uiux`, NON-CI by
+design — an a11y audit wants a human reading it; gating `ship` on it would
+either block releases on cosmetic drift or get its thresholds relaxed until it
+asserted nothing). Seven surfaces in bar-height order, **inbox last as final
+acceptance**, three objective checks each.
+
+| Check | Result (`9a0b6f56`, 2026-07-27) |
+|---|---|
+| axe serious/critical, all 7 surfaces | ✅ 0 violations (was: 5 surfaces failing) |
+| Horizontal overflow @ 1280 / 1024 / 390 | ✅ 0 across all 7 surfaces — the body never scrolls sideways at any viewport |
+| Renders in dark + light | ✅ 0 error boundaries on either theme |
+| **Total** | **23/23** |
+
+Fixed to get there: (1) every small uppercase section label used
+`text-muted-foreground` at 60-80% opacity and failed AA — one token decision
+surfacing as five separate surface failures; (2) **`--danger-fg` added as the
+missing member of the `*-fg` family** — the tickets priority label used
+`text-destructive` (a BUTTON BACKGROUND token, paired with near-white) for 11px
+text and measured 3.88:1 against AA's 4.5, while `success-fg`/`warning-fg`
+already existed as the text-safe darker variants; (3) two SLA badges
+hand-overrode `variant="muted"` with red text instead of using the designed
+`destructive` variant; (4) three presence dots carried `aria-label` on a bare
+`<span>` (`aria-prohibited-attr`) and now carry `role="img"`.
+
+**Lesson — an audit harness must be verified like production code.** This one
+produced FALSE findings twice before it produced true ones: it reported missing
+`lang`/`title` on two surfaces (it had scanned Next's dev interstitial, because
+those routes compile on first visit), then, once tightened, timed out at 390px
+where the chrome collapses and reported a passing page as failing. Both
+mistakes are documented in the spec. A rubric that invents findings is worse
+than no rubric — the minutes spent "fixing" a non-bug are worse than the bug.
+The gate is now the narrow thing that is true everywhere (lang + title, both
+from the root layout), and the report carries axe's own measured ratio and both
+colors so a contrast fix is informed rather than guessed.
+
+**Not automated, deliberately** — the subjective half of the rubric (visual
+hierarchy, copy tone, motion, empty-state helpfulness) is a reading task and
+does not belong in a fake assertion. Keyboard/focus and CLS screenshot-diffing
+remain open.
+
 ## B-M6 / deploy backlog (found outside the rubric pass — carry into it)
 
 | Finding | Where | Notes |
