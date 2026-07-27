@@ -28,9 +28,39 @@ CVE-2026-55697
 # or manifest ever reaches its tar/glob code paths.
 #
 # OUR OWN copies of these packages ARE patched via pnpm.overrides in the root
-# package.json (brace-expansion 1.1.16 / 2.1.2 / 5.0.7, js-yaml 4.3.0) — this
+# package.json (brace-expansion 1.1.16 / 2.1.2 / 5.0.8, js-yaml 4.3.0) — this
 # entry covers only the vendored duplicates inside the pnpm bundle.
 # Re-check on every pnpm bump; drop these lines once the bundle ships fixes.
 CVE-2026-59873
 CVE-2026-59874
 CVE-2026-13149
+
+# brace-expansion — DoS via a crafted brace pattern. Advisory-wide, but 5.0.8 is
+# the ONLY fixed release ever published: `npm view brace-expansion versions`
+# shows 1.1.16 and 2.1.2 are the LAST releases of their lines, both vulnerable,
+# with no backport. Verified 2026-07-27.
+#
+# OUR fixable copy IS fixed: pnpm.overrides pins `brace-expansion@5` to ^5.0.8,
+# and 5.0.7 no longer appears anywhere in pnpm-lock.yaml. This entry covers only
+# the copies that cannot be moved:
+#
+#   - api image, 1.1.16 via minimatch@3 <- glob@7 <- archiver-utils/rimraf, and
+#     2.1.2 via minimatch@5 <- readdir-glob — both under archiver@5, a
+#     transitive dependency of exceljs (our xlsx import/export). There is no
+#     patched 1.x/2.x to override to, and forcing minimatch@10 would break
+#     glob@7, whose API is entirely different.
+#   - web image, 2.1.1 vendored INSIDE next's own bundled node_modules — not in
+#     our lockfile at all, so pnpm.overrides cannot reach it (same situation as
+#     the corepack-bundled copies above). `pnpm why minimatch --prod` in
+#     apps/web returns nothing, confirming we pull no minimatch of our own.
+#
+# Not exploitable here: brace-expansion is reached only through minimatch/glob
+# doing FILE PATH matching inside archiver/unzipper (and next's build tooling).
+# Those patterns are the libraries' own internal globs and our static config —
+# no request body, uploaded filename, or other untrusted value is ever used as
+# a brace pattern.
+#
+# DROP THIS when any of: a patched 1.x/2.x ships, exceljs stops depending on
+# archiver@5 (or we replace exceljs), or next re-bundles a fixed copy.
+# Re-check on every dependency bump.
+CVE-2026-14257
