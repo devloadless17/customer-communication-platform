@@ -16,6 +16,8 @@
 import { existsSync } from "node:fs";
 
 import { PrismaClient } from "@prisma/client";
+
+import { setSharedDb } from "@/lib/db";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { NotFoundException } from "@nestjs/common";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -29,6 +31,11 @@ if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
 });
+// `remove()` reaches `gcOrphanWhatsappPortfolios`, which uses the MODULE-LEVEL
+// shared client rather than the injected one — so this spec has to publish the
+// connection or that call throws "lib/db.ts accessed before DbService booted".
+setSharedDb(prisma as unknown as PrismaClient);
+
 const service = new ChannelAccountsService(prisma as unknown as DbService);
 
 const S = `ca${Date.now().toString().slice(-8)}`;
