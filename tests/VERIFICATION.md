@@ -72,15 +72,15 @@ table/queue/cache/socket-room that references the dying entity.
 | realtime layer | 1 | R (adversarial) + E (144 e2e two-tab) | ✅ 2026-07-27 |
 | auth / org / workspaces / members | 1 | R (adversarial) + E (45 e2e) | ✅ 2026-07-27 |
 | external /v1 API | 1 | R (adversarial, all 111 routes) + E (180 e2e) | ✅ 2026-07-27 |
-| contacts (+import/export/transfer) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — bulk-tag event storm FIXED a2b6de83; 5 open (export pagination, unknownStages, resume report) |
+| contacts (+import/export/transfer) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — bulk-tag storm a2b6de83, upload-reaper pagination 73317ffd, unknownStages cap + resume-report marker 112ac0c3; 2 open (explicit-ids export skips directory filter, errorRows heap) |
 | customers / identity | 2 | R (adversarial) + N (visibility spec) | ◐ reviewed 2026-07-27 — profile visibility leak FIXED 3e137336; 2 low open |
 | inbox-views | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — THE and-not-spread invariant VERIFIED HELD across all 3 callers; 1 open (unvalidated `channels`) |
 | channels / multi-account | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 4 open (batched-webhook account misattribution HIGH) |
 | outbound-webhooks (delivery/retry) | 2 | R (adversarial) | ✅ 2026-07-27 — SSRF/HMAC/dedupe VERIFIED HELD; unbounded retention DELETE FIXED 29deb9c8 |
-| calls (WhatsApp calling) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — post-CAS throw FIXED 29deb9c8; 1 open (call-id routes bypass visibility) |
+| calls (WhatsApp calling) | 2 | R (adversarial) | ✅ 2026-07-27 — post-CAS throw 29deb9c8; live-vs-history scoping split DOCUMENTED 112ac0c3 (deliberate, was only noted on endCall) |
 | media / R2 | 2 | R (adversarial) | ✅ 2026-07-27 — tenancy + XSS VERIFIED HELD; download regression 37c0a2b9, recovery sweeper + mime + parked echo a2b6de83, SSRF fetchUrlBytes 73317ffd |
-| queues / workers | 2 | R (adversarial, all 7 workers) | ◐ reviewed 2026-07-27 — jobId/lockDuration/backpressure VERIFIED HELD; 1 open (transfer worker maxStalledCount) |
-| sweepers | 2 | R (adversarial, all 30 enumerated) | ◐ reviewed 2026-07-27 — mutex/bounds/pool-close VERIFIED HELD; retention batching 29deb9c8, upload-reaper pagination + drift starvation 73317ffd; 1 open (unreadCount has NO drift sweeper) |
+| queues / workers | 2 | R (adversarial, all 7 workers) | ✅ 2026-07-27 — jobId/lockDuration/backpressure VERIFIED HELD; transfer-worker stall config + close cap FIXED 112ac0c3 |
+| sweepers | 2 | R (adversarial, all 30 enumerated) | ✅ 2026-07-27 — mutex/bounds/pool-close VERIFIED HELD; retention batching 29deb9c8, pagination + starvation 73317ffd, openTicketCount reconciler ec282d79 (unreadCount is NOT recomputable — §7 corrected, not faked) |
 | coexistence | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — direction fail-open + poison chunk FIXED 3e137336; 2 open (no account binding, PII in failed-job Redis) |
 | tags / stages / fields / snippets / flags | 3 | | ☐ |
 | notes | 3 | mandatory-N | ☐ |
@@ -765,6 +765,24 @@ globally-unique emails incl. membership-less users; the provider credential
 cache is correctly busted on delete/rename-default/setDefault; merge is
 genuinely non-destructive and reversible; 5 of 6 workers drop cleanly when
 their row is gone.
+
+### TIER-2 — 6 of 10 domains ✅ (2026-07-27)
+
+✅ outbound-webhooks · media/R2 · calls · queues/workers · sweepers ·
+(inbox-views was clean on review — its and-not-spread invariant VERIFIED
+HELD across all three callers).
+
+◐ contacts · customers/identity · channels/multi-account · coexistence —
+each with the HIGH/MED items fixed and only lows left; see the rows above.
+
+OPEN, needs a PRODUCT decision (not a code fix):
+- `call.incoming` toasts carry the contact's name + phone to the WHOLE team
+  under `agentConversationVisibility: "assigned"`. Live call handling is
+  team-wide by design (documented at the entry point in 112ac0c3) — but a
+  call nobody can identify is also hard to answer well, so narrowing the
+  toast is a judgement call, not a defect to patch.
+- `unreadCount` can only get a reconciler if a read watermark is added
+  (schema change). §7 now states plainly that it has none and why.
 
 ### TIER-2 fixes — running tally (2026-07-27)
 
