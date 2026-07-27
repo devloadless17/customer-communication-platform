@@ -588,12 +588,28 @@ secret-shown-once contract, the merge-is-reversible guarantee (unlink must
 never delete a contact), and every scope boundary incl. the webhook READ
 gate and read:catalog-can't-run-automation.
 
-STILL OPEN (phase 3, not started): broadcast writes (needs a new
-`write:broadcasts` scope + mandatory Idempotency-Key), contact bulk ops +
-sync-profile + count/preview, conversation start/bulk/read/delete/events/
-attachments/search, the 2026-07-13 composer sends (media/location/contact-
-card/reaction/forward), template-into-existing-thread, note LIST, and the
-catalog write gaps (contact-fields, stages, usage counts, view reorder).
+Phase 3 (84b4a3c1) — 10 routes:
+- **Broadcast writes** (6): create / preview-missing / cancel / retry /
+  delete / recipient-ids. NEW `write:broadcasts` — the most dangerous scope
+  in the API (billed sends to a whole audience, no unsend), so
+  `read:broadcasts` deliberately does NOT imply it. Create + retry require
+  `Idempotency-Key` and use the irreversible claim.
+- **Conversation operations** (4): start (open/reopen by contactId or
+  phone — idempotent, which is what keeps one-conversation-per-contact
+  true under an integration retry), mark-read, audit timeline, attachments.
+- Actor-nullability threaded through create/start/mark-read to the columns
+  already nullable for it. Mark-read stamps an `api-key` sentinel instead
+  (the event's `readByUserId` is a non-null cross-tab nudge) — same
+  convention as the Coexistence phone-app echo. No wire shape changed.
+
+STILL OPEN (phase 4, not started): contact bulk ops + sync-profile +
+count/preview, conversation bulk/delete/search, the 2026-07-13 composer
+sends (media/location/contact-card/reaction/forward),
+template-into-existing-thread, note LIST, and the catalog write gaps
+(contact-fields, stages, usage counts, view reorder). Also still open from
+the session-10 audit: 9 admin-grade READS under low read scopes, and
+`docs/organization-api.md`'s stale scope table (file is deleted in-tree;
+whoever restores it must refresh those rows — the in-app page is correct).
 Full route→scope→events table in the session-10 report.
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
