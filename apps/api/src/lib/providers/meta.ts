@@ -272,6 +272,23 @@ interface MetaChangeValue {
   //     cap as a number).
   //   account_alerts → generic alert envelope (no reliable tier — we re-poll).
   current_limit?: string;
+  /**
+   * `phone_number_quality_update` also carries the number's NEW quality band
+   * (GREEN | YELLOW | RED). Without reading it, the quality a broadcast gate
+   * warns on only refreshes via the periodic Graph poll — hours stale for the
+   * one signal that means "stop sending before Meta downgrades you".
+   * (The webhook's `event` — FLAGGED/UNFLAGGED — is NOT read as a band: Meta
+   * retired the FLAGGED state; `current_quality_rating` is authoritative.)
+   */
+  current_quality_rating?: string;
+  /**
+   * Per-NUMBER account webhooks (`phone_number_quality_update`,
+   * `phone_number_name_update`) name their subject here, flat on `value` —
+   * distinct from `metadata.display_phone_number`, which only message
+   * webhooks carry. This is how an account-level signal gets attributed to the
+   * right number in a multi-number workspace.
+   */
+  display_phone_number?: string;
   // `account_update` webhook fields — account-level enforcement. `event` above
   // discriminates: ACCOUNT_VIOLATION is an early quality warning,
   // ACCOUNT_RESTRICTION is an active pause with an expiry.
@@ -1498,8 +1515,22 @@ function parseChannelHealthUpdate(
       messagingTier = String(value.max_daily_conversation_per_phone);
     }
   }
-  if (messagingTier === undefined) return null;
-  return { kind: "channel_health", messagingTier, rawPayload };
+  // The quality band rides the same webhook. It used to be parsed PAST here —
+  // a quality-only payload (no tier field) returned null and the band only
+  // ever refreshed via the periodic Graph poll.
+  const qualityRating =
+    field === "phone_number_quality_update" &&
+    typeof value.current_quality_rating === "string" &&
+    value.current_quality_rating.trim()
+      ? value.current_quality_rating.trim().toUpperCase()
+      : undefined;
+  if (messagingTier === undefined && qualityRating === undefined) return null;
+  return {
+    kind: "channel_health",
+    ...(messagingTier !== undefined ? { messagingTier } : {}),
+    ...(qualityRating !== undefined ? { qualityRating } : {}),
+    rawPayload,
+  };
 }
 
 /**
@@ -1594,6 +1625,13 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const events: NormalizedEvent[] = [];
 
     for (const entry of Array.isArray(env.entry) ? env.entry : []) {
+      // For `object: "whatsapp_business_account"` (guarded above) `entry.id`
+      // IS the WABA id. Account-level webhooks (template lifecycle, quality,
+      // capability, account_update) carry no `metadata.phone_number_id`, so
+      // this is the scope that lets ingest attribute them to the right
+      // rows instead of whichever number happens to be the workspace default.
+      const wabaId =
+        typeof entry.id === "string" && entry.id.length > 0 ? entry.id : undefined;
       for (const change of Array.isArray(entry.changes) ? entry.changes : []) {
         const value = change.value;
         if (!value) continue;
@@ -1607,7 +1645,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // until someone clicks the manual "Sync" button.
         if (change.field === "message_template_status_update") {
           const evt = parseTemplateStatusUpdate(value, payload as Record<string, unknown>);
-          if (evt) events.push(evt);
+          if (evt) events.push({ ...evt, ...(wabaId ? { wabaId } : {}) });
           continue;
         }
 
@@ -1637,7 +1675,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // than showing a stale category until the next manual Sync.
         if (change.field === "template_category_update") {
           const evt = parseTemplateCategoryUpdate(value, payload as Record<string, unknown>);
-          if (evt) events.push(evt);
+          if (evt) events.push({ ...evt, ...(wabaId ? { wabaId } : {}) });
           continue;
         }
 
@@ -1687,7 +1725,17 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             value,
             payload as Record<string, unknown>,
           );
-          if (evt) events.push(evt);
+          if (evt) {
+            events.push({
+              ...evt,
+              ...(wabaId ? { wabaId } : {}),
+              // Per-number webhooks name their subject flat on `value` — the
+              // attribution hint ingest digit-matches against stored configs.
+              ...(value.display_phone_number
+                ? { displayPhoneNumber: value.display_phone_number }
+                : {}),
+            });
+          }
           continue;
         }
 
@@ -1701,7 +1749,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             value,
             payload as Record<string, unknown>,
           );
-          if (evt) events.push(evt);
+          if (evt) events.push({ ...evt, ...(wabaId ? { wabaId } : {}) });
           continue;
         }
 

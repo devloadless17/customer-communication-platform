@@ -492,6 +492,13 @@ export interface CallPermissionState {
  */
 export interface NormalizedTemplateStatusUpdate {
   kind: "template_status";
+  /**
+   * The WABA this update is about (Meta webhook `entry[].id`). Load-bearing for
+   * the (name, language) fallback match: templates are WABA-scoped, and two
+   * WABAs in one workspace can hold same-named templates — without this, WABA
+   * B's rejection flips WABA A's row (and halts A's campaigns).
+   */
+  wabaId?: string;
   /** Provider-side template id (Meta `message_template_id`), when present. */
   externalId?: string;
   /** Template name — the fallback match key when externalId is absent. */
@@ -702,6 +709,21 @@ export interface NormalizedContactNumberChange {
  */
 export interface NormalizedChannelHealth {
   kind: "channel_health";
+  /**
+   * The WABA the update belongs to (Meta webhook `entry[].id`). Account-level
+   * webhooks carry no `metadata.phone_number_id`, so this — plus
+   * `displayPhoneNumber` below — is how ingest attributes the signal to the
+   * right connection instead of defaulting to whichever number is the
+   * workspace default.
+   */
+  wabaId?: string;
+  /**
+   * The business phone number the update is about, as Meta displays it
+   * (`value.display_phone_number` on `phone_number_quality_update` /
+   * `phone_number_name_update`). Digit-matched against the stored connection
+   * config to resolve the exact number.
+   */
+  displayPhoneNumber?: string;
   /** Raw Meta messaging_limit tier, e.g. "TIER_1K" | "TIER_10K" | "TIER_100K" | "TIER_UNLIMITED". */
   messagingTier?: string;
   /** Quality band: "GREEN" | "YELLOW" | "RED". */

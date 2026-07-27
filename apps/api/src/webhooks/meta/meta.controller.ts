@@ -277,6 +277,11 @@ export class MetaWebhookController implements OnModuleDestroy {
       );
       return { ok: true, ingested: 0, dropped: "unknown_account" };
     }
+    // Account-level payload (no receiving number): ingest resolves the subject
+    // per-event from the hints the payload carries, rather than this batch
+    // being attributed wholesale to one connection.
+    const inboundAccountId =
+      "accountLevel" in inboundAccount ? undefined : inboundAccount.id;
 
     // WhatsApp Coexistence history backfill. The `history` webhook can carry
     // thousands of past messages across chunked deliveries — far too much to
@@ -344,7 +349,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     );
 
     try {
-      await ingestEvents(workspaceId, "whatsapp", events, inboundAccount.id);
+      await ingestEvents(workspaceId, "whatsapp", events, inboundAccountId);
     } catch (err) {
       // Meta retries on any non-2xx. Map error classes to the response that
       // actually matches the intent:
@@ -441,7 +446,9 @@ export class MetaWebhookController implements OnModuleDestroy {
     // match-against-the-one-configured-account check, which dropped payloads for
     // every account after the first.
     const inboundAccount = await resolveInboundAccount(this.db, workspaceId, channel, payload);
-    if (!inboundAccount) {
+    // The account-level sentinel is WhatsApp-only; for social channels a
+    // payload without entry.id is degenerate, so treat it like no match.
+    if (!inboundAccount || "accountLevel" in inboundAccount) {
       this.logger.warn(
         `[${workspaceId}] ${channel} webhook entry.id matches no connected account — dropping`,
       );
@@ -1341,25 +1348,33 @@ async function readBodyCapped(
  * connection in this workspace claims (caller drops fail-soft, exactly as the
  * old mismatch check did).
  *
- * When the payload names no account at all, this falls back to the workspace's
- * DEFAULT account rather than dropping. That matters: only message webhooks
- * carry `metadata.phone_number_id` / `entry[].id`. Account-level notifications
- * (`phone_number_quality_update`, `account_alerts`, template status updates) do
- * not, and the previous mismatch check also treated "no id in payload" as "no
- * mismatch — proceed". Dropping them here silently stopped messaging-tier and
- * quality snapshots from ever updating.
+ * When a WHATSAPP payload names no receiving number, this returns the
+ * `accountLevel` sentinel instead of a connection. Message webhooks always
+ * carry `metadata.phone_number_id`; the ones that don't are account-level
+ * notifications (`phone_number_quality_update`, `business_capability_update`,
+ * `account_update`, `account_alerts`, template lifecycle) whose subject is a
+ * WABA or a number named inside the payload body — NOT the workspace default.
+ * The old default-account fallback wrote number B's quality/tier/restrictions
+ * onto number A in every multi-number workspace; the sentinel makes ingest
+ * resolve the subject per-event (`resolveWhatsappHealthAccount`, and the
+ * WABA-scoped template match) from `entry[].id` / `display_phone_number`.
+ *
+ * Messenger/Instagram keep the default fallback: every legitimate social
+ * webhook carries `entry[].id`, so their no-id case is a degenerate payload,
+ * not a distinct webhook class.
  */
 async function resolveInboundAccount(
   db: DbService,
   workspaceId: string,
   channel: "whatsapp" | "messenger" | "instagram",
   payload: unknown,
-): Promise<{ id: string; externalAccountId: string } | null> {
+): Promise<{ id: string; externalAccountId: string } | { accountLevel: true } | null> {
   const externalAccountId =
     channel === "whatsapp"
       ? whatsappPayloadAccountId(payload)
       : socialPayloadAccountId(payload);
   if (!externalAccountId) {
+    if (channel === "whatsapp") return { accountLevel: true };
     return db.channelConnection.findFirst({
       where: { workspaceId, channel, isDefault: true },
       select: { id: true, externalAccountId: true },

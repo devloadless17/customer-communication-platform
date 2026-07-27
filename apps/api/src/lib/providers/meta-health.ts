@@ -206,6 +206,51 @@ export function normalizeThroughputLevel(raw: unknown): string | null {
 }
 
 /**
+ * Resolve WHICH connection an account-level health webhook is about.
+ *
+ * Account-level webhooks (`phone_number_quality_update`,
+ * `business_capability_update`, `account_update`, `account_alerts`) carry no
+ * `metadata.phone_number_id`, so the controller cannot attribute them the way
+ * it does message webhooks. What they DO carry:
+ *   - `value.display_phone_number` (per-number webhooks) — digit-matched
+ *     against each stored connection's `config.displayPhoneNumber`;
+ *   - `entry[].id` = the WABA id — decisive when exactly one of the
+ *     workspace's numbers sits under that WABA.
+ * Returns null when neither pins ONE connection — the caller must then treat
+ * per-number fields as unattributable rather than guessing.
+ */
+export async function resolveWhatsappHealthAccount(
+  workspaceId: string,
+  hints: { displayPhoneNumber?: string; wabaId?: string },
+): Promise<string | null> {
+  if (!hints.displayPhoneNumber && !hints.wabaId) return null;
+  // A workspace holds a handful of numbers at most — fetch once, match in JS
+  // (the display number needs digit-normalization Prisma can't express).
+  const connections = await db.channelConnection.findMany({
+    where: { workspaceId, channel: "whatsapp" },
+    select: { id: true, wabaId: true, config: true },
+  });
+  if (connections.length === 0) return null;
+
+  if (hints.displayPhoneNumber) {
+    const digits = hints.displayPhoneNumber.replace(/\D/g, "");
+    if (digits) {
+      const byNumber = connections.filter((c) => {
+        const display = (c.config as { displayPhoneNumber?: string } | null)
+          ?.displayPhoneNumber;
+        return typeof display === "string" && display.replace(/\D/g, "") === digits;
+      });
+      if (byNumber.length === 1) return byNumber[0]!.id;
+    }
+  }
+  if (hints.wabaId) {
+    const underWaba = connections.filter((c) => c.wabaId === hints.wabaId);
+    if (underWaba.length === 1) return underWaba[0]!.id;
+  }
+  return null;
+}
+
+/**
  * Merge a partial health update onto the team's WhatsApp ChannelConnection.
  * Only the fields present in `update` are written (a webhook that carries only a
  * new tier must not blank the quality band). `messagingDailyCap` is re-derived
@@ -224,68 +269,79 @@ export async function persistWhatsappHealth(
    * line mark UK Sales and Support degraded too — and, worse, let a calling
    * restriction on one number silently block calls on the others.
    *
-   * Omitted (the pre-multi-account shape) still writes workspace-wide, which
-   * is correct for the single-number case and for a signal we genuinely can't
-   * attribute to one account.
+   * Omitted with ONE connection (the pre-multi-account shape) still writes
+   * workspace-wide, which is trivially the right row. Omitted with SEVERAL,
+   * per-number fields are DROPPED with a structured warn — never written onto
+   * an arbitrary sibling — while WABA-scoped fields (calling enforcement,
+   * policy violations, which Meta reports at account level) fall back to every
+   * connection under `wabaId`, and the tier still lands at portfolio scope.
    */
   channelConnectionId?: string | null,
+  /** The WABA the signal arrived under (webhook `entry[].id`), when known. */
+  wabaId?: string | null,
 ): Promise<void> {
-  const data: {
-    messagingTier?: string | null;
-    messagingDailyCap?: number | null;
+  // Fields split by their TRUE Meta scope, so each lands on the right rows:
+  //   per-NUMBER  — quality rating, throughput;
+  //   per-WABA    — calling enforcement + policy violations (`account_update`
+  //                 is a WABA-level webhook: the enforcement applies to every
+  //                 number under it);
+  //   per-PORTFOLIO — the messaging tier (written separately below).
+  const perNumber: {
     qualityRating?: string | null;
     throughputLevel?: string | null;
+  } = {};
+  const wabaScoped: {
     callingRestrictedUntil?: Date | null;
     callingRestrictionType?: string | null;
     callingRestrictionReason?: string | null;
     callingQualityWarning?: string | null;
     policyViolationType?: string | null;
     policyViolationAt?: Date | null;
-    messagingHealthUpdatedAt: Date;
-  } = { messagingHealthUpdatedAt: new Date() };
+  } = {};
 
-  let touched = false;
-  // The messaging limit is PORTFOLIO-scoped; it is written separately below
-  // (a per-number write would let one portfolio's budget be recorded N times).
   let portfolioTier: string | null | undefined;
   if (update.messagingTier !== undefined) {
     portfolioTier = update.messagingTier ? normalizeMessagingTier(update.messagingTier) : null;
-    touched = true;
   }
   if (update.qualityRating !== undefined) {
-    data.qualityRating = update.qualityRating
+    perNumber.qualityRating = update.qualityRating
       ? normalizeQualityRating(update.qualityRating)
       : null;
-    touched = true;
   }
   if (update.throughputLevel !== undefined) {
-    data.throughputLevel = update.throughputLevel
+    perNumber.throughputLevel = update.throughputLevel
       ? normalizeThroughputLevel(update.throughputLevel)
       : null;
-    touched = true;
   }
   // Calling enforcement. A restriction arrives with its own expiry and clears
   // the earlier warning that preceded it — by the time calling is paused, the
   // "quality is slipping" nudge is no longer the actionable message.
   if (update.callingRestrictedUntil !== undefined) {
-    data.callingRestrictedUntil = update.callingRestrictedUntil;
-    data.callingRestrictionType = update.callingRestrictionType ?? null;
-    data.callingRestrictionReason = update.callingRestrictionReason ?? null;
-    data.callingQualityWarning = null;
-    touched = true;
+    wabaScoped.callingRestrictedUntil = update.callingRestrictedUntil;
+    wabaScoped.callingRestrictionType = update.callingRestrictionType ?? null;
+    wabaScoped.callingRestrictionReason = update.callingRestrictionReason ?? null;
+    wabaScoped.callingQualityWarning = null;
   }
   if (update.callingQualityWarning !== undefined) {
-    data.callingQualityWarning = update.callingQualityWarning;
-    touched = true;
+    wabaScoped.callingQualityWarning = update.callingQualityWarning;
   }
   if (update.policyViolationType !== undefined) {
-    data.policyViolationType = update.policyViolationType;
+    wabaScoped.policyViolationType = update.policyViolationType;
     // Meta's violation payload carries no timestamp, so observation time is
     // what we have — and "when did this land" is the question an operator asks.
-    data.policyViolationAt = update.policyViolationType ? new Date() : null;
-    touched = true;
+    wabaScoped.policyViolationAt = update.policyViolationType ? new Date() : null;
   }
-  if (!touched) return;
+  const hasPerNumber = Object.keys(perNumber).length > 0;
+  const hasWabaScoped = Object.keys(wabaScoped).length > 0;
+  if (portfolioTier === undefined && !hasPerNumber && !hasWabaScoped) return;
+
+  // With no named connection, the legacy workspace-wide write is only safe when
+  // there is exactly one row it could hit.
+  const soleConnection =
+    !channelConnectionId &&
+    (await db.channelConnection.count({
+      where: { workspaceId, channel: "whatsapp" },
+    })) <= 1;
 
   if (portfolioTier !== undefined) {
     const portfolioData = {
@@ -294,7 +350,8 @@ export async function persistWhatsappHealth(
       messagingHealthUpdatedAt: new Date(),
     };
     const updated = await db.whatsappPortfolio.updateMany({
-      // The portfolio owning THIS account. Unscoped, a tier update for one
+      // The portfolio owning THIS account (or, for an account-level webhook,
+      // the one owning the WABA's numbers). Unscoped, a tier update for one
       // portfolio would overwrite every other portfolio in the workspace —
       // each of which has its own independent 24h budget.
       where: {
@@ -302,7 +359,7 @@ export async function persistWhatsappHealth(
           some: {
             workspaceId,
             channel: "whatsapp",
-            ...(channelConnectionId ? { id: channelConnectionId } : {}),
+            ...(channelConnectionId ? { id: channelConnectionId } : wabaId ? { wabaId } : {}),
           },
         },
       },
@@ -324,16 +381,60 @@ export async function persistWhatsappHealth(
     }
   }
 
-  const res = await db.channelConnection.updateMany({
-    // Narrow to the one account when we know which it is — see the param doc.
-    where: {
-      workspaceId,
-      channel: "whatsapp",
-      ...(channelConnectionId ? { id: channelConnectionId } : {}),
-    },
-    data,
-  });
-  if (res.count > 0) {
+  let wrote = portfolioTier !== undefined;
+
+  if (hasPerNumber) {
+    if (channelConnectionId || soleConnection) {
+      const res = await db.channelConnection.updateMany({
+        where: {
+          workspaceId,
+          channel: "whatsapp",
+          ...(channelConnectionId ? { id: channelConnectionId } : {}),
+        },
+        data: { ...perNumber, messagingHealthUpdatedAt: new Date() },
+      });
+      wrote ||= res.count > 0;
+    } else {
+      // Several numbers, none identified: dropping is the only correct move —
+      // stamping quality/throughput on an arbitrary sibling is exactly the
+      // misattribution this scope split exists to prevent. The warn is the
+      // audit trail for "why didn't the webhook update my panel".
+      console.warn(
+        `[whatsapp-health] dropped unattributable per-number fields ` +
+          `(${Object.keys(perNumber).join(", ")}) for team=${workspaceId}` +
+          `${wabaId ? ` waba=${wabaId}` : ""} — several numbers, none identified`,
+      );
+    }
+  }
+
+  if (hasWabaScoped) {
+    if (wabaId || channelConnectionId || soleConnection) {
+      // Prefer the WABA scope when known — `account_update` enforcement applies
+      // to every number under the WABA, and narrowing it to one row would leave
+      // sibling numbers looking healthy while calling is actually paused.
+      const res = await db.channelConnection.updateMany({
+        where: {
+          workspaceId,
+          channel: "whatsapp",
+          ...(wabaId
+            ? { wabaId }
+            : channelConnectionId
+              ? { id: channelConnectionId }
+              : {}),
+        },
+        data: { ...wabaScoped, messagingHealthUpdatedAt: new Date() },
+      });
+      wrote ||= res.count > 0;
+    } else {
+      console.warn(
+        `[whatsapp-health] dropped unattributable account-level fields ` +
+          `(${Object.keys(wabaScoped).join(", ")}) for team=${workspaceId} — ` +
+          `several numbers, no WABA in payload`,
+      );
+    }
+  }
+
+  if (wrote) {
     // The eligibility read below goes through the provider-config cache path;
     // bust it so a just-changed tier is reflected immediately.
     invalidateProviderConfig(workspaceId);

@@ -5,7 +5,10 @@ import { db } from "@/lib/db";
 import { runWithConcurrency } from "@/common/concurrency";
 import { captureRemoteContactAvatar } from "@/lib/blob-storage/avatar";
 import { getProviderBinding } from "@/lib/providers";
-import { persistWhatsappHealth } from "@/lib/providers/meta-health";
+import {
+  persistWhatsappHealth,
+  resolveWhatsappHealthAccount,
+} from "@/lib/providers/meta-health";
 import { classifyMetaStatusError } from "@/lib/providers/meta-send-error";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { publish } from "@/lib/events/bus";
@@ -184,6 +187,20 @@ export async function ingestEvents(
         }
       } else if (evt.kind === "channel_health") {
         // WhatsApp number messaging-limit tier / quality / throughput changed.
+        // Account-level webhooks name no receiving number, so the controller
+        // passes no channelConnectionId — resolve the subject from the hints
+        // the payload DOES carry (its display number, or a WABA holding
+        // exactly one of our numbers) before persisting. An unresolvable
+        // per-number signal is dropped inside persistWhatsappHealth rather
+        // than stamped onto an arbitrary sibling.
+        const healthTarget =
+          channelConnectionId ??
+          (await resolveWhatsappHealthAccount(workspaceId, {
+            ...(evt.displayPhoneNumber
+              ? { displayPhoneNumber: evt.displayPhoneNumber }
+              : {}),
+            ...(evt.wabaId ? { wabaId: evt.wabaId } : {}),
+          }));
         await persistWhatsappHealth(workspaceId, {
           ...(evt.messagingTier !== undefined ? { messagingTier: evt.messagingTier } : {}),
           ...(evt.qualityRating !== undefined ? { qualityRating: evt.qualityRating } : {}),
@@ -207,7 +224,8 @@ export async function ingestEvents(
         // Attribute the signal to the account whose webhook delivered it.
         // Quality / throughput / calling restrictions are per-NUMBER, so a
         // workspace-wide write would mark every sibling number degraded.
-        channelConnectionId ?? null);
+        healthTarget ?? null,
+        evt.wabaId ?? null);
       } else if (evt.kind === "call") {
         // Kill-switch: calling (WhatsApp + Messenger) reaches browsers via
         // realtime WebRTC signaling. DISABLE_CALLING=1 (wired in docker-compose
@@ -1021,6 +1039,16 @@ async function ingestTemplateStatusUpdate(
   // Prefer matching on Meta's template id (externalId); fall back to the
   // natural (name, language) key. Build the narrowest WHERE we can.
   const where: Prisma.MessageTemplateWhereInput = { workspaceId };
+  // Templates are WABA-scoped, and two WABAs in one workspace can hold
+  // same-named templates — without this bound, WABA B's rejection would flip
+  // WABA A's row on the (name, language) fallback and halt A's campaigns.
+  // `""` is the legacy sentinel for rows synced before wabaId existed; they
+  // must stay matchable or a pre-multi-account catalog never updates again.
+  // Kept on the externalId arm too: Meta template ids are globally unique, so
+  // there it is free belt-and-braces.
+  if (evt.wabaId) {
+    where.wabaId = { in: [evt.wabaId, ""] };
+  }
   if (evt.externalId) {
     where.externalId = evt.externalId;
   } else if (evt.name) {
