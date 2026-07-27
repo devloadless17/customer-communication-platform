@@ -653,6 +653,43 @@ deliveries, which is the strongest signal yet that no live subscription
 points at the legacy URL. Recorded in the route file. Do not delete without
 the log check; do not extend silently (the file's own policy).
 
+### Track A batch F — error-shape normalization (2026-07-27) — ✅ (9c27481a)
+
+295 error keys normalized to snake_case; `detail` keeps the sentence.
+Both spellings had coexisted for the SAME condition ("not found" ×26 vs
+"not_found" ×18; "conversation not found" vs "conversation_not_found"), so a
+client could not know which to branch on — and one already branched on the
+prose (`reply-box.tsx` matched `error === "waba id missing"` to render the
+WhatsApp-setup nudge; renamed on both sides in the same commit).
+
+Safety order that made this cheap: (1) inventory both sides — exactly ONE web
+matcher depended on a prose key; (2) confirm the /v1-DOCUMENTED set is
+already all snake_case, so no published contract moved; (3) note that the
+/v1-reachable shared services' prose keys became partner-visible only TODAY
+via the parity routes, making this the last cheap moment; (4) 269 mechanical
+renames + 26 by hand where the key was really a sentence.
+
+NEW CHECKER `scripts/check-error-keys.mjs` (6th), negative-tested, in
+`check` + CI. Scoped to HTTP-envelope surfaces ONLY — a Next server action
+returns `{ error: "Enter the 6-digit code." }` to the form that RENDERS it,
+where the string is display payload, not a key. Blanket-globbing web would
+have put "Enter_the_6_digit_code." on screen.
+
+NOT DONE (the plan's F4): routing the ~18 web call sites that discard the
+API's `detail` through one helper. Independent of the key rename and worth
+its own pass — those sites currently show a bare key where a sentence exists.
+
+## Checkers (6) — each negative-tested, all in `pnpm run check` + CI
+1. `check:prisma-fields` — stale select/where/data/orderBy keys (the #1
+   outage class; Prisma's XOR unions make them compile clean).
+2. `check-test-isolation` — unfiltered bulk writes in tests/.
+3. `check-double-assertions` — `as unknown as` ratchet (baseline 124).
+4. tenancy gate (inside check:prisma-fields) — a new model without
+   workspaceId must be allowlisted.
+5. `check-route-params` — a Next dynamic handler must destructure the param
+   names its DIRECTORY declares (caught a 5-day live outage).
+6. `check-error-keys` — API error keys stay snake_case identifiers.
+
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
 | Seam | Status |
