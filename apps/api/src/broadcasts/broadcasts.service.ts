@@ -50,6 +50,7 @@ import {
   requiredTemplateButtonParams,
   templateNeedsOfferExpiry,
   templateNamedPlaceholders,
+  unsupportedTemplateFeature,
 } from "@ccp/shared/template-render";
 import type { Channel } from "@ccp/shared/types";
 import {
@@ -304,6 +305,20 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
                   : `.`)
               : `Template is ${template.status}. Only approved templates can be broadcast.`,
         });
+      }
+
+      // Commerce templates need send-time product parameters nothing here
+      // collects — launching one mass-fails the whole audience with an
+      // unlabelled Meta error per recipient. Same guard as the single-send
+      // path; refusing at create is what keeps the failure report empty.
+      {
+        const unsupported = unsupportedTemplateFeature(template.components);
+        if (unsupported) {
+          throw new BadRequestException({
+            error: "template_feature_unsupported",
+            detail: `This template uses ${unsupported}, which this platform can't send yet.`,
+          });
+        }
       }
 
       // The composer binds POSITIONAL body variables only. A NAMED-format body

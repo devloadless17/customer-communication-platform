@@ -37,6 +37,7 @@ import {
   templateArchivalRisk,
   templateDeletionDaysLeft,
   templateReviewWarnings,
+  unsupportedTemplateFeature,
 } from "@ccp/shared/template-render";
 import { TEMPLATE_LANGUAGES } from "@ccp/shared/template-languages";
 import {
@@ -2517,5 +2518,52 @@ describe("templateReviewWarnings", () => {
     expect(
       templateReviewWarnings(bodyOf("Hi {{first_name}}, order {{order_id}} is ready today.")),
     ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unsupportedTemplateFeature — commerce templates a shared inbox can't
+// parameterize (no product catalog integration). Their sends ALWAYS fail at
+// Meta, so a named refusal beats an unlabelled per-recipient error.
+// ---------------------------------------------------------------------------
+describe("unsupportedTemplateFeature", () => {
+  it("passes every supported shape", () => {
+    expect(unsupportedTemplateFeature([{ type: "BODY", text: "hi" }])).toBeNull();
+    expect(
+      unsupportedTemplateFeature([
+        { type: "BODY", text: "hi" },
+        { type: "BUTTONS", buttons: [{ type: "URL", text: "Go", url: "https://x" }] },
+      ]),
+    ).toBeNull();
+  });
+
+  it("names catalog, MPM and order-details buttons", () => {
+    const of = (btnType: string) =>
+      unsupportedTemplateFeature([
+        { type: "BODY", text: "hi" },
+        { type: "BUTTONS", buttons: [{ type: btnType, text: "View" }] },
+      ]);
+    expect(of("CATALOG")).toBe("product catalog");
+    expect(of("MPM")).toBe("multi-product catalog");
+    expect(of("SPM")).toBe("product catalog");
+    expect(of("ORDER_DETAILS")).toBe("order details / payments");
+  });
+
+  it("finds a product card inside a carousel", () => {
+    expect(
+      unsupportedTemplateFeature([
+        { type: "BODY", text: "hi" },
+        { type: "CAROUSEL", cards: [{ components: [{ type: "PRODUCT" }] }] },
+      ]),
+    ).toBe("product catalog");
+  });
+
+  it("deliberately lets FLOW through — its send parameters are optional", () => {
+    expect(
+      unsupportedTemplateFeature([
+        { type: "BODY", text: "hi" },
+        { type: "BUTTONS", buttons: [{ type: "FLOW", text: "Book now" }] },
+      ]),
+    ).toBeNull();
   });
 });

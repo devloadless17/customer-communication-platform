@@ -1010,6 +1010,50 @@ function validateButtons(comps: ValidatableComponent[], push: Push) {
 
 /** Meta requires `{{1}}…{{N}}` with no gaps and no zero. */
 /**
+ * Does this template need a commerce feature the platform can't supply?
+ *
+ * Catalog / MPM / SPM / order-details / product-card templates are legal on
+ * Cloud API but their SENDS require product-catalog parameters (retailer ids,
+ * section lists, payment configuration) that nothing in this platform collects
+ * — so a synced one looks sendable in every picker, demands nothing in the
+ * fill UI, and then fails EVERY send with an unlabelled Meta error. Naming the
+ * refusal is strictly better; this is not a never-tighten violation because
+ * the send as we would build it (no commerce component) always fails.
+ *
+ * FLOW buttons are deliberately NOT here: a flow send's parameters are
+ * optional on the wire, so it may work without any — refusing it would block
+ * sends Meta accepts.
+ *
+ * Returns a short human label for the missing feature, or null when fine.
+ */
+export function unsupportedTemplateFeature(components: unknown): string | null {
+  if (!Array.isArray(components)) return null;
+  const commerce: Record<string, string> = {
+    CATALOG: "product catalog",
+    MPM: "multi-product catalog",
+    SPM: "product catalog",
+    ORDER_DETAILS: "order details / payments",
+    PRODUCT: "product catalog",
+  };
+  const scan = (comps: ReadonlyArray<unknown>): string | null => {
+    for (const c of asComponents(comps)) {
+      const type = (c.type ?? "").toUpperCase();
+      if (commerce[type]) return commerce[type];
+      for (const b of c.buttons ?? []) {
+        const bt = (b.type ?? "").toUpperCase();
+        if (commerce[bt]) return commerce[bt];
+      }
+      for (const card of c.cards ?? []) {
+        const inner = scan(card.components ?? []);
+        if (inner) return inner;
+      }
+    }
+    return null;
+  };
+  return scan(components);
+}
+
+/**
  * ADVISORY review-risk patterns, deliberately a separate function from
  * `validateTemplateComponents`: these are Meta's documented "common rejection
  * reasons" from the human/ML REVIEW, not wire-validity rules — and Meta's own

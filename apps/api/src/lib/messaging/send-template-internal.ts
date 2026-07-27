@@ -28,6 +28,7 @@ import {
   templateNeedsOfferExpiry,
   templateDeletionDaysLeft,
   templateNamedPlaceholders,
+  unsupportedTemplateFeature,
   validateTemplateParamValues,
 } from "@ccp/shared/template-render";
 import type { TemplateComponent, TemplateVariableSet } from "@ccp/shared/providers/types";
@@ -96,6 +97,9 @@ export class SendTemplateValidationError extends Error {
     // A Template Library template declares a value TYPE per body parameter
     // (EMAIL, NUMBER, AMOUNT…) which Meta enforces at send time.
     | "param_type_mismatch"
+    // Commerce template (catalog/MPM/SPM/order-details) — needs product
+    // parameters the platform can't supply, so every send would fail at Meta.
+    | "template_feature_unsupported"
     | "header_var_required"
     | "header_media_required"
     | "header_media_unsupported"
@@ -198,6 +202,20 @@ export async function sendTemplateInternal(
         "wrong_body_var_count",
         "wrong variable count",
         `Template body expects ${bodyVarCount} variable(s), got ${args.variables.body.length}.`,
+      );
+    }
+  }
+
+  // Commerce templates (catalog / MPM / SPM / order-details / product cards)
+  // need send-time product parameters nothing here collects — every send
+  // would fail at Meta with an unlabelled error, so refuse with the reason.
+  {
+    const unsupported = unsupportedTemplateFeature(template.components);
+    if (unsupported) {
+      throw new SendTemplateValidationError(
+        "template_feature_unsupported",
+        "template feature unsupported",
+        `This template uses ${unsupported}, which this platform can't send yet.`,
       );
     }
   }

@@ -3347,6 +3347,9 @@ const TEMPLATE_ERROR_STATUS: Record<SendTemplateValidationError["code"], number>
   named_body_vars_required: 400,
   button_params_required: 400,
   param_type_mismatch: 400,
+  // 422: the request is well-formed — the TEMPLATE is one the platform can't
+  // parameterize (commerce), and no change to the request fixes that.
+  template_feature_unsupported: 422,
   header_var_required: 400,
   header_media_required: 400,
   header_media_unsupported: 422,

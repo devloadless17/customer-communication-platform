@@ -26,6 +26,7 @@ import {
   requiredCarouselCards,
   templateNamedPlaceholders,
   templateNeedsOfferExpiry,
+  unsupportedTemplateFeature,
 } from "@ccp/shared/template-render";
 import {
   CampaignAssignment,
@@ -1935,7 +1936,11 @@ function TemplatePickerInline({
       ) : (
         <ul className="divide-y divide-border rounded-md border border-border bg-background">
           {templates.map((t) => {
-            const sendable = t.status === "approved";
+            // Commerce templates (catalog/MPM/SPM/order-details) need product
+            // parameters the platform can't supply — the server refuses them,
+            // so offering one here would be a dead click.
+            const unsupported = unsupportedTemplateFeature(t.components);
+            const sendable = t.status === "approved" && !unsupported;
             const selected = t.id === selectedId;
             return (
               <li key={t.id}>
@@ -1967,7 +1972,7 @@ function TemplatePickerInline({
                       </span>
                       {!sendable && (
                         <span className="rounded-full border border-warning-border bg-warning-bg px-1.5 py-0.5 text-3xs uppercase text-warning-fg">
-                          {t.status}
+                          {unsupported ? `Needs ${unsupported}` : t.status}
                         </span>
                       )}
                       <TemplateQualityPill score={t.qualityScore} />

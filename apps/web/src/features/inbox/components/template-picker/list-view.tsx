@@ -11,6 +11,7 @@ import {
 
 import { Input } from "@/components/ui/input";
 import { cn } from "@ccp/shared/utils";
+import { unsupportedTemplateFeature } from "@ccp/shared/template-render";
 import type { TemplateDto } from "@ccp/shared/types";
 
 import { labelCategory } from "./utils";
@@ -63,16 +64,21 @@ export function TemplateListView({
           <EmptyState query={query} />
         ) : (
           <ul className="divide-y divide-border">
-            {templates.map((t) => (
+            {templates.map((t) => {
+              // Commerce templates need product parameters the platform can't
+              // supply — the server refuses them, so offering one is a dead click.
+              const unsupported = unsupportedTemplateFeature(t.components);
+              const sendable = t.status === "approved" && !unsupported;
+              return (
               <li key={t.id}>
                 <button
                   type="button"
-                  onClick={() => t.status === "approved" && onSelect(t.id)}
-                  disabled={t.status !== "approved"}
+                  onClick={() => sendable && onSelect(t.id)}
+                  disabled={!sendable}
                   className={cn(
                     "group flex w-full cursor-pointer items-start gap-3 px-4 py-3 text-left transition-colors",
                     "hover:bg-accent/50 focus:bg-accent/50 focus:outline-hidden",
-                    t.status !== "approved" && "cursor-not-allowed opacity-60 hover:bg-transparent",
+                    !sendable && "cursor-not-allowed opacity-60 hover:bg-transparent",
                   )}
                 >
                   <div className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/8 text-primary">
@@ -86,18 +92,24 @@ export function TemplateListView({
                         {t.language}
                       </span>
                       {t.status !== "approved" && <StatusPill status={t.status} />}
+                      {unsupported && (
+                        <span className="rounded-full border border-warning-border bg-warning-bg px-1.5 py-0.5 text-3xs font-medium uppercase text-warning-fg">
+                          Needs {unsupported}
+                        </span>
+                      )}
                       <QualityPill score={t.qualityScore} />
                     </div>
                     <p className="mt-1 line-clamp-2 text-xs leading-snug text-muted-foreground">
                       {t.bodyText || "—"}
                     </p>
                   </div>
-                  {t.status === "approved" && (
+                  {sendable && (
                     <ChevronRight className="mt-2 size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
                   )}
                 </button>
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </div>
