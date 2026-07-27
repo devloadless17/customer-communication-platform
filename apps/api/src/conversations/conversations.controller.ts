@@ -117,8 +117,19 @@ export class ConversationsController {
    * GET wouldn't accidentally match `/counts` as an id.
    */
   @Get("counts")
-  async counts(@CurrentSession() session: ApiSession) {
-    return this.conversations.counts(session.workspaceId, session.userId, session);
+  async counts(
+    @CurrentSession() session: ApiSession,
+    // `?accountId=` narrows every bucket to one channel account — the inbox
+    // sidebar's account filter. Without it the preset badges kept counting the
+    // whole workspace while the list showed one number's threads.
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.conversations.counts(
+      session.workspaceId,
+      session.userId,
+      session,
+      accountId || null,
+    );
   }
 
   /**

@@ -175,6 +175,8 @@ export class ConversationsService {
     workspaceId: string,
     viewerUserId: string,
     viewer?: ConversationViewer,
+    /** Narrow every bucket to one channel account (the sidebar's account filter). */
+    accountId?: string | null,
   ): Promise<{
     active: number;
     all: number;
@@ -215,16 +217,27 @@ export class ConversationsService {
     // instinct and it is wrong here: the sidebar count must move the moment
     // YOU close or assign a thread, and CLAUDE.md holds the inbox to
     // "everything feels instant". `mine` is never memoized at all.
-    const team = await this.teamCounts(workspaceId, unreadWhere, viewer);
+    // A sibling spread is safe here (no other predicate touches
+    // channelConnectionId), unlike the visibility scope's AND treatment.
+    const accountWhere: Prisma.ConversationWhereInput = accountId
+      ? { channelConnectionId: accountId }
+      : {};
+    const team = await this.teamCounts(workspaceId, unreadWhere, viewer, accountId);
     const [mine, uMine] = await Promise.all([
       this.db.conversation.count({
-        where: { workspaceId, status: { not: "closed" }, assignedUserId: viewerUserId },
+        where: {
+          workspaceId,
+          status: { not: "closed" },
+          assignedUserId: viewerUserId,
+          ...accountWhere,
+        },
       }),
       this.db.conversation.count({
         where: {
           workspaceId,
           status: { not: "closed" },
           assignedUserId: viewerUserId,
+          ...accountWhere,
           ...unreadWhere,
         },
       }),
@@ -251,13 +264,17 @@ export class ConversationsService {
     workspaceId: string,
     unreadWhere: Prisma.ConversationWhereInput,
     viewer?: ConversationViewer,
+    accountId?: string | null,
   ): Promise<TeamCountsBlock> {
     const scope = viewer ? visibilityWhere(viewer) : {};
     // The memo key MUST include the scope. Keyed by workspaceId alone, a restricted
     // agent would read another agent's cached totals — a leak no WHERE clause
     // could catch, because the query never runs. Unrestricted viewers all share
     // the "team" key, so the cache stays exactly as effective as before.
-    const key = `${workspaceId}::${viewer ? visibilityScopeKey(viewer) : "team"}`;
+    // The ACCOUNT narrow is part of the key for the same reason: an
+    // account-narrowed block served from the team-wide slot (or vice versa)
+    // would be silently wrong for everyone who reads it.
+    const key = `${workspaceId}::${viewer ? visibilityScopeKey(viewer) : "team"}::acct:${accountId ?? "all"}`;
     const hit = this.teamCountsCache.get(key);
     if (hit && Date.now() - hit.at < ConversationsService.COUNTS_TTL_MS) return hit.value;
     const inFlight = this.teamCountsInFlight.get(key);
@@ -266,7 +283,7 @@ export class ConversationsService {
     // queries instead of N.
     if (inFlight) return inFlight;
 
-    const p = this.loadTeamCounts(workspaceId, unreadWhere, scope)
+    const p = this.loadTeamCounts(workspaceId, unreadWhere, scope, accountId)
       .then((value) => {
         this.teamCountsCache.set(key, { at: Date.now(), value });
         return value;
@@ -282,7 +299,11 @@ export class ConversationsService {
     workspaceId: string,
     unreadWhere: Prisma.ConversationWhereInput,
     scope: { assignedUserId?: string } = {},
+    accountId?: string | null,
   ): Promise<TeamCountsBlock> {
+    const acct: Prisma.ConversationWhereInput = accountId
+      ? { channelConnectionId: accountId }
+      : {};
     const [
       active,
       all,
@@ -297,10 +318,10 @@ export class ConversationsService {
       uFlagged,
     ] = await Promise.all([
       this.db.conversation.count({
-        where: { workspaceId, ...scope, status: { not: "closed" } },
+        where: { workspaceId, ...scope, ...acct, status: { not: "closed" } },
       }),
       this.db.conversation.count({
-        where: { workspaceId, ...scope },
+        where: { workspaceId, ...scope, ...acct },
       }),
       this.db.conversation.count({
         // AND, not a sibling spread: `assignedUserId: null` would otherwise
@@ -310,11 +331,12 @@ export class ConversationsService {
         // has no unassigned conversations by definition.
         where: {
           workspaceId,
+          ...acct,
           AND: [scope, { status: { not: "closed" }, assignedUserId: null }],
         },
       }),
       this.db.conversation.count({
-        where: { workspaceId, ...scope, status: "closed" },
+        where: { workspaceId, ...scope, ...acct, status: "closed" },
       }),
       // Threads with at least one unresolved triage flag. Rides the partial
       // index Conversation_workspaceId_openFlag_idx, which spans only flagged rows —
@@ -322,7 +344,7 @@ export class ConversationsService {
       // partition. Deliberately NOT status-narrowed: an unresolved complaint on
       // a closed thread still needs triage (matches the list filter).
       this.db.conversation.count({
-        where: { workspaceId, ...scope, openFlagCount: { gt: 0 } },
+        where: { workspaceId, ...scope, ...acct, openFlagCount: { gt: 0 } },
       }),
       this.db.contact.groupBy({
         by: ["stageId"],
@@ -337,19 +359,20 @@ export class ConversationsService {
           workspaceId,
           stageId: { not: null },
           deletedAt: null,
-          conversations: { some: scope },
+          conversations: { some: { ...scope, ...acct } },
         },
         _count: true,
       }),
       this.db.conversation.count({
-        where: { workspaceId, ...scope, status: { not: "closed" }, ...unreadWhere },
+        where: { workspaceId, ...scope, ...acct, status: { not: "closed" }, ...unreadWhere },
       }),
       this.db.conversation.count({
-        where: { workspaceId, ...scope, ...unreadWhere },
+        where: { workspaceId, ...scope, ...acct, ...unreadWhere },
       }),
       this.db.conversation.count({
         where: {
           workspaceId,
+          ...acct,
           AND: [
             scope,
             { status: { not: "closed" }, assignedUserId: null, ...unreadWhere },
@@ -357,10 +380,10 @@ export class ConversationsService {
         },
       }),
       this.db.conversation.count({
-        where: { workspaceId, ...scope, status: "closed", ...unreadWhere },
+        where: { workspaceId, ...scope, ...acct, status: "closed", ...unreadWhere },
       }),
       this.db.conversation.count({
-        where: { workspaceId, ...scope, openFlagCount: { gt: 0 }, ...unreadWhere },
+        where: { workspaceId, ...scope, ...acct, openFlagCount: { gt: 0 }, ...unreadWhere },
       }),
     ]);
     return {
@@ -540,7 +563,7 @@ export class ConversationsService {
 
   globalSearchMessages(
     workspaceId: string,
-    opts: { query: string; take?: number; cursor?: string },
+    opts: { query: string; take?: number; cursor?: string; accountId?: string | null },
     viewer?: ConversationViewer,
   ) {
     return searchAllMessages(workspaceId, {
@@ -551,7 +574,7 @@ export class ConversationsService {
 
   globalSearchNotes(
     workspaceId: string,
-    opts: { query: string; take?: number; cursor?: string },
+    opts: { query: string; take?: number; cursor?: string; accountId?: string | null },
     viewer?: ConversationViewer,
   ) {
     return searchAllNotes(workspaceId, {

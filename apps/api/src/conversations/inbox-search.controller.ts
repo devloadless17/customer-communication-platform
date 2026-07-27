@@ -43,7 +43,12 @@ export class InboxSearchController {
     const q = (query.q ?? "").trim();
     if (q.length === 0) return { items: [], nextCursor: null };
 
-    const opts = { query: q, take: query.take, cursor: query.cursor };
+    const opts = {
+      query: q,
+      take: query.take,
+      cursor: query.cursor,
+      accountId: query.accountId ?? null,
+    };
     switch (query.scope) {
       case "contacts":
         return this.conversations.globalSearchContacts(session.workspaceId, opts, session);

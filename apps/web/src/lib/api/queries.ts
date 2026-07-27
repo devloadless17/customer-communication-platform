@@ -734,6 +734,10 @@ export interface BroadcastListItem {
   failedCount: number;
   createdById: string | null;
   createdByName: string;
+  /** The account this campaign went out from; null when since disconnected
+   *  (SetNull FK) or pre-dating account stamping. */
+  channelConnectionId: string | null;
+  accountName: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;

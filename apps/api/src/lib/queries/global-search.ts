@@ -314,6 +314,8 @@ export async function searchAllMessages(
      * must be scoped as tightly as the conversation list itself.
      */
     visibility?: { assignedUserId?: string };
+    /** Narrow to one channel account's threads (the sidebar's account filter). */
+    accountId?: string | null;
   },
 ): Promise<GlobalMessageSearchPage> {
   const take = clampTake(opts.take, DEFAULT_TAKE);
@@ -321,10 +323,16 @@ export async function searchAllMessages(
   if (query.length === 0) return { items: [], nextCursor: null };
 
   const cursor = parseMessageCursor(opts.cursor ?? null);
+  const conversationWhere = {
+    ...(opts.visibility?.assignedUserId
+      ? { assignedUserId: opts.visibility.assignedUserId }
+      : {}),
+    ...(opts.accountId ? { channelConnectionId: opts.accountId } : {}),
+  };
   const matchBody = {
     body: { contains: query, mode: "insensitive" as const },
-    ...(opts.visibility?.assignedUserId
-      ? { conversation: { assignedUserId: opts.visibility.assignedUserId } }
+    ...(Object.keys(conversationWhere).length > 0
+      ? { conversation: conversationWhere }
       : {}),
   };
 
@@ -410,6 +418,8 @@ export async function searchAllNotes(
      * must be scoped as tightly as the conversation list itself.
      */
     visibility?: { assignedUserId?: string };
+    /** Narrow to one channel account's threads (the sidebar's account filter). */
+    accountId?: string | null;
   },
 ): Promise<NoteSearchPage> {
   const take = clampTake(opts.take, DEFAULT_TAKE);
@@ -422,11 +432,17 @@ export async function searchAllNotes(
   // set per query is small (notes are sparse vs messages) and the trgm GIN on
   // body filters first. Reuse the message cursor codec — same (timestamp, id) shape.
   const cursor = parseMessageCursor(opts.cursor ?? null);
+  const noteConversationWhere = {
+    ...(opts.visibility?.assignedUserId
+      ? { assignedUserId: opts.visibility.assignedUserId }
+      : {}),
+    ...(opts.accountId ? { channelConnectionId: opts.accountId } : {}),
+  };
   const matchWhere = {
     workspaceId,
     body: { contains: query, mode: "insensitive" as const },
-    ...(opts.visibility?.assignedUserId
-      ? { conversation: { assignedUserId: opts.visibility.assignedUserId } }
+    ...(Object.keys(noteConversationWhere).length > 0
+      ? { conversation: noteConversationWhere }
       : {}),
   };
 

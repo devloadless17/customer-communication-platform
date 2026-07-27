@@ -9,6 +9,8 @@ import type {
   NoteSearchHit,
 } from "@ccp/shared/dtos";
 
+import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
+
 const DEBOUNCE_MS = 250;
 
 /** Result row type for a given scope. */
@@ -56,6 +58,15 @@ export function useInboxSearch<S extends InboxSearchScope>(
   const trimmed = query.trim();
   const active = trimmed.length > 0;
 
+  // The sidebar's account narrow rides along so message/note hits stay inside
+  // the number the inbox is currently scoped to (the server ignores it for
+  // contacts — a person isn't account-scoped). Changing the narrow re-runs the
+  // first page via the effect deps below.
+  const { accountId } = useInboxFilter();
+  const accountParam = accountId
+    ? `&accountId=${encodeURIComponent(accountId)}`
+    : "";
+
   const [results, setResults] = useState<H[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -76,7 +87,7 @@ export function useInboxSearch<S extends InboxSearchScope>(
     setLoading(true);
     const controller = new AbortController();
     const timer = setTimeout(() => {
-      const url = `/api/inbox/search?scope=${scope}&q=${encodeURIComponent(trimmed)}`;
+      const url = `/api/inbox/search?scope=${scope}&q=${encodeURIComponent(trimmed)}${accountParam}`;
       fetch(url, { signal: controller.signal })
         .then((r) => (r.ok ? (r.json() as Promise<Page<H>>) : null))
         .then((page) => {
@@ -94,7 +105,7 @@ export function useInboxSearch<S extends InboxSearchScope>(
       clearTimeout(timer);
       controller.abort();
     };
-  }, [active, trimmed, scope]);
+  }, [active, trimmed, scope, accountParam]);
 
   const cursorRef = useRef(nextCursor);
   useEffect(() => {
@@ -117,7 +128,7 @@ export function useInboxSearch<S extends InboxSearchScope>(
         setNextCursor(page.nextCursor);
       })
       .finally(() => setLoadingMore(false));
-  }, [scope]);
+  }, [scope, accountParam]);
 
   return { active, results, nextCursor, loading, loadingMore, loadMore };
 }

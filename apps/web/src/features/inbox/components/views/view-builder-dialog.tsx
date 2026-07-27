@@ -22,6 +22,7 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
+import { useChannelAccounts } from "@/features/inbox/contexts/channel-accounts-context";
 import { VIEW_ICON_OPTIONS, viewIcon } from "./view-icon";
 
 /**
@@ -101,6 +102,20 @@ export function ViewBuilderDialog({
     [],
   );
 
+  // The workspace's connected accounts — offered as a filter only for channels
+  // that hold MORE THAN ONE (with one account, the channel chip already says
+  // it). The criteria plumbing (`channelAccountIds`: shared types → schema →
+  // where-builder) predates this UI; the builder was the only missing link.
+  const { byId: accountsById } = useChannelAccounts();
+  const filterableAccounts = useMemo(() => {
+    const all = [...accountsById.values()];
+    const perChannel = new Map<string, number>();
+    for (const a of all) perChannel.set(a.channel, (perChannel.get(a.channel) ?? 0) + 1);
+    return all
+      .filter((a) => (perChannel.get(a.channel) ?? 0) > 1)
+      .sort((a, b) => a.channel.localeCompare(b.channel) || a.name.localeCompare(b.name));
+  }, [accountsById]);
+
   const summary = useMemo(
     () =>
       summarizeInboxViewFilters(filters, {
@@ -108,8 +123,11 @@ export function ViewBuilderDialog({
         tagNames: Object.fromEntries(tags.map((t) => [t.id, t.name])),
         userNames: Object.fromEntries(teammates.map((u) => [u.id, u.name])),
         channelLabels: CHANNEL_LABEL,
+        accountNames: Object.fromEntries(
+          [...accountsById.values()].map((a) => [a.id, a.name]),
+        ),
       }),
-    [filters, stages, tags, teammates],
+    [filters, stages, tags, teammates, accountsById],
   );
 
   const assigneeMode = filters.assignee?.kind ?? "anyone";
@@ -312,6 +330,31 @@ export function ViewBuilderDialog({
               ))}
             </ChipRow>
           </Group>
+
+          {filterableAccounts.length > 0 && (
+            <Group label="Account">
+              <ChipRow>
+                {filterableAccounts.map((a) => (
+                  <Chip
+                    key={a.id}
+                    active={!!filters.channelAccountIds?.includes(a.id)}
+                    onClick={() =>
+                      setFilters((f) => ({
+                        ...f,
+                        channelAccountIds: toggle(f.channelAccountIds, a.id),
+                      }))
+                    }
+                  >
+                    {CHANNEL_LABEL[a.channel]} · {a.name}
+                  </Chip>
+                ))}
+              </ChipRow>
+              <p className="mt-1.5 text-2xs text-muted-foreground">
+                Narrow to specific numbers or accounts on a channel that has
+                several connected.
+              </p>
+            </Group>
+          )}
 
           {stages.length > 0 && (
             <Group label="Stage">

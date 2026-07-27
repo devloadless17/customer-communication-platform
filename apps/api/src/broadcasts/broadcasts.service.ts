@@ -1400,7 +1400,16 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: pageMode ? take : take + 1,
       ...(pageMode ? { skip: offset } : {}),
-      include: { createdBy: { select: { id: true, name: true } } },
+      include: {
+        createdBy: { select: { id: true, name: true } },
+        // The sender identity. With several numbers/Pages on a channel,
+        // "which account did this go out from" is the first question about a
+        // historical campaign — the id was persisted from day one but never
+        // surfaced.
+        channelConnection: {
+          select: { label: true, externalAccountId: true, config: true },
+        },
+      },
     });
     const hasMore = pageMode ? false : rows.length > take;
     const page = hasMore ? rows.slice(0, take) : rows;
@@ -1430,6 +1439,10 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         failedCount: b.failedCount,
         createdById: b.createdById,
         createdByName: b.createdBy?.name ?? "Removed user",
+        channelConnectionId: b.channelConnectionId,
+        // Null = the number was since disconnected (SetNull FK) or the row
+        // predates account stamping — the UI renders a "removed" fallback.
+        accountName: this.accountDisplayName(b.channelConnection),
         createdAt: b.createdAt.toISOString(),
         startedAt: b.startedAt?.toISOString() ?? null,
         completedAt: b.completedAt?.toISOString() ?? null,
@@ -1437,6 +1450,23 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       nextCursor,
       totalCount,
     };
+  }
+
+  /**
+   * Display name for the account a campaign was bound to — same precedence the
+   * channel-accounts directory uses (label → display number → provider id).
+   */
+  private accountDisplayName(
+    conn: {
+      label: string | null;
+      externalAccountId: string;
+      config: Prisma.JsonValue;
+    } | null,
+  ): string | null {
+    if (!conn) return null;
+    const display = (conn.config as { displayPhoneNumber?: string } | null)
+      ?.displayPhoneNumber;
+    return conn.label || display || conn.externalAccountId;
   }
 
   /**
@@ -1586,6 +1616,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       where: { id, workspaceId },
       include: {
         createdBy: { select: { id: true, name: true } },
+        channelConnection: {
+          select: { label: true, externalAccountId: true, config: true },
+        },
         recipients: {
           // Failures must sort FIRST so they're never truncated out of the
           // RECIPIENTS_INLINE_CAP (the operator triages failures first). NOTE:
@@ -1651,6 +1684,8 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       lastError: row.lastError,
       createdById: row.createdById,
       createdByName: row.createdBy?.name ?? "Removed user",
+      channelConnectionId: row.channelConnectionId,
+      accountName: this.accountDisplayName(row.channelConnection),
       createdAt: row.createdAt.toISOString(),
       startedAt: row.startedAt?.toISOString() ?? null,
       completedAt: row.completedAt?.toISOString() ?? null,

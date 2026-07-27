@@ -66,6 +66,9 @@ export interface BroadcastDetailDto {
   genuineFailedCount: number;
   lastError: string | null;
   createdByName: string;
+  /** The account this campaign went out from; null when since disconnected. */
+  channelConnectionId: string | null;
+  accountName: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -489,6 +492,15 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span>Language: {data.templateLanguage}</span>
           <span>·</span>
+          {/* Sender identity. Absent for legacy rows (pre-account-stamping,
+              removed best-channel campaigns) and numbers since disconnected —
+              omitting beats guessing there. */}
+          {data.accountName && (
+            <>
+              <span>Sent from {data.accountName}</span>
+              <span>·</span>
+            </>
+          )}
           <span>By {data.createdByName}</span>
           <span>·</span>
           <LocalTime iso={data.createdAt} format="listTime" />

@@ -506,7 +506,10 @@ function TableView({
                 </Link>
                 <div className="truncate text-2xs text-muted-foreground">
                   {b.name && b.templateName ? `${b.templateName} · ` : ""}
-                  {b.templateLanguage ? `${b.templateLanguage} · ` : ""}by {b.createdByName}
+                  {b.templateLanguage ? `${b.templateLanguage} · ` : ""}
+                  {/* Sender identity — the first question about a historical
+                      campaign once a channel holds several accounts. */}
+                  {b.accountName ? `from ${b.accountName} · ` : ""}by {b.createdByName}
                 </div>
               </td>
               <td className="px-4 py-3 text-muted-foreground">

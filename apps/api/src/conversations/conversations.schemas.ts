@@ -80,6 +80,10 @@ export const GlobalSearchQuerySchema = z.object({
   q: z.string().max(200).optional(),
   cursor: z.string().min(1).optional(),
   take: takeQuery,
+  // The sidebar's account narrow. Messages/notes scope through their
+  // conversation; contacts are account-less (a person, not a thread) and
+  // ignore it.
+  accountId: z.string().min(1).optional(),
 });
 export type GlobalSearchQuery = z.infer<typeof GlobalSearchQuerySchema>;
 

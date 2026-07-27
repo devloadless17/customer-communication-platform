@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { useCoalescedAsync } from "@/features/inbox/lib/coalesce";
+import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
 import { getClientSocket } from "@/lib/socket-client";
 import { useSocketReconnect } from "@/hooks/use-socket-reconnect";
 
@@ -91,9 +92,20 @@ export function useConversationCounts(): ConversationCounts | null {
   // so we refresh defensively.
   const lastStageRef = useRef<Map<string, string | null>>(new Map());
 
+  // The sidebar's account narrow. Without it the preset badges kept counting
+  // the whole workspace while the list showed one number's threads —
+  // "Unassigned 12" next to a list of 3. `fnRef` inside useCoalescedAsync
+  // always runs the latest closure, so the coalesced refresh picks the
+  // current accountId up without changing the callback's identity.
+  const { accountId } = useInboxFilter();
+
   const refresh = useCoalescedAsync(async () => {
     try {
-      const res = await fetchWithSessionGuard(`/api/conversations/counts`);
+      const res = await fetchWithSessionGuard(
+        `/api/conversations/counts${
+          accountId ? `?accountId=${encodeURIComponent(accountId)}` : ""
+        }`,
+      );
       if (!res.ok) return;
       const body = (await res.json()) as ConversationCounts;
       // Drop the result if we're still inside the settling window — the
@@ -123,6 +135,12 @@ export function useConversationCounts(): ConversationCounts | null {
     () => void refresh(),
     () => void refresh(),
   );
+
+  // Switching the account narrow changes what every bucket means — refetch.
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId]);
 
   useEffect(() => {
     void refresh();
