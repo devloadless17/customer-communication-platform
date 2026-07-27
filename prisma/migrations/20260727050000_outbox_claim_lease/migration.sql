@@ -1,0 +1,11 @@
+-- Outbox at-least-once (2026-07-27). `claimedAt` is the drainer's lease
+-- stamp: claim → dispatch → publish. A crash between claim and publish now
+-- REDELIVERS after the lease expires instead of silently losing the fan-out
+-- (the old model stamped publishedAt BEFORE dispatch — at-most-once).
+--
+-- The hand-maintained partial index `OutboundEvent_drainer_pending_idx`
+-- (WHERE "publishedAt" IS NULL AND "failedAt" IS NULL — see the 0_init
+-- baseline's raw-SQL section) REMAINS VALID AND UNCHANGED: the lease
+-- predicate filters WITHIN that indexed subset, so this migration must not
+-- touch it and partial-indexes.spec.ts still passes as-is.
+ALTER TABLE "OutboundEvent" ADD COLUMN "claimedAt" TIMESTAMP(3);

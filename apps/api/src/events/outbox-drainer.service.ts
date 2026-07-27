@@ -13,6 +13,7 @@ import {
   markDispatched,
   markPublishedWithError,
   setOutboxKickHandler,
+  sweepExhaustedClaims,
 } from "@/lib/events/outbox";
 import type {
   DomainEvent,
@@ -30,12 +31,17 @@ import { EventBus } from "./event-bus.service";
  * `publishInTx(tx, event)` from inside a transaction) and dispatches them
  * to in-process subscribers.
  *
- * Semantics:
- *   - `claimBatch` marks the rows `publishedAt = NOW()` ATOMICALLY before
- *     dispatch. At-most-once delivery: a process crash mid-dispatch leaves
- *     `publishedAt IS NOT NULL` even though subscribers never fired. The
- *     row stays in the table as a forensic record.
- *   - Subscriber throws are logged. Per-row failures don't poison the batch.
+ * Semantics (AT-LEAST-ONCE since 2026-07-27 — the §9 contract):
+ *   - `claimBatch` LEASES rows (`claimedAt = NOW()`, attempts+1) before
+ *     dispatch; `markDispatched` stamps `publishedAt` after the subscriber
+ *     chain ran. A process crash mid-dispatch leaves publishedAt NULL, and
+ *     the row REDELIVERS once its lease expires — subscribers tolerate the
+ *     crash-window duplicates (that has always been §9's redelivery clause).
+ *     Poison rows are capped (`sweepExhaustedClaims`) → terminal failure.
+ *   - Subscriber throws are logged AND close the row terminally
+ *     (`markPublishedWithError`) — re-running a chain where the other
+ *     subscribers succeeded would double-fire them. Per-row failures don't
+ *     poison the batch.
  *   - The tick keeps pulling claims until `claimBatch` returns ZERO rows (the
  *     table is drained for this tick) or `MAX_DRAINS_PER_TICK` is hit. It does
  *     NOT stop on a short (`< BATCH_SIZE`) claim — the per-team fairness cap
@@ -118,8 +124,11 @@ export class OutboxDrainerService
    * trips (finding#32) — only a genuinely stuck loop (e.g. `claimBatch` hung on a
    * dead pool, outside the per-row timeout's reach) does. Force the inflight latch
    * off + reschedule so the drainer self-heals instead of going dark until a human
-   * notices. Safe: at-most-once is preserved by the `publishedAt`-before-dispatch
-   * mark, so a second concurrent tick can never re-claim the first's rows.
+   * notices. Safe: the force-released tick's rows hold their claim LEASE
+   * (10 min ≫ this watchdog + the worst-case dispatch), so a second tick
+   * cannot re-claim them while the stuck one could still be limping — and if
+   * they never publish, the lease redelivers them: the at-least-once
+   * contract working as intended.
    *
    * Must exceed the worst-case single-row dispatch so one slow-but-advancing row
    * at the tail of a batch (no other lane refreshing progress) can't trip it: a
@@ -211,9 +220,11 @@ export class OutboxDrainerService
     // (90s lockDuration + tail). 25s comfortably fits two full batches
     // through the new parallel-dispatch path even under slow-subscriber
     // worst case. The earlier 2s deadline routinely SIGKILL'd the drainer
-    // mid-batch under burst load — its rows were pre-marked `publishedAt`
-    // (at-most-once), so the side effects downstream of those subscribers
-    // (audit rows, outbound webhook enqueues) were silently skipped.
+    // mid-batch under burst load — under the old at-most-once model those
+    // rows were pre-marked `publishedAt`, so their downstream side effects
+    // (audit rows, outbound webhook enqueues) were silently skipped. Under
+    // the lease model a kill here merely redelivers after the lease; the
+    // generous deadline now exists to finish cleanly, not to avoid loss.
     // The `this.stopping` check inside `tick`'s loop also lets in-flight
     // dispatches drain without picking up new batches.
     const flushDeadline = Date.now() + 25_000;
@@ -287,6 +298,9 @@ export class OutboxDrainerService
     this.lastProgressAt = this.tickStartedAt;
     const myToken = ++this.tickToken;
     try {
+      // Poison guard, once per tick: rows past the claim ceiling become
+      // terminal failures instead of clogging the oldest-pending window.
+      await sweepExhaustedClaims().catch(() => {});
       let drains = 0;
       while (drains < OutboxDrainerService.MAX_DRAINS_PER_TICK) {
         if (this.stopping) break;
@@ -337,9 +351,10 @@ export class OutboxDrainerService
         // partition, parallel across) is deferred until that race is observed.
         rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
         // Collect rows that actually finished dispatch (subscribers ran, even
-        // if one errored) so we can stamp `dispatchedAt` — closing the bracket
-        // opened by claimBatch's pre-dispatch `publishedAt`. Rows that crash /
-        // throw at the envelope level stay undispatched (the loss-window signal).
+        // if one errored) so markDispatched can stamp `publishedAt` +
+        // `dispatchedAt` — closing the LEASE claimBatch opened. Envelope-level
+        // throws are closed terminally inside dispatch() instead; a hard crash
+        // leaves only `claimedAt`, and the lease redelivers.
         const dispatched: string[] = [];
         await runWithConcurrency(
           rows,
@@ -466,10 +481,10 @@ export class OutboxDrainerService
       // Per-subscriber errors are already swallowed inside runSubscribers
       // (and surfaced via the return value above); this catch is for
       // unexpected envelope problems (corrupted JSON, type missing from
-      // the bus, etc.). The row's `publishedAt` is ALREADY set by
-      // claimBatch — so we use markPublishedWithError (not markFailed,
-      // whose `WHERE publishedAt IS NULL` predicate would silently match
-      // zero rows and the error trail would only land in stdout).
+      // the bus, etc.). Envelope errors are DETERMINISTIC — a lease
+      // redelivery would just crash the same way — so close the row
+      // terminally (markPublishedWithError sets publishedAt + failedAt)
+      // rather than letting it loop toward the attempts ceiling.
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(
         withCorrelation(`[outbox-drainer] dispatch row=${row.id} type=${row.type}`),

@@ -152,11 +152,12 @@ export async function persistDispatchedRow<K extends DomainEventType>(
 }
 
 /**
- * Stamp `failedAt` + `lastError` on an already-claimed (publishedAt set) row
- * when a subscriber threw mid-dispatch. The row STAYS marked-published
- * (at-most-once dispatch was completed; we won't re-fire — the drainer's claim
- * filters on `publishedAt IS NULL`, so setting failedAt here can't make it
- * re-grab the row), but the error trail is now durable instead of stdout-only.
+ * TERMINALLY close a claimed row whose dispatch errored — a subscriber threw
+ * (the rest of the chain still ran), or the envelope itself was undispatchable
+ * (corrupted JSON, unknown type). Sets `publishedAt` (done — never
+ * redelivered: retrying a chain where 4 of 5 subscribers succeeded would
+ * double-fire the four, and an envelope error is deterministic, so a retry is
+ * a poison loop) plus `failedAt` + `lastError` for operator triage.
  *
  * `failedAt` is set so the row matches the retention sweeper's "failedAt NOT
  * NULL → KEEP for operator triage" rule (outbound-event-retention.ts). Without
@@ -173,42 +174,74 @@ export async function markPublishedWithError(
   lastError: string,
 ): Promise<void> {
   const truncated = lastError.length > 1000 ? lastError.slice(0, 1000) + "…" : lastError;
+  // Two steps so a row that ALREADY carries a publishedAt stamp (the sync
+  // path's create, or a prior partial-error mark) keeps its original
+  // timestamp; only a claimed-but-unpublished row gets stamped now.
   await db.outboundEvent.updateMany({
-    where: { id, publishedAt: { not: null } },
+    where: { id, publishedAt: null },
+    data: { publishedAt: new Date() },
+  });
+  await db.outboundEvent.updateMany({
+    where: { id },
     data: { lastError: truncated, failedAt: new Date() },
   });
 }
 
 /**
- * Stamp `dispatchedAt` AFTER every subscriber for these rows finished
- * dispatching (success path). publishedAt is set BEFORE dispatch (at-most-once);
- * dispatchedAt closes the bracket. A row stuck published-but-undispatched for
- * minutes = the rare hard-crash-mid-dispatch loss window — see the column doc
- * in schema.prisma for the ad-hoc detection query. One batched UPDATE per
- * drain claim (cheap); never re-dispatches (that would double-fire side
- * effects — the no-duplicates posture). Best-effort: a failure here only loses
- * the bracket stamp, not the dispatch itself.
+ * Stamp completion AFTER every subscriber for these rows finished
+ * dispatching. Under the at-least-once lease model (2026-07-27) this is where
+ * `publishedAt` lands for drainer-claimed rows — claim (`claimedAt`) →
+ * dispatch → THIS — so a crash mid-dispatch leaves publishedAt NULL and the
+ * row redelivers once the lease expires. `dispatchedAt` closes the forensic
+ * bracket as before (the retention sweeper's EVT-2 rule keys on it).
+ *
+ * Two batched UPDATEs, not one: the sync path (`persistDispatchedRow`)
+ * already wrote its own publishedAt at create, and clobbering it here would
+ * shift the forensic timestamp — so publishedAt is only backfilled where
+ * NULL. Best-effort: a failure here only delays the stamps; the lease
+ * redelivers the rows and consumers tolerate the duplicates (§9).
  */
 export async function markDispatched(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
+  const now = new Date();
+  await db.outboundEvent.updateMany({
+    where: { id: { in: ids }, publishedAt: null },
+    data: { publishedAt: now },
+  });
   await db.outboundEvent.updateMany({
     where: { id: { in: ids }, dispatchedAt: null },
-    data: { dispatchedAt: new Date() },
+    data: { dispatchedAt: now },
   });
 }
 
 /**
  * Drainer-side batch fetch. Picks the oldest pending rows up to `limit` and
- * atomically marks them attempted via a single UPDATE…RETURNING so two
- * drainer instances in a hypothetical multi-process future would not pick
- * the same row twice.
+ * atomically LEASES them via a single UPDATE…RETURNING so two drainer
+ * instances in a hypothetical multi-process future would not pick the same
+ * row twice.
  *
- * We mark `publishedAt = now()` BEFORE dispatching subscribers (at-most-
- * once) — if the process dies between this mark and the subscriber call,
- * the row is "lost" forever from the wire but visible to a forensic query
- * as `attempts = 1 AND publishedAt IS NOT NULL`. The operator can then
- * manually decide whether to re-publish.
+ * AT-LEAST-ONCE (2026-07-27). The claim stamps `claimedAt` (a lease), NOT
+ * `publishedAt` — that lands in `markDispatched` after the subscriber chain
+ * ran. If the process dies between claim and publish, the row's lease expires
+ * (OUTBOX_CLAIM_LEASE_MS) and a later claim REDELIVERS it — the §9
+ * crash-window guarantee this table exists for. Costs of the redelivery
+ * (duplicate audit pills / analytics bumps for the crash window only) are the
+ * documented §9 contract: consumers tolerate at-least-once, and the
+ * denormalized counters have drift sweepers. Steady-state never redelivers —
+ * publishedAt lands well inside the lease.
+ *
+ * Lease sizing: must exceed the drainer's worst case for a still-RUNNING
+ * dispatch so a redelivery can never race a live one — worst-case single row
+ * ≈ subscriberCount × DISPATCH_TIMEOUT_MS (~150s) and the wedge watchdog
+ * force-releases at 180s; 10 minutes clears both with a wide margin.
+ *
+ * Poison guard: a row that keeps crashing the process (or keeps timing out)
+ * is re-claimed at most MAX_CLAIM_ATTEMPTS times; past the ceiling the sweep
+ * below marks it failed (`redelivery_exhausted`) for operator triage instead
+ * of looping forever.
  */
+const OUTBOX_CLAIM_LEASE_MS = 10 * 60_000;
+const MAX_CLAIM_ATTEMPTS = 5;
 /**
  * Per-team fairness: how many rows the drainer pulls from a SINGLE team per
  * `claimBatch` call. Without this, a 5k-row bulk import from one team publishes
@@ -230,6 +263,23 @@ export async function markDispatched(ids: string[]): Promise<void> {
  * so a bursty tenant's backlog can never crowd another tenant out of the window.
  */
 const PER_TEAM_BATCH_CAP = 100;
+
+/**
+ * Terminally fail rows past the claim ceiling so the pending window (and the
+ * partial index behind it) can't fill up with poison rows that crash or
+ * time out every dispatch. Called ONCE PER DRAINER TICK (not per claim — a
+ * hot tick claims up to 10× and this scans the pending set); virtually
+ * always matches zero rows.
+ */
+export async function sweepExhaustedClaims(): Promise<void> {
+  await db.$executeRaw`
+    UPDATE "OutboundEvent"
+    SET    "failedAt" = NOW(), "lastError" = 'redelivery_exhausted'
+    WHERE  "publishedAt" IS NULL
+      AND  "failedAt"    IS NULL
+      AND  "attempts"    >= ${MAX_CLAIM_ATTEMPTS}
+  `;
+}
 
 export async function claimBatch(limit: number): Promise<OutboxRow[]> {
   // Raw SQL because Prisma can't express UPDATE…WHERE…ORDER BY…LIMIT…
@@ -293,6 +343,8 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
         FROM   "OutboundEvent"
         WHERE  "publishedAt" IS NULL
           AND  "failedAt"    IS NULL
+          AND  ("claimedAt" IS NULL
+                OR "claimedAt" < NOW() - make_interval(secs => ${OUTBOX_CLAIM_LEASE_MS / 1000}))
         ORDER BY "createdAt" ASC
         LIMIT ${limit * 8}
       ) oldest_window
@@ -305,6 +357,10 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
         FROM   "OutboundEvent" o
         WHERE  o."publishedAt" IS NULL
           AND  o."failedAt"    IS NULL
+          -- Lease gate: unclaimed rows, or claims whose lease expired (a
+          -- crashed dispatch) — the at-least-once redelivery path.
+          AND  (o."claimedAt" IS NULL
+                OR o."claimedAt" < NOW() - make_interval(secs => ${OUTBOX_CLAIM_LEASE_MS / 1000}))
           AND  o."workspaceId"      = t."workspaceId"
         ORDER BY o."createdAt" ASC
         LIMIT  ${PER_TEAM_BATCH_CAP}
@@ -319,7 +375,7 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
       FROM   candidates
     )
     UPDATE "OutboundEvent"
-    SET    "publishedAt" = NOW(),
+    SET    "claimedAt" = NOW(),
            "attempts" = "attempts" + 1
     WHERE  "id" IN (
       SELECT "id" FROM ranked

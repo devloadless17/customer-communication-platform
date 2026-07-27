@@ -4095,28 +4095,39 @@ model OutboundEvent {
   payload Json
 
   createdAt    DateTime  @default(now())
-  // Set when the drainer (or the synchronous publish path) successfully
-  // ran all subscribers. Null = pending OR failed (see `failedAt`).
+  // Set when the drainer (or the synchronous publish path) finished running
+  // this row's subscribers — success, OR a terminal per-subscriber error (see
+  // `failedAt`); either way the row is DONE and never redelivered. Null =
+  // pending or claimed-in-flight. (Until 2026-07-27 this was stamped BEFORE
+  // dispatch — at-most-once — so a hard crash mid-dispatch silently lost the
+  // fan-out. It now closes the bracket `claimedAt` opens.)
   publishedAt  DateTime?
-  // Set when dispatch threw. The row is NOT retried — the operator queries
-  // failed rows and decides what to do (manual re-publish, drop, or fix
-  // the subscriber + bulk re-publish).
+  // Lease stamp (at-least-once, 2026-07-27): set when the drainer CLAIMS the
+  // row, before dispatch. A crash between claim and publish leaves
+  // publishedAt NULL, and the row is redelivered once the lease
+  // (OUTBOX_CLAIM_LEASE_MS, 10 min) expires — the crash-window redelivery §9
+  // promises. Consumers tolerate the resulting duplicates (that has always
+  // been the §9 contract); steady-state never redelivers because publishedAt
+  // lands within the lease.
+  claimedAt    DateTime?
+  // Set when dispatch threw, or when redelivery was exhausted
+  // (`attempts` ceiling → lastError "redelivery_exhausted"). The row is NOT
+  // retried — the operator queries failed rows and decides what to do
+  // (manual re-publish, drop, or fix the subscriber + bulk re-publish).
   failedAt     DateTime?
   // Truncated error message from the throwing subscriber. NULL when the
   // dispatch succeeded.
   lastError    String?
-  // Reserved for future at-least-once mode. Today the drainer increments
-  // once on pickup and never retries — so this is always 0 or 1.
+  // Claim counter. 1 on the steady-state happy path; >1 only after a
+  // crash-window redelivery. Capped (see claimBatch) so a poison row can't
+  // loop forever — at the ceiling it is marked failed instead.
   attempts     Int       @default(0)
   // Stamped AFTER the drainer finished dispatching ALL subscribers for this
-  // row. publishedAt is set BEFORE dispatch (at-most-once, so a crash can never
-  // re-dispatch + double-fire — that's the deliberate no-duplicates posture).
-  // A row with publishedAt set + dispatchedAt NULL + failedAt NULL for minutes
-  // is the rare "process hard-crashed mid-dispatch" loss window. Detect ad-hoc
-  // (no always-on sweeper — keeps the hot path lean):
-  //   SELECT count(*) FROM "OutboundEvent"
-  //   WHERE "publishedAt" < now() - interval '5 minutes'
-  //     AND "dispatchedAt" IS NULL AND "failedAt" IS NULL;
+  // row — same moment as publishedAt on the success path (kept as its own
+  // column because the retention sweeper's EVT-2 rule and existing forensic
+  // queries key on it). A row with claimedAt set + publishedAt NULL is
+  // in-flight (or awaiting redelivery after a crash); it is NEVER silently
+  // lost anymore.
   dispatchedAt DateTime?
 
   // Cross-system loop counter (X-CCP-Depth) + correlation id captured at PUBLISH
