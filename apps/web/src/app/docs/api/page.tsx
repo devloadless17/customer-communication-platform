@@ -1294,7 +1294,11 @@ export default function ApiDocsPage() {
           <strong>Launch a campaign</strong>, or schedule one by passing{" "}
           <code>scheduledAt</code>. Build the audience with the audience-group routes
           above, and call <code>preview-missing</code> first so you find out about empty
-          variables now rather than from the failure report. Returns the{" "}
+          variables now rather than from the failure report. <code>variables</code>{" "}
+          accepts the same campaign-level extras as the single-message send —
+          including <code>tapTarget</code> (<code>{`{ url, title }`}</code>, one
+          call-to-action destination for the whole campaign; Meta gates it on a
+          fully verified, high-quality WABA). Returns the{" "}
           <code>broadcastId</code> and the resolved <code>totalCount</code>. Scope{" "}
           <code>write:broadcasts</code>.
         </Endpoint>

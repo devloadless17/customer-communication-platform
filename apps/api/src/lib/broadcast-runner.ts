@@ -399,6 +399,8 @@ interface BroadcastVariables {
   };
   /** Countdown expiry for a LIMITED_TIME_OFFER template, UNIX milliseconds. */
   limitedTimeOfferExpiresAtMs?: number;
+  /** Tap-target CTA override — one destination/title for the campaign. */
+  tapTarget?: { url: string; title: string };
 }
 
 /**
@@ -1988,6 +1990,8 @@ async function processOneRecipient(
       const headerLocation = variables.headerLocation
         ? { headerLocation: variables.headerLocation }
         : {};
+      // Campaign-level too: one tap-target destination for every recipient.
+      const tapTarget = variables.tapTarget ? { tapTarget: variables.tapTarget } : {};
 
     // The template variables in Meta's wire shape, built ONCE and reused by
       // both the initial send and the 429 retry below. Two inline copies is
@@ -2016,6 +2020,7 @@ async function processOneRecipient(
               ...(headerMedia ? { headerMedia } : {}),
               ...headerLocation,
               ...offerExpiry,
+              ...tapTarget,
               ...cardsVar,
             }
           : {
@@ -2024,6 +2029,7 @@ async function processOneRecipient(
               ...(headerMedia ? { headerMedia } : {}),
               ...headerLocation,
               ...offerExpiry,
+              ...tapTarget,
               ...cardsVar,
             };
 

@@ -112,6 +112,19 @@ export const BroadcastVariablesSchema = z.object({
    * the whole campaign, which is what a countdown offer means.
    */
   limitedTimeOfferExpiresAtMs: z.number().int().positive().optional(),
+  /**
+   * Tap-target override (`tap_target_configuration`): renders the message as
+   * a CTA opening `url`, labeled `title`. Campaign-level — one destination
+   * for every recipient. Meta gates it (fully-verified, high-quality WABAs)
+   * and publishes NO title length cap, so the bound here is a loose sanity
+   * limit only — never tighten it to a guess.
+   */
+  tapTarget: z
+    .object({
+      url: z.string().url().max(2000),
+      title: z.string().trim().min(1).max(300),
+    })
+    .optional(),
 });
 export type BroadcastVariablesInput = z.infer<typeof BroadcastVariablesSchema>;
 
