@@ -61,6 +61,24 @@ import {
   type UpdateAudienceGroupInput,
 } from "@/workspace-settings/audience-groups/audience-groups.schemas";
 import { SnippetsService } from "@/workspace-settings/snippets/snippets.service";
+import { CustomersService } from "@/customers/customers.service";
+import { WorkflowsService } from "@/workspace-settings/workflows/workflows.service";
+import {
+  ListWorkflowRunsQuerySchema,
+  ManualTriggerSchema,
+  PublishWorkflowSchema,
+  type ListWorkflowRunsQuery,
+  type ManualTriggerInput,
+  type PublishWorkflowInput,
+} from "@/workspace-settings/workflows/workflows.schemas";
+import {
+  LinkContactSchema,
+  RenameCustomerSchema,
+  UnlinkContactSchema,
+  type LinkContactInput,
+  type RenameCustomerInput,
+  type UnlinkContactInput,
+} from "@/customers/customers.schemas";
 import {
   CreateSnippetSchema,
   UpdateSnippetSchema,
@@ -282,6 +300,8 @@ export class ExternalV1Controller {
     private readonly outboundWebhooks: OutboundWebhooksService,
     private readonly audienceGroups: AudienceGroupsService,
     private readonly snippets: SnippetsService,
+    private readonly customers: CustomersService,
+    private readonly workflows: WorkflowsService,
   ) {}
 
   /**
@@ -2003,6 +2023,202 @@ export class ExternalV1Controller {
       body,
       this.idemKeyRequired(idempotencyKey),
     );
+  }
+
+  // ===========================================================================
+  // WORKFLOWS
+  // ===========================================================================
+  //
+  // Parity build, phase 2. The whole automation domain was UI-only.
+  //
+  // Scope split, deliberately: READS are `read:catalog` (a workflow is
+  // configuration); EDITS and publish are `admin:settings` (publishing changes
+  // what happens to everyone's conversations); FIRING a manual workflow is its
+  // own `write:workflows`, because a run executes real step actions including
+  // billed Meta sends — that is not a catalog write.
+
+  @Get("workflows")
+  @RequireScope("read:catalog")
+  async listWorkflowsV1(@CurrentApiKey() auth: ApiKeyContext) {
+    return this.workflows.list(auth.workspaceId);
+  }
+
+  @Get("workflows/:id")
+  @RequireScope("read:catalog")
+  async getWorkflowV1(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+    return this.workflows.get(auth.workspaceId, id);
+  }
+
+  /**
+   * Fire a `manual_trigger` workflow for one contact.
+   *
+   * `Idempotency-Key` is REQUIRED and the chain-depth guard applies: a run can
+   * send billed messages, and a partner firing this from their own webhook
+   * receiver is exactly the loop the depth cap exists for. The workflow must
+   * be published and its trigger must be `manual_trigger` — anything else is
+   * rejected rather than silently doing nothing.
+   */
+  @Post("workflows/:id/trigger")
+  @RequireScope("write:workflows")
+  @RateLimit({ perMinute: 60 })
+  async triggerWorkflowV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(ManualTriggerSchema)) body: ManualTriggerInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    return this.api.triggerWorkflow(
+      auth.workspaceId,
+      auth.apiKeyId,
+      id,
+      body,
+      this.idemKeyRequired(idempotencyKey),
+    );
+  }
+
+  /** Run history for one workflow — what fired, when, and how it ended. */
+  @Get("workflows/:id/runs")
+  @RequireScope("read:catalog")
+  async listWorkflowRunsV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Query(zQuery(ListWorkflowRunsQuerySchema)) query: ListWorkflowRunsQuery,
+  ) {
+    return this.workflows.listRuns(auth.workspaceId, id, query);
+  }
+
+  /** One run, with its per-step journal — the first place to look when an
+   *  automation "did nothing". */
+  @Get("workflows/:id/runs/:runId")
+  @RequireScope("read:catalog")
+  async getWorkflowRunV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Param("runId") runId: string,
+  ) {
+    return this.workflows.getRun(auth.workspaceId, id, runId);
+  }
+
+  /**
+   * Publish / unpublish. `admin:settings`: an unpublished workflow is inert,
+   * so this switch is what makes automation live for the whole workspace.
+   */
+  @Post("workflows/:id/publish")
+  @RequireScope("admin:settings")
+  async publishWorkflowV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(PublishWorkflowSchema)) body: PublishWorkflowInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    const out = await this.workflows.publish(auth.workspaceId, id, body.publish);
+    return { ok: true, ...out };
+  }
+
+  // ===========================================================================
+  // CUSTOMERS (unified identity)
+  // ===========================================================================
+  //
+  // Parity build, phase 2. The platform ships unified customer identity — many
+  // channel-scoped Contacts roll up to one Customer (a person) — but an
+  // API-only integration could not SEE that two contacts were the same human,
+  // let alone merge or split them. That is the largest single gap in /v1.
+  //
+  // Threads stay per-contact/per-channel; a Customer is the profile-and-
+  // switcher layer over them. Merges here are the MANUAL, reversible kind:
+  // automatic merging happens only on deterministic strong keys at ingest and
+  // is deliberately not exposed.
+
+  /** The person behind a contact, with every channel identity they own. */
+  @Get("contacts/:id/customer")
+  @RequireScope("read:contacts")
+  async getCustomerByContactV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    const customer = await this.customers.getProfileByContact(auth.workspaceId, id);
+    return { customer };
+  }
+
+  /**
+   * Possible same-person matches for a contact — the candidates an agent is
+   * shown before confirming a merge. Suggestions ONLY; nothing is merged until
+   * you call link. Never fuzzy-name matching.
+   */
+  @Get("contacts/:id/merge-suggestions")
+  @RequireScope("read:contacts")
+  async getMergeSuggestionsV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    const suggestions = await this.customers.suggestLinks(auth.workspaceId, id);
+    return { suggestions };
+  }
+
+  @Get("customers/:id")
+  @RequireScope("read:contacts")
+  async getCustomerV1(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+    const customer = await this.customers.getProfile(auth.workspaceId, id);
+    return { customer };
+  }
+
+  @Patch("customers/:id")
+  @RequireScope("write:contacts")
+  async renameCustomerV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(RenameCustomerSchema)) body: RenameCustomerInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    const customer = await this.customers.rename(auth.workspaceId, id, body.name);
+    return { ok: true, customer };
+  }
+
+  /**
+   * MERGE: point a contact at this customer. Reversible — merging never
+   * deletes a contact or its messages, it only re-points `Contact.customerId`,
+   * so `unlink` puts it back on its own customer. `actorUserId` is null: an
+   * integration is not a person.
+   */
+  @Post("customers/:id/link")
+  @RequireScope("write:contacts")
+  async linkCustomerContactV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(LinkContactSchema)) body: LinkContactInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    const customer = await this.customers.linkContact(
+      auth.workspaceId,
+      id,
+      body.contactId,
+      null,
+    );
+    return { ok: true, customer };
+  }
+
+  /** SPLIT: take a contact back off this customer onto its own. */
+  @Post("customers/:id/unlink")
+  @RequireScope("write:contacts")
+  async unlinkCustomerContactV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(UnlinkContactSchema)) body: UnlinkContactInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    const out = await this.customers.unlinkContact(
+      auth.workspaceId,
+      id,
+      body.contactId,
+      null,
+    );
+    return { ok: true, ...out };
   }
 
   // ===========================================================================

@@ -116,6 +116,16 @@ export const API_KEY_SCOPES = [
   // grandfathered this scope by migration, so no partner integration broke;
   // NEW keys ask for it explicitly.
   "admin:settings",
+
+  // Fire a manual_trigger workflow from outside the app.
+  //
+  // Its own scope rather than riding `write:catalog`, because a run is not a
+  // catalog edit: it executes real step actions, including BILLED Meta sends.
+  // Reading and EDITING workflows stays under read:catalog / admin:settings —
+  // publishing changes automation for everyone in the workspace, which is an
+  // admin act; firing an already-published manual workflow is an operational
+  // one an integration legitimately does per contact.
+  "write:workflows",
 ] as const;
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];

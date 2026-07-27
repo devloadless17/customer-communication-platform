@@ -50,6 +50,8 @@ import { ApiIdempotencyService } from "./api-idempotency.service";
 import { ExternalV1MessagingService } from "./external-v1-messaging.service";
 import { getProviderBinding } from "@/lib/providers";
 import { CallsService } from "@/calls/calls.service";
+import { WorkflowsService } from "@/workspace-settings/workflows/workflows.service";
+import type { ManualTriggerInput } from "@/workspace-settings/workflows/workflows.schemas";
 import { UsersService } from "@/users/users.service";
 import {
   asWorkHours,
@@ -140,6 +142,9 @@ export class ExternalV1Service {
     // Availability writes go through the SAME service the internal admin route
     // uses, so /v1 and the UI share one writer (and one set of rules).
     private readonly users: UsersService,
+    // Same service the settings UI calls, so a /v1 trigger and a UI trigger
+    // run the identical published/trigger-type gates.
+    private readonly workflows: WorkflowsService,
   ) {}
 
   /**
@@ -2007,6 +2012,43 @@ export class ExternalV1Service {
       items: page.map(externalTemplate),
       nextCursor: hasMore ? (page[page.length - 1]?.id ?? null) : null,
     };
+  }
+
+  /**
+   * Fire a manual_trigger workflow, idempotently.
+   *
+   * A run executes real step actions — including billed Meta sends — so a
+   * partner retry after a timeout must not start a SECOND run. Wrapped in the
+   * irreversible claim for the same reason the send routes are: a crash after
+   * dispatch but before the response is ambiguous, and re-dispatching would
+   * double-send whatever the workflow sends.
+   */
+  async triggerWorkflow(
+    workspaceId: string,
+    apiKeyId: string,
+    workflowId: string,
+    input: ManualTriggerInput,
+    idempotencyKey: string,
+  ): Promise<{ ok: true; runId: string }> {
+    return this.withIdempotency(
+      workspaceId,
+      apiKeyId,
+      idempotencyKey,
+      "POST /v1/workflows/:id/trigger",
+      { workflowId, contactId: input.contactId },
+      async () => {
+        // `null` actor — an integration is not a person; the dispatcher
+        // records the run as system-triggered.
+        const out = await this.workflows.manualTrigger(
+          workspaceId,
+          null,
+          workflowId,
+          input,
+        );
+        return { ok: true as const, runId: out.runId };
+      },
+      { irreversible: true },
+    );
   }
 
   /**

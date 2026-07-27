@@ -482,7 +482,8 @@ export class WorkflowsService {
    */
   async manualTrigger(
     workspaceId: string,
-    userId: string,
+    /** Null when an API key fired it — the dispatcher records "system". */
+    userId: string | null,
     id: string,
     input: ManualTriggerInput,
   ): Promise<{ runId: string }> {

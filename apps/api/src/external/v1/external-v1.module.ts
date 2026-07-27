@@ -19,6 +19,9 @@ import { BroadcastsModule } from "@/broadcasts/broadcasts.module";
 import { OutboundWebhooksAdminModule } from "@/workspace-settings/outbound-webhooks/outbound-webhooks.module";
 import { AudienceGroupsModule } from "@/workspace-settings/audience-groups/audience-groups.module";
 import { SnippetsModule } from "@/workspace-settings/snippets/snippets.module";
+import { CustomersModule } from "@/customers/customers.module";
+// Aliased: the worker module in src/workflows exports the same class NAME.
+import { WorkflowsModule as WorkflowsSettingsModule } from "@/workspace-settings/workflows/workflows.module";
 
 @Module({
   // ContactsModule exports ContactTransferService — /v1 import/export runs the
@@ -50,6 +53,8 @@ import { SnippetsModule } from "@/workspace-settings/snippets/snippets.module";
     OutboundWebhooksAdminModule,
     AudienceGroupsModule,
     SnippetsModule,
+    CustomersModule,
+    WorkflowsSettingsModule,
     AssignmentModule,
     UsersModule,
     MessageFlagsCatalogModule,

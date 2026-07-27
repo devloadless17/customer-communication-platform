@@ -216,3 +216,129 @@ test.describe("/v1 audience groups + snippets", () => {
     expect(res.status()).toBe(403);
   });
 });
+
+test.describe("/v1 customers (unified identity)", () => {
+  test("read the person behind a contact, then merge and split reversibly", async ({
+    request,
+  }) => {
+    // Two contacts, two channels, same human — the exact case the customer
+    // layer exists for. The WhatsApp one carries a Customer because identity
+    // resolution stamps one at INGEST; a hand-seeded row has none, and
+    // `getProfileByContact` honestly returns null for those.
+    const customer = await db().customer.create({
+      data: { workspaceId, name: "Parity Person" },
+      select: { id: true },
+    });
+    const wa = await db().contact.create({
+      data: {
+        workspaceId,
+        name: "Parity Person",
+        identityChannel: "whatsapp",
+        phoneNumber: `+1555${Date.now() % 10_000_000}`,
+        source: "manual",
+        customerId: customer.id,
+      },
+    });
+    const ig = await db().contact.create({
+      data: {
+        workspaceId,
+        name: "Parity Person IG",
+        identityChannel: "instagram",
+        externalContactId: `ig_${Date.now()}`,
+        source: "manual",
+      },
+    });
+
+    const profile = await request.get(
+      `${API}/api/external/v1/contacts/${wa.id}/customer`,
+      { headers: { Authorization: `Bearer ${adminToken}` } },
+    );
+    expect(profile.ok()).toBeTruthy();
+    const customerId: string = (await profile.json()).customer.id;
+    expect(customerId).toBeTruthy();
+
+    // MERGE — reversible by construction: it only re-points customerId.
+    const linked = await request.post(
+      `${API}/api/external/v1/customers/${customerId}/link`,
+      {
+        headers: { Authorization: `Bearer ${adminToken}` },
+        data: { contactId: ig.id },
+      },
+    );
+    expect(linked.ok()).toBeTruthy();
+    expect(
+      (await db().contact.findUnique({ where: { id: ig.id } }))?.customerId,
+    ).toBe(customerId);
+
+    // SPLIT — and critically, NEITHER contact is deleted.
+    const unlinked = await request.post(
+      `${API}/api/external/v1/customers/${customerId}/unlink`,
+      {
+        headers: { Authorization: `Bearer ${adminToken}` },
+        data: { contactId: ig.id },
+      },
+    );
+    expect(unlinked.ok()).toBeTruthy();
+    const after = await db().contact.findUnique({ where: { id: ig.id } });
+    expect(after, "unlink must never delete the contact").not.toBeNull();
+    expect(after?.customerId).not.toBe(customerId);
+
+    await db().contact.deleteMany({ where: { id: { in: [wa.id, ig.id] } } });
+    await db().customer.deleteMany({ where: { workspaceId } });
+  });
+
+  test("reading identity needs read:contacts", async ({ request }) => {
+    const noContacts = await mintKey("E2E no-contacts key", ["read:catalog"]);
+    const res = await request.get(`${API}/api/external/v1/customers/whatever`, {
+      headers: { Authorization: `Bearer ${noContacts}` },
+    });
+    expect(res.status()).toBe(403);
+  });
+});
+
+test.describe("/v1 workflows", () => {
+  test("list is readable, and firing REQUIRES an Idempotency-Key", async ({ request }) => {
+    const list = await request.get(`${API}/api/external/v1/workflows`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    expect(list.ok()).toBeTruthy();
+
+    // The gate that matters: a run can send billed messages, so a retry
+    // without a key must be refused BEFORE anything dispatches.
+    const noKey = await request.post(
+      `${API}/api/external/v1/workflows/wf_does_not_exist/trigger`,
+      {
+        headers: { Authorization: `Bearer ${adminToken}` },
+        data: { contactId: "cnt_x" },
+      },
+    );
+    expect(noKey.status()).toBe(400);
+    expect((await noKey.json()).error).toBe("idempotency_key_required");
+  });
+
+  test("firing needs write:workflows — read:catalog alone can't run automation", async ({
+    request,
+  }) => {
+    const readOnly = await mintKey("E2E wf read key", ["read:catalog"]);
+    const res = await request.post(
+      `${API}/api/external/v1/workflows/wf_x/trigger`,
+      {
+        headers: {
+          Authorization: `Bearer ${readOnly}`,
+          "Idempotency-Key": "e2e-wf-1",
+        },
+        data: { contactId: "cnt_x" },
+      },
+    );
+    expect(res.status()).toBe(403);
+  });
+
+  test("publishing needs admin:settings, not write:workflows", async ({ request }) => {
+    const trigger = await mintKey("E2E wf trigger key", ["write:workflows"]);
+    const res = await request.post(`${API}/api/external/v1/workflows/wf_x/publish`, {
+      headers: { Authorization: `Bearer ${trigger}` },
+      data: { publish: true },
+    });
+    expect(res.status()).toBe(403);
+  });
+});

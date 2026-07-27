@@ -40,6 +40,11 @@ const SCOPES: ReadonlyArray<{ scope: string; grants: string }> = [
   { scope: "read:calls", grants: "read call history + calling-permission state" },
   { scope: "write:calls", grants: "request calling permission · send call buttons" },
   {
+    scope: "write:workflows",
+    grants:
+      "fire a published manual-trigger workflow for a contact. Its own scope because a run executes real step actions, including billed sends — reading and editing workflows stay under read:catalog / admin:settings.",
+  },
+  {
     scope: "write:users",
     grants:
       "legacy — grants nothing on its own. Availability + working-hours writes moved to admin:settings on 2026-07-27; keys minted before then were granted admin:settings automatically.",
@@ -1227,6 +1232,109 @@ export default function ApiDocsPage() {
           Remove a flag entirely — “this was flagged by mistake”. Different from{" "}
           <code>dismissed</code>, which keeps the record that someone looked and decided
           it wasn’t one. Scope <code>write:flags</code>.
+        </Endpoint>
+      </Section>
+
+      <Section title="Customers (unified identity)">
+        <p className="mb-4 text-sm text-muted-foreground">
+          One person often reaches you on several channels — a WhatsApp number, an
+          Instagram handle, a web-chat session. Each of those is a <strong>contact</strong>;
+          the person behind them is a <strong>customer</strong>. Threads stay per-contact
+          (we never merge message histories), so a customer is the profile-and-switcher
+          layer over them.
+          <br />
+          <br />
+          Merging here is the <strong>manual, reversible</strong> kind: linking only
+          re-points a contact at a customer — no contact and no message is ever deleted, so
+          unlink puts it back. Automatic merging happens at ingest on deterministic strong
+          keys only (an exact phone, or an email the customer themselves shared) and is
+          deliberately not exposed here. There is no fuzzy name matching, ever.
+        </p>
+        <Endpoint method="GET" path="/api/external/v1/contacts/:id/customer">
+          <strong>The person behind a contact</strong>, with every channel identity they
+          own — so you can answer &quot;is this the same human?&quot; without guessing.
+          Scope <code>read:contacts</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/contacts/:id/merge-suggestions">
+          <strong>Possible same-person matches</strong> for a contact — the candidates an
+          agent would be shown before confirming. Suggestions only: nothing is merged until
+          you call <code>link</code>. Scope <code>read:contacts</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/customers/:id">
+          <strong>One customer profile</strong> and its linked contacts. Scope{" "}
+          <code>read:contacts</code>.
+        </Endpoint>
+        <Endpoint method="PATCH" path="/api/external/v1/customers/:id" body={{ name: "Dana Okafor" }}>
+          <strong>Rename the person.</strong> Scope <code>write:contacts</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/customers/:id/link"
+          body={{ contactId: "cnt_ig_9f2" }}
+        >
+          <strong>Merge:</strong> attach a contact to this customer. Reversible — this
+          re-points <code>Contact.customerId</code> and nothing else. Scope{" "}
+          <code>write:contacts</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/customers/:id/unlink"
+          body={{ contactId: "cnt_ig_9f2" }}
+        >
+          <strong>Split:</strong> take a contact back off this customer onto its own.
+          Returns the customer id it now belongs to. Scope <code>write:contacts</code>.
+        </Endpoint>
+      </Section>
+
+      <Section title="Workflows (automation)">
+        <p className="mb-4 text-sm text-muted-foreground">
+          Read your automations, fire a manual one for a contact, and inspect what
+          happened. The scope split is deliberate: <strong>reading</strong> is{" "}
+          <code>read:catalog</code> (a workflow is configuration), <strong>publishing</strong>{" "}
+          is <code>admin:settings</code> (it changes what happens to everyone&apos;s
+          conversations), and <strong>firing</strong> one is its own{" "}
+          <code>write:workflows</code> — a run executes real step actions, including billed
+          sends, which is not a catalog write.
+        </p>
+        <Endpoint method="GET" path="/api/external/v1/workflows">
+          <strong>List workflows</strong> with their trigger and published state. Scope{" "}
+          <code>read:catalog</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/workflows/:id">
+          <strong>One workflow</strong>, including its step graph. Scope{" "}
+          <code>read:catalog</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/workflows/:id/trigger"
+          headers={{ "Idempotency-Key": "order-4417-shipped" }}
+          body={{ contactId: "cnt_123", metadata: { orderId: "4417" } }}
+        >
+          <strong>Fire a manual-trigger workflow for one contact.</strong>{" "}
+          <code>Idempotency-Key</code> is <strong>required</strong> — a run can send billed
+          messages, so a retry after a timeout must not start a second one. Use something
+          stable from your side (an order id, the inbound message id), not a random value.
+          The workflow must be <strong>published</strong> and its trigger must be{" "}
+          <code>manual_trigger</code>; anything else is rejected rather than silently doing
+          nothing. <code>metadata</code> is yours — steps can read it. Scope{" "}
+          <code>write:workflows</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/workflows/:id/runs">
+          <strong>Run history</strong> — what fired, when, and how it ended. Scope{" "}
+          <code>read:catalog</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/workflows/:id/runs/:runId">
+          <strong>One run with its per-step journal</strong> — the first place to look when
+          an automation &quot;did nothing&quot;. Scope <code>read:catalog</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/workflows/:id/publish"
+          body={{ publish: true }}
+        >
+          <strong>Publish or unpublish.</strong> An unpublished workflow is inert, so this
+          switch is what makes automation live for the whole workspace. Scope{" "}
+          <code>admin:settings</code>.
         </Endpoint>
       </Section>
 
