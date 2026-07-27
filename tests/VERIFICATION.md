@@ -70,7 +70,7 @@ table/queue/cache/socket-room that references the dying entity.
 | broadcasts (+audience/templates/analytics) | 1 | R (3-track adversarial) + E (meta 165) | ✅ 2026-07-27 |
 | tickets (+SLA+numbering) | 1 | R (adversarial) + E (meta 165) + N (breach guard) | ✅ 2026-07-27 |
 | realtime layer | 1 | R (adversarial) + E (144 e2e two-tab) | ✅ 2026-07-27 |
-| auth / org / workspaces / members | 1 | | ☐ |
+| auth / org / workspaces / members | 1 | R (adversarial) + E (45 e2e) | ✅ 2026-07-27 |
 | external /v1 API | 1 | | ☐ |
 | contacts (+import/export/transfer) | 2 | | ☐ |
 | customers / identity | 2 | | ☐ |
@@ -457,6 +457,49 @@ ACCEPTED / DEFERRED:
   NOT done — §17 forbids rewrites without a concrete defect exposing the
   seam, and this session's fixes landed cleanly inside the current
   structure. Revisit only if a future fix fights the file layout.
+
+### auth / org / workspaces / members (B-M3 session 9, 2026-07-27) — ✅ CLOSED
+
+FIXED (b9649d8):
+- HIGH: self-serve password reset never revoked sessions — Better Auth
+  gates that on `revokeSessionsOnPasswordReset` (unset), while the code
+  comment asserted it happened. The one flow for "someone has my session"
+  left the intruder logged in for 90 days.
+- MED-HIGH: `POST /api/auth/sign-in/email-otp` was an open account+org
+  signup channel (plugin creates the user on an unknown email → our hook
+  mints an Organization with orgRole owner), bypassing the register rate
+  limit, disposable-domain policy, password requirement and lockout. The
+  app has no passwordless flow at all: disableSignUp + edge block.
+- MED: `maxMembers` enforced only at invite-accept while the invite flow
+  routes admins to the uncapped direct-add path; zero-membership org owner
+  locked out in a login→logout loop (no fallback in
+  resolveActiveWorkspaceId); org-wide deactivation's last-admin guard
+  checked only the acting workspace (remove() already spanned all);
+  invite accept had no org-status gate.
+- LOW: canDeleteMember let a workspace admin delete an org ADMIN (latent —
+  no write path grants orgRole admin yet); /api/register skipped the
+  disposable-email policy.
+
+VERIFIED HELD: the four-caller active-workspace rule is genuinely one
+definition, DB-verified and org-scoped everywhere; org-authority gating on
+org-wide actions (delete = RequireOrgRole owner, no superAdmin bypass);
+tenant boundary on every workspace route; one-org-per-user + global email
+(org delete cascades orphans, so emails no longer strand); every
+concurrency guard holds (workspace-create cap, invite seat cap, last-admin
+demotion, lockout increment) — all FOR UPDATE; suspension gates HTTP +
+socket + /v1 keys without deleting sessions; Better Auth additionalFields
+complete and input:false; deactivation revokes + re-homes + preserves
+grants; remove-member covers the full detachment list from both callers;
+invite tokens hashed/single-use/expiring/email-bound.
+
+OPEN (documented, needs a product decision):
+- orgRole has NO write path: "org admin" is unreachable and there is no
+  ownership succession. If the sole owner is deactivated or lost, the
+  tenant permanently loses org rename, workspace create/delete AND all
+  membership management. Recommend an owner-transfer + org-admin grant
+  before real customers land.
+- Workspace delete busts caches but doesn't drop members' sockets (no
+  frames can target a deleted workspace, so exposure is nil).
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
