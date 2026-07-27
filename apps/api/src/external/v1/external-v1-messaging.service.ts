@@ -59,7 +59,7 @@ import {
 } from "@/lib/providers/channel";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import { encodeConvoCursor, parseConvoCursor } from "@/lib/queries/_cursors";
-import { normalizeMetaSendError } from "@/lib/providers/meta";
+import { isProvablyNotSent, normalizeMetaSendError } from "@/lib/providers/meta";
 import type { Message, Channel } from "@ccp/shared/types";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import {
@@ -691,6 +691,9 @@ export class ExternalV1MessagingService {
         contactId: true,
         // Channel is conversation-owned — bind + stamp from here.
         channel: true,
+        // §2: the /v1 send goes out the THREAD's account, not the workspace
+        // default (see getSendConfig below).
+        channelConnectionId: true,
         // Status drives the deferred reopen below (reopenIfClosed path only).
         status: true,
         aiEnabled: true,
@@ -836,7 +839,10 @@ export class ExternalV1MessagingService {
 
     let send;
     try {
-      const config = await binding.getSendConfig(workspaceId);
+      const config = await binding.getSendConfig(
+        workspaceId,
+        conversation.channelConnectionId ?? undefined,
+      );
       send = await binding.provider.sendText(
         {
           to: channel.to,
@@ -856,8 +862,7 @@ export class ExternalV1MessagingService {
       // must use a fresh key to deliberately resend.
       const normalized = normalizeMetaSendError(err);
       const provablyNotSent =
-        err instanceof ProviderNotConfiguredError ||
-        (normalized != null && normalized.httpStatus < 500);
+        err instanceof ProviderNotConfiguredError || isProvablyNotSent(normalized);
       if (idempotencyKey && provablyNotSent) {
         await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
       }
@@ -1318,7 +1323,7 @@ export class ExternalV1MessagingService {
           // Release ONLY on a Meta 4xx (definitive rejection, nothing sent). A
           // 5xx may have landed AFTER Meta accepted — treat as ambiguous + keep
           // the claim so a retry can't double-send (OUTBOUND-1).
-          if (idempotencyKey && normalized.httpStatus < 500) {
+          if (idempotencyKey && isProvablyNotSent(normalized)) {
             await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
           }
           throw new UnprocessableEntityException({
@@ -1657,7 +1662,7 @@ export class ExternalV1MessagingService {
         !sentThenLostConversation &&
         (err instanceof SendTextValidationError ||
           err instanceof ProviderNotConfiguredError ||
-          (normalized != null && normalized.httpStatus < 500));
+          isProvablyNotSent(normalized));
       if (provablyNotSent) {
         await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
       }

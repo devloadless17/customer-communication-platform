@@ -63,7 +63,7 @@ table/queue/cache/socket-room that references the dying entity.
 | Domain | Tier | Method | Status |
 |---|---|---|---|
 | webhooks ingest | 1 | R (controller + core, adversarial) + E (meta 165) | ✅ 2026-07-27 |
-| outbound send + idempotency ledger | 1 | | ☐ |
+| outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ 2026-07-27 |
 | event bus / outbox | 1 | | ☐ |
 | workflows (~22 step types) | 1 | | ☐ |
 | assignment (policies/rules/capacity) | 1 | | ☐ |
@@ -152,6 +152,49 @@ ACCEPTED (documented tradeoffs, not fixed):
 Structural #14 (media-infra extraction out of meta.controller): DEFERRED to a
 paired structural slot with #15 (realtime session) — correctness fixes took
 this session's budget; extraction is move-only and safest done cold.
+
+### outbound send + idempotency (B-M3 session 2, 2026-07-27)
+
+Verdicts CLEAN: double-send on the QUEUE path (ledger claim/retain/release,
+stable jobId across restart, completedAt stamped pre-insert, recovery
+re-inserts from the recorded wamid instead of re-calling Meta), dropped-send
+(enqueue awaited before 200, 7d dead-letter retention, terminal failure
+publishes message.send_failed + client watchdog), status truth, events
+(broadcast bypass complete — no commitOutboundSend import, no ticket/unread
+side effects), concurrency caps (per-team 3 under global 5, slot handed back
+on defer, no retry-policy deadlock).
+
+FIXED (2026-07-27):
+- HIGH §2 violation: five send paths (composer preflight, worker executor,
+  media, forward, /v1 text) resolved credentials WITHOUT the thread's
+  `channelConnectionId`, falling back to the workspace DEFAULT account — a
+  two-number/two-Page workspace replied from the wrong sender, where no 24h
+  window exists. All five now pass the conversation's account (forward
+  resolves AFTER the destination thread, so a fresh thread still gets the
+  default, which is correct for it).
+- MED: worker crash-recovery re-insert published a SILENT message.sent even
+  when the original commit never ran — no bump, no ticket attach, no SLA
+  first-response stamp, no workflows/webhooks for a message the customer had
+  received. Recovery now runs the full commit pipeline when it had to
+  re-create the row; the silent re-emit stays only for the row-already-exists
+  replay.
+- LOW: `isProvablyNotSent` extracted as THE shared release-vs-retain rule —
+  the worker's `rate_limited` carve-out was missing from all three /v1 sites,
+  so a rate-limit signalled ≥500 stranded a partner's key on an unsent
+  message.
+- LOW: the ambiguous-refusal message told users to "re-send", which can never
+  work (the reply box retries in place with the same clientTempId); copy +
+  comment now say to compose it again. Sweeper comment describing a
+  `v1-send-*` prefix no code writes corrected.
+
+ACCEPTED (documented):
+- No per-conversation send ordering: two rapid sends can reach the customer
+  out of order if the first hits a transient Meta failure and retries (local
+  thread order stays correct). Serializing per conversation is the fix if a
+  real case appears.
+- Sync paths (media/template/interactive/forward) keep only the in-process
+  idempotency map: an api restart between Meta-accept and the HTTP response
+  can let a human Retry re-send. Pre-existing, documented tradeoff.
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 

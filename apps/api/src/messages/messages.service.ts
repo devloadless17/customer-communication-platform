@@ -55,7 +55,7 @@ import {
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Channel } from "@ccp/shared/types";
 import { loadReplySnapshotById, mediaPreview } from "@/lib/providers/ingest";
-import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta";
+import { MetaSendError, isProvablyNotSent, normalizeMetaSendError } from "@/lib/providers/meta";
 import {
   assertCanViewConversation,
   ConversationNotVisibleError,
@@ -820,6 +820,11 @@ export class MessagesService {
           // Channel is conversation-owned — the preflight returns this provider
           // (resolveContactChannel below only supplies the destination address).
           channel: true,
+          // §2: the preflight must probe the THREAD's account, not the
+          // workspace default — a default-account probe passed while the
+          // thread's own (non-default) account was disconnected, and vice
+          // versa.
+          channelConnectionId: true,
           contact: {
             select: {
               phoneNumber: true,
@@ -876,7 +881,7 @@ export class MessagesService {
     // anymore — we need the contact's channel first — but a cached config is
     // a Map read, so the serialization cost is sub-millisecond steady-state.)
     try {
-      await binding.getSendConfig(workspaceId);
+      await binding.getSendConfig(workspaceId, conversation.channelConnectionId ?? undefined);
     } catch (err) {
       if (err instanceof ProviderNotConfiguredError) {
         // Channel-neutral key — this internal composer route (not /v1, whose
@@ -1003,23 +1008,28 @@ export class MessagesService {
     // Conversation row gone → fail non-recoverable BEFORE we hit Meta so
     // we don't strand a customer with a message no agent can see.
     // Pull lastMessageAt for the timestamp-monotonicity guard further down.
-    const [exists, configOrErr] = await Promise.all([
-      this.db.conversation.findFirst({
-        where: { id: conversationId, workspaceId },
-        select: {
-          id: true,
-          lastMessageAt: true,
-          contactId: true,
-          // For the social RESPONSE-vs-Human-Agent-tag decision at send time.
-          contact: { select: { lastInboundAt: true } },
-        },
-      }),
-      binding.getSendConfig(workspaceId).catch((err: unknown) => {
+    const exists = await this.db.conversation.findFirst({
+      where: { id: conversationId, workspaceId },
+      select: {
+        id: true,
+        lastMessageAt: true,
+        contactId: true,
+        // §2: a reply always goes out the account the customer messaged —
+        // resolving the send config WITHOUT this fell back to the workspace
+        // DEFAULT account, so a two-number workspace replied to number B's
+        // customer from number A (wrong sender + no open 24h window there).
+        channelConnectionId: true,
+        // For the social RESPONSE-vs-Human-Agent-tag decision at send time.
+        contact: { select: { lastInboundAt: true } },
+      },
+    });
+    if (!exists) throw new NotFoundException({ error: "conversation not found" });
+    const configOrErr = await binding
+      .getSendConfig(workspaceId, exists.channelConnectionId ?? undefined)
+      .catch((err: unknown) => {
         if (err instanceof ProviderNotConfiguredError) return err;
         throw err;
-      }),
-    ]);
-    if (!exists) throw new NotFoundException({ error: "conversation not found" });
+      });
     if (configOrErr instanceof ProviderNotConfiguredError) {
       throw new ConflictException({
         error: "channel_not_connected",
@@ -1073,7 +1083,17 @@ export class MessagesService {
                 externalId: prior.externalId,
               },
             });
+            // Did THIS call have to re-create the row? If so the original
+            // send crashed BEFORE `commitOutboundEvent` ever ran, so nothing
+            // was ever delivered to any subscriber — the recovery has to run
+            // the FULL commit pipeline, not the silent client-only re-emit
+            // (which would leave the thread un-bumped, the message unattached
+            // to its active ticket, the SLA first-response clock running, and
+            // workflows + partner webhooks never fired for a message the
+            // customer HAS received).
+            let recoveredInsert = false;
             if (!existing) {
+              recoveredInsert = true;
               // No Message row despite a completed attempt: a crash/rollback
               // landed between the (pre-insert) attempt stamp and a committed
               // Message insert. Meta ALREADY delivered this wamid, so we must
@@ -1136,6 +1156,28 @@ export class MessagesService {
               // dedicated analytics-suppress path. The audit row may likewise
               // dupe — accepted, because the alternative is the client UI never
               // showing the bubble.
+              if (recoveredInsert) {
+                // The original send never committed its event — run the real
+                // pipeline so the bump, ticket routing / first-response stamp,
+                // workflows, audit, analytics and partner webhooks all fire
+                // exactly once for a message the customer already received.
+                await this.commitOutboundEvent({
+                  conversationId: existing.conversationId,
+                  bumpTimestamp: existing.timestamp,
+                  preview: existing.body.slice(0, 200),
+                  event: {
+                    type: "message.sent",
+                    workspaceId,
+                    conversationId: existing.conversationId,
+                    contactId: exists.contactId,
+                    message: replayed,
+                    preview: existing.body.slice(0, 200),
+                    senderUserId: userId,
+                    ...(clientTempId ? { clientTempId } : {}),
+                  } as Omit<DomainEventOf<"message.sent">, "unreadCount" | "lastMessageAt">,
+                });
+                return;
+              }
               await publish({
                 type: "message.sent",
                 workspaceId,
@@ -1150,6 +1192,9 @@ export class MessagesService {
                 // row got undefined lastMessageAt/unreadCount on this path.)
                 lastMessageAt: existing.timestamp.toISOString(),
                 unreadCount: 0,
+                // Row already existed ⇒ the original commit DID run: this is a
+                // pure client-side re-emit, so suppress the side-effecting
+                // subscribers (no workflow re-trigger, no partner re-POST).
                 silent: true,
                 skipOutboundWebhook: true,
                 ...(clientTempId ? { clientTempId } : {}),
@@ -1167,12 +1212,18 @@ export class MessagesService {
           // fresh above and never lands here. Refusing to retry here avoids the
           // rare double-send. Non-recoverable so BullMQ stops retrying; the worker
           // categorizes this `error` field as non-recoverable, publishes
-          // message.send_failed, and the client's failed-bubble UI lets
-          // the user retry with a new clientTempId.
+          // message.send_failed, and the failed bubble surfaces the refusal.
+          // NOTE: the bubble's in-place Retry reuses the SAME clientTempId, so
+          // it lands here again by design — only composing the message afresh
+          // (new clientTempId ⇒ new attempt row) can send it.
           throw new UnprocessableEntityException({
             error: "send_in_progress_or_lost",
+            // The reply box RETRIES IN PLACE with the SAME clientTempId (see
+            // reply-box.tsx), which lands right back here — so "re-send" was
+            // advice that could never work. Type the message again (a fresh
+            // clientTempId = a new attempt row) if it genuinely never arrived.
             message:
-              "A previous attempt for this message may have already reached WhatsApp. Refusing to retry to avoid a duplicate send. Re-send to try again.",
+              "A previous attempt for this message may have already reached WhatsApp. Refusing to retry to avoid a duplicate send — check the chat, and type it again if it never arrived.",
             status: 409,
           });
         }
@@ -1216,9 +1267,9 @@ export class MessagesService {
       //    and DOUBLE-SEND (no idempotency key, no externalId captured yet). A
       //    one-shot failed bubble the agent can re-send beats a duplicate
       //    WhatsApp message.
-      const provablyNotSent =
-        !!normalized &&
-        (normalized.httpStatus < 500 || normalized.code === "rate_limited");
+      // THE shared rule (lib/providers/meta-send-error.ts) — the worker and
+      // every /v1 ledger site must classify release-vs-retain identically.
+      const provablyNotSent = isProvablyNotSent(normalized);
       if (attemptCreated && jobId) {
         if (provablyNotSent) {
           await this.db.outboundSendAttempt
@@ -1550,6 +1601,9 @@ export class MessagesService {
         contactId: true,
         // Channel is conversation-owned — bind + stamp the send from here.
         channel: true,
+        // §2: the media send goes out the THREAD's account, not the workspace
+        // default (see getSendConfig below).
+        channelConnectionId: true,
         // For the timestamp monotonicity guard further down — outbound
         // must sort strictly after any inbound it might be responding to.
         lastMessageAt: true,
@@ -1836,7 +1890,10 @@ export class MessagesService {
 
     let sendConfig;
     try {
-      sendConfig = await binding.getSendConfig(workspaceId);
+      sendConfig = await binding.getSendConfig(
+        workspaceId,
+        conversation.channelConnectionId ?? undefined,
+      );
     } catch (err) {
       throw new ConflictException({
         error: "WhatsApp is not connected for this team",
@@ -2353,24 +2410,6 @@ export class MessagesService {
         };
       }
       const binding = getProviderBinding(channel.channel);
-      let sendConfig;
-      try {
-        sendConfig = await binding.getSendConfig(workspaceId);
-      } catch (err) {
-        return {
-          contactId: contact.id,
-          contactName: contact.name,
-          ok: false,
-          sent: 0,
-          failed: sourceRows.length,
-          error:
-            err instanceof ProviderNotConfiguredError
-              ? "channel not connected"
-              : err instanceof Error
-                ? err.message
-                : "send config error",
-        };
-      }
       const contactPhone = channel.to;
 
       // Window band for this contact — drives the Meta social messaging_type
@@ -2417,6 +2456,33 @@ export class MessagesService {
         });
       } else {
         conversation = existing;
+      }
+
+      // §2: the forward goes out the DESTINATION thread's account (a fresh
+      // thread has none yet → the default is correct for it). Resolved after
+      // the conversation on purpose — resolving before it always used the
+      // workspace default, sending from the wrong number/Page for contacts
+      // whose thread lives on a non-default account.
+      let sendConfig;
+      try {
+        sendConfig = await binding.getSendConfig(
+          workspaceId,
+          conversation.channelConnectionId ?? undefined,
+        );
+      } catch (err) {
+        return {
+          contactId: contact.id,
+          contactName: contact.name,
+          ok: false,
+          sent: 0,
+          failed: sourceRows.length,
+          error:
+            err instanceof ProviderNotConfiguredError
+              ? "channel not connected"
+              : err instanceof Error
+                ? err.message
+                : "send config error",
+        };
       }
       // Reopen broadcast — see method docstring for the `silent: true`
       // rationale (workflow chain-trigger avoidance; audit + analytics

@@ -81,11 +81,12 @@ async function sweepOnce(): Promise<void> {
     Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000,
   );
 
-  // ── 1) Non-broadcast rows (`msg-send-*` queue sends, `v1-send-*` external
-  // sends) ─────────────────────────────────────────────────────────────────
-  // These have a BOUNDED retry window: msg-send by BullMQ `removeOnFail` (7d),
-  // v1-send by the 5-min ApiIdempotencyKey TTL. Once past 7d there is no
-  // surviving retry path, so the row's double-send-guard purpose is moot.
+  // ── 1) Non-broadcast rows (`msg-send-*` queue sends) ────────────────────
+  // These have a BOUNDED retry window: BullMQ `removeOnFail` (7d). Once past
+  // 7d there is no surviving retry path, so the row's double-send-guard
+  // purpose is moot. (/v1 sends do NOT write here — they guard with
+  // ApiIdempotencyKey and its own TTL; an earlier comment claimed a
+  // `v1-send-*` prefix in this table that no code ever wrote.)
   // EXCLUDE `bc-recipient-*` — broadcasts have NO BullMQ layer and their
   // resume path is the UNBOUNDED-in-time boot reconciler, so a time-based
   // window would GC a still-load-bearing guard (BC-1).

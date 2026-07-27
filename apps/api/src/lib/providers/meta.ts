@@ -1,6 +1,6 @@
 import { readLimitedBody } from "@/lib/http/safe-fetch";
 import type { MetaSendConfig } from "@/lib/providers/config";
-import { MetaSendError, normalizeMetaSendError } from "./meta-send-error";
+import { MetaSendError, normalizeMetaSendError, isProvablyNotSent } from "./meta-send-error";
 import { metaWireEnabled, wireOut } from "./meta-wire";
 
 // Meta error responses are tiny in practice (JSON envelope, a few KB).
@@ -4389,7 +4389,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 // Send-error classification moved to `meta-send-error.ts` (shared with the
 // social providers). Re-exported here so every existing `@/lib/providers/meta`
 // import keeps working. Imported at the top for meta.ts's own `throw`s.
-export { MetaSendError, normalizeMetaSendError };
+export { MetaSendError, normalizeMetaSendError, isProvablyNotSent };
 export type { MetaErrorCode, NormalizedSendError } from "./meta-send-error";
 
 /**

@@ -507,3 +507,26 @@ function extractMetaError(body: string): { code: number | null; subcode: number 
     subcode: subMatch ? Number(subMatch[1]) : null,
   };
 }
+
+/**
+ * THE "was this send provably NOT delivered?" rule — the one classification
+ * every idempotency ledger must agree on, because it decides whether a claim
+ * is RELEASED (the partner/agent may safely retry the same key) or RETAINED
+ * (Meta may have accepted; a retry would double-send a billed message).
+ *
+ * Provably-not-sent = Meta refused before accepting:
+ *   - a Meta 4xx (definitive rejection), OR
+ *   - `rate_limited` at ANY status — Meta never processed it, and this is what
+ *     makes a throttled send actually retryable instead of dying as
+ *     `send_in_progress_or_lost`.
+ * Everything else — 5xx, transport error, timeout, null normalization — is
+ * AMBIGUOUS and must retain.
+ *
+ * Extracted 2026-07-27: the worker carried the `rate_limited` carve-out while
+ * the three /v1 sites checked `httpStatus < 500` only, so a rate-limit signalled
+ * with a ≥500 status stranded a partner's key on a message that was never sent.
+ */
+export function isProvablyNotSent(normalized: NormalizedSendError | null): boolean {
+  if (!normalized) return false; // transport error / timeout → ambiguous
+  return normalized.httpStatus < 500 || normalized.code === "rate_limited";
+}
