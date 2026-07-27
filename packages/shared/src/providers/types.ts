@@ -1232,6 +1232,13 @@ export interface ProviderTemplate {
   name: string;
   language: string;
   /**
+   * Present ONLY on templates created from Meta's Template Library — the
+   * marker Meta's docs key send-time parameter TYPE checks on. Persisted so a
+   * library template created outside this app (WhatsApp Manager) or a row
+   * recreated by a resync keeps its type-check identity.
+   */
+  libraryTemplateName?: string;
+  /**
    * `null` when Meta returned a category we don't map.
    *
    * NOT the same as "absent". The catalog sync treats a returned-but-unmappable

@@ -3028,7 +3028,14 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // `quality_score` is only returned if asked for. It is the EARLY warning
         // that a template is heading for a pause — the `PAUSED` status that
         // follows is too late to act on.
-        "message_send_ttl_seconds,quality_score",
+        "message_send_ttl_seconds,quality_score," +
+        // `library_template_name` marks a template created from Meta's Template
+        // Library — those are subject to send-time parameter TYPE checks (the
+        // doc's own warning keys on this field's presence in this response).
+        // Without it, a library template created in WhatsApp Manager (or a row
+        // recreated by a resync) lost the marker and its type checks silently
+        // vanished.
+        "library_template_name",
     );
     url.searchParams.set("limit", "200");
 
@@ -4810,6 +4817,9 @@ interface MetaTemplateRow {
   message_send_ttl_seconds?: number;
   /** Quality band + when Meta last computed it. `date` is unix SECONDS. */
   quality_score?: { score?: string; date?: number };
+  /** Present ONLY on templates created from the Template Library — the marker
+   *  the doc keys send-time parameter TYPE checks on. */
+  library_template_name?: string;
 }
 
 /**
@@ -5010,6 +5020,7 @@ function normalizeMetaTemplate(row: MetaTemplateRow): ProviderTemplate | null {
     ...(typeof row.message_send_ttl_seconds === "number"
       ? { messageSendTtlSeconds: row.message_send_ttl_seconds }
       : {}),
+    ...(row.library_template_name ? { libraryTemplateName: row.library_template_name } : {}),
     ...(row.id ? { externalId: row.id } : {}),
   };
 }

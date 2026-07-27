@@ -6,7 +6,11 @@ import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { getMetaProvider } from "@/lib/providers";
-import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
+import {
+  getMetaSendConfig,
+  ProviderNotConfiguredError,
+  type MetaSendConfig,
+} from "@/lib/providers/config";
 import type { ProviderTemplate } from "@ccp/shared/providers/types";
 
 /**
@@ -116,9 +120,54 @@ export async function syncTemplateCatalog(workspaceId: string): Promise<CatalogS
     const one = await reconcileWaba(workspaceId, wabaId, fetched);
     result.syncedCount += one.syncedCount;
     result.prunedCount += one.prunedCount;
+
+    // Backfill parameter TYPES for library rows that lack them. The WABA edge
+    // returns the marker but NOT `body_param_types` — those live only on the
+    // library-browse endpoint — so a library template we didn't create (or a
+    // resync-recreated row) has the marker with no types, and the send-time
+    // type checks would silently not run. One blueprint fetch per DISTINCT
+    // missing library name (usually zero), fail-soft: a library hiccup must
+    // not fail the sync that just completed.
+    await backfillLibraryParamTypes(workspaceId, wabaId, config).catch(() => undefined);
   }
 
   return result;
+}
+
+/** See the call site above. Bounded: one library lookup per distinct name. */
+async function backfillLibraryParamTypes(
+  workspaceId: string,
+  wabaId: string,
+  config: MetaSendConfig,
+): Promise<void> {
+  const provider = getMetaProvider();
+  if (!provider.fetchTemplateLibrary) return;
+  const missing = await db.messageTemplate.findMany({
+    where: {
+      workspaceId,
+      wabaId,
+      libraryTemplateName: { not: null },
+      bodyParamTypes: { isEmpty: true },
+    },
+    select: { id: true, libraryTemplateName: true },
+  });
+  if (missing.length === 0) return;
+  const byName = new Map<string, string[]>();
+  for (const row of missing) {
+    const name = row.libraryTemplateName!;
+    const ids = byName.get(name) ?? [];
+    ids.push(row.id);
+    byName.set(name, ids);
+  }
+  for (const [name, ids] of byName) {
+    const blueprints = await provider.fetchTemplateLibrary({ name }, config);
+    const types = blueprints[0]?.bodyParamTypes ?? [];
+    if (types.length === 0) continue;
+    await db.messageTemplate.updateMany({
+      where: { workspaceId, id: { in: ids } },
+      data: { bodyParamTypes: types },
+    });
+  }
 }
 
 /**
@@ -192,6 +241,10 @@ async function reconcileWaba(
           messageSendTtlSeconds: t.messageSendTtlSeconds ?? null,
           qualityScore: t.qualityScore ?? null,
           qualityScoreAt: t.qualityScoreAt ?? null,
+          // The Template Library marker — send-time parameter TYPE checks key
+          // on it. Without persisting it here, a library template created in
+          // WhatsApp Manager (or a row recreated by resync) lost the checks.
+          libraryTemplateName: t.libraryTemplateName ?? null,
           syncedAt: now,
         },
         update: {
@@ -217,6 +270,10 @@ async function reconcileWaba(
           // the webhook just delivered.
           ...(t.qualityScore ? { qualityScore: t.qualityScore } : {}),
           ...(t.qualityScoreAt ? { qualityScoreAt: t.qualityScoreAt } : {}),
+          // ADD-ONLY, never cleared: a template cannot stop being
+          // library-created, and a Graph version that omits the field must not
+          // strip the type-check identity off every stored row.
+          ...(t.libraryTemplateName ? { libraryTemplateName: t.libraryTemplateName } : {}),
           syncedAt: now,
         },
       });

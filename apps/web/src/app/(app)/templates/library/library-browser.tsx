@@ -42,6 +42,37 @@ const TOPICS = [
 
 const INDUSTRIES = ["E_COMMERCE", "FINANCIAL_SERVICES"] as const;
 
+// Meta's 25 documented use cases — the finest-grained filter dimension the
+// library API offers, and the fastest path to "the delivery-failed template"
+// when a topic still lists dozens of blueprints.
+const USECASES = [
+  "ACCOUNT_CREATION_CONFIRMATION",
+  "AUTO_PAY_REMINDER",
+  "DELIVERY_CONFIRMATION",
+  "DELIVERY_FAILED",
+  "DELIVERY_UPDATE",
+  "FEEDBACK_SURVEY",
+  "FRAUD_ALERT",
+  "LOW_BALANCE_WARNING",
+  "ORDER_ACTION_NEEDED",
+  "ORDER_CONFIRMATION",
+  "ORDER_DELAY",
+  "ORDER_OR_TRANSACTION_CANCEL",
+  "ORDER_PICK_UP",
+  "PAYMENT_ACTION_REQUIRED",
+  "PAYMENT_CONFIRMATION",
+  "PAYMENT_DUE_REMINDER",
+  "PAYMENT_OVERDUE",
+  "PAYMENT_REJECT_FAIL",
+  "PAYMENT_SCHEDULED",
+  "RECEIPT_ATTACHMENT",
+  "RETURN_CONFIRMATION",
+  "SHIPMENT_CONFIRMATION",
+  "STATEMENT_ATTACHMENT",
+  "STATEMENT_AVAILABLE",
+  "TRANSACTION_ALERT",
+] as const;
+
 interface LibraryTemplate {
   name: string;
   language: string;
@@ -67,6 +98,7 @@ export function TemplateLibraryBrowser() {
 
   const [search, setSearch] = useState("");
   const [topic, setTopic] = useState("");
+  const [usecase, setUsecase] = useState("");
   const [industry, setIndustry] = useState("");
   const [language, setLanguage] = useState("en_US");
 
@@ -82,6 +114,7 @@ export function TemplateLibraryBrowser() {
       const q = new URLSearchParams();
       if (search.trim()) q.set("search", search.trim());
       if (topic) q.set("topic", topic);
+      if (usecase) q.set("usecase", usecase);
       if (industry) q.set("industry", industry);
       if (language) q.set("language", language);
       const res = await apiFetch(`/api/workspace/whatsapp/templates/library?${q}`);
@@ -102,7 +135,7 @@ export function TemplateLibraryBrowser() {
     } finally {
       setLoading(false);
     }
-  }, [search, topic, industry, language]);
+  }, [search, topic, usecase, industry, language]);
 
   // Debounced so typing in the search box doesn't fire one Graph read per
   // keystroke; the filter selects re-run immediately (they're deliberate).
@@ -143,6 +176,12 @@ export function TemplateLibraryBrowser() {
           />
         </label>
         <FilterSelect label="Topic" value={topic} onChange={setTopic} options={TOPICS} />
+        <FilterSelect
+          label="Use case"
+          value={usecase}
+          onChange={setUsecase}
+          options={USECASES}
+        />
         <FilterSelect
           label="Industry"
           value={industry}
