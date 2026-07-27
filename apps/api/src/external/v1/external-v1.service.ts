@@ -51,6 +51,11 @@ import { ExternalV1MessagingService } from "./external-v1-messaging.service";
 import { getProviderBinding } from "@/lib/providers";
 import { CallsService } from "@/calls/calls.service";
 import { WorkflowsService } from "@/workspace-settings/workflows/workflows.service";
+import { BroadcastsService } from "@/broadcasts/broadcasts.service";
+import type {
+  CreateBroadcastInput,
+  RetryBroadcastInput,
+} from "@/broadcasts/broadcasts.schemas";
 import type { ManualTriggerInput } from "@/workspace-settings/workflows/workflows.schemas";
 import { UsersService } from "@/users/users.service";
 import {
@@ -145,6 +150,9 @@ export class ExternalV1Service {
     // Same service the settings UI calls, so a /v1 trigger and a UI trigger
     // run the identical published/trigger-type gates.
     private readonly workflows: WorkflowsService,
+    // Same service the composer calls — one set of audience-resolution,
+    // template-validation and budget-gate rules for both entry points.
+    private readonly broadcasts: BroadcastsService,
   ) {}
 
   /**
@@ -2012,6 +2020,67 @@ export class ExternalV1Service {
       items: page.map(externalTemplate),
       nextCursor: hasMore ? (page[page.length - 1]?.id ?? null) : null,
     };
+  }
+
+  /**
+   * Launch a campaign, idempotently.
+   *
+   * The most irreversible write in the product: it sends billed template
+   * messages to a whole audience and there is no unsend. The irreversible
+   * claim is therefore mandatory — a pending row past its TTL is NOT
+   * auto-cleared, because a crash between "campaign created" and "response
+   * written" is ambiguous and a re-claim would launch it twice.
+   */
+  async createBroadcast(
+    workspaceId: string,
+    apiKeyId: string,
+    input: CreateBroadcastInput,
+    idempotencyKey: string,
+  ) {
+    return this.withIdempotency(
+      workspaceId,
+      apiKeyId,
+      idempotencyKey,
+      "POST /v1/broadcasts",
+      // Fingerprint on what defines the campaign, so the SAME key with a
+      // different audience is caught as a conflict rather than replayed.
+      { templateId: input.templateId, audience: input.audience },
+      async () => {
+        // `createdById: null` — an integration is not a person.
+        const out = await this.broadcasts.create(workspaceId, null, input);
+        return {
+          ok: true as const,
+          broadcastId: out.broadcastId,
+          totalCount: out.totalCount,
+          scheduled: out.scheduled,
+        };
+      },
+      { irreversible: true },
+    );
+  }
+
+  /** Re-queue failed recipients. Bills again, so same discipline as create. */
+  async retryBroadcast(
+    workspaceId: string,
+    apiKeyId: string,
+    broadcastId: string,
+    input: RetryBroadcastInput,
+    idempotencyKey: string,
+  ) {
+    return this.withIdempotency(
+      workspaceId,
+      apiKeyId,
+      idempotencyKey,
+      "POST /v1/broadcasts/:id/retry",
+      { broadcastId, errorCodes: input.errorCodes ?? null },
+      async () => {
+        const out = await this.broadcasts.retryFailed(workspaceId, broadcastId, {
+          ...(input.errorCodes ? { errorCodes: input.errorCodes } : {}),
+        });
+        return { ok: true as const, requeued: out.requeued };
+      },
+      { irreversible: true },
+    );
   }
 
   /**

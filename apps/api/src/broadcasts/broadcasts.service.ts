@@ -368,7 +368,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
 
   async create(
     workspaceId: string,
-    userId: string,
+    /** Null when an API key launched it — an integration is not a person.
+     *  `Broadcast.createdById` is already nullable for exactly this. */
+    userId: string | null,
     input: CreateBroadcastInput,
   ): Promise<{ broadcastId: string; totalCount: number; scheduled: boolean }> {
     const { templateId, audience, variables } = input;

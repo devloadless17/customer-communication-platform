@@ -117,6 +117,15 @@ export const API_KEY_SCOPES = [
   // NEW keys ask for it explicitly.
   "admin:settings",
 
+  // Create / cancel / retry / delete BROADCAST campaigns.
+  //
+  // Its own scope, and the most dangerous one in this list: a create sends
+  // billed template messages to an entire audience, and there is no unsend.
+  // `read:broadcasts` deliberately does NOT imply it — a reporting
+  // integration must never be one typo away from launching a campaign. Sends
+  // through this scope require an `Idempotency-Key` for the same reason.
+  "write:broadcasts",
+
   // Fire a manual_trigger workflow from outside the app.
   //
   // Its own scope rather than riding `write:catalog`, because a run is not a

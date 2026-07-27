@@ -53,6 +53,7 @@ const SCOPE_LABELS: Record<string, string> = {
   "write:calls": "Request calling permission / send call buttons",
   "write:users": "Legacy — grants nothing (availability moved to Admin settings)",
   "write:workflows": "Fire manual-trigger workflows (runs can send messages)",
+  "write:broadcasts": "Launch / cancel / retry campaigns — billed sends, no unsend",
   "read:tickets": "Read tickets + SLA state",
   "write:tickets": "Create / update / resolve tickets",
   "read:channels": "Read connected channel accounts",

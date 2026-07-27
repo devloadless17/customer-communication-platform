@@ -40,6 +40,11 @@ const SCOPES: ReadonlyArray<{ scope: string; grants: string }> = [
   { scope: "read:calls", grants: "read call history + calling-permission state" },
   { scope: "write:calls", grants: "request calling permission · send call buttons" },
   {
+    scope: "write:broadcasts",
+    grants:
+      "create / cancel / retry / delete campaigns. The most dangerous scope here — a create sends billed messages to a whole audience and there is no unsend, so read:broadcasts deliberately does not imply it.",
+  },
+  {
     scope: "write:workflows",
     grants:
       "fire a published manual-trigger workflow for a contact. Its own scope because a run executes real step actions, including billed sends — reading and editing workflows stay under read:catalog / admin:settings.",
@@ -1232,6 +1237,107 @@ export default function ApiDocsPage() {
           Remove a flag entirely — “this was flagged by mistake”. Different from{" "}
           <code>dismissed</code>, which keeps the record that someone looked and decided
           it wasn’t one. Scope <code>write:flags</code>.
+        </Endpoint>
+      </Section>
+
+      <Section title="Broadcasts (launching campaigns)">
+        <p className="mb-4 text-sm text-muted-foreground">
+          <strong>
+            <code>write:broadcasts</code> is the most dangerous scope in this API.
+          </strong>{" "}
+          A create sends billed template messages to an entire audience and{" "}
+          <strong>there is no unsend</strong>. <code>read:broadcasts</code> deliberately
+          does <em>not</em> imply it, so a reporting integration can never be one typo away
+          from launching a campaign.
+          <br />
+          <br />
+          Create and retry both <strong>require</strong> an <code>Idempotency-Key</code>,
+          and an ambiguous crash is never auto-cleared into a re-send: if we cannot prove a
+          campaign did <em>not</em> launch, a retry with the same key is refused rather
+          than risking a second one.
+        </p>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/broadcasts"
+          headers={{ "Idempotency-Key": "campaign-autumn-2026" }}
+          body={{
+            templateId: "tpl_123",
+            audience: { audienceGroupId: "aud_456" },
+            variables: { "1": "{{contact.firstName}}" },
+          }}
+        >
+          <strong>Launch a campaign</strong>, or schedule one by passing{" "}
+          <code>scheduledAt</code>. Build the audience with the audience-group routes
+          above, and call <code>preview-missing</code> first so you find out about empty
+          variables now rather than from the failure report. Returns the{" "}
+          <code>broadcastId</code> and the resolved <code>totalCount</code>. Scope{" "}
+          <code>write:broadcasts</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/broadcasts/preview-missing"
+          body={{ templateId: "tpl_123", audience: { audienceGroupId: "aud_456" } }}
+        >
+          <strong>Pre-send preflight:</strong> how many recipients would resolve a template
+          variable to empty and be rejected by WhatsApp. Read-only. Scope{" "}
+          <code>read:broadcasts</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/broadcasts/:id/cancel">
+          <strong>Stop a running or scheduled campaign.</strong> Recipients Meta has
+          already accepted stay sent — a message cannot be unsent. Scope{" "}
+          <code>write:broadcasts</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/broadcasts/:id/retry"
+          headers={{ "Idempotency-Key": "campaign-autumn-2026-retry-1" }}
+          body={{ errorCodes: ["130429"] }}
+        >
+          <strong>Re-queue failed recipients.</strong> <code>errorCodes</code> narrows it to
+          one failure bucket, so you can retry the rate-limited without also re-sending to
+          numbers that are permanently invalid. This bills again —{" "}
+          <code>Idempotency-Key</code> required. Scope <code>write:broadcasts</code>.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/broadcasts/:id">
+          <strong>Delete a campaign</strong> and its recipient rows. Terminal campaigns
+          only — one that is still running is refused. Scope{" "}
+          <code>write:broadcasts</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/broadcasts/:id/recipient-ids">
+          <strong>Every recipient contact id</strong> — for building a follow-up audience
+          from who actually received a campaign. Scope <code>read:broadcasts</code>.
+        </Endpoint>
+      </Section>
+
+      <Section title="Conversation operations">
+        <p className="mb-4 text-sm text-muted-foreground">
+          Reads, status and assignment already existed; these are the operations an
+          integration needs to actually drive a thread.
+        </p>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/conversations"
+          body={{ phone: "+15555550100", name: "Dana Okafor" }}
+        >
+          <strong>Open (or reopen) a thread</strong> with a contact, by{" "}
+          <code>contactId</code> or by <code>phone</code> — the precursor to a send.
+          Idempotent by nature: an existing open thread comes back as-is, a closed one is
+          reopened through the audited status path, and a phone with no contact yet
+          find-or-creates one. Scope <code>write:conversations</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/conversations/:id/read">
+          <strong>Mark a thread read.</strong> Unread is <strong>team-wide</strong> in this
+          product, not per-agent, so this clears it for everyone — call it when your system
+          rather than a human has handled the thread. Repeating it is a genuine no-op.
+          Scope <code>write:conversations</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/conversations/:id/events">
+          <strong>The audit timeline</strong> — every status change, assignment, tag and
+          ticket transition, in order. Scope <code>read:conversations</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/conversations/:id/attachments">
+          <strong>Every media attachment</strong> on a thread, newest first. Scope{" "}
+          <code>read:messages</code>.
         </Endpoint>
       </Section>
 

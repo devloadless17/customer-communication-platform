@@ -342,3 +342,108 @@ test.describe("/v1 workflows", () => {
     expect(res.status()).toBe(403);
   });
 });
+
+test.describe("/v1 broadcast writes", () => {
+  test("launching REQUIRES an Idempotency-Key — the no-unsend guard", async ({ request }) => {
+    // A campaign is the most irreversible write in the product. The key must
+    // be demanded BEFORE anything resolves an audience or touches Meta.
+    const res = await request.post(`${API}/api/external/v1/broadcasts`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+      // Schema-VALID on purpose: an invalid body would 400 at Zod and prove
+      // nothing about the idempotency gate.
+      data: {
+        templateId: "tpl_x",
+        audience: { mode: "custom", contactIds: ["cnt_x"] },
+      },
+    });
+    expect(res.status()).toBe(400);
+    expect((await res.json()).error).toBe("idempotency_key_required");
+  });
+
+  test("read:broadcasts must NOT imply write:broadcasts", async ({ request }) => {
+    // The whole point of the new scope: a reporting integration can never be
+    // one typo away from launching a campaign.
+    const reporting = await mintKey("E2E reporting key", ["read:broadcasts"]);
+    const res = await request.post(`${API}/api/external/v1/broadcasts`, {
+      headers: {
+        Authorization: `Bearer ${reporting}`,
+        "Idempotency-Key": "e2e-should-not-launch",
+      },
+      data: {
+        templateId: "tpl_x",
+        audience: { mode: "custom", contactIds: ["cnt_x"] },
+      },
+    });
+    expect(res.status()).toBe(403);
+    expect((await res.json()).error).toBe("insufficient_scope");
+  });
+
+  test("cancel and retry are gated too", async ({ request }) => {
+    const reporting = await mintKey("E2E reporting key 2", ["read:broadcasts"]);
+    const cancel = await request.post(
+      `${API}/api/external/v1/broadcasts/bc_x/cancel`,
+      { headers: { Authorization: `Bearer ${reporting}` } },
+    );
+    expect(cancel.status()).toBe(403);
+
+    const retry = await request.post(`${API}/api/external/v1/broadcasts/bc_x/retry`, {
+      headers: {
+        Authorization: `Bearer ${reporting}`,
+        "Idempotency-Key": "e2e-retry",
+      },
+      data: {},
+    });
+    expect(retry.status()).toBe(403);
+  });
+});
+
+test.describe("/v1 conversation operations", () => {
+  test("start is idempotent: the same phone returns the same thread", async ({
+    request,
+  }) => {
+    const phone = `+1555${Date.now() % 10_000_000}`;
+    const first = await request.post(`${API}/api/external/v1/conversations`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+      data: { phone, name: "Parity Start" },
+    });
+    expect(first.ok()).toBeTruthy();
+    const a = await first.json();
+    expect(a.conversationId).toBeTruthy();
+    expect(a.created).toBe(true);
+
+    // Second call must NOT mint a second thread — one conversation per
+    // contact is a core invariant, and an integration retrying a start is
+    // exactly how you would violate it.
+    const second = await request.post(`${API}/api/external/v1/conversations`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+      data: { phone },
+    });
+    expect(second.ok()).toBeTruthy();
+    const b = await second.json();
+    expect(b.conversationId).toBe(a.conversationId);
+    expect(b.created).toBe(false);
+
+    // The audit timeline and attachment list are readable for it.
+    const events = await request.get(
+      `${API}/api/external/v1/conversations/${a.conversationId}/events`,
+      { headers: { Authorization: `Bearer ${adminToken}` } },
+    );
+    expect(events.ok()).toBeTruthy();
+
+    const attachments = await request.get(
+      `${API}/api/external/v1/conversations/${a.conversationId}/attachments`,
+      { headers: { Authorization: `Bearer ${adminToken}` } },
+    );
+    expect(attachments.ok()).toBeTruthy();
+
+    // Marking read is a safe no-op when there is nothing unread.
+    const read = await request.post(
+      `${API}/api/external/v1/conversations/${a.conversationId}/read`,
+      { headers: { Authorization: `Bearer ${adminToken}` } },
+    );
+    expect(read.ok()).toBeTruthy();
+
+    await db().conversation.deleteMany({ where: { id: a.conversationId } });
+    await db().contact.deleteMany({ where: { workspaceId, phoneNumber: phone } });
+  });
+});

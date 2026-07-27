@@ -127,7 +127,9 @@ export class ContactsService {
    */
   async create(
     workspaceId: string,
-    userId: string,
+    /** Null when an API key created it — `Contact.createdByUserId` is
+     *  nullable for exactly this (an integration is not a person). */
+    userId: string | null,
     input: CreateContactInput,
   ): Promise<Contact> {
     const phone = normalizePhoneE164(input.phoneNumber);
@@ -238,7 +240,8 @@ export class ContactsService {
    */
   private async reviveSoftDeletedByPhone(
     workspaceId: string,
-    userId: string,
+    /** Null for an API-key caller — see `create`. */
+    userId: string | null,
     phone: string,
     data: {
       name: string;

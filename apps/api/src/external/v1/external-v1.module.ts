@@ -20,6 +20,7 @@ import { OutboundWebhooksAdminModule } from "@/workspace-settings/outbound-webho
 import { AudienceGroupsModule } from "@/workspace-settings/audience-groups/audience-groups.module";
 import { SnippetsModule } from "@/workspace-settings/snippets/snippets.module";
 import { CustomersModule } from "@/customers/customers.module";
+import { ConversationsModule } from "@/conversations/conversations.module";
 // Aliased: the worker module in src/workflows exports the same class NAME.
 import { WorkflowsModule as WorkflowsSettingsModule } from "@/workspace-settings/workflows/workflows.module";
 
@@ -54,6 +55,7 @@ import { WorkflowsModule as WorkflowsSettingsModule } from "@/workspace-settings
     AudienceGroupsModule,
     SnippetsModule,
     CustomersModule,
+    ConversationsModule,
     WorkflowsSettingsModule,
     AssignmentModule,
     UsersModule,

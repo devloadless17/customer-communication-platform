@@ -70,6 +70,15 @@ interface TeamCountsBlock {
   uFlagged: number;
 }
 
+/**
+ * "Who read it" attribution when an API key marks a thread read. There is no
+ * acting agent — an integration handled it — so we stamp a stable sentinel
+ * rather than a user id, exactly like the Coexistence phone-app echo. Clients
+ * compare this field only as a cross-tab "not me" nudge, so a sentinel clears
+ * the badge for everyone, which is the intent.
+ */
+const API_KEY_READER = "api-key";
+
 @Injectable()
 export class ConversationsService {
   private readonly logger = new Logger(ConversationsService.name);
@@ -768,7 +777,9 @@ export class ConversationsService {
    */
   async setStatus(
     workspaceId: string,
-    actorUserId: string,
+    /** Null when an API key changed it — the event's `changedByUserId` is
+     *  nullable and downstream already renders that as automation. */
+    actorUserId: string | null,
     conversationId: string,
     input: SetConversationStatusInput,
     opts?: { silent?: boolean },
@@ -857,7 +868,8 @@ export class ConversationsService {
    */
   async startConversation(
     workspaceId: string,
-    actorUserId: string,
+    /** Null when an API key started it — an integration is not a person. */
+    actorUserId: string | null,
     input: StartConversationInput,
   ): Promise<{ conversationId: string; created: boolean; reopened: boolean }> {
     // Resolve the target contact id — either given directly, or found/created
@@ -1045,7 +1057,18 @@ export class ConversationsService {
    * The CAS protects against the read-vs-incoming-bump race; loser skips the
    * publish and the next message:received re-syncs the badge.
    */
-  async markRead(workspaceId: string, userId: string, conversationId: string): Promise<void> {
+  async markRead(
+    workspaceId: string,
+    /**
+     * Null when an API key marked it. Unread is TEAM-WIDE, so the reader's
+     * identity only ever feeds the event's "was it me?" cross-tab nudge — a
+     * stable sentinel clears the badge for everyone, which is the intent.
+     * Same convention as the Coexistence phone-app echo
+     * (`COEXISTENCE_ECHO_READER` in lib/providers/ingest.ts).
+     */
+    userId: string | null,
+    conversationId: string,
+  ): Promise<void> {
     // Single-round-trip CAS. The client calls markRead on EVERY visible
     // thread mount (not just when its cached snapshot claims unread>0) so
     // the team-wide counter converges to server truth even when that
@@ -1067,7 +1090,7 @@ export class ConversationsService {
       publish: (e) => this.bus.publish(e),
       workspaceId,
       conversationId,
-      readByUserId: userId,
+      readByUserId: userId ?? API_KEY_READER,
     });
     if (!cleared) {
       // Either already-read OR missing. Probe to distinguish so callers
