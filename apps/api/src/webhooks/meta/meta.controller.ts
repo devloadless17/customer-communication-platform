@@ -47,6 +47,7 @@ import {
   isTransientDbError,
 } from "@/lib/providers/ingest";
 import { enqueueHistoryChunk } from "@/lib/coexistence/history-queue";
+import { safeFetch } from "@/lib/http/safe-fetch";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
 import type { Channel, MediaKind } from "@ccp/shared/types";
 import { mediaPreviewLabel } from "@ccp/shared/types";
@@ -1271,10 +1272,28 @@ async function fetchUrlBytes(
   url: string,
   capBytes: number,
 ): Promise<{ bytes: Uint8Array; mimeType: string }> {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 20_000);
   try {
-    const res = await fetch(url, { signal: ac.signal, redirect: "follow" });
+    // SSRF-SAFE, not raw `fetch`. This URL comes straight out of a webhook
+    // payload, and the HMAC that authenticates that payload is signed with an
+    // `appSecret` the WORKSPACE ADMIN sets themselves — so an admin can sign a
+    // body naming any host reachable from this container (`127.0.0.1`,
+    // `169.254.169.254`, another service on the VPS), have us fetch it, and
+    // then read the bytes back through `GET /api/media/:messageId`. Full read
+    // exfiltration, not blind: the mime gate doesn't stop it, because an
+    // unknown body sniffs to nothing and falls through to the kind's canonical
+    // type.
+    //
+    // `safeFetch` resolves the host, refuses every private/link-local range in
+    // both v4 and all v6 notations, and PINS the validated address for the
+    // actual connection so a DNS rebind between check and fetch can't win.
+    // CLAUDE.md §16 already required it for provider/webhook calls; this path
+    // was the one that missed. Redirects off — a CDN 302 to an internal host
+    // would otherwise re-open the hole one hop later.
+    const res = await safeFetch(url, {
+      timeoutMs: 20_000,
+      maxRedirects: 0,
+      maxResponseBytes: capBytes,
+    });
     if (!res.ok) throw new Error(`social media fetch ${res.status}`);
     // Content-Length is an EARLY reject when present, but a CDN can omit or
     // understate it — so we ALSO enforce the cap while STREAMING the body,
@@ -1291,8 +1310,10 @@ async function fetchUrlBytes(
         .split(";")[0]
         ?.trim() || "application/octet-stream";
     return { bytes, mimeType };
-  } finally {
-    clearTimeout(timer);
+  } catch (err) {
+    // Surface an SSRF refusal distinctly so an operator debugging a missing
+    // attachment sees "we refused this host", not a generic fetch failure.
+    throw err;
   }
 }
 

@@ -68,14 +68,35 @@ async function sweepOnce(): Promise<void> {
  * Cross-checked against `sourceKey` before deleting: a file staged minutes ago
  * and imported seconds ago must not be pulled out from under a running job.
  */
+/**
+ * Provider cursor carried ACROSS ticks, exactly like the blob-orphan sweeper.
+ *
+ * Without it this listed the same first `BATCH` keys forever: `listKeys` is
+ * S3 `ListObjectsV2`, which returns keys in lexicographic order and honours
+ * `MaxKeys`. The `contact-imports/` prefix holds BOTH `staged-<uuid>` uploads
+ * and `<jobId>-errors.<fmt>` reports (which live until their job's 7-day
+ * expiry), so a tenant whose workspace cuid sorts early and which runs a
+ * dozen imports a day pins the window permanently — after which no other
+ * workspace's abandoned upload, at up to 50 MB each, is ever reclaimed.
+ *
+ * This is the identical bug blob-orphan.ts documents having fixed for itself
+ * ("each weekly tick would rescan the same first 2000 lexicographic keys and
+ * never reclaim a leak sorting after them"). Same remedy.
+ */
+let resumeCursor: string | undefined;
+
 async function reapAbandonedUploads(): Promise<void> {
   if (!blobStorage.listKeys) return; // provider can't enumerate — nothing to do
 
   const cutoff = Date.now() - ABANDONED_UPLOAD_MS;
-  const { keys } = await blobStorage.listKeys({
+  const { keys, nextCursor } = await blobStorage.listKeys({
     limit: BATCH,
     prefix: "contact-imports/",
+    ...(resumeCursor ? { cursor: resumeCursor } : {}),
   });
+  // Advance (or wrap to the start when the listing is exhausted) BEFORE any
+  // early return below, so a page with no candidates still moves the window.
+  resumeCursor = nextCursor;
 
   // Only `staged-` objects: the `-errors.` reports are job-owned and reaped
   // with their row.

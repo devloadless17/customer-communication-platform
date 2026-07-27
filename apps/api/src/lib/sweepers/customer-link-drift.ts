@@ -31,6 +31,13 @@ async function sweepOnce(): Promise<void> {
   const orphans = await db.contact.findMany({
     where: { customerId: null, deletedAt: null },
     select: { id: true, workspaceId: true, phoneNumber: true, email: true, name: true },
+    // ORDERED — every other paged sweeper is, and this one's absence was a
+    // starvation bug: a contact `resolveCustomerId` throws on permanently
+    // occupies a slot in the unordered window, so at a 60s cadence the same
+    // failing rows are re-selected forever and every orphan behind them is
+    // never reached. Newest-first also matches the intent stated at the top of
+    // this file ("a just-created contact gets its unified profile fast").
+    orderBy: { createdAt: "desc" },
     take: BATCH,
   });
   for (const c of orphans) {
@@ -68,6 +75,15 @@ async function runTick(label: string): Promise<void> {
   try {
     await withSweeperMutex("customer-link", sweepOnce);
   } catch (err) {
+    // Pool already ended (dev hot-reload / graceful shutdown) — STOP rather
+    // than log a stack trace every 60s for the whole drain. The per-contact
+    // catch inside `sweepOnce` handled this, but the initial `findMany` sits
+    // outside it, so a pool-closed error there escaped to here and was only
+    // ever console.error'd. Every other sweeper stops itself at this level.
+    if (isPoolClosedError(err)) {
+      stopCustomerLinkSweeper();
+      return;
+    }
     console.error(`[sweeper.customer-link] ${label} failed`, err);
   } finally {
     inFlight = false;

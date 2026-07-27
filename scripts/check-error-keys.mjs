@@ -85,6 +85,17 @@ for (const file of files) {
     // Template literals and interpolations are not literal keys.
     if (key.includes("${")) continue;
     const line = src.slice(0, m.index).split("\n").length;
+    // An internal RESULT object — `{ ok: false, error: "…" }` — is not the HTTP
+    // envelope. The envelope is `{ error, detail? }` and never carries `ok`;
+    // a Result carries a human sentence for a caller to surface, exactly like
+    // the sibling line that does `error: err.message`. Flagging those would
+    // push snake_case identifiers into UI copy, which is the same mistake as
+    // the column case above — so the discriminator is `ok:` in the same
+    // object literal, not a per-site marker.
+    const objStart = src.lastIndexOf("{", m.index);
+    if (objStart !== -1 && /\bok:\s*(true|false)/.test(src.slice(objStart, m.index))) {
+      continue;
+    }
     // Escape marker on any of the few lines above (the write may be wrapped).
     const preceding = src.split("\n").slice(Math.max(0, line - 7), line - 1).join("\n");
     if (preceding.includes(ESCAPE_MARKER)) continue;
