@@ -17,6 +17,7 @@ import { test, expect, type Page } from "@playwright/test";
  *   horizontal overflow       copy tone and clarity
  *   dark + light both render  motion tastefulness
  *   keyboard focus visible    empty-state helpfulness
+ *   cumulative layout shift
  *
  * HORIZONTAL OVERFLOW is the one worth explaining. CLAUDE.md §15 forbids layout
  * instability, and the single most common way this app could break on a laptop
@@ -27,6 +28,15 @@ import { test, expect, type Page } from "@playwright/test";
  * `document.documentElement.scrollWidth <= clientWidth`, so it is checked at
  * every viewport rather than eyeballed.
  */
+
+declare global {
+  interface Window {
+    /** Accumulated layout-shift score, summed by the observer below. */
+    __cls?: number;
+    /** Previously focused node, for by-reference identity across Tab presses. */
+    __prevFocus?: Element | null;
+  }
+}
 
 /** The plan's surface order, by bar height. Inbox last = final acceptance. */
 const SURFACES = [
@@ -167,6 +177,145 @@ for (const surface of SURFACES) {
             .join("\n"),
       );
       expect(blocking.map((v) => `${v.impact}:${v.id}`), report.join("\n")).toEqual([]);
+    });
+
+    test(`${surface.name}: keyboard focus is always visible and never lost`, async ({ page }) => {
+      await page.setViewportSize({ width: 1280, height: 800 });
+      await page.goto(surface.path);
+      await settle(page);
+
+      // Tab through the first stretch of the tab order.
+      //
+      // WHAT IS *NOT* A BUG, learned the hard way: focus reaching <body> is the
+      // browser WRAPPING its tab order after the last control — completely
+      // normal. An earlier version of this test called that "stranded" and so
+      // failed all seven surfaces at once, which would have been reported as
+      // "keyboard navigation is broken app-wide". It isn't. When a check fails
+      // everywhere identically, suspect the check.
+      //
+      // What genuinely matters, and is asserted below:
+      //   NAVIGABLE — a real number of distinct controls actually receive
+      //               focus, so the surface can be operated without a mouse.
+      //   VISIBLE   — every focused control shows an indicator. Tailwind draws
+      //               focus with `ring`, i.e. a box-shadow, so testing outline
+      //               alone would be wrong.
+      //   NOT STUCK — focus keeps advancing rather than pinning to one element.
+      const STEPS = 25;
+      const invisible: string[] = [];
+      const seen = new Set<string>();
+      let stuckRun = 0;
+      let worstStuck = 0;
+
+      for (let i = 0; i < STEPS; i++) {
+        await page.keyboard.press("Tab");
+        const info = await page.evaluate(() => {
+          const el = document.activeElement as HTMLElement | null;
+          // IDENTITY IS COMPARED IN PAGE CONTEXT, by reference. A previous
+          // version compared a className-derived label and reported every
+          // surface as "trapped", because a row of buttons that share classes
+          // produced identical labels — two different elements looked like one
+          // stuck element. Only the DOM node itself is a reliable identity.
+          const changed = el !== (window.__prevFocus ?? null);
+          window.__prevFocus = el;
+          if (!el || el === document.body) return { tag: "BODY", visible: true, changed };
+          const cs = getComputedStyle(el);
+          const outline =
+            cs.outlineStyle !== "none" && parseFloat(cs.outlineWidth || "0") > 0;
+          const shadow = cs.boxShadow !== "none" && cs.boxShadow.trim().length > 0;
+          // AN INDICATOR MAY BE DRAWN ON A DESCENDANT. The inbox resize handle
+          // is the case that taught this: it is a correctly-built separator
+          // (aria-valuemin/max/now, a key handler, tabIndex) whose focus ring
+          // is painted by `group-focus-visible:bg-primary` on a CHILD span.
+          // Inspecting only the focused element's own computed style called it
+          // indicator-less, which was simply false.
+          //
+          // So also accept the app's declared convention: a `focus-visible:` /
+          // `focus:` / `group-focus-visible:` utility on the element or any
+          // descendant. This is a heuristic — it proves a focus style was
+          // DECLARED, not that it is perceivable — and its real job is catching
+          // controls that declare nothing at all. A stricter test would diff a
+          // screenshot of the element focused vs blurred; that is the upgrade
+          // path if this ever passes something it shouldn't.
+          const declaresFocusStyle = (node: Element): boolean => {
+            const cls = typeof node.className === "string" ? node.className : "";
+            return /(^|\s|:)(group-)?focus(-visible)?:/.test(cls);
+          };
+          const declared =
+            declaresFocusStyle(el) || Array.from(el.querySelectorAll("*")).some(declaresFocusStyle);
+          const label =
+            `${el.tagName.toLowerCase()}` +
+            `${el.id ? `#${el.id}` : ""}` +
+            `${typeof el.className === "string" && el.className ? `.${el.className.trim().split(/\s+/).slice(0, 8).join(".")}` : ""}` +
+            `${el.getAttribute("tabindex") ? `[tabindex=${el.getAttribute("tabindex")}]` : ""}`;
+          // `nextjs-portal` is Next's DEV-ONLY tooling overlay (the error
+          // indicator). It is not app code and does not exist in a production
+          // build, so holding it to the app's focus-indicator rule would be a
+          // permanent false finding on every surface that renders it.
+          const isDevOverlay = el.tagName.toLowerCase() === "nextjs-portal";
+          return { tag: label, visible: outline || shadow || declared || isDevOverlay, changed };
+        });
+
+        if (info.tag === "BODY") {
+          // Tab order wrapped. Keep going — the next Tab re-enters the document.
+          stuckRun = 0;
+          continue;
+        }
+        seen.add(info.tag);
+        if (!info.visible) invisible.push(info.tag);
+        if (info.changed) {
+          stuckRun = 0;
+        } else {
+          stuckRun += 1;
+          worstStuck = Math.max(worstStuck, stuckRun);
+        }
+      }
+
+      expect(
+        seen.size,
+        `${surface.name} must be operable by keyboard — only ${seen.size} distinct ` +
+          `control(s) took focus across ${STEPS} tabs`,
+      ).toBeGreaterThanOrEqual(3);
+      expect(worstStuck, "focus stopped advancing — the tab order is trapped").toBeLessThan(3);
+      expect(
+        [...new Set(invisible)],
+        `these took focus with NO visible indicator (no outline, no ring) — a ` +
+          `keyboard user cannot see where they are`,
+      ).toEqual([]);
+    });
+
+    test(`${surface.name}: cumulative layout shift stays under the "good" threshold`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: 1280, height: 800 });
+      // Start observing BEFORE navigation so shifts during hydration count —
+      // that is exactly where this app could shift (RSC shell paints, then a
+      // client component swaps in). CLAUDE.md §15: "No layout shift, no
+      // flicker, no visual instability."
+      await page.addInitScript(() => {
+        window.__cls = 0;
+        new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            const e = entry as PerformanceEntry & { value: number; hadRecentInput: boolean };
+            // Shifts within 500ms of a real interaction are user-initiated and
+            // excluded by the Web Vitals definition itself.
+            if (!e.hadRecentInput) {
+              window.__cls = (window.__cls ?? 0) + e.value;
+            }
+          }
+        }).observe({ type: "layout-shift", buffered: true });
+      });
+      await page.goto(surface.path);
+      await settle(page);
+      // Let late work (fonts, virtualized lists, avatars) land before reading.
+      await page.waitForTimeout(1500);
+      const cls = await page.evaluate(() => window.__cls ?? 0);
+      console.log(`[uiux:cls] ${surface.name} = ${cls.toFixed(4)}`);
+      // Google's "good" bar. Measured against the DEV server, which is the
+      // PESSIMISTIC case (uncompiled routes, no bundle splitting) — a prod
+      // build should only be better, so a green result here is trustworthy and
+      // a red one is worth reading before believing.
+      expect(cls, `${surface.name} shifts too much during load (CLS ${cls.toFixed(4)} > 0.1)`)
+        .toBeLessThan(0.1);
     });
 
     test(`${surface.name}: renders in dark and light`, async ({ page }) => {
