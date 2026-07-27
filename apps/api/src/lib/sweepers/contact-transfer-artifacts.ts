@@ -110,7 +110,14 @@ async function failStalledRuns(): Promise<void> {
     },
     data: {
       status: "failed",
-      error: "transfer_interrupted", detail: "The transfer stopped unexpectedly. Its progress was saved — start it again to continue.",
+      // `ContactTransferJob.error` is a COLUMN the UI renders verbatim, not an
+      // HTTP error envelope — so the sentence belongs here, not a key. (The
+      // batch-F normalization script mistook it for an envelope and added a
+      // `detail` field the model doesn't have; check:prisma-fields caught it,
+      // which is precisely the runtime-only class that checker exists for.)
+      // error-key-checker: column-not-envelope
+      error:
+        "The transfer stopped unexpectedly. Its progress was saved — start it again to continue.",
       finishedAt: new Date(),
     },
   });

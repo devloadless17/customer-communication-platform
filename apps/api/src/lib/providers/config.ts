@@ -195,6 +195,29 @@ async function loadSendCipher(
   // SECURITY: `workspaceId` stays in the WHERE even when an explicit account is
   // named. `accountId` can originate from a stored row, so scoping by it alone
   // would let a mis-stamped/foreign id load ANOTHER tenant's credentials.
+  if (!accountId) {
+    // NO ACCOUNT NAMED. Falling straight through to the default is only safe
+    // when there IS no other choice.
+    //
+    // `Conversation.channelConnectionId` and `Broadcast.channelConnectionId`
+    // are both `onDelete: SetNull`, so disconnecting a number silently nulls
+    // every thread and campaign bound to it — and a null here used to resolve
+    // to `isDefault: true`. The customer then got a reply (or a whole
+    // campaign) from a number they never messaged, with no 24h window there,
+    // which is exactly what `channel-accounts.service.remove()`'s docstring
+    // promises cannot happen ("they become unsendable rather than silently
+    // falling back to a sibling number"). It also quietly undid the §2
+    // per-thread account fix by nulling the column the send paths read.
+    //
+    // With one active account the fallback is unambiguous and stays. With
+    // several, refuse: the next inbound re-stamps the thread's account
+    // (ingest re-stamps whenever it differs), so this is self-healing rather
+    // than terminal.
+    const active = await db.channelConnection.count({
+      where: { workspaceId, channel: "whatsapp", isActive: true },
+    });
+    if (active > 1) return { kind: "err", missing: ["account-unresolved"] };
+  }
   const conn = await db.channelConnection.findFirst({
     where: accountId
       ? { id: accountId, workspaceId, channel: "whatsapp" }

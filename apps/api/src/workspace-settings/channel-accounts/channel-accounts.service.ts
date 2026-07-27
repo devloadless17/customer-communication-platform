@@ -175,9 +175,14 @@ export class ChannelAccountsService {
       this.db.conversation.count({
         where: { workspaceId, channelConnectionId: id, status: { not: "closed" } },
       }),
-      // A queued campaign bound to this account would fail every recipient with
-      // `send_account_unresolved` the moment it runs — worth naming BEFORE the
-      // credentials go, not after.
+      // A queued campaign bound to this account. `Broadcast.channelConnectionId`
+      // is `onDelete: SetNull`, so after the disconnect the runner resolves a
+      // null account — which is exactly why `loadSendCipher` now REFUSES an
+      // unresolved account in a multi-account workspace (missing:
+      // "account-unresolved"). Before that guard the campaign silently sent
+      // from whichever number happened to be default: a billed, irreversible
+      // mass send from a sender the audience never messaged. Worth naming
+      // BEFORE the credentials go, not after.
       this.db.broadcast.count({
         where: {
           workspaceId,
@@ -235,9 +240,17 @@ export class ChannelAccountsService {
    *
    * The row is DELETED, not soft-disabled: its credentials are the thing being
    * revoked. Conversations survive — `Conversation.channelConnectionId` is
-   * SetNull — but they become unsendable (`send_account_unresolved`) rather than
-   * silently falling back to a sibling number, which would reply to a customer
-   * from a number they never messaged.
+   * SetNull — and they become unsendable rather than silently falling back to a
+   * sibling number, which would reply to a customer from a number they never
+   * messaged.
+   *
+   * That last promise is enforced in `lib/providers/config.ts` (and the
+   * messenger/instagram siblings), NOT here: the FK nulls the column, and a
+   * null used to resolve straight to `isDefault: true`. The loader now refuses
+   * an unresolved account whenever the workspace has more than one active
+   * account on that channel. With a single account the fallback is
+   * unambiguous and stays; the state is self-healing either way, because
+   * ingest re-stamps the thread's account on the next inbound.
    *
    * Removing the default promotes the oldest remaining account so the channel
    * doesn't end up with accounts but no default.

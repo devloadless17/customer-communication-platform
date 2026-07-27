@@ -34,12 +34,19 @@ const SCAN_DIRS = [
 const SCAN_FILES = ["apps/web/src/proxy.ts"]; // edge responses
 
 /**
- * Keys that are allowed to contain spaces because they are NOT ours to
- * rename — a provider's own string echoed back, or a value that is prose by
- * definition. Keep this list short and justified; an entry here is a promise
- * that the value never reaches a client as a branchable key.
+ * Per-site escape hatch. Put this comment on the line ABOVE an `error:` that
+ * is legitimately prose:
+ *
+ *     // error-key-checker: column-not-envelope
+ *     error: "The transfer stopped unexpectedly. …",
+ *
+ * The real case it exists for: `ContactTransferJob.error` is a database
+ * COLUMN the UI renders verbatim, not an HTTP envelope — there the sentence
+ * IS the value, and snake-casing it would put an identifier in front of a
+ * user. An inline marker beats a string allowlist because it lives at the
+ * site, explains itself, and survives a reword.
  */
-const ALLOWED = new Set([]);
+const ESCAPE_MARKER = "error-key-checker: column-not-envelope";
 
 async function walk(dir, out = []) {
   let entries;
@@ -75,10 +82,12 @@ for (const file of files) {
   PROSE_KEY.lastIndex = 0;
   while ((m = PROSE_KEY.exec(src))) {
     const key = m[1];
-    if (ALLOWED.has(key)) continue;
     // Template literals and interpolations are not literal keys.
     if (key.includes("${")) continue;
     const line = src.slice(0, m.index).split("\n").length;
+    // Escape marker on any of the few lines above (the write may be wrapped).
+    const preceding = src.split("\n").slice(Math.max(0, line - 7), line - 1).join("\n");
+    if (preceding.includes(ESCAPE_MARKER)) continue;
     problems.push(
       `${file}:${line}\n    error: "${key}"\n` +
         `    → keys are snake_case identifiers clients branch on; put the sentence in \`detail\`.\n` +

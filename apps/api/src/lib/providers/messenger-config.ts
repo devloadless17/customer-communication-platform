@@ -88,6 +88,17 @@ async function loadSendCipher(
 ): Promise<CachedSend> {
   // SECURITY: workspaceId stays in the WHERE even with an explicit account, so a
   // mis-stamped/foreign id can never load another tenant's credentials.
+  if (!accountId) {
+    // Same ambiguity guard as WhatsApp (see lib/providers/config.ts): a null
+    // account is `onDelete: SetNull` fallout from a disconnected Page, and
+    // resolving it to the default would reply from a Page/handle the customer
+    // never messaged. Unambiguous with one active account; refused with
+    // several, and self-healing because ingest re-stamps on the next inbound.
+    const active = await db.channelConnection.count({
+      where: { workspaceId, channel: "messenger", isActive: true },
+    });
+    if (active > 1) return { kind: "err", missing: ["account-unresolved"] };
+  }
   const conn = await db.channelConnection.findFirst({
     where: accountId
       ? { id: accountId, workspaceId, channel: "messenger" }

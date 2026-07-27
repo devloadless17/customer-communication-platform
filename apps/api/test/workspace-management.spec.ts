@@ -22,6 +22,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { BadRequestException, ForbiddenException, NotFoundException } from "@nestjs/common";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { WorkspaceRootService } from "@/workspace-settings/workspace-root.service";
 import { WorkspacesService } from "@/workspaces/workspaces.service";
 import type { ApiSession } from "@/auth/session.guard";
 import type { DbService } from "@/db/db.service";
@@ -35,9 +36,20 @@ const prisma = new PrismaClient({
 // The invalidator's socket side is a no-op here — these specs exercise the
 // membership writes, not the realtime eviction (which needs a live gateway).
 const noopInvalidator = { bustCache() {}, revoke() {} };
+// A REAL WorkspaceRootService: `remove()` delegates the destruction to it
+// (batched message drain, blob cleanup, provider-cache bust), so stubbing it
+// would leave this spec asserting isolation against a cascade that never ran.
+// Its own bus publish is the only part that needs a stand-in here.
+const noopBus = { publish: async () => {} };
+const workspaceRoot = new WorkspaceRootService(
+  prisma as unknown as DbService,
+  noopInvalidator as never,
+  noopBus as never,
+);
 const service = new WorkspacesService(
   prisma as unknown as DbService,
   noopInvalidator as never,
+  workspaceRoot,
 );
 
 const S = `wm${Date.now().toString().slice(-8)}`;

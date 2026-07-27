@@ -14,6 +14,7 @@ import { invalidateSessionCache, type ApiSession } from "../auth/session.guard";
 import { SessionInvalidationService } from "../auth/session-invalidation.service";
 import { Prisma } from "@prisma/client";
 import { DbService } from "../db/db.service";
+import { WorkspaceRootService } from "../workspace-settings/workspace-root.service";
 
 export interface WorkspaceSummary {
   id: string;
@@ -33,6 +34,8 @@ export class WorkspacesService {
   constructor(
     private readonly db: DbService,
     private readonly sessionInvalidator: SessionInvalidationService,
+    // The one real implementation of "destroy a workspace" — see remove().
+    private readonly workspaceRoot: WorkspaceRootService,
   ) {}
 
   /**
@@ -449,17 +452,40 @@ export class WorkspacesService {
         where: { workspaceId },
         select: { userId: true },
       });
-      await tx.workspace.delete({ where: { id: workspaceId } });
-      // Anyone whose active workspace was this one now points at a row that no
-      // longer exists. `Session.activeWorkspaceId` has no FK (a per-device
-      // preference, not a relation), so clear it explicitly — otherwise their
-      // next request resolves a dead id and errors instead of falling through
-      // to their first remaining membership.
-      await tx.session.updateMany({
-        where: { activeWorkspaceId: workspaceId },
-        data: { activeWorkspaceId: null },
-      });
       return m;
+    });
+
+    // THE DELETE ITSELF IS DELEGATED. This method used to run its own
+    // `tx.workspace.delete` inside the org-lock transaction above, which was a
+    // second, unsafe implementation of a job `WorkspaceRootService.destroy`
+    // already does properly:
+    //
+    //   - it pre-drains `Message` in batches, because a single cascade deletes
+    //     them all in ONE transaction — a lock storm + WAL blowup that can
+    //     wedge the database on a workspace with real history. Worse, running
+    //     it inside the interactive transaction above meant it ALSO held the
+    //     org row lock, so a slow delete blocked every other org-level write
+    //     (workspace create, member add, user delete) and then failed on
+    //     Prisma's 5s interactive-transaction timeout;
+    //   - it snapshots and deletes the R2 blobs (message media, thumbnails,
+    //     member and contact avatars) before the rows vanish. Nothing else can
+    //     reclaim them: the orphan sweeper deliberately skips `avatars/`;
+    //   - it busts the provider-credential cache, which otherwise keeps a
+    //     deleted workspace's channel config live for up to its TTL;
+    //   - it kicks the members' sockets.
+    //
+    // The org-lock transaction above stays: it is what makes the
+    // "an org must keep one workspace" check race-safe. Only the destruction
+    // moved out of it.
+    await this.workspaceRoot.destroy(workspaceId, "workspace-delete");
+
+    // `Session.activeWorkspaceId` has no FK (a per-device preference, not a
+    // relation), so it survives the cascade pointing at a dead id. Clear it or
+    // the member's next request resolves a workspace that no longer exists
+    // instead of falling through to their first remaining membership.
+    await this.db.session.updateMany({
+      where: { activeWorkspaceId: workspaceId },
+      data: { activeWorkspaceId: null },
     });
     // Every member of the deleted workspace holds a stale membership list.
     for (const m of members) invalidateSessionCache(m.userId);
