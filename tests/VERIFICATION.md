@@ -980,6 +980,12 @@ revocation immediacy.
 | Channel-connection delete → threads, sends, webhooks, broadcasts | ☐ |
 | Org delete → users, workspaces, sessions, globally-unique emails | ☐ |
 
+## B-M6 UI/UX backlog (found outside the rubric pass — carry into it)
+
+| Finding | Where | Notes |
+|---|---|---|
+| **Every deploy shows a hard error page for a few seconds.** Compose recreates `ccp-web-1` and `ccp-api-1` together; web comes up first and its RSC pages fetch the API over `INTERNAL_API_URL` during render, so while the API is still `health: starting` the render throws and the user gets "Something broke." with a digest instead of a retry. Observed live on the 2026-07-27 deploy (run 30279058678 — all 8 gates green; this window is invisible to the smoke check, which runs after health). Fix shape: retry/backoff around the RSC session+data fetch, or hold the request at Caddy until the API healthcheck passes. Not a regression from any one change — it is how the deploy has always behaved. | `apps/web/src/lib/auth/current-user.ts` + every RSC page fetch; `docker-compose.yml` service ordering; Caddyfile | Deliberately NOT hot-fixed under deploy pressure — belongs in the rubric pass with the loading/error-state row it falls under |
+
 ## Pressure numbers (B-M5 — record with commit hash)
 
 | Check | Last measured | Result |
