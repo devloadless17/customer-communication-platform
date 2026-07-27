@@ -995,7 +995,8 @@ acceptance**, three objective checks each.
 | Renders in dark + light | ✅ 0 error boundaries on either theme |
 | Keyboard: operable, focus advances, indicator on every focused control | ✅ 0 failures across all 7 |
 | Cumulative layout shift (PerformanceObserver, observed from before navigation) | ✅ **0.0000 on all 7** vs Google's 0.1 "good" bar — measured on the DEV server, the pessimistic case |
-| **Total** | **37/37** (`2b0de46a`) |
+| **Deep sweep: all 16 settings subpages (axe)** | ✅ 0 (was **10 of 16 failing**, incl. 4 critical) — `09757752` |
+| **Total** | **53/53** (`09757752`) |
 
 Fixed to get there: (1) every small uppercase section label used
 `text-muted-foreground` at 60-80% opacity and failed AA — one token decision
@@ -1032,6 +1033,26 @@ check.** Identity is now compared by DOM reference in page context; Next's
 dev-only `nextjs-portal` is excluded; a descendant-declared focus style counts
 (a documented heuristic — it proves a style was DECLARED; screenshot-diffing
 focused-vs-blurred is the named upgrade path).
+
+**The deep sweep was the highest-yield hour of B-M6.** The rubric had only ever
+scanned `/settings`, but that page is a HUB — the channel warnings, provider
+callouts and inline editors all live one level down, and 10 of the 16 subpages
+were failing. Findings: four CRITICAL (unlabelled inline editors on
+message-flags; a `Field` component whose `<label>` sat BESIDE its control with
+no `htmlFor`, so it associated nothing; a `Row` title that is plain text;
+icon-only copy buttons with no name) and two TOKEN-level contrast bugs —
+`--warning-fg` measured **4.39:1** on `--warning-bg`, just under AA, so every
+warning pill in the app was a hair below the bar; and `/settings/integrations`
+faded its "coming soon" cards with a blanket `opacity-60`, compositing the
+description text down to **2.58:1**, the least readable text in the app.
+
+**One of them was a product bug, not an a11y bug.** `channel-accounts-panel`
+resolved its display name with `a.label ?? … ?? "Unnamed account"`, and `??`
+falls back only on null/undefined — NOT on `""`. An admin who clears the label
+field saves an empty string, so the row rendered an EMPTY button: nothing
+visible to click. Accessibility tooling found it because an unnamed button is
+exactly what an empty one is. **Coverage gaps hide product bugs, not just
+accessibility ones.**
 
 **Not automated, deliberately** — the subjective half of the rubric (visual
 hierarchy, copy tone, motion, empty-state helpfulness) is a reading task and
