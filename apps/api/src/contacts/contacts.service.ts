@@ -30,6 +30,7 @@ import { workflowContactSnapshot } from "@/lib/workflows/events";
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
 import { runWithConcurrency } from "../common/concurrency";
+import { IMPORT_EVENT_FANOUT_CAP } from "@ccp/shared/contacts/transfer-columns";
 import {
   MAX_FILTER_MATCH,
   MAX_TOTAL_FIELDS,
@@ -654,6 +655,26 @@ export class ContactsService {
     // on them — but the resident set stays bounded by the chunk, not by the
     // tenant's contact count.
     const RELOAD_CHUNK = 1_000;
+    // PER-CONTACT EVENT FAN-OUT CAP, matching the import path's
+    // `IMPORT_EVENT_FANOUT_CAP` and for identical reasons.
+    //
+    // A filter-mode bulk tag expands to up to `MAX_FILTER_MATCH` (50,000)
+    // contacts, and this loop published TWO events each — `contact.updated`
+    // plus `contact.tag_changed` — with no ceiling. One "select all matching →
+    // add tag" on a 40k audience therefore meant ~80,000 outbox rows, up to
+    // 40,000 WorkflowRuns if any `contact_tag_updated` workflow exists, and
+    // 40,000 webhook deliveries PER subscribed endpoint, on an 8GB
+    // single-VPS box. `suppressSocketFanout` never helped: it suppresses the
+    // socket frame only, not the outbox row, the dispatch, or the delivery.
+    //
+    // The import runner already refuses to do this and says why (CLAUDE.md §9,
+    // the same reasoning as "never subscribe audit or workflow to
+    // broadcast.*"). The tag WRITE itself is unaffected and still applies to
+    // every matched contact — only the per-contact notification stops, and the
+    // caller is told, so the UI can say so instead of implying automations ran.
+    const eventBudget = IMPORT_EVENT_FANOUT_CAP;
+    let eventsPublished = 0;
+    let automationsSkipped = 0;
     for (let i = 0; i < ownedIds.length; i += RELOAD_CHUNK) {
       const chunkIds = ownedIds.slice(i, i + RELOAD_CHUNK);
       const updated = await this.db.contact.findMany({
@@ -669,6 +690,15 @@ export class ContactsService {
       // loop on a 500-id bulk-tag. Per-subscriber try/catch in the bus
       // prevents one bad subscriber from breaking the rest.
       await runWithConcurrency(updated, 16, async (c) => {
+          // Callback, not a loop body — `return` skips THIS contact's events.
+          // The counters are safe under the 16-lane fanout: both are plain
+          // increments on the single JS thread with no await between the read
+          // and the write, so they cannot interleave.
+          if (eventsPublished >= eventBudget) {
+            automationsSkipped++;
+            return;
+          }
+          eventsPublished++;
           const tagIds = c.tags.map((t) => t.id);
           const payload: Contact = toContactWire(c, { tagIds });
           const before = hadTag.get(c.id) ?? false;
@@ -732,6 +762,10 @@ export class ContactsService {
       count: ownedIds.length,
       action,
       ...(capped ? { capped: true } : {}),
+      // Surfaced, not silent: if the fan-out cap bit, the tag WAS applied to
+      // every contact but automations/webhooks did not fire for this many —
+      // the UI must be able to say so rather than imply they ran.
+      ...(automationsSkipped > 0 ? { automationsSkipped } : {}),
     };
   }
 

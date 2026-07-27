@@ -5,6 +5,7 @@ import { MEDIA_SIZE_CAPS } from "@/lib/media-storage";
 import { getMetaProvider } from "@/lib/providers";
 import { MediaTooLargeError } from "@/lib/providers/meta";
 import { getMetaSendConfig } from "@/lib/providers/config";
+import { reconcileInboundMediaMime } from "@/lib/blob-storage/mime-guard";
 import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
 import type { MediaKind } from "@ccp/shared/types";
@@ -139,7 +140,13 @@ async function selectAndDowngrade(): Promise<ParkedRow[]> {
   // it the 60s tick seq-scans the whole Message table.
   const stuck = await db.message.findMany({
     where: {
-      direction: "in",
+      // Matches what the WIRE layer marks `mediaPending` (queries/_shared.ts):
+      // `direction === "in" || origin === "business_app"`. Scanning inbound
+      // ONLY meant a parked COEXISTENCE ECHO carrying media — the owner's own
+      // phone-app reply, which is `direction: "out"` — was never retried and
+      // never downgraded either, so its bubble shimmered forever. Same for
+      // every history-backfilled outbound media row.
+      OR: [{ direction: "in" }, { origin: "business_app" }],
       mediaKind: { not: null },
       mediaUrl: null,
       createdAt: { lt: cutoff },
@@ -158,6 +165,9 @@ async function selectAndDowngrade(): Promise<ParkedRow[]> {
       createdAt: true,
       rawPayload: true,
       externalId: true,
+      // The thread's OWN account — required to resolve a send config at all in
+      // a multi-account workspace (see `retryDownload`).
+      conversation: { select: { channelConnectionId: true } },
     },
     take: 100,
   });
@@ -277,6 +287,7 @@ type ParkedRow = {
   body: string;
   rawPayload: unknown;
   externalId: string;
+  conversation: { channelConnectionId: string | null } | null;
 };
 
 /**
@@ -297,7 +308,16 @@ async function retryDownload(row: ParkedRow): Promise<void> {
     return;
   }
 
-  const sendConfig = await getMetaSendConfig(row.workspaceId);
+  // THE RECOVERY PATH FOR THE VERY BUG THIS SWEEPER EXISTS TO FIX had the same
+  // defect: no account. Since the account-unresolved guard landed, omitting it
+  // makes this THROW in every multi-account workspace — so the one mechanism
+  // that could re-fetch a lost binary was itself dead exactly where the loss
+  // happened. The account is also simply correct: a Meta media id is scoped to
+  // the account that received it.
+  const sendConfig = await getMetaSendConfig(
+    row.workspaceId,
+    row.conversation?.channelConnectionId,
+  );
   const cap = MEDIA_SIZE_CAPS[mediaKind];
   // minor#3: pass the cap so fetchMedia rejects via Content-Length BEFORE
   // buffering the binary into heap (RAM guard), same as the webhook path.
@@ -319,11 +339,23 @@ async function retryDownload(row: ParkedRow): Promise<void> {
     return;
   }
 
+  // RECONCILE, exactly like both live download paths do. Meta's CDN labels
+  // m4a/aac voice notes `video/mp4`; passing the raw value made
+  // `assertAllowedMime("audio", "video/mp4")` throw, which
+  // `isDeterministicMediaRejection` then treated as unrecoverable and CLEARED
+  // the row to text-only — destroying every voice note that took the parked
+  // path, immediately and deterministically, on the one path meant to save it.
+  const reconciledMime = reconcileInboundMediaMime(
+    mediaKind,
+    fetched.mimeType,
+    fetched.bytes,
+  );
+
   let saved;
   try {
     saved = await blobStorage.upload({
       bytes: fetched.bytes,
-      mimeType: fetched.mimeType,
+      mimeType: reconciledMime,
       kind: mediaKind,
       context: {
         workspaceId: row.workspaceId,
@@ -403,7 +435,7 @@ async function retryDownload(row: ParkedRow): Promise<void> {
     media: {
       kind: mediaKind,
       url: `/api/media/${row.id}`,
-      mimeType: fetched.mimeType,
+      mimeType: reconciledMime,
       sizeBytes: saved.sizeBytes,
       ...(row.body ? { caption: row.body } : {}),
       ...(row.mediaFilename ? { filename: row.mediaFilename } : {}),
