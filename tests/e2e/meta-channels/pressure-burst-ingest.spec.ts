@@ -83,7 +83,7 @@ async function runBurst(label: string, indices?: number[]): Promise<Timing[]> {
       const startedAt = Date.now();
       const res = await postMetaWebhook(META_TEST_TEAM_ID, payloadFor(i));
       timings.push({ ms: Date.now() - startedAt, status: res.status });
-      statusHistory[i].push(`${label}:${res.status}${res.text.includes("dropped") ? "(dropped)" : ""}`);
+      statusHistory[i]?.push(`${label}:${res.status}${res.text.includes("dropped") ? "(dropped)" : ""}`);
     }
   }
   const startedAt = Date.now();
@@ -94,7 +94,7 @@ async function runBurst(label: string, indices?: number[]): Promise<Timing[]> {
   console.log(
     `[pressure:${label}] ${ids.length} webhooks in ${wall}ms ` +
       `(${(ids.length / (wall / 1000)).toFixed(1)}/s) · ` +
-      `p50=${pct(0.5)}ms p95=${pct(0.95)}ms max=${sorted[sorted.length - 1]}ms`,
+      `p50=${pct(0.5)}ms p95=${pct(0.95)}ms max=${sorted.at(-1) ?? 0}ms`,
   );
   return timings;
 }
