@@ -127,6 +127,45 @@ describe("WorkflowRun.eventKey", () => {
     expect(await prisma.workflowRun.count({ where: { workspaceId: WS_ID } })).toBe(2);
   });
 
+  it("does NOT suppress the SECOND trigger one event legitimately fans out to", async () => {
+    // `message.received` dispatches conversation_created AND message_received;
+    // `conversation.status_changed` dispatches status_changed AND
+    // opened/closed. A workflow subscribed to two of them must run for each,
+    // so the key carries the TRIGGER — a (row, workflow)-only key silently
+    // ate the second run.
+    const workflowId = await seedWorkflow();
+    const row = "outbox-row-multi";
+    await prisma.workflowRun.create({
+      data: {
+        ...runData(workflowId, `${row}:${workflowId}:conversation_created:c1`),
+        trigger: "conversation_created",
+      },
+    });
+    await prisma.workflowRun.create({
+      data: runData(workflowId, `${row}:${workflowId}:message_received:c1`),
+    });
+    expect(await prisma.workflowRun.count({ where: { workspaceId: WS_ID } })).toBe(2);
+
+    // …while a true replay of either one is still rejected.
+    await expect(
+      prisma.workflowRun.create({
+        data: runData(workflowId, `${row}:${workflowId}:message_received:c1`),
+      }),
+    ).rejects.toMatchObject({ code: "P2002" });
+  });
+
+  it("keeps runs for DIFFERENT contacts on one event independent", async () => {
+    const workflowId = await seedWorkflow();
+    const row = "outbox-row-fanout";
+    await prisma.workflowRun.create({
+      data: runData(workflowId, `${row}:${workflowId}:message_received:contact-1`),
+    });
+    await prisma.workflowRun.create({
+      data: runData(workflowId, `${row}:${workflowId}:message_received:contact-2`),
+    });
+    expect(await prisma.workflowRun.count({ where: { workspaceId: WS_ID } })).toBe(2);
+  });
+
   it("leaves the synchronous publish path (NULL key) unconstrained", async () => {
     const workflowId = await seedWorkflow();
     await prisma.workflowRun.create({ data: runData(workflowId, null) });

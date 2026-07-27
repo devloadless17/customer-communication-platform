@@ -39,13 +39,27 @@ import { enqueueWorkflowRun } from "@/lib/workflows/queue";
  * only; messages still ingest, replies still send.
  */
 /**
- * Per-(outbox row, workflow) dedupe key, or null on the synchronous publish
- * path (which never redelivers, so its runs stay unkeyed and the partial
- * unique index ignores them).
+ * Per-(outbox row, workflow, trigger, contact) dedupe key, or null on the
+ * synchronous publish path (which never redelivers, so its runs stay unkeyed
+ * and the partial unique index ignores them).
+ *
+ * Every component is load-bearing — ONE domain event legitimately produces
+ * several distinct runs, and a coarser key would suppress the real ones:
+ *   - trigger: `message.received` dispatches BOTH `conversation_created` and
+ *     `message_received`; `conversation.status_changed` dispatches the
+ *     status-changed trigger PLUS opened/closed. A workflow subscribed to two
+ *     of them must run for each.
+ *   - contactId: a future fan-out event covering several contacts must not
+ *     collapse to one run.
  */
-function dispatchDedupeKey(workflowId: string): string | null {
+function dispatchDedupeKey(
+  workflowId: string,
+  trigger: string,
+  contactId: string | null | undefined,
+): string | null {
   const dispatchId = getOutboxDispatchId();
-  return dispatchId ? `${dispatchId}:${workflowId}` : null;
+  if (!dispatchId) return null;
+  return `${dispatchId}:${workflowId}:${trigger}:${contactId ?? "-"}`;
 }
 
 export async function dispatch<E extends WorkflowTriggerEvent>(
@@ -184,7 +198,11 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
             workspaceId: args.workspaceId,
           },
         });
-        const oncePerContactKey = dispatchDedupeKey(args.workflowId);
+        const oncePerContactKey = dispatchDedupeKey(
+          args.workflowId,
+          args.trigger,
+          args.contactId,
+        );
         const run = await tx.workflowRun.create({
           data: {
             workflowId: args.workflowId,
@@ -217,7 +235,7 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
     // Meta send (the exact class this file's once-per-contact branch already
     // guards for its own case). `eventKey` is null on the sync publish path,
     // which never redelivers, and the partial unique lets those coexist.
-    const eventKey = dispatchDedupeKey(args.workflowId);
+    const eventKey = dispatchDedupeKey(args.workflowId, args.trigger, args.contactId);
     try {
       const run = await db.workflowRun.create({
         data: {
