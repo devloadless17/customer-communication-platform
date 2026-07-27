@@ -232,6 +232,47 @@ describe("channel-health attribution", () => {
   });
 });
 
+describe("phone_number_name_update", () => {
+  it("writes the decision onto the number the payload names", async () => {
+    // A rejection lands as DECLINED and keeps the previous verified name.
+    await deliver(
+      webhook(WABA_B, "phone_number_name_update", {
+        display_phone_number: "+1 555-010-0002",
+        decision: "REJECTED",
+        requested_verified_name: "Totally Different Brand",
+        rejection_reason: "NONE",
+      }),
+    );
+    const b = await prisma.channelConnection.findUniqueOrThrow({
+      where: { id: connB },
+      select: { nameStatus: true, verifiedName: true },
+    });
+    expect(b.nameStatus).toBe("DECLINED");
+    expect(b.verifiedName).toBeNull(); // rejection must not adopt the requested name
+
+    // An approval flips the status AND adopts the reviewed name.
+    await deliver(
+      webhook(WABA_B, "phone_number_name_update", {
+        display_phone_number: "+1 555-010-0002",
+        decision: "APPROVED",
+        requested_verified_name: "Support Line",
+      }),
+    );
+    const after = await prisma.channelConnection.findUniqueOrThrow({
+      where: { id: connB },
+      select: { nameStatus: true, verifiedName: true },
+    });
+    expect(after.nameStatus).toBe("APPROVED");
+    expect(after.verifiedName).toBe("Support Line");
+    // The sibling number is untouched.
+    const a = await prisma.channelConnection.findUniqueOrThrow({
+      where: { id: connA },
+      select: { nameStatus: true },
+    });
+    expect(a.nameStatus).toBeNull();
+  });
+});
+
 describe("template-status attribution (W2)", () => {
   it("a rejection on WABA B's template does not flip WABA A's same-named template", async () => {
     await deliver(

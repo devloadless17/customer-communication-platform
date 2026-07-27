@@ -840,6 +840,19 @@ model ChannelConnection {
   policyViolationType      String?
   policyViolationAt        DateTime?
 
+  // ── Number identity, as Meta has verified it (WhatsApp only) ──────────────
+  // `verifiedName` is the display name customers see; `nameStatus` is its
+  // review state (Meta vocabulary, raw: APPROVED | AVAILABLE_WITHOUT_REVIEW |
+  // DECLINED | EXPIRED | PENDING_REVIEW | NONE). Load-bearing beyond cosmetics:
+  // a NONE/EXPIRED name means the number has no certificate and cannot be
+  // registered for Cloud API, and a DECLINED rename silently keeps the old
+  // name — both were invisible before these columns (the connect flow fetched
+  // verified_name and threw it away). Written at connect and by the
+  // `phone_number_name_update` webhook; NOT in `config` because settings saves
+  // rebuild that JSON wholesale and would clobber webhook writes.
+  verifiedName String?
+  nameStatus   String?
+
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
   workspace     Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)

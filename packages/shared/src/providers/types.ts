@@ -763,6 +763,29 @@ export interface NormalizedChannelHealth {
 }
 
 /**
+ * A business phone number's DISPLAY NAME review concluded (Meta's
+ * `phone_number_name_update` webhook). The name and its status gate more than
+ * cosmetics: without an approved name the number has no certificate and cannot
+ * be (re)registered for Cloud API. This webhook was previously ignored, so a
+ * DECLINED rename was invisible — the number silently kept its old name and
+ * the operator learned at registration time.
+ */
+export interface NormalizedNumberNameUpdate {
+  kind: "number_name_update";
+  /** Which number, as Meta displays it — resolved to a connection by ingest. */
+  displayPhoneNumber?: string;
+  /** The WABA the update arrived under (webhook `entry[].id`). */
+  wabaId?: string;
+  /** Meta's decision, raw: "APPROVED" | "REJECTED". */
+  decision: string;
+  /** The name that was reviewed. */
+  requestedVerifiedName?: string;
+  /** Meta's reason on a rejection, verbatim. */
+  rejectionReason?: string;
+  rawPayload: Record<string, unknown>;
+}
+
+/**
  * A WhatsApp user changed their MARKETING messaging preference (Meta's
  * `user_preferences` webhook). `optedOut: false` is the only signal permitted to
  * clear an existing opt-out — an inbound STOP keyword may opt a customer OUT but
@@ -787,6 +810,7 @@ export type NormalizedEvent =
   | NormalizedReaction
   | NormalizedTemplateStatusUpdate
   | NormalizedTemplateComponentsChanged
+  | NormalizedNumberNameUpdate
   | NormalizedOutboundEcho
   | NormalizedContactSync
   | NormalizedMessageCorrection

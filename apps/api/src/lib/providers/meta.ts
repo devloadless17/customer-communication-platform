@@ -289,6 +289,12 @@ interface MetaChangeValue {
    * right number in a multi-number workspace.
    */
   display_phone_number?: string;
+  // `phone_number_name_update` webhook fields — a display-name review
+  // concluded. An unapproved name voids the number's certificate (blocks
+  // registration), so this is readiness state, not cosmetics.
+  decision?: string;
+  requested_verified_name?: string;
+  rejection_reason?: string | null;
   // `account_update` webhook fields — account-level enforcement. `event` above
   // discriminates: ACCOUNT_VIOLATION is an early quality warning,
   // ACCOUNT_RESTRICTION is an active pause with an expiry.
@@ -1734,6 +1740,33 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               ...(value.display_phone_number
                 ? { displayPhoneNumber: value.display_phone_number }
                 : {}),
+            });
+          }
+          continue;
+        }
+
+        // Display-name review concluded (`phone_number_name_update`). More
+        // than cosmetics: an unapproved name voids the number's certificate,
+        // which blocks Cloud API (re)registration — a DECLINED rename used to
+        // be invisible (this field fell through the catch-all) and the number
+        // silently kept its old name.
+        if (change.field === "phone_number_name_update") {
+          const decision = value.decision?.trim();
+          if (decision) {
+            events.push({
+              kind: "number_name_update",
+              decision: decision.toUpperCase(),
+              ...(value.display_phone_number
+                ? { displayPhoneNumber: value.display_phone_number }
+                : {}),
+              ...(wabaId ? { wabaId } : {}),
+              ...(value.requested_verified_name
+                ? { requestedVerifiedName: value.requested_verified_name }
+                : {}),
+              ...(value.rejection_reason
+                ? { rejectionReason: value.rejection_reason }
+                : {}),
+              rawPayload: payload as Record<string, unknown>,
             });
           }
           continue;

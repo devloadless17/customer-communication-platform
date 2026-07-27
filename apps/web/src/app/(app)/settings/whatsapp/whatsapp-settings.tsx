@@ -71,6 +71,11 @@ export function WhatsappSettings({
   const { confirm, confirmDialog } = useConfirm();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  // Non-fatal connect problems the server found (unverified WABA ownership,
+  // unregistered number, declined display name, unsubscribed WABA). The save
+  // SUCCEEDED — these are the "will bite later" list, and the admin at this
+  // form is the one person who can act on them.
+  const [warnings, setWarnings] = useState<string[]>([]);
   // Open the form by default when there are no creds yet, OR when the stored
   // creds couldn't be decrypted (key rotated / different env), OR when
   // ?expand=advanced sent us here from the templates page.
@@ -83,6 +88,7 @@ export function WhatsappSettings({
 
   async function save(form: FormData) {
     setError(null);
+    setWarnings([]);
     const body = {
       phoneNumberId: form.get("phoneNumberId"),
       // Access token is an optional override (advanced field); the App secret,
@@ -109,6 +115,10 @@ export function WhatsappSettings({
           .join(" ") || "Failed to save",
       );
       return false;
+    }
+    const ok = (await res.json().catch(() => ({}))) as { warnings?: string[] };
+    if (Array.isArray(ok.warnings) && ok.warnings.length > 0) {
+      setWarnings(ok.warnings.filter((w): w is string => typeof w === "string"));
     }
     return true;
   }
@@ -148,6 +158,23 @@ export function WhatsappSettings({
         >
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
           <div className="wrap-break-word">{error}</div>
+        </div>
+      )}
+
+      {warnings.length > 0 && (
+        <div
+          role="status"
+          className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+        >
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+          <div className="flex flex-col gap-1">
+            <div className="font-medium">Connected, with things to fix:</div>
+            {warnings.map((w) => (
+              <div key={w} className="wrap-break-word">
+                {w}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </>

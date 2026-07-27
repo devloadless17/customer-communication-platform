@@ -16,10 +16,12 @@ import type { ApiSession } from "../../auth/session.guard";
 import { zBody } from "../../common/zod-validation.pipe";
 import {
   CreateQrCodeSchema,
+  RegisterWhatsappNumberSchema,
   UpdateQrCodeSchema,
   UpdateBusinessProfileSchema,
   UpdateWhatsappConfigSchema,
   type CreateQrCodeInput,
+  type RegisterWhatsappNumberInput,
   type UpdateQrCodeInput,
   type UpdateBusinessProfileInput,
   type UpdateWhatsappConfigInput,
@@ -50,6 +52,9 @@ import {
  *   POST   /api/workspace/whatsapp/health/refresh
  *                                — re-poll Meta for tier / quality / throughput
  *                                  and re-resolve the owning portfolio
+ *   POST   /api/workspace/whatsapp/register
+ *                                — register a number for Cloud API (2-step PIN;
+ *                                  passthrough to Meta, PIN never stored)
  *
  * Template endpoints live in WhatsappTemplatesController (any agent on the
  * team can refresh/create/delete — templates are catalog data, not secret
@@ -94,6 +99,20 @@ export class WhatsappController {
     @Query("accountId") accountId?: string,
   ) {
     return this.whatsapp.refreshHealth(session.workspaceId, accountId || null);
+  }
+
+  /**
+   * Register a number for Cloud API use. Rate-limited hard: each attempt is a
+   * Graph write, and a wrong PIN can lock the number for hours at Meta.
+   */
+  @Post("register")
+  @HttpCode(200)
+  @RateLimit({ perMinute: 3 })
+  async registerNumber(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(RegisterWhatsappNumberSchema)) body: RegisterWhatsappNumberInput,
+  ) {
+    return this.whatsapp.registerNumber(session.workspaceId, body);
   }
 
   /**

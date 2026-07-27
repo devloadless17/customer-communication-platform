@@ -185,6 +185,39 @@ export async function ingestEvents(
             await clearOptOut(workspaceId, contact.id);
           }
         }
+      } else if (evt.kind === "number_name_update") {
+        // Display-name review concluded. Resolve WHICH number the same way
+        // channel-health does; an unresolvable update is dropped with a warn
+        // rather than stamped on an arbitrary sibling.
+        const nameTarget =
+          channelConnectionId ??
+          (await resolveWhatsappHealthAccount(workspaceId, {
+            ...(evt.displayPhoneNumber
+              ? { displayPhoneNumber: evt.displayPhoneNumber }
+              : {}),
+            ...(evt.wabaId ? { wabaId: evt.wabaId } : {}),
+          }));
+        if (nameTarget) {
+          const approved = evt.decision === "APPROVED";
+          await db.channelConnection.updateMany({
+            where: { id: nameTarget, workspaceId, channel: "whatsapp" },
+            data: {
+              // Meta's decision vocabulary maps onto name_status's:
+              // APPROVED → APPROVED; REJECTED → DECLINED.
+              nameStatus: approved ? "APPROVED" : "DECLINED",
+              // Only an approval changes the live name; a rejection keeps the
+              // previous verified name in service.
+              ...(approved && evt.requestedVerifiedName
+                ? { verifiedName: evt.requestedVerifiedName }
+                : {}),
+            },
+          });
+        } else {
+          console.warn(
+            `[ingest] dropped unattributable phone_number_name_update for team=${workspaceId}` +
+              `${evt.displayPhoneNumber ? ` number=${evt.displayPhoneNumber}` : ""}`,
+          );
+        }
       } else if (evt.kind === "channel_health") {
         // WhatsApp number messaging-limit tier / quality / throughput changed.
         // Account-level webhooks name no receiving number, so the controller

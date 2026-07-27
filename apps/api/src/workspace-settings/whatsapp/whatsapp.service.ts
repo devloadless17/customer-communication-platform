@@ -31,6 +31,7 @@ import {
   gcOrphanWhatsappPortfolios,
   getWhatsappHealth,
 } from "@/lib/providers/meta-health";
+import { ensureWabaSubscribed } from "@/lib/providers/meta-waba-subscription";
 import { normalizeDefaultAccount } from "@/lib/providers/normalize-default-account";
 import {
   readTemplateAnalytics,
@@ -263,8 +264,17 @@ export class WhatsappService {
       displayNumber: string | null;
       verifyToken: string;
     };
+    /**
+     * Non-fatal problems found while connecting — credentials that work but a
+     * setup that will bite later (unverified WABA ownership, unregistered
+     * number, declined display name, unsubscribed WABA). Each used to be a
+     * silent server-side log line; the admin filling the form is the one
+     * person who can act on them, so they go in the response.
+     */
+    warnings: string[];
   }> {
     const { phoneNumberId } = input;
+    const warnings: string[] = [];
 
     // Source the access token (system-user) + App secret from the shared Meta
     // App connection unless overridden on this form.
@@ -280,9 +290,16 @@ export class WhatsappService {
     }
 
     let displayNumber: string | undefined;
+    let verifiedName: string | undefined;
+    let nameStatus: string | undefined;
     try {
+      // One node read validates the credentials AND captures the number's
+      // identity + readiness: `verified_name`/`name_status` (a NONE/EXPIRED
+      // name voids the certificate) and `status`/`code_verification_status`
+      // (an unregistered number saves cleanly but fails every send).
       const res = await fetch(
-        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(phoneNumberId)}?fields=display_phone_number,verified_name`,
+        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(phoneNumberId)}` +
+          `?fields=display_phone_number,verified_name,name_status,code_verification_status,status`,
         {
           headers: { authorization: `Bearer ${accessToken}` },
           // Hard per-call timeout — the only outbound api fetch that doesn't go
@@ -301,8 +318,35 @@ export class WhatsappService {
           detail: body.slice(0, 500),
         });
       }
-      const data = (await res.json()) as { display_phone_number?: string };
+      const data = (await res.json()) as {
+        display_phone_number?: string;
+        verified_name?: string;
+        name_status?: string;
+        code_verification_status?: string;
+        status?: string;
+      };
       displayNumber = data.display_phone_number;
+      verifiedName = data.verified_name;
+      nameStatus = data.name_status;
+      // Registration readiness. `status` must be CONNECTED to message; a number
+      // never registered for Cloud API reads DISCONNECTED/PENDING here. Warn,
+      // don't block: the admin may be mid-setup, and the guarded /register
+      // endpoint below is the fix.
+      const status = data.status?.toUpperCase();
+      if (status && status !== "CONNECTED") {
+        warnings.push(
+          `This number's Cloud API status is ${status} — sends will fail until it is ` +
+            `registered. Use "Register number" (two-step PIN) or register it in WhatsApp Manager.`,
+        );
+      }
+      const ns = nameStatus?.toUpperCase();
+      if (ns === "DECLINED" || ns === "EXPIRED" || ns === "NONE") {
+        warnings.push(
+          `The display name for this number is ${ns} at Meta — without an approved ` +
+            `name the number has no certificate and cannot be (re)registered. Fix it in ` +
+            `WhatsApp Manager → Phone numbers.`,
+        );
+      }
     } catch (err) {
       if (err instanceof HttpException) throw err;
       this.logger.error("meta validation failed", err);
@@ -387,7 +431,12 @@ export class WhatsappService {
     const nextWabaId =
       input.wabaId === undefined ? existingConfig.wabaId : input.wabaId || undefined;
     if (nextWabaId) {
-      await this.assertWabaOwnsNumber(nextWabaId, phoneNumberId, accessToken);
+      const wabaWarning = await this.assertWabaOwnsNumber(
+        nextWabaId,
+        phoneNumberId,
+        accessToken,
+      );
+      if (wabaWarning) warnings.push(wabaWarning);
     }
 
     const newConfig = pruneUndefined<MetaChannelConfig>({
@@ -423,6 +472,9 @@ export class WhatsappService {
         channel: META_PROVIDER,
         externalAccountId: phoneNumberId,
         wabaId: newConfig.wabaId ?? null,
+        // The number's Meta-verified identity, captured by the node read above.
+        verifiedName: verifiedName ?? null,
+        nameStatus: nameStatus ?? null,
         // First account on this channel becomes the send default.
         isDefault: !(await this.db.channelConnection.count({
           where: { workspaceId, channel: META_PROVIDER },
@@ -433,6 +485,10 @@ export class WhatsappService {
       },
       update: {
         wabaId: newConfig.wabaId ?? null,
+        // Refresh identity on every save; only overwrite with real values so a
+        // Meta hiccup can't blank a stored name (the webhook keeps it live).
+        ...(verifiedName !== undefined ? { verifiedName } : {}),
+        ...(nameStatus !== undefined ? { nameStatus } : {}),
         config: newConfig as Prisma.InputJsonValue,
         secrets: newSecrets as Prisma.InputJsonValue,
         isActive: true,
@@ -490,12 +546,29 @@ export class WhatsappService {
       );
     });
 
+    // Assert the WABA↔app webhook subscription — the WhatsApp twin of the
+    // Pages outage this product already shipped a fix for (zero inbound with
+    // valid credentials; see meta-waba-subscription.ts). Awaited (one Graph
+    // POST+GET) because its warning belongs in THIS response: the admin at the
+    // connect form is the person who can fix it.
+    if (nextWabaId) {
+      const sub = await ensureWabaSubscribed(nextWabaId, accessToken, GRAPH_VERSION);
+      if (!sub.ok) {
+        warnings.push(
+          `Couldn't confirm this app is subscribed to the WABA's webhooks (${sub.error}). ` +
+            `Without the subscription NO inbound messages arrive: in the Meta App ` +
+            `dashboard → WhatsApp → Configuration, subscribe the app and tick "messages".`,
+        );
+      }
+    }
+
     return {
       config: {
         phoneNumberId,
         displayNumber: displayNumber ?? null,
         verifyToken,
       },
+      warnings,
     };
   }
 
@@ -728,7 +801,7 @@ export class WhatsappService {
     wabaId: string,
     phoneNumberId: string,
     accessToken: string,
-  ): Promise<void> {
+  ): Promise<string | null> {
     let numbers: Array<{ id?: string }>;
     try {
       const res = await fetch(
@@ -739,10 +812,20 @@ export class WhatsappService {
         },
       );
       if (!res.ok) {
+        // A skip is not silent anymore: 401/403 means the token can't read the
+        // WABA (`whatsapp_business_management` missing) — ownership is
+        // unverified AND template sync + portfolio discovery will be degraded,
+        // which the admin standing at the form can actually fix.
         this.logger.warn(
           `skipping waba-ownership check: meta returned ${res.status} reading ${wabaId}/phone_numbers`,
         );
-        return;
+        return res.status === 401 || res.status === 403
+          ? "Your access token can't read this WhatsApp Business Account " +
+              "(whatsapp_business_management scope missing?). WABA ownership was NOT " +
+              "verified, and template sync + business-portfolio discovery will be " +
+              "degraded until the token can read it."
+          : `Couldn't verify this WABA owns the number (Meta returned ${res.status}); ` +
+              "connected anyway. If templates look wrong, re-check the WABA ID.";
       }
       const data = (await res.json()) as { data?: Array<{ id?: string }> };
       numbers = data.data ?? [];
@@ -752,7 +835,10 @@ export class WhatsappService {
           err instanceof Error ? err.message : String(err)
         })`,
       );
-      return;
+      return (
+        "Couldn't reach Meta to verify this WABA owns the number; connected anyway. " +
+        "If templates look wrong, re-check the WABA ID."
+      );
     }
     if (!numbers.some((n) => n.id === phoneNumberId)) {
       throw new BadRequestException({
@@ -761,6 +847,61 @@ export class WhatsappService {
           "This WhatsApp Business Account ID doesn't contain the phone number you connected — you've likely pasted the WABA ID of a different (e.g. test) account. In WhatsApp Manager → Account tools → Phone numbers, copy the WABA ID that owns this number.",
       });
     }
+    return null;
+  }
+
+  /**
+   * Register a connected number for Cloud API use (`POST /{id}/register` with
+   * the two-step PIN). The lite version of Meta's registration flow: no
+   * request_code/verify_code, no PIN storage — the admin already has the PIN
+   * (or just set one in WhatsApp Manager), and an unregistered number is the
+   * one connect-time warning they cannot fix from our UI any other way.
+   */
+  async registerNumber(
+    workspaceId: string,
+    input: { accountId: string; pin: string },
+  ): Promise<{ ok: true }> {
+    let config;
+    try {
+      config = await getMetaSendConfig(workspaceId, input.accountId);
+    } catch {
+      throw new BadRequestException({ error: "account_not_connected" });
+    }
+    let res: Response;
+    try {
+      res = await fetch(
+        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(config.phoneNumberId)}/register`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${config.accessToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ messaging_product: "whatsapp", pin: input.pin }),
+          signal: AbortSignal.timeout(20_000),
+        },
+      );
+    } catch (err) {
+      throw new BadGatewayException({
+        error: "could_not_reach_meta",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (!res.ok) {
+      // Meta's error names the actual problem (wrong PIN, name not approved,
+      // number in use elsewhere) — surface it verbatim; inventing a friendlier
+      // sentence here would hide the fix.
+      const body = await res.text().catch(() => "");
+      throw new BadRequestException({
+        error: "register_failed",
+        status: res.status,
+        detail: body.slice(0, 500),
+      });
+    }
+    // Registration flips the number's `status` to CONNECTED — refresh the
+    // snapshot now so the settings panel reflects it without waiting a sweep.
+    void fetchWhatsappHealthFromGraph(workspaceId, input.accountId).catch(() => undefined);
+    return { ok: true };
   }
 
   /**

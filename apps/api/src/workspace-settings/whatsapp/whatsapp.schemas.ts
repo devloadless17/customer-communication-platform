@@ -26,6 +26,21 @@ export const UpdateWhatsappConfigSchema = z.object({
 export type UpdateWhatsappConfigInput = z.infer<typeof UpdateWhatsappConfigSchema>;
 
 /**
+ * POST /api/workspace/whatsapp/register — register a connected number for
+ * Cloud API use (Meta's two-step-verification PIN). The PIN passes straight
+ * through to Meta and is never stored; a number saved before registration
+ * fails every send, and this closes that gap without leaving the app.
+ */
+export const RegisterWhatsappNumberSchema = z.object({
+  accountId: z.string().trim().min(1),
+  pin: z
+    .string()
+    .trim()
+    .regex(/^\d{6}$/, "PIN must be exactly 6 digits"),
+});
+export type RegisterWhatsappNumberInput = z.infer<typeof RegisterWhatsappNumberSchema>;
+
+/**
  * PATCH /api/workspace/whatsapp/templates/:id — update variableBindings only.
  *
  * Generous on shape: the runner re-parses bindings on every read so a bad
