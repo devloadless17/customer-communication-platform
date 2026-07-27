@@ -35,7 +35,13 @@ if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
 });
-const service = new WorkspacesService(prisma as unknown as DbService);
+// The invalidator's socket side is a no-op here — these specs exercise the
+// membership writes, not the realtime eviction (which needs a live gateway).
+const noopInvalidator = { bustCache() {}, revoke() {} };
+const service = new WorkspacesService(
+  prisma as unknown as DbService,
+  noopInvalidator as never,
+);
 
 const SUFFIX = `ws${Date.now().toString().slice(-8)}`;
 

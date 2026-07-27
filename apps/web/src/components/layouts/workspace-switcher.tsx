@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import Link from "next/link";
 import { Building2, Check, ChevronsUpDown, Loader2, Plus, Settings } from "lucide-react";
 
@@ -55,6 +55,22 @@ export function WorkspaceSwitcher({
   const [pending, startTransition] = useTransition();
   const [switchingTo, setSwitchingTo] = useState<string | null>(null);
 
+  // Cross-tab convergence. The `ccp.ws` cookie is per-BROWSER, so switching in
+  // this tab silently re-scopes every OTHER tab's HTTP fetches to the new
+  // workspace while their sockets (identity fixed at handshake) stay bound to
+  // the old one — list state could interleave two workspaces' rows. Announce
+  // the switch; tabs rendered against a different workspace reload themselves.
+  useEffect(() => {
+    if (typeof BroadcastChannel === "undefined") return;
+    const ch = new BroadcastChannel("ccp-workspace-switch");
+    ch.onmessage = (e: MessageEvent<{ workspaceId?: string }>) => {
+      if (e.data?.workspaceId && e.data.workspaceId !== activeWorkspaceId) {
+        window.location.reload();
+      }
+    };
+    return () => ch.close();
+  }, [activeWorkspaceId]);
+
   function switchTo(workspaceId: string) {
     if (workspaceId === activeWorkspaceId || pending) return;
     setSwitchingTo(workspaceId);
@@ -80,6 +96,17 @@ export function WorkspaceSwitcher({
           toast.error(d.detail || d.error || "Couldn't switch workspace");
           setSwitchingTo(null);
           return;
+        }
+        // Tell every other tab BEFORE navigating — they reload into the new
+        // workspace instead of mixing old-socket frames with new-cookie fetches.
+        if (typeof BroadcastChannel !== "undefined") {
+          try {
+            const ch = new BroadcastChannel("ccp-workspace-switch");
+            ch.postMessage({ workspaceId });
+            ch.close();
+          } catch {
+            // Best-effort — the switching tab's own reload is what matters.
+          }
         }
         // Full reload — see the note above about the socket's `ws:` room.
         window.location.assign("/inbox");

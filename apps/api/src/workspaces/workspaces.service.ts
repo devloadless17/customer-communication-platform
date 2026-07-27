@@ -11,6 +11,7 @@ import { detachMemberFromWorkspace } from "@/lib/workspaces/remove-member";
 import { makeCanAccessBeyondMembership } from "@ccp/shared/auth/active-workspace";
 
 import { invalidateSessionCache, type ApiSession } from "../auth/session.guard";
+import { SessionInvalidationService } from "../auth/session-invalidation.service";
 import { Prisma } from "@prisma/client";
 import { DbService } from "../db/db.service";
 
@@ -29,7 +30,10 @@ export interface WorkspaceSummary {
 export class WorkspacesService {
   private readonly logger = new Logger(WorkspacesService.name);
 
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly sessionInvalidator: SessionInvalidationService,
+  ) {}
 
   /**
    * The workspaces this user may act in, for the switcher.
@@ -329,8 +333,17 @@ export class WorkspacesService {
       await applyWrite(this.db);
     }
     // The TARGET's session carries their membership set + effective role, so
-    // theirs is the cache that must drop — not the actor's.
-    invalidateSessionCache(userId);
+    // theirs is the state that must drop — not the actor's. `revoke`, not just
+    // a cache bust: a cache bust alone fixed the next HTTP request but left
+    // the member's LIVE SOCKETS joined to `ws:<id>` and every conv room — a
+    // removed agent's open tab kept the full team firehose (message bodies,
+    // contact PII) until it happened to reconnect. Workspaces are the hard
+    // isolation boundary; the disconnect forces a re-handshake that resolves
+    // against the new membership (and re-derives the role for a demotion).
+    this.sessionInvalidator.revoke(
+      userId,
+      role === null ? "workspace-removal" : "workspace-role-change",
+    );
 
     // Detach the work and the grants. Detached + best-effort ON PURPOSE, exactly
     // like the deactivation path: the membership write has committed and is what

@@ -31,6 +31,65 @@ export class RealtimeEmitter {
   /** Called by RealtimeGateway in afterInit to publish the live IO server. */
   bind(server: TypedIO): void {
     this.server = server;
+    // Sweep expired assignee-cache entries. The TTL was only ever checked on
+    // READ and entries were deleted only by targeted invalidation, so on a
+    // restricted high-volume tenant the maps grew one entry per conversation/
+    // contact ever touched — a slow unbounded heap leak on a weeks-old
+    // process. Same posture as the gateway's availabilityCache sweep.
+    if (!this.cacheSweep) {
+      this.cacheSweep = setInterval(() => {
+        const cutoff = Date.now() - RealtimeEmitter.SCOPE_TTL_MS;
+        for (const [k, v] of this.assigneeCache) {
+          if (v.at < cutoff) this.assigneeCache.delete(k);
+        }
+        for (const [k, v] of this.contactAssigneeCache) {
+          if (v.at < cutoff) this.contactAssigneeCache.delete(k);
+        }
+      }, 60_000);
+      this.cacheSweep.unref?.();
+    }
+  }
+
+  private cacheSweep: NodeJS.Timeout | null = null;
+
+  /**
+   * Kick every restricted agent EXCEPT the new assignee out of a conversation
+   * room. Room membership is granted at subscribe-time against the visibility
+   * rule, but nothing revoked it when the rule's answer changed: a thread
+   * reassigned away from a restricted agent left their live socket in
+   * `conv:<id>` — typing, viewers, message status and broadcast message
+   * BODIES included — until they navigated away. Called from the
+   * `conversation.assigned` fanout rule. Admins/managers and unrestricted
+   * agents keep the room; only sockets whose visibility depends on being the
+   * assignee are affected.
+   */
+  evictStaleFromConversationRoom(
+    workspaceId: string,
+    conversationId: string,
+    newAssigneeUserId: string | null,
+  ): void {
+    const io = this.server;
+    if (!io) return;
+    const room = io.sockets.adapter.rooms.get(conversationRoom(conversationId));
+    if (!room) return;
+    for (const socketId of room) {
+      const s = io.sockets.sockets.get(socketId);
+      if (!s) continue;
+      const d = s.data as {
+        workspaceId?: string;
+        userId?: string;
+        role?: string;
+        agentConversationVisibility?: string;
+      };
+      if (
+        d.workspaceId === workspaceId &&
+        d.role === "agent" &&
+        d.agentConversationVisibility === "assigned" &&
+        d.userId !== newAssigneeUserId
+      ) {
+        s.leave(conversationRoom(conversationId));
+      }
+    }
   }
 
   // ---------------------------------------------------------------------

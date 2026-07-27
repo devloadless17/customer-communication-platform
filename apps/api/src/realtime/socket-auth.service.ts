@@ -266,7 +266,13 @@ export class SocketAuthService {
       storedWorkspaceId: stored?.activeWorkspaceId ?? null,
       canAccessBeyondMembership: canAccess,
     });
-    if (!activeWorkspaceId) return { kind: "unauthenticated" };
+    // Zero resolvable workspaces (removed from all of them, org still active)
+    // is a GATE, not a dead session: `unauthenticated` makes the client
+    // navigate to /logout, which DELETES a session the HTTP path would have
+    // kept — the exact conflation the `gated` kind exists to prevent. The
+    // server-rendered layout routes a workspace-less member to the right
+    // explanation screen on the reload.
+    if (!activeWorkspaceId) return { kind: "gated" };
 
     const active = memberships.find((m) => m.workspace.id === activeWorkspaceId);
     const effectiveRole: Role =

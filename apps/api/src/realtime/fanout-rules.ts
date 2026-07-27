@@ -277,6 +277,14 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // Without this, a reassigned conversation's messages would keep flowing to
     // the PREVIOUS owner's room for up to 30 seconds.
     emitter.invalidateConversationAssignee(e.conversationId);
+    // ...and revoke the conv-room membership visibility granted the previous
+    // assignee: subscribe-time checks alone never expire, so a restricted
+    // agent who lost the thread kept listening in its room indefinitely.
+    emitter.evictStaleFromConversationRoom(
+      e.workspaceId,
+      e.conversationId,
+      e.assignedUser?.id ?? null,
+    );
     // Target the PREVIOUS owner explicitly as well. Under visibility scoping
     // the audience is resolved from the CURRENT assignee, so without this the
     // agent who just lost the conversation never hears about it and keeps a row

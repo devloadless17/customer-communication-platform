@@ -293,9 +293,16 @@ export class RealtimeGateway
 
     // When an admin flips the org's agent-visibility setting, bust the
     // emitter's per-team scope cache so fanout switches audience on the next
-    // frame instead of up to a TTL later.
+    // frame — AND disconnect the workspace's live sockets. Room membership and
+    // `socket.data.agentConversationVisibility` are fixed at handshake, so
+    // without the disconnect every already-connected agent kept the team-room
+    // firehose (and could still join arbitrary conv rooms) until their next
+    // organic reconnect — potentially days for a parked tab. The forced
+    // re-handshake re-derives both under the new setting; reconnect is
+    // automatic and converges via the standard recovery paths.
     registerVisibilityInvalidator((workspaceId) => {
       this.emitter.invalidateTeamScope(workspaceId);
+      this.disconnectWorkspaceSockets(workspaceId);
     });
 
     // realtime-added-1: start the outbound write-buffer reaper. Disconnects a
@@ -534,6 +541,10 @@ export class RealtimeGateway
     // do — a backgrounded tab just keeps receiving). Detached: a slow DB read
     // must not hold up the connect path.
     if (client.recovered) {
+      void this.pruneRecoveredConversationRooms(client, identity).catch(
+        (err: unknown) =>
+          this.logger.error(`pruneRecoveredConversationRooms failed: ${err}`),
+      );
       void this.pruneRecoveredChannelRooms(client, identity.workspaceId, identity.userId).catch(
         (err) =>
           this.logger.error(`pruneRecoveredChannelRooms failed: ${err}`),
@@ -588,6 +599,50 @@ export class RealtimeGateway
    *
    * One query for the channels, one for the memberships — not per room.
    */
+  /**
+   * Drop any `conv:` room a recovered socket was re-joined to that its user
+   * may no longer see. connectionStateRecovery restores room membership with
+   * NO handler running, so without this a thread reassigned away from a
+   * restricted agent while their laptop slept stayed subscribed — typing,
+   * viewers, message status, and broadcast message bodies included. Mirrors
+   * `pruneRecoveredChannelRooms`; one batched query for all recovered rooms.
+   */
+  private async pruneRecoveredConversationRooms(
+    client: Socket,
+    identity: { workspaceId: string; userId: string },
+  ): Promise<void> {
+    const conversationIds: string[] = [];
+    for (const room of client.rooms) {
+      if (room.startsWith("conv:")) conversationIds.push(room.slice("conv:".length));
+    }
+    if (conversationIds.length === 0) return;
+
+    const visible = await this.db.conversation.findMany({
+      where: {
+        id: { in: conversationIds },
+        workspaceId: identity.workspaceId,
+        ...visibilityWhere({
+          userId: identity.userId,
+          workspaceId: identity.workspaceId,
+          role: client.data.role as Role,
+          agentConversationVisibility: client.data.agentConversationVisibility as
+            | string
+            | undefined,
+        }),
+      },
+      select: { id: true },
+    });
+    const allowed = new Set(visible.map((c) => c.id));
+    for (const conversationId of conversationIds) {
+      if (!allowed.has(conversationId)) {
+        client.leave(conversationRoom(conversationId));
+        this.logger.warn(
+          `pruned recovered socket ${client.id} from conv:${conversationId} (user ${identity.userId} no longer visible)`,
+        );
+      }
+    }
+  }
+
   private async pruneRecoveredChannelRooms(
     client: Socket,
     workspaceId: string,
@@ -1069,54 +1124,58 @@ export class RealtimeGateway
     // emit always; the snapshots are O(viewers) and capped by team size.
     const alreadyJoined = client.rooms.has(room);
 
-    if (!alreadyJoined) {
-      // Charge the rate-limit budget ONLY on the expensive first-join path
-      // (the DB ownership check + team broadcast below). A re-subscribe is
-      // cheap and MUST always reach the snapshot re-emit — otherwise a
-      // team-wide reconnect storm could exhaust the shared subscribe bucket
-      // and silently drop the typing/viewer snapshot on the displayed
-      // thread, the exact desync the always-emit design exists to prevent.
-      if (!checkSubscribeBudget(client, "subscribe:conversation")) return;
-      try {
-        // Ownership gate. Team scope defends against cross-tenant id-guessing;
-        // the visibility clause additionally stops a RESTRICTED agent from
-        // joining a thread that isn't theirs. That matters even though they're
-        // out of the team room: the conv room carries typing, viewers, AI
-        // suggestions/summaries and message status, so an agent who learned an
-        // id elsewhere could otherwise still listen in.
-        const owns = await this.db.conversation.findFirst({
-          where: {
-            id: body.conversationId,
+    // Charge the rate-limit budget ONLY on the first-join path (which also
+    // team-broadcasts below). A re-subscribe MUST always reach the snapshot
+    // re-emit — otherwise a team-wide reconnect storm could exhaust the shared
+    // subscribe bucket and silently drop the typing/viewer snapshot on the
+    // displayed thread, the exact desync the always-emit design exists to
+    // prevent.
+    if (!alreadyJoined && !checkSubscribeBudget(client, "subscribe:conversation")) return;
+    try {
+      // Ownership gate — on EVERY subscribe, not just first join. Team scope
+      // defends against cross-tenant id-guessing; the visibility clause
+      // additionally stops a RESTRICTED agent from joining a thread that isn't
+      // theirs. The alreadyJoined path used to skip this entirely — exactly
+      // the recovery hole subscribe:channel fixed for itself: connection-
+      // StateRecovery restores room membership with no handler, so a thread
+      // reassigned away from a restricted agent mid-sleep stayed subscribed
+      // (typing, viewers, message status, and broadcast message BODIES).
+      const owns = await this.db.conversation.findFirst({
+        where: {
+          id: body.conversationId,
+          workspaceId,
+          ...visibilityWhere({
+            userId: client.data.userId as string,
             workspaceId,
-            ...visibilityWhere({
-              userId: client.data.userId as string,
-              workspaceId,
-              role: client.data.role as Role,
-              agentConversationVisibility: client.data
-                .agentConversationVisibility as string | undefined,
-            }),
-          },
-          select: { id: true, channel: true },
-        });
-        if (!owns) return; // silently drop — fail-soft posture
-        client.join(room);
-        // Seed website-widget visitor presence to THIS agent. The live frame only
-        // fires on the visitor's connect/disconnect, so an agent opening a thread
-        // whose visitor is already connected would otherwise never see the chip.
-        // Emit the last-known state (Online / Left Xm ago), or "Away" when we've
-        // never seen this visitor's socket this process.
-        if (owns.channel === "webchatwidget") {
-          const p = this.visitorPresence.get(body.conversationId);
-          client.emit("conversation:visitor_presence", {
-            conversationId: body.conversationId,
-            present: p?.present ?? false,
-            leftAt: p?.present ? null : p?.leftAt ?? null,
-          });
-        }
-      } catch (err) {
-        this.logger.error(`subscribe:conversation lookup failed: ${err}`);
-        return;
+            role: client.data.role as Role,
+            agentConversationVisibility: client.data
+              .agentConversationVisibility as string | undefined,
+          }),
+        },
+        select: { id: true, channel: true },
+      });
+      if (!owns) {
+        // No longer (or never) theirs. A stale recovered membership is
+        // actively revoked, not just left unrefreshed.
+        if (alreadyJoined) client.leave(room);
+        return; // silently drop — fail-soft posture
       }
+      if (!alreadyJoined) client.join(room);
+      // Seed website-widget visitor presence to THIS agent — on re-subscribe
+      // too: the live frame only fires on the visitor's connect/disconnect, so
+      // a recovered socket parked on a widget thread would otherwise show a
+      // stale Online/Left chip until the visitor's next transition.
+      if (owns.channel === "webchatwidget") {
+        const p = this.visitorPresence.get(body.conversationId);
+        client.emit("conversation:visitor_presence", {
+          conversationId: body.conversationId,
+          present: p?.present ?? false,
+          leftAt: p?.present ? null : p?.leftAt ?? null,
+        });
+      }
+    } catch (err) {
+      this.logger.error(`subscribe:conversation lookup failed: ${err}`);
+      return;
     }
 
     // Always re-emit typing snapshot — handles both first-subscribe and
@@ -1240,7 +1299,11 @@ export class RealtimeGateway
     @MessageBody() body: { conversationId: string },
   ): void {
     if (!isValidBody(body, "conversationId")) return;
-    if (!checkTypingBudget(client)) return;
+    // Stops are deliberately NOT charged against the typing budget: a stop is
+    // bounded by a prior tracked start (the typingIn set delete below no-ops
+    // otherwise), and dropping a STOP is strictly worse than dropping a start —
+    // a budget-exhausted client's "X is typing…" pill stuck for the whole room
+    // until the socket disconnected.
     const userId = client.data.userId as string | undefined;
     const typingIn = client.data.typingIn as Set<string> | undefined;
     if (!userId || !typingIn) return;
@@ -1391,7 +1454,11 @@ export class RealtimeGateway
     @MessageBody() body: { channelId: string },
   ): void {
     if (!isValidBody(body, "channelId")) return;
-    if (!checkTypingBudget(client)) return;
+    // Stops are deliberately NOT charged against the typing budget: a stop is
+    // bounded by a prior tracked start (the typingIn set delete below no-ops
+    // otherwise), and dropping a STOP is strictly worse than dropping a start —
+    // a budget-exhausted client's "X is typing…" pill stuck for the whole room
+    // until the socket disconnected.
     const userId = client.data.userId as string | undefined;
     const typingInChannel = client.data.typingInChannel as Set<string> | undefined;
     if (!userId || !typingInChannel) return;
@@ -1487,7 +1554,11 @@ export class RealtimeGateway
     @MessageBody() body: { channelId: string; threadRootId: string },
   ): void {
     if (!isValidBody(body, "channelId") || !isValidBody(body, "threadRootId")) return;
-    if (!checkTypingBudget(client)) return;
+    // Stops are deliberately NOT charged against the typing budget: a stop is
+    // bounded by a prior tracked start (the typingIn set delete below no-ops
+    // otherwise), and dropping a STOP is strictly worse than dropping a start —
+    // a budget-exhausted client's "X is typing…" pill stuck for the whole room
+    // until the socket disconnected.
     const userId = client.data.userId as string | undefined;
     const typingInThread = client.data.typingInThread as Set<string> | undefined;
     if (!userId || !typingInThread) return;
@@ -1537,6 +1608,31 @@ export class RealtimeGateway
       if (s) s.leave(room);
     }
   }
+
+  /**
+   * Disconnect every live socket bound to a workspace, forcing a re-handshake
+   * that re-derives role + visibility + room membership. Used when an admin
+   * flips `agentConversationVisibility` — the one setting whose enforcement
+   * lives in handshake-time state. Restricted agents are NOT in the `ws:` room,
+   * so this iterates all sockets rather than a room. ~hundreds of sockets at
+   * this deployment's scale; the disconnect is `close=true` so clients
+   * auto-reconnect immediately.
+   */
+  disconnectWorkspaceSockets(workspaceId: string): number {
+    let dropped = 0;
+    for (const s of this.server.sockets.sockets.values()) {
+      if (s.data?.workspaceId === workspaceId) {
+        s.disconnect(true);
+        dropped++;
+      }
+    }
+    if (dropped > 0) {
+      this.logger.log(
+        `disconnected ${dropped} socket(s) for workspace ${workspaceId} (visibility change)`,
+      );
+    }
+    return dropped;
+  }
 }
 
 // Re-export Server typed event names for ergonomic consumer imports.
@@ -1563,12 +1659,15 @@ function isValidBody(
  * Per-socket token bucket for `subscribe:*` handlers. Without this, an
  * authenticated client (browser bug or hostile script) can spam 10k
  * subscribe requests/sec, each costing a Postgres roundtrip via the
- * tenant-ownership check. 30 subscribes/10s is generous for a tab cluster
- * but caps the worst case. Bucket lives in `client.data` so it dies with
- * the socket.
+ * tenant-ownership check. 60 subscribes/10s caps the worst case while
+ * leaving headroom for real keyboard triage — an agent j/k-ing at ~3
+ * threads/sec exhausted the old 30 cap and the dropped subscribes left
+ * on-screen threads silently missing conv-room frames until reconnect
+ * (the hook subscribes once per mount, no retry). Bucket lives in
+ * `client.data` so it dies with the socket.
  */
-const SUB_CAP = 30;
-const SUB_REFILL_PER_MS = 30 / 10_000;
+const SUB_CAP = 60;
+const SUB_REFILL_PER_MS = 60 / 10_000;
 function checkSubscribeBudget(client: Socket, label: string): boolean {
   const now = Date.now();
 
