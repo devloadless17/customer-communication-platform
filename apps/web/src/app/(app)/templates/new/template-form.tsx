@@ -97,6 +97,14 @@ interface ButtonRow {
    * both without it, and the composer used to send neither.
    */
   example: string;
+  /**
+   * The ORIGINAL Meta button object, kept when editing a synced template so
+   * properties this form doesn't model survive the round-trip. Without it, an
+   * edit silently STRIPPED `app_deep_link` (a Manager-created deep-link button)
+   * — the resubmission was reviewed and approved without its deep link, and an
+   * unknown button TYPE was rewritten as quick_reply. Absent on new buttons.
+   */
+  raw?: Record<string, unknown>;
 }
 
 type HeaderKind = "none" | "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT" | "LOCATION";
@@ -1601,23 +1609,49 @@ function Field({
 }
 
 function toMetaButton(b: ButtonRow): NonNullable<TemplateComponent["buttons"]>[number] {
+  // Properties this form doesn't model (`app_deep_link`, flow configs, …),
+  // carried through verbatim so an edit can't strip them. The fields the form
+  // DOES edit are re-derived below and override anything stale in the raw copy.
+  const {
+    type: rawType,
+    text: _text,
+    url: _url,
+    phone_number: _phone,
+    example: _example,
+    ...passthrough
+  } = (b.raw ?? {}) as Record<string, unknown>;
+
   if (b.kind === "URL") {
     // `example` is REQUIRED once the URL ends in a variable — Meta substitutes a
     // suffix, and rejects the template if it has no sample to review. Omitted
     // for a static URL, where an example would itself be invalid.
     const hasVar = /\{\{\s*[A-Za-z0-9_]+\s*\}\}/.test(b.url);
     return {
+      ...passthrough,
       type: "URL",
       text: b.text,
       url: b.url,
       ...(hasVar && b.example.trim() ? { example: [b.example.trim()] } : {}),
     };
   }
-  if (b.kind === "PHONE_NUMBER") return { type: "PHONE_NUMBER", text: b.text, phone_number: b.phone };
+  if (b.kind === "PHONE_NUMBER") {
+    return { ...passthrough, type: "PHONE_NUMBER", text: b.text, phone_number: b.phone };
+  }
   // A copy-code button has NO label — it is defined solely by the sample code
   // Meta puts on the recipient's clipboard.
-  if (b.kind === "COPY_CODE") return { type: "COPY_CODE", example: b.example.trim() };
-  return { type: "QUICK_REPLY", text: b.text };
+  if (b.kind === "COPY_CODE") {
+    return { ...passthrough, type: "COPY_CODE", example: b.example.trim() };
+  }
+  // A button type this form doesn't know keeps its ORIGINAL type on the way
+  // out (only the label is editable here) — rewriting it as quick_reply was a
+  // silent mutation of a Meta-approved component.
+  const keepType =
+    typeof rawType === "string" && rawType.toUpperCase() !== "QUICK_REPLY"
+      ? rawType
+      : "QUICK_REPLY";
+  return { ...passthrough, type: keepType, text: b.text } as NonNullable<
+    TemplateComponent["buttons"]
+  >[number];
 }
 
 /**
@@ -1695,6 +1729,9 @@ function hydrateFromTemplate(t: TemplateEditTarget): {
         url: b.url ?? "",
         phone: b.phone_number ?? "",
         example: Array.isArray(b.example) ? (b.example[0] ?? "") : (b.example ?? ""),
+        // Keep the original so props the form doesn't model (app_deep_link,
+        // flow configs) — and unknown TYPES — survive the edit round-trip.
+        raw: b as unknown as Record<string, unknown>,
       };
     }),
     examples,
