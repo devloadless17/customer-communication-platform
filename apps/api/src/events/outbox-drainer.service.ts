@@ -7,7 +7,7 @@ import {
 
 import { runWithCorrelationContext, withCorrelation } from "@/common/correlation";
 import { runWithConcurrency } from "@/common/concurrency";
-import { flushDispatchedStamps } from "@/lib/events/bus";
+import { assertSingleCriticalSubscriber, flushDispatchedStamps } from "@/lib/events/bus";
 import {
   claimBatch,
   markDispatched,
@@ -167,6 +167,12 @@ export class OutboxDrainerService
   // rows into an empty/partial handler list and stamping them fully green
   // (published+dispatched) with the fanout silently skipped.
   onApplicationBootstrap(): void {
+    // Every module has registered its subscribers by now (see the comment
+    // above), so this is the one moment the whole subscriber table is
+    // complete: assert the critical tier holds exactly one realtime handler
+    // per event type. Two would leave the second in the detached background
+    // chain, ordered by AppModule.imports luck.
+    assertSingleCriticalSubscriber();
     // Register the immediate-drain hook so a tx-context publish dispatches the
     // instant it commits, instead of waiting out the poll. The poll stays as
     // the durable fallback (a missed/early kick is harmless — see kick()).
@@ -227,7 +233,14 @@ export class OutboxDrainerService
     // generous deadline now exists to finish cleanly, not to avoid loss.
     // The `this.stopping` check inside `tick`'s loop also lets in-flight
     // dispatches drain without picking up new batches.
-    const flushDeadline = Date.now() + 25_000;
+    // 60s, not 25s: a single row can legitimately take up to
+    // subscriberCount × DISPATCH_TIMEOUT_MS (~150s worst case, which is why
+    // the wedge watchdog sits at 180s), and the compose `stop_grace_period`
+    // is ~100s. At 25s a deploy landing on a slow batch was SIGKILLed
+    // mid-dispatch → guaranteed redelivery on next boot, i.e. every rough
+    // deploy became a duplicate-side-effect event. 60s leaves headroom under
+    // the grace period while covering the common slow batch.
+    const flushDeadline = Date.now() + 60_000;
     while (this.inflight && Date.now() < flushDeadline) {
       await new Promise((r) => setTimeout(r, 50));
     }
@@ -261,6 +274,33 @@ export class OutboxDrainerService
    * on top of a still-progressing one. At-most-once holds regardless
    * (publishedAt-before-dispatch), so a transient double-tick can't re-fire any row.
    */
+  /**
+   * Stamp completion with a bounded retry. Idempotent by construction, so a
+   * repeat is free; the point is that a transient failure must not turn a
+   * successful batch into a redelivery (F10).
+   */
+  private async markDispatchedWithRetry(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await markDispatched(ids);
+        return;
+      } catch (err) {
+        if (attempt === 2) {
+          this.logger.warn(
+            withCorrelation(
+              `[outbox-drainer] markDispatched failed after 3 attempts (${ids.length} rows will redeliver after the lease): ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ),
+          );
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 100 * (attempt + 1)));
+      }
+    }
+  }
+
   private checkWedge(): void {
     if (this.stopping || !this.inflight || this.lastProgressAt == null) return;
     const stalledFor = Date.now() - this.lastProgressAt;
@@ -334,8 +374,12 @@ export class OutboxDrainerService
         //   - audit: reads stage/tag names then INSERTS new event rows
         //     (no shared-row contention).
         //   - workflow-dispatch: reads fresh conversation snapshot then
-        //     calls `dispatch()` whose create-then-enqueue is per-run
-        //     idempotent (P2002 on @@unique).
+        //     calls `dispatch()`, whose run create is deduped per (outbox row,
+        //     workflow) via `WorkflowRun.eventKey` (partial unique) — added
+        //     2026-07-27 when the at-least-once lease made redelivery real.
+        //     The older claim that it was "per-run idempotent" was FALSE for
+        //     every workflow without triggerOncePerContact, and is exactly
+        //     how the duplicate-run bug survived review.
         // If you add a subscriber that reads-then-writes a shared row,
         // either make the write predicate-gated or batch this back to
         // sequential dispatch per event.
@@ -377,11 +421,12 @@ export class OutboxDrainerService
         );
         // One batched UPDATE — best-effort (a miss only loses the bracket
         // stamp, never re-dispatches). Never throws into the tick.
-        await markDispatched(dispatched).catch((err) =>
-          this.logger.warn(
-            withCorrelation(`[outbox-drainer] markDispatched failed: ${err instanceof Error ? err.message : String(err)}`),
-          ),
-        );
+        // Retry before giving up: markDispatched is idempotent (both writes
+        // are predicate-gated), and a single pool blip here would otherwise
+        // leave a FULLY-SUCCESSFUL batch unpublished — redelivering every row
+        // in 10 minutes. The lease exists for crashes, not for routine DB
+        // flap.
+        await this.markDispatchedWithRetry(dispatched);
         drains += 1;
         // Keep draining within this tick while ANY rows came back — do NOT
         // break on `rows.length < BATCH_SIZE`. The per-team fairness cap
@@ -452,7 +497,15 @@ export class OutboxDrainerService
       // 1, defeating the cross-system loop guard. Bound each dispatch with a
       // timeout (obs-1) so a hung subscriber can't wedge the tick.
       const subscriberError = await runWithCorrelationContext(
-        { requestId: row.correlationId ?? row.id, chainDepth: row.chainDepth },
+        {
+          requestId: row.correlationId ?? row.id,
+          chainDepth: row.chainDepth,
+          // Stable across every redelivery of THIS row — subscribers with
+          // non-idempotent side effects key their dedup on it so the
+          // at-least-once lease can't duplicate a workflow run, a partner
+          // webhook or an audit pill.
+          outboxDispatchId: row.id,
+        },
         () =>
           // Timeout is applied PER-SUBSCRIBER inside the bus (not once around
           // the whole chain) so one hung handler can't drop every downstream

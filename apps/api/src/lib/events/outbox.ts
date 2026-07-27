@@ -62,9 +62,12 @@ export function kickOutbox(): void {
  * (OutboxDrainerService) picks it up on next poll and runs subscribers.
  *
  * Use this from any `db.$transaction(async (tx) => { ... })` block where
- * you want at-most-once durable delivery — the typical case is the
+ * you want DURABLE (at-least-once) delivery — the typical case is the
  * inbound-webhook path (message + denorm + event must all land together
- * or none of them do).
+ * or none of them do). §18 rule: any event whose subscribers have
+ * irreversible side effects (billed sends, partner webhooks, workflow runs)
+ * MUST be published this way — the synchronous `publish()` path loses them
+ * on a crash with no redelivery.
  *
  * For non-tx call sites, use `publish` from `bus.ts` instead — it writes
  * a row here AND dispatches synchronously.

@@ -1,5 +1,6 @@
 import { type ConversationEventKind, Prisma } from "@prisma/client";
 
+import { getOutboxDispatchId } from "@/common/correlation";
 import { db } from "@/lib/db";
 
 /**
@@ -36,9 +37,25 @@ interface RecordArgs {
    *  ai_changed handler via the event's occurredAt) pass it so the pill sorts
    *  where it happened, not where it was written. */
   at?: Date | string;
+  /**
+   * Discriminator appended to the outbox dispatch id to form this row's
+   * redelivery-dedupe key. Needed when ONE event legitimately writes several
+   * pills (e.g. contact.tag_changed writes one per tag) — without it the
+   * second pill of the same event would collide with the first.
+   * Defaults to the kind.
+   */
+  dedupeDiscriminator?: string;
 }
 
 export async function recordConversationEvent(args: RecordArgs): Promise<void> {
+  // Redelivery dedupe (2026-07-27): the outbox is at-least-once, so a
+  // crash-window redelivery used to write a SECOND identical pill (the
+  // "messy timeline" class). Null on the sync publish path — which never
+  // redelivers — and the partial unique index ignores nulls.
+  const dispatchId = getOutboxDispatchId();
+  const eventKey = dispatchId
+    ? `${dispatchId}:${args.conversationId}:${args.dedupeDiscriminator ?? args.kind}`
+    : null;
   try {
     // Prisma differentiates explicit JSON-null from "leave as DB default" —
     // `Prisma.JsonNull` is the explicit-null sentinel; `undefined` skips the
@@ -52,6 +69,7 @@ export async function recordConversationEvent(args: RecordArgs): Promise<void> {
         apiKeyId: args.apiKeyId ?? null,
         workflowId: args.workflowId ?? null,
         kind: args.kind,
+        ...(eventKey ? { eventKey } : {}),
         ...(args.at ? { at: new Date(args.at) } : {}),
         before:
           args.before == null
@@ -64,6 +82,11 @@ export async function recordConversationEvent(args: RecordArgs): Promise<void> {
       },
     });
   } catch (err) {
+    // P2002 on eventKey = this outbox row already recorded this pill; a
+    // redelivery is a no-op, not a failure.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return;
+    }
     console.warn("[recordConversationEvent] failed", {
       conversationId: args.conversationId,
       kind: args.kind,

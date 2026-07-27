@@ -60,7 +60,13 @@ export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestr
     }
   }
 
+  private registered = false;
+
   onModuleInit(): void {
+    // Same idempotence guard as every sibling subscriber: a double
+    // registration would deliver each visitor frame twice.
+    if (this.registered) return;
+    this.registered = true;
     this.offs.push(
       this.bus.subscribe(
         "message.received",
@@ -68,7 +74,7 @@ export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestr
           if (e.message.channel !== CHANNEL) return;
           this.gateway.deliverToVisitor(e.conversationId, "message", frameFromMessage(e.message));
         },
-        SubscriberPriority.REALTIME,
+        SubscriberPriority.REALTIME_SECONDARY,
       ),
       this.bus.subscribe(
         "message.sent",
@@ -86,7 +92,7 @@ export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestr
             frameFromMessage(e.message, { senderName, ai }),
           );
         },
-        SubscriberPriority.REALTIME,
+        SubscriberPriority.REALTIME_SECONDARY,
       ),
       this.bus.subscribe(
         "message.status_changed",
@@ -101,7 +107,7 @@ export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestr
             status: e.status,
           });
         },
-        SubscriberPriority.REALTIME,
+        SubscriberPriority.REALTIME_SECONDARY,
       ),
       this.bus.subscribe(
         "conversation.status_changed",
@@ -114,7 +120,7 @@ export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestr
             status: e.newStatus,
           });
         },
-        SubscriberPriority.REALTIME,
+        SubscriberPriority.REALTIME_SECONDARY,
       ),
     );
   }

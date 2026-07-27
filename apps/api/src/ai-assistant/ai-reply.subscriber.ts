@@ -35,31 +35,60 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
   onModuleInit(): void {
     if (this.registered) return;
     this.registered = true;
+    // Handlers are AWAITED (2026-07-27): the previous `void …` shape resolved
+    // synchronously, so these ran outside the per-subscriber timeout, outside
+    // the outbox `lastError` sink, and outside the at-least-once lease — a
+    // crash mid-enqueue marked the row done and lost the AI turn. try/catch
+    // preserves "never throw into the bus".
     this.offs.push(
       subscribe(
         "message.received",
-        (e) => void this.onReceived(e).catch((err) => this.logError("received", err)),
+        async (e) => {
+          try {
+            await this.onReceived(e);
+          } catch (err) {
+            this.logError("received", err);
+          }
+        },
         SubscriberPriority.DEFAULT,
       ),
     );
     this.offs.push(
       subscribe(
         "message.media_ready",
-        (e) => void this.onMediaReady(e).catch((err) => this.logError("media_ready", err)),
+        async (e) => {
+          try {
+            await this.onMediaReady(e);
+          } catch (err) {
+            this.logError("media_ready", err);
+          }
+        },
         SubscriberPriority.DEFAULT,
       ),
     );
     this.offs.push(
       subscribe(
         "message.sent",
-        (e) => void this.onSent(e).catch((err) => this.logError("sent", err)),
+        async (e) => {
+          try {
+            await this.onSent(e);
+          } catch (err) {
+            this.logError("sent", err);
+          }
+        },
         SubscriberPriority.DEFAULT,
       ),
     );
     this.offs.push(
       subscribe(
         "conversation.status_changed",
-        (e) => void this.onStatusChanged(e).catch((err) => this.logError("status_changed", err)),
+        async (e) => {
+          try {
+            await this.onStatusChanged(e);
+          } catch (err) {
+            this.logError("status_changed", err);
+          }
+        },
         SubscriberPriority.DEFAULT,
       ),
     );

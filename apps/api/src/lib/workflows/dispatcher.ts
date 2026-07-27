@@ -2,6 +2,7 @@ import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { Prisma, type WorkflowTriggerEvent } from "@prisma/client";
 
 import { runWithConcurrency } from "@/common/concurrency";
+import { getOutboxDispatchId } from "@/common/correlation";
 import { db } from "@/lib/db";
 import { evaluateConditions } from "@/lib/workflows/conditions";
 import type { EventPayload, PayloadFor } from "@/lib/workflows/events";
@@ -37,6 +38,16 @@ import { enqueueWorkflowRun } from "@/lib/workflows/queue";
  * additive infrastructure. A degraded Redis or Postgres degrades workflows
  * only; messages still ingest, replies still send.
  */
+/**
+ * Per-(outbox row, workflow) dedupe key, or null on the synchronous publish
+ * path (which never redelivers, so its runs stay unkeyed and the partial
+ * unique index ignores them).
+ */
+function dispatchDedupeKey(workflowId: string): string | null {
+  const dispatchId = getOutboxDispatchId();
+  return dispatchId ? `${dispatchId}:${workflowId}` : null;
+}
+
 export async function dispatch<E extends WorkflowTriggerEvent>(
   workspaceId: string,
   event: E,
@@ -173,6 +184,7 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
             workspaceId: args.workspaceId,
           },
         });
+        const oncePerContactKey = dispatchDedupeKey(args.workflowId);
         const run = await tx.workflowRun.create({
           data: {
             workflowId: args.workflowId,
@@ -183,6 +195,7 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
             eventPayload: args.payload as Prisma.InputJsonValue,
             graphSnapshot: args.graph,
             status: "queued",
+            ...(oncePerContactKey ? { eventKey: oncePerContactKey } : {}),
           },
           select: { id: true },
         });
@@ -198,20 +211,38 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
       throw err;
     }
   } else {
-    const run = await db.workflowRun.create({
-      data: {
-        workflowId: args.workflowId,
-        workspaceId: args.workspaceId,
-        trigger: args.trigger,
-        contactId: args.contactId,
-        conversationId: args.conversationId,
-        eventPayload: args.payload as Prisma.InputJsonValue,
-        graphSnapshot: args.graph,
-        status: "queued",
-      },
-      select: { id: true },
-    });
-    runId = run.id;
+    // Redelivery dedupe: the outbox is at-least-once, so a crash between
+    // claim and publish redelivers the row. Without a key, the replay created
+    // a SECOND run and re-executed every step — including a second billed
+    // Meta send (the exact class this file's once-per-contact branch already
+    // guards for its own case). `eventKey` is null on the sync publish path,
+    // which never redelivers, and the partial unique lets those coexist.
+    const eventKey = dispatchDedupeKey(args.workflowId);
+    try {
+      const run = await db.workflowRun.create({
+        data: {
+          workflowId: args.workflowId,
+          workspaceId: args.workspaceId,
+          trigger: args.trigger,
+          contactId: args.contactId,
+          conversationId: args.conversationId,
+          eventPayload: args.payload as Prisma.InputJsonValue,
+          graphSnapshot: args.graph,
+          status: "queued",
+          ...(eventKey ? { eventKey } : {}),
+        },
+        select: { id: true },
+      });
+      runId = run.id;
+    } catch (err) {
+      // P2002 on the eventKey unique = this outbox row already dispatched
+      // this workflow. Benign: the original run exists (queued, running, or
+      // finished) and re-running it is exactly the duplicate we're avoiding.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        return;
+      }
+      throw err;
+    }
   }
   if (!runId) return;
   // Enqueue OUTSIDE the tx so a Redis stall can't pin a Prisma connection.

@@ -69,6 +69,15 @@ type Handler<K extends DomainEventType> = (
  */
 export const SubscriberPriority = {
   REALTIME: 0,
+  /**
+   * A SECOND realtime-latency consumer for the same event (today: the webchat
+   * widget's visitor-side delivery, which must land as fast as the agent-side
+   * fanout but is a different audience). Deliberately 1, not 0: only `list[0]`
+   * runs in the critical tier, so two priority-0 registrations decided the
+   * winner by `AppModule.imports` order — the exact fragility these tiers
+   * exist to remove. `assertSingleCriticalSubscriber` pins it at boot.
+   */
+  REALTIME_SECONDARY: 1,
   AUDIT: 10,
   ANALYTICS: 20,
   WORKFLOW_DISPATCH: 30,
@@ -99,6 +108,42 @@ const state: BusState = (g.__ccpEventBus ??= {
  * independent of registration timing. Returns an unsubscribe function —
  * handy for tests + `OnModuleDestroy`.
  */
+/**
+ * How many REALTIME-tier subscribers are registered for `type`.
+ *
+ * Only `list[0]` is dispatched as the critical tier (see `runCriticalTier`),
+ * so a SECOND priority-0 registration silently lands in the detached
+ * background chain — and which one wins is decided by `AppModule.imports`
+ * order, the exact fragility the priority tiers exist to remove. The
+ * bootstrap assertion (`assertSingleCriticalSubscriber`) turns that into a
+ * loud boot failure instead of a race nobody can see.
+ */
+export function criticalSubscriberCount(type: DomainEventType): number {
+  const list = state.handlers.get(type) ?? [];
+  return list.filter((r) => r.priority === SubscriberPriority.REALTIME).length;
+}
+
+/**
+ * Boot-time invariant: at most ONE realtime-tier subscriber per event type.
+ * Called from the drainer's bootstrap (after every module has registered).
+ * Throws with the offending event types so the failure names itself.
+ */
+export function assertSingleCriticalSubscriber(): void {
+  const offenders: string[] = [];
+  for (const [type, list] of state.handlers) {
+    const n = list.filter((r) => r.priority === SubscriberPriority.REALTIME).length;
+    if (n > 1) offenders.push(`${type} (${n})`);
+  }
+  if (offenders.length > 0) {
+    throw new Error(
+      `[bus] more than one REALTIME-tier subscriber for: ${offenders.join(", ")}. ` +
+        "Only list[0] runs in the critical tier; the rest silently fall into the " +
+        "background chain, ordered by module-init luck. Give the secondary one an " +
+        "explicit tier (e.g. REALTIME + 1).",
+    );
+  }
+}
+
 export function subscribe<K extends DomainEventType>(
   type: K,
   handler: Handler<K>,
@@ -151,7 +196,7 @@ export function subscribe<K extends DomainEventType>(
  * audit row than to lose the realtime emit" posture — the outbox row from
  * the `publish()` path is best-effort audit; the durable trail for
  * background failures is each subscriber's own logging + the outbox row
- * written by `publishInTx` + the drainer for callers that need at-most-once.
+ * written by `publishInTx` + the drainer for callers that need durability (at-least-once).
  *
  * The outbox drainer's path (`dispatchPersistedEvent`) keeps awaiting ALL
  * tiers so the drainer can stamp `lastError` accurately.
@@ -331,6 +376,10 @@ function runCriticalTier<K extends DomainEventType>(
   if (!list || list.length === 0) return null;
   const first = list[0]!;
   if (first.priority !== SubscriberPriority.REALTIME) return null;
+  // NOTE: only list[0] is treated as critical. More than one REALTIME
+  // registration for the same event would leave the rest in the background
+  // tier, decided by module-init order — see `criticalTierCount` below, which
+  // makes that a boot-time assertion instead of a silent race.
   try {
     const maybe = first.handler(event as DomainEventOf<DomainEventType>);
     if (maybe && typeof (maybe as Promise<void>).then === "function") {
@@ -363,13 +412,23 @@ function runCriticalTier<K extends DomainEventType>(
  * subscriber latency. Each handler gets its own try/catch so a broken
  * subscriber can't poison the chain. Errors are logged only — this tier
  * runs DETACHED from `publish()`, so there's no caller awaiting an
- * aggregated trail; the durable record for at-most-once consumers is the
- * `publishInTx` + drainer path instead.
+ * aggregated trail. Consumers that need DURABILITY (redelivery across a
+ * crash) must go through `publishInTx` + the drainer, which is at-least-once;
+ * this synchronous path is best-effort by construction.
  *
  * When `list[0]` isn't REALTIME (events with a `null` fanout rule like
  * `contact.tag_changed`), the first real subscriber lives in this tier and
  * is awaited like any other.
  */
+/**
+ * Per-subscriber ceiling for the SYNCHRONOUS publish() path. The drainer got
+ * one (DISPATCH_TIMEOUT_MS) precisely because a hung subscriber starves every
+ * downstream tier — but publish() never had it, and the wedge watchdog does
+ * not cover this path: a stuck Prisma call inside one subscriber pended the
+ * whole background chain forever, silently, behind a green /health.
+ */
+const PUBLISH_SUBSCRIBER_TIMEOUT_MS = 30_000;
+
 async function runBackgroundTier<K extends DomainEventType>(
   event: DomainEventOf<K>,
 ): Promise<void> {
@@ -381,7 +440,11 @@ async function runBackgroundTier<K extends DomainEventType>(
   for (let i = startIdx; i < list.length; i++) {
     const record = list[i]!;
     try {
-      await record.handler(event as DomainEventOf<DomainEventType>);
+      await withSubscriberTimeout(
+        Promise.resolve(record.handler(event as DomainEventOf<DomainEventType>)),
+        PUBLISH_SUBSCRIBER_TIMEOUT_MS,
+        `subscriber #${i} for "${event.type}"`,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(

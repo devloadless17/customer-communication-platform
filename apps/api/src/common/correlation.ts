@@ -36,6 +36,18 @@ interface RequestContext {
    *  Idempotency-Key doesn't burn the tighter per-route bucket (the api-key
    *  guard bucket is already refunded on replay). */
   flags: { idempotentReplay: boolean };
+  /**
+   * Outbox row id, set ONLY while the drainer is dispatching a persisted
+   * event. It is the stable identity of one DELIVERY ATTEMPT-SET: the same
+   * value on every redelivery of that row, and absent on the synchronous
+   * `publish()` path (which never redelivers).
+   *
+   * Subscribers with non-idempotent side effects derive a dedup key from it
+   * (`getOutboxDispatchId()`), so the at-least-once lease introduced
+   * 2026-07-27 can't turn a crash into a duplicate WorkflowRun, a duplicate
+   * partner webhook, or a duplicate audit pill.
+   */
+  outboxDispatchId?: string;
 }
 
 const als = new AsyncLocalStorage<RequestContext>();
@@ -81,10 +93,22 @@ export function wasIdempotentReplay(): boolean {
  * defeating the X-CCP-Depth guard (EVT-1).
  */
 export function runWithCorrelationContext<T>(
-  ctx: { requestId: string; chainDepth: number },
+  ctx: { requestId: string; chainDepth: number; outboxDispatchId?: string },
   fn: () => T,
 ): T {
   return als.run({ ...ctx, flags: { idempotentReplay: false } }, fn);
+}
+
+/**
+ * The outbox row id currently being dispatched, or undefined on the
+ * synchronous publish path. See `RequestContext.outboxDispatchId`.
+ *
+ * Subscribers use it to make redelivery a no-op: derive a deterministic key
+ * (`${dispatchId}:${discriminator}`), let the unique index reject the second
+ * write, and treat P2002 as "already delivered".
+ */
+export function getOutboxDispatchId(): string | undefined {
+  return als.getStore()?.outboxDispatchId;
 }
 
 /**

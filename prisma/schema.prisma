@@ -3383,6 +3383,15 @@ model WorkflowRun {
   status      WorkflowRunStatus    @default(queued)
   trigger     WorkflowTriggerEvent
 
+  // Redelivery dedupe (2026-07-27). The outbox is at-least-once: a crash
+  // between claim and publish redelivers the row, and without this a second
+  // WorkflowRun would re-execute every step — including a second BILLED
+  // Meta send. Set to the outbox row id (+ discriminator) when the dispatch
+  // came from the drainer; NULL on the synchronous publish path, which never
+  // redelivers. The partial unique index (0_init hand-section) makes the
+  // duplicate create a P2002 the dispatcher swallows as "already ran".
+  eventKey String?
+
   // The contact this run is acting on. Nullable for triggers that aren't
   // contact-scoped (none today, but keeps the schema flexible if we add a
   // team-level "any time of day" cron trigger). Used by:
@@ -3635,6 +3644,12 @@ model OutboundWebhook {
 model OutboundWebhookDelivery {
   id             String    @id @default(cuid())
   webhookId      String
+  /// Redelivery dedupe (2026-07-27): outbox row id + webhook id when the
+  /// delivery was created by the drainer, NULL on the sync publish path.
+  /// `id` doubles as the partner's X-CCP-Delivery dedup header, so minting a
+  /// fresh UUID on a redelivered event defeated dedupe on BOTH sides (ours
+  /// and theirs). Partial unique in the 0_init hand-section.
+  eventKey       String?
   eventType      String
   /// Public-shape payload the receiver was sent. Stored verbatim so a retry
   /// from the UI can re-POST the same JSON.
@@ -3718,6 +3733,12 @@ model ConversationEvent {
   id             String                @id @default(cuid())
   conversationId String
   workspaceId    String
+  /// Redelivery dedupe (2026-07-27): outbox row id + discriminator when the
+  /// audit write came from the drainer, NULL on the sync publish path. The
+  /// at-least-once lease would otherwise write a SECOND identical pill on a
+  /// crash-window redelivery — the "messy timeline" class. Partial unique in
+  /// the 0_init hand-section; P2002 is swallowed as "already recorded".
+  eventKey       String?
   userId         String?
   /// Set when the mutation came from an external /v1 API call instead of a
   /// human session. Mutually exclusive with userId in practice — partner

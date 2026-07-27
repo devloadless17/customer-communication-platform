@@ -205,6 +205,9 @@ export function registerAuditSubscribers(): () => void {
         userId: e.changedByUserId,
         apiKeyId: e.changedByApiKeyId ?? null,
         kind: "tag_added",
+        // One pill PER TAG from a single event — the discriminator keeps the
+        // second tag's dedupe key distinct from the first's.
+        dedupeDiscriminator: `tag_added:${tagId}`,
         after: { tagId, tagName: nameById.get(tagId) ?? null },
       });
     }
@@ -215,6 +218,7 @@ export function registerAuditSubscribers(): () => void {
         userId: e.changedByUserId,
         apiKeyId: e.changedByApiKeyId ?? null,
         kind: "tag_removed",
+        dedupeDiscriminator: `tag_removed:${tagId}`,
         before: { tagId, tagName: nameById.get(tagId) ?? null },
       });
     }

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import type { Channel as ChannelMedium } from "@prisma/client";
 
 import { toExternalMediaUrl } from "@/lib/blob-storage";
@@ -20,7 +21,7 @@ import {
 
 import { DbService } from "../db/db.service";
 import { runWithConcurrency } from "../common/concurrency";
-import { getChainDepth, getCorrelationId } from "../common/correlation";
+import { getChainDepth, getCorrelationId, getOutboxDispatchId } from "../common/correlation";
 import { enqueueWebhookDelivery } from "@/lib/outbound-webhooks/queue";
 import { WEBHOOK_WIRE_VERSION } from "@/lib/outbound-webhooks/signing";
 import {
@@ -173,6 +174,9 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     // webhook back into /v1 carries an incrementing counter that trips at
     // MAX_CHAIN_DEPTH. 0 for events with no HTTP origin (sweepers, ingest).
     const chainDepth = getChainDepth();
+    // Stable across redeliveries of this outbox row (null on the sync publish
+    // path) — see the per-delivery `eventKey` below.
+    const dispatchId = getOutboxDispatchId();
 
     const envelopes = toPublicEnvelopes(event as Parameters<typeof toPublicEnvelopes>[0]);
     if (envelopes.length === 0) return;
@@ -326,12 +330,21 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       try {
         await runWithConcurrency(matching, 8, async (w) => {
           const deliveryId = randomUUID();
+          // Redelivery dedupe (2026-07-27). The outbox is at-least-once, and
+          // `deliveryId` is BOTH our BullMQ jobId and the partner's
+          // X-CCP-Delivery dedup header — so minting a fresh UUID on a
+          // redelivered event defeated dedupe on both sides: we re-enqueued,
+          // and the partner saw a second POST with a different event_id it
+          // could not correlate. Keyed per (outbox row, webhook); null on the
+          // sync publish path, which never redelivers.
+          const eventKey = dispatchId ? `${dispatchId}:${w.id}:${type}` : null;
           try {
             await this.db.outboundWebhookDelivery.create({
               data: {
                 id: deliveryId,
                 webhookId: w.id,
                 eventType: type,
+                ...(eventKey ? { eventKey } : {}),
                 correlationId,
                 // minor#8: persist the chain depth on the row so the orphan
                 // sweeper's re-enqueue preserves the loop-guard counter (it only
@@ -344,6 +357,15 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
               select: { id: true },
             });
           } catch (createErr) {
+            // P2002 on eventKey = this outbox row already created (and
+            // enqueued) this webhook's delivery. A redelivery must NOT
+            // re-POST the partner.
+            if (
+              createErr instanceof Prisma.PrismaClientKnownRequestError &&
+              createErr.code === "P2002"
+            ) {
+              return;
+            }
             this.logger.error(
               `delivery create failed for webhook=${w.id} type=${type}: ${
                 createErr instanceof Error ? createErr.message : createErr

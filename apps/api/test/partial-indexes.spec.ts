@@ -43,6 +43,27 @@ afterAll(async () => {
 /** Every raw partial index the product depends on, and what it protects. */
 const REQUIRED_PARTIAL_INDEXES: { name: string; unique: boolean; protects: string }[] = [
   {
+    name: "WorkflowRun_event_key_uniq",
+    unique: true,
+    protects:
+      "Outbox redelivery: without it a crash-window replay creates a SECOND " +
+      "WorkflowRun and re-executes every step — including a second BILLED send.",
+  },
+  {
+    name: "OutboundWebhookDelivery_event_key_uniq",
+    unique: true,
+    protects:
+      "Outbox redelivery: the delivery id IS the partner's dedup header, so a " +
+      "replay without this re-POSTs with a fresh id neither side can dedupe.",
+  },
+  {
+    name: "ConversationEvent_event_key_uniq",
+    unique: true,
+    protects:
+      "Outbox redelivery: without it a replay writes a second identical audit " +
+      "pill (the messy-timeline class).",
+  },
+  {
     name: "Contact_workspaceId_phoneNumber_whatsapp_key",
     unique: true,
     protects:

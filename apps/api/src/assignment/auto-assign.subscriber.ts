@@ -56,7 +56,21 @@ export class AutoAssignSubscriber implements OnModuleInit, OnModuleDestroy {
     this.offs.push(
       subscribe(
         "message.received",
-        (e) => void this.onReceived(e).catch((err) => this.logError(err)),
+        // AWAITED (2026-07-27). This used to be `void this.onReceived(e)`,
+        // which returned synchronously — so the bus moved straight on to
+        // WORKFLOW_DISPATCH while routing was still resolving, and the tier-25
+        // ordering this subscriber exists for was fiction: a `message_received`
+        // workflow RACED the routing decision instead of observing it. The
+        // try/catch keeps the "never throw into the bus" posture, while the
+        // await also brings this handler back inside the per-subscriber
+        // timeout, the outbox `lastError` sink, and the at-least-once lease.
+        async (e) => {
+          try {
+            await this.onReceived(e);
+          } catch (err) {
+            this.logError(err);
+          }
+        },
         // Between ANALYTICS (20) and WORKFLOW_DISPATCH (30).
         SubscriberPriority.ANALYTICS + 5,
       ),
