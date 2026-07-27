@@ -990,7 +990,23 @@ revocation immediacy.
 
 | Check | Last measured | Result |
 |---|---|---|
-| Burst ingest 500 signed webhooks ×2 (dedup + p50/p95 ingest→fanout) | — | — |
+| Burst ingest 500 webhooks / 50 contacts / 25 in flight, + redelivery | `857f420f` (2026-07-27) | **42-63/s · p50 ~310ms · p95 883-950ms · max 1.5-2.2s.** Sheds 9-22% as retryable 503 under peak contention and converges to exactly 500 on redelivery — no duplicates, no thread fragmentation (50 conversations), no `unreadCount` drift. 5 consecutive clean runs. **Found a silent data-loss bug**: a serialization conflict escaping the retry wrapper arrives as `DriverAdapterError("TransactionWriteConflict")` — no `.code`, no SQLSTATE — so `isDriverTransientError` called it permanent poison, answered **200**, and Meta never redelivered. Reproduced in 2 of 5 pre-fix runs (1-2 lost messages each). Before: p95 4479ms, max 4891ms, 43.5/s. Harness: `tests/e2e/meta-channels/pressure-burst-ingest.spec.ts` (`@pressure`, excluded from CI) |
 | Broadcast scale 10k mock recipients | — | — |
 | CSV import 100k rows under heap cap | — | — |
 | Socket frame ceiling per room, 200-inbound burst | — | — |
+
+**B-M5 lesson — the pressure harness earns its keep on run one.** The burst
+found a defect that no amount of reading would have: the ingest path's
+transient-vs-permanent classifier is correct about every error code it names
+(P2034, 40001, 40P01) and was still wrong, because under the pg driver adapter
+the conflict never arrives as any of them. Both times this function has been
+defeated it was the error's SHAPE changing, not a missing condition — so when
+adding a transient class, match it more than one way (`cause.kind` AND message
+text) and let the harness prove it, since the failure mode is invisible in
+normal operation and permanent when it fires.
+
+**Shed rate is not a regression signal on its own.** The fix made the measured
+shed go UP (from ~6% to 9-22%) because conflicts that previously vanished as a
+200 are now honestly reported as retryable 503s. What matters is the pair:
+every non-2xx must be a status Meta RETRIES, and the burst must converge with
+no duplicates.
