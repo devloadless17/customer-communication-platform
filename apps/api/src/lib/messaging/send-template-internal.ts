@@ -20,6 +20,7 @@ import {
   renderTemplateBody,
 } from "@/lib/providers/meta";
 import {
+  LIMITED_TIME_OFFER_LIMITS,
   TEMPLATE_AUTO_ARCHIVE_MONTHS,
   TEMPLATE_LIMITS,
   renderTemplateBodyNamed,
@@ -341,21 +342,31 @@ export async function sendTemplateInternal(
     }
   }
 
-  // A MARKETING coupon's send-time code shares the create-example's 20-char cap
-  // (coupon-templates reference) — a longer one fails at Meta without naming
-  // the field. Auth copy-code buttons never reach this: their sub_type is
-  // `url` (otpKeys) and their cap is the 15-char authentication guard above.
-  for (const b of effectiveButtons) {
-    if (
-      b.subType === "copy_code" &&
-      b.text.length > TEMPLATE_LIMITS.copyCodeExampleMaxLength
-    ) {
-      throw new SendTemplateValidationError(
-        "param_type_mismatch",
-        "coupon code too long",
-        `Coupon codes are limited to ${TEMPLATE_LIMITS.copyCodeExampleMaxLength} ` +
-          `characters — button #${b.index + 1}'s is ${b.text.length}.`,
+  // A MARKETING coupon's send-time code shares the create-example's cap —
+  // 20 characters for a plain coupon button, but only 15 when the template is
+  // a limited-time offer (its reference caps the offer code tighter). A longer
+  // one fails at Meta without naming the field. Auth copy-code buttons never
+  // reach this: their sub_type is `url` (otpKeys) and the 15-char
+  // authentication guard above covers them.
+  {
+    const hasLto =
+      Array.isArray(template.components) &&
+      (template.components as Array<{ type?: unknown }>).some(
+        (c) => typeof c?.type === "string" && c.type.toUpperCase() === "LIMITED_TIME_OFFER",
       );
+    const codeMax = hasLto
+      ? LIMITED_TIME_OFFER_LIMITS.offerCodeMaxLength
+      : TEMPLATE_LIMITS.copyCodeExampleMaxLength;
+    for (const b of effectiveButtons) {
+      if (b.subType === "copy_code" && b.text.length > codeMax) {
+        throw new SendTemplateValidationError(
+          "param_type_mismatch",
+          "coupon code too long",
+          `${hasLto ? "A limited-time offer code" : "Coupon codes"} ` +
+            `${hasLto ? "is" : "are"} limited to ${codeMax} characters — ` +
+            `button #${b.index + 1}'s is ${b.text.length}.`,
+        );
+      }
     }
   }
 
