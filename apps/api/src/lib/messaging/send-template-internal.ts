@@ -21,6 +21,7 @@ import {
 } from "@/lib/providers/meta";
 import {
   TEMPLATE_AUTO_ARCHIVE_MONTHS,
+  TEMPLATE_LIMITS,
   renderTemplateBodyNamed,
   requiredCarouselCards,
   requiredTemplateButtonParams,
@@ -206,12 +207,13 @@ export async function sendTemplateInternal(
   // restrictions). A longer value fails the send with an error that names
   // neither the parameter nor the limit.
   if (template.category === "authentication") {
-    const tooLong = args.variables.body.findIndex((v) => v.length > 15);
+    const max = TEMPLATE_LIMITS.authCodeMaxLength;
+    const tooLong = args.variables.body.findIndex((v) => v.length > max);
     if (tooLong >= 0) {
       throw new SendTemplateValidationError(
         "param_type_mismatch",
         "authentication parameter too long",
-        `Authentication template values are limited to 15 characters — value ` +
+        `Authentication template values are limited to ${max} characters — value ` +
           `${tooLong + 1} is ${args.variables.body[tooLong]!.length}.`,
       );
     }

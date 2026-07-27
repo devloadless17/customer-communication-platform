@@ -244,6 +244,12 @@ export const TEMPLATE_LIMITS = {
    * to reject a template.
    */
   buttonsBeforeSeeAllOptions: 3,
+  /**
+   * An authentication template's one-time password/code, sent as the body's
+   * single parameter (and mirrored onto the button). Meta's one-tap send
+   * reference: "Maximum 15 characters."
+   */
+  authCodeMaxLength: 15,
 } as const;
 
 /**

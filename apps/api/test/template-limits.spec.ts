@@ -73,6 +73,8 @@ describe("the documented numbers", () => {
     expect(TEMPLATE_LIMITS.copyCodeExampleMaxLength).toBe(20);
     expect(TEMPLATE_LIMITS.urlMaxLength).toBe(2000);
     expect(TEMPLATE_LIMITS.phoneNumberMaxLength).toBe(20);
+    // One-tap send reference: the one-time password "Maximum 15 characters".
+    expect(TEMPLATE_LIMITS.authCodeMaxLength).toBe(15);
     expect(TEMPLATE_LIMITS.maxButtons).toBe(10);
   });
 
