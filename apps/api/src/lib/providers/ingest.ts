@@ -2628,7 +2628,10 @@ async function ingestOutboundEcho(
   }
   const { firstName, lastName } = splitContactName(identityLabel);
 
-  let { contact, conversation, isNewContact, wasRevived, isNewConversation, needsReopen } =
+  // `conversation` is reassigned below (the reopen path re-reads it); the rest
+  // never are, so they bind as const — lint's prefer-const flags each name
+  // in a destructuring pattern independently.
+  const { contact, isNewContact, wasRevived, isNewConversation, needsReopen, ...convHolder } =
     await runWithSerializableRetry(async (tx) => {
       const found = await tx.contact.findFirst({
         // Scope by identityChannel exactly like the inbound / call / history
@@ -2731,6 +2734,7 @@ async function ingestOutboundEcho(
       }
       return { contact: contact!, conversation, isNewContact, wasRevived, isNewConversation, needsReopen };
     });
+  let conversation = convHolder.conversation;
 
   // Strict-monotonic timestamp so a phone reply landing in the same second as
   // the inbound it answers still sorts AFTER it (same rule as send-text-internal).

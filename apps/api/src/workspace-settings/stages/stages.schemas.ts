@@ -28,6 +28,11 @@ export type UpdateStageInput = z.infer<typeof UpdateStageSchema>;
 export const ReorderStagesSchema = z.object({
   orderedIds: z
     .array(z.string().min(1))
+    // Bounded like every other list schema. The service comments already claim
+    // "capped at 30 stages", but the cap lived only on CREATE — a reorder body
+    // with 100k ids reached `findMany({ id: { in: ids } })` before anything
+    // rejected it, held back only by the JSON body limit.
+    .max(30)
     .refine((ids) => new Set(ids).size === ids.length, {
       message: "orderedIds has duplicates",
     }),

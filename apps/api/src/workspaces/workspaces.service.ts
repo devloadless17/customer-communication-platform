@@ -15,6 +15,7 @@ import { SessionInvalidationService } from "../auth/session-invalidation.service
 import { Prisma } from "@prisma/client";
 import { DbService } from "../db/db.service";
 import { WorkspaceRootService } from "../workspace-settings/workspace-root.service";
+import { joinDefaultChannel } from "@/lib/team-chat/default-channel";
 
 export interface WorkspaceSummary {
   id: string;
@@ -323,6 +324,11 @@ export class WorkspacesService {
           });
         }
         await tx.workspaceMember.create({ data: { userId, workspaceId, role } });
+        // Same transaction as the membership: a member who exists but isn't in
+        // #general has an empty channel sidebar, dead workspace-wide chat
+        // search, and a `/team` redirect loop once anyone DMs them. See
+        // `joinDefaultChannel` — this path was the one that didn't do it.
+        await joinDefaultChannel(tx, workspaceId, userId, session.userId);
       });
       invalidateSessionCache(userId);
       this.sessionInvalidator.revoke(userId, "workspace-membership-added");

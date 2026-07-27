@@ -65,6 +65,11 @@ import type {
  * client (see the check in `toggleReaction`).
  */
 const MAX_DISTINCT_REACTIONS_PER_MESSAGE = 40;
+/** Pins per channel. `listChannelPins` is unpaginated and carries the full
+ *  message DTO per pin, and it loads on every channel open — so the cap is the
+ *  only thing bounding that response. Generous vs. real use (Slack's own limit
+ *  is 100); the point is that a bound exists. */
+const MAX_PINS_PER_CHANNEL = 100;
 
 @Injectable()
 export class ChannelsService {
@@ -749,7 +754,7 @@ export class ChannelsService {
       // Now returns { items, nextCursor } symmetrically with the
       // ?before= path — client doesn't have to infer pagination state
       // from `items.length >= PAGE_SIZE` anymore.
-      return listChannelMessagesAfter(channelId, workspaceId, after);
+      return listChannelMessagesAfter(channelId, workspaceId, after, opts.take);
     }
 
     const before = opts.before ? decodeCursor(opts.before) : null;
@@ -1202,6 +1207,20 @@ export class ChannelsService {
       });
     }
 
+    // Cap the catalog. Every other list in the product has one (stages 30,
+    // contact fields 50, knowledge docs 50, distinct reactions 40); pins did
+    // not, and `listChannelPins` is unpaginated and carries the FULL message
+    // DTO for each pin — it is fetched on every channel open, by BOTH parties
+    // in a DM where either may pin without a role gate. A scripted loop at the
+    // rate limit turned that response into tens of MB.
+    const pinCount = await this.db.teamChannelPin.count({ where: { channelId } });
+    if (pinCount >= MAX_PINS_PER_CHANNEL) {
+      throw new BadRequestException({
+        error: "pin_limit_reached",
+        detail: `This channel has reached its limit of ${MAX_PINS_PER_CHANNEL} pinned messages. Unpin one to make room.`,
+      });
+    }
+
     let pinnedAt = new Date();
     try {
       const pin = await this.db.teamChannelPin.create({
@@ -1402,13 +1421,24 @@ export class ChannelsService {
       // upsert + read frame rather than risk dropping a just-arrived message.
       receipt.lastReadAt.getTime() > channel.lastMessageAt.getTime()
     ) {
-      const unreadMention = await this.db.teamChannelMention.findFirst({
-        where: {
-          mentionedUserId: userId,
-          message: { channelId, workspaceId, createdAt: { gt: receipt.lastReadAt } },
-        },
-        select: { id: true },
-      });
+      // COALESCE(editedAt, createdAt), NOT createdAt — the two counters that
+      // PRODUCE this badge (the rail count above and `queries.ts`'s per-channel
+      // count) both do, precisely because an @mention added by an EDIT has an
+      // old createdAt. Probing on createdAt alone made the clearing path
+      // disagree with the counting paths: an edit-added mention is never found
+      // here, so markRead returns early without stamping the receipt, and the
+      // badge sticks forever (editing doesn't bump `lastMessageAt`, so the
+      // short-circuit stays entered) until an unrelated message lands.
+      const [unreadMention] = await this.db.$queryRaw<{ id: string }[]>`
+        SELECT mn.id
+        FROM "TeamChannelMention" mn
+        JOIN "TeamChannelMessage" m ON m.id = mn."messageId"
+        WHERE mn."mentionedUserId" = ${userId}
+          AND m."channelId" = ${channelId}
+          AND m."workspaceId" = ${workspaceId}
+          AND COALESCE(m."editedAt", m."createdAt") > ${receipt.lastReadAt}
+        LIMIT 1
+      `;
       if (!unreadMention) {
         return { lastReadAt: receipt.lastReadAt.toISOString() };
       }

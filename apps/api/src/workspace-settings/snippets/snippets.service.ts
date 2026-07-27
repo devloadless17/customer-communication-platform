@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -10,6 +11,9 @@ import type {
   CreateSnippetInput,
   UpdateSnippetInput,
 } from "./snippets.schemas";
+
+/** See create(). `list()` is deliberately unpaginated; this is its bound. */
+const MAX_SNIPPETS_PER_WORKSPACE = 300;
 
 export interface SnippetDto {
   id: string;
@@ -52,6 +56,16 @@ export class SnippetsService {
     userId: string | null,
     input: CreateSnippetInput,
   ): Promise<{ id: string }> {
+    // Same reasoning as the tag cap: an unpaginated list that every client in
+    // the workspace refetches on `team.catalog_changed` needs a bound, and
+    // snippet BODIES are far larger than tag names.
+    const count = await this.db.snippet.count({ where: { workspaceId } });
+    if (count >= MAX_SNIPPETS_PER_WORKSPACE) {
+      throw new BadRequestException({
+        error: "snippet_limit_reached",
+        detail: `This workspace has reached its limit of ${MAX_SNIPPETS_PER_WORKSPACE} snippets. Delete an unused one to make room.`,
+      });
+    }
     try {
       const created = await this.db.snippet.create({
         data: { workspaceId, createdById: userId, ...input },

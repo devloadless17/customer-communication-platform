@@ -943,6 +943,10 @@ export async function listChannelPins(
   const rows = await db.teamChannelPin.findMany({
     where: { channelId, channel: { workspaceId } },
     orderBy: { pinnedAt: "desc" },
+    // Mirrors MAX_PINS_PER_CHANNEL in channels.service. The write cap is the
+    // real bound; this one covers channels that accumulated rows before the
+    // cap existed, so an old channel can't ship an unbounded payload on open.
+    take: 100,
     include: {
       pinnedBy: { select: { name: true } },
       message: { include: MESSAGE_INCLUDE },

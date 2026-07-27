@@ -39,6 +39,11 @@ export type UpdateContactFieldInput = z.infer<typeof UpdateContactFieldSchema>;
 export const ReorderContactFieldsSchema = z.object({
   orderedIds: z
     .array(z.string().min(1))
+    // Bounded like every other list schema. The service comments already claim
+    // "capped at 50 fields", but the cap lived only on CREATE — a reorder body
+    // with 100k ids reached `findMany({ id: { in: ids } })` before anything
+    // rejected it, held back only by the JSON body limit.
+    .max(50)
     .refine((ids) => new Set(ids).size === ids.length, {
       message: "orderedIds has duplicates",
     }),

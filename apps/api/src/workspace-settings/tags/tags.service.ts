@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -6,9 +7,14 @@ import {
 
 import { TAG_COLORS, type Tag, type TagColor } from "@ccp/shared/types";
 
+import { Prisma } from "@prisma/client";
+
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
 import type { CreateTagInput, UpdateTagInput } from "./tags.schemas";
+
+/** See create(). `list()` is deliberately unpaginated; this is its bound. */
+const MAX_TAGS_PER_WORKSPACE = 300;
 
 /**
  * Tag catalog operations. Everything below the HTTP layer goes here so the
@@ -36,12 +42,25 @@ export class TagsService {
    * One aggregate query so 100 tags don't fan into 100 SELECTs.
    */
   async usage(workspaceId: string): Promise<Record<string, number>> {
-    const rows = await this.db.tag.findMany({
-      where: { workspaceId },
-      select: { id: true, _count: { select: { contacts: true } } },
-    });
+    const [rows, views] = await Promise.all([
+      this.db.tag.findMany({
+        where: { workspaceId },
+        select: { id: true, _count: { select: { contacts: true } } },
+      }),
+      // Saved views that filter on a tag count as usage too. Counting contacts
+      // alone under-reported the blast radius of a delete: a tag on zero
+      // contacts reads as "unused" while a shared view still filters on it.
+      this.db.inboxView.findMany({ where: { workspaceId }, select: { filters: true } }),
+    ]);
     const usage: Record<string, number> = {};
     for (const r of rows) usage[r.id] = r._count.contacts;
+    for (const v of views) {
+      const tagIds = (v.filters as { tagIds?: unknown } | null)?.tagIds;
+      if (!Array.isArray(tagIds)) continue;
+      for (const t of tagIds) {
+        if (typeof t === "string" && usage[t] !== undefined) usage[t] += 1;
+      }
+    }
     return usage;
   }
 
@@ -61,6 +80,18 @@ export class TagsService {
 
   async create(workspaceId: string, input: CreateTagInput): Promise<Tag> {
     const color = normalizeColor(input.color);
+    // Bounded like every other catalog (stages 30, contact fields 50, knowledge
+    // docs 50). `list()` is unpaginated ON PURPOSE ("small N") and every client
+    // in the workspace refetches it on `team.catalog_changed` — so an uncapped
+    // catalog is a workspace-wide fanout of an unbounded payload, and
+    // `tags:manage` defaults to TRUE for agents.
+    const count = await this.db.tag.count({ where: { workspaceId } });
+    if (count >= MAX_TAGS_PER_WORKSPACE) {
+      throw new BadRequestException({
+        error: "tag_limit_reached",
+        detail: `This workspace has reached its limit of ${MAX_TAGS_PER_WORKSPACE} tags. Delete an unused one to make room.`,
+      });
+    }
     try {
       const created = await this.db.tag.create({
         data: { workspaceId, name: input.name, color },
@@ -102,8 +133,49 @@ export class TagsService {
   async remove(workspaceId: string, id: string): Promise<void> {
     const existing = await this.db.tag.findFirst({ where: { id, workspaceId } });
     if (!existing) throw new NotFoundException({ error: "tag_not_found" });
-    // Implicit M2M join rows go with the delete — contacts simply lose this tag.
-    await this.db.tag.delete({ where: { id } });
+
+    // Delete the tag AND scrub it out of every saved view that filtered on it,
+    // in one transaction — same discipline as a contact-field delete, which
+    // strips the JSONB key from every contact alongside the definition.
+    //
+    // Without this the FK cascade takes the M2M rows but leaves a DANGLING id
+    // inside `InboxView.criteria`, and `inboxViewWhereClauses` turns it into a
+    // predicate that can never match: in `tagMatch: "all"` mode the view
+    // returns an empty inbox forever, with nothing on screen explaining why —
+    // and a SHARED view does that for the whole workspace.
+    await this.db.$transaction(async (tx) => {
+      await tx.tag.delete({ where: { id } });
+
+      const views = await tx.inboxView.findMany({
+        where: { workspaceId },
+        select: { id: true, filters: true },
+      });
+      for (const view of views) {
+        const filters = view.filters as Record<string, unknown> | null;
+        const tagIds = filters?.tagIds;
+        if (!Array.isArray(tagIds) || !tagIds.includes(id)) continue;
+        const next: Record<string, unknown> = { ...filters };
+        const remaining = tagIds.filter((t) => t !== id);
+        if (remaining.length > 0) {
+          next.tagIds = remaining;
+        } else {
+          // Drop the key entirely rather than leaving `tagIds: []` — an absent
+          // key is what "no tag filter" means everywhere else in the document,
+          // and it takes `tagMatch` with it so the view reads as unfiltered.
+          delete next.tagIds;
+          delete next.tagMatch;
+        }
+        await tx.inboxView.update({
+          where: { id: view.id },
+          data: { filters: next as Prisma.InputJsonValue },
+        });
+      }
+    });
+
+    // Only the tags frame: saved views are not event-driven (nothing in the
+    // codebase publishes for them), so a corrected criteria document is picked
+    // up on the next view load. The scrub is what matters — the stale in-memory
+    // copy still filters on a tag that no longer matches anything either way.
     await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "tags" });
   }
 }

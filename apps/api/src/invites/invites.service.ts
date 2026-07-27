@@ -20,6 +20,7 @@ import { EventBus } from "../events/event-bus.module";
 import type { ApiSession } from "../auth/session.guard";
 import { DbService } from "../db/db.service";
 import type { AcceptInviteInput, CreateInviteInput } from "./invites.schemas";
+import { joinDefaultChannel } from "@/lib/team-chat/default-channel";
 
 export interface InviteListDto {
   id: string;
@@ -500,19 +501,7 @@ export class InvitesService {
         // moment they log in. Non-default channels stay invite-by-admin; the
         // members dialog (apps/web/src/features/team-chat/channel-members-*)
         // is where the admin adds them to specialized rooms.
-        const defaultChannel = await tx.teamChannel.findFirst({
-          where: { workspaceId: invite.workspaceId, isDefault: true },
-          select: { id: true },
-        });
-        if (defaultChannel) {
-          await tx.teamChannelMember.create({
-            data: {
-              channelId: defaultChannel.id,
-              userId: user.id,
-              addedById: invite.createdById,
-            },
-          });
-        }
+        await joinDefaultChannel(tx, invite.workspaceId, user.id, invite.createdById);
 
         return { email: invite.email, workspaceId: invite.workspaceId };
       });

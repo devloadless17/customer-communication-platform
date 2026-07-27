@@ -47,7 +47,7 @@ import {
   isTransientDbError,
 } from "@/lib/providers/ingest";
 import { enqueueHistoryChunk } from "@/lib/coexistence/history-queue";
-import { safeFetch } from "@/lib/http/safe-fetch";
+import { SsrfBlockedError, safeFetch } from "@/lib/http/safe-fetch";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
 import type { Channel, MediaKind } from "@ccp/shared/types";
 import { mediaPreviewLabel } from "@ccp/shared/types";
@@ -1313,6 +1313,11 @@ async function fetchUrlBytes(
   } catch (err) {
     // Surface an SSRF refusal distinctly so an operator debugging a missing
     // attachment sees "we refused this host", not a generic fetch failure.
+    // (This block used to rethrow unchanged, which made the comment a lie and
+    // the wrapper dead weight — lint's `no-useless-catch` was right.)
+    if (err instanceof SsrfBlockedError) {
+      throw new Error(`social media fetch refused: ${err.message}`, { cause: err });
+    }
     throw err;
   }
 }
