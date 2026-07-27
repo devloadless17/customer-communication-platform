@@ -431,9 +431,9 @@ export async function sendTemplateInternal(
     headerComp && headerComp.format && headerComp.format in HEADER_MEDIA_FORMATS
       ? HEADER_MEDIA_FORMATS[headerComp.format as keyof typeof HEADER_MEDIA_FORMATS]
       : null;
-  // LOCATION headers carry the whole pin at SEND time (the component is declared
-  // with no parameters at create time), so all four fields must be present or
-  // Meta rejects the message.
+  // LOCATION headers carry the whole pin at SEND time (the component is
+  // declared with no parameters at create time). Only the coordinates are
+  // required — see the guard below.
   const headerLocation =
     headerComp?.format === "LOCATION" ? args.variables.headerLocation : undefined;
   if (headerComp?.format === "LOCATION") {
