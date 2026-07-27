@@ -15,6 +15,7 @@ import {
 } from "@prisma/client";
 
 import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
+import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
 import {
   providerPlaceCall,
   providerAnswerCall,
@@ -902,6 +903,10 @@ export class CallsService {
       where: { id: conversationId, workspaceId },
       select: {
         channel: true,
+        // The thread's OWN account — calling permission is per business phone
+        // number, so reading or requesting it against the workspace default
+        // answers about a different number than the customer is talking to.
+        channelConnectionId: true,
         contact: { select: { id: true, phoneNumber: true, bsuid: true } },
       },
     });
@@ -918,7 +923,10 @@ export class CallsService {
     };
 
     const binding = getProviderBinding(conversation.channel);
-    const config = await binding.getSendConfig(workspaceId);
+    const config = await binding.getSendConfig(
+      workspaceId,
+      conversation.channelConnectionId,
+    );
     const readPermission = binding.provider.getCallPermission;
     if (readPermission) {
       const permission = await readPermission(identity, config);
@@ -974,18 +982,13 @@ export class CallsService {
       ttlMinutes?: number;
       payload?: string;
     },
+    senderApiKeyId?: string | null,
   ): Promise<{ externalId: string }> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, workspaceId },
-      select: {
-        channel: true,
-        contact: { select: { phoneNumber: true } },
-      },
+      select: { channel: true },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
-    if (!conversation.contact?.phoneNumber) {
-      throw new BadRequestException({ error: "contact has no phone number" });
-    }
     const binding = getProviderBinding(conversation.channel);
     if (!binding.provider.capabilities.calling) {
       throw new BadRequestException({
@@ -993,26 +996,28 @@ export class CallsService {
         detail: `Call buttons aren't available on ${conversation.channel}.`,
       });
     }
-    const sendInteractive = requireProviderMethod(
-      binding.provider,
-      "sendInteractive",
-      conversation.channel,
-    );
-    const config = await binding.getSendConfig(workspaceId);
-    const out = await sendInteractive(
-      {
-        to: conversation.contact.phoneNumber,
-        bodyText: input.bodyText,
-        kind: "voice_call",
-        options: [],
-        voiceCall: {
-          ...(input.displayText ? { displayText: input.displayText } : {}),
-          ...(input.ttlMinutes != null ? { ttlMinutes: input.ttlMinutes } : {}),
-          ...(input.payload ? { payload: input.payload } : {}),
-        },
+    // Through the SHARED interactive sender, not a bare provider call. This
+    // used to send straight to Meta and return: no Message row, no
+    // `message.sent` publish, so the customer got a call CTA that no agent
+    // ever saw in the thread, with no audit row, no realtime frame, no
+    // outbound webhook, and a conversation whose lastMessageAt never moved.
+    // It also resolves the THREAD's account (channelConnectionId) rather than
+    // the workspace default — a call button must come from the number the
+    // customer is actually talking to.
+    const out = await sendInteractiveInternal({
+      workspaceId,
+      conversationId,
+      bodyText: input.bodyText,
+      kind: "voice_call",
+      options: [],
+      voiceCall: {
+        ...(input.displayText ? { displayText: input.displayText } : {}),
+        ...(input.ttlMinutes != null ? { ttlMinutes: input.ttlMinutes } : {}),
+        ...(input.payload ? { payload: input.payload } : {}),
       },
-      config,
-    );
+      senderApiKeyId: senderApiKeyId ?? null,
+      sentVia: "v1/call-button",
+    });
     return { externalId: out.externalId };
   }
 

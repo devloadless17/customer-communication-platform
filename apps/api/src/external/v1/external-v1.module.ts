@@ -15,6 +15,7 @@ import { TicketsModule } from "@/tickets/tickets.module";
 import { MessageFlagsCatalogModule } from "@/workspace-settings/message-flags/message-flags-catalog.module";
 import { InboxViewsModule } from "@/inbox-views/inbox-views.module";
 import { WhatsappModule } from "@/workspace-settings/whatsapp/whatsapp.module";
+import { BroadcastsModule } from "@/broadcasts/broadcasts.module";
 
 @Module({
   // ContactsModule exports ContactTransferService — /v1 import/export runs the
@@ -36,6 +37,10 @@ import { WhatsappModule } from "@/workspace-settings/whatsapp/whatsapp.module";
   imports: [
     ContactsModule,
     CallsModule,
+    // Same service the campaign report page uses — the /v1 analytics refresh
+    // must hit the identical Meta fetch + COALESCE upsert, or the API and the
+    // dashboard would disagree about a campaign's cost.
+    BroadcastsModule,
     AssignmentModule,
     UsersModule,
     MessageFlagsCatalogModule,

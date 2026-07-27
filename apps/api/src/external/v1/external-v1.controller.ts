@@ -43,6 +43,7 @@ import {
 import { AssignmentService } from "@/assignment/assignment.service";
 import { ChannelAccountsService } from "@/workspace-settings/channel-accounts/channel-accounts.service";
 import { WhatsappService } from "@/workspace-settings/whatsapp/whatsapp.service";
+import { BroadcastsService } from "@/broadcasts/broadcasts.service";
 import {
   CreateQrCodeSchema,
   UpdateBusinessProfileSchema,
@@ -254,6 +255,7 @@ export class ExternalV1Controller {
     private readonly channelAccounts: ChannelAccountsService,
     private readonly tickets: TicketsService,
     private readonly whatsapp: WhatsappService,
+    private readonly broadcasts: BroadcastsService,
   ) {}
 
   /**
@@ -445,11 +447,18 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     this.guardChainDepth(xCcpDepth);
+    // REQUIRED, not optional: this route's own docblock, the service comment
+    // and both doc surfaces all said so while the code accepted a missing
+    // header. A gateway timeout + client retry then queued a SECOND job over
+    // the same staged file — `assertNoRunningJob` only blocks a CONCURRENT
+    // second job, not a retry issued after the first finished, so in
+    // create_and_update mode every row re-applied and (with fireAutomations)
+    // every per-row workflow and outbound webhook fired twice.
     return this.api.startContactImport(
       auth.workspaceId,
       auth.apiKeyId,
       body,
-      this.idemKey(idempotencyKey),
+      this.idemKeyRequired(idempotencyKey),
     );
   }
 
@@ -815,6 +824,20 @@ export class ExternalV1Controller {
   // Delegates to the SAME AssignmentService the internal controller uses, so
   // validation, the version CAS and cache invalidation can't drift.
 
+  /**
+   * The policy catalog — `[{ id, name, isDefault, strategy }]`.
+   *
+   * Both doc surfaces tell partners to resolve a ticket's `assignedTeamId`
+   * through this route, but it only ever existed as a session endpoint, so a
+   * partner got a 404 and had no documented way to discover valid team ids for
+   * `PATCH /v1/tickets/:id`. Same query the in-app catalog controller runs.
+   */
+  @Get("assignment-policies")
+  @RequireScope("read:catalog")
+  async listAssignmentPolicies(@CurrentApiKey() auth: ApiKeyContext) {
+    return this.api.listAssignmentPolicies(auth.workspaceId);
+  }
+
   @Get("assignment")
   @RequireScope("read:catalog")
   async getAssignment(@CurrentApiKey() auth: ApiKeyContext) {
@@ -970,7 +993,9 @@ export class ExternalV1Controller {
   async createTicketV1(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(CreateTicketSchema)) body: CreateTicketInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     return this.tickets.create(auth.workspaceId, { apiKeyId: auth.apiKeyId }, body);
   }
 
@@ -980,7 +1005,9 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Body(zBody(UpdateTicketSchema)) body: UpdateTicketInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     return this.tickets.update(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body);
   }
 
@@ -992,7 +1019,10 @@ export class ExternalV1Controller {
    */
   @Delete("tickets/:id")
   @RequireScope("write:tickets")
-  async deleteTicketV1(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+  async deleteTicketV1(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
     return this.tickets.remove(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id);
   }
 
@@ -1014,7 +1044,9 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Body(zBody(AddTicketNoteSchema)) body: AddTicketNoteInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     return this.tickets.addNote(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body.body);
   }
 
@@ -1146,6 +1178,26 @@ export class ExternalV1Controller {
   }
 
   /**
+   * Pull Meta's own template analytics for this campaign (currency cost +
+   * unique link clicks — figures the per-recipient funnel cannot derive).
+   *
+   * Documented in both doc surfaces since the analytics work landed but never
+   * implemented on /v1, so an API-only integration got a 404 and its
+   * `report.metaAnalytics` block stayed permanently stale — the internal
+   * dashboard was the only way to refresh it. `read:broadcasts` because it
+   * fetches and caches a report figure; it changes no campaign state.
+   */
+  @Post("broadcasts/:id/analytics/refresh")
+  @RequireScope("read:broadcasts")
+  @RateLimit({ perMinute: 10 })
+  async refreshBroadcastAnalytics(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    return this.broadcasts.refreshAnalytics(auth.workspaceId, id);
+  }
+
+  /**
    * Recipient-level results. `updatedSince` enables incremental sync — delivery
    * and read receipts keep arriving for hours, so without it a client would
    * have to re-pull every recipient on each poll.
@@ -1157,7 +1209,16 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Query(zQuery(ListBroadcastRecipientsQuerySchema)) query: ListBroadcastRecipientsQueryInput,
   ) {
-    return this.api.listBroadcastRecipients(auth.workspaceId, id, query);
+    // Same `read:contacts` PII gate every conversation/message read applies.
+    // Without it a key scoped for campaign BI alone could page every campaign's
+    // recipients and walk out with the whole contact book's phone numbers —
+    // exactly the side door `redactExternalContactPii` exists to close.
+    return this.api.listBroadcastRecipients(
+      auth.workspaceId,
+      id,
+      query,
+      hasScope(auth.scopes, "read:contacts"),
+    );
   }
 
   @Get("conversations")
@@ -1490,7 +1551,9 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Param("noteId") noteId: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     return this.api.deleteNote(auth.workspaceId, id, noteId);
   }
   // ---- Message flags ------------------------------------------------
@@ -1671,8 +1734,16 @@ export class ExternalV1Controller {
    * it DISABLES the template), so this is for one paused by Template Pacing,
    * which never unpauses on its own. Campaigns parked for the template resume.
    */
+  /**
+   * Lift a Template-Pacing pause. `admin:settings`, not `write:catalog`:
+   * unpausing RESUMES every broadcast campaign parked on this template — i.e.
+   * it restarts irreversible billed sends. `write:catalog` is advertised as
+   * "create/edit tags + custom fields"; a key minted for that must not be able
+   * to restart a 50k-recipient campaign. Matches the internal twin's
+   * `templates:manage` capability gate.
+   */
   @Post("templates/:id/unpause")
-  @RequireScope("write:catalog")
+  @RequireScope("admin:settings")
   async unpauseTemplate(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
@@ -1802,7 +1873,9 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("messageId") messageId: string,
     @Body(zBody(ExternalRaiseFlagSchema)) body: ExternalRaiseFlagInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     // No Idempotency-Key requirement here, unlike sends: raising a flag is
     // idempotent by construction (@@unique([messageId, definitionId]) + upsert)
     // and costs nothing, so demanding a key would be friction with no payoff.
@@ -1815,7 +1888,9 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("flagId") flagId: string,
     @Body(zBody(ExternalUpdateFlagSchema)) body: ExternalUpdateFlagInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     return this.flags.update(auth.workspaceId, auth.apiKeyId, flagId, body);
   }
 
@@ -1824,7 +1899,9 @@ export class ExternalV1Controller {
   async deleteMessageFlag(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("flagId") flagId: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     return this.flags.remove(auth.workspaceId, auth.apiKeyId, flagId);
   }
 

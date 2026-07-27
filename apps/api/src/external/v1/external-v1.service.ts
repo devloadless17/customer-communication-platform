@@ -28,6 +28,7 @@ import {
   EXTERNAL_CONTACT_INCLUDE,
   type ExternalContact,
   externalTemplate,
+  maskPhoneLikeName,
 } from "@/lib/external-shapes";
 import { directoryContactWhere, ensureDefaultStage, toContactWire } from "@/lib/queries";
 import type {
@@ -156,6 +157,15 @@ export class ExternalV1Service {
     route: string,
     fingerprintPayload: unknown,
     work: () => Promise<T>,
+    /**
+     * Set for IRREVERSIBLE work (anything that bills a Meta send). A pending
+     * row past its TTL is then NOT auto-cleared for a re-claim: a crash after
+     * Meta accepted but before `complete()` is AMBIGUOUS, and re-claiming
+     * would send the customer a second billed message. Without it the two
+     * call-send routes — the only irreversible ones on this service — took
+     * the auto-clear path every other send path explicitly opts out of.
+     */
+    opts?: { irreversible?: boolean },
   ): Promise<T> {
     if (!idempotencyKey) return work();
     const claim = await this.idem.claim<T>(
@@ -163,6 +173,7 @@ export class ExternalV1Service {
       apiKeyId,
       idempotencyKey,
       this.idem.fingerprint(route, fingerprintPayload),
+      opts?.irreversible ? { refuseStaleOnAmbiguity: true } : undefined,
     );
     if (claim.kind === "replay") return claim.result;
     try {
@@ -452,6 +463,10 @@ export class ExternalV1Service {
       where: { id: conversationId, workspaceId },
       select: {
         channel: true,
+        // Permission is per business phone number — read it against the
+        // thread's OWN account, not the workspace default, or a two-number
+        // workspace gets the wrong answer for every thread on the second one.
+        channelConnectionId: true,
         contact: { select: { phoneNumber: true, bsuid: true } },
       },
     });
@@ -467,7 +482,7 @@ export class ExternalV1Service {
     if (!conv.contact?.phoneNumber && !conv.contact?.bsuid) {
       throw new BadRequestException({ error: "contact_has_no_callable_identity" });
     }
-    const config = await binding.getSendConfig(workspaceId);
+    const config = await binding.getSendConfig(workspaceId, conv.channelConnectionId);
     const permission = await read(
       {
         ...(conv.contact.phoneNumber ? { to: conv.contact.phoneNumber } : {}),
@@ -510,6 +525,8 @@ export class ExternalV1Service {
           expires_at: out.expiresAt,
         };
       },
+      // Billed Meta send — never auto-clear an ambiguous pending row.
+      { irreversible: true },
     );
   }
 
@@ -532,9 +549,14 @@ export class ExternalV1Service {
           workspaceId,
           conversationId,
           input,
+          // Attribution: the `message.sent` event + audit row name the API
+          // key rather than a phantom human author.
+          apiKeyId,
         );
         return { ok: true as const, message_id: out.externalId };
       },
+      // Billed Meta send — never auto-clear an ambiguous pending row.
+      { irreversible: true },
     );
   }
 
@@ -1935,8 +1957,13 @@ export class ExternalV1Service {
    */
   async listTemplates(
     workspaceId: string,
-    filters: { status?: string; category?: string } = {},
+    filters: { status?: string; category?: string; limit?: number; cursor?: string } = {},
   ) {
+    // Keyset-paged like every other list route. This was the ONE unbounded
+    // list: with Meta's 6,000-templates-per-WABA ceiling and multi-KB carousel
+    // `components`, a single call could materialize tens of MB in the api's
+    // 2GB heap.
+    const limit = filters.limit ?? 50;
     const rows = await this.db.messageTemplate.findMany({
       where: {
         workspaceId,
@@ -1949,7 +1976,10 @@ export class ExternalV1Service {
           ? { category: filters.category as Prisma.MessageTemplateWhereInput["category"] }
           : {}),
       },
-      orderBy: [{ name: "asc" }, { language: "asc" }],
+      // (name, language, id) is the stable keyset order; the cursor is the id.
+      orderBy: [{ name: "asc" }, { language: "asc" }, { id: "asc" }],
+      take: limit + 1,
+      ...(filters.cursor ? { cursor: { id: filters.cursor }, skip: 1 } : {}),
       select: {
         id: true,
         externalId: true,
@@ -1971,7 +2001,26 @@ export class ExternalV1Service {
         syncedAt: true,
       },
     });
-    return { items: rows.map(externalTemplate) };
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    return {
+      items: page.map(externalTemplate),
+      nextCursor: hasMore ? (page[page.length - 1]?.id ?? null) : null,
+    };
+  }
+
+  /**
+   * Policy catalog for resolving `assignedTeamId` values. Byte-identical query
+   * to `AssignmentCatalogController` — kept in sync deliberately rather than
+   * importing the controller, which owns no service.
+   */
+  async listAssignmentPolicies(workspaceId: string) {
+    const policies = await this.db.assignmentPolicy.findMany({
+      where: { workspaceId, archivedAt: null },
+      select: { id: true, name: true, isDefault: true, strategy: true },
+      orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+    });
+    return { policies };
   }
 
   // ===========================================================================
@@ -2194,6 +2243,8 @@ export class ExternalV1Service {
     workspaceId: string,
     id: string,
     q: ListBroadcastRecipientsQueryInput,
+    /** Caller holds `read:contacts` — otherwise recipient identity is masked. */
+    includeContactPii = false,
   ) {
     // BroadcastRecipient carries no workspaceId of its own (it is scoped through the
     // parent), so ownership must be proven here before any recipient read.
@@ -2219,7 +2270,7 @@ export class ExternalV1Service {
     const hasMore = rows.length > q.limit;
     const page = hasMore ? rows.slice(0, q.limit) : rows;
     return {
-      items: page.map(broadcastRecipientToExternal),
+      items: page.map((r) => broadcastRecipientToExternal(r, includeContactPii)),
       nextCursor: hasMore ? (page[page.length - 1]?.id ?? null) : null,
     };
   }
@@ -2384,12 +2435,17 @@ function broadcastRecipientToExternal(r: {
   conversationId: string | null;
   updatedAt: Date;
   contact: { name: string; phoneNumber: string | null };
-}) {
+}, includeContactPii: boolean) {
   return {
     id: r.id,
     contactId: r.contactId,
-    contactName: r.contact.name,
-    phone: r.contact.phoneNumber,
+    // Identity is gated on `read:contacts`, like every other external read.
+    // `contactId` stays so a key that DOES hold the scope can join, and so
+    // campaign analytics remain usable without the directory.
+    contactName: includeContactPii
+      ? r.contact.name
+      : maskPhoneLikeName(r.contact.name, r.contact.phoneNumber),
+    phone: includeContactPii ? r.contact.phoneNumber : null,
     deliveryState: r.deliveryState,
     sendStatus: r.status,
     sentAt: r.sentAt?.toISOString() ?? null,

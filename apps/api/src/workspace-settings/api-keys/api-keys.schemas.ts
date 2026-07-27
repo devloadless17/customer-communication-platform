@@ -13,14 +13,16 @@ const ScopeEnum = z.enum(API_KEY_SCOPES);
 export const CreateApiKeySchema = z.object({
   name: z.string().trim().min(1).max(80),
   /**
-   * Optional. If omitted, the create endpoint defaults to `["*"]` — the
-   * wildcard. The settings UI presents specific scope checkboxes so
-   * the wildcard path is essentially "admin / migration only" usage.
+   * REQUIRED. This used to be optional and defaulted to `["*"]`, so
+   * `POST /api/workspace/api-keys {"name":"x"}` minted a FULL-ACCESS key —
+   * and `"*"` short-circuits `hasScope`, so it also bypassed `admin:settings`.
+   * Least privilege has to be the default for a credential mint; the settings
+   * UI has shipped its scope picker and always sends this, and a caller that
+   * genuinely wants everything can say `["*"]` explicitly.
    */
   scopes: z
     .array(ScopeEnum)
     .min(1, "at least one scope is required")
-    .max(API_KEY_SCOPES.length)
-    .optional(),
+    .max(API_KEY_SCOPES.length),
 });
 export type CreateApiKeyInput = z.infer<typeof CreateApiKeySchema>;

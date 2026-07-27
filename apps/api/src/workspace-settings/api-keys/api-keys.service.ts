@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 
 import { generateApiKey } from "@/auth/api-key";
 
@@ -64,11 +64,11 @@ export class ApiKeysService {
     input: CreateApiKeyInput,
   ): Promise<ApiKeyCreateDto> {
     const generated = generateApiKey();
-    // Default to wildcard for create requests that omit scopes — keeps the
-    // existing UI flow (no scope picker shipped yet) working without lying
-    // to callers. The settings UI WILL ship a picker as part of this batch;
-    // once it does, this branch primarily covers admin scripts.
-    const scopes = input.scopes && input.scopes.length > 0 ? input.scopes : ["*"];
+    // Scopes are REQUIRED by the schema now (they used to default to the
+    // wildcard, so a bare `{"name":"x"}` minted a full-access key). The
+    // fallback stays only as a type narrowing — Zod has already rejected an
+    // empty/absent list before we get here.
+    const scopes = input.scopes;
     const row = await this.db.workspaceApiKey.create({
       data: {
         workspaceId,
@@ -131,14 +131,24 @@ export class ApiKeysService {
       select: { id: true, name: true, scopes: true, revokedAt: true },
     });
     if (!existing) throw new NotFoundException({ error: "key not found" });
+    // Rotating an ALREADY-REVOKED key re-granted exactly what was revoked: a
+    // leaked key that an admin killed could be brought back (new secret, same
+    // scopes, active again) by anyone who could reach this route. Rotation
+    // means "replace a live credential", so a revoked key is terminal —
+    // create a fresh key instead, deliberately.
+    if (existing.revokedAt) {
+      throw new BadRequestException({
+        error: "key_revoked",
+        detail:
+          "This key was revoked and can't be rotated back into service. Create a new key instead.",
+      });
+    }
     const generated = generateApiKey();
     const created = await this.db.$transaction(async (tx) => {
-      if (!existing.revokedAt) {
-        await tx.workspaceApiKey.update({
-          where: { id: existing.id },
-          data: { revokedAt: new Date() },
-        });
-      }
+      await tx.workspaceApiKey.update({
+        where: { id: existing.id },
+        data: { revokedAt: new Date() },
+      });
       return tx.workspaceApiKey.create({
         data: {
           workspaceId,

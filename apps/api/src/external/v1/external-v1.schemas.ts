@@ -808,12 +808,22 @@ export type ExternalTemplateAnalyticsQueryInput = z.infer<
  * Meta's own vocabulary lowercased — so `status=approved` is the one that
  * matters (an integration checking what it may send).
  */
-export const ExternalTemplateListQuerySchema = z.object({
-  status: z
-    .enum(["approved", "pending", "rejected", "paused", "disabled", "archived"])
-    .optional(),
-  category: z.enum(["marketing", "utility", "authentication"]).optional(),
-});
+export const ExternalTemplateListQuerySchema = z
+  .object({
+    status: z
+      .enum(["approved", "pending", "rejected", "paused", "disabled", "archived"])
+      .optional(),
+    category: z.enum(["marketing", "utility", "authentication"]).optional(),
+    /** Keyset page size. Meta permits 6,000 templates per WABA and a carousel's
+     *  `components` JSON runs to KBs, so an unbounded list could materialize
+     *  tens of MB in a 2GB-capped heap — this was the only unpaged list route. */
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    /** Opaque cursor: the last template id from the previous page. */
+    cursor: z.string().min(1).optional(),
+  })
+  // `.strict()` like every neighbouring query schema — without it a typo'd
+  // `?status_=approved` silently returned the UNFILTERED catalog.
+  .strict();
 export type ExternalTemplateListQueryInput = z.infer<
   typeof ExternalTemplateListQuerySchema
 >;

@@ -85,10 +85,13 @@ export const API_KEY_SCOPES = [
   // genuinely drive — teeing up a call a human then makes or takes.
   "write:calls",
 
-  // Team members — setting a teammate's availability or working hours. Read
-  // stays under "read:catalog" (where GET /v1/users already lives); this is
-  // write-only so a workforce-management integration can push shift changes
-  // without also being able to edit tags, stages or templates.
+  // LEGACY as of 2026-07-27 — grants nothing on its own.
+  //
+  // It used to cover setting a teammate's availability / working hours, but
+  // those routes are admin-gated internally, so they moved to
+  // `admin:settings` (existing keys holding this were granted that scope by
+  // the grandfather migration). The value stays in the enum so those keys and
+  // their specs keep validating; do NOT advertise it as granting anything.
   //
   // Deliberately NOT "create/delete users": inviting and removing members is
   // an auth-boundary action with its own email flow and seat-cap enforcement.

@@ -210,7 +210,7 @@ export function conversationRowToExternal(
  * `read:conversations`-only key, so mask a name that is (digit-for-digit) the
  * contact's phone number down to a partial form that still distinguishes threads.
  */
-function maskPhoneLikeName(name: string, phoneNumber: string | null): string {
+export function maskPhoneLikeName(name: string, phoneNumber: string | null): string {
   if (!phoneNumber) return name;
   const digits = (s: string) => s.replace(/\D/g, "");
   const phoneDigits = digits(phoneNumber);

@@ -39,7 +39,11 @@ const SCOPES: ReadonlyArray<{ scope: string; grants: string }> = [
   { scope: "read:broadcasts", grants: "read broadcast campaigns + delivery reports" },
   { scope: "read:calls", grants: "read call history + calling-permission state" },
   { scope: "write:calls", grants: "request calling permission · send call buttons" },
-  { scope: "write:users", grants: "set a teammate's availability · working hours" },
+  {
+    scope: "write:users",
+    grants:
+      "legacy — grants nothing on its own. Availability + working-hours writes moved to admin:settings on 2026-07-27; keys minted before then were granted admin:settings automatically.",
+  },
   {
     scope: "admin:settings",
     grants:

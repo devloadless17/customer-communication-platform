@@ -40,10 +40,13 @@ export interface SendInteractiveInternalArgs {
   workspaceId: string;
   conversationId: string;
   bodyText: string;
-  kind: "buttons" | "list";
+  kind: "buttons" | "list" | "voice_call";
   options: InteractiveOption[];
   listCtaLabel?: string;
   listSectionTitle?: string;
+  /** WhatsApp call-button CTA. Only meaningful with `kind: "voice_call"`,
+   *  which carries no `options`. */
+  voiceCall?: { displayText?: string; ttlMinutes?: number; payload?: string };
   /** Author of the message. Null = system (workflow auto-send); a uuid =
    *  agent-driven send via the inbox composer. Drives bubble attribution
    *  the same way it does for text replies. Defaults to null. */
@@ -192,6 +195,7 @@ export async function sendInteractiveInternal(
       kind: args.kind,
       options: args.options,
       useHumanAgentTag,
+      ...(args.voiceCall ? { voiceCall: args.voiceCall } : {}),
       ...(contactShare.length > 0 ? { contactShare } : {}),
       ...(args.listCtaLabel ? { listCtaLabel: args.listCtaLabel } : {}),
       ...(args.listSectionTitle ? { listSectionTitle: args.listSectionTitle } : {}),
@@ -219,6 +223,7 @@ export async function sendInteractiveInternal(
     interactive: {
       kind: args.kind,
       options: args.options.map((o) => ({ id: o.id, title: o.title })),
+      ...(args.voiceCall ? { voiceCall: args.voiceCall } : {}),
       ...(contactShare.length > 0 ? { contactShare } : {}),
     },
   };
