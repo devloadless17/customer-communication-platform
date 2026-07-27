@@ -62,7 +62,7 @@ table/queue/cache/socket-room that references the dying entity.
 
 | Domain | Tier | Method | Status |
 |---|---|---|---|
-| webhooks ingest | 1 | | ☐ |
+| webhooks ingest | 1 | R (controller + core, adversarial) + E (meta 165) | ✅ 2026-07-27 |
 | outbound send + idempotency ledger | 1 | | ☐ |
 | event bus / outbox | 1 | | ☐ |
 | workflows (~22 step types) | 1 | | ☐ |
@@ -90,6 +90,68 @@ table/queue/cache/socket-room that references the dying entity.
 | registration / invites | 3 | mandatory-N | ☐ |
 | common guards / pipes / filters | 3 | mandatory-N | ☐ |
 | api-keys lifecycle | 3 | mandatory-N | ☐ |
+
+## Domain session notes
+
+### webhooks ingest (B-M3 session 1, 2026-07-27)
+
+Controller-side R-pass (meta.controller.ts) — verified clean:
+- HMAC: raw-body bytes, timing-safe compare with length guard, dual
+  team-owned secret candidates, dev-skip hard-gated off in production.
+- Fail-soft envelope: parse failure / unknown account / missing rawBody →
+  200-dropped (no retry storm); ONLY transient DB errors → 503 (safe because
+  ingest dedupes); history chunks offloaded to BullMQ with 503-on-enqueue-fail
+  (worker dedupes by wamid, so redelivery is safe).
+- Media completion: patch CAS'd on `mediaUrl IS NULL AND mediaKind NOT NULL` —
+  duplicate completions and sweeper races are no-ops; transient download
+  failures PARK the shimmer for the sweeper; permanent ones collapse to a
+  labeled text bubble exactly once.
+- Orphaned-promise discipline: every fire-and-forget carries a non-consuming
+  catch; in-flight media tracked for graceful shutdown drain.
+
+Noted (efficiency, not correctness): a redelivered media batch re-downloads
+bytes before the dedupe verdict — the patch no-ops but bandwidth is spent;
+acceptable at current scale.
+
+E-audit: meta suite (165 green today) covers signed ingest, HMAC rejection,
+dedupe-on-redelivery, cross-channel identity separation, read receipts,
+quoted replies, calls, ticket attach/reopen.
+
+Core ingest.ts + ingest-call.ts adversarial pass (10 findings; per-checklist
+verdicts CLEAN on tenancy, one-conversation-per-contact, fail-soft, media,
+identity seam, ticket seam):
+
+FIXED (2026-07-27):
+- P2: echo-path reopen event permanently lost (third live copy of the INB-1
+  tx-split class) → reopen CAS + status_changed now co-committed with the
+  message insert; duplicate race can no longer split CAS winner from insert
+  winner.
+- Call terminal race: concurrent duplicate terminate double-published
+  call.missed/ended and double-incremented consecutiveUnansweredOutCalls →
+  terminal write is now a status-CAS; side effects gate on the CAS win.
+- Parked-status drain lacked the live path's direction guard → a parked
+  status can no longer rewrite an INBOUND row.
+- Watermark paths published transitions that never committed (partners have
+  no monotonic guard) → publish only rows re-selected in the committed state.
+- Echo splice for a reopened thread carried lastInboundAt: null (teammates
+  saw a template-only reply box) → filled from the contact.
+- Stale/dead: header claim about status updates ignoring workspaceId; 15min
+  park TTL; auto-open-era select + comments; loadRecentForWorkflow now
+  carries workspaceId (letter of §18; was transitively safe).
+
+ACCEPTED (documented tradeoffs, not fixed):
+- Social reaction redelivery toggles a reaction off (IG same-glyph-remove is
+  wire-indistinguishable from a redelivery; UI-only, deliberate per comment).
+- Correction/reaction arriving before its target is dropped (no park) — rare
+  double-fault ordering, UI-only; park infra exists if it ever bites.
+- contact.created is a post-commit bare publish (acknowledged crash-window
+  loss, comment accurate).
+- BSUID↔phone identity fork if the keys arrive in separate events — DORMANT
+  (bsuid null until Meta's 2026+ transition); re-flag before Phase 2.
+
+Structural #14 (media-infra extraction out of meta.controller): DEFERRED to a
+paired structural slot with #15 (realtime session) — correctness fixes took
+this session's budget; extraction is move-only and safest done cold.
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 

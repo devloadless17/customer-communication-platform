@@ -282,10 +282,8 @@ export async function routeMessageToTicket(
       contactId: true,
       channel: true,
       activeTicketId: true,
-      // Carried so an auto-opened ticket inherits the thread's owner (see
-      // createTicketInTx). Without it the ingest path would always open
-      // unassigned, defeating the inheritance for the commonest case.
-      assignedUserId: true,
+      // (assignedUserId was selected here for the auto-open owner-inheritance
+      // path; auto-open was removed 2026-07-25 and nothing read it since.)
     },
   });
   if (!conversation) return { ticketId: null, opened: null };

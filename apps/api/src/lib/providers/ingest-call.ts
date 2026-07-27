@@ -343,6 +343,15 @@ export async function ingestCallEvent(
       const alreadyTerminal = existing
         ? TERMINAL_STATUSES.has(existing.status)
         : false;
+      // Authoritative "THIS webhook performed the non-terminal→terminal
+      // transition" — set by the terminal-write CAS below (or by a terminal-
+      // on-first-insert, where creation IS the transition). `!alreadyTerminal`
+      // alone is a STALE read under a concurrent duplicate: two parallel
+      // deliveries both read `ringing`, both saw alreadyTerminal=false, and
+      // both published call.missed + double-incremented the (non-idempotent)
+      // consecutiveUnansweredOutCalls counter. The CAS makes exactly one
+      // winner.
+      let terminalTransitionWon = false;
 
       // ── Resolve the REAL answer state (channel-agnostic) ──────────────────
       // answeredAt comes from the provider's connected signal — for Meta that's
@@ -464,27 +473,47 @@ export async function ingestCallEvent(
           // the agent's panel. So the only non-terminal write allowed is onto a
           // still-`ringing` row, which also covers the ringing→in_progress
           // advance from `answered`.
-          const canWriteStatus =
-            isTerminalPhase || existing.status === CallStatus.ringing;
-          callRow = await tx.call.update({
-            where: { id: existing.id },
-            data: {
-              ...(canWriteStatus ? { status: effectiveStatus } : {}),
-              // answeredAt is set-once, stamped from the provider's REAL pickup
-              // time (evt.connectedAt). Never from the media-setup connect.
-              ...(!existing.answeredAt && evt.connectedAt
-                ? { answeredAt: evt.connectedAt }
-                : {}),
-              ...(isTerminalPhase
-                ? {
-                    endedAt: evt.timestamp,
-                    durationSeconds: terminalDurationSeconds,
-                  }
-                : {}),
-              rawPayload: evt.rawPayload as Prisma.InputJsonValue,
-            },
-            select: { id: true, status: true },
-          });
+          if (isTerminalPhase) {
+            // CAS on the status still being non-terminal: of two concurrent
+            // duplicate terminal deliveries, exactly one matches — the loser
+            // writes nothing (same observable behavior as the alreadyTerminal
+            // branch) and fires no side effects below.
+            const won = await tx.call.updateMany({
+              where: { id: existing.id, status: { notIn: [...TERMINAL_STATUSES] } },
+              data: {
+                status: effectiveStatus,
+                // answeredAt is set-once, stamped from the provider's REAL
+                // pickup time (evt.connectedAt). Never from the media-setup
+                // connect.
+                ...(!existing.answeredAt && evt.connectedAt
+                  ? { answeredAt: evt.connectedAt }
+                  : {}),
+                endedAt: evt.timestamp,
+                durationSeconds: terminalDurationSeconds,
+                rawPayload: evt.rawPayload as Prisma.InputJsonValue,
+              },
+            });
+            terminalTransitionWon = won.count > 0;
+            callRow = {
+              id: existing.id,
+              status: terminalTransitionWon ? effectiveStatus : existing.status,
+            };
+          } else {
+            // The sole non-terminal write allowed is onto a still-`ringing`
+            // row (see the downgrade rationale above).
+            const canWriteStatus = existing.status === CallStatus.ringing;
+            callRow = await tx.call.update({
+              where: { id: existing.id },
+              data: {
+                ...(canWriteStatus ? { status: effectiveStatus } : {}),
+                ...(!existing.answeredAt && evt.connectedAt
+                  ? { answeredAt: evt.connectedAt }
+                  : {}),
+                rawPayload: evt.rawPayload as Prisma.InputJsonValue,
+              },
+              select: { id: true, status: true },
+            });
+          }
         }
       } else {
         // INSERT path — first webhook for this call id.
@@ -511,6 +540,10 @@ export async function ingestCallEvent(
           select: { id: true, status: true },
         });
         isFirstInsert = true;
+        // Terminal-on-first-webhook: creation IS the non-terminal→terminal
+        // transition (a concurrent duplicate insert P2002-rolls-back wholesale,
+        // publishes included, so the winner is still exactly one).
+        terminalTransitionWon = isTerminalPhase;
       }
 
       // Reopen the closed thread HERE (tx2), atomically with its event. The
@@ -621,20 +654,18 @@ export async function ingestCallEvent(
       }
 
       // Terminal phase-events + the unanswered-counter mutation fire ONLY on a
-      // genuine non-terminal→terminal transition. `alreadyTerminal` means this
-      // is a duplicate/redundant terminal webhook (Meta at-least-once) landing
-      // on a row that already terminalized — re-publishing call.* would re-fire
-      // downstream subscribers and re-incrementing the (non-idempotent) counter
-      // would inflate it. A duplicate terminal webhook thus becomes a true
-      // no-op for side effects (the row UPDATE above is idempotent). Inserts
-      // (isFirstInsert) are never alreadyTerminal, so a terminal-on-first-
-      // webhook call still fires its event exactly once.
+      // genuine non-terminal→terminal transition, keyed on the terminal-write
+      // CAS (`terminalTransitionWon`) — not on the stale `alreadyTerminal`
+      // read, which two CONCURRENT duplicate deliveries could both see false
+      // (both then published call.* and double-incremented the non-idempotent
+      // counter). A sequential duplicate is still a no-op (CAS matches zero);
+      // a terminal-on-first-insert still fires exactly once (P2002 rolls a
+      // losing duplicate back wholesale).
       // Key the terminal events off the CORRECTED status (effectiveStatus), not
-      // the raw parser phase — an outbound no-answer now resolves to `missed`
-      // (so the counter fires) and an answered call to `completed` (carrying the
-      // provider's authoritative duration). Only fires on a real non-terminal→
-      // terminal transition (alreadyTerminal already excluded above).
-      if (!alreadyTerminal && isTerminalPhase) {
+      // the raw parser phase — an outbound no-answer resolves to `missed` (so
+      // the counter fires) and an answered call to `completed` (carrying the
+      // provider's authoritative duration).
+      if (terminalTransitionWon) {
         // Direction from the authoritative Call ROW, not the parser: the social
         // `terminate` webhook carries no direction signal, so mapSocialCall
         // hardcodes "in". Using it would record an OUTBOUND Messenger call as

@@ -42,6 +42,26 @@ const ORG_ID = "e2e-outbox-lease-org";
 // Comfortably past the 10-minute lease.
 const PAST_LEASE = new Date(Date.now() - 11 * 60_000);
 
+/**
+ * A RUNNING api on this database claims + dispatches every pending outbox row
+ * within ~100ms — its drainer races this spec's own claimBatch calls and
+ * steals the seeded rows mid-assertion (observed: the dev stack's api). The
+ * state machine under test is exercised deterministically in the CI `unit`
+ * job, where no api runs. Locally with a live stack we skip rather than
+ * flake; the meta/main e2e suites still cover outbox behavior end-to-end.
+ */
+async function liveDrainerPresent(): Promise<boolean> {
+  try {
+    const res = await fetch("http://localhost:4000/health", {
+      signal: AbortSignal.timeout(1000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+const skipForLiveDrainer = await liveDrainerPresent();
+
 async function seedEvent(): Promise<string> {
   // Direct insert in exactly publishInTx's shape (which returns void — the
   // tests need the row id back).
@@ -103,7 +123,7 @@ afterAll(async () => {
   await db.organization.deleteMany({ where: { id: ORG_ID } });
 });
 
-describe("outbox claim lease", () => {
+describe.skipIf(skipForLiveDrainer)("outbox claim lease", () => {
   it("a claim stamps the lease, not publishedAt — and a claimed row is NOT re-claimable inside the lease", async () => {
     const id = await seedEvent();
     expect(await claimOurs(id)).toBe(true);

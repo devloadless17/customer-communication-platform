@@ -81,8 +81,8 @@ import { isPhoneChannel, isSocialContactPlaceholder } from "@ccp/shared/provider
  * One entry point per route. Routes never touch the DB or Socket.io directly.
  *
  * `workspaceId` is resolved by the caller (the per-team webhook URL contains it,
- * so the route trusts it). Status updates ignore workspaceId — they look up the
- * existing message row by externalId, which already carries its own team.
+ * so the route trusts it) and keys EVERY lookup — status updates included,
+ * which resolve on the compound (workspaceId, channel, externalId) unique.
  */
 
 export async function ingestEvents(
@@ -690,13 +690,22 @@ async function ingestReadWatermark(
     // Repeat the status predicate: between the findMany above and this write a
     // concurrent status webhook could have advanced a row (e.g. to failed, or a
     // later read), and an id-only updateMany would clobber it — regressing the
-    // status at the DB level. Only promote rows still sent/delivered. (Any
-    // resulting over-publish below is absorbed by the client's monotonic guard.)
+    // status at the DB level. Only promote rows still sent/delivered.
     where: { id: { in: msgs.map((m) => m.id) }, status: { in: ["sent", "delivered"] } },
     data: { status: "read" },
   });
+  // Publish only what actually COMMITTED as read: rows the predicate skipped
+  // (a concurrent lane advanced them, e.g. to `failed`) must not fan out a
+  // phantom `read`. The browser's monotonic guard absorbed those, but
+  // `message.status_changed` also feeds outbound webhooks — a partner has no
+  // such guard and would record `read` for a message whose real state is
+  // `failed`. One extra indexed read on a receipt path, not the send path.
+  const committed = await db.message.findMany({
+    where: { id: { in: msgs.map((m) => m.id) }, status: "read" },
+    select: { id: true },
+  });
   const occurredAt = new Date().toISOString();
-  for (const m of msgs) {
+  for (const m of committed) {
     await publish({
       type: "message.status_changed",
       workspaceId,
@@ -754,8 +763,16 @@ async function ingestDeliveredWatermark(
     where: { id: { in: msgs.map((m) => m.id) }, status: "sent" },
     data: { status: "delivered" },
   });
+  // Publish only what COMMITTED as delivered — same rationale as the read
+  // watermark: partners consuming message.status_changed have no monotonic
+  // guard, so a row a concurrent lane pushed to `read`/`failed` must not fan
+  // out a phantom `delivered`.
+  const committed = await db.message.findMany({
+    where: { id: { in: msgs.map((m) => m.id) }, status: "delivered" },
+    select: { id: true },
+  });
   const occurredAt = new Date().toISOString();
-  for (const m of msgs) {
+  for (const m of committed) {
     await publish({
       type: "message.status_changed",
       workspaceId,
@@ -1229,11 +1246,20 @@ async function drainParkIfRowCommitted(
     },
     select: {
       id: true,
+      direction: true,
       conversationId: true,
       conversation: { select: { contactId: true } },
     },
   });
   if (!row) return;
+  // Same direction guard the LIVE status path applies (see ingestStatusUpdate's
+  // `direction !== "out"` bail): a parked status must never rewrite an INBOUND
+  // row. Without this, a status webhook that parked (no row yet) and a later
+  // inbound committing under the same wamid — abnormal wire, but exactly the
+  // class the live guard cites (Instagram read receipts) — would let the drain
+  // overwrite a customer message's status and publish a phantom
+  // message.status_changed.
+  if (row.direction !== "out") return;
   await drainParkedStatus(
     workspaceId,
     channel,
@@ -2060,7 +2086,7 @@ async function ingestInboundMessage(
 
       // Attach the message to a ticket — the unit of WORK this thread is doing
       // right now. Inside THIS transaction on purpose: a message that exists
-      // with no ticket (or a ticket auto-opened for a message that rolled back)
+      // with no ticket (or a reopened ticket for a message that rolled back)
       // is exactly the inconsistency the explicit `Message.ticketId` column
       // exists to rule out. Runs AFTER the reopen flip so a returning customer
       // routes against the post-reopen thread state.
@@ -2069,7 +2095,7 @@ async function ingestInboundMessage(
       // false safety: a failed statement has already poisoned the surrounding
       // Postgres transaction, so every write after the catch fails anyway.
       // Routing only throws on infrastructure failure (it returns null, never
-      // throws, for every logical miss — unknown conversation, auto-open off),
+      // throws, for every logical miss — e.g. an unknown conversation),
       // and in that case the message write is failing too. Letting it roll back
       // means Meta redelivers and we ingest cleanly on the retry.
       const routed = await routeMessageToTicket(tx, {
@@ -2232,6 +2258,7 @@ async function ingestInboundMessage(
       // consistency snapshot, not a global-pool query that might miss
       // sibling concurrent inserts mid-flight.
       const recentMessages = await loadRecentForWorkflow(
+        workspaceId,
         conversation.id,
         created.id,
         tx,
@@ -2531,7 +2558,7 @@ async function ingestOutboundEcho(
   }
   const { firstName, lastName } = splitContactName(identityLabel);
 
-  const { contact, conversation, isNewContact, wasRevived, isNewConversation, reopened } =
+  let { contact, conversation, isNewContact, wasRevived, isNewConversation, needsReopen } =
     await runWithSerializableRetry(async (tx) => {
       const found = await tx.contact.findFirst({
         // Scope by identityChannel exactly like the inbound / call / history
@@ -2598,9 +2625,10 @@ async function ingestOutboundEcho(
         orderBy: { lastMessageAt: "desc" },
       });
       const isNewConversation = !existingConvo;
-      // Whether THIS echo won the closed→pending reopen CAS (drives the
-      // conversation.status_changed publish + splice-in below).
-      let reopened = false;
+      // Whether the thread needs a closed→pending reopen. The CAS itself runs
+      // co-committed with the message insert below (INB-1) — this tx only
+      // detects.
+      let needsReopen = false;
       let conversation = existingConvo;
       if (!conversation) {
         conversation = await tx.conversation.create({
@@ -2616,16 +2644,21 @@ async function ingestOutboundEcho(
           },
         });
       } else if (conversation.status === "closed") {
-        // Reopen: the owner is chatting this contact again. CAS so a racing
-        // inbound reopen doesn't double-flip; either way the thread ends pending.
-        const flip = await tx.conversation.updateMany({
-          where: { id: conversation.id, status: "closed" },
-          data: { status: "pending", assignedUserId: null },
-        });
-        reopened = flip.count > 0;
-        conversation = { ...conversation, status: "pending", assignedUserId: null };
+        // INB-1 (third copy, fixed 2026-07-27): only DETECT the reopen here —
+        // do NOT flip closed→pending in this (separate) transaction. The CAS
+        // flip + the `status_changed` publish are co-committed with the
+        // message INSERT below, so:
+        //   (a) a crash between this tx and the publish can no longer leave a
+        //       silently-reopened thread with no event (redelivery used to see
+        //       status='pending', skip `reopened`, and PERMANENTLY drop the
+        //       workflow trigger + partner webhook + list splice), and
+        //   (b) the duplicate-echo race can no longer split the CAS winner
+        //       from the insert winner (the old pre-publish `!isFreshRow`
+        //       return ate the event whenever they differed).
+        // Mirrors the inbound path + ingest-call.ts's detect/flip split.
+        needsReopen = true;
       }
-      return { contact: contact!, conversation, isNewContact, wasRevived, isNewConversation, reopened };
+      return { contact: contact!, conversation, isNewContact, wasRevived, isNewConversation, needsReopen };
     });
 
   // Strict-monotonic timestamp so a phone reply landing in the same second as
@@ -2639,45 +2672,93 @@ async function ingestOutboundEcho(
     evt.media && !(evt.media.storageKey && evt.media.storageUrl),
   );
 
-  const { message: created, created: isFreshRow } = await createOutboundMessageIdempotentDetailed({
-    workspaceId,
-    conversationId: conversation.id,
-    externalId: evt.externalId,
-    senderUserId: null,
-    origin: "business_app",
-    body: evt.body,
-    direction: "out",
-    channel,
-    status: "sent",
-    rawPayload: evt.rawPayload as Prisma.InputJsonValue,
-    timestamp: messageTimestamp,
-    ...(evt.media
-      ? {
-          mediaKind: evt.media.kind,
-          mediaMimeType: evt.media.mimeType,
-          mediaCaption: evt.body || null,
-          mediaFilename: evt.media.filename ?? null,
-          mediaDurationMs: evt.media.durationMs ?? null,
-          mediaVoice: evt.media.voice ?? null,
-          ...(evt.media.storageKey && evt.media.storageUrl
-            ? {
-                mediaKey: evt.media.storageKey,
-                mediaUrl: evt.media.storageUrl,
-                mediaSizeBytes: evt.media.sizeBytes ?? null,
-              }
-            : {}),
-        }
-      : {}),
+  // Message INSERT + reopen CAS + status_changed publish in ONE transaction
+  // (INB-1): the flip and its event can neither outlive a failed insert nor
+  // be split from it by a crash or a duplicate race. `reopened` is true only
+  // for the copy that BOTH inserted the fresh row AND won the CAS.
+  const { created, isFreshRow, reopened } = await db.$transaction(async (tx) => {
+    const { message: createdRow, created: fresh } = await createOutboundMessageIdempotentDetailed(
+      {
+        workspaceId,
+        conversationId: conversation.id,
+        externalId: evt.externalId,
+        senderUserId: null,
+        origin: "business_app",
+        body: evt.body,
+        direction: "out",
+        channel,
+        status: "sent",
+        rawPayload: evt.rawPayload as Prisma.InputJsonValue,
+        timestamp: messageTimestamp,
+        ...(evt.media
+          ? {
+              mediaKind: evt.media.kind,
+              mediaMimeType: evt.media.mimeType,
+              mediaCaption: evt.body || null,
+              mediaFilename: evt.media.filename ?? null,
+              mediaDurationMs: evt.media.durationMs ?? null,
+              mediaVoice: evt.media.voice ?? null,
+              ...(evt.media.storageKey && evt.media.storageUrl
+                ? {
+                    mediaKey: evt.media.storageKey,
+                    mediaUrl: evt.media.storageUrl,
+                    mediaSizeBytes: evt.media.sizeBytes ?? null,
+                  }
+                : {}),
+            }
+          : {}),
+      },
+      tx,
+    );
+
+    let flipped = false;
+    if (fresh && needsReopen) {
+      // CAS so a racing inbound reopen doesn't double-flip; only the winner
+      // publishes. Closed threads already cleared the assignee on close, so
+      // null is the correct post-reopen value.
+      const flip = await tx.conversation.updateMany({
+        where: { id: conversation.id, status: "closed" },
+        data: { status: "pending", assignedUserId: null },
+      });
+      flipped = flip.count > 0;
+      if (flipped) {
+        const reopenSnapshot = workflowConversationSnapshotAfterStatusChange(
+          {
+            ...conversation,
+            status: "pending",
+            assignedUserId: null,
+            lastMessageAt: messageTimestamp,
+            unreadCount: conversation.unreadCount,
+          },
+          { previousStatus: "closed", changedByUserId: null },
+        );
+        await publishInTx(tx, {
+          type: "conversation.status_changed",
+          workspaceId,
+          conversationId: conversation.id,
+          previousStatus: "closed",
+          newStatus: "pending",
+          changedByUserId: null,
+          contact: toWorkflowContact(contact),
+          conversation: reopenSnapshot,
+        });
+      }
+    }
+    return { created: createdRow, isFreshRow: fresh, reopened: flipped };
   });
+  if (reopened) {
+    conversation = { ...conversation, status: "pending", assignedUserId: null };
+    kickOutbox();
+  }
 
   // A raced duplicate of the same echo: the cheap findUnique above ran before
   // either copy committed, so both reached the insert and the loser got the
   // winner's row back. Everything past this point has SIDE EFFECTS —
   // `message.sent` fanout (one outbound-webhook delivery per publish, and a
   // +1 on Conversation.outgoingMessagesCount), the unread clear, the
-  // `contact.created` publish — so a duplicate must stop here. The inbound path
-  // already behaves this way (its P2002 rolls back before any publish); the
-  // echo path publishes from a separate tx, so it needs this explicit gate.
+  // `contact.created` publish — so a duplicate must stop here. The reopen +
+  // its event are safe either way: they co-committed with the WINNER's insert
+  // above.
   if (!isFreshRow) return;
 
   const preview = (evt.body.trim() || mediaPreview(evt.media?.kind)).slice(0, 200);
@@ -2717,7 +2798,11 @@ async function ingestOutboundEcho(
         assignedUser: null,
         messages: [],
         notes: [],
-        lastInboundAt: null,
+        // An ECHO is outbound — the 24h window state comes from the contact's
+        // stored last inbound. `null` here made a REOPENED thread render as
+        // never-contacted (template-only reply box) on teammates' spliced-in
+        // rows until a refetch.
+        lastInboundAt: contact.lastInboundAt?.toISOString() ?? null,
       }
     : undefined;
 
@@ -2744,32 +2829,8 @@ async function ingestOutboundEcho(
     },
   });
 
-  // A phone-initiated echo that reopened a CLOSED thread must announce the
-  // status change like the inbound reopen path does — otherwise clients keep
-  // showing the thread as closed and workflows / outbound webhooks never see
-  // the reopen. Only the CAS winner publishes (reopened === true). Same
-  // snapshot shape as the inbound reopen (status applied, close fields nulled).
-  if (reopened) {
-    const reopenSnapshot = workflowConversationSnapshotAfterStatusChange(
-      {
-        ...conversation,
-        status: "pending",
-        lastMessageAt: messageTimestamp,
-        unreadCount: conversation.unreadCount,
-      },
-      { previousStatus: "closed", changedByUserId: null },
-    );
-    await publish({
-      type: "conversation.status_changed",
-      workspaceId,
-      conversationId: conversation.id,
-      previousStatus: "closed",
-      newStatus: "pending",
-      changedByUserId: null,
-      contact: toWorkflowContact(contact),
-      conversation: reopenSnapshot,
-    });
-  }
+  // (The reopen's `conversation.status_changed` is co-committed with the
+  // message insert above — INB-1 — so there is no post-commit publish here.)
 
   // Clear team-wide unread: the owner read the thread on their phone to reply.
   // CAS so a concurrent inbound bump isn't clobbered; publish conversation.read
@@ -3519,6 +3580,7 @@ function looksLikeIdentityFallback(value: string): boolean {
  *  message itself. Surfaced in MessageReceivedPayload.recentMessages so a
  *  downstream AI flow has short-term context without a callback. */
 async function loadRecentForWorkflow(
+  workspaceId: string,
   conversationId: string,
   excludeMessageId: string,
   // Optional tx — pass it when the caller is already inside a $transaction
@@ -3528,7 +3590,11 @@ async function loadRecentForWorkflow(
   client: { message: typeof db.message } = db,
 ): Promise<WorkflowMessageSnapshot[]> {
   const rows = await client.message.findMany({
-    where: { conversationId, NOT: { id: excludeMessageId } },
+    // workspaceId is transitively guaranteed (conversationId was resolved
+    // tenant-scoped upstream) — carried anyway per the §18 letter, so the
+    // where-checker convention stays greppable and a future caller can't
+    // reach across tenants with a raw id.
+    where: { workspaceId, conversationId, NOT: { id: excludeMessageId } },
     orderBy: { timestamp: "desc" },
     take: 10,
     select: {

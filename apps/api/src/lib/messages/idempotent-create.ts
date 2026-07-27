@@ -130,7 +130,7 @@ export async function createOutboundMessageIdempotentDetailed(
       const created = await db.message.create({ data });
       // Race: Meta can deliver `sent`/`delivered`/`read` for the wamid
       // BEFORE this row commits. The status webhook handler parks the
-      // status for ~5min; drain it here so a fast-arriving status isn't
+      // status (15min TTL); drain it here so a fast-arriving status isn't
       // dropped silently. Fire-and-forget so we don't slow the happy path.
       // One retry on transient failure — a Redis hiccup at exactly this
       // millisecond would otherwise lose the parked status (GETDEL is
