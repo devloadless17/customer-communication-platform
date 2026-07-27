@@ -78,8 +78,10 @@ function parseAnswerNumber(body: string): number {
  *   Resume call (isResume=true) — the handler reads `pendingAnswer` from
  *   ctx. Set ⇒ branch "answered"; null ⇒ branch "timeout". The runner
  *   clears WorkflowAwaitingReply + pendingAnswer after this branch lands
- *   on the next step (delete handled by the inbound ingest hook; the
- *   timeout path leaves the row to be cleaned by the daily sweeper).
+ *   on the next step. The inbound path CLAIMS the row atomically
+ *   (`DELETE … RETURNING` in resume-on-inbound.ts) so two concurrent replies
+ *   can't both consume it; this handler deletes unconditionally on resume,
+ *   and the hourly sweeper mops up rows whose timeout fired first.
  *
  * Only fires on contact-scoped triggers — runner returns a permanent
  * failure if `run.contactId` is null when await_reply lands. The same is

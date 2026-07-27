@@ -49,23 +49,36 @@ import { enqueueWorkflowRun } from "@/lib/workflows/queue";
  *     `message_received`; `conversation.status_changed` dispatches the
  *     status-changed trigger PLUS opened/closed. A workflow subscribed to two
  *     of them must run for each.
- *   - contactId: a future fan-out event covering several contacts must not
- *     collapse to one run.
+ *   - contactId: a fan-out event covering several contacts must not collapse
+ *     to one run.
+ *   - discriminator: ONE `contact.updated` fans out one dispatch PER CHANGED
+ *     FIELD and PER TAG — same workflow, same trigger, same contact. Without
+ *     it, a bulk edit setting two custom fields would fire a
+ *     `contact_field_updated` workflow ONCE instead of twice, silently. The
+ *     subscriber passes the field key / tag id.
  */
 function dispatchDedupeKey(
   workflowId: string,
   trigger: string,
   contactId: string | null | undefined,
+  discriminator: string | null | undefined,
 ): string | null {
   const dispatchId = getOutboxDispatchId();
   if (!dispatchId) return null;
-  return `${dispatchId}:${workflowId}:${trigger}:${contactId ?? "-"}`;
+  return `${dispatchId}:${workflowId}:${trigger}:${contactId ?? "-"}:${discriminator ?? "-"}`;
 }
 
 export async function dispatch<E extends WorkflowTriggerEvent>(
   workspaceId: string,
   event: E,
   payload: PayloadFor<E>,
+  /**
+   * Distinguishes SEVERAL dispatches of the same (workflow, trigger, contact)
+   * from ONE domain event — the per-field / per-tag fan-out of
+   * `contact.updated`. Only used to build the redelivery dedupe key; ignored
+   * on the synchronous publish path. See `dispatchDedupeKey`.
+   */
+  dedupeDiscriminator?: string,
 ): Promise<void> {
   try {
     // M8: load-all + in-memory condition filter. Fine at <500 workflows/team
@@ -153,6 +166,7 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
           payload,
           graph: w.graph as Prisma.InputJsonValue,
           oncePerContact: w.triggerOncePerContact,
+          dedupeDiscriminator,
         });
       } catch (err) {
         console.error(
@@ -179,6 +193,9 @@ interface CreateAndEnqueueArgs {
   // Snapshot of the workflow's graph at dispatch time, pinned onto the run.
   graph: Prisma.InputJsonValue;
   oncePerContact: boolean;
+  /** See `dispatchDedupeKey` — separates the per-field / per-tag fan-out of a
+   *  single `contact.updated` event. */
+  dedupeDiscriminator?: string;
 }
 
 async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
@@ -202,6 +219,7 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
           args.workflowId,
           args.trigger,
           args.contactId,
+          args.dedupeDiscriminator,
         );
         const run = await tx.workflowRun.create({
           data: {
@@ -235,7 +253,12 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
     // Meta send (the exact class this file's once-per-contact branch already
     // guards for its own case). `eventKey` is null on the sync publish path,
     // which never redelivers, and the partial unique lets those coexist.
-    const eventKey = dispatchDedupeKey(args.workflowId, args.trigger, args.contactId);
+    const eventKey = dispatchDedupeKey(
+      args.workflowId,
+      args.trigger,
+      args.contactId,
+      args.dedupeDiscriminator,
+    );
     try {
       const run = await db.workflowRun.create({
         data: {
@@ -387,11 +410,13 @@ export async function dispatchManualTrigger(args: {
   ]);
   if (!contact) throw new Error("contact not found");
 
-  // Build a manual_trigger payload from the live rows. Note: this still
-  // routes through `dispatch()` so it inherits the once-per-contact ledger.
-  // If a manual-trigger workflow is configured with triggerOncePerContact,
-  // the second manual trigger for the same contact is a no-op — surprising
-  // but matches respond.io's "once per contact" semantics.
+  // Build a manual_trigger payload from the live rows. This does NOT route
+  // through `dispatch()` (see "Create the run directly" below — manual
+  // triggers skip the conditions gate by design); the once-per-contact ledger
+  // is applied here explicitly, gated on `enforceOncePerContact`. So a
+  // manual-trigger workflow with triggerOncePerContact set is still a no-op
+  // on the second trigger for the same contact — matching respond.io's
+  // semantics — but by this code path, not by inheritance.
   const payload = {
     contact: {
       id: contact.id,

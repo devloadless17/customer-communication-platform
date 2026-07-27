@@ -47,14 +47,25 @@ export async function findAndConsumeAwaitingReplies(
   // (e.g., a different workflow restarted the same contact's question while
   // the prior run was awaiting its timeout). The hourly sweeper is the
   // primary cleanup; this filter is the read-side defense.
-  const rows = await tx.workflowAwaitingReply.findMany({
-    where: {
-      workspaceId: args.workspaceId,
-      contactId: args.contactId,
-      expiresAt: { gt: new Date() },
-    },
-    select: { id: true, runId: true },
-  });
+  // DELETE … RETURNING, not find-then-delete: under READ COMMITTED two
+  // concurrent inbound messages both saw the same rows, both wrote
+  // `pendingAnswer` (last writer wins), and both returned the runId — so ONE
+  // await produced TWO resume jobs with different tags (BullMQ's jobId dedupe
+  // can't collapse them), and the second landed on a run that had already
+  // advanced, potentially answering a LATER ask_question with the earlier
+  // reply. Making the DELETE the claim means exactly one caller can win each
+  // row. (Same pattern the message-flags work landed on.)
+  const rows = await tx.$queryRaw<Array<{ id: string; runId: string }>>`
+    DELETE FROM "WorkflowAwaitingReply"
+    WHERE  "id" IN (
+      SELECT "id" FROM "WorkflowAwaitingReply"
+      WHERE  "workspaceId" = ${args.workspaceId}
+        AND  "contactId"   = ${args.contactId}
+        AND  "expiresAt"   > NOW()
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING "id", "runId"
+  `;
   if (rows.length === 0) return [];
   // Drop the answer onto each run, then delete the awaiting rows. Using
   // updateMany via $transaction would let us batch, but the per-run write
@@ -71,8 +82,7 @@ export async function findAndConsumeAwaitingReplies(
       data: { pendingAnswer: answerJson },
     });
   }
-  await tx.workflowAwaitingReply.deleteMany({
-    where: { id: { in: rows.map((r) => r.id) } },
-  });
+  // (The awaiting rows were already consumed by the DELETE … RETURNING above —
+  // claiming and deleting are one atomic step now.)
   return rows.map((r) => r.runId);
 }

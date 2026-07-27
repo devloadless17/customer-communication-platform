@@ -176,13 +176,20 @@ export function registerWorkflowDispatchSubscribers(): () => void {
       // must NOT fan out a workflow trigger. See BUILT_IN_KEYS above.
       if (BUILT_IN_KEYS.has(change.key)) continue;
       dispatches.push(
-        dispatch(e.workspaceId, "contact_field_updated", {
-          contact: e.workflowContact,
-          fieldKey: change.key,
-          previousValue: change.previous,
-          newValue: change.next,
-          changedByUserId: e.changedByUserId,
-        }),
+        dispatch(
+          e.workspaceId,
+          "contact_field_updated",
+          {
+            contact: e.workflowContact,
+            fieldKey: change.key,
+            previousValue: change.previous,
+            newValue: change.next,
+            changedByUserId: e.changedByUserId,
+          },
+          // One event fans out per CHANGED FIELD — the discriminator keeps
+          // each field's run distinct under the redelivery dedupe key.
+          `field:${change.key}`,
+        ),
       );
     }
     if (e.previousStageId !== newStageId) {
@@ -198,22 +205,32 @@ export function registerWorkflowDispatchSubscribers(): () => void {
     if (e.tagChanges) {
       for (const tagId of e.tagChanges.added) {
         dispatches.push(
-          dispatch(e.workspaceId, "contact_tag_updated", {
-            contact: e.workflowContact,
-            kind: "added",
-            tagId,
-            changedByUserId: e.changedByUserId,
-          }),
+          dispatch(
+            e.workspaceId,
+            "contact_tag_updated",
+            {
+              contact: e.workflowContact,
+              kind: "added",
+              tagId,
+              changedByUserId: e.changedByUserId,
+            },
+            `tag-added:${tagId}`,
+          ),
         );
       }
       for (const tagId of e.tagChanges.removed) {
         dispatches.push(
-          dispatch(e.workspaceId, "contact_tag_updated", {
-            contact: e.workflowContact,
-            kind: "removed",
-            tagId,
-            changedByUserId: e.changedByUserId,
-          }),
+          dispatch(
+            e.workspaceId,
+            "contact_tag_updated",
+            {
+              contact: e.workflowContact,
+              kind: "removed",
+              tagId,
+              changedByUserId: e.changedByUserId,
+            },
+            `tag-removed:${tagId}`,
+          ),
         );
       }
     }

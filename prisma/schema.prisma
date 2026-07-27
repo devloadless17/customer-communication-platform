@@ -3428,7 +3428,7 @@ model WorkflowRun {
   // Per-step audit log. Append-only array of:
   //   { stepId, type, status, startedAt, finishedAt?, responseStatus?,
   //     responseBody?, errorMessage?, nextStepId? }
-  // Limited to ~100 entries by the runner's step ceiling.
+  // Bounded by the runner's ceilings (~600 entries / ~1.3MB worst case; deliberately not truncated — see runner.ts).
   stepLog Json @default("[]")
 
   // Inbound answer dropped here by the message-ingest hook when a contact

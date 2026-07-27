@@ -161,7 +161,7 @@ export interface JumpToStepConfig {
   targetStepId: string;
   /**
    * Per-workflow ceiling on how many times this step can fire for a given
-   * run. Combined with the runner's global per-run step ceiling (100), it
+   * run. Combined with the runner's global per-run step ceiling (200), it
    * lets authors set a tighter local cap on a specific loop. Optional.
    */
   maxJumps?: number;

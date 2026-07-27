@@ -209,11 +209,22 @@ export const assignTicketStepHandler: StepHandler<AssignTicketStepConfig> = {
     if (config.mode === "user" && !config.overwrite) {
       const current = await db.ticket.findFirst({
         where: { id: ticketId, workspaceId: ctx.workspaceId },
-        select: { assignedUserId: true },
+        select: { assignedUserId: true, version: true },
       });
       if (current?.assignedUserId) {
         return advance({ skipped: "already_assigned", ticketId });
       }
+      // §18 "automation never overrides a human", enforced with a CAS rather
+      // than a bare read-then-write: `updateTicket`'s own CAS pins STATUS
+      // only, so an agent claiming an already-`open` ticket between the read
+      // above and this write did not move the status — the automation's
+      // assign then silently overwrote them. Pinning the version closes that
+      // window; a lost race degrades to `changed_by_someone_else` in
+      // applyTicketUpdate, which is exactly the intended outcome.
+      return applyTicketUpdate(ctx.workspaceId, ticketId, {
+        assignedUserId: config.userId,
+        ...(current ? { expectedVersion: current.version } : {}),
+      });
     }
 
     return applyTicketUpdate(ctx.workspaceId, ticketId, {

@@ -194,6 +194,7 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
             select: { stepLog: true },
           });
           await rollbackOncePerContactLedger(
+            run.workspaceId,
             run.workflowId,
             run.contactId,
             finalRun?.stepLog,

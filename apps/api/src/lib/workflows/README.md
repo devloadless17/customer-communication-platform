@@ -53,32 +53,38 @@ the step from the top, and the DB-side write is harmless on the second run:
 either `update` is a no-op because the field already has that value, or the
 `upsert` matches the same row.
 
-**Cross-step at-least-once.** The run itself is NOT exactly-once end to end.
-The retry pathology:
+**Cross-step crash safety.** The pathology this design has to survive:
 
 1. Step N runs an external call (e.g. Meta API: send a WhatsApp template).
 2. The external side accepts the call and returns 200.
-3. The runner crashes / the worker is killed / the network drops before the
-   row update for "step N succeeded" commits.
-4. BullMQ retries the job. The runner picks up the run with
-   `currentStepId` still pointing at step N. Step N runs again. Meta sends
-   the template a second time.
+3. The runner crashes before the "step N succeeded" row update commits.
+4. BullMQ retries the job with `currentStepId` still pointing at step N.
 
-This is acceptable for the current step catalog:
+Naively that re-sends. It does NOT here: the runner **journals** an
+`in_progress` stepLog entry BEFORE every step whose handler declares
+`sideEffect: "irreversible"`, and on the next pickup an `in_progress` entry
+for the current step is recognised as an orphan — the runner writes
+`skipped_after_crash` and ADVANCES instead of re-running (`runner.ts`, the
+orphan-detect path). Duplicate billed sends from a crash are therefore
+prevented, not tolerated.
 
-- **send-message / send-template** — duplicate sends are visible to the user
-  but recoverable (apologise, the customer received two messages). Better than
-  the alternative (a workflow that silently failed to send anything).
-- **assign-to / tag / set-status / update-field / update-lifecycle / add-comment**
-  — DB-side idempotent (same write twice = same result).
-- **http-request** — depends on the receiving endpoint. n8n + most ops
-  endpoints handle replay; idempotency keys are the receiver's job.
+What remains at-least-once by design:
 
-If a future step is sensitive to double-execution and not amenable to a
-DB-idempotent rewrite, the right fix is a per-step idempotency key stamped in
-`stepLog` *before* the external call, with a "did this attempt already
-succeed?" lookup at the start of the step. Don't generalise to that pattern
-until a real step demands it.
+- **send-message / send-template / ask-question** — protected by the journal
+  above; a crash in the narrow window before the journal commits can still
+  re-send. These bypass the `OutboundSendAttempt` ledger the composer/API
+  sends use.
+- **assign-to / tag / set-status / update-field / update-lifecycle / ticket
+  steps** — DB-side idempotent or CAS-guarded (same write twice = same
+  result).
+- **http-request** — `sideEffect: "pure"`, and it stamps a stable
+  `X-CCP-Delivery` (`runId:stepId:executionIndex`) so the RECEIVER can dedupe.
+
+Separately, DISPATCH is deduped: since the outbox became at-least-once, a
+redelivered domain event would otherwise create a second `WorkflowRun` and
+re-execute the whole graph. `WorkflowRun.eventKey`
+(`outboxRowId:workflowId:trigger:contactId:discriminator`, partial unique)
+makes the replay a no-op (`dispatcher.ts`).
 
 ## Loop guards
 
@@ -106,11 +112,14 @@ step count does.
 | Workflow disabled while running        | Next pickup marks the run "skipped" and exits cleanly. |
 | `MAX_STEPS_PER_RUN` exceeded           | Run marked failed with `errorMessage: "step ceiling exceeded"`. |
 
-`reconcileOrphanedBroadcasts`-style reconciliation does NOT apply to
-workflow runs — every "running" row is implicitly owned by a live BullMQ
-job (or has been failed by BullMQ's retry-exhaustion handler). If you ever
-see runs stuck in `status: running` after a deploy, something is wrong;
-the job state in Redis should mirror the DB.
+Runs ARE reconciled, unlike the original design note here claimed: the
+waiting sweeper (`sweepers/workflow-waiting.ts`) carries a **`running`
+backstop** (a `running` row whose per-run lock is gone = a dead lane →
+re-enqueue) and a **`queued` backstop** (`strandedQueued`: a run created but
+never enqueued, e.g. a crash between the row insert and the Redis enqueue, or
+a P2002-deduped redelivery that legitimately skipped the enqueue). So a run
+stranded by a rough deploy self-heals within a sweep rather than sitting
+`running` forever.
 
 ## Layout
 
@@ -134,13 +143,21 @@ apps/api/src/lib/workflows/            ← framework-agnostic engine
   conditions.ts                          branch step expression eval
   events.ts                              WorkflowEventEnvelope type +
                                          per-trigger payload shapes
-  dispatcher.ts                          event → workflow matching logic
+  dispatcher.ts                          event → workflow matching logic,
+                                         incl. the redelivery dedupe key
+  resume-on-inbound.ts                   claims WorkflowAwaitingReply rows
+                                         (DELETE … RETURNING) when a contact
+                                         replies to an ask_question
+  branch-presets.ts                      the branch step's preset predicates
   steps/
     types.ts                             StepHandler + StepResult contracts
     index.ts                             handler registry
+    target.ts                            resolves a step's contact/conversation
+    token-context.ts                     live token/{{var}} resolution
     {tag,assign-to,set-status,add-comment,
      update-field,update-lifecycle,
      send-message,send-template,
+     ask-question,ticket,noop,
      open-close-conversation,
      control-flow,http-request,
      trigger-workflow}.ts                handlers (one per step type)

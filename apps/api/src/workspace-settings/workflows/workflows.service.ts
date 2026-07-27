@@ -956,15 +956,20 @@ export class WorkflowsService {
     const take = query?.take ?? 50;
     const cursor = parseRunCursor(query?.cursor);
     const rows = await this.db.workflowRun.findMany({
+      // workspaceId in BOTH branches: the workflow was already ownership-checked
+      // above, so this is defence-in-depth — but it is also a ternary-built
+      // `where`, the exact shape scripts/check-prisma-fields.mjs cannot see, so
+      // the boundary has to be visible in the code itself (§18).
       where: cursor
         ? {
+            workspaceId,
             workflowId: id,
             OR: [
               { startedAt: { lt: cursor.startedAt } },
               { startedAt: cursor.startedAt, id: { lt: cursor.id } },
             ],
           }
-        : { workflowId: id },
+        : { workspaceId, workflowId: id },
       orderBy: [{ startedAt: "desc" }, { id: "desc" }],
       take: take + 1,
       select: {

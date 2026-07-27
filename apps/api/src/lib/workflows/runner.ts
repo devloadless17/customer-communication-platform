@@ -414,6 +414,9 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
   // pickup-local counter prevents a single resumption from hogging the
   // worker if a stale waiting run woke into a tight loop.
   let executedThisPickup = 0;
+  // Set when a jump ceiling trips, so the terminal write below reports the
+  // real reason instead of a silent `completed`.
+  let jumpCeilingHit: string | null = null;
 
   // For the global ceiling we count DISTINCT steps that reached a terminal
   // outcome (success / waiting / permanently failed), not raw log length.
@@ -958,9 +961,17 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
       // Cap jumps per run at the global ceiling; a workflow that loops forever
       // should fail fast rather than chew the worker. Per-step maxJumps tightens
       // it further — this jump already counts as `priorJumpsThisNode + 1`.
+      // A tripped ceiling must be VISIBLE. `jump_to_step` nodes normally have
+      // no outgoing edge, so `findNextStep` returns null and the run used to
+      // fall through to the "end of graph — completed" write: a runaway loop
+      // reported SUCCESS, with a stepLog entry claiming it jumped to a target
+      // it never went to. Record the reason and let the terminal-failure
+      // branch below own the outcome (same shape as the per-pickup ceiling).
       if (jumpsUsed > MAX_STEPS_PER_RUN) {
+        jumpCeilingHit = `jump ceiling (${MAX_STEPS_PER_RUN} jumps/run) exceeded — likely a jump_to_step loop`;
         nextId = findNextStep(graph, node.id);
       } else if (maxJumps !== undefined && priorJumpsThisNode + 1 > maxJumps) {
+        jumpCeilingHit = `per-step jump cap (${maxJumps}) exceeded on step ${node.id}`;
         nextId = findNextStep(graph, node.id);
       } else {
         nextId = result.targetStepId;
@@ -1043,11 +1054,12 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
   // progressCount stays low. The old check tested progressCount alone, so a
   // runaway jump loop fell through to the "completed" branch below, masking
   // the runaway AND nulling pending work as if the run finished cleanly.
-  if (currentStepId) {
+  if (currentStepId || jumpCeilingHit) {
     const reason =
-      progressCount(stepLog) >= MAX_STEPS_PER_RUN
+      jumpCeilingHit ??
+      (progressCount(stepLog) >= MAX_STEPS_PER_RUN
         ? `step ceiling (${MAX_STEPS_PER_RUN}) exceeded`
-        : `execution ceiling (${MAX_STEPS_PER_RUN} steps/pickup) exceeded — likely a jump_to_step loop`;
+        : `execution ceiling (${MAX_STEPS_PER_RUN} steps/pickup) exceeded — likely a jump_to_step loop`);
     await db.workflowRun.update({
       where: { id: run.id },
       data: {
@@ -1155,8 +1167,20 @@ function hasSideEffect(type: WorkflowStepType): boolean {
   // level. The earlier hand-maintained string list silently classified
   // every new step as "pure" — exactly the regression vector CLAUDE.md
   // rule #3 (idempotent Meta sends) exists to prevent.
-  const handler = getStepHandler(type);
-  return handler.sideEffect === "irreversible";
+  // Wrapped like `producesAwaitReply` below: this is called while SCANNING A
+  // STEP LOG, which can contain `{ type: "unknown" }` entries written by the
+  // "node not found in graph" branch — and `getStepHandler` THROWS on those.
+  // Unwrapped, that throw escaped the ledger rollback in the BullMQ processor
+  // (whose `finally` doesn't catch), so a run with a dangling currentStepId
+  // burned all three attempts, fired a false job-failure alarm, and left the
+  // once-per-contact ledger held — locking that contact out of the workflow
+  // permanently. `true` is the conservative answer: assume a side effect and
+  // KEEP the ledger rather than releasing it on a step we can't classify.
+  try {
+    return getStepHandler(type).sideEffect === "irreversible";
+  } catch {
+    return true;
+  }
 }
 
 // WF-2: a step that PAUSES for a contact reply (ask_question). Drives the
@@ -1328,7 +1352,12 @@ export async function failRunFromRetryExhaustion(
     // the workflow can re-fire for this contact — UNLESS an irreversible side
     // effect already fired (WF-1b), in which case the ledger stays to prevent a
     // double-send on the next trigger.
-    await rollbackOncePerContactLedger(run.workflowId, run.contactId, run.stepLog);
+    await rollbackOncePerContactLedger(
+      run.workspaceId,
+      run.workflowId,
+      run.contactId,
+      run.stepLog,
+    );
   } catch (err) {
     console.warn(
       `[workflow-runner] failRunFromRetryExhaustion(${runId}) threw:`,
@@ -1367,6 +1396,7 @@ function runFiredIrreversibleSideEffect(stepLog: StepLogEntry[]): boolean {
 }
 
 export async function rollbackOncePerContactLedger(
+  workspaceId: string,
   workflowId: string,
   contactId: string | null,
   stepLogJson?: unknown,
@@ -1385,7 +1415,7 @@ export async function rollbackOncePerContactLedger(
     return;
   }
   try {
-    await db.workflowContactState.deleteMany({ where: { workflowId, contactId } });
+    await db.workflowContactState.deleteMany({ where: { workspaceId, workflowId, contactId } });
   } catch (err) {
     console.warn(
       `[workflow-runner] rollbackOncePerContactLedger(${workflowId}, ${contactId}) threw:`,
