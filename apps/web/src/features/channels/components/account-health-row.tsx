@@ -15,13 +15,24 @@ import type { ChannelAccountHealth } from "@/lib/api/queries";
  * `PortfolioSummary`; repeating "10,000 / 24h" under each number would read as
  * two separate budgets and invite an operator to plan twice the volume they have.
  */
-export function AccountHealthRow({ health }: { health: ChannelAccountHealth }) {
+export function AccountHealthRow({
+  health,
+  nameStatus = null,
+}: {
+  health: ChannelAccountHealth;
+  /** The display name's review status (raw Meta vocabulary). Only the
+   *  problem states render — an APPROVED name is the silent normal. */
+  nameStatus?: string | null;
+}) {
   const quality = health.qualityRating;
   const throughput = health.throughputLevel;
+  const ns = nameStatus?.toUpperCase() ?? null;
+  const nameProblem = ns === "DECLINED" || ns === "EXPIRED" || ns === "NONE";
+  const namePending = ns === "PENDING_REVIEW";
 
   // Nothing captured yet — say so plainly rather than rendering an empty row
   // that reads as "all clear".
-  if (!quality && !throughput && !health.updatedAt) {
+  if (!quality && !throughput && !health.updatedAt && !nameProblem && !namePending) {
     return (
       <p className="mt-1 text-3xs text-muted-foreground">
         No health snapshot yet — Meta pushes these as they change, or press Refresh.
@@ -56,6 +67,26 @@ export function AccountHealthRow({ health }: { health: ChannelAccountHealth }) {
               : throughput === "STANDARD"
                 ? "Standard · up to ~80 msg/s"
                 : throughput}
+          </span>
+        </span>
+      )}
+
+      {(nameProblem || namePending) && (
+        <span className="inline-flex items-center gap-1">
+          <span className="text-muted-foreground">Display name</span>
+          <span
+            className={cn(
+              "rounded-full border px-1.5 py-px font-medium",
+              namePending && "border-warning-border bg-warning-bg text-warning-fg",
+              nameProblem && "border-destructive/30 bg-destructive/10 text-destructive",
+            )}
+            title={
+              nameProblem
+                ? "Without an approved display name the number has no certificate and cannot be (re)registered for Cloud API. Fix it in WhatsApp Manager → Phone numbers."
+                : "Meta is reviewing this number's display name."
+            }
+          >
+            {ns}
           </span>
         </span>
       )}

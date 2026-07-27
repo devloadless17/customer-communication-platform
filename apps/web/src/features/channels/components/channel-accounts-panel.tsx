@@ -213,7 +213,9 @@ export function ChannelAccountsPanel({
                   {a.externalAccountId}
                   {a.wabaId ? ` · WABA ${a.wabaId}` : ""}
                 </div>
-                {a.health && <AccountHealthRow health={a.health} />}
+                {a.health && (
+                  <AccountHealthRow health={a.health} nameStatus={a.nameStatus} />
+                )}
               </div>
 
               {a.isDefault && (

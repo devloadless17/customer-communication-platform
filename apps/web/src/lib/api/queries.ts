@@ -555,6 +555,9 @@ export interface ChannelAccountView {
   needsReconnect: boolean;
   displayPhoneNumber: string | null;
   wabaId: string | null;
+  /** WhatsApp only — the display name's review status at Meta (raw). A
+   *  DECLINED/EXPIRED/NONE name voids the certificate → blocks registration. */
+  nameStatus: string | null;
   createdAt: string;
   /** WhatsApp only — per-number quality/throughput + the shared portfolio. */
   health: ChannelAccountHealth | null;
@@ -595,6 +598,9 @@ export interface ChannelAccountDirectoryEntry {
   providerName: string | null;
   isDefault: boolean;
   isActive: boolean;
+  /** Expired token: replies on this account's threads will fail until an
+   *  admin reconnects. Drives the thread header's amber pill. */
+  needsReconnect: boolean;
 }
 
 export async function listChannelAccountDirectory(): Promise<ChannelAccountDirectoryEntry[]> {

@@ -2,6 +2,7 @@
 
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Languages,
   MapPin,
   MessageSquare,
@@ -52,6 +53,7 @@ import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/wi
 import { CHANNEL_CAPABILITIES, supportsInlineCaption } from "@ccp/shared/providers/capabilities";
 import { mediaSizeCap, channelSupportsMediaKind } from "@ccp/shared/providers/media-caps";
 import { CHANNEL_LABEL } from "./channel-badge";
+import { useChannelAccounts } from "@/features/inbox/contexts/channel-accounts-context";
 import type { Channel } from "@ccp/shared/types";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 import { useNow } from "@/hooks/use-now";
@@ -751,6 +753,14 @@ function ReplyBoxImpl({
   const templatesAccountQuery = channelConnectionId
     ? `?accountId=${encodeURIComponent(channelConnectionId)}`
     : "";
+
+  // Dead-token state for THIS thread's account (directory is SSR-seeded; the
+  // lookup is a Map get). Drives the non-blocking warning banner below.
+  const { byId: accountDirectoryById } = useChannelAccounts();
+  const accountNeedsReconnect = Boolean(
+    channelConnectionId &&
+      accountDirectoryById.get(channelConnectionId)?.needsReconnect,
+  );
 
   const loadTemplates = useCallback(async () => {
     setTemplatesLoading(true);
@@ -1525,6 +1535,22 @@ function ReplyBoxImpl({
           (message-thread.tsx) so the composer and messages line up at the same
           width — otherwise the two columns look misaligned / gappy. */}
       <div className="mx-auto w-full max-w-6xl px-4 pt-3 pb-4">
+        {/* Dead-token warning for THIS thread's account. Warn, don't disable —
+            the server's refusal is the truth (the token may have just been
+            re-issued) — but the agent shouldn't learn it from a failed bubble. */}
+        {accountNeedsReconnect && !isNote && (
+          <div
+            role="status"
+            className="mb-2 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-2xs text-amber-700 dark:text-amber-400"
+          >
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+            <span>
+              This conversation&apos;s {CHANNEL_LABEL[channel]} account has an
+              expired connection — replies will fail until an admin reconnects
+              it in Settings.
+            </span>
+          </div>
+        )}
         {/* flex-wrap + gap-y so that if the thread is ever narrow enough that
             the toggle + window badge + Send template can't share one line, they
             wrap onto the next line instead of overlapping. The resizers also

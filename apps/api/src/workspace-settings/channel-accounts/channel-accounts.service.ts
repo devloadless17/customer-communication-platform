@@ -26,6 +26,13 @@ export interface ChannelAccountDto {
   /** WhatsApp only. */
   displayPhoneNumber: string | null;
   wabaId: string | null;
+  /**
+   * WhatsApp only: the display name's review status at Meta (raw vocabulary:
+   * APPROVED | DECLINED | EXPIRED | PENDING_REVIEW | NONE …). Readiness state,
+   * not cosmetics — NONE/EXPIRED voids the number's certificate, which blocks
+   * Cloud API (re)registration.
+   */
+  nameStatus: string | null;
   createdAt: string;
   /**
    * Per-ACCOUNT messaging health (WhatsApp only; null elsewhere).
@@ -82,6 +89,9 @@ export interface ChannelAccountDirectoryEntry {
   providerName: string | null;
   isDefault: boolean;
   isActive: boolean;
+  /** Expired token (Graph 190): replies on this account's threads will fail
+   *  until an admin reconnects. Drives the inbox's amber trust pill. */
+  needsReconnect: boolean;
 }
 
 @Injectable()
@@ -102,6 +112,7 @@ export class ChannelAccountsService {
         isActive: true,
         needsReconnect: true,
         wabaId: true,
+        nameStatus: true,
         config: true,
         createdAt: true,
         qualityRating: true,
@@ -129,6 +140,7 @@ export class ChannelAccountsService {
       displayPhoneNumber:
         (r.config as { displayPhoneNumber?: string } | null)?.displayPhoneNumber ?? null,
       wabaId: r.wabaId,
+      nameStatus: r.nameStatus,
       createdAt: r.createdAt.toISOString(),
       // Only WhatsApp carries messaging health; the social channels have no
       // equivalent from Meta, so `null` means "not applicable", not "unknown".
@@ -314,6 +326,7 @@ export class ChannelAccountsService {
         label: true,
         isDefault: true,
         isActive: true,
+        needsReconnect: true,
         config: true,
       },
     });
@@ -345,6 +358,11 @@ export class ChannelAccountsService {
           providerName,
           isDefault: r.isDefault,
           isActive: r.isActive,
+          // The agent-facing trust signal: an expired token means replies on
+          // this account's threads will fail until an admin reconnects. Set
+          // per-connection by the send paths (Graph 190), cleared on a
+          // successful send or a fresh credential save.
+          needsReconnect: r.needsReconnect,
         };
       });
   }

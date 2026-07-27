@@ -273,6 +273,18 @@ function ThreadHeaderImpl({
               >
                 via <span className="font-medium text-foreground/70">{inboundAccount.name}</span>
               </span>
+              {/* Trust pill: this account's token is dead, so a reply typed
+                  here WILL fail at send. Non-blocking — the server's refusal
+                  stays the truth — but the agent shouldn't discover it from a
+                  failed bubble. */}
+              {inboundAccount.needsReconnect && (
+                <span
+                  className="inline-flex shrink-0 items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-px text-3xs font-medium text-amber-700 dark:text-amber-400"
+                  title={`${inboundAccount.name} has an expired connection — replies will fail until an admin reconnects it in Settings.`}
+                >
+                  reconnect needed
+                </span>
+              )}
             </>
           )}
         </div>

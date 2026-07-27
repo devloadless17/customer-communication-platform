@@ -385,6 +385,13 @@ export function SendMessageEditor({
         onChange={(target) => onChange({ ...config, target })}
         extraHint="Free-form sends require the contact to have messaged you in the last 24h. For cold reachout, use a Send Template step."
       />
+      {/* Sender-identity honesty for multi-account workspaces: workflows have
+          no account picker (deliberately — automation follows the thread), so
+          state the routing rule instead of leaving it implicit. */}
+      <p className="text-2xs text-muted-foreground">
+        Sends go out on the conversation&apos;s own number/account; a workflow
+        that starts a brand-new conversation uses the channel&apos;s default.
+      </p>
     </div>
   );
 }
