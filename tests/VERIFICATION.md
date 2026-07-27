@@ -69,7 +69,7 @@ table/queue/cache/socket-room that references the dying entity.
 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E + N (pick-burst spec) | ✅ 2026-07-27 |
 | broadcasts (+audience/templates/analytics) | 1 | R (3-track adversarial) + E (meta 165) | ✅ 2026-07-27 |
 | tickets (+SLA+numbering) | 1 | R (adversarial) + E (meta 165) + N (breach guard) | ✅ 2026-07-27 |
-| realtime layer | 1 | | ☐ |
+| realtime layer | 1 | R (adversarial) + E (144 e2e two-tab) | ✅ 2026-07-27 |
 | auth / org / workspaces / members | 1 | | ☐ |
 | external /v1 API | 1 | | ☐ |
 | contacts (+import/export/transfer) | 2 | | ☐ |
@@ -409,6 +409,54 @@ issues) — the pointer + scan routes to the newest; terminal tickets accept
 subject/customFields edits (harmless corrections); a counter restored from
 an old backup could still 500 ticket creation until it catches up (one
 withUniqueRetry only).
+
+### realtime layer (B-M3 session 8, 2026-07-27) — ✅ CLOSED
+
+THEME: authorization enforced at JOIN, never revoked. FIXED (36a6a9d):
+- HIGH: member removal / role change never severed live sockets (removed
+  agent kept the full team firehose — message bodies, contact PII — until
+  an organic reconnect). Now revoke = cache bust + disconnect.
+- HIGH: conv-room membership had no revocation path — always-authz on
+  subscribe (leave on failure; the alreadyJoined skip was the same recovery
+  hole subscribe:channel fixed for itself), recovered conv rooms pruned,
+  and conversation.assigned now evicts the stale restricted assignee (who
+  otherwise kept typing/viewers/status + broadcast message BODIES).
+- MED-HIGH: agentConversationVisibility flip now disconnects the
+  workspace's sockets (handshake-time state was never re-derived).
+- MED: multi-tab workspace switch announces via BroadcastChannel (other
+  tabs' HTTP silently re-scoped while sockets stayed on the old ws);
+  emitter assignee caches grow-only → periodic sweep; zero-workspace socket
+  auth routed to /logout destroying a valid session → gated/reload path.
+- LOW: typing STOPs uncharged (stuck pills), SUB_CAP 30→60 (keyboard
+  triage silently unsubscribed on-screen threads), visitor-presence chip
+  re-seeds on re-subscribe.
+
+VERIFIED HELD: emit-after-commit with seq-guarded presence transitions;
+room scoping table (message:status/typing/viewers/broadcast frames → conv
+room; user room = user:<ws>:<uid> everywhere); DM/private frames fail
+CLOSED; first-join authz + rawPayload stripped; reconnect convergence
+(delta backfill + full refetch + monotonic status guard on both ends);
+markRead visible+on-thread on every path, unread team-wide, badge via
+local conversation:read; assertReducerCoverage partitions the full event
+set; multi-tab 0↔1 transition gating; memory bounds on every gateway
+structure; deactivation revoke ordering (bust-then-disconnect).
+
+#12 CHARACTERIZED: the ~8 raw-emitted wire events (presence, availability
+snapshot, typing ×3, viewers, visitor presence/typing) are each correctly
+scoped — recorded as a documented sidecar of fanout-rules rather than
+forced into the table.
+
+ACCEPTED / DEFERRED:
+- Restricted agents (out of the ws room by design) don't receive benign
+  team-wide frames: presence dots, availability badges, member catalog,
+  ticket:changed (even own tickets), contacts:bulk_updated, default-channel
+  chat activity. Stale-state class, self-heals on reload; restricted
+  visibility is off by default. Fix-shape recorded: a second
+  `ws:<id>:benign` room joined by everyone, benign rules emit to both.
+- #14/#15 (meta.controller / realtime.gateway size extractions): explicitly
+  NOT done — §17 forbids rewrites without a concrete defect exposing the
+  seam, and this session's fixes landed cleanly inside the current
+  structure. Revisit only if a future fix fights the file layout.
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
