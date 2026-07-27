@@ -39,6 +39,7 @@ import type {
   UpdateMyProfileInput,
   UpdateUserInput,
 } from "./users.schemas";
+import { invalidateSuperAdminAggregates } from "@/lib/queries";
 
 /**
  * Multer-style upload payload for the avatar route. Re-declared here so the
@@ -760,6 +761,9 @@ export class UsersService {
         targetId,
         deactivated ? "deactivation" : "role-change",
       );
+      // Deactivation removes a live seat from every count the platform roster
+      // reports — see the delete path for the same bust.
+      if (deactivated) invalidateSuperAdminAggregates();
     } else {
       this.sessionInvalidator.bustCache(targetId);
     }
@@ -1128,6 +1132,10 @@ export class UsersService {
     // per-process session cache + any live Socket.io connections so the
     // user is kicked instantly rather than waiting for the 15s TTL.
     this.sessionInvalidator.revoke(targetId, "deletion");
+    // The platform roster's userCount / memberCount are memoized for 60s; a
+    // delete changes both, and an operator who just acted must not watch the
+    // console contradict them for a minute.
+    invalidateSuperAdminAggregates();
     await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "members" });
   }
 }

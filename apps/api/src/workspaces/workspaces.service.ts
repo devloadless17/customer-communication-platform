@@ -16,6 +16,7 @@ import { Prisma } from "@prisma/client";
 import { DbService } from "../db/db.service";
 import { WorkspaceRootService } from "../workspace-settings/workspace-root.service";
 import { joinDefaultChannel } from "@/lib/team-chat/default-channel";
+import { invalidateSuperAdminAggregates } from "@/lib/queries";
 
 export interface WorkspaceSummary {
   id: string;
@@ -244,6 +245,8 @@ export class WorkspacesService {
     // without this bust, the new workspace is invisible for up to 15s and the
     // page that just created it would show nothing.
     invalidateSessionCache(session.userId);
+    // The platform roster memo counts workspaces per org — bust it here too.
+    invalidateSuperAdminAggregates();
     return workspace;
   }
 
@@ -332,6 +335,10 @@ export class WorkspacesService {
       });
       invalidateSessionCache(userId);
       this.sessionInvalidator.revoke(userId, "workspace-membership-added");
+      // The platform roster reports memberCount per workspace and userCount per
+      // org off a 60s memo. Without this bust an operator who just added
+      // someone watches the console contradict the action for a full minute.
+      invalidateSuperAdminAggregates();
       return;
     }
 
@@ -493,6 +500,10 @@ export class WorkspacesService {
       where: { activeWorkspaceId: workspaceId },
       data: { activeWorkspaceId: null },
     });
+
+    // Same reason as the membership path: workspaceCount / memberCount on the
+    // platform roster are memoized for 60s and this just changed both.
+    invalidateSuperAdminAggregates();
     // Every member of the deleted workspace holds a stale membership list.
     for (const m of members) invalidateSessionCache(m.userId);
   }

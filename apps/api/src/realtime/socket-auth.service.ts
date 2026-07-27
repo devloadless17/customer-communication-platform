@@ -272,7 +272,10 @@ export class SocketAuthService {
         dbUser.isSuperAdmin || isOrgAdmin
           ? (
               await this.db.workspace.findMany({
-                where: dbUser.isSuperAdmin ? {} : { organizationId: dbUser.organizationId },
+                // The caller's OWN org, superAdmin or not — see the
+                // HTTP guard's twin. `where: {}` picked the oldest workspace
+                // on the PLATFORM, i.e. a customer's.
+                where: { organizationId: dbUser.organizationId },
                 select: { id: true },
                 orderBy: { createdAt: "asc" },
                 take: 1,

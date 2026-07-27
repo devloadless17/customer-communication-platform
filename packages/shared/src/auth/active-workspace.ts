@@ -126,10 +126,23 @@ export function makeCanAccessBeyondMembership(
   const cache = new Map<string, Promise<boolean>>();
   const uncached = async (wsId: string): Promise<boolean> => {
     if (input.memberWorkspaceIds.has(wsId)) return true;
-    if (input.isSuperAdmin) {
-      return (await input.countWorkspaces({ id: wsId })) > 0;
-    }
-    if (input.isOrgAdmin) {
+    if (input.isSuperAdmin || input.isOrgAdmin) {
+      // ORG-SCOPED FOR BOTH, deliberately. A platform superAdmin used to be
+      // granted ANY workspace that exists (`countWorkspaces({ id })`, no org
+      // filter) and `resolveSession` then handed them role "admin" in it — so
+      // setting one cookie (`ccp.ws=<any customer workspace>`) turned every
+      // workspace-scoped API into that tenant's inbox: message bodies, contact
+      // names, phone numbers. Unlogged, unaudited, and contradicting what
+      // `lib/queries/super-admin.ts` states as the invariant ("a superAdmin's
+      // visibility ends at aggregate counts + the member roster, never at
+      // message bodies or contact names"). The only thing standing in front of
+      // it was a client-side redirect to /platform.
+      //
+      // Platform operations do not need this: the (platform) surface is gated
+      // on the `isSuperAdmin` FLAG through RoleGuard and reads its own
+      // aggregate queries. If support impersonation is ever wanted, it belongs
+      // here as an EXPLICIT, audited mode — not as a silent side effect of the
+      // active-workspace resolver.
       return (
         (await input.countWorkspaces({
           id: wsId,

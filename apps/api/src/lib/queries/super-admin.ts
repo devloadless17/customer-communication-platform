@@ -87,6 +87,14 @@ export async function listAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> 
 
 async function loadAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> {
   const teams = await db.workspace.findMany({
+    // The platform's own anchor is not a customer — the SAME filter every
+    // sibling here carries (`loadAllOrgsForSuperAdmin`, `getTeamDetail…`, and
+    // every aggregate in `loadPlatformAnalytics`). This loader was the one
+    // that didn't, so `GET /api/admin/teams` returned the anchor workspace in
+    // `teams`; it stayed invisible only because nothing renders that array
+    // today. One new consumer would have reintroduced the "Loadless listed
+    // beside real customers" bug the org-side filter was added to fix.
+    where: { organization: { isPlatform: false } },
     // createdAt-asc here; the platform page re-groups status-first (pending
     // queue on top) using this as the stable within-group order.
     orderBy: [{ createdAt: "asc" }],
@@ -188,7 +196,11 @@ async function loadAllOrgsForSuperAdmin(): Promise<SuperAdminOrgRow[]> {
         maxWorkspaces: true,
       },
     }),
-    loadAllTeamsForSuperAdmin(),
+    // The MEMOIZED entry point, not the raw loader: `GET /api/admin/teams`
+    // awaits both this and `listAllTeamsForSuperAdmin()` in one Promise.all,
+    // so calling the loader directly ran the per-workspace `_count.messages`
+    // scan TWICE concurrently on a cold cache.
+    listAllTeamsForSuperAdmin(),
   ]);
 
   // Distinct people per org, EXCLUDING platform operators and deactivated

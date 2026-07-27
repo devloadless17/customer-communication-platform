@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 
 import { generateApiKey } from "@/auth/api-key";
 
@@ -105,8 +110,12 @@ export class ApiKeysService {
     });
     if (!key) throw new NotFoundException({ error: "key_not_found" });
     if (key.revokedAt) return; // Idempotent — revoking twice is fine.
-    await this.db.workspaceApiKey.update({
-      where: { id },
+    // updateMany carrying BOTH columns, not a bare-id update after a scoped
+    // pre-check — §18's letter, and the same correction applied to
+    // loadRecentForWorkflow / listRuns. `revokedAt: null` also keeps the
+    // double-submit idempotent rather than restamping the timestamp.
+    await this.db.workspaceApiKey.updateMany({
+      where: { id, workspaceId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
     await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "api-keys" });
@@ -145,10 +154,24 @@ export class ApiKeysService {
     }
     const generated = generateApiKey();
     const created = await this.db.$transaction(async (tx) => {
-      await tx.workspaceApiKey.update({
-        where: { id: existing.id },
+      // CAS on `revokedAt: null`, inside the transaction. The liveness read
+      // above is OUTSIDE it, and there is no unique on (workspaceId, name), so
+      // a double-clicked Rotate had both requests read "live", both revoke,
+      // and both create — leaving the original dead and TWO full-scope
+      // credentials alive, one of which was handed to a request nobody
+      // watched. The method's own contract ("never leave a team with two
+      // active keys of the same name") is only true with this predicate.
+      const claimed = await tx.workspaceApiKey.updateMany({
+        where: { id: existing.id, workspaceId, revokedAt: null },
         data: { revokedAt: new Date() },
       });
+      if (claimed.count === 0) {
+        throw new ConflictException({
+          error: "key_rotate_conflict",
+          detail:
+            "This key was just rotated or revoked by someone else. Reload the list to see the current key.",
+        });
+      }
       return tx.workspaceApiKey.create({
         data: {
           workspaceId,

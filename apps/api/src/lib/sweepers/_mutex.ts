@@ -51,7 +51,8 @@ type SweeperName =
   | "work-hours"
   | "assignment-rebalance"
   | "ticket-sla-breach"
-  | "template-analytics-capture";
+  | "template-analytics-capture"
+  | "abandoned-registration";
 
 // Single in-process mutex; sweepers serialize through it. Boolean is enough
 // because Node's event loop is single-threaded — the only way two callers
@@ -88,6 +89,7 @@ const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
   "webchat-visitor-retention": 25 * 60 * 60 * 1000, // 24h cadence
   "work-hours": 5 * 60 * 1000, // 60s cadence
   "assignment-rebalance": 11 * 60 * 1000, // 5m cadence
+  "abandoned-registration": 25 * 60 * 60 * 1000, // 24h cadence
 };
 
 // First time we ATTEMPTED each sweeper. Lets the stale-warn fire for a sweeper

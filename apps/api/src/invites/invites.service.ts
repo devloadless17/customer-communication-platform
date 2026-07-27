@@ -22,6 +22,10 @@ import { DbService } from "../db/db.service";
 import type { AcceptInviteInput, CreateInviteInput } from "./invites.schemas";
 import { joinDefaultChannel } from "@/lib/team-chat/default-channel";
 
+/** See create(): the re-invite path deletes the pending row before counting
+ *  seats, so the seat cap cannot bound resends. This does. */
+const INVITE_RESEND_COOLDOWN_MS = 60_000;
+
 export interface InviteListDto {
   id: string;
   email: string;
@@ -180,6 +184,28 @@ export class InvitesService {
       // would let any workspace admin probe whether an arbitrary address has an
       // account on the platform, and who it belongs to.
       throw new ConflictException({ error: "email_already_in_use" });
+    }
+
+    // Per-recipient cooldown BEFORE the wipe below. Re-invite deletes the prior
+    // pending row and then counts seats, so `activeMembers + pendingInvites`
+    // stays flat no matter how many times you loop — the seat cap could never
+    // stop it, and every iteration sent a REAL email from the platform's shared
+    // sender identity. That made this route a mail bomb aimed at any address an
+    // admin cares to type, burning deliverability for every other tenant.
+    const recent = await this.db.invite.findFirst({
+      where: {
+        workspaceId,
+        email: input.email,
+        acceptedAt: null,
+        createdAt: { gt: new Date(Date.now() - INVITE_RESEND_COOLDOWN_MS) },
+      },
+      select: { createdAt: true },
+    });
+    if (recent) {
+      throw new ConflictException({
+        error: "invite_recently_sent",
+        detail: `An invite was already sent to this address moments ago. Wait a minute before sending another, or copy the existing link from the list.`,
+      });
     }
 
     // Wipe prior pending invites for this (team, email) so the new link

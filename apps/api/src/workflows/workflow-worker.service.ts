@@ -57,6 +57,11 @@ import {
   stopOpenTicketCountDriftSweeper,
 } from "@/lib/sweepers/open-ticket-count-drift";
 import {
+  setAbandonedRegistrationDestroyer,
+  startAbandonedRegistrationSweeper,
+  stopAbandonedRegistrationSweeper,
+} from "@/lib/sweepers/abandoned-registration";
+import {
   startMessageFlagCountDriftSweeper,
   stopMessageFlagCountDriftSweeper,
 } from "@/lib/sweepers/message-flag-count-drift";
@@ -136,6 +141,7 @@ import {
   startMessageRawPayloadRetentionSweeper,
   stopMessageRawPayloadRetentionSweeper,
 } from "@/lib/sweepers/message-rawpayload-retention";
+import { WorkspaceRootService } from "../workspace-settings/workspace-root.service";
 
 /**
  * BullMQ workflow worker + inbound-media sweeper bootstrap. The actual
@@ -186,6 +192,9 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private templateCatalogRefreshStarted = false;
   private templateAnalyticsCaptureStarted = false;
   private workHoursSweeperStarted = false;
+  private abandonedRegistrationSweeperStarted = false;
+
+  constructor(private readonly workspaceRoot: WorkspaceRootService) {}
 
   onModuleInit(): void {
     const inline = process.env.RUN_WORKER_INLINE !== "0";
@@ -199,6 +208,19 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log("Workflow worker started");
     } catch (err) {
       this.logger.error("Failed to start workflow worker", err);
+    }
+    try {
+      // Reaps tenants minted by an unfinished registration (rows commit BEFORE
+      // the OTP is sent, and the OAuth hook mints an org with no compensating
+      // delete). Handed the real destroy path rather than reimplementing it.
+      setAbandonedRegistrationDestroyer((organizationId, label) =>
+        this.workspaceRoot.destroyOrganization(organizationId, label),
+      );
+      startAbandonedRegistrationSweeper();
+      this.abandonedRegistrationSweeperStarted = true;
+      this.logger.log("Abandoned-registration sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start abandoned-registration sweeper", err);
     }
     try {
       startInboundMediaSweeper();
@@ -602,6 +624,13 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(
         `stopMessageFlagCountDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.abandonedRegistrationSweeperStarted) stopAbandonedRegistrationSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopAbandonedRegistrationSweeper threw: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {

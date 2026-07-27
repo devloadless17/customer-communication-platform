@@ -102,8 +102,11 @@ export class AdminTeamsController {
     // rendered for every org including the operator's own.
     // The seat cap is a WORKSPACE-level fact: a member holds a seat in a
     // workspace, not in the organisation as a whole.
+    // The anchor is not a tenant — 404 it here exactly as the org-side sibling
+    // does via `assertExists`. The same operation reachable by two ids must not
+    // behave differently depending on which id you use.
     const updated = await this.db.workspace.updateMany({
-      where: { id: workspaceId },
+      where: { id: workspaceId, organization: { isPlatform: false } },
       data: { maxMembers: body.maxMembers },
     });
     if (updated.count === 0) {
@@ -134,7 +137,7 @@ export class AdminTeamsController {
     @Body(zBody(SetMaxWorkspacesSchema)) body: SetMaxWorkspacesInput,
   ) {
     const updated = await this.db.organization.updateMany({
-      where: { workspaces: { some: { id: workspaceId } } },
+      where: { isPlatform: false, workspaces: { some: { id: workspaceId } } },
       data: { maxWorkspaces: body.maxWorkspaces },
     });
     if (updated.count === 0) {

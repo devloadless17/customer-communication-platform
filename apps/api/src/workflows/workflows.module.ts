@@ -1,5 +1,7 @@
 import { Module } from "@nestjs/common";
 
+import { WorkspaceSettingsModule } from "../workspace-settings/workspace-settings.module";
+
 import { WorkflowSubscribersService } from "./workflow-subscribers.service";
 import { WorkflowWorkerService } from "./workflow-worker.service";
 
@@ -18,6 +20,10 @@ import { WorkflowWorkerService } from "./workflow-worker.service";
  * (`dispatch`, `dispatchManualTrigger`) without going through Nest DI.
  */
 @Module({
+  // WorkspaceSettingsModule exports WorkspaceRootService — the ONE real
+  // implementation of "destroy a tenant". The abandoned-registration sweeper
+  // is handed that method rather than growing a second delete path.
+  imports: [WorkspaceSettingsModule],
   providers: [WorkflowWorkerService, WorkflowSubscribersService],
 })
 export class WorkflowsModule {}

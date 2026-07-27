@@ -519,9 +519,10 @@ export async function resolveSession(
       user.isSuperAdmin || isOrgAdmin
         ? (
             await prisma.workspace.findMany({
-              where: user.isSuperAdmin
-                ? {}
-                : { organizationId: user.organizationId },
+              // The caller's OWN org, superAdmin or not. `where: {}`
+              // picked the oldest workspace ON THE PLATFORM — a customer's,
+              // for any operator seeded after the anchor.
+              where: { organizationId: user.organizationId },
               select: { id: true },
               orderBy: { createdAt: "asc" },
               take: 1,

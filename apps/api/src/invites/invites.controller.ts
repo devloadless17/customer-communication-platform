@@ -7,6 +7,7 @@ import type { ApiSession } from "../auth/session.guard";
 import { zBody } from "../common/zod-validation.pipe";
 import { InvitesService } from "./invites.service";
 import { CreateInviteSchema, type CreateInviteInput } from "./invites.schemas";
+import { RateLimit } from "@/common/rate-limit.interceptor";
 
 /**
  * Team invites — admin-only.
@@ -20,6 +21,10 @@ import { CreateInviteSchema, type CreateInviteInput } from "./invites.schemas";
  */
 @Controller("api/invites")
 @RequireRole("admin")
+// Every write here sends real outbound mail to an address the caller types.
+// The 300/min/user default is not a mail bound — see the resend cooldown in
+// InvitesService.create for the per-recipient half of the same problem.
+@RateLimit({ perMinute: 20 })
 export class InvitesController {
   constructor(private readonly invites: InvitesService) {}
 

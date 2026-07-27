@@ -3,6 +3,7 @@ import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
 import {
+  Logger,
   BadRequestException,
   Controller,
   ForbiddenException,
@@ -54,6 +55,8 @@ const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
  */
 @Controller("api/widget")
 export class WebchatwidgetPublicController {
+  private readonly logger = new Logger(WebchatwidgetPublicController.name);
+
   constructor(private readonly db: DbService) {}
 
   /**
@@ -160,9 +163,15 @@ export class WebchatwidgetPublicController {
       // Errors, so they still fall through to the generic shape below.
       if (err instanceof BadRequestException) throw err;
       // A mime/signature rejection is a client error, not a 500.
+      // PUBLIC, UNAUTHENTICATED surface — a website visitor is on the other
+      // end. Anything the R2/blob layer throws (bucket name, endpoint host,
+      // internal path) was going back verbatim. Logged, not echoed.
+      this.logger.warn(
+        `widget upload rejected: ${err instanceof Error ? err.message : String(err)}`,
+      );
       throw new BadRequestException({
         error: "upload_rejected",
-        detail: err instanceof Error ? err.message : String(err),
+        detail: "This file could not be uploaded. Try a different file.",
       });
     } finally {
       await unlink(file.path).catch(() => undefined);

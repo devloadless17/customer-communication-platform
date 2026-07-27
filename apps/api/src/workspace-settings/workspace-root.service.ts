@@ -291,9 +291,13 @@ export class WorkspaceRootService {
       await this.db.workspace.delete({ where: { id: workspaceId } });
     } catch (err) {
       this.logger.error(`[${label}] cascade delete failed`, err);
+      // The message is LOGGED with the label above, never echoed: a Prisma
+      // cascade failure carries table and constraint names, which is exactly
+      // what PrismaExceptionFilter's ".meta stays out of the response body"
+      // discipline exists to keep off the wire.
       throw new InternalServerErrorException({
         error: "delete_failed",
-        detail: err instanceof Error ? err.message : String(err),
+        detail: "The delete could not be completed. Check the server logs for the cause.",
       });
     }
 
@@ -346,6 +350,14 @@ export class WorkspaceRootService {
    * storm `destroy()` exists to avoid.
    */
   async destroyOrganization(organizationId: string, label: string): Promise<void> {
+    // NOT ATOMIC, and deliberately so: each workspace is destroyed through the
+    // full `destroy()` path (bounded message pre-drain, blob cleanup, provider
+    // cache bust, socket kick), which cannot be folded into one transaction
+    // without recreating the lock storm that path exists to avoid. A failure
+    // partway leaves the earlier workspaces gone and the org alive — which is
+    // RESUMABLE by construction: re-running this method re-reads the remaining
+    // workspaces and continues, because the loop is driven by a live query and
+    // not a snapshot. The operator's retry is the recovery.
     const workspaces = await this.db.workspace.findMany({
       where: { organizationId },
       select: { id: true },
@@ -369,9 +381,13 @@ export class WorkspaceRootService {
       await this.db.organization.delete({ where: { id: organizationId } });
     } catch (err) {
       this.logger.error(`[${label}] organization delete failed`, err);
+      // The message is LOGGED with the label above, never echoed: a Prisma
+      // cascade failure carries table and constraint names, which is exactly
+      // what PrismaExceptionFilter's ".meta stays out of the response body"
+      // discipline exists to keep off the wire.
       throw new InternalServerErrorException({
         error: "delete_failed",
-        detail: err instanceof Error ? err.message : String(err),
+        detail: "The delete could not be completed. Check the server logs for the cause.",
       });
     }
 

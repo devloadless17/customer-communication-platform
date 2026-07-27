@@ -48,6 +48,9 @@ import { wasIdempotentReplay } from "./correlation";
  */
 
 const DEFAULT_PER_MIN = 300;
+/** Roof across ALL routes for one principal, decorated or not. See the ceiling
+ *  consume() in intercept() for why the per-bucket limits alone weren't one. */
+const GLOBAL_CEILING_PER_MIN = 3000;
 const WINDOW_MS = 60_000;
 const BUCKET_MAX = 10_000;
 const BUCKET_IDLE_SWEEP_MS = 10 * 60_000;
@@ -208,6 +211,32 @@ export class RateLimitInterceptor implements NestInterceptor {
         },
         429,
       );
+    }
+    // A decorated route ALSO consumes the global per-user bucket. The comment
+    // above says the default "stays GLOBAL per-user ... so a user can't do
+    // 300/min PER controller and defeat the global DoS ceiling" — but that only
+    // held for UNdecorated routes: a decorated one consumed its own bucket and
+    // nothing else, so one principal could spend inbox 1200 + conversations +
+    // messages + search + broadcasts + calls concurrently ON TOP of the 300.
+    // The ceiling was per-bucket, not global. A decorated route with a HIGHER
+    // allowance still gets it — the per-route bucket is what limits it first —
+    // but the sum across every route now has a roof.
+    //
+    // Sized as a multiple of the default: the point is a DoS roof, not a second
+    // per-route limit, so it must not be the thing that rejects an ordinary
+    // burst on a deliberately-generous route.
+    if (decoratorOpts) {
+      const ceiling = consume(key, "__ceiling__", GLOBAL_CEILING_PER_MIN);
+      if (!ceiling.ok) {
+        throw new HttpException(
+          {
+            error: "rate_limited",
+            detail: `${GLOBAL_CEILING_PER_MIN} req/min per ${userId ? "user" : "api key"} across all routes`,
+            retryAfter: ceiling.retryAfter,
+          },
+          429,
+        );
+      }
     }
     // minor#9: refund the token if the handler short-circuited to an idempotent
     // /v1 replay (zero real work). Mirrors the api-key guard bucket refund.
