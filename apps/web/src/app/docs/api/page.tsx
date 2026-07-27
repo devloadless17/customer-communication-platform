@@ -691,7 +691,15 @@ export default function ApiDocsPage() {
           <code>GREEN</code>/<code>YELLOW</code>/<code>RED</code>/
           <code>UNKNOWN</code>). The quality band is the one worth alerting on:
           all four bands still send, but it drives Meta&apos;s template pausing,
-          so <code>RED</code> is a template about to stop working. Filter with{" "}
+          so <code>RED</code> is a template about to stop working.{" "}
+          <code>statusDetail</code>, when present, carries Meta&apos;s rich
+          status context verbatim: <code>rejectionReason</code> +{" "}
+          <code>recommendation</code> (the explanation and fix advice sent with{" "}
+          <code>INVALID_FORMAT</code> rejections), <code>title</code> (the pause
+          instance — <code>FIRST_PAUSE</code>/<code>SECOND_PAUSE</code> self-lift
+          in 3/6 hours; <code>RATE_LIMITING_PAUSE</code> is Template Pacing and
+          only lifts via the unpause route below), and <code>disabledAt</code>.
+          Filter with{" "}
           <code>?status=</code> / <code>?category=</code> /{" "}
           <code>?wabaId=</code> (templates belong to one WhatsApp Business
           Account — read the id off any row, then scope to it). Read-only —
