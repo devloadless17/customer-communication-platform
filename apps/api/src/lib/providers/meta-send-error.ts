@@ -46,6 +46,8 @@ export type MetaErrorCode =
   | "rate_limited"         // WA 4/80007/130429/131048/131056 · social 613/80006 — rate/throughput limit
   | "per_user_marketing_cap" // WA 131049 — Meta's per-USER marketing frequency cap (not our rate limit)
   | "marketing_opt_out"     // WA 131050 — this recipient stopped marketing messages FROM US
+  | "duplicate_person"      // OURS, not Meta's — customer-mode: this contact merged
+                            // into a person the campaign had already reached
   | "portfolio_paced_drop"  // WA 135000 — dropped by a business-portfolio pacing review
   | "template_unavailable" // WA 132001/132007/132015/132016 — template paused/disabled/not-approved (run-fatal)
   | "auth_expired"         // 190 — access token expired
@@ -71,6 +73,7 @@ export const ALL_META_ERROR_CODES = [
   "rate_limited",
   "per_user_marketing_cap",
   "marketing_opt_out",
+  "duplicate_person",
   "portfolio_paced_drop",
   "template_unavailable",
   "auth_expired",
@@ -479,6 +482,11 @@ export function failureBucket(code: MetaErrorCode | string | null): FailureBucke
     case "duplicate_button_title":
     case "message_unavailable":
       return "content";
+    case "duplicate_person":
+      // Deliberately suppressed, never retryable: the person DID receive this
+      // campaign — on their other contact. Retrying is the double-send the
+      // skip exists to prevent, and the contact is not "bad" either.
+      return "suppress";
     default:
       // Unknown / provider_rejected. Not safely retryable in bulk, and we can't
       // claim the recipient is bad either — so it stays in the conservative

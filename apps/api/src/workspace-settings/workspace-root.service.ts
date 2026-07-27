@@ -200,6 +200,30 @@ export class WorkspaceRootService {
   }
 
   /** Captured social-contact avatar keys, paged for the same reason. */
+  /**
+   * Every R2 object a contact import/export left behind.
+   *
+   * Three keys per job: the uploaded source file, the produced export, and the
+   * per-row error report. All three are PII-heavy — an export is the entire
+   * address book in one downloadable file — and none of them is reclaimable
+   * once the job ROW is gone, because `contact-transfer-artifacts` (the only
+   * sweeper that owns this prefix) walks rows, and the blob-orphan sweeper
+   * skips the prefix precisely because that sweeper owns it. The cascade takes
+   * the rows, so the keys have to be snapshotted here or the objects are
+   * stranded forever.
+   */
+  private async collectTransferArtifactKeys(workspaceId: string): Promise<string[]> {
+    const jobs = await this.db.contactTransferJob.findMany({
+      where: { workspaceId },
+      select: { sourceKey: true, artifactKey: true, errorArtifactKey: true },
+    });
+    return jobs.flatMap((j) =>
+      [j.sourceKey, j.artifactKey, j.errorArtifactKey].filter(
+        (k): k is string => typeof k === "string" && k.length > 0,
+      ),
+    );
+  }
+
   private async collectContactAvatarKeys(workspaceId: string): Promise<string[]> {
     const keys: string[] = [];
     const PAGE = 1_000;
@@ -225,9 +249,10 @@ export class WorkspaceRootService {
     // Blob keys feed post-delete cleanup; member ids feed the explicit
     // socket kick (the cascade clears their Session rows but already-
     // connected sockets stay live until kicked).
-    const [messageBlobKeys, contactAvatarKeys, teamMembers] = await Promise.all([
+    const [messageBlobKeys, contactAvatarKeys, transferKeys, teamMembers] = await Promise.all([
       this.collectMessageBlobKeys(workspaceId),
       this.collectContactAvatarKeys(workspaceId),
+      this.collectTransferArtifactKeys(workspaceId),
       this.db.user.findMany({ where: { workspaceMemberships: { some: { workspaceId } } }, select: { id: true, avatarUrl: true } }),
     ]);
     const blobKeys = messageBlobKeys
@@ -243,7 +268,14 @@ export class WorkspaceRootService {
       // `avatars/` prefix. A churned enterprise tenant with 200k social
       // contacts therefore left ~200k orphaned objects in R2, billed forever
       // with no row, no reference, and no reclaim path anywhere in the tree.
-      .concat(contactAvatarKeys);
+      .concat(contactAvatarKeys)
+      // Contact IMPORT/EXPORT artifacts. An export is "a bulk PII dump — the
+      // whole address book in one downloadable file" (that sweeper's own
+      // words), and it was orphaned FOREVER by a delete: the only reaper walks
+      // `ContactTransferJob` ROWS, which cascade away with the workspace, and
+      // the blob-orphan sweeper deliberately skips these prefixes because that
+      // reaper "owns the category". Nothing was left holding a handle.
+      .concat(transferKeys);
 
     try {
       // DB-2: pre-drain the Message table in bounded batches BEFORE the cascade.

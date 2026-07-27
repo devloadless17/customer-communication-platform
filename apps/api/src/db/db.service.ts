@@ -91,6 +91,25 @@ export class DbService extends PrismaClient implements OnModuleInit, OnModuleDes
     super({
       adapter: new PrismaPg(pool),
       log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],
+      // INTERACTIVE-TRANSACTION BUDGET. Prisma's default is 5s, which was
+      // inconsistent with the 30s `statement_timeout` above: a single query
+      // could run 30s while the transaction containing it died at 5.
+      //
+      // The failure that surfaced it: ticket creation holds one interactive
+      // transaction across the number allocation (a row lock, so concurrent
+      // creates SERIALIZE on it), the ticket write, a TicketEvent, a
+      // conversation pill and an in-tx publish. Eight agents raising tickets
+      // at the same moment queue on that lock, and the ones at the back of the
+      // queue blew the 5s budget — P2028, ticket creation FAILS, on work that
+      // was only ever waiting its turn. It reproduced consistently under load
+      // and was masked for four runs as "the test is flaky".
+      //
+      // 15s sits under the statement timeout (so a runaway QUERY is still the
+      // thing that trips first, with a clearer error) and well under the
+      // send/webhook timeouts, while giving a lock queue room to drain.
+      // `maxWait` bounds how long a caller waits for a POOL slot before
+      // failing fast rather than pinning the event loop.
+      transactionOptions: { timeout: 15_000, maxWait: 5_000 },
     });
     this.pool = pool;
     this.poolMax = poolMax;

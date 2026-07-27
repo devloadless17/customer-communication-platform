@@ -304,7 +304,8 @@ export async function listDirectMessagesForUser(
 
   return rows.map(({ row, item }) => {
     const members = (row as unknown as { members: DmMemberRow[] }).members;
-    return { ...item, peer: mapDmPeer(members, userId) };
+    const dmKey = (row as unknown as { dmKey: string | null }).dmKey ?? null;
+    return { ...item, peer: mapDmPeer(members, userId, dmKey) };
   });
 }
 
@@ -338,11 +339,26 @@ const DM_MEMBER_SELECT = {
  * whose User row was HARD-deleted leaves no membership row at all (the cascade
  * removes it) while the DM and its history survive, because deleting those
  * would destroy the survivor's own messages; that case renders as a tombstone.
+ *
+ * `dmKey` is REQUIRED to tell those apart from a third case the original shape
+ * missed: a peer REMOVED from the workspace keeps their User row but loses
+ * their membership row (`remove-member.ts` deletes every `TeamChannelMember`
+ * for them, DMs included). That leaves exactly one member row — the viewer —
+ * which is indistinguishable from a self-DM by members alone, so the survivor's
+ * conversation with a colleague rendered as their own "notes to self", showing
+ * their own name and avatar. The key is the sorted user-id pair, so a genuine
+ * self-DM is `"u:u"` and anything else with a missing peer is a departure.
  */
-function mapDmPeer(members: DmMemberRow[], userId: string): DirectMessagePeerDto {
+function mapDmPeer(
+  members: DmMemberRow[],
+  userId: string,
+  dmKey: string | null,
+): DirectMessagePeerDto {
   const other = members.find((m) => m.userId !== userId) ?? null;
-  const isSelf = other === null;
-  const source = other ?? members.find((m) => m.userId === userId) ?? null;
+  // Only a key naming ONE distinct participant is a real self-DM.
+  const isSelf =
+    other === null && dmKey !== null && new Set(dmKey.split(":")).size === 1;
+  const source = other ?? (isSelf ? members.find((m) => m.userId === userId) ?? null : null);
 
   return source?.user
     ? {
@@ -391,7 +407,7 @@ export async function getChannelById(
     where: { channelId },
     select: DM_MEMBER_SELECT,
   });
-  return { ...dto, peer: mapDmPeer(members, userId) };
+  return { ...dto, peer: mapDmPeer(members, userId, row.dmKey ?? null) };
 }
 
 /**

@@ -606,7 +606,28 @@ export class ChannelsService {
       where: { workspaceId_dmKey: { workspaceId, dmKey } },
       include: { _count: { select: { members: true } } },
     });
-    if (existing) return mapChannel(existing, existing._count.members);
+    if (existing) {
+      // REPAIR MISSING MEMBERSHIP before handing the channel back.
+      //
+      // Removing someone from a workspace deletes every `TeamChannelMember`
+      // row they hold, DMs included (remove-member.ts). Re-adding them creates
+      // only the `WorkspaceMember` row — so this used to return the channel
+      // DTO while `requireChannelMembership` 404'd every read of it, and the
+      // `@@unique([workspaceId, dmKey])` guaranteed no replacement could ever
+      // be created. The DM was unreachable for BOTH people, permanently, with
+      // no route back from the UI.
+      //
+      // `createMany` + `skipDuplicates` is a no-op in the common case (both
+      // rows present), so the healthy path pays one cheap upsert.
+      await this.db.teamChannelMember.createMany({
+        data: memberIds.map((userId) => ({ channelId: existing.id, userId })),
+        skipDuplicates: true,
+      });
+      const members = await this.db.teamChannelMember.count({
+        where: { channelId: existing.id },
+      });
+      return mapChannel(existing, members);
+    }
 
     try {
       const created = await this.db.$transaction(async (tx) => {

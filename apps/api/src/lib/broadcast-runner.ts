@@ -1114,6 +1114,12 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     id: true,
     contactId: true,
     status: true,
+    // The person this recipient stood for at CREATE time. Compared against the
+    // contact's CURRENT customerId at fire time to detect a merge that landed
+    // in the create→fire gap — see the person-dedupe guard in
+    // `processOneRecipient`. Written since customer-mode shipped; this is the
+    // first thing to read it.
+    customerId: true,
     // Pre-drawn campaign assignee (lib/assignment/broadcast-plan.ts), applied
     // after a successful send.
     assignedUserId: true,
@@ -1121,6 +1127,9 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       select: {
         id: true,
         name: true,
+        // CURRENT owner of this contact. A merge in the create→fire gap moves
+        // it, which is exactly what the person-dedupe guard looks for.
+        customerId: true,
         // Drives per-recipient send-channel routing in customer-mode (and the
         // conversation/message channel stamp in every mode).
         identityChannel: true,
@@ -1151,11 +1160,13 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         id: true,
         contactId: true,
         status: true,
+        customerId: true,
         assignedUserId: true,
         contact: {
           select: {
             id: true,
             name: true,
+            customerId: true,
             identityChannel: true,
             phoneNumber: true,
             externalContactId: true,
@@ -1581,11 +1592,15 @@ async function processOneRecipient(
   recipient: {
     id: string;
     contactId: string;
+    /** The person this row stood for at CREATE time (customer-mode). */
+    customerId: string | null;
     /** Assignee drawn at materialize time; null when the campaign assigns nobody. */
     assignedUserId: string | null;
     contact: {
       id: string;
       name: string;
+      /** CURRENT owner — differs from `recipient.customerId` after a merge. */
+      customerId: string | null;
       identityChannel: Channel;
       phoneNumber: string | null;
       externalContactId: string | null;
@@ -1685,6 +1700,47 @@ async function processOneRecipient(
     );
     return;
   }
+  // PERSON-DEDUPE at FIRE time (customer-mode only).
+  //
+  // "One send per PERSON" is decided once, when the audience is built: two
+  // unlinked contacts of the same human are two persons then, so they get two
+  // recipient rows. If they are MERGED before the campaign fires, those rows
+  // now describe one person — and nothing downstream noticed. The
+  // `@@unique([broadcastId, contactId])` backstop is per-CONTACT, so it cannot
+  // see it. The merge needs no human either: ingest's strong-key adoption and
+  // the customer-link drift sweeper both re-point `Contact.customerId`
+  // automatically, and a SCHEDULED campaign's create→fire gap is days.
+  //
+  // Cheap by construction: `recipient.customerId` is the create-time snapshot,
+  // so a contact whose owner is unchanged short-circuits with no query at all.
+  // Only a row that actually moved pays for the twin lookup.
+  if (
+    broadcast.targetMode === "customer" &&
+    recipient.contact.customerId &&
+    recipient.contact.customerId !== recipient.customerId
+  ) {
+    const twin = await db.broadcastRecipient.findFirst({
+      where: {
+        broadcastId: broadcast.id,
+        id: { not: recipient.id },
+        status: "sent",
+        contact: { customerId: recipient.contact.customerId },
+      },
+      select: { id: true },
+    });
+    if (twin) {
+      await failRecipientAndCount(
+        recipient.id,
+        "Merged into a contact this campaign already reached.",
+        broadcast.id,
+        broadcast.workspaceId,
+        pendingBumps,
+        "duplicate_person",
+      );
+      return;
+    }
+  }
+
   // Re-check marketing opt-out at FIRE time. Create-time suppression
   // (broadcasts.service.ts) only sees opt-outs that existed when the broadcast
   // was built; a contact who opts out during the create→fire gap of a SCHEDULED

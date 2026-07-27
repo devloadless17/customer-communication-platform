@@ -41,6 +41,12 @@ if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 
 const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
+  // MIRRORS DbService. Without this the spec runs on Prisma's 5s default while
+  // the app runs on 15s — so the concurrency test below was exercising a
+  // configuration that does not exist in production, and failing on it. The
+  // 5s default is what the APP used too until this test surfaced it; see the
+  // reasoning at db.service.ts.
+  transactionOptions: { timeout: 15_000, maxWait: 5_000 },
 });
 // The mutations take an injected `db` — the same surface the Nest service
 // passes. No Nest container needed.
@@ -103,7 +109,12 @@ afterAll(async () => {
 });
 
 describe("numbering", () => {
-  it("hands out unique sequential numbers under concurrent creates", async () => {
+  // 8 concurrent creates each SERIALIZE on the counter's row lock, so the wall
+  // clock is 8 lock acquisitions deep — under a loaded machine that overran
+  // vitest's 5s default and reported a timeout as a failure four separate
+  // times. The thing under test is correctness (no duplicate numbers), not
+  // latency, so give it room rather than keep re-running a false alarm.
+  it("hands out unique sequential numbers under concurrent creates", { timeout: 20_000 }, async () => {
     const conversations = await Promise.all(
       Array.from({ length: 8 }, () => makeConversation()),
     );

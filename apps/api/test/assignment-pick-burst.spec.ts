@@ -94,7 +94,10 @@ afterAll(async () => {
 });
 
 describe("concurrent pick burst (round_robin)", () => {
-  it("a cold-cache burst of 6 rotates 2-2-2, not 6-0-0", async () => {
+  // Same reasoning as the ticket-numbering concurrency test: the per-policy
+  // pick lock serializes these deliberately, so the run is as deep as the
+  // burst and a loaded box overran the 5s default.
+  it("a cold-cache burst of 6 rotates 2-2-2, not 6-0-0", { timeout: 20_000 }, async () => {
     const decisions = await Promise.all(
       Array.from({ length: 6 }, () =>
         resolveAssignee({

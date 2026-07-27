@@ -145,6 +145,7 @@ export const ERROR_LABELS: Record<string, string> = {
   invalid_recipient: "Invalid or unreachable number",
   per_user_marketing_cap: "Meta per-user marketing cap (or US recipient)",
   marketing_opt_out: "Stopped marketing from your business",
+  duplicate_person: "Already reached on another channel (contacts merged)",
   rate_limited: "Rate limited by Meta",
   template_unavailable: "Template paused or disabled",
   // Two situations share Meta's 132015: a send rejected because the template was
