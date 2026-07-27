@@ -559,6 +559,43 @@ OPEN — for the parity build (inventory in the session report):
   assignment config, ticket settings) — no credentials leak; re-scope
   alongside the parity build.
 
+### /v1 integration-first PARITY BUILD (2026-07-27)
+
+Phase 1 (5f4ccd8e) — 21 routes, the self-serve onboarding blockers:
+- **Outbound webhooks** (7): list/create/update/rotate-secret/delete/
+  deliveries/test, all `admin:settings` INCLUDING reads (a webhook is a
+  standing data-egress grant). Until this, an integration could not receive
+  ONE event until a human clicked through Settings.
+- **Audience groups** (5) + **snippets** (4): `read/write:catalog`.
+- Schema: `OutboundWebhook.createdById` nullable (migration
+  20260727150000) — an integration has no human creator. DROP NOT NULL
+  only; no column dropped, so the hand-maintained partial indexes are safe.
+
+Phase 2 (5fd9b4b6) — 12 routes:
+- **Customers / unified identity** (6): the largest single gap — an API-only
+  integration could not see that two contacts were the same person.
+  Merge/split are the manual REVERSIBLE kind (re-point `customerId` only);
+  auto-merge stays ingest-only and unexposed. `read/write:contacts`.
+- **Workflows** (6): list/get/runs/run-detail/publish/trigger. Deliberate
+  3-way scope split — reads `read:catalog`, publish `admin:settings`,
+  firing a NEW `write:workflows` (a run executes billed sends; that is not
+  a catalog write). Trigger requires `Idempotency-Key` + chain-depth guard
+  and uses the irreversible claim.
+
+Every route reuses the SAME service the UI calls. Pinned by
+`tests/e2e/post-audit-fixes/v1-parity.spec.ts` (13 tests): happy paths, the
+secret-shown-once contract, the merge-is-reversible guarantee (unlink must
+never delete a contact), and every scope boundary incl. the webhook READ
+gate and read:catalog-can't-run-automation.
+
+STILL OPEN (phase 3, not started): broadcast writes (needs a new
+`write:broadcasts` scope + mandatory Idempotency-Key), contact bulk ops +
+sync-profile + count/preview, conversation start/bulk/read/delete/events/
+attachments/search, the 2026-07-13 composer sends (media/location/contact-
+card/reaction/forward), template-into-existing-thread, note LIST, and the
+catalog write gaps (contact-fields, stages, usage counts, view reorder).
+Full route→scope→events table in the session-10 report.
+
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
 | Seam | Status |
