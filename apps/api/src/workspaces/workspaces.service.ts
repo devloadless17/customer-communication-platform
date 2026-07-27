@@ -8,6 +8,7 @@ import {
 
 import { provisionWorkspace } from "@/lib/workspaces/provision";
 import { detachMemberFromWorkspace } from "@/lib/workspaces/remove-member";
+import { makeCanAccessBeyondMembership } from "@ccp/shared/auth/active-workspace";
 
 import { invalidateSessionCache, type ApiSession } from "../auth/session.guard";
 import { Prisma } from "@prisma/client";
@@ -443,16 +444,22 @@ export class WorkspacesService {
   }
 
   private async canAccess(session: ApiSession, workspaceId: string): Promise<boolean> {
-    if (session.isSuperAdmin) {
-      const exists = await this.db.workspace.count({ where: { id: workspaceId } });
-      return exists > 0;
-    }
-    if (session.orgRole === "owner" || session.orgRole === "admin") {
-      const inOrg = await this.db.workspace.count({
-        where: { id: workspaceId, organizationId: session.organizationId },
-      });
-      return inOrg > 0;
-    }
+    // The beyond-membership escape is THE shared rule
+    // (`@ccp/shared/auth/active-workspace`) — the same one the HTTP guard, the
+    // socket handshake and the RSC session apply, so the switch endpoint can
+    // never accept a workspace those resolvers will refuse (or vice versa).
+    // Membership set is EMPTY here on purpose: this method re-validates
+    // membership against the database below rather than trusting the session
+    // snapshot — a membership revoked moments ago must not stay switchable for
+    // the cache window.
+    const beyond = makeCanAccessBeyondMembership({
+      isSuperAdmin: session.isSuperAdmin,
+      isOrgAdmin: session.orgRole === "owner" || session.orgRole === "admin",
+      organizationId: session.organizationId,
+      memberWorkspaceIds: new Set<string>(),
+      countWorkspaces: (where) => this.db.workspace.count({ where }),
+    });
+    if (await beyond(workspaceId)) return true;
     const membership = await this.db.workspaceMember.count({
       where: { userId: session.userId, workspaceId },
     });

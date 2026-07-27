@@ -3,6 +3,7 @@ import type { Socket } from "socket.io";
 
 import { auth } from "@/auth/better-auth";
 import {
+  makeCanAccessBeyondMembership,
   readActiveWorkspaceCookie,
   resolveActiveWorkspaceId,
 } from "@ccp/shared/auth/active-workspace";
@@ -240,31 +241,13 @@ export class SocketAuthService {
     const isOrgAdmin = dbUser.orgRole === "owner" || dbUser.orgRole === "admin";
     const memberWorkspaceIds = new Set(memberships.map((m) => m.workspace.id));
 
-    const canAccessUncached = async (wsId: string): Promise<boolean> => {
-      if (memberWorkspaceIds.has(wsId)) return true;
-      if (dbUser.isSuperAdmin) {
-        return (await this.db.workspace.count({ where: { id: wsId } })) > 0;
-      }
-      if (isOrgAdmin) {
-        return (
-          (await this.db.workspace.count({
-            where: { id: wsId, organizationId: dbUser.organizationId },
-          })) > 0
-        );
-      }
-      return false;
-    };
-    // Memoised: the resolver asks about the same candidate the guard below already
-    // probed, and for an org admin acting outside their membership rows each ask
-    // is a real query. One lookup per distinct workspace id per resolve.
-    const accessCache = new Map<string, Promise<boolean>>();
-    const canAccess = (wsId: string): Promise<boolean> => {
-      const hit = accessCache.get(wsId);
-      if (hit) return hit;
-      const p = canAccessUncached(wsId);
-      accessCache.set(wsId, p);
-      return p;
-    };
+    const canAccess = makeCanAccessBeyondMembership({
+      isSuperAdmin: dbUser.isSuperAdmin,
+      isOrgAdmin,
+      organizationId: dbUser.organizationId,
+      memberWorkspaceIds,
+      countWorkspaces: (where) => this.db.workspace.count({ where }),
+    });
 
     // The stored per-device choice is consulted here too — it used to be
     // skipped on this path, so a tab whose `ccp.ws` cookie was missing joined

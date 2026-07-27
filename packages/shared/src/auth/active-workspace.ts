@@ -69,6 +69,64 @@ export async function resolveActiveWorkspaceId(
 }
 
 /**
+ * THE beyond-membership access rule, as a factory.
+ *
+ * Encodes who may act in a workspace they hold no `WorkspaceMember` row for:
+ *   - a platform superAdmin → any workspace that exists;
+ *   - an org owner/admin  → any workspace IN THEIR OWN org (DB-verified —
+ *     trusting an unscoped "is org admin" boolean is exactly the bug that let
+ *     any org owner set `ccp.ws` to another tenant's workspace);
+ *   - anyone else → nothing beyond their membership rows.
+ *
+ * This rule used to be COPIED VERBATIM in three places (the HTTP guard, the
+ * socket handshake and the switch endpoint) and semantically re-derived in a
+ * fourth (the RSC session — which omitted it, producing the split-tenant
+ * render this file's header warns about). One definition, DB injected so the
+ * package stays framework-agnostic; per-candidate memoised because resolvers
+ * legitimately probe the same id more than once per request.
+ */
+export interface BeyondMembershipInput {
+  isSuperAdmin: boolean;
+  /** `orgRole === "owner" || orgRole === "admin"` — computed by the caller. */
+  isOrgAdmin: boolean;
+  organizationId: string;
+  memberWorkspaceIds: ReadonlySet<string>;
+  /** `prisma.workspace.count({ where })`-shaped probe, injected. */
+  countWorkspaces: (where: {
+    id: string;
+    organizationId?: string;
+  }) => Promise<number>;
+}
+
+export function makeCanAccessBeyondMembership(
+  input: BeyondMembershipInput,
+): (workspaceId: string) => Promise<boolean> {
+  const cache = new Map<string, Promise<boolean>>();
+  const uncached = async (wsId: string): Promise<boolean> => {
+    if (input.memberWorkspaceIds.has(wsId)) return true;
+    if (input.isSuperAdmin) {
+      return (await input.countWorkspaces({ id: wsId })) > 0;
+    }
+    if (input.isOrgAdmin) {
+      return (
+        (await input.countWorkspaces({
+          id: wsId,
+          organizationId: input.organizationId,
+        })) > 0
+      );
+    }
+    return false;
+  };
+  return (wsId: string): Promise<boolean> => {
+    const hit = cache.get(wsId);
+    if (hit) return hit;
+    const p = uncached(wsId);
+    cache.set(wsId, p);
+    return p;
+  };
+}
+
+/**
  * Parse the `ccp.ws` cookie out of a raw `Cookie` header.
  *
  * Lives here, next to the rule that consumes it, so the API guard, the socket

@@ -6,8 +6,10 @@ import { redirect } from "next/navigation";
 
 import { loadActiveUser } from "@/lib/auth/active-user";
 import { getCurrentSession } from "@/lib/auth";
+import { db } from "@/lib/db";
 import {
   ACTIVE_WORKSPACE_COOKIE,
+  makeCanAccessBeyondMembership,
   resolveActiveWorkspaceId,
 } from "@ccp/shared/auth/active-workspace";
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
@@ -120,22 +122,52 @@ export const getSession = cache(async (): Promise<Session> => {
   // against the wrong id and simply vanished; admin-only UI was gated on the
   // wrong workspace's role.
   //
-  // The org-admin escape is deliberately NOT applied here. This is a UI-shaping
-  // read, and an org admin acting in a workspace they hold no membership row in
-  // gets a validated scope from the API on the very next call; widening it here
-  // would mean the browser, not the server, deciding tenant scope.
+  // The beyond-membership escape (org owner/admin in their OWN org, superAdmin
+  // anywhere — both DB/list-VERIFIED, so the browser never widens its own
+  // scope) is applied here for the same reason: the switcher below offers an
+  // org admin every org workspace and `setActive` accepts the switch, so a
+  // resolver WITHOUT the escape re-created the exact split-tenant render this
+  // comment describes — the API said workspace B while every page rendered
+  // workspace A. Same rule, same four callers, one definition.
   const isOrgAdmin = row.orgRole === "owner" || row.orgRole === "admin";
+  const orgWorkspaceIds = new Set((row.organization?.workspaces ?? []).map((w) => w.id));
+  const canAccess = makeCanAccessBeyondMembership({
+    isSuperAdmin: row.isSuperAdmin,
+    isOrgAdmin,
+    organizationId: row.organizationId,
+    memberWorkspaceIds: new Set(row.workspaceMemberships.map((m) => m.workspace.id)),
+    countWorkspaces: async (where) => {
+      // Org-scoped probes answer from the already-loaded org workspace list —
+      // no extra query. Only a superAdmin probing OUTSIDE their org (rare;
+      // platform surfaces) pays a DB roundtrip.
+      if (where.organizationId === row.organizationId) {
+        return orgWorkspaceIds.has(where.id) ? 1 : 0;
+      }
+      return db.workspace.count({ where });
+    },
+  });
   const cookieStore = await cookies();
-  const activeWorkspaceId =
-    (await resolveActiveWorkspaceId({
-      memberships: row.workspaceMemberships.map((m) => ({ workspaceId: m.workspace.id })),
-      cookieCandidate: cookieStore.get(ACTIVE_WORKSPACE_COOKIE)?.value ?? null,
-      storedWorkspaceId:
-        row.sessions.find((s) => s.id === session.session.id)?.activeWorkspaceId ?? null,
-    })) ?? "";
-  const activeMembership =
-    row.workspaceMemberships.find((m) => m.workspace.id === activeWorkspaceId) ??
-    row.workspaceMemberships[0];
+  const activeWorkspaceId = await resolveActiveWorkspaceId({
+    memberships: row.workspaceMemberships.map((m) => ({ workspaceId: m.workspace.id })),
+    cookieCandidate: cookieStore.get(ACTIVE_WORKSPACE_COOKIE)?.value ?? null,
+    storedWorkspaceId:
+      row.sessions.find((s) => s.id === session.session.id)?.activeWorkspaceId ?? null,
+    canAccessBeyondMembership: canAccess,
+  });
+  // No workspace to act in = unauthenticated, exactly like the API guard's
+  // null → 401. This used to fall through as `?? ""` and render the whole app
+  // tree against an EMPTY tenant scope.
+  if (!activeWorkspaceId) {
+    redirect("/logout");
+  }
+  // No `?? workspaceMemberships[0]` fallback: in the beyond-membership case
+  // there IS no membership row, and falling back applied a DIFFERENT
+  // workspace's rolePermissions to this one. undefined is correct — the
+  // effective role resolves to "admin" below, and resolvePermissions ignores
+  // the per-workspace config for admins.
+  const activeMembership = row.workspaceMemberships.find(
+    (m) => m.workspace.id === activeWorkspaceId,
+  );
   const effectiveRole: Role =
     row.isSuperAdmin || isOrgAdmin ? "admin" : ((activeMembership?.role ?? "agent") as Role);
 

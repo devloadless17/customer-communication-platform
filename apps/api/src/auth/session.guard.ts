@@ -11,6 +11,7 @@ import type { Request } from "express";
 import { auth } from "@/auth/better-auth";
 import {
   ACTIVE_WORKSPACE_COOKIE,
+  makeCanAccessBeyondMembership,
   readActiveWorkspaceCookie,
   resolveActiveWorkspaceId,
 } from "@ccp/shared/auth/active-workspace";
@@ -476,40 +477,19 @@ export async function resolveSession(
 
   // Whether the user may select `wsId` as their active workspace.
   //
-  // SECURITY-CRITICAL, and async ON PURPOSE. The `ccp.ws` cookie is client
-  // input; this is the gate that stops it being a cross-org key. Membership is
-  // the fast path (no query). BEYOND membership, the org-admin / superAdmin
-  // short-circuit MUST be verified against the DB — an org owner (every
-  // self-signup is `orgRole: "owner"`) is admin only within their OWN org, so
-  // the workspace has to be confirmed to belong to `user.organizationId`.
-  // Trusting `isOrgAdmin` unscoped let any org owner set `ccp.ws` to any
-  // workspace on the platform and act as its admin (mirrors the check
-  // `workspaces.service.canAccess` already does for the switch endpoint).
-  const canAccessUncached = async (wsId: string): Promise<boolean> => {
-    if (memberWorkspaceIds.has(wsId)) return true;
-    if (user.isSuperAdmin) {
-      return (await prisma.workspace.count({ where: { id: wsId } })) > 0;
-    }
-    if (isOrgAdmin) {
-      return (
-        (await prisma.workspace.count({
-          where: { id: wsId, organizationId: user.organizationId },
-        })) > 0
-      );
-    }
-    return false;
-  };
-  // Memoised: the resolver asks about the same candidate the guard below already
-  // probed, and for an org admin acting outside their membership rows each ask
-  // is a real query. One lookup per distinct workspace id per resolve.
-  const accessCache = new Map<string, Promise<boolean>>();
-  const canAccess = (wsId: string): Promise<boolean> => {
-    const hit = accessCache.get(wsId);
-    if (hit) return hit;
-    const p = canAccessUncached(wsId);
-    accessCache.set(wsId, p);
-    return p;
-  };
+  // SECURITY-CRITICAL. The `ccp.ws` cookie is client input; this is the gate
+  // that stops it being a cross-org key. THE rule (membership fast path,
+  // DB-verified superAdmin/org-admin escape, per-candidate memoisation) lives
+  // in `@ccp/shared/auth/active-workspace` — one definition shared with the
+  // socket handshake, the switch endpoint and the RSC session, because three
+  // hand-copied versions drifted once and produced a split-tenant render.
+  const canAccess = makeCanAccessBeyondMembership({
+    isSuperAdmin: user.isSuperAdmin,
+    isOrgAdmin,
+    organizationId: user.organizationId,
+    memberWorkspaceIds,
+    countWorkspaces: (where) => prisma.workspace.count({ where }),
+  });
 
   // Active-workspace resolution — the SHARED rule
   // (`@ccp/shared/auth/active-workspace`), used identically by the socket
