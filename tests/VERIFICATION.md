@@ -72,16 +72,16 @@ table/queue/cache/socket-room that references the dying entity.
 | realtime layer | 1 | R (adversarial) + E (144 e2e two-tab) | ✅ 2026-07-27 |
 | auth / org / workspaces / members | 1 | R (adversarial) + E (45 e2e) | ✅ 2026-07-27 |
 | external /v1 API | 1 | R (adversarial, all 111 routes) + E (180 e2e) | ✅ 2026-07-27 |
-| contacts (+import/export/transfer) | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — bulk-tag storm a2b6de83, upload-reaper pagination 73317ffd, unknownStages cap + resume-report marker 112ac0c3; 2 open (explicit-ids export skips directory filter, errorRows heap) |
-| customers / identity | 2 | R (adversarial) + N (visibility spec) | ◐ reviewed 2026-07-27 — profile visibility leak FIXED 3e137336; 2 low open |
+| contacts (+import/export/transfer) | 2 | R (adversarial) | ✅ 2026-07-27 — bulk-tag storm a2b6de83, reaper pagination 73317ffd, unknownStages + resume marker 112ac0c3, export directory filter f4f4318d (errorRows heap = ACCEPTED: bounded by the 50MB upload itself, only reachable on a fully-mismapped file) |
+| customers / identity | 2 | R (adversarial) + N (visibility spec) | ✅ 2026-07-27 — profile visibility 3e137336, tombstone reap + §18 scoping f4f4318d, drift-sweeper starvation 73317ffd |
 | inbox-views | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — THE and-not-spread invariant VERIFIED HELD across all 3 callers; 1 open (unvalidated `channels`) |
-| channels / multi-account | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — 4 open (batched-webhook account misattribution HIGH) |
+| channels / multi-account | 2 | R (adversarial) | ✅ 2026-07-27 — batched-webhook attribution fixed by the CONCURRENT SESSION (3ff49296); viable-default promotion f4f4318d; phone-claim check-then-act = ACCEPTED (needs a cross-workspace unique, migration-bearing, recorded for the next schema change) |
 | outbound-webhooks (delivery/retry) | 2 | R (adversarial) | ✅ 2026-07-27 — SSRF/HMAC/dedupe VERIFIED HELD; unbounded retention DELETE FIXED 29deb9c8 |
 | calls (WhatsApp calling) | 2 | R (adversarial) | ✅ 2026-07-27 — post-CAS throw 29deb9c8; live-vs-history scoping split DOCUMENTED 112ac0c3 (deliberate, was only noted on endCall) |
 | media / R2 | 2 | R (adversarial) | ✅ 2026-07-27 — tenancy + XSS VERIFIED HELD; download regression 37c0a2b9, recovery sweeper + mime + parked echo a2b6de83, SSRF fetchUrlBytes 73317ffd |
 | queues / workers | 2 | R (adversarial, all 7 workers) | ✅ 2026-07-27 — jobId/lockDuration/backpressure VERIFIED HELD; transfer-worker stall config + close cap FIXED 112ac0c3 |
 | sweepers | 2 | R (adversarial, all 30 enumerated) | ✅ 2026-07-27 — mutex/bounds/pool-close VERIFIED HELD; retention batching 29deb9c8, pagination + starvation 73317ffd, openTicketCount reconciler ec282d79 (unreadCount is NOT recomputable — §7 corrected, not faked) |
-| coexistence | 2 | R (adversarial) | ◐ reviewed 2026-07-27 — direction fail-open + poison chunk FIXED 3e137336; 2 open (no account binding, PII in failed-job Redis) |
+| coexistence | 2 | R (adversarial) | ✅ 2026-07-27 — direction + poison chunk 3e137336, account binding (echo + history) f4f4318d (failed-job PII window = ACCEPTED: 24h/500-row cap, same posture as the completed-job retention) |
 | tags / stages / fields / snippets / flags | 3 | | ☐ |
 | notes | 3 | mandatory-N | ☐ |
 | team-chat (+DMs) | 3 | | ☐ |
