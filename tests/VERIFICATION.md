@@ -67,7 +67,7 @@ table/queue/cache/socket-room that references the dying entity.
 | event bus / outbox | 1 | R (adversarial) + E + N (dedupe spec) | ✅ 2026-07-27 |
 | workflows (~22 step types) | 1 | R (adversarial) + E (144 e2e) | ✅ 2026-07-27 |
 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E + N (pick-burst spec) | ✅ 2026-07-27 |
-| broadcasts (+audience/templates/analytics) | 1 | | ☐ |
+| broadcasts (+audience/templates/analytics) | 1 | R (3-track adversarial) + E (meta 165) | ✅ 2026-07-27 |
 | tickets (+SLA+numbering) | 1 | | ☐ |
 | realtime layer | 1 | | ☐ |
 | auth / org / workspaces / members | 1 | | ☐ |
@@ -306,6 +306,66 @@ CLOSED (704717b): the whole open list.
 
 Evidence: vitest 512/512 twice, workflows-events 144/144 (on final code),
 meta 165/165, typecheck + all 4 checkers green.
+
+### broadcasts + audience + templates + analytics (B-M3 session 6, 2026-07-27) — ✅ CLOSED
+
+Three-track adversarial pass (runner/service core; analytics + deliveryState
+funnel; campaign-assignment seam). FIXED (f0e9e63):
+- HIGH: paused SCHEDULED campaign resumed as an IMMEDIATE send (template
+  re-approval webhook, or boot resume after ANY deploy) — resume now returns
+  future-scheduled rows to `scheduled` + re-arms the delayed job. Also fixed
+  the same path stamping a not-yet-materialized scheduled row `completed`.
+- HIGH: analytics windows frozen at completedAt while Meta buckets
+  reads/clicks by EVENT day — the post-completion engagement tail was never
+  fetched anywhere (sweeper/report/manual refresh) and expired at ~7d.
+  All three now read through `analyticsWindowEnd` (completedAt+7d clamp now).
+- MED: runner pacing read the DEFAULT number's throughput (bound account now
+  passed); customer-mode runs were fully unpaced under the enabled limiter
+  (now static gap pacing); pre-claim fail() left recipients queued → Retry
+  409 forever (now fails them, CAS on status so cancel wins); sweeper `take:
+  10` (no orderBy) permanently dropped arbitrary templates; only `completed`
+  campaigns swept (failed/canceled billed sends now covered);
+  `pendingCampaignAssignee` post-filtered ONE row (on_send masked a pending
+  on_reply draw — filters moved into the where); optedOutAt missed a STOP
+  after an earlier reply; drift sweeper missed held→undelivered (135000
+  drops) and never backfilled deliveredAt on straight-to-read rows.
+- LOW: materialize plan-failure on retry inserted the remainder unassigned
+  (now rethrows); cancel-race repair boot-only vs 7d attempt retention (now
+  on the drift-sweeper cadence); cancel-mid-materialize totalCount recount;
+  GREATEST high-water mark on sent/delivered; held drillable via the
+  `pending` outcome filter; retryable-failures card capped at what Retry
+  actually re-queues; per-WABA fault isolation in the capture sweeper;
+  on_send draw to a deactivated agent now logged instead of silent.
+
+VERIFIED HELD: never-open-tickets; no audit/workflow on broadcast.*;
+parameterFormat single-authority; requiredCarouselCards gate; customer-mode
+one-per-person dedupe (+ @@unique backstop); send idempotency across restart
+(bc-recipient ledger, fail-closed on ambiguity); §18 on_send assignment via
+shared assignConversation; keyset paging + slots/ceilings; tenancy
+parent-scoped everywhere (no bare recipient id from request input); crash
+matrix coherent; NULL-overwrite rule + null-vs-0 + UTC-day normalization;
+monotonic delivery ladder incl. held; 131049/131050 workspace-scoped
+opt-outs; failureBucket defaults to suppress; funnel is a partition (no
+double counting); attribution repliedAt CAS first-only.
+
+ACCEPTED (documented, not fixed):
+- Quote-attribution vs last-touch divergence: with TWO on_reply campaigns
+  in-window, a quote-reply to the older one can lose the owner race to the
+  newer campaign's draw (both drawn by the admin; plumbing quote context
+  into the auto-assign subscriber isn't worth the coupling).
+- skipDuplicates drops a dup contact's plan slot ("exactly 50" can be 49 on
+  an imperfectly-deduped audience); plan.totals stay the drawn counts.
+- Customer-mode cross-channel replies (template on WhatsApp, answer on
+  Instagram) lose attribution/assignment — inherent to per-contact threads;
+  revisit with person-level identity lift.
+- on_send + assignment on a 10k campaign publishes 10k non-silent
+  `conversation.assigned` events (deliberate: audit/workflows SHOULD see
+  ownership); the audit/workflow-storm invariant governs broadcast.* only.
+- Cancel is cooperative (~2s lane latency); rate tokens burn on suppressed
+  recipients; template-resume vs still-draining lanes can strand `queued`
+  ~60s until the drift sweeper re-fires it (self-healing, CAS-safe).
+- /v1 broadcasts is read-only and create has no Idempotency-Key gate — both
+  scheduled for the /v1 parity sub-track (#20).
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
