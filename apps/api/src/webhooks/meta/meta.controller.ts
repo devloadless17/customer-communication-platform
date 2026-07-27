@@ -337,7 +337,12 @@ export class MetaWebhookController implements OnModuleDestroy {
     // task writes outcomes as each event completes; `completePendingMedia`
     // reads the map after `downloadPromise` settles.
     const downloadOutcomes = new Map<string, DownloadOutcome>();
-    const downloadPromise = this.downloadInboundMedia(workspaceId, events, downloadOutcomes);
+    const downloadPromise = this.downloadInboundMedia(
+      workspaceId,
+      events,
+      downloadOutcomes,
+      inboundAccountId,
+    );
     // The ingest-failure branches below return/throw WITHOUT ever consuming
     // `downloadPromise` (only the success path threads it into
     // `completePendingMedia`). A rejection on that orphaned promise would
@@ -918,6 +923,15 @@ export class MetaWebhookController implements OnModuleDestroy {
     workspaceId: string,
     events: NormalizedEvent[],
     outcomes: Map<string, DownloadOutcome>,
+    /**
+     * The account this batch arrived on. REQUIRED in a multi-account
+     * workspace: a Meta media id is scoped to the account that received it, so
+     * fetching it with a sibling number's token is wrong on its face — and
+     * since the account-unresolved guard landed, omitting it makes
+     * `getMetaSendConfig` REFUSE, which failed every media event
+     * non-retriably and destroyed the binary permanently.
+     */
+    accountId: string | undefined,
   ): Promise<void> {
     const mediaEvents = events.filter(
       (e): e is Extract<NormalizedEvent, { kind: "message" | "echo" }> =>
@@ -961,7 +975,7 @@ export class MetaWebhookController implements OnModuleDestroy {
 
     let sendConfig;
     try {
-      sendConfig = await getMetaSendConfig(workspaceId);
+      sendConfig = await getMetaSendConfig(workspaceId, accountId);
     } catch (err) {
       this.logger.warn(`[${workspaceId}] cannot download media — send config missing`, err);
       // No way to fetch any of them — record failure so each row is created
