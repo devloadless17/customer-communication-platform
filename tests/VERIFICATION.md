@@ -68,7 +68,7 @@ table/queue/cache/socket-room that references the dying entity.
 | workflows (~22 step types) | 1 | R (adversarial) + E (144 e2e) | ✅ 2026-07-27 |
 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E + N (pick-burst spec) | ✅ 2026-07-27 |
 | broadcasts (+audience/templates/analytics) | 1 | R (3-track adversarial) + E (meta 165) | ✅ 2026-07-27 |
-| tickets (+SLA+numbering) | 1 | | ☐ |
+| tickets (+SLA+numbering) | 1 | R (adversarial) + E (meta 165) + N (breach guard) | ✅ 2026-07-27 |
 | realtime layer | 1 | | ☐ |
 | auth / org / workspaces / members | 1 | | ☐ |
 | external /v1 API | 1 | | ☐ |
@@ -366,6 +366,49 @@ ACCEPTED (documented, not fixed):
   ~60s until the drift sweeper re-fires it (self-healing, CAS-safe).
 - /v1 broadcasts is read-only and create has no Idempotency-Key gate — both
   scheduled for the /v1 parity sub-track (#20).
+
+### tickets + SLA + numbering (B-M3 session 7, 2026-07-27) — ✅ CLOSED
+
+FIXED (6be6acc):
+- HIGH: reopen never reset the SLA clock — any reopen past the old
+  `resolutionDueAt` fired an instant, permanent, unretractable breach on a
+  ticket resolved ON TIME (both the update path and the ingest reopen).
+  Reopens now start a fresh commitment; genuinely-fired flags stay (history).
+- HIGH: `expectedVersion` was a pre-tx JS compare while the CAS guarded
+  status only — the documented 409 contract failed for every non-status
+  write (concurrent customFields edits erased each other wholesale).
+- HIGH: `ticketCloseConversationOnLastSolved` was a dead control (stored,
+  UI-settable, /v1-settable, documented — read by nothing). Now implemented
+  on the shared solve path, detached and best-effort.
+- MED: pointer-only routing misrouted with two tickets on a thread (solved
+  pointer-holder → other active ticket unroutable, solved one resurrected)
+  — active-scan fallback per docs §2 rule 1, pointer repaired; breach mark
+  CAS now repeats the full scan predicate (no phantom breach when an agent
+  replies mid-loop); fillActiveTicketAssignee fill-empty-only moved into the
+  write CAS (§18); workflow auto-replies no longer stamp firstResponseAt;
+  restricted agents can no longer raise tickets outside their visibility;
+  the 2 SLA partial indexes joined partial-indexes.spec; escalate-while-
+  paused no longer inflates the new commitment; rehomeTickets now bumps
+  version + writes TicketEvents.
+- LOW: closed→solved cleared of its double-life; deleteTicket counter read
+  in-tx; /v1 `?assignee=me` 400s instead of silently matching nothing;
+  listTicketEvents bounded (newest 500); priority recompute gated on active
+  status; stale comments corrected.
+
+VERIFIED HELD: no auto-open (reply attaches/reopens, never creates;
+broadcasts can't reach commitOutboundSend); number allocation race-safe
+(row-locked counter + unique backstop + one retry); tenancy on every
+ticket/event/field/SLA query; breach fires once per leg; closed never
+ingest-reopens, solved does within the window (inclusive gte); /v1 route
+parity with admin:settings on config writes; visibility via the canonical
+AND-array builder (reads); remove-member covers tickets; ingest redelivery
+safe (message dedupe gate + co-committed reopen).
+
+ACCEPTED: multiple active tickets per thread are PERMITTED (two teams, two
+issues) — the pointer + scan routes to the newest; terminal tickets accept
+subject/customFields edits (harmless corrections); a counter restored from
+an old backup could still 500 ticket creation until it catches up (one
+withUniqueRetry only).
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
