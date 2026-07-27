@@ -82,14 +82,14 @@ table/queue/cache/socket-room that references the dying entity.
 | queues / workers | 2 | R (adversarial, all 7 workers) | ✅ 2026-07-27 — jobId/lockDuration/backpressure VERIFIED HELD; transfer-worker stall config + close cap FIXED 112ac0c3 |
 | sweepers | 2 | R (adversarial, all 30 enumerated) | ✅ 2026-07-27 — mutex/bounds/pool-close VERIFIED HELD; retention batching 29deb9c8, pagination + starvation 73317ffd, openTicketCount reconciler ec282d79 (unreadCount is NOT recomputable — §7 corrected, not faked) |
 | coexistence | 2 | R (adversarial) | ✅ 2026-07-27 — direction + poison chunk 3e137336, account binding (echo + history) f4f4318d (failed-job PII window = ACCEPTED: 24h/500-row cap, same posture as the completed-job retention) |
-| tags / stages / fields / snippets / flags | 3 | | ☐ |
-| notes | 3 | mandatory-N | ☐ |
-| team-chat (+DMs) | 3 | | ☐ |
-| ai-assistant | 3 | | ☐ |
-| admin / platform (superadmin) | 3 | | ☐ |
-| registration / invites | 3 | mandatory-N | ☐ |
-| common guards / pipes / filters | 3 | mandatory-N | ☐ |
-| api-keys lifecycle | 3 | mandatory-N | ☐ |
+| tags / stages / fields / snippets / flags | 3 | R (adversarial) | ✅ 2026-07-27 — bcf656d8: tag delete now scrubs InboxView.filters (a dangling tagId made a SHARED `tagMatch:all` view return an empty inbox forever); usage() counts views; tags/snippets capped at 300 (unpaginated lists every client refetches on team.catalog_changed, `tags:manage` defaults TRUE for agents); reorder bodies capped. 4f080e1c: the stage isDefault race now reports itself instead of a bogus name collision |
+| notes | 3 | R (adversarial) | ✅ 2026-07-27 — CLEAN, zero findings. visibilityWhere(viewer) on both mutations, publishInTx + kickOutbox (not fire-and-forget), emitAboutConversation respects restricted-agent scope, global-search notes carry the same restriction, body capped, no edit route |
+| team-chat (+DMs) | 3 | R (adversarial) + the 5 tenancy-exception satellites audited | ✅ 2026-07-27 — bcf656d8. HIGH: setMembership never created the #general TeamChannelMember row → empty sidebar, dead workspace search, and an infinite /team redirect loop once anyone DM'd them (one DM defeats ChannelExistenceGuard's escape hatch); one `joinDefaultChannel` now serves all three membership paths. MED: markRead probed on createdAt while both badge counters use COALESCE(editedAt, createdAt), so an edit-added mention could never be cleared. MED: pins uncapped + unpaginated with full message DTOs, either party may pin in a DM. **All 5 TeamChannel* TENANCY EXCEPTIONS verified**: every query reaches them through a workspaceId-scoped parent or carries `channel: { workspaceId }` — no bare child id from request input |
+| ai-assistant | 3 | R (adversarial) | ✅ 2026-07-27 — 4f080e1c. MED: the debounce silently DROPPED a message (remove() can't touch a locked job; BullMQ ignores an add on an existing jobId) — the assistant never answered it. MED: `escalate` bypassed autoReplyMode:'draft', auto-sending free-form model text in a workspace whose contract is human-approval-only; now sends only where the mode would, and the routing/hand-off is one shared helper. MED: knowledge extraction ran uninterruptible CPU work on the loop shared by Socket.io + ingest + every worker (Promise.race can't preempt it) — serialized process-wide, residual single-file block documented with its named trigger (worker thread). LOW: prompt now fences customer text; caption branch gates on configEnabled |
+| admin / platform (superadmin) | 3 | R (adversarial) | ✅ 2026-07-27 — 98c94160. **MED/SEC**: a superAdmin was granted ANY workspace that exists and resolveSession handed them role 'admin' in it — one `ccp.ws` cookie exposed any tenant's message bodies + contact PII, unlogged, contradicting super-admin.ts's own stated invariant. Beyond-membership is now org-scoped for superAdmin and org-admin alike, in all three copies. The zero-membership fallback picked the oldest workspace ON THE PLATFORM (a customer's) — now the caller's own org. Anchor leaked into GET /api/admin/teams and was writable by the limit controls; roster memo not busted by workspace/member mutations; cold roster scan ran twice |
+| registration / invites | 3 | R (adversarial) | ✅ 2026-07-27 — 98c94160. MED: invite create was an unmetered mail amplifier — re-invite deletes the pending row BEFORE counting seats, so the cap never bounded resends and each loop sent a real email from the shared sender identity; 60s per-recipient cooldown + 20/min controller limit. MED: registration COMMITS a whole tenant before the OTP is sent (OAuth mints an org with no compensating delete) and nothing reaped them — new `abandoned-registration` sweeper, deliberately narrow (pending + >7d + zero verified email + zero work), destroying through the real `destroyOrganization` rather than a second impl |
+| common guards / pipes / filters | 3 | R (adversarial) | ✅ 2026-07-27 — 98c94160. The guard/pipe/filter layer VERIFIED HELD in depth (RoleGuard keys superAdmin on the flag not the collapsed role; ScopeGuard fail-closed; ConversationVisibilityGuard 404-never-403 through the single authority; SessionGuard cache keyed (userId, workspaceId) with the cookie hash covering ccp.ws; PrismaExceptionFilter logs .meta and never bodies it, incl. P2003→409). Fixed: the @RateLimit ceiling was per-bucket not global (a decorated route consumed only its own bucket, so one principal could stack inbox+conversations+messages+… on top of the 300) — decorated routes now also draw a 3000/min roof; two raw-exception echoes closed, one on a PUBLIC unauthenticated route |
+| api-keys lifecycle | 3 | R (adversarial) | ✅ 2026-07-27 — 98c94160. MED: concurrent rotate left TWO live keys — the liveness read sat outside the transaction and the revoke had no CAS, so a double-click had both requests revoke and both create, one secret returned to a request nobody watched. Now `updateMany` on (id, workspaceId, revokedAt: null); the loser 409s. revoke() moved to the same scoped updateMany (§18 letter). Scope validation, one-time plaintext, hash-only storage and immediate revocation all verified held |
 
 ## Domain session notes
 
@@ -904,6 +904,66 @@ VERIFIED HELD (real coverage — the good news):
 - **Calls**: dedup unique key, terminal-state CAS genuinely idempotent under
   redelivery, permission is a provider READ not a local ledger, SIP never
   enabled, recording correctly unbuilt.
+
+### TIER-3 — 8 of 8 domains ✅ (2026-07-27) — **MATRIX COMPLETE: 28/28 domains**
+
+Two adversarial review agents (team-chat/notes/AI/catalog · admin/guards/registration/keys),
+~26 findings. Fixed across `bcf656d8` (team-chat + catalogs), `4f080e1c` (AI),
+`98c94160` (admin/registration/keys). Evidence: vitest 549/549, meta e2e 165/165,
+`pnpm run check` clean (6 checkers + typecheck + lint, 0 errors).
+
+**Headline defects, by blast radius**
+
+1. **A superAdmin could read any tenant's inbox with one cookie.** The
+   beyond-membership escape granted `isSuperAdmin` *any workspace that exists*
+   and `resolveSession` then collapsed them to role `"admin"` in it. Setting
+   `ccp.ws=<victim-workspace>` returned that tenant's message bodies, contact
+   names and phone numbers from every workspace-scoped route — unlogged, with no
+   audit row, and directly contradicting the invariant `lib/queries/super-admin.ts`
+   states for itself ("visibility ends at aggregate counts + the member roster").
+   The only thing in front of it was a client-side redirect to `/platform`.
+   Now org-scoped for superAdmin exactly as for an org admin, in all three
+   copies of the rule. **If support impersonation is ever wanted it belongs here
+   as an explicit, audited mode** — a one-line reversal, deliberately not taken.
+
+2. **Adding an existing org user to a workspace produced a broken member.**
+   `setMembership` — the path the invite flow's own conflict message points
+   admins at — was the one of three membership-creating paths that never wrote
+   the `#general` `TeamChannelMember` row. Empty channel sidebar, zero results
+   from workspace-wide chat search, and an infinite `/team` redirect loop the
+   moment anyone DM'd them (one DM makes `knownCount > 0`, which defeats
+   `ChannelExistenceGuard`'s escape hatch — the exact loop that guard exists to
+   end). One `joinDefaultChannel` helper now serves all three paths.
+
+3. **The AI assistant silently dropped messages and escaped draft mode.** The
+   debounce removes-and-re-adds a per-conversation job, but `remove()` cannot
+   touch a locked (active) job and BullMQ ignores an `add` on an existing jobId —
+   so a message arriving mid-generation was discarded and stayed discarded.
+   Separately, `escalate` short-circuited ahead of every `autoReplyMode` branch,
+   so a workspace whose whole contract is "a human approves every outbound" still
+   auto-sent free-form model text whenever the model set a flag the customer's
+   own message steers.
+
+**Accepted with reason (not defects)**
+
+- `destroyOrganization` is non-atomic — resumable by construction (the loop is
+  query-driven, so an operator retry continues), documented in place.
+- Knowledge-extraction's residual single-file event-loop block — serialized
+  process-wide so concurrent uploads can't stack; the worker-thread fix has a
+  named trigger (a measured stall) rather than being pre-built. Uploader is an
+  authenticated workspace admin under a 10MB / 50-doc cap.
+
+**Refuted by reading the code**
+
+- "P2003 is unmapped by `PrismaExceptionFilter`" — it maps to 409
+  `relation_violation` alongside P2014.
+
+**Verified held (worth not re-auditing)** — the five `TeamChannel*` TENANCY
+EXCEPTION satellites (every query reaches them through a workspaceId-scoped
+parent or carries `channel: { workspaceId }`; no bare child id from request
+input); the whole guard/pipe/filter layer; notes (zero findings); invite
+token/seat-cap/escalation-matrix handling; api-key scope validation and
+revocation immediacy.
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
