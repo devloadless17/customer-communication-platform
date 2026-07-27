@@ -159,7 +159,10 @@ async function rebalanceTeam(workspaceId: string): Promise<void> {
       context: { excludeUserIds: [owner] },
       changedByUserId: null,
     });
-    if (outcome.applied) moved++;
+    // `changed`, not just `applied`: an idempotent no-op (the picker handed
+    // the thread back to the same owner) is NOT a move, and counting it made
+    // this sweeper log rescues that never happened.
+    if (outcome.applied && outcome.changed) moved++;
     // Not applied (nobody else eligible) → deliberately leave it with the
     // offline agent. Unassigning would trade a bad owner for no owner.
   }

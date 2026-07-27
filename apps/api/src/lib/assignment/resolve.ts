@@ -505,6 +505,14 @@ export async function resolveAssignee(args: {
 
   if (commit && result.userId) {
     reserve(workspaceId, result.userId);
+    // Advance the cursor on the CACHED row too, not just in the DB. `loadConfig`
+    // hands back the cached policy object by reference for CONFIG_TTL_MS (15s),
+    // and `rotate()` (round_robin) depends on NOTHING but the cursor — so a
+    // DB-only write meant every pick in a TTL window saw the same stale cursor
+    // and returned the same agent. "Strict turn-taking" degenerated into
+    // 15-second shifts with the rest of the team idle. Mutating the shared
+    // object is what makes the next pick inside the window see this one.
+    policy.cursorUserId = result.userId;
     await commitPick(db, policy, result.userId).catch(() => {
       // Bookkeeping only — the assignment itself is already decided.
     });

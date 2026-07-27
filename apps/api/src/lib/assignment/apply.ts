@@ -66,6 +66,14 @@ export type AssignByPolicyOutcome =
       decision: AssignmentDecision;
       /** True when the write also flipped closed→pending (reopen into triage). */
       statusChanged: boolean;
+      /**
+       * False when the write was an idempotent NO-OP (the target was already
+       * the assignee). Callers that COUNT moves — the offline rebalance's
+       * "moved N conversations", remove-member's unassign-when-no-candidate —
+       * must not treat a no-op as a move: the rebalance logged rescues that
+       * never happened, and remove-member skipped the unassign it owed.
+       */
+      changed: boolean;
     }
   | {
       applied: false;
@@ -182,15 +190,20 @@ export async function assignByPolicy(args: {
         publish,
         workspaceId,
         conversationId,
-        targetUserId: drawn,
+        targetUserId: drawn.userId,
         changedByUserId,
         ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
         ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
+        // Honour the campaign's own overwrite setting, not just the caller's
+        // flag: `assignmentOverwrite: false` (the default) promises a blast
+        // never takes a live thread from the agent handling it, and the
+        // ai_handoff path calls in with onlyIfUnassigned: false.
+        onlyIfUnassigned: onlyIfUnassigned || !drawn.overwrite,
         silent,
       });
       if (result.ok) {
         const decision: AssignmentDecision = {
-          userId: drawn,
+          userId: drawn.userId,
           reason: "fixed",
           policyId: null,
           policyName: "Campaign assignment",
@@ -199,9 +212,10 @@ export async function assignByPolicy(args: {
         };
         return {
           applied: true,
-          userId: drawn,
+          userId: drawn.userId,
           decision,
           statusChanged: result.statusChanged,
+          changed: result.changed,
         };
       }
       // Anything else (the drawn member left, a CAS race) falls through to
@@ -216,7 +230,15 @@ export async function assignByPolicy(args: {
     const decision = await resolveAssignee({
       db,
       workspaceId,
-      ctx: { ...built.ctx, excludeUserIds: excluded },
+      // Caller exclusions (e.g. the offline-rebalance excluding the agent who
+      // went home) MUST survive: this used to overwrite `built.ctx`'s list
+      // with the retry-loop's own `excluded`, which is empty on attempt 0 —
+      // so the offline sweep happily re-picked the very agent it was trying
+      // to route around (continuity then hands the thread straight back).
+      ctx: {
+        ...built.ctx,
+        excludeUserIds: [...(built.ctx.excludeUserIds ?? []), ...excluded],
+      },
       policyId,
       conversationId,
     });
@@ -234,6 +256,14 @@ export async function assignByPolicy(args: {
       changedByUserId,
       ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
       ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
+      // §18, enforced where it is actually race-proof. The pre-read at the top
+      // of this function is only a cheap fast path: between it and this write
+      // sit a campaign lookup, a config load, a member groupBy, a continuity
+      // read and a cursor write — tens of ms in which an agent can claim the
+      // thread. Passing the flag makes `assignConversation` re-check INSIDE
+      // the same read that feeds its CAS, so automation can no longer
+      // overwrite a human who clicked "Assign to me" mid-routing.
+      onlyIfUnassigned,
       silent,
     });
 
@@ -243,6 +273,7 @@ export async function assignByPolicy(args: {
         userId: decision.userId,
         decision,
         statusChanged: result.statusChanged,
+        changed: result.changed,
       };
     }
 

@@ -49,23 +49,25 @@ export async function applyCampaignAssigneeOnReply(args: {
 
   const conversation = await db.conversation.findFirst({
     where: { workspaceId, contactId },
-    select: { id: true, assignedUserId: true },
+    select: { id: true },
   });
   if (!conversation) return;
-
-  // Never take a live conversation from the agent already handling it unless
-  // the campaign explicitly opted in.
-  if (conversation.assignedUserId && !recipient.broadcast.assignmentOverwrite) return;
 
   // Shared mutation → same CAS, status side-effects, realtime frame, audit row
   // and outbound webhook as a manual assign. NOT silent: campaign ownership is
   // a real business change workflows and partners should see.
+  //
+  // "Never take a live conversation from the agent already handling it" is
+  // enforced by `onlyIfUnassigned` INSIDE the mutation's own read — the
+  // previous read-then-return left two round trips in which an agent could
+  // claim the thread and still be overwritten.
   await assignConversation({
     db,
     publish,
     workspaceId,
     conversationId: conversation.id,
     targetUserId: recipient.assignedUserId,
+    onlyIfUnassigned: !recipient.broadcast.assignmentOverwrite,
     changedByUserId: null,
   });
 }
@@ -99,7 +101,7 @@ export async function applyCampaignAssigneeOnReply(args: {
 export async function pendingCampaignAssignee(args: {
   workspaceId: string;
   conversationId: string;
-}): Promise<string | null> {
+}): Promise<{ userId: string; overwrite: boolean } | null> {
   const conv = await db.conversation.findFirst({
     where: { id: args.conversationId, workspaceId: args.workspaceId },
     select: { contactId: true },
@@ -120,13 +122,29 @@ export async function pendingCampaignAssignee(args: {
     orderBy: { sentAt: "desc" },
     select: {
       assignedUserId: true,
-      broadcast: { select: { workspaceId: true, assignmentTrigger: true } },
+      broadcast: {
+        select: {
+          workspaceId: true,
+          assignmentTrigger: true,
+          // Carried so the CALLER can honour it. `applyCampaignAssigneeOnReply`
+          // below always did; the ai_handoff/inbound/reopen path in apply.ts
+          // did not, so a campaign with the default `assignmentOverwrite:
+          // false` — documented as "a blast never takes a live support thread
+          // from the agent handling it" — still took the thread from the agent
+          // working it when the AI later escalated.
+          assignmentOverwrite: true,
+        },
+      },
     },
   });
   if (!recipient) return null;
   if (recipient.broadcast.workspaceId !== args.workspaceId) return null;
   if (recipient.broadcast.assignmentTrigger !== "on_reply") return null;
-  return recipient.assignedUserId;
+  if (!recipient.assignedUserId) return null;
+  return {
+    userId: recipient.assignedUserId,
+    overwrite: recipient.broadcast.assignmentOverwrite,
+  };
 }
 
 /**

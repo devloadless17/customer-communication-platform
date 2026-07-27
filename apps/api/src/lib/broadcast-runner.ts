@@ -2333,18 +2333,19 @@ async function processOneRecipient(
     // a blast must not take a live support thread from the agent handling it.
     if (recipient.assignedUserId && broadcast.assignmentTrigger === "on_send") {
       try {
-        const current = await db.conversation.findFirst({
-          where: { id: conversationId, workspaceId: broadcast.workspaceId },
-          select: { assignedUserId: true },
-        });
-        const free = current != null && current.assignedUserId === null;
-        if (free || broadcast.assignmentOverwrite) {
+        // No pre-read: `onlyIfUnassigned` is evaluated INSIDE the mutation's
+        // own read, which is the only place it is race-proof. The old
+        // read-then-write left a full round trip in which an agent could claim
+        // the thread — and the campaign then took it from them, the exact
+        // outcome `assignmentOverwrite: false` promises cannot happen.
+        {
           await assignConversation({
             db,
             publish,
             workspaceId: broadcast.workspaceId,
             conversationId,
             targetUserId: recipient.assignedUserId,
+            onlyIfUnassigned: !broadcast.assignmentOverwrite,
             changedByUserId: null,
             // NOT silent: campaign ownership is a real business change that
             // workflows and partner webhooks should see. Note the invariant

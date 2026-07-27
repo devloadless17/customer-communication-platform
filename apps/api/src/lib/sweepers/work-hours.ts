@@ -119,9 +119,25 @@ async function sweepOnce(): Promise<void> {
     try {
       const { workspaceIds, teamSchedule } = await loadAvailabilityScope(db, user.id);
       if (workspaceIds.length === 0) continue;
+      // RE-READ inside the loop. The findMany above is a point-in-time
+      // snapshot, and a 300-member sweep takes seconds — long enough for an
+      // agent to set themselves `busy` mid-sweep. Applying the stale row
+      // recomputed their status from schedule and silently reverted the
+      // override they had just chosen (applyAvailability's write is
+      // unconditional). Skipping a row that changed under us is correct: the
+      // write that changed it already published its own frame, and the next
+      // tick (60s) re-evaluates from fresh state.
+      const fresh = await db.user.findFirst({
+        // deactivatedAt in the WHERE, not the select: AVAILABILITY_SELECT
+        // doesn't carry it, and a member deactivated mid-sweep should simply
+        // drop out.
+        where: { id: user.id, deactivatedAt: null },
+        select: AVAILABILITY_SELECT,
+      });
+      if (!fresh) continue;
       const result = await applyAvailability({
         db,
-        user,
+        user: fresh,
         workspaceIds,
         teamSchedule,
         intent: { kind: "sync" },

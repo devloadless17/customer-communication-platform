@@ -134,7 +134,11 @@ async function rehomeConversations(
       changedByUserId: null,
     }).catch(() => null);
 
-    if (outcome?.applied) {
+    // `changed`, not just `applied`: a no-op write (somehow still the same
+    // assignee) must fall through to the unassign below rather than being
+    // counted as a successful hand-off — otherwise the departing member keeps
+    // the thread and `unassignWhenNoCandidate` never fires.
+    if (outcome?.applied && outcome.changed) {
       moved++;
       continue;
     }
