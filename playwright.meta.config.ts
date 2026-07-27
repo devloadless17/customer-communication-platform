@@ -20,6 +20,11 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 10_000 },
   forbidOnly: !!process.env.CI,
+  // `@pressure` specs are MEASUREMENT harnesses, not gates: they run a
+  // 500-webhook burst twice and take minutes. CI runs everything else; measure
+  // deliberately with `pnpm test:e2e:meta -- --grep @pressure` and record the
+  // numbers (with their commit) in tests/VERIFICATION.md.
+  grepInvert: process.env.CI ? /@pressure/ : undefined,
   reporter: process.env.CI ? "github" : "list",
   // No browser projects — the specs use node fetch + the Prisma client. A single
   // default project runs them in-process.

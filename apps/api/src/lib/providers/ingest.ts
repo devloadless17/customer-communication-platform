@@ -430,10 +430,46 @@ export function isDriverTransientError(err: unknown): boolean {
     }
   }
 
+  // THE DRIVER ADAPTER'S OWN ERROR CLASS. `@prisma/adapter-pg` raises
+  // `DriverAdapterError` (from PgTransaction.onError) whose `message` is a bare
+  // kind name like "TransactionWriteConflict" — no `.code`, no SQLSTATE, and
+  // none of Prisma's text. So a serialization conflict that escapes
+  // `runWithSerializableRetry` matched NOTHING above (P2034 and 40001 are both
+  // covered, but neither is what arrives) and was classified as permanent
+  // poison: swallowed, webhook answered 200, and Meta — which has no history
+  // sync — never redelivered. An inbound customer message lost for good, under
+  // load, which is exactly the failure the comments here say must never happen.
+  //
+  // This is the SECOND time this function was defeated by the error's SHAPE
+  // changing rather than by a missing condition (the first was the pg-pool
+  // timeout above). Measured by the B-M5 burst harness: a 500-webhook storm
+  // reproducibly lost 1-2 messages this way, each answered 200 on its only
+  // delivery. Checked BEFORE the message-text matching below because these
+  // carry no code and no recognizable sentence.
+  const cause = (err as { cause?: { kind?: unknown } }).cause;
+  const causeKind = typeof cause?.kind === "string" ? cause.kind : "";
+  if (
+    (err as { name?: unknown }).name === "DriverAdapterError" &&
+    (causeKind === "TransactionWriteConflict" ||
+      causeKind === "SocketTimeout" ||
+      causeKind === "ConnectionClosed")
+  ) {
+    return true;
+  }
+
   const message = (err as { message?: unknown }).message;
   if (typeof message !== "string" || message.length === 0) return false;
   const m = message.toLowerCase();
   return (
+    // Same driver-adapter errors matched by TEXT as well as by cause kind:
+    // the adapter has moved this detail between `cause.kind` and `message`
+    // across releases, and being wrong in the "permanent" direction costs a
+    // customer message while being wrong the other way costs one deduped
+    // redelivery. Match both.
+    m === "transactionwriteconflict" ||
+    m.includes("write conflict") ||
+    m.includes("deadlock") ||
+    m.includes("could not serialize") ||
     // pg-pool acquisition timeout — the regression this function was written for.
     m.includes("timeout exceeded when trying to connect") ||
     m.includes("connection terminated due to connection timeout") ||
@@ -3850,16 +3886,43 @@ export async function loadReplySnapshotById(
 export async function runWithSerializableRetry<T>(
   work: (tx: Prisma.TransactionClient) => Promise<T>,
 ): Promise<T> {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // ATTEMPTS AND BACKOFF ARE MEASURED, NOT GUESSED. This was 2 attempts with a
+  // flat 5-25ms jitter, which is enough for two writers colliding once and not
+  // enough for a real burst. The B-M5 pressure harness
+  // (tests/e2e/meta-channels/pressure-burst-ingest.spec.ts) drove 500 inbound
+  // webhooks across 50 contacts at 25 in flight and produced 273 serialization
+  // conflicts; with one retry, 32 requests (6.4%) exhausted the budget and
+  // returned 503.
+  //
+  // A 503 here is not a quiet failure — it is the fail-soft contract (CLAUDE.md
+  // §8): Meta redelivers. So every exhausted retry converts one request into a
+  // whole redelivered BATCH later, amplifying exactly the load that caused it,
+  // and a sustained error rate is also how Meta decides to throttle or disable
+  // a webhook subscription. Spending a few hundred milliseconds retrying is far
+  // cheaper than that.
+  //
+  // Conflicts here are inherent, not a bug to fix elsewhere: ten messages from
+  // ONE customer arriving together all touch that contact's conversation row
+  // (unreadCount, lastMessagePreview), and Serializable is what makes the
+  // one-conversation-per-contact invariant hold. The right answer to a
+  // serialization conflict is to retry it.
+  //
+  // Exponential backoff with FULL jitter (random in [0, cap]) rather than a
+  // fixed sleep: symmetric retries after a fixed delay collide again in step.
+  // Worst case adds ~0.5s before giving up — bounded well inside the 5s pool
+  // acquisition timeout, so a retrying request can never be the thing that
+  // starves the pool.
+  const MAX_ATTEMPTS = 5;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
       return await db.$transaction(work, { isolationLevel: "Serializable" });
     } catch (err) {
       const isRaceRetryable =
         err instanceof Prisma.PrismaClientKnownRequestError &&
         (err.code === "P2034" || err.code === "P2002");
-      if (!isRaceRetryable || attempt === 1) throw err;
-      // Brief jitter before retry to break the symmetric-conflict cycle.
-      await new Promise((r) => setTimeout(r, 5 + Math.random() * 20));
+      if (!isRaceRetryable || attempt === MAX_ATTEMPTS - 1) throw err;
+      const cap = Math.min(240, 15 * 2 ** attempt);
+      await new Promise((r) => setTimeout(r, Math.random() * cap));
     }
   }
   // Unreachable — the loop either returns or throws.
