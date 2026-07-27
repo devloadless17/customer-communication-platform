@@ -71,7 +71,7 @@ table/queue/cache/socket-room that references the dying entity.
 | tickets (+SLA+numbering) | 1 | R (adversarial) + E (meta 165) + N (breach guard) | ✅ 2026-07-27 |
 | realtime layer | 1 | R (adversarial) + E (144 e2e two-tab) | ✅ 2026-07-27 |
 | auth / org / workspaces / members | 1 | R (adversarial) + E (45 e2e) | ✅ 2026-07-27 |
-| external /v1 API | 1 | | ☐ |
+| external /v1 API | 1 | R (adversarial, all 111 routes) + E (180 e2e) | ✅ 2026-07-27 |
 | contacts (+import/export/transfer) | 2 | | ☐ |
 | customers / identity | 2 | | ☐ |
 | inbox-views | 2 | | ☐ |
@@ -500,6 +500,64 @@ OPEN (documented, needs a product decision):
   before real customers land.
 - Workspace delete busts caches but doesn't drop members' sockets (no
   frames can target a deleted workspace, so exposure is nil).
+
+### external /v1 API (B-M3 session 10, 2026-07-27) — ✅ CLOSED — **TIER-1 COMPLETE**
+
+FIXED (e3194a0):
+- HIGH: `POST /v1/contacts/import` accepted a MISSING Idempotency-Key while
+  its own docblock, the service comment and both doc surfaces said REQUIRED
+  — a gateway timeout + retry queued a second job over the same staged file
+  (assertNoRunningJob only blocks a CONCURRENT one), re-applying every row
+  and re-firing every per-row workflow + webhook.
+- HIGH: the two BILLED call sends claimed idempotency without
+  `refuseStaleOnAmbiguity` — a crash after Meta accepted but before
+  `complete()` let the retry re-send once the pending row aged past TTL.
+- MED-HIGH: `read:broadcasts` alone exfiltrated every recipient's name +
+  raw E.164 phone (recipient list skipped the `read:contacts` PII gate).
+- MED: `/v1/conversations/:id/call-button` sent a real CTA that persisted
+  NOTHING and published nothing (no Message row, audit, frame, webhook, or
+  lastMessageAt bump) — now through the shared interactive sender, extended
+  for `voice_call`; that also fixed it (and both permission paths) sending
+  from the workspace DEFAULT account instead of the thread's.
+- MED: 8 webhook-firing writes had no chain-depth guard (partner echo could
+  loop unbounded); `templates/:id/unpause` moved to `admin:settings` (it
+  resumes billed campaigns); the template list — the only unpaged route —
+  is keyset-paged and `.strict()`.
+- MED: API-key creation defaulted to the `"*"` WILDCARD when scopes were
+  omitted (a bare `{"name":"x"}` minted full access, bypassing even
+  `admin:settings`); rotating an already-REVOKED key resurrected it.
+- IMPLEMENTED the two routes both doc surfaces promised but that 404'd:
+  `POST /v1/broadcasts/:id/analytics/refresh` (the ONLY way an API-only
+  integration pulls Meta's currency cost + unique clicks) and
+  `GET /v1/assignment-policies` (resolves `assignedTeamId` for tickets).
+- `write:users` is dead post-S2c — the three advertising surfaces corrected.
+
+VERIFIED HELD: all 111 routes carry `@RequireScope`; ScopeGuard fail-closed;
+workspaceId sourced ONLY from the key (no P0 tenancy leak — every
+parent-scoped exception proves ownership first, incl. the `"__no_user__"`
+sentinel that closed the null-actor saved-view bug); the three customer
+message sends enforce Idempotency-Key WITH ambiguity protection and correct
+release/retain discipline; /v1 writes publish the same domain events as the
+UI (same services); every implemented route appears in both doc surfaces;
+Zod on every route; keyset pagination everywhere; key tokens hashed, scopes
+server-validated, revocation immediate, no self-escalation path, suspended
+orgs rejected after the rate-limit consume; layered rate limits with no
+cross-key collision; the `X-CCP-Origin-Key` self-loop guard.
+
+OPEN — for the parity build (inventory in the session report):
+- `docs/organization-api.md` is DELETED from the working tree (another
+  session owns the docs move) and its scope table is stale for all ~20
+  routes moved to `admin:settings`, plus it documents 2 routes that only
+  now exist. WHOEVER RESTORES docs/ MUST refresh those rows — the in-app
+  /docs/api page is already correct.
+- Whole domains still UI-only: workflows, customers/identity,
+  audience-groups, outbound-webhooks management, snippets, broadcast
+  writes. Plus contact/conversation/message op gaps (bulk, start,
+  media/location/contact-card/reaction/forward sends, note LIST). Full
+  route→scope→events table in the session report.
+- 9 admin-grade READS sit under low read scopes (WA profile/QR/status,
+  assignment config, ticket settings) — no credentials leak; re-scope
+  alongside the parity build.
 
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
