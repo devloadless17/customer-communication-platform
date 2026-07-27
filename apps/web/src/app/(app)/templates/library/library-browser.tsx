@@ -268,7 +268,10 @@ function LibraryCard({
           {template.name}
         </span>
         {isForm && (
-          <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-3xs font-medium text-primary">
+          <span
+            className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-3xs font-medium text-primary"
+            title="An interactive form powered by WhatsApp Flows. Meta only offers Forms to accounts whose messaging limits have been increased — creating one before that may be rejected."
+          >
             Form
           </span>
         )}
