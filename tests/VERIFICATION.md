@@ -612,6 +612,47 @@ the session-10 audit: 9 admin-grade READS under low read scopes, and
 whoever restores it must refresh those rows — the in-app page is correct).
 Full route→scope→events table in the session-10 report.
 
+### Track A batch E — naming drift (2026-07-27) — ✅ (E3 decision pending)
+
+FOUND A LIVE P0 (e9ffd8d2): the legacy Meta webhook proxy had been BROKEN
+for 5 days. The org→workspace rename (f59696a9, 2026-07-22) renamed the
+variable inside `app/api/webhooks/meta/[teamId]/route.ts` including the
+`ctx.params` destructure, but left the DIRECTORY `[teamId]` — and in the App
+Router the params keys come from the directory, so `workspaceId` was
+`undefined` and every legacy delivery forwarded to
+`/webhooks/meta/undefined`. Typecheck cannot see this: the route's own
+RouteContext declares whatever the author typed, so the lie is
+self-consistent. Fixed by renaming the directory (URL path unchanged — Caddy
+wildcards it).
+
+NEW CHECKER `scripts/check-route-params.mjs` — a dynamic Next handler must
+destructure the param names its PATH declares. Negative-tested by
+reintroducing the exact bug. In `pnpm run check` + the deploy workflow.
+(5th checker: prisma-fields, test-isolation, double-assertions, tenancy
+gate, route-params.)
+
+E1/E2 done in the same commit: TeamsModule→RegistrationModule;
+emitToTeam→emitToWorkspace + invalidateTeamScope→invalidateWorkspaceScope
+(24 sites); `/settings/team`→`/settings/members` with a permanent redirect
+(the page shows the workspace member roster, while "team" in this product
+means an AssignmentPolicy INSIDE a workspace); the stranded
+`Organization.maxWorkspaces` comment describing a member cap that moved to
+`Workspace.maxMembers`.
+
+E2 DELIBERATELY LEFT (documented, wire-persisted): the bus event
+`team.catalog_changed` (its type string is persisted in OutboundEvent rows —
+renaming breaks pending outbox rows) and the socket events
+`team:renamed`/`team:catalog:changed`. Blob `teamSlug` prefixes stay
+(historical keys).
+
+**E3 — OPEN, NEEDS THE OPERATOR.** The legacy proxy's deletion deadline is
+2026-08-03 and step 1 of its checklist is a 7-day zero-hit check against
+prod Caddy access logs — which needs VPS access, not a code change. NEW
+EVIDENCE: it was broken 07-22→07-27 with nobody reporting missing Meta
+deliveries, which is the strongest signal yet that no live subscription
+points at the legacy URL. Recorded in the route file. Do not delete without
+the log check; do not extend silently (the file's own policy).
+
 ## Cross-domain seam traces (after both endpoint domains ✅)
 
 | Seam | Status |
