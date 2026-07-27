@@ -86,6 +86,7 @@ export function TemplateListView({
                         {t.language}
                       </span>
                       {t.status !== "approved" && <StatusPill status={t.status} />}
+                      <QualityPill score={t.qualityScore} />
                     </div>
                     <p className="mt-1 line-clamp-2 text-xs leading-snug text-muted-foreground">
                       {t.bodyText || "—"}
@@ -162,6 +163,29 @@ function CategoryPill({ category }: { category: string }) {
       )}
     >
       {labelCategory(category)}
+    </span>
+  );
+}
+
+/**
+ * Meta's per-TEMPLATE quality band, shown only when it is a warning: RED/YELLOW
+ * mean the template drew negative feedback or low read-rates and risks a pause
+ * or disable. GREEN and UNKNOWN are the healthy default and render nothing.
+ * Carried verbatim from Meta, so an unrecognized band also stays silent.
+ */
+function QualityPill({ score }: { score: string | null }) {
+  const band = score?.toUpperCase();
+  if (band !== "RED" && band !== "YELLOW") return null;
+  return (
+    <span
+      className={cn(
+        "rounded-full border px-1.5 py-0.5 text-3xs font-medium uppercase",
+        band === "RED"
+          ? "border-destructive/30 bg-destructive/10 text-destructive"
+          : "border-warning-border bg-warning-bg text-warning-fg",
+      )}
+    >
+      {band === "RED" ? "Low quality" : "Medium quality"}
     </span>
   );
 }

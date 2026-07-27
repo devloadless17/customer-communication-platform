@@ -983,8 +983,27 @@ export function NewBroadcastForm({
           "further downgrade or block. Consider warming up with a smaller send first.",
       };
     }
+    // Per-TEMPLATE quality (distinct from the number's rating above). RED means
+    // Meta may pause or disable the template soon — and a mid-flight pause
+    // auto-halts the campaign, so surface it BEFORE launch, not from the
+    // failure report.
+    if (selectedTemplate?.qualityScore?.toUpperCase() === "RED") {
+      return {
+        level: "warn",
+        text:
+          "This template's quality rating is RED (low) — Meta may pause or disable it " +
+          "soon, which would halt this campaign mid-send. Consider a different template, " +
+          "or address the feedback driving the rating first.",
+      };
+    }
     return null;
-  }, [messageKind, messagingHealth, audienceCount, selectedTemplate?.category]);
+  }, [
+    messageKind,
+    messagingHealth,
+    audienceCount,
+    selectedTemplate?.category,
+    selectedTemplate?.qualityScore,
+  ]);
 
   const filteredTemplates = useMemo(() => {
     const q = templateQuery.trim().toLowerCase();
@@ -1951,6 +1970,7 @@ function TemplatePickerInline({
                           {t.status}
                         </span>
                       )}
+                      <TemplateQualityPill score={t.qualityScore} />
                     </div>
                     <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
                       {t.bodyText || "—"}
@@ -1974,6 +1994,30 @@ function TemplatePickerInline({
 // ---------------------------------------------------------------------------
 // Small inline helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Meta's per-TEMPLATE quality band, shown only when it is a warning: RED/YELLOW
+ * mean the template drew negative feedback or low read-rates and risks a pause
+ * (which auto-halts a campaign mid-send). GREEN and UNKNOWN are the healthy
+ * default and render nothing — a pill on every row would bury the signal.
+ * Carried verbatim from Meta, so an unrecognized band also stays silent.
+ */
+function TemplateQualityPill({ score }: { score: string | null }) {
+  const band = score?.toUpperCase();
+  if (band !== "RED" && band !== "YELLOW") return null;
+  return (
+    <span
+      className={cn(
+        "rounded-full border px-1.5 py-0.5 text-3xs font-medium uppercase",
+        band === "RED"
+          ? "border-destructive/30 bg-destructive/10 text-destructive"
+          : "border-warning-border bg-warning-bg text-warning-fg",
+      )}
+    >
+      {band === "RED" ? "Low quality" : "Medium quality"}
+    </span>
+  );
+}
 
 /**
  * One plain field of a LOCATION header's pin. Deliberately NOT a `VarField`:
