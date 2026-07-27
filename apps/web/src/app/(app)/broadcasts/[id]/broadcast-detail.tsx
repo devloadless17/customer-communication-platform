@@ -407,12 +407,14 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
   }, [data.status, data.id]);
 
   const variables = parseVariables(data.variables);
-  // Title: prefer the operator-set name, then the template name, then a
-  // human fallback for freeform / People broadcasts (which have neither).
+  // Title: prefer the operator-set name, then the template name, then a human
+  // fallback for freeform broadcasts (which have neither). `targetMode ===
+  // "customer"` marks a HISTORICAL campaign from the removed omnichannel
+  // "best channel" mode (2026-07-27) — it still renders, clearly labeled.
   const isFreeform = data.kind === "freeform" || data.targetMode === "customer";
   const fallbackTitle =
     data.targetMode === "customer"
-      ? "People broadcast"
+      ? "Best channel (legacy)"
       : `Free-form · ${data.channel}`;
   const title = data.name || data.templateName || fallbackTitle;
   const remaining = data.totalCount - data.sentCount - data.failedCount;

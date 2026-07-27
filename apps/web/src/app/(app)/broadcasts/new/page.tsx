@@ -80,13 +80,15 @@ export default async function NewBroadcastPage({
     : null;
   // Reproduce the source's message kind on duplicate rather than defaulting to
   // "template": a freeform-to-one-channel clone reopens as freeform on that
-  // channel, a customer-mode ("People") clone reopens in People mode, and both
-  // carry the original body text.
+  // channel and carries the original body text. A legacy customer-mode
+  // ("People / best channel") source — the mode was removed 2026-07-27 —
+  // reopens as freeform too: the body carries over, the operator picks the
+  // channel (the form maps the sentinel).
   const cloneMessageKind: "template" | "freeform" | "customer" | null = clone
     ? clone.kind === "template"
       ? "template"
       : clone.targetMode === "customer"
-        ? "customer"
+        ? "customer" // form coerces to freeform
         : "freeform"
     : null;
 

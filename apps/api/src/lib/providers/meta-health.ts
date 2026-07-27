@@ -546,11 +546,13 @@ async function recentUniqueRecipientIds(
             ],
           }
         : {}),
-      // Contact-mode WhatsApp sends only. A `targetMode: "customer"` broadcast
-      // stores `channel: "whatsapp"` as an inert default while routing each
-      // recipient to their best channel, so counting those would charge
-      // Messenger/Instagram deliveries against the WhatsApp number's budget and
-      // falsely block later sends.
+      // Contact-mode WhatsApp sends only. LEGACY-ONLY filter: the omnichannel
+      // `customer` mode was removed 2026-07-27 (creation rejects it), but the
+      // 72h lookback can still see rows sent before the removal — those stored
+      // `channel: "whatsapp"` as an inert default while routing recipients to
+      // their best channel, so counting them would charge Messenger/Instagram
+      // deliveries against the WhatsApp portfolio's budget and falsely block
+      // later sends. Keep the filter as long as any legacy row can age in.
       channel: "whatsapp",
       targetMode: { not: "customer" },
       createdAt: { gte: new Date(now - BROADCAST_LOOKBACK_HOURS * 3_600_000) },

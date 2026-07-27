@@ -181,11 +181,15 @@ export const CreateBroadcastSchema = z
     // `template` (WhatsApp, default — back-compat for existing callers) or
     // `freeform` (plain text to in-window Messenger / Instagram contacts).
     kind: z.enum(["template", "freeform"]).default("template"),
-    // Who to reach. `contact` (default) = channel-scoped contacts on ONE channel
-    // (today's behavior). `customer` = the PERSON, once, on their best live
-    // channel — omnichannel + deduped; freeform-body based (channel resolved
-    // per recipient, so `channel` is ignored).
-    targetMode: z.enum(["contact", "customer"]).default("contact"),
+    // A broadcast is strictly SINGLE-CHANNEL, single sending account. The
+    // omnichannel `customer` mode ("People / best channel") was removed
+    // 2026-07-27: it was the one cross-channel send path, and it made "which
+    // number is this going out on" unanswerable. The field survives (literal)
+    // so existing callers sending `targetMode: "contact"` keep working, and a
+    // caller still sending "customer" gets a clear Zod rejection rather than a
+    // silently re-interpreted campaign. Historical rows keep their stored
+    // value for reporting.
+    targetMode: z.literal("contact").default("contact"),
     // template kind:
     templateId: z.string().min(1).optional(),
     variables: BroadcastVariablesSchema.default({ body: [] }),
@@ -224,17 +228,12 @@ export const CreateBroadcastSchema = z
     assignment: BroadcastAssignmentSchema.optional(),
   })
   .refine(
-    (v) => {
-      // customer-mode = per-person best-channel freeform; channel is resolved
-      // per recipient, so only bodyText is required.
-      if (v.targetMode === "customer") return Boolean(v.bodyText);
-      return v.kind === "freeform"
+    (v) =>
+      v.kind === "freeform"
         ? Boolean(v.channel && v.bodyText)
-        : Boolean(v.templateId);
-    },
+        : Boolean(v.templateId),
     {
-      message:
-        "customer-mode + freeform require bodyText; freeform requires channel + bodyText; template requires templateId",
+      message: "freeform requires channel + bodyText; template requires templateId",
     },
   );
 export type CreateBroadcastInput = z.infer<typeof CreateBroadcastSchema>;

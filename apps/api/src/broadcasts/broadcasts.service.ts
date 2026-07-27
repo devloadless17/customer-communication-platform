@@ -42,8 +42,6 @@ import {
 import { refreshTemplateAnalytics } from "@/lib/analytics/template-analytics";
 import { csvHeader, csvRows } from "@/lib/csv";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
-import { teamConnectedChannels } from "@/lib/providers";
-import { pickBestChannel, type RankableContact } from "@/lib/identity/best-channel";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import {
   TEMPLATE_AUTO_ARCHIVE_MONTHS,
@@ -57,7 +55,6 @@ import type { Channel } from "@ccp/shared/types";
 import {
   BROADCASTABLE_CHANNELS,
   CHANNEL_CAPABILITIES,
-  isBroadcastable,
 } from "@ccp/shared/providers/capabilities";
 import { checkTextCap } from "../lib/messaging/text-cap";
 import { directoryContactWhere, resolveAudienceGroupMembers } from "@/lib/queries";
@@ -215,21 +212,6 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * events reach realtime-fanout in this same process with zero pub/sub hop.
    */
   /**
-   * customer-mode recipient resolution: collapse a raw contact audience into
-   * PERSONS and pick each person's best live IN-WINDOW channel, so a person
-   * reachable on WhatsApp + Messenger + IG is sent to ONCE (not per channel).
-   *
-   *  - Contacts sharing a `customerId` are one person → `bestChannelForCustomer`
-   *    (ranked in-window-then-freshest) picks the single contact to send to;
-   *    a person with no in-window channel is dropped (a freeform send can't
-   *    reach them).
-   *  - A contact with no `customerId` is its own person (singleton) — sent
-   *    directly; the runner + Meta enforce its window.
-   *
-   * Resolution runs concurrency-bounded (the per-person best-channel query is
-   * indexed but there's one per person).
-   */
-  /**
    * The account a campaign sends from: the one the operator chose, else the
    * channel's default.
    *
@@ -269,103 +251,6 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     return fallback?.id ?? null;
   }
 
-  private async resolveCustomerRecipients(
-    workspaceId: string,
-    contactIds: string[],
-  ): Promise<Array<{ contactId: string; customerId: string | null }>> {
-    if (contactIds.length === 0) return [];
-    const contacts = await this.db.contact.findMany({
-      where: { workspaceId, deletedAt: null, id: { in: contactIds } },
-      // Same columns as the sibling load below: a singleton is ranked through
-      // `pickBestChannel` too (over a one-contact pool), so it needs to satisfy
-      // `RankableContact`.
-      select: {
-        id: true,
-        customerId: true,
-        identityChannel: true,
-        phoneNumber: true,
-        externalContactId: true,
-        lastInboundAt: true,
-      },
-    });
-
-    // Which channels can this team actually SEND on right now? A channel with a
-    // registered provider but no/expired connection would otherwise be ranked
-    // "best" for a person and then dropped at send — reaching nobody. Also gate
-    // on `isBroadcastable` so a person whose only live channel is the website
-    // widget (no durable push address) is never picked as a broadcast recipient.
-    const connectedAll = await teamConnectedChannels(workspaceId);
-    const connected = new Set([...connectedAll].filter(isBroadcastable));
-
-    // One entry per person: keyed by customerId, or the contact id for singletons.
-    const persons = new Map<
-      string,
-      { customerId: string | null; contactId: string; channel: Channel; contact: RankableContact }
-    >();
-    for (const c of contacts) {
-      const key = c.customerId ?? `contact:${c.id}`;
-      if (!persons.has(key)) {
-        persons.set(key, {
-          customerId: c.customerId,
-          contactId: c.id,
-          channel: c.identityChannel,
-          contact: c,
-        });
-      }
-    }
-
-    // Bulk-load every LINKED person's sibling contacts in ONE query, then rank in
-    // memory — instead of a `bestChannelForCustomer` findMany per person (an N+1
-    // that scaled with audience size). Singletons need no siblings.
-    const linkedCustomerIds = [...persons.values()]
-      .map((p) => p.customerId)
-      .filter((id): id is string => id !== null);
-    const siblingsByCustomer = new Map<string, RankableContact[]>();
-    if (linkedCustomerIds.length > 0) {
-      const siblings = await this.db.contact.findMany({
-        where: { workspaceId, deletedAt: null, customerId: { in: linkedCustomerIds } },
-        select: {
-          id: true,
-          customerId: true,
-          identityChannel: true,
-          phoneNumber: true,
-          externalContactId: true,
-          lastInboundAt: true,
-        },
-      });
-      for (const s of siblings) {
-        if (!s.customerId) continue;
-        const arr = siblingsByCustomer.get(s.customerId) ?? [];
-        arr.push(s);
-        siblingsByCustomer.set(s.customerId, arr);
-      }
-    }
-
-    const now = Date.now();
-    const rows: Array<{ contactId: string; customerId: string | null }> = [];
-    for (const p of persons.values()) {
-      // Singletons rank over a one-contact pool; linked people over their
-      // siblings. Both go through the SAME gate — a singleton used to be pushed
-      // on `connected.has(channel)` alone, with no window check, so an
-      // out-of-window singleton got a freeform send that Meta rejects (only a
-      // template can reopen a closed window) and was marked failed. That
-      // contradicted the composer's own promise that people with no open window
-      // are skipped, and treated two identically-situated people differently
-      // purely because one happened to be linked.
-      const pool = p.customerId
-        ? (siblingsByCustomer.get(p.customerId) ?? [])
-        : [p.contact];
-      // Rank only over the team's CONNECTED channels so we never drop a person
-      // reachable on a connected channel by picking an unconnected one.
-      const best = pickBestChannel(pool, now, connected);
-      // Only in-window people are reachable by a freeform send; drop the rest.
-      if (best && best.inWindow) {
-        rows.push({ contactId: best.contactId, customerId: p.customerId });
-      }
-    }
-    return rows;
-  }
-
   async create(
     workspaceId: string,
     /** Null when an API key launched it — an integration is not a person.
@@ -389,17 +274,8 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // channel and skip the whole template gauntlet. `template` broadcasts load +
     // validate the approved WhatsApp template exactly as before. The input
     // schema's refine already guarantees the right fields per kind.
-    //
-    // customer-mode (omnichannel) is ALWAYS body-based — each person's channel
-    // is resolved per-recipient — so force freeform semantics and skip both the
-    // template gauntlet and the single-channel binding.
-    const effectiveKind = input.targetMode === "customer" ? "freeform" : input.kind;
-    const freeformChannel =
-      input.targetMode === "customer"
-        ? null
-        : input.kind === "freeform"
-          ? input.channel!
-          : null;
+    const effectiveKind = input.kind;
+    const freeformChannel = input.kind === "freeform" ? input.channel! : null;
     const template =
       effectiveKind === "template"
         ? await this.db.messageTemplate.findFirst({ where: { id: templateId, workspaceId } })
@@ -747,16 +623,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    // Resolve the recipient ROWS ({contactId, customerId}) per target mode:
-    //  - contact  (default): ONE channel. Drop contacts whose identity channel
-    //    doesn't match — a mixed audience/tag/group sweeps in others that can't
-    //    receive this single-channel send. (The runner + Meta enforce the
-    //    per-send window for freeform.)
-    //  - customer (omnichannel): collapse the audience to PERSONS and pick each
-    //    person's best live IN-WINDOW channel (`bestChannelForCustomer`) — one
-    //    send per person, deduped across channels. A person with no in-window
-    //    channel is dropped (unreachable by a freeform send).
-    const isCustomerMode = input.targetMode === "customer";
+    // Resolve the recipient ROWS. A broadcast is strictly SINGLE-CHANNEL:
+    // drop contacts whose identity channel doesn't match — a mixed
+    // audience/tag/group sweeps in others that can't receive this send. (The
+    // runner + Meta enforce the per-send window for freeform.) The omnichannel
+    // `customer` mode was removed 2026-07-27; see broadcasts.schemas.ts.
     const filterChannel: Channel = template ? "whatsapp" : freeformChannel ?? "whatsapp";
     const hadAnyBeforeFilter = recipientIds.length > 0;
 
@@ -765,12 +636,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // hold several per channel, and every one of them is a distinct sender
     // identity to the customer — so the campaign binds to one, and both the
     // audience and the template catalogue are scoped to it below.
-    //
-    // Customer-mode is the deliberate exception: it routes per recipient across
-    // channels, so there is no single account to bind.
-    const sendingAccountId = isCustomerMode
-      ? null
-      : await this.resolveSendingAccount(workspaceId, filterChannel, input.channelConnectionId);
+    const sendingAccountId = await this.resolveSendingAccount(
+      workspaceId,
+      filterChannel,
+      input.channelConnectionId,
+    );
 
     // A template belongs to a WhatsApp Business Account, and a number can only
     // send templates from its OWN WABA. Sending one from the wrong account is
@@ -819,73 +689,68 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
-    let recipientRows: Array<{ contactId: string; customerId: string | null }>;
     // Set when the audience was narrowed to the sending ACCOUNT and the operator
     // did NOT opt into reaching other accounts' contacts — used only to make the
     // "empty audience" message say which of the two filters emptied it.
     let droppedByAccount = 0;
-    if (isCustomerMode) {
-      recipientRows = await this.resolveCustomerRecipients(workspaceId, recipientIds);
-    } else {
-      if (hadAnyBeforeFilter) {
-        const rows = await this.db.contact.findMany({
-          where: {
-            workspaceId,
-            id: { in: recipientIds },
-            identityChannel: filterChannel,
-            deletedAt: null,
-          },
-          select: { id: true },
-        });
-        recipientIds = rows.map((c) => c.id);
-      }
-
-      // ── Account scoping ───────────────────────────────────────────────────
-      // A workspace can hold several accounts on one channel (WhatsApp numbers
-      // under a portfolio, Pages, IG handles). Broadcasting from account B to a
-      // contact who has only ever talked to account A shows them a sender they
-      // don't recognise, and their reply opens a SEPARATE thread on B — the
-      // customer's history looks split in two.
-      //
-      // So the default audience is the sending account's own contacts, and
-      // reaching the rest is an explicit opt-in rather than a silent default.
-      if (sendingAccountId && recipientIds.length > 0 && !input.includeOtherAccounts) {
-        // Only contacts that BELONG TO ANOTHER account are dropped.
-        //
-        // A contact with no conversation at all has no account yet — imported
-        // and manually-added contacts are exactly that, and they are the whole
-        // point of a cold broadcast. Filtering to "has a conversation on THIS
-        // account" would have removed every one of them and reported an empty
-        // audience for the commonest campaign there is.
-        //
-        // A null `channelConnectionId` is the same story for a different reason:
-        // conversations that predate multi-account carry no account, so they
-        // belong to no one in particular and stay reachable.
-        const elsewhere = await this.db.conversation.findMany({
-          where: {
-            workspaceId,
-            contactId: { in: recipientIds },
-            channelConnectionId: { not: null },
-            NOT: { channelConnectionId: sendingAccountId },
-          },
-          select: { contactId: true },
-        });
-        const foreign = new Set(elsewhere.map((c) => c.contactId));
-        droppedByAccount = foreign.size;
-        if (foreign.size > 0) {
-          recipientIds = recipientIds.filter((id) => !foreign.has(id));
-        }
-      }
-
-      recipientRows = recipientIds.map((id) => ({ contactId: id, customerId: null }));
+    if (hadAnyBeforeFilter) {
+      const rows = await this.db.contact.findMany({
+        where: {
+          workspaceId,
+          id: { in: recipientIds },
+          identityChannel: filterChannel,
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      recipientIds = rows.map((c) => c.id);
     }
+
+    // ── Account scoping ───────────────────────────────────────────────────
+    // A workspace can hold several accounts on one channel (WhatsApp numbers
+    // under a portfolio, Pages, IG handles). Broadcasting from account B to a
+    // contact who has only ever talked to account A shows them a sender they
+    // don't recognise, and their reply opens a SEPARATE thread on B — the
+    // customer's history looks split in two.
+    //
+    // So the default audience is the sending account's own contacts, and
+    // reaching the rest is an explicit opt-in rather than a silent default.
+    if (sendingAccountId && recipientIds.length > 0 && !input.includeOtherAccounts) {
+      // Only contacts that BELONG TO ANOTHER account are dropped.
+      //
+      // A contact with no conversation at all has no account yet — imported
+      // and manually-added contacts are exactly that, and they are the whole
+      // point of a cold broadcast. Filtering to "has a conversation on THIS
+      // account" would have removed every one of them and reported an empty
+      // audience for the commonest campaign there is.
+      //
+      // A null `channelConnectionId` is the same story for a different reason:
+      // conversations that predate multi-account carry no account, so they
+      // belong to no one in particular and stay reachable.
+      const elsewhere = await this.db.conversation.findMany({
+        where: {
+          workspaceId,
+          contactId: { in: recipientIds },
+          channelConnectionId: { not: null },
+          NOT: { channelConnectionId: sendingAccountId },
+        },
+        select: { contactId: true },
+      });
+      const foreign = new Set(elsewhere.map((c) => c.contactId));
+      droppedByAccount = foreign.size;
+      if (foreign.size > 0) {
+        recipientIds = recipientIds.filter((id) => !foreign.has(id));
+      }
+    }
+
+    let recipientRows: Array<{ contactId: string; customerId: string | null }> =
+      recipientIds.map((id) => ({ contactId: id, customerId: null }));
 
     if (recipientRows.length === 0) {
       throw new BadRequestException({
         error: "empty_audience",
-        detail: isCustomerMode
-          ? "None of the selected people are reachable on a live channel right now (no open messaging window)."
-          : droppedByAccount > 0
+        detail:
+          droppedByAccount > 0
             ? `All ${droppedByAccount} selected contact${droppedByAccount === 1 ? "" : "s"} ` +
               `belong to another of your ${filterChannel} accounts. Switch the sending ` +
               `account, or turn on "include contacts from other accounts" to reach them ` +
@@ -974,9 +839,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // Pre-send eligibility gate (WhatsApp template broadcasts only): refuse — with
     // an actionable message — an audience the number's messaging-limit TIER can't
     // deliver to in 24h, BEFORE any row is written or Meta call made. Advisory
-    // only when we have no tier snapshot (null → ungated). Skipped for freeform /
-    // customer-mode (social windows, not a WhatsApp 24h unique-recipient tier).
-    if (effectiveKind === "template" && !isCustomerMode) {
+    // only when we have no tier snapshot (null → ungated). Skipped for freeform
+    // (social windows, not a WhatsApp 24h unique-recipient tier).
+    if (effectiveKind === "template") {
       // Pass the ids, not just the size: recipients already messaged inside the
       // rolling window consume no additional Meta budget, and without the ids
       // the gate assumes all of them are new and refuses legitimate re-sends.
@@ -1024,11 +889,8 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       scheduledAt: scheduledAtDate,
       kind: effectiveKind,
       targetMode: input.targetMode,
-      // customer-mode routes per recipient, so the broadcast's own channel is
-      // unused — store whatsapp as an inert default.
-      channel: isCustomerMode ? "whatsapp" : filterChannel,
-      // The account this campaign sends from. Null only in customer-mode, which
-      // resolves an account per recipient at send time.
+      channel: filterChannel,
+      // The account this campaign sends from.
       channelConnectionId: sendingAccountId,
       templateId: template?.id ?? null,
       templateName: template?.name ?? null,

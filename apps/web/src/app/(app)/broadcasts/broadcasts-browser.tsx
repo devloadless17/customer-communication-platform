@@ -770,12 +770,17 @@ function canRetry(b: BroadcastListItem): boolean {
   );
 }
 
-/** Row title: name → templateName → a fallback for freeform/People broadcasts,
- *  which have no templateName (so the raw `name || templateName` was blank). */
+/** Row title: name → templateName → a fallback for freeform broadcasts, which
+ *  have no templateName (so the raw `name || templateName` was blank).
+ *  `targetMode === "customer"` marks a HISTORICAL campaign from the removed
+ *  omnichannel "best channel" mode (2026-07-27) — label it as such rather
+ *  than misfiling it under a single channel. */
 function broadcastTitle(b: BroadcastListItem): string {
   if (b.name) return b.name;
   if (b.templateName) return b.templateName;
-  return b.targetMode === "customer" ? "People broadcast" : `Free-form · ${b.channel}`;
+  return b.targetMode === "customer"
+    ? "Best channel (legacy)"
+    : `Free-form · ${b.channel}`;
 }
 
 function ProgressBar({

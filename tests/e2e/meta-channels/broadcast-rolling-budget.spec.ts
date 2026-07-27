@@ -251,11 +251,14 @@ test("without ids the gate stays CONSERVATIVE (treats every recipient as new)", 
   expect(gate.allowed).toBe(false);
 });
 
-test("customer-mode broadcasts do not consume the WhatsApp number's budget", async () => {
+test("legacy customer-mode broadcasts do not consume the WhatsApp budget", async () => {
   await clearSends();
-  // A customer-mode broadcast stores channel:"whatsapp" as an inert default
-  // while routing each recipient to their best channel — counting those would
-  // charge Messenger/Instagram deliveries against this number and falsely block.
+  // The omnichannel customer mode was REMOVED 2026-07-27 (creation rejects
+  // it), but rows sent before the removal can still sit inside the 72h
+  // lookback — seeded directly here, as only the DB can produce one now.
+  // Those stored channel:"whatsapp" as an inert default while routing each
+  // recipient to their best channel — counting them would charge
+  // Messenger/Instagram deliveries against this portfolio and falsely block.
   const b = await db().broadcast.create({
     data: {
       workspaceId: TEAM_ID,

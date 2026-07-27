@@ -34,7 +34,7 @@ import {
 } from "@/features/broadcasts/components/campaign-assignment";
 import type { ContactFieldDefinition, ContactStage, Tag, TemplateDto } from "@ccp/shared/types";
 import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
-import { CHANNEL_CAPABILITIES, LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
+import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
@@ -136,8 +136,11 @@ export function NewBroadcastForm({
   cloneTemplateId?: string | null;
   cloneBodyVars?: string[] | null;
   cloneHeaderVar?: string | null;
-  /** Clone of a freeform/People broadcast — reopen in the same message mode,
-   *  channel, and body instead of an empty WhatsApp-template composer. */
+  /** Clone of a freeform broadcast — reopen in the same message mode, channel,
+   *  and body instead of an empty WhatsApp-template composer. A legacy
+   *  "customer" (People / best channel — mode removed 2026-07-27) clone
+   *  reopens as freeform: the body carries over, the operator picks the
+   *  channel. */
   cloneKind?: "template" | "freeform" | "customer" | null;
   cloneBodyText?: string | null;
   cloneChannel?: string | null;
@@ -200,17 +203,19 @@ export function NewBroadcastForm({
   // Message type:
   //  - template: approved WhatsApp template (reaches contacts any time).
   //  - freeform: plain text to ONE social channel's in-window contacts.
-  //  - customer: plain text to unified PEOPLE — each reached ONCE on their best
-  //    live channel (omnichannel + deduped). Both non-template modes share the
-  //    free-form body input + skip the template/variables steps.
-  const [messageKind, setMessageKind] = useState<"template" | "freeform" | "customer">(
-    cloneKind ??
-      // `?channel=` from the channel-scoped Outreach nav. A social channel means
-      // free-form (neither has templates); WhatsApp and anything unrecognized
-      // fall back to the template composer.
-      (initialChannel === "messenger" || initialChannel === "instagram"
-        ? "freeform"
-        : "template"),
+  // A broadcast is strictly single-channel: the omnichannel "customer"
+  // (People / best channel) mode was removed 2026-07-27; a legacy clone of one
+  // reopens as freeform so its body carries over.
+  const [messageKind, setMessageKind] = useState<"template" | "freeform">(
+    cloneKind === "customer"
+      ? "freeform"
+      : cloneKind ??
+          // `?channel=` from the channel-scoped Outreach nav. A social channel
+          // means free-form (neither has templates); WhatsApp and anything
+          // unrecognized fall back to the template composer.
+          (initialChannel === "messenger" || initialChannel === "instagram"
+            ? "freeform"
+            : "template"),
   );
   const [freeformChannel, setFreeformChannel] = useState<"messenger" | "instagram">(
     cloneChannel === "instagram" || initialChannel === "instagram"
@@ -548,30 +553,23 @@ export function NewBroadcastForm({
 
   // The channel a template/freeform broadcast actually sends on. All/group
   // recipient counts must be scoped to it (a WhatsApp template can't reach a
-  // Messenger-only contact). Customer ("People") mode is person-level → the
-  // count stays the raw all-channel totals (unscoped, best-channel reach).
+  // Messenger-only contact).
   /**
    * The channel this campaign targets, as ONE value.
    *
    * `messageKind` conflated "what am I sending" with "where am I sending it".
-   * The composer is now channel-first — you pick WhatsApp / Messenger /
-   * Instagram (or People, which spans all of them) and everything downstream
-   * derives from that — so this is the single selection and `messageKind` +
-   * `freeformChannel` are DERIVED from it. Keeping the old state as the
-   * derivation target means every existing gate, cap and count below is
-   * untouched.
+   * The composer is channel-first — you pick WhatsApp / Messenger / Instagram
+   * and everything downstream derives from that — so this is the single
+   * selection and `messageKind` + `freeformChannel` are DERIVED from it.
+   * Keeping the old state as the derivation target means every existing gate,
+   * cap and count below is untouched.
    */
-  const selectedChannel: "whatsapp" | "messenger" | "instagram" | "people" =
-    messageKind === "template"
-      ? "whatsapp"
-      : messageKind === "customer"
-        ? "people"
-        : freeformChannel;
+  const selectedChannel: "whatsapp" | "messenger" | "instagram" =
+    messageKind === "template" ? "whatsapp" : freeformChannel;
 
   const setSelectedChannel = useCallback(
-    (next: "whatsapp" | "messenger" | "instagram" | "people") => {
+    (next: "whatsapp" | "messenger" | "instagram") => {
       if (next === "whatsapp") setMessageKind("template");
-      else if (next === "people") setMessageKind("customer");
       else {
         setMessageKind("freeform");
         setFreeformChannel(next);
@@ -587,10 +585,7 @@ export function NewBroadcastForm({
 
   /** Connected accounts on the selected channel, default first. */
   const channelAccounts = useMemo(
-    () =>
-      selectedChannel === "people"
-        ? []
-        : accounts.filter((a) => a.channel === selectedChannel && a.isActive),
+    () => accounts.filter((a) => a.channel === selectedChannel && a.isActive),
     [accounts, selectedChannel],
   );
 
@@ -605,40 +600,32 @@ export function NewBroadcastForm({
       accounts.some((a) => a.channel === ch && a.isActive),
     );
     // NEVER render an empty channel row. `accounts` is empty both before the
-    // fetch resolves and if it fails outright, and an empty list would leave
-    // "People" as the only selectable mode — silently removing the ability to
-    // send a template at all. Falling back to the current selection keeps the
-    // composer usable and lets the server be the authority on connectivity
-    // (it already rejects an unknown/inactive account).
+    // fetch resolves and if it fails outright, and an empty list would
+    // silently remove the ability to send a template at all. Falling back to
+    // the current selection keeps the composer usable and lets the server be
+    // the authority on connectivity (it already rejects an unknown/inactive
+    // account).
     if (live.length > 0) return live;
-    return selectedChannel === "people" ? (["whatsapp"] as const) : ([selectedChannel] as const);
+    return [selectedChannel] as const;
   }, [accounts, selectedChannel]);
 
   // Default to the channel's default account as soon as accounts land, so the
   // template list and the audience are scoped from the first render rather than
   // silently defaulting server-side.
   useEffect(() => {
-    if (selectedChannel === "people") return;
     if (accountId && channelAccounts.some((a) => a.id === accountId)) return;
     const fallback = channelAccounts.find((a) => a.isDefault) ?? channelAccounts[0];
     setAccountId(fallback?.id ?? null);
   }, [selectedChannel, channelAccounts, accountId]);
 
-  const countChannel: "whatsapp" | "messenger" | "instagram" | undefined =
-    messageKind === "template"
-      ? "whatsapp"
-      : messageKind === "freeform"
-        ? freeformChannel
-        : undefined;
+  const countChannel: "whatsapp" | "messenger" | "instagram" =
+    messageKind === "template" ? "whatsapp" : freeformChannel;
 
   // Per-target text cap for the freeform composer, mirroring the server's
-  // smallest-cap gate (broadcasts.service create): a fixed freeform channel caps
-  // against that channel (Messenger 2000 / Instagram 1000); customer-mode resolves
-  // a channel per recipient, so it caps against the SMALLEST live-channel limit —
-  // the only bound guaranteeing no recipient fails on length. Static 2000 let a
-  // 1001–2000 char Instagram/customer body pass the composer and 400 at create.
-  const freeformCapChannels =
-    messageKind === "customer" ? [...LIVE_CHANNELS] : [freeformChannel];
+  // cap gate (broadcasts.service create): the fixed freeform channel caps
+  // against that channel (Messenger 2000 / Instagram 1000). Static 2000 let a
+  // 1001–2000 char Instagram body pass the composer and 400 at create.
+  const freeformCapChannels = [freeformChannel];
   const freeformMaxChars = Math.min(
     ...freeformCapChannels.map((c) => CHANNEL_CAPABILITIES[c].messageTextMaxChars),
   );
@@ -663,9 +650,7 @@ export function NewBroadcastForm({
       : null;
 
   // Channel-scoped server counts for the all/group audiences (custom mode's
-  // count comes from the builder). Both are inert unless a single channel is
-  // targeted — in customer ("People") mode we render the raw all-channel totals,
-  // so firing these requests would just burn rate limit for a discarded answer.
+  // count comes from the builder).
   const allCount = useAudienceCount([], [], {
     all: audience.mode === "all" && !!countChannel,
     channel: countChannel,
@@ -925,15 +910,8 @@ export function NewBroadcastForm({
     if (!readyToSend) return;
     if (messageKind === "template" && !selectedTemplate) return;
     const isFreeform = messageKind === "freeform";
-    const isCustomerMode = messageKind === "customer";
-    // Both non-template modes send the free-form body.
-    const usesBody = isFreeform || isCustomerMode;
-    // customer-mode dedupes the audience to PEOPLE and drops out-of-window ones,
-    // so the exact recipient count isn't known client-side — phrase it as an
-    // upper bound ("up to N people") rather than a misleading exact number.
-    const countLabel = isCustomerMode
-      ? `up to ${audienceCount} ${audienceCount === 1 ? "person" : "people"}`
-      : `${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`;
+    const usesBody = isFreeform;
+    const countLabel = `${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`;
     // Re-entrancy lock. `sending` (the button-disable signal) isn't set until
     // AFTER the destructive confirm resolves, so a fast double-click / Enter
     // before the confirm modal mounts could fire submit() twice and create two
@@ -987,11 +965,12 @@ export function NewBroadcastForm({
         const bodyPreview = truncate(resolvedBody, 90);
         // Single source of truth for channel display names — a local ternary here
         // silently mislabels the moment a fourth channel goes live.
-        const channelLabel = isCustomerMode
-          ? "each person's best channel"
-          : isFreeform
-            ? CHANNEL_LABEL[freeformChannel]
-            : CHANNEL_LABEL.whatsapp;
+        const channelLabel = isFreeform
+          ? CHANNEL_LABEL[freeformChannel]
+          : CHANNEL_LABEL.whatsapp;
+        // Name the SENDER too — with several accounts on a channel, "over
+        // WhatsApp" alone leaves the most important fact of the send implicit.
+        const senderLabel = selectedAccount ? ` from ${selectedAccount.name}` : "";
         const ok = await confirm({
           title: `Send to ${countLabel} now?`,
           description:
@@ -999,12 +978,10 @@ export function NewBroadcastForm({
               ? `Sending a message to ${countLabel}`
               : `Sending «${selectedTemplate!.name}» to ${countLabel}`) +
             (bodyPreview ? `: “${bodyPreview}”` : "") +
-            `. This sends immediately over ${channelLabel} and can't be undone once recipients start receiving it.` +
-            (isCustomerMode
-              ? " Each person is reached once on their best live channel; people with no open window are skipped."
-              : isFreeform
-                ? " Only contacts inside their messaging window will receive it."
-                : ""),
+            `. This sends immediately over ${channelLabel}${senderLabel} and can't be undone once recipients start receiving it.` +
+            (isFreeform
+              ? " Only contacts inside their messaging window will receive it."
+              : ""),
           confirmLabel: "Send now",
           destructive: true,
         });
@@ -1018,13 +995,7 @@ export function NewBroadcastForm({
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            ...(isCustomerMode
-              ? {
-                  targetMode: "customer",
-                  kind: "freeform",
-                  bodyText: freeformBody.trim(),
-                }
-              : isFreeform
+            ...(isFreeform
               ? { kind: "freeform", channel: freeformChannel, bodyText: freeformBody.trim() }
               : {
                   templateId: selectedTemplate!.id,
@@ -1050,12 +1021,9 @@ export function NewBroadcastForm({
                       : {}),
                   },
                 }),
-            // Bind the campaign to the chosen sender. Omitted in People mode,
-            // which resolves an account per recipient.
-            ...(accountId && !isCustomerMode ? { channelConnectionId: accountId } : {}),
-            ...(includeOtherAccounts && !isCustomerMode
-              ? { includeOtherAccounts: true }
-              : {}),
+            // Bind the campaign to the chosen sender.
+            ...(accountId ? { channelConnectionId: accountId } : {}),
+            ...(includeOtherAccounts ? { includeOtherAccounts: true } : {}),
             ...(name.trim() ? { name: name.trim() } : {}),
             ...(scheduledAtIso ? { scheduledAt: scheduledAtIso } : {}),
             // Omitted entirely when the campaign assigns nobody, so the request
@@ -1156,11 +1124,8 @@ export function NewBroadcastForm({
           totalContactCount={totalContactCount}
           // Channel-scoped "all" count so the AllContactsCard's number matches
           // its channel-scoped copy (and the send footer). Falls back to the
-          // unscoped total until the server count resolves, or in People mode
-          // where reach is person-level (no channel scope).
-          allContactsCount={
-            countChannel && allCount.resolved ? allCount.count : totalContactCount
-          }
+          // unscoped total until the server count resolves.
+          allContactsCount={allCount.resolved ? allCount.count : totalContactCount}
           initialContactLabels={initialContactLabels}
           value={audience}
           onChange={setAudience}
@@ -1168,32 +1133,21 @@ export function NewBroadcastForm({
           onGroupSaved={handleGroupSaved}
           // Scope the custom-audience recipient count to the channel the
           // broadcast will actually send on: templates → WhatsApp, freeform →
-          // the chosen social channel. Customer-mode is person-level (reached on
-          // a best channel), so it stays unscoped.
-          channel={
-            messageKind === "template"
-              ? "whatsapp"
-              : messageKind === "freeform"
-                ? freeformChannel
-                : undefined
-          }
+          // the chosen social channel.
+          channel={countChannel}
         />
       </StepCard>
 
       {/* Channel & sender. Deliberately the FIRST decision: a campaign is
           WhatsApp OR Messenger OR Instagram, never a mix, and everything after
-          this — templates, audience counts, message type, limits — derives from
-          it. "People" is the one omnichannel mode, and it says so. */}
+          this — templates, audience counts, message type, limits — derives
+          from it. */}
       <StepCard
         index={1}
         title="Channel"
-        summary={
-          selectedChannel === "people"
-            ? "People · best live channel"
-            : `${CHANNEL_LABEL[selectedChannel]}${
-                selectedAccount ? ` · ${selectedAccount.name}` : ""
-              }`
-        }
+        summary={`${CHANNEL_LABEL[selectedChannel]}${
+          selectedAccount ? ` · ${selectedAccount.name}` : ""
+        }`}
         done
       >
         <div className="flex flex-col gap-3">
@@ -1213,32 +1167,11 @@ export function NewBroadcastForm({
                 {CHANNEL_LABEL[ch]}
               </button>
             ))}
-            <button
-              type="button"
-              onClick={() => setSelectedChannel("people")}
-              className={
-                "flex-1 whitespace-nowrap rounded-md border px-3 py-2 text-sm font-medium transition " +
-                (selectedChannel === "people"
-                  ? "border-primary bg-primary/10 text-foreground"
-                  : "border-border bg-muted/20 text-muted-foreground hover:text-foreground")
-              }
-            >
-              People (best channel)
-            </button>
           </div>
 
-          {selectedChannel === "people" ? (
-            <p className="text-2xs leading-relaxed text-muted-foreground">
-              Reaches each PERSON once on whichever channel they&apos;re
-              currently reachable on — so someone you know on both WhatsApp and
-              Instagram gets one message, not two. Free-form only, and only for
-              people with an open messaging window.
-            </p>
-          ) : (
-            <>
-              {/* A single-account channel needs no picker — showing one is
-                  noise. The account is still bound on the wire. */}
-              {channelAccounts.length > 1 && (
+          {/* A single-account channel needs no picker — showing one is
+              noise. The account is still bound on the wire. */}
+          {channelAccounts.length > 1 && (
                 <label className="flex flex-col gap-1">
                   <span className="text-2xs font-medium text-muted-foreground">
                     Send from
@@ -1264,9 +1197,9 @@ export function NewBroadcastForm({
                     ))}
                   </select>
                 </label>
-              )}
+          )}
 
-              {channelAccounts.length > 1 && (
+          {channelAccounts.length > 1 && (
                 <label className="flex items-start gap-2 rounded-md border border-border bg-muted/20 px-3 py-2">
                   <input
                     type="checkbox"
@@ -1284,23 +1217,21 @@ export function NewBroadcastForm({
                     a new conversation here.
                   </span>
                 </label>
-              )}
+          )}
 
-              {selectedChannel === "whatsapp" ? (
-                <p className="text-2xs leading-relaxed text-muted-foreground">
-                  Only a pre-approved <strong>template</strong> reaches someone
-                  outside the 24-hour customer service window. Templates belong to
-                  this account&apos;s WhatsApp Business Account, so the list below
-                  is scoped to it.
-                </p>
-              ) : (
-                <p className="text-2xs leading-relaxed text-muted-foreground">
-                  {CHANNEL_LABEL[selectedChannel]} has no templates — free-form
-                  messages reach only contacts whose messaging window is still
-                  open. Everyone else is skipped.
-                </p>
-              )}
-            </>
+          {selectedChannel === "whatsapp" ? (
+            <p className="text-2xs leading-relaxed text-muted-foreground">
+              Only a pre-approved <strong>template</strong> reaches someone
+              outside the 24-hour customer service window. Templates belong to
+              this account&apos;s WhatsApp Business Account, so the list below
+              is scoped to it.
+            </p>
+          ) : (
+            <p className="text-2xs leading-relaxed text-muted-foreground">
+              {CHANNEL_LABEL[selectedChannel]} has no templates — free-form
+              messages reach only contacts whose messaging window is still
+              open. Everyone else is skipped.
+            </p>
           )}
         </div>
       </StepCard>
@@ -1311,13 +1242,13 @@ export function NewBroadcastForm({
           title="Message"
           summary={
             freeformDone
-              ? `${messageKind === "customer" ? "People" : CHANNEL_LABEL[freeformChannel]} · ${freeformBody.slice(0, 40)}`
+              ? `${CHANNEL_LABEL[freeformChannel]} · ${freeformBody.slice(0, 40)}`
               : undefined
           }
           done={freeformDone}
         >
           <div className="flex flex-col gap-3">
-            {messageKind === "freeform" && (
+            {(
               <div className="flex gap-2">
                 {(["messenger", "instagram"] as const).map((ch) => (
                   <button
@@ -1347,9 +1278,8 @@ export function NewBroadcastForm({
               maxLength={freeformByteMode ? undefined : freeformMaxChars}
             />
             <p className="text-2xs text-muted-foreground">
-              {messageKind === "customer"
-                ? "Each person is reached ONCE on their best live channel (WhatsApp, Messenger, or Instagram). People with no open messaging window are skipped."
-                : "Free-form messages reach only contacts within their messaging window; others are skipped."}{" "}
+              Free-form messages reach only contacts within their messaging
+              window; others are skipped.{" "}
               <span className={cn(freeformOverCap && "text-destructive")}>
                 {freeformTextSize}/{freeformMaxChars}
                 {freeformByteMode ? " bytes" : ""}
@@ -1384,8 +1314,8 @@ export function NewBroadcastForm({
       )}
 
       {/* Template-only. Without the messageKind gate, picking a template and then
-          switching to Free-form / People left this step (and the warning below)
-          on screen beside the free-form composer — two contradictory ways to
+          switching to Free-form left this step (and the warning below) on
+          screen beside the free-form composer — two contradictory ways to
           compose one message. */}
       {messageKind === "template" && selectedTemplate && (
         <StepCard

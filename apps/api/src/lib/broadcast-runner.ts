@@ -19,7 +19,7 @@ import {
 } from "@ccp/shared/template-render";
 import type { MessagingProvider, TemplateCardVariables } from "@ccp/shared/providers/types";
 import type { Channel } from "@ccp/shared/types";
-import { CHANNEL_CAPABILITIES, LIVE_CHANNELS, isPhoneChannel } from "@ccp/shared/providers/capabilities";
+import { CHANNEL_CAPABILITIES, isPhoneChannel } from "@ccp/shared/providers/capabilities";
 import { flagChannelNeedsReconnect } from "@/lib/providers/channel-health";
 import { enqueueBroadcastMaterialize } from "@/lib/broadcasts/materialize-queue";
 import { enqueueScheduledBroadcast } from "@/lib/broadcasts/schedule-queue";
@@ -214,11 +214,10 @@ function resolveSendPacing(
   // the historical static pacing byte-for-byte, so enabling the bucket is the
   // single switch that changes send behaviour.
   //
-  // `limiterActive` is the RUN's authority, not the env flag alone: a
-  // customer-mode run never acquires tokens (its recipients span channels, so
-  // no single number's bucket applies), and taking this branch for it produced
-  // gapMs 0 with NO rate authority at all — full-speed unpaced lanes. Such a
-  // run must fall through to the static gap pacing below.
+  // `limiterActive` is the RUN's authority, not the env flag alone: a run
+  // that never acquires tokens taking this branch would get gapMs 0 with NO
+  // rate authority at all — full-speed unpaced lanes. Such a run must fall
+  // through to the static gap pacing below.
   if (limiterActive && channel === "whatsapp") {
     return { lanes: lanesForRate(resolveSendRate(throughputLevel)), gapMs: 0 };
   }
@@ -811,31 +810,26 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     return;
   }
 
-  // Resolve the send binding(s). Two modes:
-  //  - contact  (default): ONE channel (`broadcast.channel`) with the
-  //    park-on-missing-creds recovery below — byte-identical to before.
-  //  - customer (omnichannel): recipients span mixed channels, so load a
-  //    binding per LIVE channel; a recipient on an unconnected channel fails
-  //    individually rather than parking the whole broadcast.
-  // Both feed one `bindingByChannel` map; `processOneRecipient` resolves the
-  // right entry per recipient's send channel.
-  const isCustomerMode = broadcast.targetMode === "customer";
-  const bindingByChannel = new Map<Channel, ChannelBinding>();
+  // The omnichannel `customer` mode was REMOVED 2026-07-27 (a broadcast is
+  // strictly single-channel, single sending account). A legacy customer-mode
+  // row can still reach here — scheduled or parked `paused` before the
+  // removal, then fired/resumed after deploy. Running it through the
+  // single-channel path would misroute its mixed-channel recipients out one
+  // number, so refuse loudly instead: fail with a reason the operator can act
+  // on (recreate as per-channel campaigns).
+  if (broadcast.targetMode === "customer") {
+    await fail(
+      broadcast.id,
+      'This campaign used the removed "People (best channel)" mode. Recreate it as one broadcast per channel.',
+    );
+    return;
+  }
 
-  if (isCustomerMode) {
-    for (const ch of LIVE_CHANNELS) {
-      try {
-        const b = getProviderBinding(ch);
-        bindingByChannel.set(ch, { provider: b.provider, config: await b.getSendConfig(broadcast.workspaceId) });
-      } catch {
-        // Not connected — recipients resolved onto this channel fail individually.
-      }
-    }
-    if (bindingByChannel.size === 0) {
-      await fail(broadcast.id, "No channel is connected to send this broadcast.");
-      return;
-    }
-  } else {
+  // Resolve the send binding: ONE channel (`broadcast.channel`) with the
+  // park-on-missing-creds recovery below. `bindingByChannel` holds that single
+  // entry; `processOneRecipient` resolves it per recipient.
+  const bindingByChannel = new Map<Channel, ChannelBinding>();
+  {
     // Route to the broadcast's ACTUAL channel: template broadcasts are WhatsApp;
     // freeform broadcasts carry their own channel (Messenger / Instagram).
     const binding = getProviderBinding(broadcast.channel);
@@ -1114,11 +1108,9 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     id: true,
     contactId: true,
     status: true,
-    // The person this recipient stood for at CREATE time. Compared against the
-    // contact's CURRENT customerId at fire time to detect a merge that landed
-    // in the create→fire gap — see the person-dedupe guard in
-    // `processOneRecipient`. Written since customer-mode shipped; this is the
-    // first thing to read it.
+    // The person this recipient stood for at CREATE time. Only populated by
+    // the removed customer-mode (2026-07-27) — kept in the select so legacy
+    // rows keep their shape; new rows always carry null.
     customerId: true,
     // Pre-drawn campaign assignee (lib/assignment/broadcast-plan.ts), applied
     // after a successful send.
@@ -1127,11 +1119,9 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       select: {
         id: true,
         name: true,
-        // CURRENT owner of this contact. A merge in the create→fire gap moves
-        // it, which is exactly what the person-dedupe guard looks for.
+        // CURRENT owner of this contact (person link).
         customerId: true,
-        // Drives per-recipient send-channel routing in customer-mode (and the
-        // conversation/message channel stamp in every mode).
+        // Drives the conversation/message channel stamp.
         identityChannel: true,
         phoneNumber: true,
         // Freeform (social) broadcasts dial the PSID/IGSID, not a phone.
@@ -1243,15 +1233,15 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     }));
 
   await refill();
-  // Resolve send pacing from the number's throughput level (WhatsApp only; social
-  // + customer-mode + never-polled numbers fall to the conservative baseline).
+  // Resolve send pacing from the number's throughput level (WhatsApp only;
+  // social + never-polled numbers fall to the conservative baseline).
   // One health read per run — cheap, and the level rarely changes mid-run.
   // The ACCOUNT id matters: throughput is per-number, and this run sends from
   // the campaign's bound account — reading the workspace default would size
   // lanes and the bucket's fill rate off a different number's tier (a HIGH
   // default pacing a STANDARD second number at 900/s = sustained 130429s).
   const throughputLevel =
-    !isCustomerMode && broadcast.channel === "whatsapp"
+    broadcast.channel === "whatsapp"
       ? (
           await getWhatsappHealth(
             broadcast.workspaceId,
@@ -1259,7 +1249,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
           ).catch(() => null)
         )?.throughputLevel ?? null
       : null;
-  const rateLimited = sendRateLimiterEnabled() && !isCustomerMode;
+  const rateLimited = sendRateLimiterEnabled();
   const pacing = resolveSendPacing(broadcast.channel, throughputLevel, rateLimited);
   const lanes = Math.min(pacing.lanes, queue.length);
 
@@ -1576,6 +1566,8 @@ async function processOneRecipient(
     id: string;
     workspaceId: string;
     kind: "template" | "freeform";
+    // "customer" never reaches here — runBroadcast refuses legacy omnichannel
+    // rows up front (mode removed 2026-07-27); the type keeps the DB row shape.
     targetMode: "contact" | "customer";
     channel: Channel;
     templateId: string | null;
@@ -1626,15 +1618,9 @@ async function processOneRecipient(
   // each lane rediscovering it.
   mediaState: BroadcastMediaState,
 ): Promise<void> {
-  // Resolve the SEND channel + its provider binding for THIS recipient:
-  //  - contact-mode: the broadcast's single channel.
-  //  - customer-mode: the recipient's own identity channel (omnichannel).
-  // A recipient whose channel isn't connected fails individually (customer-mode
-  // can sweep in a channel the team never connected) — never poisons the run.
-  const sendChannel: Channel =
-    broadcast.targetMode === "customer"
-      ? recipient.contact.identityChannel
-      : broadcast.channel;
+  // Resolve the broadcast's single channel + its provider binding. A missing
+  // binding fails the recipient individually — never poisons the run.
+  const sendChannel: Channel = broadcast.channel;
   const activeBinding = bindingByChannel.get(sendChannel);
   if (!activeBinding) {
     await failRecipientAndCount(
@@ -1653,10 +1639,9 @@ async function processOneRecipient(
   // continues. Using the local const also keeps `sendTemplate` typed as
   // defined across the await points below.
   // Template broadcasts need the template send method; freeform broadcasts use
-  // plain `sendText` (a required provider method, always present). customer-mode
-  // is always body-based, so it always takes the freeform path.
+  // plain `sendText` (a required provider method, always present).
   const sendTemplate = provider.sendTemplate;
-  const isFreeform = broadcast.targetMode === "customer" || broadcast.kind === "freeform";
+  const isFreeform = broadcast.kind === "freeform";
   // Meta social: inside the 24h free-form window Meta wants messaging_type:
   // RESPONSE (no tag); the HUMAN_AGENT tag is only for the 24h–7d support band.
   // Freeform broadcasts target IN-WINDOW recipients, so without deriving this
@@ -1700,47 +1685,6 @@ async function processOneRecipient(
     );
     return;
   }
-  // PERSON-DEDUPE at FIRE time (customer-mode only).
-  //
-  // "One send per PERSON" is decided once, when the audience is built: two
-  // unlinked contacts of the same human are two persons then, so they get two
-  // recipient rows. If they are MERGED before the campaign fires, those rows
-  // now describe one person — and nothing downstream noticed. The
-  // `@@unique([broadcastId, contactId])` backstop is per-CONTACT, so it cannot
-  // see it. The merge needs no human either: ingest's strong-key adoption and
-  // the customer-link drift sweeper both re-point `Contact.customerId`
-  // automatically, and a SCHEDULED campaign's create→fire gap is days.
-  //
-  // Cheap by construction: `recipient.customerId` is the create-time snapshot,
-  // so a contact whose owner is unchanged short-circuits with no query at all.
-  // Only a row that actually moved pays for the twin lookup.
-  if (
-    broadcast.targetMode === "customer" &&
-    recipient.contact.customerId &&
-    recipient.contact.customerId !== recipient.customerId
-  ) {
-    const twin = await db.broadcastRecipient.findFirst({
-      where: {
-        broadcastId: broadcast.id,
-        id: { not: recipient.id },
-        status: "sent",
-        contact: { customerId: recipient.contact.customerId },
-      },
-      select: { id: true },
-    });
-    if (twin) {
-      await failRecipientAndCount(
-        recipient.id,
-        "Merged into a contact this campaign already reached.",
-        broadcast.id,
-        broadcast.workspaceId,
-        pendingBumps,
-        "duplicate_person",
-      );
-      return;
-    }
-  }
-
   // Re-check marketing opt-out at FIRE time. Create-time suppression
   // (broadcasts.service.ts) only sees opt-outs that existed when the broadcast
   // was built; a contact who opts out during the create→fire gap of a SCHEDULED

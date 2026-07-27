@@ -2488,11 +2488,11 @@ function broadcastToExternal(b: {
   completedAt: Date | null;
   scheduledAt: Date | null;
 }) {
-  // `targetMode:"customer"` (People / best-channel) campaigns store an inert
-  // channel:"whatsapp" — surfacing kind + targetMode lets a partner tell an
-  // omnichannel campaign apart from a WhatsApp one (the API claims never to
-  // disagree with the UI), and channel is null'd for customer mode so it can't
-  // be mistaken for a real per-channel send.
+  // LEGACY rows only: the omnichannel `customer` mode was removed 2026-07-27
+  // (broadcasts are strictly single-channel; creation rejects it), but
+  // campaigns sent before then still carry it. Those stored an inert
+  // channel:"whatsapp", so channel stays null'd for them — a historical
+  // best-channel campaign must not read as a real WhatsApp send.
   const isCustomerMode = b.targetMode === "customer";
   return {
     id: b.id,
