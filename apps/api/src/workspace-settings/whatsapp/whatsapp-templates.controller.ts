@@ -125,14 +125,20 @@ export class WhatsappTemplatesController {
     });
   }
 
-  /** Instantiate a library blueprint under our own name. */
+  /** Instantiate a library blueprint under our own name. `?accountId=` picks
+   *  which number's WABA it is created under (omitted = default). */
   @Post("library/create")
   @RequireCapability("templates:manage")
   async createFromLibrary(
     @CurrentSession() session: ApiSession,
     @Body() body: unknown,
+    @Query("accountId") accountId?: string,
   ) {
-    const out = await this.whatsapp.createFromLibrary(session.workspaceId, body);
+    const out = await this.whatsapp.createFromLibrary(
+      session.workspaceId,
+      body,
+      accountId || null,
+    );
     return { ok: true, ...out };
   }
 
@@ -157,24 +163,36 @@ export class WhatsappTemplatesController {
     });
   }
 
-  /** Create/update an authentication template across many languages at once. */
+  /** Create/update an authentication template across many languages at once.
+   *  `?accountId=` picks which number's WABA (omitted = default). */
   @Post("auth/upsert")
   @RequireCapability("templates:manage")
   async authUpsert(
     @CurrentSession() session: ApiSession,
     @Body() body: unknown,
+    @Query("accountId") accountId?: string,
   ) {
-    const out = await this.whatsapp.upsertAuthTemplate(session.workspaceId, body);
+    const out = await this.whatsapp.upsertAuthTemplate(
+      session.workspaceId,
+      body,
+      accountId || null,
+    );
     return { ok: true, ...out };
   }
 
+  /** `?accountId=` picks which number's WABA the template is created under. */
   @Post("create")
   @RequireCapability("templates:manage")
   async create(
     @CurrentSession() session: ApiSession,
     @Body() body: unknown,
+    @Query("accountId") accountId?: string,
   ) {
-    const out = await this.whatsapp.createTemplate(session.workspaceId, body);
+    const out = await this.whatsapp.createTemplate(
+      session.workspaceId,
+      body,
+      accountId || null,
+    );
     return { ok: true, ...out };
   }
 
@@ -205,6 +223,7 @@ export class WhatsappTemplatesController {
   async uploadMedia(
     @CurrentSession() session: ApiSession,
     @UploadedFile() file: Express.Multer.File | undefined,
+    @Query("accountId") accountId?: string,
   ) {
     if (!file) {
       throw new BadRequestException({ error: "file_part_missing" });
@@ -212,7 +231,11 @@ export class WhatsappTemplatesController {
     try {
       const buffer = await readFile(file.path);
       const fileWithBuffer = { ...file, buffer } as Express.Multer.File;
-      const out = await this.whatsapp.uploadHeaderMedia(session.workspaceId, fileWithBuffer);
+      const out = await this.whatsapp.uploadHeaderMedia(
+        session.workspaceId,
+        fileWithBuffer,
+        accountId || null,
+      );
       return { ok: true, ...out };
     } finally {
       await unlink(file.path).catch(() => undefined);

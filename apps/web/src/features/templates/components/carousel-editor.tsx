@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Loader2, Plus, Trash2, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -323,6 +324,13 @@ function CardRow({
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Account scope from the page URL (stamped by the templates view) — the
+  // header asset uploads under the app the template's WABA account uses.
+  const searchParams = useSearchParams();
+  const templateAccountId = searchParams?.get("accountId") ?? null;
+  const templateAccountQuery = templateAccountId
+    ? `?accountId=${encodeURIComponent(templateAccountId)}`
+    : "";
 
   const upload = useCallback(
     async (file: File) => {
@@ -335,11 +343,17 @@ function CardRow({
       try {
         const fd = new FormData();
         fd.append("file", file);
-        const res = await apiFetch("/api/workspace/whatsapp/templates/upload-media", {
-          method: "POST",
-          body: fd,
-          signal: abort.signal,
-        });
+        const res = await apiFetch(
+          // Same account scope the template-form's own uploads carry — the
+          // header asset must be uploaded under the app the template's WABA
+          // account uses, read from the page URL the templates view stamped.
+          `/api/workspace/whatsapp/templates/upload-media${templateAccountQuery}`,
+          {
+            method: "POST",
+            body: fd,
+            signal: abort.signal,
+          },
+        );
         const data = (await res.json()) as {
           headerHandle?: string;
           error?: string;
@@ -363,7 +377,7 @@ function CardRow({
         setUploading(false);
       }
     },
-    [onPatch],
+    [onPatch, templateAccountQuery],
   );
 
   return (

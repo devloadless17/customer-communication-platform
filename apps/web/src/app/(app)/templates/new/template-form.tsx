@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
   AlertTriangle,
@@ -151,6 +151,14 @@ export function TemplateForm({
   editing?: TemplateEditTarget | null;
 }) {
   const router = useRouter();
+  // The account scope the templates page stamped on its "New template" link —
+  // the new template is created under THAT number's WABA, not silently on the
+  // default one. Absent = default (single-account and legacy paths).
+  const searchParams = useSearchParams();
+  const templateAccountId = searchParams?.get("accountId") ?? null;
+  const templateAccountQuery = templateAccountId
+    ? `?accountId=${encodeURIComponent(templateAccountId)}`
+    : "";
   const softRefresh = useSoftRefresh();
 
   const initial = useMemo(
@@ -563,7 +571,7 @@ export function TemplateForm({
       try {
         const fd = new FormData();
         fd.append("file", file);
-        const res = await apiFetch("/api/workspace/whatsapp/templates/upload-media", {
+        const res = await apiFetch(`/api/workspace/whatsapp/templates/upload-media${templateAccountQuery}`, {
           method: "POST",
           body: fd,
           signal: abort.signal,
@@ -591,7 +599,7 @@ export function TemplateForm({
         setUploadingHeader(false);
       }
     },
-    [headerPreviewUrl],
+    [headerPreviewUrl, templateAccountQuery],
   );
 
   const submit = useCallback(async () => {
@@ -605,7 +613,7 @@ export function TemplateForm({
       const res = await apiFetch(
         editing
           ? `/api/workspace/whatsapp/templates/${editing.id}/edit`
-          : "/api/workspace/whatsapp/templates/create",
+          : `/api/workspace/whatsapp/templates/create${templateAccountQuery}`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -664,6 +672,7 @@ export function TemplateForm({
     ttlSeconds,
     router,
     softRefresh,
+    templateAccountQuery,
   ]);
 
   // -------------------------------------------------------------------------

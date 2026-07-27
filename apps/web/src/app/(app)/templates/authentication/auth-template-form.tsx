@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { AlertTriangle, ArrowLeft, Check, Loader2, ShieldCheck, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -69,6 +69,13 @@ const OTP_TYPES: Array<{ value: OtpType; label: string; hint: string }> = [
 export function AuthTemplateForm() {
   const router = useRouter();
   const softRefresh = useSoftRefresh();
+  // Account scope stamped by the templates page's "Authentication" link — the
+  // upserted templates land on that number's WABA, not the default's.
+  const searchParams = useSearchParams();
+  const templateAccountId = searchParams?.get("accountId") ?? null;
+  const templateAccountQuery = templateAccountId
+    ? `?accountId=${encodeURIComponent(templateAccountId)}`
+    : "";
 
   const [name, setName] = useState("");
   const [languages, setLanguages] = useState<string[]>(["en_US"]);
@@ -150,7 +157,7 @@ export function AuthTemplateForm() {
     setSubmitting(true);
     setError(null);
     try {
-      const res = await apiFetch("/api/workspace/whatsapp/templates/auth/upsert", {
+      const res = await apiFetch(`/api/workspace/whatsapp/templates/auth/upsert${templateAccountQuery}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -196,6 +203,7 @@ export function AuthTemplateForm() {
     zeroTapTerms,
     router,
     softRefresh,
+    templateAccountQuery,
   ]);
 
   return (

@@ -749,7 +749,11 @@ export class WhatsappService {
       });
     }
 
-    const config = await this.requireSendConfig(workspaceId);
+    // Credentials for the WABA both templates live under (verified equal
+    // above) — the default account's edge is the wrong one on a two-WABA
+    // workspace, and Meta answers a wrong-WABA compare with an empty result
+    // that reads as "these perform identically".
+    const config = await this.templateOpConfig(workspaceId, { wabaId: a.wabaId });
     const provider = getMetaProvider();
     if (!provider.compareTemplates) {
       throw new HttpException({ error: "provider_does_not_support_comparison" }, 501);
@@ -1106,6 +1110,8 @@ export class WhatsappService {
   async createTemplate(
     workspaceId: string,
     raw: unknown,
+    /** Which number's WABA the template is created under; omitted = default. */
+    accountId?: string | null,
   ): Promise<{ templateId: string; status: string }> {
     const obj = (raw ?? {}) as Record<string, unknown>;
 
@@ -1171,7 +1177,7 @@ export class WhatsappService {
     // message rather than blocked by a number we'd have to keep in sync.
     const messageSendTtlSeconds = parseTtlSeconds(obj.messageSendTtlSeconds, category);
 
-    const config = await this.requireSendConfig(workspaceId);
+    const config = await this.templateOpConfig(workspaceId, { accountId });
     const provider = getMetaProvider();
     if (!provider.createTemplate) {
       throw new HttpException(
@@ -1289,7 +1295,7 @@ export class WhatsappService {
     },
   ): Promise<{ previews: AuthTemplatePreview[] }> {
     const minutes = parseCodeExpirationMinutes(input.codeExpirationMinutes);
-    const config = await this.requireSendConfig(workspaceId);
+    const config = await this.templateOpConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.previewAuthTemplates) {
       throw new HttpException({ error: "provider_has_no_auth_previews" }, 501);
@@ -1326,6 +1332,8 @@ export class WhatsappService {
   async upsertAuthTemplate(
     workspaceId: string,
     raw: unknown,
+    /** Which number's WABA the templates are created under; omitted = default. */
+    accountId?: string | null,
   ): Promise<{ created: number; templates: Array<{ language: string; status: string }> }> {
     const obj = (raw ?? {}) as Record<string, unknown>;
     const name = typeof obj.name === "string" ? obj.name.trim() : "";
@@ -1426,7 +1434,7 @@ export class WhatsappService {
 
     const codeExpirationMinutes = parseCodeExpirationMinutes(obj.codeExpirationMinutes);
 
-    const config = await this.requireSendConfig(workspaceId);
+    const config = await this.templateOpConfig(workspaceId, { accountId });
     const provider = getMetaProvider();
     if (!provider.upsertAuthTemplate) {
       throw new HttpException({ error: "provider_cannot_upsert_auth_templates" }, 501);
@@ -1490,7 +1498,10 @@ export class WhatsappService {
     workspaceId: string,
     filters: TemplateLibraryFilters,
   ): Promise<{ templates: LibraryTemplate[] }> {
-    const config = await this.requireSendConfig(workspaceId);
+    // Any active account's credentials read the (account-agnostic) library —
+    // resolved explicitly because a workspace-only load refuses with several
+    // active numbers, which had broken library browsing on multi-account.
+    const config = await this.templateOpConfig(workspaceId);
     const provider = getMetaProvider();
     if (!provider.fetchTemplateLibrary) {
       throw new HttpException({ error: "provider_has_no_template_library" }, 501);
@@ -1525,6 +1536,8 @@ export class WhatsappService {
   async createFromLibrary(
     workspaceId: string,
     raw: unknown,
+    /** Which number's WABA the template is created under; omitted = default. */
+    accountId?: string | null,
   ): Promise<{ templateId: string; status: string }> {
     const obj = (raw ?? {}) as Record<string, unknown>;
     const name = typeof obj.name === "string" ? obj.name.trim() : "";
@@ -1551,7 +1564,7 @@ export class WhatsappService {
       });
     }
 
-    const config = await this.requireSendConfig(workspaceId);
+    const config = await this.templateOpConfig(workspaceId, { accountId });
     const provider = getMetaProvider();
     if (!provider.createFromLibrary || !provider.fetchTemplateLibrary) {
       throw new HttpException({ error: "provider_has_no_template_library" }, 501);
@@ -1759,7 +1772,8 @@ export class WhatsappService {
       });
     }
 
-    const config = await this.requireSendConfig(workspaceId);
+    // Credentials for the WABA that OWNS this template — see templateOpConfig.
+    const config = await this.templateOpConfig(workspaceId, { wabaId: template.wabaId });
     const provider = getMetaProvider();
     if (!provider.editTemplate) {
       throw new HttpException({ error: "provider_cannot_edit_templates" }, 501);
@@ -1838,7 +1852,35 @@ export class WhatsappService {
       });
     }
 
-    const config = await this.requireSendConfig(workspaceId);
+    // Meta's delete-by-NAME deletes EVERY language variant of that name.
+    // Without an externalId we can only delete by name, so refuse when
+    // sibling variants exist rather than silently nuking them — the delete
+    // confirm promised "the {language} variant", and a Sync populates the
+    // externalId that makes a precise per-variant delete possible.
+    if (!template.externalId) {
+      const siblings = await this.db.messageTemplate.count({
+        where: {
+          workspaceId,
+          wabaId: template.wabaId,
+          name: template.name,
+          NOT: { id: template.id },
+        },
+      });
+      if (siblings > 0) {
+        throw new ConflictException({
+          error: "template_delete_would_remove_all_languages",
+          detail:
+            `"${template.name}" exists in ${siblings + 1} languages, and without a ` +
+            `synced Meta id a delete removes ALL of them. Press "Refresh from Meta" ` +
+            `first, then delete just this variant.`,
+        });
+      }
+    }
+
+    // Credentials for the WABA that OWNS this template — see templateOpConfig.
+    // The default account's edge answered a wrong-WABA delete with a 404 that
+    // the provider treats as "already gone", while the real template survived.
+    const config = await this.templateOpConfig(workspaceId, { wabaId: template.wabaId });
     const provider = getMetaProvider();
     if (!provider.deleteTemplate) {
       throw new HttpException(
@@ -1890,7 +1932,7 @@ export class WhatsappService {
   async unpauseTemplate(workspaceId: string, id: string): Promise<void> {
     const template = await this.db.messageTemplate.findFirst({
       where: { id, workspaceId },
-      select: { id: true, externalId: true, status: true, name: true },
+      select: { id: true, externalId: true, status: true, name: true, wabaId: true },
     });
     if (!template) throw new NotFoundException({ error: "template_not_found" });
     if (template.status !== "paused") {
@@ -1907,7 +1949,8 @@ export class WhatsappService {
       });
     }
 
-    const config = await this.requireSendConfig(workspaceId);
+    // Credentials for the WABA that OWNS this template — see templateOpConfig.
+    const config = await this.templateOpConfig(workspaceId, { wabaId: template.wabaId });
     const provider = getMetaProvider();
     if (!provider.unpauseTemplate) {
       throw new HttpException({ error: "provider_does_not_support_unpause" }, 501);
@@ -2162,6 +2205,8 @@ export class WhatsappService {
   async uploadHeaderMedia(
     workspaceId: string,
     file: Express.Multer.File,
+    /** Which number's credentials/app upload the asset; omitted = default. */
+    accountId?: string | null,
   ): Promise<{ headerHandle: string }> {
     if (file.size > UPLOAD_MAX_BYTES) {
       throw new PayloadTooLargeException({
@@ -2178,7 +2223,7 @@ export class WhatsappService {
     }
     const filename = file.originalname || "upload";
 
-    const config = await this.requireSendConfig(workspaceId);
+    const config = await this.templateOpConfig(workspaceId, { accountId });
     const provider = getMetaProvider();
     if (!provider.uploadHeaderMedia) {
       throw new HttpException(
@@ -2232,6 +2277,59 @@ export class WhatsappService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Credentials for a TEMPLATE operation — resolved to a concrete account,
+   * never left to the workspace-only fallback. Two failure modes this closes:
+   *
+   *  1. With 2+ active numbers, `getMetaSendConfig(workspaceId)` refuses
+   *     (`account-unresolved`), which had silently turned EVERY template
+   *     operation — edit, delete, unpause, compare, library browse/create,
+   *     header-media upload — into a guaranteed 409 on multi-account
+   *     workspaces.
+   *  2. Operations on an EXISTING template must run against the WABA that
+   *     OWNS it. The default account's credentials point at the default
+   *     account's WABA — on a two-WABA workspace that meant editing/deleting
+   *     WABA B's template through WABA A's edge: a 404 Meta answer that the
+   *     delete path treats as "already gone" while the real template
+   *     survives, silently diverging the local catalog.
+   *
+   * Resolution: an explicit `accountId` (the operator's pick) wins; else the
+   * first active connection under the template's `wabaId`; else the default
+   * account (correct for single-WABA workspaces and for rows carrying the
+   * legacy "" wabaId sentinel).
+   */
+  private async templateOpConfig(
+    workspaceId: string,
+    opts: { wabaId?: string | null; accountId?: string | null } = {},
+  ) {
+    let targetId = opts.accountId ?? null;
+    if (!targetId && opts.wabaId) {
+      targetId =
+        (
+          await this.db.channelConnection.findFirst({
+            where: {
+              workspaceId,
+              channel: META_PROVIDER,
+              wabaId: opts.wabaId,
+              isActive: true,
+            },
+            orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+            select: { id: true },
+          })
+        )?.id ?? null;
+    }
+    if (!targetId) {
+      targetId =
+        (
+          await this.db.channelConnection.findFirst({
+            where: { workspaceId, channel: META_PROVIDER, isDefault: true },
+            select: { id: true },
+          })
+        )?.id ?? null;
+    }
+    return this.requireSendConfig(workspaceId, targetId ?? undefined);
   }
 
   private throwIfMissingWaba(err: unknown): void {

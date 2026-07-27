@@ -139,6 +139,10 @@ export function TemplatesView({
   const accountQuery = templatesAccountId
     ? `?accountId=${encodeURIComponent(templatesAccountId)}`
     : "";
+  // The same scope, stamped on the creation LINKS (new / library / auth) so a
+  // template authored while viewing a non-default number lands on that
+  // number's WABA — the forms read it from the URL and forward it.
+  const creationAccountQuery = accountQuery;
   // Switching the scope re-reads the catalogue for that account's WABA (via a
   // ref so this effect doesn't also fire on every reload identity change).
   // Skipped while unset — the SSR-seeded default-scope list is already right.
@@ -423,10 +427,13 @@ export function TemplatesView({
           </Button>
           {/* The library is the FASTER path — an unchanged blueprint is approved
               immediately, where an authored template waits for review — so it
-              sits beside "New template" rather than buried inside it. */}
+              sits beside "New template" rather than buried inside it.
+              Every creation link carries the page's ACCOUNT scope so the new
+              template lands on the WABA the operator is looking at, not
+              silently on the default one. */}
           {canManage && connected && hasWabaId && (
             <Button asChild variant="outline">
-              <Link href="/templates/library" className="gap-1.5">
+              <Link href={`/templates/library${creationAccountQuery}`} className="gap-1.5">
                 <Sparkles className="size-4" />
                 Browse library
               </Link>
@@ -437,7 +444,10 @@ export function TemplatesView({
               composer would offer an editor for copy that can't be edited. */}
           {canManage && connected && hasWabaId && (
             <Button asChild variant="outline">
-              <Link href="/templates/authentication" className="gap-1.5">
+              <Link
+                href={`/templates/authentication${creationAccountQuery}`}
+                className="gap-1.5"
+              >
                 <ShieldCheck className="size-4" />
                 Authentication
               </Link>
@@ -454,7 +464,7 @@ export function TemplatesView({
               </Button>
             ) : (
               <Button asChild>
-                <Link href="/templates/new" className="gap-1.5">
+                <Link href={`/templates/new${creationAccountQuery}`} className="gap-1.5">
                   <Plus className="size-4" />
                   New template
                 </Link>

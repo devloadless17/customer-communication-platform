@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -358,6 +358,13 @@ function InstantiateDialog({
   const [suffixExamples, setSuffixExamples] = useState<Record<number, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Account scope stamped by the templates page's "Browse library" link — the
+  // instantiated template lands on that number's WABA, not the default's.
+  const searchParams = useSearchParams();
+  const templateAccountId = searchParams?.get("accountId") ?? null;
+  const templateAccountQuery = templateAccountId
+    ? `?accountId=${encodeURIComponent(templateAccountId)}`
+    : "";
 
   const nameValid = TEMPLATE_NAME_PATTERN.test(name);
   const inputsNeeded = template.buttons
@@ -389,7 +396,7 @@ function InstantiateDialog({
         };
       });
 
-      const res = await apiFetch("/api/workspace/whatsapp/templates/library/create", {
+      const res = await apiFetch(`/api/workspace/whatsapp/templates/library/create${templateAccountQuery}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -424,6 +431,7 @@ function InstantiateDialog({
     name,
     template,
     onCreated,
+    templateAccountQuery,
   ]);
 
   return (
