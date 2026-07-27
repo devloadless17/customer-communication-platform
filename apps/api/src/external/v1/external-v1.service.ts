@@ -2010,6 +2010,7 @@ export class ExternalV1Service {
         correctCategory: true,
         status: true,
         statusReason: true,
+        statusDetail: true,
         parameterFormat: true,
         messageSendTtlSeconds: true,
         bodyText: true,

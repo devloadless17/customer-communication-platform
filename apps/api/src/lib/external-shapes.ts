@@ -356,6 +356,12 @@ export interface ExternalTemplate {
   correctCategory: string | null;
   status: string;
   statusReason: string | null;
+  /**
+   * The status webhook's rich detail, when Meta sent one: rejection
+   * explanation + fix recommendation (INVALID_FORMAT), pause instance title,
+   * disable timestamp. Null otherwise.
+   */
+  statusDetail: unknown;
   /** "positional" (`{{1}}`) or "named" (`{{order_id}}`) — decides the send shape. */
   parameterFormat: string;
   messageSendTtlSeconds: number | null;
@@ -383,6 +389,7 @@ export function externalTemplate(t: {
   correctCategory: string | null;
   status: string;
   statusReason: string | null;
+  statusDetail: unknown;
   parameterFormat: string;
   messageSendTtlSeconds: number | null;
   bodyText: string;
@@ -406,6 +413,7 @@ export function externalTemplate(t: {
       t.correctCategory && t.correctCategory !== t.category ? t.correctCategory : null,
     status: t.status,
     statusReason: t.statusReason,
+    statusDetail: t.statusDetail ?? null,
     parameterFormat: t.parameterFormat,
     messageSendTtlSeconds: t.messageSendTtlSeconds,
     bodyText: t.bodyText,

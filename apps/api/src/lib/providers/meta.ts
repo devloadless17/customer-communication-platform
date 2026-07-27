@@ -254,9 +254,18 @@ interface MetaChangeValue {
   event?: string;
   /** Human reason Meta attaches on PAUSED/REJECTED (quality, policy, etc.). */
   reason?: string;
-  // `template_category_update` webhook fields — Meta auto-migrated a template's
-  // category. `correct_category` is the current spec field; `new_category` is the
-  // older alias. UPPERCASE (MARKETING | UTILITY | AUTHENTICATION).
+  /** INVALID_FORMAT rejections: Meta's detailed explanation + fix advice. */
+  rejection_info?: { reason?: string; recommendation?: string };
+  /** Pause/unpause lock events: title (FIRST_PAUSE | SECOND_PAUSE |
+   *  RATE_LIMITING_PAUSE | UNPAUSE | DISABLED) + human description. */
+  other_info?: { title?: string; description?: string };
+  /** DISABLED events: when the disable happened (unix seconds). */
+  disable_info?: { disable_date?: string | number };
+  // `template_category_update` webhook fields. Meta sends this for TWO moments:
+  // ADVANCE NOTICE carries `correct_category` (the future category) with
+  // `new_category` meaning the CURRENT one; ACTION TAKEN carries
+  // `new_category` (now the new one) + `previous_category` and no
+  // `correct_category`. UPPERCASE (MARKETING | UTILITY | AUTHENTICATION).
   correct_category?: string;
   new_category?: string;
   previous_category?: string;
@@ -1297,17 +1306,61 @@ function parseTemplateStatusUpdate(
       : undefined;
   const name = value.message_template_name;
   if (!externalId && !name) return null;
+
+  // The rich sub-objects the coarse `reason` string can't carry: the
+  // INVALID_FORMAT explanation + fix recommendation, the pause-instance title
+  // (FIRST_PAUSE/SECOND_PAUSE self-lift; RATE_LIMITING_PAUSE is pacing and
+  // needs the manual unpause), and the disable timestamp. All optional and all
+  // verbatim — these are Meta's words to the operator, not state we interpret.
+  const disableSecs =
+    value.disable_info?.disable_date != null
+      ? Number(value.disable_info.disable_date)
+      : NaN;
+  const statusDetail = {
+    ...(value.other_info?.title ? { title: value.other_info.title } : {}),
+    ...(value.other_info?.description
+      ? { description: value.other_info.description }
+      : {}),
+    ...(value.rejection_info?.reason
+      ? { rejectionReason: value.rejection_info.reason }
+      : {}),
+    ...(value.rejection_info?.recommendation
+      ? { recommendation: value.rejection_info.recommendation }
+      : {}),
+    ...(Number.isFinite(disableSecs)
+      ? { disabledAt: new Date(disableSecs * 1000).toISOString() }
+      : {}),
+  };
+
   return {
     kind: "template_status",
     ...(externalId ? { externalId } : {}),
     ...(name ? { name } : {}),
     ...(value.message_template_language
-      ? { language: value.message_template_language }
+      ? { language: normalizeTemplateLanguage(value.message_template_language) }
       : {}),
     status: mapTemplateStatus(value.event),
+    // UNARCHIVED restores "the previous status" — which this webhook doesn't
+    // carry, so it can't be a blind status write. Ingest clears the deletion
+    // countdown and refetches the catalog to learn the real status.
+    ...((value.event ?? "").toUpperCase() === "UNARCHIVED"
+      ? { unarchived: true }
+      : {}),
     ...(value.reason ? { reason: value.reason } : {}),
+    ...(Object.keys(statusDetail).length > 0 ? { statusDetail } : {}),
     rawPayload,
   };
+}
+
+/**
+ * Meta's own webhook examples mix `en-US` and `en_US` for the SAME field
+ * across references, while the catalog list (what our rows store) uses the
+ * underscore form — so a dash-form webhook would silently miss the
+ * (name, language) fallback match. Normalized at the parser, the one place
+ * every template webhook flows through.
+ */
+function normalizeTemplateLanguage(language: string): string {
+  return language.replace("-", "_");
 }
 
 /**
@@ -1344,7 +1397,7 @@ function parseTemplateCategoryUpdate(
     ...(externalId ? { externalId } : {}),
     ...(name ? { name } : {}),
     ...(value.message_template_language
-      ? { language: value.message_template_language }
+      ? { language: normalizeTemplateLanguage(value.message_template_language) }
       : {}),
     status: null,
     ...(applied ? { category: applied } : {}),
@@ -1384,7 +1437,7 @@ function parseTemplateQualityUpdate(
     ...(externalId ? { externalId } : {}),
     ...(name ? { name } : {}),
     ...(value.message_template_language
-      ? { language: value.message_template_language }
+      ? { language: normalizeTemplateLanguage(value.message_template_language) }
       : {}),
     status: null,
     qualityScore: score.toUpperCase(),
@@ -5097,7 +5150,6 @@ function mapTemplateStatus(s: string | undefined): TemplateStatus | null {
       return "approved";
     case "PENDING":
     case "IN_APPEAL":
-    case "PENDING_DELETION":
       return "pending";
     case "REJECTED":
       return "rejected";
@@ -5109,8 +5161,12 @@ function mapTemplateStatus(s: string | undefined): TemplateStatus | null {
     case "FLAGGED":
     case "LIMIT_EXCEEDED":
       return "paused";
+    // PENDING_DELETION is "deleted via WhatsApp Manager" (webhook reference),
+    // not a review state — it used to map to `pending`, which rendered a
+    // template on its way OUT as one on its way IN.
     case "DISABLED":
     case "DELETED":
+    case "PENDING_DELETION":
       return "disabled";
     // Its own state, NOT `disabled`. An archived template is recoverable for 28
     // days and then deleted for good — collapsing it into `disabled` hid both

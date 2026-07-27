@@ -2270,6 +2270,16 @@ model MessageTemplate {
   // INCORRECT_CATEGORY", which tells the author to resubmit under a different
   // category rather than rewrite the copy.
   statusReason     String?
+  // The status webhook's rich sub-objects, which the coarse `statusReason`
+  // can't carry: `rejection_info` (Meta's detailed explanation AND its fix
+  // recommendation for INVALID_FORMAT rejections), `other_info` (the pause
+  // instance — FIRST_PAUSE 3h / SECOND_PAUSE 6h self-lift vs
+  // RATE_LIMITING_PAUSE, which is pacing and only lifts via manual unpause),
+  // and `disable_info.disable_date`. Shape:
+  //   { title?, description?, rejectionReason?, recommendation?, disabledAt? }
+  // Cleared alongside statusReason on any status that arrives without one, so
+  // stale guidance can't hang off a since-recovered template.
+  statusDetail     Json?
   // Meta's `message_send_ttl_seconds`: how long delivery is retried before the
   // message is dropped. Null = the template uses Meta's per-category default
   // (minutes for authentication, days for marketing/utility) — we never

@@ -1859,6 +1859,7 @@ export class WhatsappService {
         ...(messageSendTtlSeconds !== undefined ? { messageSendTtlSeconds } : {}),
         status: "pending",
         statusReason: null,
+        statusDetail: Prisma.DbNull,
         syncedAt: new Date(),
       },
     });
@@ -2016,6 +2017,8 @@ export class WhatsappService {
       data: {
         status: "approved",
         statusReason: null,
+        // The pause-instance detail (FIRST_PAUSE etc.) died with the pause.
+        statusDetail: Prisma.DbNull,
         // Meta re-derives the band from recent feedback on unpause, so the RED
         // that caused the pause is no longer true. Null reads as "pending",
         // which is honest; the next webhook or sync fills in the new value.
@@ -2410,6 +2413,7 @@ function toTemplateDto(row: {
   correctCategory: string | null;
   status: string;
   statusReason: string | null;
+  statusDetail: Prisma.JsonValue;
   archivedAt: Date | null;
   lastUsedAt: Date | null;
   qualityScore: string | null;
@@ -2437,6 +2441,10 @@ function toTemplateDto(row: {
         : null,
     status: row.status,
     statusReason: row.statusReason,
+    statusDetail:
+      row.statusDetail && typeof row.statusDetail === "object"
+        ? (row.statusDetail as TemplateDto["statusDetail"])
+        : null,
     archivedAt: row.archivedAt?.toISOString() ?? null,
     lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
     qualityScore: row.qualityScore,

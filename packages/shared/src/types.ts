@@ -460,6 +460,20 @@ export interface TemplateDto {
   correctCategory: string | null;
   /** Meta's `reason` on the last status change, e.g. `INCORRECT_CATEGORY`. */
   statusReason: string | null;
+  /**
+   * The status webhook's rich detail, when Meta sent one. `rejectionReason` +
+   * `recommendation` are Meta's own explanation and fix advice for an
+   * INVALID_FORMAT rejection; `title` is the pause instance (FIRST_PAUSE and
+   * SECOND_PAUSE self-lift in 3h/6h; RATE_LIMITING_PAUSE is Template Pacing
+   * and only lifts via manual unpause); `disabledAt` from disable_info.
+   */
+  statusDetail: {
+    title?: string;
+    description?: string;
+    rejectionReason?: string;
+    recommendation?: string;
+    disabledAt?: string;
+  } | null;
   /** Meta's `message_send_ttl_seconds`; null = Meta's per-category default. */
   messageSendTtlSeconds: number | null;
   /**

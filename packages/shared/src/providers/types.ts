@@ -508,6 +508,29 @@ export interface NormalizedTemplateStatusUpdate {
   /** New status, already mapped to our enum; null when unmappable. */
   status: TemplateStatus | null;
   /**
+   * Meta's UNARCHIVED event. Deliberately NOT a status: the doc says the
+   * template is "restored to its previous status", which the webhook doesn't
+   * carry — so ingest clears the deletion countdown immediately and triggers
+   * a throttled catalog refetch to learn the real status, rather than guessing.
+   */
+  unarchived?: boolean;
+  /**
+   * The status webhook's rich sub-objects, verbatim where Meta's strings are
+   * verbatim: `rejection_info` (detailed explanation + actionable fix
+   * recommendation, sent with INVALID_FORMAT rejections), `other_info` (pause
+   * instance titles — FIRST_PAUSE/SECOND_PAUSE self-lift in 3h/6h,
+   * RATE_LIMITING_PAUSE is pacing and needs a manual unpause), and
+   * `disable_info.disable_date`.
+   */
+  statusDetail?: {
+    title?: string;
+    description?: string;
+    rejectionReason?: string;
+    recommendation?: string;
+    /** ISO timestamp derived from Meta's disable_date. */
+    disabledAt?: string;
+  };
+  /**
    * New quality band (`GREEN` | `YELLOW` | `RED` | `UNKNOWN`), set ONLY by the
    * `message_template_quality_update` webhook. Verbatim from Meta — quality
    * vocabulary churns and this is informational, never a sendability decision.

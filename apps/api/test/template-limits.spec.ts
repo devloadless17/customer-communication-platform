@@ -1979,6 +1979,91 @@ describe("template pause — status webhook shapes", () => {
     );
     expect((events[0] as { status: string }).status).toBe("approved");
   });
+
+  it("maps PENDING_DELETION to `disabled`, never `pending`", () => {
+    // The webhook reference: "template has been deleted via WhatsApp Manager".
+    // It used to map to `pending` — a template on its way OUT rendered as one
+    // on its way IN.
+    const events = metaProvider.parseWebhook(
+      wrap({ message_template_name: "order_promo", event: "PENDING_DELETION" }),
+    );
+    expect((events[0] as { status: string }).status).toBe("disabled");
+  });
+
+  it("UNARCHIVED sets the flag, not a status — the restored status is unknowable", () => {
+    // The doc: unarchiving restores "the previous status", which the webhook
+    // doesn't carry. Ingest clears the deletion countdown and refetches the
+    // catalog rather than guessing.
+    const events = metaProvider.parseWebhook(
+      wrap({ message_template_name: "order_promo", event: "UNARCHIVED" }),
+    );
+    const evt = events[0] as { status: unknown; unarchived?: boolean };
+    expect(evt.status).toBeNull();
+    expect(evt.unarchived).toBe(true);
+  });
+
+  it("carries rejection_info verbatim — Meta's explanation and fix advice", () => {
+    // The webhook reference's own INVALID_FORMAT example. This is the
+    // difference between showing an operator a code and an answer.
+    const events = metaProvider.parseWebhook(
+      wrap({
+        message_template_id: 1689556908129835,
+        message_template_name: "abandoned_cart",
+        message_template_language: "en",
+        event: "REJECTED",
+        reason: "INVALID_FORMAT",
+        rejection_info: {
+          reason:
+            "Your template has parameters placed next to each other (like {{1}}{{2}}) without text or punctuation between them.",
+          recommendation:
+            "Separate parameters with descriptive text and ensure each parameter is clearly contextualized.",
+        },
+      }),
+    );
+    const evt = events[0] as {
+      status: string;
+      reason?: string;
+      statusDetail?: { rejectionReason?: string; recommendation?: string };
+    };
+    expect(evt.status).toBe("rejected");
+    expect(evt.reason).toBe("INVALID_FORMAT");
+    expect(evt.statusDetail?.rejectionReason).toContain("parameters placed next to each other");
+    expect(evt.statusDetail?.recommendation).toContain("Separate parameters");
+  });
+
+  it("carries the pause-instance title and the disable timestamp", () => {
+    const paused = metaProvider.parseWebhook(
+      wrap({
+        message_template_name: "order_promo",
+        event: "PAUSED",
+        other_info: { title: "SECOND_PAUSE", description: "Second pause." },
+      }),
+    );
+    expect(
+      (paused[0] as { statusDetail?: { title?: string } }).statusDetail?.title,
+    ).toBe("SECOND_PAUSE");
+
+    const disabled = metaProvider.parseWebhook(
+      wrap({
+        message_template_name: "order_promo",
+        event: "DISABLED",
+        disable_info: { disable_date: 1751234563 },
+      }),
+    );
+    expect(
+      (disabled[0] as { statusDetail?: { disabledAt?: string } }).statusDetail?.disabledAt,
+    ).toBe(new Date(1751234563 * 1000).toISOString());
+  });
+
+  it("normalizes Meta's dash-form language to the stored underscore form", () => {
+    // Meta's webhook references mix `en-US` and `en_US` for the same field
+    // across examples, while the catalog list stores `en_US` — a dash-form
+    // webhook would silently miss the (name, language) fallback match.
+    const events = metaProvider.parseWebhook(
+      wrap({ message_template_name: "order_promo", message_template_language: "en-US", event: "APPROVED" }),
+    );
+    expect((events[0] as { language?: string }).language).toBe("en_US");
+  });
 });
 
 describe("business-portfolio pacing", () => {

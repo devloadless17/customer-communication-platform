@@ -1027,6 +1027,21 @@ function DetailDrawer({
                   <section>
                     <SectionLabel>Paused</SectionLabel>
                     <div className="mt-2 rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-xs leading-relaxed text-warning-fg">
+                      {/* Meta names the instance (other_info.title): the 1st and
+                          2nd self-lift; a RATE_LIMITING_PAUSE is Template Pacing
+                          and only Unpause lifts it. Shown when we have it so the
+                          generic ladder below has a concrete "you are here". */}
+                      {template.statusDetail?.title && (
+                        <p className="mb-1.5 font-medium">
+                          {template.statusDetail.title === "FIRST_PAUSE"
+                            ? "First pause — lifts itself in about 3 hours."
+                            : template.statusDetail.title === "SECOND_PAUSE"
+                              ? "Second pause — lifts itself in about 6 hours. A third pause disables the template."
+                              : template.statusDetail.title === "RATE_LIMITING_PAUSE"
+                                ? "Paused by Template Pacing — this one never lifts on its own. Use Unpause below."
+                                : template.statusDetail.title}
+                        </p>
+                      )}
                       <p>
                         WhatsApp pauses a template when its quality hits{" "}
                         <strong>low</strong>, to protect the numbers that send
@@ -1177,6 +1192,21 @@ function DetailDrawer({
                           . Once fixed, delete this and submit a new one with the
                           corrected content.
                         </>
+                      )}
+                      {/* INVALID_FORMAT rejections come with Meta's own
+                          explanation and fix advice (rejection_info) — the
+                          difference between a code and an answer. */}
+                      {template.statusDetail?.rejectionReason && (
+                        <p className="mt-1.5">
+                          <span className="font-medium">Meta&apos;s explanation:</span>{" "}
+                          {template.statusDetail.rejectionReason}
+                        </p>
+                      )}
+                      {template.statusDetail?.recommendation && (
+                        <p className="mt-1.5">
+                          <span className="font-medium">Meta&apos;s recommendation:</span>{" "}
+                          {template.statusDetail.recommendation}
+                        </p>
                       )}
                     </div>
                   </section>

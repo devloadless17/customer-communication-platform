@@ -1089,11 +1089,21 @@ async function ingestTemplateStatusUpdate(
     // actionable. Cleared on any status that arrives without one, so a stale
     // rejection reason can't hang off a since-approved template.
     data.statusReason = evt.reason ?? null;
+    // Same lifecycle for the rich detail (rejection explanation + fix
+    // recommendation, pause instance, disable timestamp) — cleared whenever a
+    // status arrives without one, so recovered templates don't keep old advice.
+    data.statusDetail = evt.statusDetail ?? Prisma.DbNull;
     // Archival starts a 28-day deletion countdown. This webhook is the EXACT
     // moment it began — a catalog sync can only tell us a template is already
     // archived, not when. Unarchiving restores the previous status and cancels
     // the deletion, so any non-archived status clears the deadline.
     data.archivedAt = evt.status === "archived" ? new Date() : null;
+  }
+  // UNARCHIVED restores "the previous status", which the webhook doesn't say —
+  // so stop the deletion countdown NOW and let the catalog refetch (below)
+  // learn the real status instead of guessing one.
+  if (evt.unarchived) {
+    data.archivedAt = null;
   }
   if (evt.qualityScore) {
     data.qualityScore = evt.qualityScore;
@@ -1178,6 +1188,13 @@ async function ingestTemplateStatusUpdate(
       if (row.status === "approved") continue; // no transition, nothing parked
       await resumeBroadcastsForTemplate(workspaceId, row.id);
     }
+  }
+
+  // UNARCHIVED: the row's status is still whatever it was (archived) because
+  // the webhook doesn't carry the restored status — the throttled catalog
+  // refetch is what learns it. Publishes its own catalog_changed on success.
+  if (evt.unarchived) {
+    await ingestTemplateComponentsChanged(workspaceId);
   }
 
   // Refresh every open /settings/whatsapp + broadcast-form tab so the new
