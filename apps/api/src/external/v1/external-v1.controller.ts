@@ -5,6 +5,7 @@ import {
   Delete,
   Get,
   Headers,
+  HttpCode,
   HttpException,
   NotFoundException,
   Param,
@@ -102,9 +103,11 @@ import {
 } from "@/workspace-settings/snippets/snippets.schemas";
 import {
   CreateQrCodeSchema,
+  RegisterWhatsappNumberSchema,
   UpdateBusinessProfileSchema,
   UpdateQrCodeSchema,
   type CreateQrCodeInput,
+  type RegisterWhatsappNumberInput,
   type UpdateBusinessProfileInput,
   type UpdateQrCodeInput,
 } from "@/workspace-settings/whatsapp/whatsapp.schemas";
@@ -1762,8 +1765,43 @@ export class ExternalV1Controller {
 
   @Get("whatsapp/health")
   @RequireScope("read:catalog")
-  async whatsappHealth(@CurrentApiKey() auth: ApiKeyContext) {
-    return getMessagingHealthSummary(auth.workspaceId);
+  async whatsappHealth(
+    @CurrentApiKey() auth: ApiKeyContext,
+    // `?accountId=` scopes the figures to ONE number (quality/tier are
+    // per-number; the 24h budget is portfolio-shared) — parity with the UI's
+    // per-account health panels and the composer's per-account gate.
+    @Query("accountId") accountId?: string,
+  ) {
+    return getMessagingHealthSummary(auth.workspaceId, accountId || null);
+  }
+
+  /**
+   * Re-poll Meta for a number's tier / quality / throughput now, rather than
+   * waiting for the periodic sweep. Parity with the settings Refresh button.
+   * `admin:settings` — it spends Graph reads on the workspace's behalf.
+   */
+  @Post("whatsapp/health/refresh")
+  @HttpCode(200)
+  @RequireScope("admin:settings")
+  async whatsappHealthRefresh(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.refreshHealth(auth.workspaceId, accountId || null);
+  }
+
+  /**
+   * Register a number for Cloud API use (two-step PIN, passed straight
+   * through to Meta and never stored). Parity with the UI's guided register.
+   */
+  @Post("whatsapp/register")
+  @HttpCode(200)
+  @RequireScope("admin:settings")
+  async whatsappRegister(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(RegisterWhatsappNumberSchema)) body: RegisterWhatsappNumberInput,
+  ) {
+    return this.whatsapp.registerNumber(auth.workspaceId, body);
   }
 
   // ---- Template analytics ----------------------------------------------

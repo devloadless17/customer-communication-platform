@@ -692,8 +692,10 @@ export default function ApiDocsPage() {
           <code>UNKNOWN</code>). The quality band is the one worth alerting on:
           all four bands still send, but it drives Meta&apos;s template pausing,
           so <code>RED</code> is a template about to stop working. Filter with{" "}
-          <code>?status=</code> / <code>?category=</code>. Read-only — creating a
-          template is a Meta review submission, not a CRUD write.
+          <code>?status=</code> / <code>?category=</code> /{" "}
+          <code>?wabaId=</code> (templates belong to one WhatsApp Business
+          Account — read the id off any row, then scope to it). Read-only —
+          creating a template is a Meta review submission, not a CRUD write.
         </Endpoint>
         <Endpoint method="POST" path="/api/external/v1/templates/:id/unpause">
           Lift a quality pause, and release any campaigns that were paused with
@@ -718,6 +720,29 @@ export default function ApiDocsPage() {
           having a large send refused, and the refusal is correct so there is
           nothing to retry. <code>portfolioAccountCount &gt; 1</code> means the
           budget is <strong>shared</strong> with other numbers in the portfolio.
+          <code>?accountId=</code> scopes the figures to one number (quality and
+          throughput are per-number; the budget is portfolio-shared).{" "}
+          <code>utilityRestrictionType</code>, when set, means Meta is enforcing
+          template-categorization rules on the WABA — utility sends over its cap
+          are rejected until <code>utilityRestrictedUntil</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/whatsapp/health/refresh">
+          Re-poll Meta for a number&apos;s tier / quality / throughput now
+          instead of waiting for the periodic sweep. <code>?accountId=</code>{" "}
+          picks the number; omitted polls the default. Scope{" "}
+          <code>admin:settings</code> — it spends Graph reads.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/whatsapp/register"
+          body={{ accountId: "acc_123", pin: "123456" }}
+        >
+          Register a connected number for Cloud API use (Meta&apos;s two-step
+          verification PIN — passed straight through, never stored). A number
+          saved before registration fails every send; this closes that gap
+          without leaving the API. Meta&apos;s error is surfaced verbatim
+          (wrong PIN, unapproved display name, number in use elsewhere). Scope{" "}
+          <code>admin:settings</code>.
         </Endpoint>
         <p className="text-sm text-muted-foreground">
           <strong>Reading the nulls.</strong> <code>read</code> and{" "}

@@ -814,6 +814,10 @@ export const ExternalTemplateListQuerySchema = z
       .enum(["approved", "pending", "rejected", "paused", "disabled", "archived"])
       .optional(),
     category: z.enum(["marketing", "utility", "authentication"]).optional(),
+    /** Scope to ONE WhatsApp Business Account — the API-shaped counterpart of
+     *  the UI's per-account catalogue scoping. Rows already return `wabaId`,
+     *  so a partner reads the id off any row and filters by it. */
+    wabaId: z.string().min(1).optional(),
     /** Keyset page size. Meta permits 6,000 templates per WABA and a carousel's
      *  `components` JSON runs to KBs, so an unbounded list could materialize
      *  tens of MB in a 2GB-capped heap — this was the only unpaged list route. */

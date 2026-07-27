@@ -1970,7 +1970,13 @@ export class ExternalV1Service {
    */
   async listTemplates(
     workspaceId: string,
-    filters: { status?: string; category?: string; limit?: number; cursor?: string } = {},
+    filters: {
+      status?: string;
+      category?: string;
+      wabaId?: string;
+      limit?: number;
+      cursor?: string;
+    } = {},
   ) {
     // Keyset-paged like every other list route. This was the ONE unbounded
     // list: with Meta's 6,000-templates-per-WABA ceiling and multi-KB carousel
@@ -1988,6 +1994,7 @@ export class ExternalV1Service {
         ...(filters.category
           ? { category: filters.category as Prisma.MessageTemplateWhereInput["category"] }
           : {}),
+        ...(filters.wabaId ? { wabaId: filters.wabaId } : {}),
       },
       // (name, language, id) is the stable keyset order; the cursor is the id.
       orderBy: [{ name: "asc" }, { language: "asc" }, { id: "asc" }],
