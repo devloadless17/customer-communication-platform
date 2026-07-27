@@ -1773,6 +1773,12 @@ export interface UpsertAuthTemplateArgs {
   addSecurityRecommendation?: boolean;
   /** 1–90. Omit to leave the expiry footer off entirely. */
   codeExpirationMinutes?: number;
+  /**
+   * Meta's `message_send_ttl_seconds` — supported on the upsert edge like any
+   * other creation property (the bulk-management doc excludes only `language`,
+   * `text` and `autofill_text`). Omit for Meta's per-category default.
+   */
+  messageSendTtlSeconds?: number;
   otpType: OtpType;
   /** Required for ONE_TAP and ZERO_TAP — the app that receives the code. */
   supportedApps?: Array<{ package_name: string; signature_hash: string }>;

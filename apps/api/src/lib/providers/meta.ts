@@ -3438,6 +3438,9 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         name: args.name,
         languages: args.languages,
         category: "AUTHENTICATION",
+        ...(args.messageSendTtlSeconds !== undefined
+          ? { message_send_ttl_seconds: args.messageSendTtlSeconds }
+          : {}),
         components: [
           {
             type: "BODY",

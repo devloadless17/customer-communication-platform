@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { TEMPLATE_LANGUAGES } from "@ccp/shared/template-languages";
-import { TEMPLATE_NAME_PATTERN } from "@ccp/shared/template-render";
+import { TEMPLATE_NAME_PATTERN, validateTemplateTtl } from "@ccp/shared/template-render";
 import { cn } from "@ccp/shared/utils";
 
 /**
@@ -81,6 +81,7 @@ export function AuthTemplateForm() {
   const [languages, setLanguages] = useState<string[]>(["en_US"]);
   const [addSecurity, setAddSecurity] = useState(true);
   const [expiryMinutes, setExpiryMinutes] = useState("");
+  const [ttlSeconds, setTtlSeconds] = useState("");
   const [otpType, setOtpType] = useState<OtpType>("COPY_CODE");
   const [apps, setApps] = useState<SupportedApp[]>([]);
   /** Zero-tap only. Meta refuses to create the template without it. */
@@ -100,6 +101,15 @@ export function AuthTemplateForm() {
     (/^\d+$/.test(expiryMinutes.trim()) &&
       Number(expiryMinutes) >= 1 &&
       Number(expiryMinutes) <= 90);
+  // Meta's per-category TTL range for authentication (30s–15min) — the shared
+  // rules are the authority, so this and the API rejection can't disagree.
+  const ttlError =
+    ttlSeconds.trim() === "" || !/^\d+$/.test(ttlSeconds.trim())
+      ? null
+      : validateTemplateTtl("authentication", Number(ttlSeconds.trim()));
+  const ttlValid =
+    ttlSeconds.trim() === "" ||
+    (/^\d+$/.test(ttlSeconds.trim()) && ttlError === null);
   const appsValid =
     !needsApps ||
     (apps.length > 0 &&
@@ -111,6 +121,7 @@ export function AuthTemplateForm() {
     nameValid &&
     languages.length > 0 &&
     expiryValid &&
+    ttlValid &&
     appsValid &&
     (otpType !== "ZERO_TAP" || zeroTapTerms) &&
     !submitting;
@@ -167,6 +178,9 @@ export function AuthTemplateForm() {
           addSecurityRecommendation: addSecurity,
           ...(expiryMinutes.trim()
             ? { codeExpirationMinutes: Number(expiryMinutes.trim()) }
+            : {}),
+          ...(ttlSeconds.trim() && ttlValid
+            ? { messageSendTtlSeconds: Number(ttlSeconds.trim()) }
             : {}),
           ...(otpType === "ZERO_TAP" ? { zeroTapTermsAccepted: zeroTapTerms } : {}),
           ...(needsApps
@@ -308,6 +322,27 @@ export function AuthTemplateForm() {
               <span className="text-2xs text-muted-foreground">
                 Adds an expiry line and disables the button after this long. Left
                 blank, no expiry line appears and the button lasts 10 minutes.
+              </span>
+            </label>
+
+            <label className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium">
+                Delivery time-to-live in seconds (30–900, optional)
+              </span>
+              <Input
+                value={ttlSeconds}
+                onChange={(e) => setTtlSeconds(e.target.value.replace(/[^\d]/g, ""))}
+                inputMode="numeric"
+                placeholder="e.g. 300"
+                className="max-w-40"
+              />
+              {ttlError && (
+                <span className="text-2xs text-destructive">{ttlError}</span>
+              )}
+              <span className="text-2xs text-muted-foreground">
+                How long WhatsApp keeps trying to deliver before dropping the
+                message — a code that arrives after it expired only confuses.
+                Left blank, Meta&apos;s default of 10 minutes applies.
               </span>
             </label>
           </div>

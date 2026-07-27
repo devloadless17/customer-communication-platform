@@ -1476,6 +1476,10 @@ export class WhatsappService {
     }
 
     const codeExpirationMinutes = parseCodeExpirationMinutes(obj.codeExpirationMinutes);
+    const messageSendTtlSeconds = parseTtlSeconds(
+      obj.messageSendTtlSeconds,
+      "authentication",
+    );
 
     const config = await this.templateOpConfig(workspaceId, { accountId });
     const provider = getMetaProvider();
@@ -1492,6 +1496,7 @@ export class WhatsappService {
           otpType,
           ...(obj.addSecurityRecommendation ? { addSecurityRecommendation: true } : {}),
           ...(codeExpirationMinutes !== undefined ? { codeExpirationMinutes } : {}),
+          ...(messageSendTtlSeconds !== undefined ? { messageSendTtlSeconds } : {}),
           ...(supportedApps.length > 0 ? { supportedApps } : {}),
           ...(otpType === "ZERO_TAP" ? { zeroTapTermsAccepted } : {}),
         },
