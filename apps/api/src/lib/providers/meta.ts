@@ -4849,13 +4849,25 @@ function buttonComponent(btn: {
   index: number;
   subType: "url" | "quick_reply" | "copy_code";
   text: string;
+  paramName?: string;
 }): Record<string, unknown> {
   const parameter =
     btn.subType === "copy_code"
       ? { type: "coupon_code", coupon_code: btn.text }
       : btn.subType === "quick_reply"
         ? { type: "payload", payload: btn.text }
-        : { type: "text", text: btn.text };
+        : {
+            type: "text",
+            // NAMED-format templates carry the URL variable's name — see
+            // TemplateButtonParam.paramName. Positional templates omit it.
+            // NOTE: `text` is sent VERBATIM. Percent-encoding of dynamic-URL
+            // values happens in send-template-internal, which can tell a
+            // genuine URL suffix apart from an authentication OTP code —
+            // both arrive here as sub_type "url", and Meta's auth example
+            // sends the code raw.
+            ...(btn.paramName ? { parameter_name: btn.paramName } : {}),
+            text: btn.text,
+          };
   return {
     type: "button",
     sub_type: btn.subType,

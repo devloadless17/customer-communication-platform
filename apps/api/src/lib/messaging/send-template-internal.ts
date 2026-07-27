@@ -262,7 +262,50 @@ export async function sendTemplateInternal(
     )
     .map((b) => ({ index: b.index, subType: b.subType, text: args.variables.body[0] ?? "" }))
     .filter((b) => b.text.length > 0);
-  const effectiveButtons = [...(args.variables.buttons ?? []), ...autofilledButtons];
+  const effectiveButtonsRaw = [...(args.variables.buttons ?? []), ...autofilledButtons];
+
+  function encodeUrlButtonValue(value: string): string {
+    try {
+      const decoded = decodeURIComponent(value);
+      if (encodeURIComponent(decoded) === value) return value;
+    } catch {
+      // Malformed percent sequence (e.g. a literal "100%") — encode the raw value.
+    }
+    return encodeURIComponent(value);
+  }
+  // NAMED-format templates: Meta requires `parameter_name` on a URL button's
+  // parameter. The name lives only in the template's stored URL, so it is
+  // resolved HERE from `requiredButtons` (server truth) rather than trusted
+  // from the client's button payload.
+  const paramNameByKey = new Map<string, string>(
+    requiredButtons
+      .filter((b) => b.paramName)
+      .map((b) => [`${b.index}:${b.subType}`, b.paramName!]),
+  );
+  // Which url-subType buttons carry an OTP CODE rather than a URL suffix.
+  // Both share sub_type "url" on the wire, but only the suffix gets
+  // percent-encoded below — Meta's own authentication example sends the code
+  // verbatim, and encoding `J$FpnYnP` to `J%24FpnYnP` breaks autofill.
+  const otpKeys = new Set(
+    requiredButtons
+      .filter((b) => b.autofillFromBody)
+      .map((b) => `${b.index}:${b.subType}`),
+  );
+  const effectiveButtons = effectiveButtonsRaw.map((b) => {
+    const key = `${b.index}:${b.subType}`;
+    const paramName = paramNameByKey.get(key);
+    // Percent-encode a dynamic URL suffix. Meta's components doc is explicit:
+    // unencoded special characters (spaces, `:`, `|`, `ç`, `ñ`, …) in a URL
+    // parameter make the generated URL fail validation and the send error.
+    // Already-encoded input passes through untouched (double-encoding turns
+    // %20 into %2520): a value that decodes cleanly AND re-encodes to itself
+    // is already in wire form.
+    const text =
+      b.subType === "url" && !otpKeys.has(key)
+        ? encodeUrlButtonValue(b.text)
+        : b.text;
+    return { ...b, text, ...(paramName ? { paramName } : {}) };
+  });
 
   if (requiredButtons.length > 0) {
     const supplied = new Set(effectiveButtons.map((b) => `${b.index}:${b.subType}`));

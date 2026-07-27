@@ -79,6 +79,12 @@ export interface RequiredTemplateButtonParam {
   index: number;
   subType: "url" | "copy_code";
   /**
+   * The URL variable's name for a NAMED-format template (`{{token}}` in the
+   * stored URL). Meta's send payload requires `parameter_name` on the button
+   * parameter for named templates; absent for positional (`{{1}}`) URLs.
+   */
+  paramName?: string;
+  /**
    * True for an authentication template's OTP button, whose value is by
    * definition the SAME verification code already in the body.
    *
@@ -178,7 +184,16 @@ export function requiredTemplateButtonParams(
       if (type === "COPY_CODE") {
         required.push({ index, subType: "copy_code" });
       } else if (type === "URL" && typeof btn.url === "string" && btn.url.includes("{{")) {
-        required.push({ index, subType: "url" });
+        // A NAMED-format template's URL variable is `{{token}}`, and Meta's
+        // send payload then requires `parameter_name` on the button parameter
+        // (its URL-encoding example shows exactly this shape). The name lives
+        // ONLY in the stored URL, so it is read from there — this reads the
+        // NAME, not the format: `parameterFormat` stays the sole authority on
+        // positional-vs-named, and a numeric token (a positional `{{1}}`)
+        // must never be emitted as a name.
+        const token = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/.exec(btn.url)?.[1];
+        const paramName = token && !/^\d+$/.test(token) ? token : undefined;
+        required.push({ index, subType: "url", ...(paramName ? { paramName } : {}) });
       }
     });
   }
@@ -791,6 +806,21 @@ function validateHeader(
         `A location header is only allowed on ${LOCATION_HEADER_CATEGORIES.join(" or ")} templates.`,
       );
     }
+    return;
+  }
+
+  if (fmt === "GIF") {
+    // Meta's components doc: "Gifs are only available for Marketing Messages
+    // API" — a different product from the Cloud API this platform sends
+    // through. Kept in MEDIA_HEADER_FORMATS so a synced catalog row carrying
+    // one still parses; refused at AUTHORING so an operator doesn't create a
+    // template our send path can never deliver.
+    push(
+      "header",
+      "GIF headers are a Marketing Messages API feature and can't be sent through " +
+        "the WhatsApp Cloud API — use a VIDEO header instead (larger gifs display " +
+        "as videos anyway).",
+    );
     return;
   }
 

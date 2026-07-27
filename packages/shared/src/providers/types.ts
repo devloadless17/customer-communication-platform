@@ -1353,6 +1353,14 @@ export interface TemplateButtonParam {
   subType: "url" | "copy_code" | "quick_reply";
   /** The dynamic value (URL suffix / coupon code / payload). */
   text: string;
+  /**
+   * NAMED-format templates only: the URL variable's name (`{{token}}` in the
+   * stored URL). Meta then requires `parameter_name` on the button parameter —
+   * its URL-encoding example shows exactly this shape. Resolved SERVER-SIDE
+   * from the template's components (never trusted from the client); absent for
+   * positional templates.
+   */
+  paramName?: string;
 }
 
 export interface TemplateVariableSet {
