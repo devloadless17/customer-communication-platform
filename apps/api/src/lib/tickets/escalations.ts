@@ -206,7 +206,10 @@ export async function escalateTicket(db: Db, args: EscalateTicketArgs): Promise<
           sourceTicketId: source.id,
           targetWorkspaceId: target.id,
           targetTicketId: twin.id,
-          contactSnapshot: snapshot as unknown as Prisma.InputJsonValue,
+          // Spread into a fresh literal: ContactSnapshot is structurally a
+          // valid InputJsonObject, but the named interface (no index
+          // signature) isn't assignable — the literal is.
+          contactSnapshot: { ...snapshot },
           createdById: args.actor.userId ?? null,
         },
       });

@@ -1731,7 +1731,9 @@ function hydrateFromTemplate(t: TemplateEditTarget): {
         example: Array.isArray(b.example) ? (b.example[0] ?? "") : (b.example ?? ""),
         // Keep the original so props the form doesn't model (app_deep_link,
         // flow configs) — and unknown TYPES — survive the edit round-trip.
-        raw: b as unknown as Record<string, unknown>,
+        // A spread, not a double assertion: the literal is structurally a
+        // Record<string, unknown> without defeating the checker.
+        raw: { ...b },
       };
     }),
     examples,
