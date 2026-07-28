@@ -32,7 +32,6 @@ if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 
 import { metaProvider } from "@/lib/providers/meta";
 import {
-  ConsentMessageSchema,
   RecordingPolicySchema,
   UpdateCallSettingsSchema,
 } from "@/calls/calls.schemas";
@@ -407,7 +406,7 @@ describe("voicemail schema pre-flight", () => {
   });
 });
 
-describe("recording policy + consent message schemas", () => {
+describe("recording policy schema", () => {
   it("policy is a bare on/off — Meta's announcement fields were removed outright", () => {
     expect(RecordingPolicySchema.safeParse({ enabled: true }).success).toBe(true);
     expect(RecordingPolicySchema.safeParse({ enabled: false }).success).toBe(true);
@@ -424,14 +423,5 @@ describe("recording policy + consent message schemas", () => {
         announcementLanguage: "en",
       }).success,
     ).toBe(false);
-  });
-
-  it("accepts an Arabic consent message and a null clear", () => {
-    expect(
-      ConsentMessageSchema.safeParse({
-        message: "سيتم تسجيل هذه المكالمة لأغراض الجودة وتحسين الخدمة.",
-      }).success,
-    ).toBe(true);
-    expect(ConsentMessageSchema.safeParse({ message: null }).success).toBe(true);
   });
 });

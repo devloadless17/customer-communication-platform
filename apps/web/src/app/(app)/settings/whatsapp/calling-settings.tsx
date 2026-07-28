@@ -88,7 +88,6 @@ interface Readiness {
   settings: CallSettingsState | null;
   recordingPolicy: RecordingPolicy | null;
   transcriptionPolicy: RecordingPolicy | null;
-  consentMessage: string | null;
 }
 
 /** "HHMM" → "HH:MM" for an <input type="time">, and back. */
@@ -128,8 +127,6 @@ export function CallingSettings({
   // Per-number artifact toggles (draft-then-Save like hours/voicemail).
   const [recEnabled, setRecEnabled] = useState(false);
   const [trEnabled, setTrEnabled] = useState(false);
-  // The optional written consent notice — ours end-to-end, Arabic-capable.
-  const [consentMessage, setConsentMessage] = useState("");
 
   // Same account-qualification the sibling panels use: explicit account when
   // the picker chose one, the legacy no-param request otherwise.
@@ -168,7 +165,6 @@ export function CallingSettings({
       setVmMediaId(vm?.announcementMediaId ?? null);
       setRecEnabled(data.recordingPolicy?.enabled ?? false);
       setTrEnabled(data.transcriptionPolicy?.enabled ?? false);
-      setConsentMessage(data.consentMessage ?? "");
     } catch {
       setReadiness(null);
     } finally {
@@ -292,32 +288,6 @@ export function CallingSettings({
         return;
       }
       toast.success(enabled ? onMessage : offMessage);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function saveConsentMessage() {
-    setSaving(true);
-    try {
-      const res = await apiFetch(
-        `/api/calls/admin/consent-message${accountQuery}`,
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ message: consentMessage.trim() || null }),
-        },
-      );
-      if (!res.ok) {
-        const err = (await res.json().catch(() => ({}))) as { detail?: string };
-        toast.error(err.detail ?? "Couldn't save the consent message.");
-        return;
-      }
-      toast.success(
-        consentMessage.trim()
-          ? "Consent message saved — it will be sent around recorded calls."
-          : "Consent message cleared.",
-      );
     } finally {
       setSaving(false);
     }
@@ -478,45 +448,6 @@ export function CallingSettings({
             />
           </div>
 
-          {(recEnabled || trEnabled) && (
-            <div className="border-t pt-4">
-              <div className="flex flex-col gap-1.5">
-                <p className="text-sm font-medium">
-                  Written consent message — Arabic ready
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Sent automatically into the chat around recorded or
-                  transcribed calls: before dialing on outbound, and the moment
-                  an agent answers on inbound. Unlike WhatsApp&apos;s spoken
-                  announcement, this message is yours — write it in Arabic and
-                  your customers get clear written notice in their own
-                  language, kept in the conversation as proof.
-                </p>
-                <textarea
-                  value={consentMessage}
-                  maxLength={1000}
-                  rows={3}
-                  dir="auto"
-                  onChange={(e) => setConsentMessage(e.target.value)}
-                  placeholder="سيتم تسجيل هذه المكالمة لأغراض الجودة وتحسين الخدمة."
-                  disabled={saving}
-                  className="max-w-md rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  aria-label="Written consent message"
-                />
-                <div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={saving}
-                    onClick={() => void saveConsentMessage()}
-                  >
-                    Save message
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       )}
 

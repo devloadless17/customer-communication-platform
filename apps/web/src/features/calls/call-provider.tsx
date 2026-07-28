@@ -4,6 +4,7 @@ import { createContext, useContext, type ReactNode } from "react";
 
 import { useCall } from "@/features/calls/hooks/use-call";
 import { IncomingCallToast } from "@/features/calls/components/incoming-call-toast";
+import { CallbackRequestToast } from "@/features/calls/components/callback-request-toast";
 import { CallPanel } from "@/features/calls/components/call-panel";
 
 /**
@@ -58,6 +59,9 @@ export function CallProvider({
           void callApi.reject(callId);
         }}
       />
+      {/* Passive team-wide "customer requested a callback" sonner toast —
+          deliberately NOT capability-gated (informational, nothing to answer). */}
+      <CallbackRequestToast />
       <CallPanel
         liveCall={callApi.liveCall}
         error={callApi.error}

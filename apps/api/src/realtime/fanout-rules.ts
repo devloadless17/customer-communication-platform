@@ -881,6 +881,20 @@ export const FANOUT_RULES: FanoutRuleMap = {
   //                              filters by callId; broadcasting it widely
   //                              avoids the "agent A clicked answer but the
   //                              SDP only went to agent B" race.
+  "call.permission_changed": (e, emitter) => {
+    // Team-visible on purpose (same fan as the sibling call frames): the
+    // whole point is that a callback request must reach agents who are NOT
+    // viewing the thread — the call provider toasts it team-wide, and thread
+    // viewers use it to refresh the activity log for the new pill.
+    emitter.emitAboutConversation(e.workspaceId, e.conversationId, "call:permission", {
+      workspaceId: e.workspaceId,
+      conversationId: e.conversationId,
+      contactId: e.contactId,
+      contactName: e.contactName,
+      permission: e.permission,
+    });
+  },
+
   "call.incoming": (e, emitter) => {
     emitter.emitAboutConversation(e.workspaceId,
       e.conversationId, "call:incoming", {

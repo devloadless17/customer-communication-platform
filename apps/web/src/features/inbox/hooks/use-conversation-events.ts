@@ -1625,6 +1625,7 @@ export function useConversationEvents(
       "conversation:activity",
       "conversation:deleted",
       "contacts:bulk_updated",
+      "call:permission",
       "connect",
     ];
     assertReducerCoverage([
@@ -1723,6 +1724,19 @@ export function useConversationEvents(
       }, 350);
     };
 
+    // A customer's call-permission decision wrote an audit pill server-side
+    // (callback_requested / call_permission_granted / call_permission_declined)
+    // but carries no thread-state patch — the frame exists purely so the pill
+    // appears live. Registered here (not in ACTIVITY_REFRESH_EVENTS) because
+    // that set only covers events with reducer entries; this one has none.
+    const onCallPermission: Parameters<typeof socket.on<"call:permission">>[1] = (
+      payload,
+    ) => {
+      if (payload.conversationId !== conversationId) return;
+      refreshActivity();
+    };
+    socket.on("call:permission", onCallPermission);
+
     // Iterated wiring — bind one direct-setData handler per reducer entry.
     // Skips events in COALESCED_LIVE_HOOK_EVENTS (declared in thread-reducers.ts
     // as the structural source of truth). Adding a non-coalesced entry to
@@ -1814,6 +1828,7 @@ export function useConversationEvents(
       socket.off("conversation:activity", onActivity);
       socket.off("conversation:deleted", onConversationDeleted);
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
+      socket.off("call:permission", onCallPermission);
       for (const { event, handler } of reducerHandlers) {
          
         socket.off(event as any, handler as any);

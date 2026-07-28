@@ -48,14 +48,6 @@ interface MetaChannelConfig {
     announcementLanguage?: string;
   };
   /**
-   * OUR written consent notice, auto-sent into the chat around
-   * recorded/transcribed calls (before dialing on outbound, at answer on
-   * inbound). Exists because the provider's SPOKEN announcement has no Arabic
-   * voice — this message is ours and can be fully Arabic, and it leaves
-   * durable in-thread proof of notice the voice line can't.
-   */
-  callConsentMessage?: string;
-  /**
    * HOW call artifacts are produced for this number:
    *   - "inapp" (DEFAULT — maintainer decision 2026-07-28): the agent's
    *     BROWSER records (silently — no announcement), uploads to our R2, and

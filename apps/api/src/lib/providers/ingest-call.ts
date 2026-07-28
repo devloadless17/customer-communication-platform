@@ -14,6 +14,7 @@ import {
   downloadCallTranscript,
 } from "@/lib/media/call-recording-download";
 import { resolveCustomerId } from "@/lib/identity/identity-service";
+import { recordConversationEvent } from "@/lib/inbox/events";
 import { toContactWire } from "@/lib/queries/_shared";
 import {
   runWithSerializableRetry,
@@ -1022,10 +1023,9 @@ async function handlePermissionEvent(
         ],
       }
     : { workspaceId, identityChannel: channel, externalContactId: evt.externalContactId };
-  const contact = await db.contact.findFirst({
-    where: identityWhere,
-    select: { id: true },
-  });
+  // Full row, not a narrow select: the callback-request branch below reopens
+  // the thread (needs `toWorkflowContact`) and the pill snapshots the name.
+  const contact = await db.contact.findFirst({ where: identityWhere });
   if (!contact) return;
 
   if (evt.phase === "permission_granted") {
@@ -1056,6 +1056,11 @@ async function handlePermissionEvent(
         new Date(grantedAt.getTime() + 7 * 24 * 60 * 60 * 1000)
       : evt.permissionExpiresAt ??
         new Date(grantedAt.getTime() + 7 * 24 * 60 * 60 * 1000);
+    // Tracks whether THIS delivery actually changed grant state. The pill +
+    // realtime fanout below gate on it, so an at-least-once redelivery (which
+    // finds everything already applied) stays silent — same posture as the
+    // synthetic-row idempotency guard.
+    let grantTransitioned = false;
     const pending = await db.callPermissionRequest.findFirst({
       where: {
         workspaceId,
@@ -1080,6 +1085,7 @@ async function handlePermissionEvent(
           isPermanent,
         },
       });
+      grantTransitioned = true;
     } else {
       // Customer granted without a request row on file (e.g. they accepted a
       // request that predated this tracking, or the row was pruned). Record a
@@ -1111,6 +1117,7 @@ async function handlePermissionEvent(
             isPermanent,
           },
         });
+        grantTransitioned = true;
       } else if (
         // A live grant already exists, but this reply may STRENGTHEN it: the
         // customer can upgrade a temporary permission to permanent, or re-grant
@@ -1135,7 +1142,18 @@ async function handlePermissionEvent(
             expiresAt: grantExpiresAt,
           },
         });
+        grantTransitioned = true;
       }
+    }
+    // Visibility (2026-07-28): the reply webhook is consumed whole into the
+    // state above, so without this the customer's decision — most importantly
+    // a "request a callback" tap outside call hours — leaves NO visible trace
+    // anywhere. Gated on a real transition so redeliveries stay silent.
+    if (grantTransitioned) {
+      await recordCallPermissionActivity(workspaceId, channel, contact, evt, {
+        isPermanent,
+        expiresAt: grantExpiresAt,
+      });
     }
   } else if (evt.phase === "permission_revoked") {
     // Two very different things arrive as a "reject", and conflating them
@@ -1174,7 +1192,7 @@ async function handlePermissionEvent(
     // permission are both dead as authorizations. Correlate to the exact
     // request when the reply told us which one it answers; otherwise retire
     // whatever is outstanding.
-    await db.callPermissionRequest.updateMany({
+    const retired = await db.callPermissionRequest.updateMany({
       where: {
         workspaceId,
         contactId: contact.id,
@@ -1188,6 +1206,131 @@ async function handlePermissionEvent(
       },
       data: { status: CallPermissionStatus.denied },
     });
+    // A customer's explicit decline gets a pill (the request bubble they
+    // answered is otherwise the thread's last word on it). An AUTOMATIC
+    // withdrawal does not — that's provider bookkeeping, already explained by
+    // the contact panel's revoked-until notice. Gated on actually retiring a
+    // row so an at-least-once redelivery stays silent.
+    if (!isAutomaticRevocation && retired.count > 0) {
+      await recordCallPermissionActivity(workspaceId, channel, contact, evt, null);
+    }
   }
+}
+
+/**
+ * Surface a customer's call-permission decision as a conversation-timeline
+ * pill + a `call.permission_changed` publish (→ `call:permission` frame: live
+ * pill refresh for thread viewers, team-wide callback toast).
+ *
+ * Classification of a GRANT (`grant` non-null):
+ *   - automatic + context names a call we ingested → NO pill. The customer
+ *     called us; the CallBubble already tells that story.
+ *   - automatic otherwise → `callback_requested`. This is the invisible case
+ *     this function exists for: outside call hours WhatsApp offers "request a
+ *     callback", and the tap arrives as nothing but this automatic grant.
+ *   - user_action → `granted` (they tapped Allow on our permission request).
+ * `grant === null` → `declined`.
+ *
+ * A callback request is customer-initiated outreach, so it also rises for
+ * triage exactly like a missed call (see the main ingest path): reopen a
+ * closed thread and bump `lastMessageAt` monotonically.
+ *
+ * Callers gate on a real state transition, so this never double-writes on
+ * at-least-once redelivery.
+ */
+async function recordCallPermissionActivity(
+  workspaceId: string,
+  channel: Channel,
+  contact: Contact,
+  evt: NormalizedCallEvent,
+  grant: { isPermanent: boolean; expiresAt: Date } | null,
+): Promise<void> {
+  let permission: "callback_requested" | "granted" | "declined";
+  if (!grant) {
+    permission = "declined";
+  } else if (evt.permissionAutomatic === true) {
+    const ctx = evt.permissionRequestExternalId;
+    const matchingCall = ctx
+      ? await db.call.findFirst({
+          where: { workspaceId, channel, externalCallId: ctx },
+          select: { id: true },
+        })
+      : null;
+    if (matchingCall) return;
+    permission = "callback_requested";
+  } else {
+    permission = "granted";
+  }
+
+  // No thread yet (they never messaged us) → nothing to attach the pill to;
+  // the contact panel still shows the callable state.
+  const conversation = await db.conversation.findUnique({
+    where: { workspaceId_contactId: { workspaceId, contactId: contact.id } },
+  });
+  if (!conversation) return;
+
+  if (permission === "callback_requested") {
+    // CAS reopen, same shape as the call-ingest path: idempotent across
+    // retries, and the status_changed publish only fires when THIS delivery
+    // actually flipped the row.
+    const flip = await db.conversation.updateMany({
+      where: { id: conversation.id, status: "closed" },
+      data: { status: "pending" },
+    });
+    if (flip.count > 0) {
+      await publish({
+        type: "conversation.status_changed",
+        workspaceId,
+        conversationId: conversation.id,
+        previousStatus: "closed",
+        newStatus: "pending",
+        changedByUserId: null,
+        contact: toWorkflowContact(contact),
+        conversation: workflowConversationSnapshotAfterStatusChange(
+          { ...conversation, status: "pending" },
+          { previousStatus: "closed", changedByUserId: null },
+        ),
+      });
+    }
+    // Monotonic bump so the thread rises in the inbox list for triage — the
+    // `lt` guard stops an out-of-order webhook moving it backward past a
+    // newer message or call.
+    await db.conversation.updateMany({
+      where: { id: conversation.id, lastMessageAt: { lt: evt.timestamp } },
+      data: { lastMessageAt: evt.timestamp },
+    });
+  }
+
+  const kind =
+    permission === "callback_requested"
+      ? ("callback_requested" as const)
+      : permission === "granted"
+        ? ("call_permission_granted" as const)
+        : ("call_permission_declined" as const);
+  // Pill BEFORE the publish so the frame-triggered activity GET finds the row
+  // (the trailing coalesced fetch backstops a race regardless).
+  await recordConversationEvent({
+    conversationId: conversation.id,
+    workspaceId,
+    userId: null,
+    kind,
+    after: {
+      contactId: contact.id,
+      contactName: contact.name ?? null,
+      ...(grant
+        ? { isPermanent: grant.isPermanent, expiresAt: grant.expiresAt.toISOString() }
+        : {}),
+    },
+    at: evt.timestamp,
+  });
+  await publish({
+    type: "call.permission_changed",
+    workspaceId,
+    conversationId: conversation.id,
+    contactId: contact.id,
+    contactName: contact.name ?? null,
+    permission,
+    occurredAt: evt.timestamp.toISOString(),
+  });
 }
 

@@ -351,6 +351,25 @@ enum ConversationEventKind {
   ticket_solved
   ticket_reopened
   ticket_closed
+  // Customer call-permission decisions — VISIBLE inline pills (unlike the
+  // DB-only call_* rows above), because nothing else in the thread shows them:
+  // the permission reply webhook is consumed whole into contact state, so
+  // without a pill a weekend "request a callback" tap is invisible to the team.
+  // `after` carries { contactId, contactName } (name snapshotted at write time,
+  // same rule as tag_added) plus { isPermanent, expiresAt } on grants. Actor is
+  // the CUSTOMER → no userId; rendered self-contained like
+  // visitor_started_conversation.
+  //   callback_requested      — automatic grant NOT explained by a call we have
+  //                             on file = the customer tapped "request a
+  //                             callback" (outside call hours / calls disabled).
+  //   call_permission_granted — the customer answered our permission request
+  //                             with Allow (user_action grant).
+  //   call_permission_declined— the customer declined the request.
+  // An automatic grant that accompanies a call we already ingested writes NO
+  // pill — the CallBubble already tells that story.
+  callback_requested
+  call_permission_granted
+  call_permission_declined
 }
 
 // WhatsApp Business Calling lifecycle. ringing → in_progress on first agent

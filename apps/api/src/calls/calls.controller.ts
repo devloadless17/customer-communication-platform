@@ -36,7 +36,6 @@ import {
   InitiateCallSchema,
   ListCallsQuerySchema,
   ListTeamCallsQuerySchema,
-  ConsentMessageSchema,
   MediaUpdateSchema,
   RecordingPolicySchema,
   RejectCallSchema,
@@ -47,7 +46,6 @@ import {
   type InitiateCallInput,
   type ListCallsQuery,
   type ListTeamCallsQuery,
-  type ConsentMessageInput,
   type MediaUpdateInput,
   type RecordingPolicyInput,
   type RejectCallInput,
@@ -296,28 +294,6 @@ export class CallsController {
       callId,
       { bytes: new Uint8Array(file.buffer), mimeType: file.mimetype || "audio/webm" },
       final === "1" || final === "true",
-    );
-  }
-
-  /**
-   * The written consent notice auto-sent around recorded/transcribed calls —
-   * OUR message, fully Arabic-capable, unlike the provider's announcement
-   * voice. ADMIN-only, same reasoning as the policies themselves.
-   */
-  @Patch("api/calls/admin/consent-message")
-  @HttpCode(200)
-  @RequireRole("admin")
-  async updateConsentMessage(
-    @CurrentSession() session: ApiSession,
-    @Body(zBody(ConsentMessageSchema)) body: ConsentMessageInput,
-    @Query("channel") channel?: string,
-    @Query("accountId") accountId?: string,
-  ) {
-    return this.calls.updateCallConsentMessage(
-      session,
-      body.message,
-      this.channelOf(channel),
-      accountId ?? null,
     );
   }
 

@@ -595,6 +595,11 @@ export const REDUCER_EXCLUSIONS: ReadonlyMap<string, string> = new Map([
   // not into the thread snapshot. The browser hangs them off the peer
   // connection, not the rendered state.
   ["call:sdp_offer", "WebRTC signaling, owned by useCall"],
+  // No thread-state patch — the customer's permission decision lives in an
+  // audit pill, which the live hook pulls via its coalesced activity GET on
+  // this frame. Cached snapshots pick the pill up through the cache-hit
+  // events refetch on thread open, same as every other pill.
+  ["call:permission", "activity-log refresh signal, handled by use-conversation-events"],
 ]);
 
 /**

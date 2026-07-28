@@ -1295,6 +1295,29 @@ export interface CallFailedEvent {
 }
 
 /**
+ * The customer's call-permission state changed via a `call_permission_reply`
+ * webhook — after the ingest already committed the contact/request mutation
+ * AND wrote the matching timeline pill. Fanout emits `call:permission` so open
+ * threads refresh their activity log and the team sees a callback-request
+ * toast; there is no call row involved, hence no callId.
+ *
+ * `permission` mirrors the pill kinds: `callback_requested` is an automatic
+ * grant not explained by a call on file (the customer tapped "request a
+ * callback" outside call hours); `granted`/`declined` are answers to our
+ * permission request.
+ */
+export interface CallPermissionChangedEvent {
+  workspaceId: string;
+  conversationId: string;
+  contactId: string;
+  /** Snapshotted display name for toast copy — null when the contact has none. */
+  contactName: string | null;
+  permission: "callback_requested" | "granted" | "declined";
+  /** Webhook action time (ISO), not fanout time. */
+  occurredAt: string;
+}
+
+/**
  * Meta delivered an SDP for this call. Routed to the agent's browser as
  * `call:sdp_offer`. Two cases share this frame:
  *
@@ -1423,6 +1446,7 @@ export interface DomainEventMap {
   "call.rejected": CallRejectedEvent;
   "call.failed": CallFailedEvent;
   "call.sdp_offer": CallSdpOfferEvent;
+  "call.permission_changed": CallPermissionChangedEvent;
 }
 
 export type DomainEventType = keyof DomainEventMap;

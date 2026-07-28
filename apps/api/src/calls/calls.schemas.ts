@@ -211,17 +211,6 @@ export const RecordingPolicySchema = z
   .strict();
 export type RecordingPolicyInput = z.infer<typeof RecordingPolicySchema>;
 
-/**
- * The written consent notice auto-sent around recorded/transcribed calls.
- * Fully Arabic-capable (it's OUR message, not the provider's announcement
- * voice). Null or empty clears it.
- */
-export const ConsentMessageSchema = z
-  .object({
-    message: z.string().trim().max(1000).nullable(),
-  })
-  .strict();
-export type ConsentMessageInput = z.infer<typeof ConsentMessageSchema>;
 
 
 /** Listing — keyset cursor on (ringingAt DESC, id DESC). */

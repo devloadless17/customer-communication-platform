@@ -9,6 +9,9 @@ import {
   CircleDot,
   Flag,
   FlagOff,
+  PhoneCall,
+  PhoneIncoming,
+  PhoneOff,
   RefreshCw,
   Tag,
   Ticket as TicketIcon,
@@ -250,6 +253,46 @@ function describe(e: ConversationActivityEvent): {
         icon: RefreshCw,
         text: <>Visitor started a new conversation</>,
       };
+    // Customer call-permission decisions. The actor is the CUSTOMER (no team
+    // user), so these are self-contained lines like the visitor case above.
+    // `contactName` was snapshotted at write time — same rename-proofing as
+    // tagName. callback_requested is the load-bearing one: it is the ONLY
+    // visible trace of a "request a callback" tap outside call hours.
+    case "callback_requested": {
+      const name = (e.after?.contactName as string | null | undefined) ?? null;
+      return {
+        icon: PhoneIncoming,
+        text: (
+          <>
+            <b>{name ?? "Customer"}</b> requested a callback
+          </>
+        ),
+      };
+    }
+    case "call_permission_granted": {
+      const name = (e.after?.contactName as string | null | undefined) ?? null;
+      const permanent = e.after?.isPermanent === true;
+      return {
+        icon: PhoneCall,
+        text: (
+          <>
+            <b>{name ?? "Customer"}</b> allowed voice calls
+            {permanent ? " permanently" : ""}
+          </>
+        ),
+      };
+    }
+    case "call_permission_declined": {
+      const name = (e.after?.contactName as string | null | undefined) ?? null;
+      return {
+        icon: PhoneOff,
+        text: (
+          <>
+            <b>{name ?? "Customer"}</b> declined the call request
+          </>
+        ),
+      };
+    }
     // Ticket boundaries. Only four of the ticket lifecycle's transitions cross
     // over into the THREAD timeline — the ones that change what the
     // conversation means from here on. The full history lives on the ticket

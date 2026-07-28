@@ -202,6 +202,14 @@ export function useCall(): {
   // teardown that triggers the OGG remux + Whisper transcription server-side.
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const recordArmedRef = useRef(false);
+  // OUTBOUND pickup gate. The media leg "connects" ~1s after dialing — that's
+  // WhatsApp's media server, NOT the customer — so starting the recorder on
+  // `connected` captured the entire ringing period (a 6s conversation became a
+  // 23s file). Set synchronously by the `call:answered` frame (the provider's
+  // ACCEPTED status = real pickup); a ref, not state, so the recorder guard
+  // never races React's render cycle. Inbound calls don't consult it — the
+  // agent answering IS the pickup.
+  const outboundAnsweredRef = useRef(false);
   const recorderRef = useRef<{
     recorder: MediaRecorder;
     ctx: AudioContext;
@@ -355,6 +363,9 @@ export function useCall(): {
     const remote = remoteStreamRef.current;
     const live = liveCallRef.current;
     if (!local || !remote || !live || live.callId.startsWith("tmp_")) return;
+    // Outbound: wait for REAL pickup (see outboundAnsweredRef) so the ring
+    // period is never recorded and the file length matches the conversation.
+    if (live.direction === "out" && !outboundAnsweredRef.current) return;
     try {
       const ctx = new AudioContext();
       const dest = ctx.createMediaStreamDestination();
@@ -481,6 +492,7 @@ export function useCall(): {
     // final upload is what triggers remux + transcription).
     void uploadInAppRecording(true);
     recordArmedRef.current = false;
+    outboundAnsweredRef.current = false;
     releaseMedia();
     // Clear any stashed answers so they can't leak into the next call's PC.
     pendingAnswersRef.current.clear();
@@ -588,6 +600,11 @@ export function useCall(): {
         ) {
           return prev;
         }
+        // Real pickup — open the outbound recorder gate and start it. The ref
+        // flips synchronously (no render-cycle race), and the start call is
+        // idempotent.
+        outboundAnsweredRef.current = true;
+        startInAppRecorder();
         return {
           ...prev,
           status: "in_progress",
@@ -616,7 +633,7 @@ export function useCall(): {
       socket.off("call:answered", onAnswered);
       socket.off("call:ended", onEnded);
     };
-  }, [tearDown, applyOutboundAnswer]);
+  }, [tearDown, applyOutboundAnswer, startInAppRecorder]);
 
 
   // ── Surviving a reload / tab close ──────────────────────────────────────
@@ -1086,6 +1103,9 @@ export function useCall(): {
       conversationId: string,
       contactName: string,
     ): Promise<{ ok: true } | { ok: false; reason: string }> => {
+      // Fresh call ⇒ fresh pickup gate (teardown also resets it; this covers
+      // any path that reaches a new dial without a clean teardown between).
+      outboundAnsweredRef.current = false;
       setError(null);
 
       // Single peer connection (1:1). If a call is already live — or another

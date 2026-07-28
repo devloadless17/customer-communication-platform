@@ -16,7 +16,6 @@ import {
 
 import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
 import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
-import { sendTextInternal } from "@/lib/messaging/send-text-internal";
 import { storeInAppRecording } from "@/lib/media/call-recording-download";
 import {
   providerPlaceCall,
@@ -115,8 +114,6 @@ export interface CallingReadiness {
   recordingPolicy: { enabled: boolean } | null;
   /** Per-number toggle: transcribe calls (our own Whisper pipeline). */
   transcriptionPolicy: { enabled: boolean } | null;
-  /** OUR optional written in-thread consent notice (Arabic-capable). */
-  consentMessage: string | null;
 }
 
 export interface InitiateCallSuccess {
@@ -451,27 +448,15 @@ export class CallsService {
     let recordInApp = false;
     try {
       // The number's recording/transcription toggles. Nothing is attached to
-      // the provider call — recording is silent in-app; `recordInApp` on the
-      // response is what tells the browser to run its recorder.
+      // the provider call and nothing is sent to the customer — recording is
+      // silent in-app; `recordInApp` on the response is what tells the
+      // browser to run its recorder (which starts at PICKUP, not at dial).
       const policies = await this.callArtifactPolicies(
         session.workspaceId,
         channelForCall,
         conversation.channelConnectionId,
       );
-      const artifactsWanted =
-        policies.recordingEnabled || policies.transcriptionEnabled;
-      recordInApp = artifactsWanted;
-      // Optional written notice BEFORE dialing, so the customer reads it (in
-      // their own language) before the phone rings. Best-effort: an
-      // out-of-window failure never blocks the call. Clearing the message in
-      // settings disables this entirely — consent is the business's call.
-      if (artifactsWanted && policies.consentMessage) {
-        await this.sendConsentNotice(
-          session.workspaceId,
-          conversationId,
-          policies.consentMessage,
-        );
-      }
+      recordInApp = policies.recordingEnabled || policies.transcriptionEnabled;
       placed = await providerPlaceCall(binding.provider, channelForCall, sendConfig, {
         ...(to ? { to } : {}),
         ...(recipient ? { recipient } : {}),
@@ -792,19 +777,18 @@ export class CallsService {
   ): Promise<{
     /** Per-number toggles: does this workspace want the call recorded /
      *  transcribed? Drives the browser recorder (`recordInApp` on the
-     *  initiate/answer responses) and the optional consent notice. */
+     *  initiate/answer responses). */
     recordingEnabled: boolean;
     transcriptionEnabled: boolean;
-    /** OUR optional written in-thread consent notice (fully Arabic-capable). */
-    consentMessage?: string;
   }> {
     // Artifacts are produced IN-APP only (maintainer decision 2026-07-28):
     // the agent's browser records silently and our own Whisper transcribes.
     // Meta's built-in recording/transcription objects are NEVER attached to a
-    // call — they are what triggered Meta's spoken consent announcement, and
-    // that flow was removed outright, not made optional. (The webhook ingest
-    // for `call_recording_available`/`call_transcript_available` remains as a
-    // safety net for artifacts of historical calls.)
+    // call, and nothing is sent to the customer about recording either — the
+    // maintainer removed the consent-notice message outright as well; the
+    // notice posture is the business's own responsibility. (The webhook
+    // ingest for `call_recording_available`/`call_transcript_available`
+    // remains as a safety net for artifacts of historical calls.)
     if (channel !== "whatsapp") {
       return { recordingEnabled: false, transcriptionEnabled: false };
     }
@@ -817,41 +801,11 @@ export class CallsService {
     const config = conn?.config as {
       callRecording?: { enabled?: boolean };
       callTranscription?: { enabled?: boolean };
-      callConsentMessage?: string;
     } | null;
-    const consentMessage = config?.callConsentMessage?.trim();
     return {
       recordingEnabled: config?.callRecording?.enabled === true,
       transcriptionEnabled: config?.callTranscription?.enabled === true,
-      ...(consentMessage ? { consentMessage } : {}),
     };
-  }
-
-  /**
-   * Best-effort written consent notice into the thread around a
-   * recorded/transcribed call. Never blocks or fails the call: on outbound
-   * the 24h window may be closed (the free-form send fails and the spoken
-   * announcement remains the notice); everywhere else a failure just logs.
-   */
-  private async sendConsentNotice(
-    workspaceId: string,
-    conversationId: string,
-    consentMessage: string,
-  ): Promise<void> {
-    try {
-      await sendTextInternal({
-        workspaceId,
-        conversationId,
-        body: consentMessage,
-        sentVia: "call-consent",
-      });
-    } catch (err) {
-      this.logger.warn(
-        `call consent notice not sent for conversation=${conversationId}: ${
-          err instanceof Error ? err.message : err
-        } — the provider's spoken announcement still plays`,
-      );
-    }
   }
 
   /**
@@ -1203,7 +1157,6 @@ export class CallsService {
       transcriptionPolicy: policies.transcriptionEnabled
         ? { enabled: true }
         : null,
-      consentMessage: policies.consentMessage ?? null,
     };
   }
 
@@ -1258,44 +1211,6 @@ export class CallsService {
       transcribe: final && policies.transcriptionEnabled,
     });
     return { ok: true, stored: true };
-  }
-
-  /**
-   * Admin: set the written consent notice auto-sent around
-   * recorded/transcribed calls. Ours end-to-end, so it is fully
-   * Arabic-capable — the counterweight to the provider's announcement voice,
-   * which has no Arabic. Null/empty clears it.
-   */
-  async updateCallConsentMessage(
-    session: ApiSession,
-    message: string | null,
-    channel: Channel = "whatsapp",
-    accountId?: string | null,
-  ): Promise<{ consentMessage: string | null }> {
-    if (channel !== "whatsapp") {
-      throw new BadRequestException({
-        error: "recording_not_supported",
-        detail: `${channel} calls can't be recorded or transcribed through the provider.`,
-      });
-    }
-    const conn = await this.db.channelConnection.findFirst({
-      where: accountId
-        ? { id: accountId, workspaceId: session.workspaceId, channel }
-        : { workspaceId: session.workspaceId, channel, isDefault: true },
-      select: { id: true, config: true },
-    });
-    if (!conn) throw new NotFoundException({ error: "channel_not_connected" });
-    const config = (conn.config ?? {}) as Prisma.JsonObject;
-    const trimmed = message?.trim() || null;
-    const next: Prisma.JsonObject = { ...config };
-    if (trimmed) next.callConsentMessage = trimmed;
-    else delete next.callConsentMessage;
-    await this.db.channelConnection.update({
-      where: { id: conn.id },
-      data: { config: next as Prisma.InputJsonValue },
-    });
-    invalidateProviderConfig(session.workspaceId);
-    return { consentMessage: trimmed };
   }
 
   /**
@@ -1929,25 +1844,8 @@ export class CallsService {
         call.conversation.channelConnectionId,
       );
       // Inbound accept: nothing artifact-related is attached to the provider
-      // call — the browser is already recording (told by answerCall's
-      // `recordInApp`). The optional written notice lands in the thread the
-      // moment we answer (the customer just called, so the service window is
-      // open). Detached — never delays media start.
-      const policies = await this.callArtifactPolicies(
-        session.workspaceId,
-        call.channel,
-        call.conversation.channelConnectionId,
-      );
-      if (
-        (policies.recordingEnabled || policies.transcriptionEnabled) &&
-        policies.consentMessage
-      ) {
-        void this.sendConsentNotice(
-          session.workspaceId,
-          call.conversationId,
-          policies.consentMessage,
-        );
-      }
+      // call and nothing is sent to the customer — the browser is already
+      // recording (told by answerCall's `recordInApp`).
       await providerCompleteAccept(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
         sdp: sdpAnswer,

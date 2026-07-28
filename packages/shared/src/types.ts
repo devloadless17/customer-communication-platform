@@ -873,7 +873,16 @@ export type ConversationEventKind =
   // { contactId }; the actor rides the standard attribution columns. The pill
   // explains the locked composer to anyone reading the thread later.
   | "contact_blocked"
-  | "contact_unblocked";
+  | "contact_unblocked"
+  // Customer call-permission decisions. The permission-reply webhook is
+  // consumed whole into contact state, so these pills are the ONLY visible
+  // trace — without them a weekend "request a callback" tap is invisible.
+  // `after` carries { contactId, contactName } (snapshotted at write time) plus
+  // { isPermanent, expiresAt } on grants. Actor is the customer → no userId;
+  // rendered self-contained like visitor_started_conversation.
+  | "callback_requested"
+  | "call_permission_granted"
+  | "call_permission_declined";
 
 /**
  * Who triggered the change.

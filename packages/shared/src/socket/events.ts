@@ -1012,6 +1012,22 @@ export interface ServerToClientEvents {
     sdp: { type: "offer" | "answer"; sdp: string };
   }) => void;
 
+  /**
+   * The customer's call-permission state changed (no call row involved). Two
+   * consumers: use-conversation-events refreshes the activity log so the
+   * matching pill appears live in the open thread, and the call provider shows
+   * a team-wide toast for `callback_requested` — the customer asked to be
+   * called back (e.g. outside call hours) and NOTHING else surfaces that live.
+   */
+  "call:permission": (payload: {
+    workspaceId: string;
+    conversationId: string;
+    contactId: string;
+    /** Snapshotted display name for toast copy; null when the contact has none. */
+    contactName: string | null;
+    permission: "callback_requested" | "granted" | "declined";
+  }) => void;
+
 }
 
 // -------------------------------------------------------------------------
