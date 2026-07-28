@@ -847,10 +847,19 @@ export class ContactsService {
       !isPhoneChannel(contact.identityChannel) &&
       contact.externalContactId
     ) {
+      // The account this contact actually talks to — its thread owns that
+      // fact. Without it the resolver falls to the workspace default, which is
+      // the wrong token for another Page's PSID and, in a multi-account
+      // workspace, no token at all (account-unresolved).
+      const thread = await this.db.conversation.findFirst({
+        where: { workspaceId, contactId: contact.id },
+        select: { channelConnectionId: true },
+      });
       await enrichSocialContactNames(
         workspaceId,
         contact.identityChannel,
         [contact.externalContactId],
+        thread?.channelConnectionId ?? null,
         { forceAvatar: true },
       );
     }

@@ -227,6 +227,33 @@ export function mapTicketEvent(e: TicketEventRow): TicketEvent {
   };
 }
 
+/**
+ * THE agent conversation-visibility predicate for tickets — one definition,
+ * ANDed in by both the list query and the per-ticket guard.
+ *
+ * A ticket is normally reached through its conversation, so the rule is the
+ * canonical one: the parent thread must be assigned to this agent. But
+ * `Ticket.conversationId` is NULLABLE for an escalated-in ticket, and a Prisma
+ * relation filter never matches a null relation — so expressed as the
+ * conversation clause alone this silently hid every escalation a sibling
+ * workspace sent, from the board AND from the detail route, INCLUDING from the
+ * agent it was assigned to. That is a deadlock, not just a gap: the only action
+ * that binds a conversation (and would restore visibility) is on the ticket
+ * page the agent can no longer open.
+ *
+ * So an UNBOUND ticket falls back to the ticket's own assignee. An unassigned
+ * one stays invisible, which matches what "assigned" visibility already means
+ * for an unassigned conversation — an admin or manager routes it first.
+ */
+export function ticketVisibilityWhere(viewerUserId: string): Prisma.TicketWhereInput {
+  return {
+    OR: [
+      { conversation: { assignedUserId: viewerUserId } },
+      { conversationId: null, assignedUserId: viewerUserId },
+    ],
+  };
+}
+
 export interface ListTicketsFilters {
   status?: TicketStatus[];
   priority?: TicketPriority[];
@@ -292,9 +319,7 @@ export async function listTickets(
     and.push({ OR: [{ firstResponseBreached: true }, { resolutionBreached: true }] });
   }
   if (filters.restrictToConversationsAssignedTo) {
-    and.push({
-      conversation: { assignedUserId: filters.restrictToConversationsAssignedTo },
-    });
+    and.push(ticketVisibilityWhere(filters.restrictToConversationsAssignedTo));
   }
   if (filters.cursor) {
     // Keyset: strictly older than the cursor, ties broken by id — matches the
@@ -370,7 +395,7 @@ export async function getTicketCounts(
 ): Promise<TicketCounts> {
   const active = { in: TICKET_ACTIVE_STATUSES as TicketStatus[] };
   const scope: Prisma.TicketWhereInput[] = restrictToConversationsAssignedTo
-    ? [{ conversation: { assignedUserId: restrictToConversationsAssignedTo } }]
+    ? [ticketVisibilityWhere(restrictToConversationsAssignedTo)]
     : [];
   const [byStatusRows, mineActive, breached] = await Promise.all([
     db.ticket.groupBy({

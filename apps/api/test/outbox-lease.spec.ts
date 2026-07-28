@@ -13,8 +13,8 @@
  */
 import { existsSync } from "node:fs";
 
-import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
+import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 // Vitest doesn't auto-load .env; same posture as tickets.spec.ts (cwd is
@@ -32,9 +32,7 @@ import { db, setSharedDb } from "@/lib/db";
 
 // Same standalone-Prisma posture as tickets.spec.ts — the outbox helpers read
 // the SHARED db; point it at this connection, no Nest container needed.
-const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
-});
+const prisma = createTestPrismaClient();
 setSharedDb(prisma as unknown as PrismaClient);
 
 const WS_ID = "e2e-outbox-lease-ws";

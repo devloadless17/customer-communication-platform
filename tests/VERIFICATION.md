@@ -25,9 +25,9 @@ table/queue/cache/socket-room that references the dying entity.
 
 ## Predeploy ritual (run before every push to `production`)
 
-1. `pnpm run check` (typecheck ×3 + lint + prisma-fields + test isolation)
-2. `pnpm test` (Vitest, 36 files)
-3. `pnpm test:e2e:meta` (hermetic; needs Postgres + Redis)
+1. `pnpm run check` (typecheck ×3 + lint + 6 checkers) — must be 0 ERRORS
+2. `pnpm test` (Vitest, 65 files / 718 tests as of 2026-07-28)
+3. `pnpm test:e2e:meta` (hermetic, 166; needs Postgres + Redis)
 4. `pnpm test:e2e` against the running stack (needs `pnpm dev` or prod:local)
 5. Canary intact after 3 & 4 (automatic — the run fails if not)
 
@@ -60,6 +60,12 @@ table/queue/cache/socket-room that references the dying entity.
 
 ## Domain matrix
 
+> A ✅ row is scoped to the code that existed when it was written. Five commits
+> landed after the matrix closed (`80f606c8`) and were reviewed separately —
+> see **POST-MATRIX DELTA (2026-07-28)**, which found a HIGH in a ✅ domain
+> (sweepers) introduced by a LATER feature. Closing a domain does not immunise
+> it; new code re-opens the invariants it touches.
+
 | Domain | Tier | Method | Status |
 |---|---|---|---|
 | webhooks ingest | 1 | R (controller + core, adversarial) + E (meta 165) | ✅ 2026-07-27 |
@@ -68,7 +74,7 @@ table/queue/cache/socket-room that references the dying entity.
 | workflows (~22 step types) | 1 | R (adversarial) + E (144 e2e) | ✅ 2026-07-27 |
 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E + N (pick-burst spec) | ✅ 2026-07-27 |
 | broadcasts (+audience/templates/analytics) | 1 | R (3-track adversarial) + E (meta 165) | ✅ 2026-07-27 |
-| tickets (+SLA+numbering) | 1 | R (adversarial) + E (meta 165) + N (breach guard) | ✅ 2026-07-27 |
+| tickets (+SLA+numbering) | 1 | R (adversarial) + E (meta 166) + N (breach guard, escalation visibility) | ✅ 2026-07-28 — re-reviewed after cross-workspace escalation landed: `conversationId` went NULLABLE and silently broke the agent-visibility relation filter (post-matrix delta) |
 | realtime layer | 1 | R (adversarial) + E (144 e2e two-tab) | ✅ 2026-07-27 |
 | auth / org / workspaces / members | 1 | R (adversarial) + E (45 e2e) | ✅ 2026-07-27 |
 | external /v1 API | 1 | R (adversarial, all 111 routes) + E (180 e2e) | ✅ 2026-07-27 |
@@ -80,7 +86,7 @@ table/queue/cache/socket-room that references the dying entity.
 | calls (WhatsApp calling) | 2 | R (adversarial) | ✅ 2026-07-27 — post-CAS throw 29deb9c8; live-vs-history scoping split DOCUMENTED 112ac0c3 (deliberate, was only noted on endCall) |
 | media / R2 | 2 | R (adversarial) | ✅ 2026-07-27 — tenancy + XSS VERIFIED HELD; download regression 37c0a2b9, recovery sweeper + mime + parked echo a2b6de83, SSRF fetchUrlBytes 73317ffd |
 | queues / workers | 2 | R (adversarial, all 7 workers) | ✅ 2026-07-27 — jobId/lockDuration/backpressure VERIFIED HELD; transfer-worker stall config + close cap FIXED 112ac0c3 |
-| sweepers | 2 | R (adversarial, all 30 enumerated) | ✅ 2026-07-27 — mutex/bounds/pool-close VERIFIED HELD; retention batching 29deb9c8, pagination + starvation 73317ffd, openTicketCount reconciler ec282d79 (unreadCount is NOT recomputable — §7 corrected, not faked) |
+| sweepers | 2 | R (adversarial, all 30 enumerated) + N (blob-orphan cross-check) | ✅ 2026-07-27 — mutex/bounds/pool-close VERIFIED HELD; retention batching 29deb9c8, pagination + starvation 73317ffd, openTicketCount reconciler ec282d79 (unreadCount is NOT recomputable — §7 corrected, not faked). **2026-07-28**: blob-orphan was permanently DELETING call recordings + transcripts (4th miss of that class) — fixed + negative-tested |
 | coexistence | 2 | R (adversarial) | ✅ 2026-07-27 — direction + poison chunk 3e137336, account binding (echo + history) f4f4318d (failed-job PII window = ACCEPTED: 24h/500-row cap, same posture as the completed-job retention) |
 | tags / stages / fields / snippets / flags | 3 | R (adversarial) | ✅ 2026-07-27 — bcf656d8: tag delete now scrubs InboxView.filters (a dangling tagId made a SHARED `tagMatch:all` view return an empty inbox forever); usage() counts views; tags/snippets capped at 300 (unpaginated lists every client refetches on team.catalog_changed, `tags:manage` defaults TRUE for agents); reorder bodies capped. 4f080e1c: the stage isDefault race now reports itself instead of a bogus name collision |
 | notes | 3 | R (adversarial) | ✅ 2026-07-27 — CLEAN, zero findings. visibilityWhere(viewer) on both mutations, publishInTx + kickOutbox (not fire-and-forget), emitAboutConversation respects restricted-agent scope, global-search notes carry the same restriction, body capped, no edit route |
@@ -784,6 +790,27 @@ OPEN, needs a PRODUCT decision (not a code fix):
 - `unreadCount` can only get a reconciler if a read watermark is added
   (schema change). §7 now states plainly that it has none and why.
 
+### Account-resolution family — CURRENT status (2026-07-28)
+
+The regression family opened by the `account-unresolved` guard (4e4925ec).
+Re-verified against code, because the standing list had gone stale in both
+directions:
+
+| Site | Status |
+|---|---|
+| `downloadInboundMedia` (the original regression) | ✅ fixed 37c0a2b9 |
+| `lib/sweepers/inbound-media.ts` recovery path | ✅ fixed (later session) — list was stale |
+| `calls.service.ts` (~13 sites) | ✅ fixed by the calling session — every site now passes `accountId` |
+| `conversations.service.ts` typing | ✅ fixed 2026-07-28 |
+| `conversations.service.ts` read receipts | ✅ fixed 2026-07-28 |
+| `ingest.ts` social contact enrichment | ✅ fixed 2026-07-28 (account was already in scope at the caller) |
+| `lib/analytics/template-analytics.ts` insights enable | ✅ fixed 2026-07-28; per-WABA enable still OPEN |
+
+RULE (restated, because it cost four more sites): tightening a shared resolver
+means auditing EVERY caller, not the ones the change was written for. And the
+audit has to be able to SEE them — one of these four sat in a file `grep -r`
+silently skipped as binary.
+
 ### TIER-2 fixes — running tally (2026-07-27)
 
 37c0a2b9 media download (my regression) · 29deb9c8 webhook retention +
@@ -904,6 +931,117 @@ VERIFIED HELD (real coverage — the good news):
 - **Calls**: dedup unique key, terminal-state CAS genuinely idempotent under
   redelivery, permission is a provider READ not a local ledger, SIP never
   enabled, recording correctly unbuilt.
+
+### POST-MATRIX DELTA review (2026-07-28) — the 137 files that landed AFTER 28/28
+
+The matrix closed on `80f606c8` (2026-07-27). Five commits landed after it —
+**137 files, ~2.9k lines of real code** (the 33k figure is Postman JSON) — and
+none of it had been through the program: cross-workspace ticket escalation,
+the calling artifacts (recording/transcript/voicemail), the WhatsApp
+doc-conformance batch, contact block, campaign button values. This session
+reviewed that delta and re-verified the open backlog against current code
+rather than trusting the list.
+
+Evidence: `pnpm run check` 0 errors / 6 checkers · vitest **718/718** (65
+files, was 714/715 — the suite was RED on arrival) · meta e2e **166/166**.
+
+**HIGH — call recordings and transcripts were being permanently deleted.**
+`call-recordings/{ws}/{callId}.ogg` and `call-transcripts/{ws}/{callId}.json`
+are referenced ONLY by `Call.recordingKey` / `Call.transcriptKey`. The
+blob-orphan sweeper walks the whole bucket and deletes anything past its 24h
+grace window that it can't find in `Message.mediaKey` /
+`Message.mediaThumbnailKey` / `TeamChannelMessage.mediaKey` — and neither new
+prefix was in `URL_ONLY_KEY_PREFIXES` either. So every recording was reclaimed
+about a day after the call while the `Call` row went on advertising it, and
+**unrecoverably**: Meta drops its own copy at 7 days, which is the entire
+reason the download-to-R2 path exists. This is the FOURTH instance of the class
+that file's own header documents three times (avatars, ai-knowledge +
+ai-voice-draft, contact import/export). Fixed by cross-checking both columns —
+not by prefix exclusion, because the columns exist, so exclusion would have
+protected live artifacts while leaking every genuinely orphaned one forever.
+New spec `apps/api/test/blob-orphan-call-artifacts.spec.ts` pins it and
+NEGATIVE-TESTED: removing the two queries fails it, while the
+"genuine orphan is still reclaimed" half keeps the test from passing vacuously.
+`WorkspaceRootService.destroy` now collects the same keys.
+
+**MED — an escalated-in ticket was invisible to every restricted agent.**
+`Ticket.conversationId` became NULLABLE for the escalation target, and the
+agent conversation-visibility rule was expressed purely as a relation filter on
+`conversation` — which in Prisma never matches a null relation. In a workspace
+running `agentConversationVisibility: "assigned"` the referred work was absent
+from the board, 404 on the detail route, and 404 for the assignee themselves.
+That is a deadlock, not a gap: the only action that binds a conversation (and
+would restore visibility) lives on the page they cannot open. There were
+THREE copies of the predicate (list, counts, per-ticket guard); all now call
+one `ticketVisibilityWhere`, which falls back to the ticket's own assignee
+while it is unbound. Pinned in `tickets-escalation.spec.ts` and
+negative-tested. **A nullable FK silently changes the meaning of every relation
+filter written against it** — worth checking the next time a required column
+is relaxed.
+
+**MED — four more members of the account-resolution regression family.** The
+`account-unresolved` guard turns "no account passed" into a THROW once a
+workspace has two active accounts on a channel, so every caller that omits it
+is dead in exactly the multi-account setup two prior sessions were hardening.
+The backlog listed six suspects; two (`inbound-media` recovery, all of
+`calls.service`) were already fixed by later sessions — the list was stale.
+The four that were real, all silent because each swallows the error:
+- `sendTyping` — typing indicators never delivered.
+- `markIncomingReadBestEffort` — blue-tick read receipts never delivered.
+- `enrichSocialContactNames` — social contacts stay named by their raw
+  PSID/IGSID with no avatar, forever. The account was already in scope at the
+  webhook caller (`inboundAccount.id`) and simply not passed.
+- `enableTemplateInsights` — 500s outright; it also only ever targeted the
+  default WABA. Now resolves against the connection row it already read.
+  (Per-WABA enable still needs an `?accountId=` like its sibling routes — OPEN.)
+
+**MED — `pnpm test` was RED, and the reason was a config that doesn't exist in
+production.** `message-flags.spec.ts` failed with `P2028 ... the timeout for
+this transaction was 5000 ms`. Prisma's interactive-transaction default is 5s;
+the app runs 15s (`db.service.ts`). The identical failure was diagnosed on
+tickets in `7d9149e7` — and fixed by hand-COPYING `transactionOptions` into
+that one spec. Twenty-four specs build their own client; two had the options.
+Hand-copied config drifts, which is the whole reason this codebase funnels
+rules through one definition, so there is now `apps/api/test/_prisma.ts` and
+every spec imports the factory. The direction that matters more than the red:
+a transaction legitimately taking 8s passes in prod and could never be observed
+in a spec that kills it at 5.
+
+**LOW — a source file was invisible to every `grep -r` in the repo.**
+`template-analytics.ts` carried a raw NUL byte as a composite map-key separator
+(`` `${b.type}\x00${...}` `` written as the literal byte). grep, git grep and
+GitHub code search all classify such a file as **binary** and skip it silently —
+so it never appeared in any repo-wide sweep, which is precisely how its
+`getSendConfig(workspaceId)` call survived an audit that grepped for exactly
+that pattern. Now written as the `\u0000` ESCAPE: identical string at runtime,
+file stays plain text.
+`grep -rIL "" apps/api/src apps/web/src packages/shared/src scripts` is the
+one-liner that finds this class; it is clean now.
+
+**LOW — two UNIQUE race backstops named in 0_init's own header were unpinned.**
+`InboxView_shared_name_key` / `_personal_name_key` are both partial AND
+expression indexes (`WHERE visibility = …` over `lower(name)`), so `migrate
+diff` is blind to them in both directions. Added to `partial-indexes.spec.ts`
+(now 19). The post-baseline policy itself was checked and is correctly
+followed — the two new `BroadcastRecipient` partial indexes live in their own
+migration and are already pinned.
+
+**VERIFIED HELD in the delta** — the `TicketEscalation` tenancy exception is
+genuine (org derived from the SOURCE workspace, never input; cross-org target
+answers exactly like a nonexistent one; every read reaches the row through a
+workspace-scoped ticket; both sides' events written MIRRORED and
+workspace-scoped; twin publishes `silent` + `skipOutboundWebhook` so a mirror
+can't chain workflows or echo a partner webhook); escalation chains banned and
+DB-enforced; the P2002 classifier re-reads state instead of parsing
+`err.meta.target` (the shape that has defeated it before); sever-before-delete
+on both directions; `blockedAt` enforced on all six send internals plus the
+broadcast runner and audience counts.
+
+**STILL OPEN from this pass** — per-WABA template-insights enable (needs
+`?accountId=`); `ai-knowledge/`, `ai-voice-draft/`, `tpl-hdr-` blobs still
+orphaned by workspace delete (the pre-existing MED, unchanged — those are
+prefix-excluded rather than cross-checked, so `destroy()` is the only reclaim
+path); everything else in the B-M4 open list re-confirmed still open.
 
 ### TIER-3 — 8 of 8 domains ✅ (2026-07-27) — **MATRIX COMPLETE: 28/28 domains**
 

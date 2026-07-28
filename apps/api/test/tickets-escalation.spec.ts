@@ -22,7 +22,7 @@
 import { existsSync } from "node:fs";
 
 import { PrismaClient } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createTicket, deleteTicket, routeMessageToTicket, updateTicket } from "@/lib/tickets/mutations";
@@ -32,15 +32,13 @@ import {
   escalateTicket,
   getEscalationSnapshot,
 } from "@/lib/tickets/escalations";
+import { getTicketCounts, listTickets } from "@/lib/tickets/queries";
 import { setSharedDb } from "@/lib/db";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 
-const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
-  transactionOptions: { timeout: 15_000, maxWait: 5_000 },
-});
+const prisma = createTestPrismaClient();
 const db = prisma as unknown as Parameters<typeof escalateTicket>[0];
 const mdb = prisma as unknown as Parameters<typeof createTicket>[0];
 setSharedDb(prisma as unknown as PrismaClient);
@@ -52,6 +50,9 @@ let wsA = ""; // source
 let wsB = ""; // target
 let wsForeign = ""; // another org's workspace
 let userId = "";
+/** A second agent in the target workspace — proves the visibility fallback
+ *  widens the rule for UNBOUND tickets without switching the boundary off. */
+let otherUserId = "";
 let contactSeq = 0;
 
 async function makeConversation(workspaceId: string, withProfile = false) {
@@ -111,6 +112,15 @@ beforeAll(async () => {
   });
   userId = user.id;
   await prisma.workspaceMember.create({ data: { userId, workspaceId: wsA, role: "agent" } });
+  await prisma.workspaceMember.create({ data: { userId, workspaceId: wsB, role: "agent" } });
+  const other = await prisma.user.create({
+    data: { name: "ESC Other Agent", email: `esc-other-${S}@example.test`, organizationId: orgId },
+    select: { id: true },
+  });
+  otherUserId = other.id;
+  await prisma.workspaceMember.create({
+    data: { userId: otherUserId, workspaceId: wsB, role: "agent" },
+  });
   // A field definition so the snapshot resolves keys → labels.
   await prisma.contactFieldDefinition.create({
     data: { workspaceId: wsA, key: "plan_tier", label: "Plan tier" },
@@ -482,5 +492,60 @@ describe("binding a conversation ('Message customer')", () => {
       conversationId,
     });
     expect(out).toEqual({ ok: false, reason: "not_escalated_in" });
+  });
+});
+
+describe("agent conversation-visibility", () => {
+  /**
+   * An escalated-in ticket has NO conversation until "Message customer" binds
+   * one. The restriction used to be expressed purely as a relation filter on
+   * `conversation`, and a Prisma relation filter never matches a null relation
+   * — so in a workspace running `agentConversationVisibility: "assigned"` the
+   * referred work was invisible on the board AND 404 on the detail route, even
+   * to the agent it was assigned to. That is a deadlock rather than a mere gap:
+   * the only action that binds a conversation lives on the page they cannot
+   * open. `ticketVisibilityWhere` therefore falls back to the TICKET's own
+   * assignee while it is unbound.
+   */
+  it("shows an unbound escalated-in ticket to its assignee, and hides it from everyone else", async () => {
+    const { ticket } = await makeSourceTicket(true);
+    const esc = await escalateTicket(db, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId },
+      targetWorkspaceId: wsB,
+      cause: "visibility check",
+    });
+    if (!esc.ok) throw new Error(`escalate failed: ${esc.reason}`);
+
+    // Unassigned: invisible to a restricted agent, exactly as an unassigned
+    // conversation already is.
+    const unassigned = await listTickets(db, wsB, {
+      restrictToConversationsAssignedTo: userId,
+    });
+    expect(unassigned.tickets.map((t) => t.id)).not.toContain(esc.targetTicket.id);
+
+    // Assign it to them — now it must be reachable, or the escalation is a
+    // black hole in every restricted workspace.
+    await prisma.ticket.update({
+      where: { id: esc.targetTicket.id },
+      data: { assignedUserId: userId },
+    });
+    const mine = await listTickets(db, wsB, {
+      restrictToConversationsAssignedTo: userId,
+    });
+    expect(mine.tickets.map((t) => t.id)).toContain(esc.targetTicket.id);
+
+    // A DIFFERENT restricted agent still must not see it — the fallback widens
+    // the rule for unbound tickets, it does not switch the boundary off.
+    const other = await listTickets(db, wsB, {
+      restrictToConversationsAssignedTo: otherUserId,
+    });
+    expect(other.tickets.map((t) => t.id)).not.toContain(esc.targetTicket.id);
+
+    // And the counts agree with the list — a badge that advertises work the
+    // board won't show is the same defect one layer up.
+    const counts = await getTicketCounts(db, wsB, userId, userId);
+    expect(counts.mineActive).toBeGreaterThan(0);
   });
 });

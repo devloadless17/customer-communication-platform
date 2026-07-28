@@ -63,7 +63,17 @@ export async function enableTemplateInsights(workspaceId: string): Promise<{
   if (!provider.enableTemplateInsights) {
     throw new BadRequestException({ error: "provider_lacks_template_insights" });
   }
-  const config = await binding.getSendConfig(workspaceId);
+  // Resolve credentials for the connection we just read, not "whatever the
+  // workspace defaults to". Passing nothing used to mean the same thing, but
+  // since the account-unresolved guard it means an outright throw the moment a
+  // workspace has two active numbers — so this route 500'd for exactly the
+  // customers most likely to want analytics. Naming the row also keeps the
+  // Graph call and the `insightsEnabledAt` stamp below on the SAME account.
+  //
+  // Still default-account-only by design: insights are a per-WABA switch and
+  // this route takes no `?accountId=` (unlike its siblings on this controller),
+  // so a second WABA cannot be enabled yet. Tracked as an open gap.
+  const config = await binding.getSendConfig(workspaceId, connection.id);
   await provider.enableTemplateInsights(config);
 
   const enabledAt = new Date();
@@ -135,15 +145,37 @@ export async function refreshTemplateAnalytics(
     throw new BadRequestException({ error: "provider_lacks_template_insights" });
   }
   // Select the ACCOUNT that owns this WABA, not just the workspace default.
+  // `getSendConfig` resolves its accountId against the connection ROW id —
+  // this used to pass `externalAccountId` (Meta's id), which matches no row,
+  // loads as "not-connected" and failed EVERY refresh for a synced template.
+  // That was the real bug behind the report's unexplained "Couldn't fetch
+  // from Meta".
   const accountId = opts.wabaId
     ? (
         await db.channelConnection.findFirst({
           where: { workspaceId, channel: "whatsapp", wabaId: opts.wabaId },
-          select: { externalAccountId: true },
+          select: { id: true },
         })
-      )?.externalAccountId ?? null
+      )?.id ?? null
     : null;
-  const config = await binding.getSendConfig(workspaceId, accountId);
+  // Config resolution fails for reasons the operator can fix (missing WABA id
+  // on the connection, undecryptable token) — but ProviderNotConfiguredError is
+  // a plain Error, and unwrapped it surfaced as a bare 500 whose toast could
+  // only say "Couldn't fetch from Meta". Wrap it HERE so the reason travels.
+  let config: Awaited<ReturnType<typeof binding.getSendConfig>>;
+  try {
+    config = await binding.getSendConfig(workspaceId, accountId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[template-analytics] send-config unavailable for workspace=${workspaceId}:`,
+      msg,
+    );
+    throw new BadRequestException({
+      error: "whatsapp_not_configured",
+      detail: msg.slice(0, 300),
+    });
+  }
 
   // Clamp to Meta's 90-day lookback rather than passing a wider window through:
   // an out-of-range start returns an EMPTY set, which is indistinguishable from
@@ -169,6 +201,12 @@ export async function refreshTemplateAnalytics(
       // it into the one thing the admin can act on rather than a raw Graph
       // error, which reads like an outage.
       const msg = err instanceof Error ? err.message : String(err);
+      // Server-side trail regardless of what the client shows — "the toast
+      // said X" must always be reconstructible from the logs.
+      console.warn(
+        `[template-analytics] fetch failed for workspace=${workspaceId}:`,
+        msg,
+      );
       if (/insight/i.test(msg)) {
         throw new ConflictException({ error: "template_insights_not_enabled" });
       }
@@ -359,7 +397,13 @@ export async function readTemplateAnalytics(
   const byButton = new Map<string, TemplateButtonClicks>();
   for (const day of days) {
     for (const b of day.clickedButtons ?? []) {
-      const key = `${b.type} ${b.buttonContent ?? ""}`;
+      // NUL as the composite-key separator (it can't occur in either part).
+      // Written as the ESCAPE, never as a literal byte: a raw NUL in a source
+      // file makes grep, git grep and code search classify the whole file as
+      // binary and skip it, so it vanishes from every repo-wide sweep — which
+      // is how the account-resolution bug fixed above survived an audit that
+      // grepped for exactly its call site.
+      const key = `${b.type}\u0000${b.buttonContent ?? ""}`;
       const prev = byButton.get(key);
       if (prev) prev.count += b.count;
       else byButton.set(key, { ...b });

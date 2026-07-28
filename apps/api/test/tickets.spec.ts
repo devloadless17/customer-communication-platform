@@ -22,7 +22,7 @@
 import { existsSync } from "node:fs";
 
 import { PrismaClient } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -39,15 +39,7 @@ import { computeDueDates, dueAt } from "@/lib/tickets/sla";
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 
-const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
-  // MIRRORS DbService. Without this the spec runs on Prisma's 5s default while
-  // the app runs on 15s — so the concurrency test below was exercising a
-  // configuration that does not exist in production, and failing on it. The
-  // 5s default is what the APP used too until this test surfaced it; see the
-  // reasoning at db.service.ts.
-  transactionOptions: { timeout: 15_000, maxWait: 5_000 },
-});
+const prisma = createTestPrismaClient();
 // The mutations take an injected `db` — the same surface the Nest service
 // passes. No Nest container needed.
 const db = prisma as unknown as Parameters<typeof createTicket>[0];

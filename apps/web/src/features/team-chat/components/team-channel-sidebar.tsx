@@ -72,7 +72,7 @@ export function TeamChannelSidebar({ currentUser }: { currentUser: User }) {
     setPendingChannelId(null);
   }, [routeChannelId]);
   const activeChannelId = pendingChannelId ?? routeChannelId;
-  const { onlineUserIds, availabilityByUserId } = usePresence(
+  const { onlineUserIds, availabilityByUserId, availabilitySeeded } = usePresence(
     currentUser.workspaceId,
     currentUser.id,
   );
@@ -124,6 +124,8 @@ export function TeamChannelSidebar({ currentUser }: { currentUser: User }) {
           teamMembers={teamMembers}
           currentUserId={currentUser.id}
           onlineUserIds={onlineUserIds}
+          availabilityByUserId={availabilityByUserId}
+          availabilitySeeded={availabilitySeeded}
           onClose={() => setNewDmOpen(false)}
           onOpened={(ch) => {
             setNewDmOpen(false);

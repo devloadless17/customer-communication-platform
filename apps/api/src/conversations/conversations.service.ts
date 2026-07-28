@@ -1141,7 +1141,15 @@ export class ConversationsService {
         // recipient id (PSID / IGSID); WhatsApp ignores it. Loaded off the same
         // query so no extra round-trip on the read hot path.
         conversation: {
-          select: { contact: { select: { externalContactId: true, phoneNumber: true } } },
+          select: {
+            // The thread's own account — see sendTyping. A read receipt sent
+            // from the workspace DEFAULT number is wrong, and since the
+            // account-unresolved guard it isn't sent at all in a multi-account
+            // workspace: the helper swallows ProviderNotConfiguredError, so
+            // blue ticks simply stopped appearing with nothing logged.
+            channelConnectionId: true,
+            contact: { select: { externalContactId: true, phoneNumber: true } },
+          },
         },
       },
     });
@@ -1155,6 +1163,7 @@ export class ConversationsService {
         latestInbound.externalId,
         latestInbound.channel,
         recipientId,
+        latestInbound.conversation.channelConnectionId,
       );
     }
   }
@@ -1174,6 +1183,13 @@ export class ConversationsService {
       where: { id: conversationId, workspaceId },
       select: {
         id: true,
+        // The thread's OWN account — a typing indicator has to come from the
+        // number/Page the customer messaged. Omitting it meant the resolver
+        // fell to the workspace default and, since the account-unresolved
+        // guard, threw outright in every multi-account workspace — silently,
+        // because the catch below swallows ProviderNotConfiguredError. The
+        // whole feature was dead there.
+        channelConnectionId: true,
         // Recipient identity for the social typing sender_action (PSID / IGSID);
         // WhatsApp ignores it and anchors on the inbound message id.
         contact: { select: { externalContactId: true, phoneNumber: true } },
@@ -1194,7 +1210,10 @@ export class ConversationsService {
       // Route by the inbound's own channel; a provider without typing support
       // no-ops via the optional `?.`.
       const binding = getProviderBinding(latestInbound.channel);
-      const config = await binding.getSendConfig(workspaceId);
+      const config = await binding.getSendConfig(
+        workspaceId,
+        conversation.channelConnectionId ?? undefined,
+      );
       const recipientId =
         conversation.contact.externalContactId ??
         conversation.contact.phoneNumber ??
@@ -1219,10 +1238,11 @@ export class ConversationsService {
     externalId: string,
     channel: Channel,
     recipientId?: string,
+    channelConnectionId?: string | null,
   ): Promise<void> {
     try {
       const binding = getProviderBinding(channel);
-      const config = await binding.getSendConfig(workspaceId);
+      const config = await binding.getSendConfig(workspaceId, channelConnectionId ?? undefined);
       await binding.provider.markIncomingRead?.(externalId, config, recipientId);
     } catch (err) {
       if (err instanceof ProviderNotConfiguredError) return;

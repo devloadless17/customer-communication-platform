@@ -22,7 +22,7 @@
 import { existsSync } from "node:fs";
 
 import { PrismaClient } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { db, setSharedDb } from "@/lib/db";
@@ -37,9 +37,7 @@ if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 // which NestJS normally seeds at boot. Outside Nest we seed it ourselves so the
 // SAME code path runs here as in production.
 setSharedDb(
-  new PrismaClient({
-    adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
-  }) as unknown as PrismaClient,
+  createTestPrismaClient() as unknown as PrismaClient,
 );
 
 const SUFFIX = `vt${Date.now().toString().slice(-8)}`;

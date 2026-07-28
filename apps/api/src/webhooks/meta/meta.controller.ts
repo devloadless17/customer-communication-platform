@@ -508,7 +508,15 @@ export class MetaWebhookController implements OnModuleDestroy {
       e.kind === "message" && e.externalContactId ? [e.externalContactId] : [],
     );
     if (senderIds.length > 0) {
-      void enrichSocialContactNames(workspaceId, channel, senderIds).catch((err) =>
+      // Same account the batch was attributed to (and that ingestEvents was
+      // given): a PSID/IGSID only resolves against the Page/IG account that
+      // issued it.
+      void enrichSocialContactNames(
+        workspaceId,
+        channel,
+        senderIds,
+        inboundAccount.id,
+      ).catch((err) =>
         this.logger.error(`[${workspaceId}] ${channel} name enrichment failed`, err),
       );
     }

@@ -11,7 +11,7 @@ import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { toast } from "@/lib/toast";
 import { cn, initials } from "@ccp/shared/utils";
 import type { TeamChannelDto } from "@ccp/shared/team-chat/types";
-import type { User } from "@ccp/shared/types";
+import type { User, UserAvailabilityStatus } from "@ccp/shared/types";
 
 /**
  * Roster picker for starting a 1:1 DM.
@@ -24,12 +24,19 @@ export function NewDmDialog({
   teamMembers,
   currentUserId,
   onlineUserIds,
+  availabilityByUserId,
+  availabilitySeeded,
   onClose,
   onOpened,
 }: {
   teamMembers: User[];
   currentUserId: string;
   onlineUserIds: Set<string>;
+  /** Live availability, sparse. `teamMembers` carries a server-rendered status
+   *  that froze at page load, so it may only be trusted before the snapshot
+   *  lands — after that an absent entry genuinely means "available". */
+  availabilityByUserId?: Record<string, { status: UserAvailabilityStatus }>;
+  availabilitySeeded?: boolean;
   onClose: () => void;
   onOpened: (channel: TeamChannelDto) => void;
 }) {
@@ -130,7 +137,10 @@ export function NewDmDialog({
                     {!isSelf && (
                       <PresenceDot
                         online={onlineUserIds.has(m.id)}
-                        availability={m.availabilityStatus ?? null}
+                        availability={
+                          availabilityByUserId?.[m.id]?.status ??
+                          (availabilitySeeded ? "available" : (m.availabilityStatus ?? null))
+                        }
                         className="absolute -bottom-0.5 -right-0.5"
                       />
                     )}

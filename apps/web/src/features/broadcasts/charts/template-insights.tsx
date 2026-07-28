@@ -133,11 +133,13 @@ export function TemplateInsights({ templateId }: { templateId: string }) {
             ? "Turn on template analytics in Settings → WhatsApp first."
             : body.error === "template_not_synced"
               ? "This template isn't approved by Meta yet."
-              : // Meta's own sentence when we have it — same rule as the
-                // campaign report panel: a reason the operator can act on.
-                body.detail
-                ? `Meta refused the fetch: ${body.detail}`
-                : "Couldn't fetch from Meta.",
+              : body.error === "whatsapp_not_configured"
+                ? `This account's WhatsApp connection is missing something — check Settings → WhatsApp. (${body.detail ?? "no detail"})`
+                : // Meta's own sentence when we have it — same rule as the
+                  // campaign report panel: a reason the operator can act on.
+                  body.detail
+                  ? `Meta refused the fetch: ${body.detail}`
+                  : `Couldn't fetch from Meta (HTTP ${res.status}).`,
         );
         return;
       }

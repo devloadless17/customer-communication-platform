@@ -224,6 +224,30 @@ export class WorkspaceRootService {
     );
   }
 
+  /**
+   * Call recordings + transcripts (`call-recordings/` / `call-transcripts/`).
+   * Their only reference is `Call.recordingKey` / `Call.transcriptKey`, which
+   * the cascade drops with the workspace. The blob-orphan sweeper does now
+   * cross-check both columns, so these would be reclaimed within a week
+   * regardless — collecting them here just makes the purge immediate, the same
+   * reason message blobs and transfer artifacts are collected rather than left
+   * to that sweeper.
+   */
+  private async collectCallArtifactKeys(workspaceId: string): Promise<string[]> {
+    const calls = await this.db.call.findMany({
+      where: {
+        workspaceId,
+        OR: [{ recordingKey: { not: null } }, { transcriptKey: { not: null } }],
+      },
+      select: { recordingKey: true, transcriptKey: true },
+    });
+    return calls.flatMap((c) =>
+      [c.recordingKey, c.transcriptKey].filter(
+        (k): k is string => typeof k === "string" && k.length > 0,
+      ),
+    );
+  }
+
   private async collectContactAvatarKeys(workspaceId: string): Promise<string[]> {
     const keys: string[] = [];
     const PAGE = 1_000;
@@ -249,10 +273,11 @@ export class WorkspaceRootService {
     // Blob keys feed post-delete cleanup; member ids feed the explicit
     // socket kick (the cascade clears their Session rows but already-
     // connected sockets stay live until kicked).
-    const [messageBlobKeys, contactAvatarKeys, transferKeys, teamMembers] = await Promise.all([
+    const [messageBlobKeys, contactAvatarKeys, transferKeys, callArtifactKeys, teamMembers] = await Promise.all([
       this.collectMessageBlobKeys(workspaceId),
       this.collectContactAvatarKeys(workspaceId),
       this.collectTransferArtifactKeys(workspaceId),
+      this.collectCallArtifactKeys(workspaceId),
       this.db.user.findMany({ where: { workspaceMemberships: { some: { workspaceId } } }, select: { id: true, avatarUrl: true } }),
     ]);
     const blobKeys = messageBlobKeys
@@ -275,7 +300,9 @@ export class WorkspaceRootService {
       // `ContactTransferJob` ROWS, which cascade away with the workspace, and
       // the blob-orphan sweeper deliberately skips these prefixes because that
       // reaper "owns the category". Nothing was left holding a handle.
-      .concat(transferKeys);
+      .concat(transferKeys)
+      // Call recordings + transcripts — see collectCallArtifactKeys.
+      .concat(callArtifactKeys);
 
     try {
       // DB-2: pre-drain the Message table in bounded batches BEFORE the cascade.

@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 
-import { PrismaClient } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 /**
@@ -25,9 +24,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 
-const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
-});
+const prisma = createTestPrismaClient();
 
 const S = `pa${Date.now().toString().slice(-8)}`;
 let anchorOrgId = "";

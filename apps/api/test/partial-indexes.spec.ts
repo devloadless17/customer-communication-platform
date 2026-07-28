@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 
-import { PrismaClient } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { createTestPrismaClient } from "./_prisma";
 import { afterAll, describe, expect, it } from "vitest";
 
 /**
@@ -32,9 +31,7 @@ import { afterAll, describe, expect, it } from "vitest";
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 
-const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
-});
+const prisma = createTestPrismaClient();
 
 afterAll(async () => {
   await prisma.$disconnect();
@@ -107,6 +104,22 @@ const REQUIRED_PARTIAL_INDEXES: { name: string; unique: boolean; protects: strin
     name: "ConversationSessionSummary_one_open_per_conversation",
     unique: true,
     protects: "two open session summaries on one conversation",
+  },
+  // The last two of the seven UNIQUE race backstops 0_init's own header block
+  // enumerates. They were the only ones that header named and this tripwire
+  // did not pin — and they are doubly invisible to the toolchain: partial
+  // (WHERE visibility = …) AND expression (lower(name)), so `migrate diff`
+  // cannot see them in either direction.
+  {
+    name: "InboxView_shared_name_key",
+    unique: true,
+    protects:
+      "two shared inbox views whose names differ only in case — the picker would show one workspace-wide filter twice with no way to tell them apart",
+  },
+  {
+    name: "InboxView_personal_name_key",
+    unique: true,
+    protects: "the same case-insensitive clash among one user's personal views",
   },
   {
     name: "Conversation_workspaceId_unread_idx",

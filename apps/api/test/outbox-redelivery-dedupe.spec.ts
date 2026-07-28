@@ -19,8 +19,8 @@
  */
 import { existsSync } from "node:fs";
 
-import { PrismaPg } from "@prisma/adapter-pg";
 import { Prisma, PrismaClient } from "@prisma/client";
+import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { getOutboxDispatchId, runWithCorrelationContext } from "@/common/correlation";
@@ -29,9 +29,7 @@ import { setSharedDb } from "@/lib/db";
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 
-const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
-});
+const prisma = createTestPrismaClient();
 setSharedDb(prisma as unknown as PrismaClient);
 
 const WS_ID = "e2e-dedupe-ws";

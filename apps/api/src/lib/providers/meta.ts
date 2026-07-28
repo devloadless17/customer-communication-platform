@@ -493,9 +493,20 @@ interface MetaCall {
       url?: string;
     };
   };
-  /** `call_transcription_available` payload — same media semantics as
-   *  call_recording, but the asset is a JSON transcript document. */
+  /** Transcript-available payload — same media semantics as call_recording,
+   *  but the asset is a JSON transcript document. TWO spellings typed: the
+   *  doc says `call_transcript` under a `call_transcription_available` event,
+   *  while the wire delivers the event as `call_transcript_available` — so
+   *  the field name is read defensively under both spellings too. */
   call_transcript?: {
+    document?: {
+      id?: string;
+      sha256?: string;
+      mime_type?: string;
+      url?: string;
+    };
+  };
+  call_transcription?: {
     document?: {
       id?: string;
       sha256?: string;
@@ -1267,7 +1278,12 @@ function mapMetaCallPhase(
       // expires provider-side after 7 days — ingest downloads to R2 promptly.
       return "recording_available";
     case "call_transcription_available":
-      // Post-call transcript document (same 7-day media retention).
+    case "call_transcript_available":
+      // Post-call transcript document (same 7-day media retention). TWO names
+      // accepted: the call-transcription doc says `call_transcription_available`
+      // but the wire actually delivers `call_transcript_available` (observed
+      // live 2026-07-28 — the unhandled-event log below caught it). Keep both:
+      // Meta may converge on the documented name later.
       return "transcript_available";
     default:
       console.warn(
@@ -1495,15 +1511,20 @@ function parseMetaCall(
           },
         }
       : {}),
-    ...(phase === "transcript_available" && c.call_transcript?.document?.id
-      ? {
-          transcriptMedia: {
-            mediaId: c.call_transcript.document.id,
-            mimeType: c.call_transcript.document.mime_type ?? null,
-            sha256: c.call_transcript.document.sha256 ?? null,
-          },
-        }
-      : {}),
+    ...(() => {
+      if (phase !== "transcript_available") return {};
+      // Field name read under both spellings — see the MetaCall comment.
+      const doc = c.call_transcript?.document ?? c.call_transcription?.document;
+      return doc?.id
+        ? {
+            transcriptMedia: {
+              mediaId: doc.id,
+              mimeType: doc.mime_type ?? null,
+              sha256: doc.sha256 ?? null,
+            },
+          }
+        : {};
+    })(),
     timestamp: ts,
     rawPayload,
   };

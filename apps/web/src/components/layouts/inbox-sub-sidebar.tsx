@@ -68,6 +68,7 @@ export function InboxSubSidebar({
   teammates,
   onlineUserIds,
   availabilityByUserId,
+  availabilitySeeded,
   filter,
   onFilterChange,
   canManageSharedViews,
@@ -81,11 +82,15 @@ export function InboxSubSidebar({
   teammates?: User[];
   /** When provided, teammate avatars get a green/grey dot. */
   onlineUserIds?: Set<string>;
-  /** Sparse per-user availability badge. Absent entry = "available, no note". */
+  /** Sparse per-user availability badge. Absent entry = "available, no note"
+   *  — but ONLY once `availabilitySeeded` is true. */
   availabilityByUserId?: Record<
     string,
     { status: import("@ccp/shared/types").UserAvailabilityStatus; message?: string | null }
   >;
+  /** True once the availability snapshot has landed, i.e. an absent entry is a
+   *  real "available, no note" rather than "not seeded yet". */
+  availabilitySeeded?: boolean;
   filter: Filter;
   onFilterChange: (f: Filter) => void;
   /** Whether this agent may create/edit SHARED views. */
@@ -435,9 +440,26 @@ export function InboxSubSidebar({
                 // vibrate on refresh" jank. Live data takes over the instant it
                 // arrives (a present entry is authoritative, even if its note is
                 // null = the user cleared it).
+                //
+                // ONCE SEEDED, an ABSENT entry is authoritative too — it means
+                // "available, no note", because the map is deliberately sparse
+                // (both the server snapshot and the delta handler drop that
+                // default). Falling back to the SSR seed after seeding is what
+                // made a teammate who switched from "Appear offline" back to
+                // "Available" keep a grey dot until the page was reloaded: the
+                // delta DELETED their entry and this line then read the frozen
+                // page-load status.
                 const live = availabilityByUserId?.[u.id];
-                const status = live ? live.status : (u.availabilityStatus ?? "available");
-                const note = live ? live.message ?? null : (u.availabilityMessage ?? null);
+                const status = live
+                  ? live.status
+                  : availabilitySeeded
+                    ? "available"
+                    : (u.availabilityStatus ?? "available");
+                const note = live
+                  ? live.message ?? null
+                  : availabilitySeeded
+                    ? null
+                    : (u.availabilityMessage ?? null);
                 const dotClass = online
                   ? AVAILABILITY_DOT_CLASSES[status]
                   : AVAILABILITY_DOT_CLASSES.offline;

@@ -173,7 +173,10 @@ export function MembersSettings({
   // with no presence check, so a teammate who wasn't connected at all still
   // showed a green "Available" here while the sidebar correctly showed them
   // grey — the two surfaces disagreed about the same person.
-  const { onlineUserIds, availabilityByUserId } = usePresence(workspaceId, currentUserId);
+  const { onlineUserIds, availabilityByUserId, availabilitySeeded } = usePresence(
+    workspaceId,
+    currentUserId,
+  );
   const { confirm, confirmDialog } = useConfirm();
 
   const refresh = softRefresh;
@@ -454,6 +457,7 @@ export function MembersSettings({
               online={onlineUserIds.has(u.id)}
               liveAvailability={availabilityByUserId[u.id]?.status}
               liveNote={availabilityByUserId[u.id]?.message ?? undefined}
+              availabilitySeeded={availabilitySeeded}
               canManageAvailability={canManageOthersAvailability}
               onAvailabilityChanged={refresh}
               onAvailabilityError={setError}
@@ -548,6 +552,7 @@ function UserRow({
   online,
   liveAvailability,
   liveNote,
+  availabilitySeeded,
   canManageAvailability,
   onAvailabilityChanged,
   onAvailabilityError,
@@ -563,9 +568,12 @@ function UserRow({
   actorOrgRole?: OrgRole;
   /** Has a live socket. Offline wins over any availability — see PresenceDot. */
   online: boolean;
-  /** Live status/note from the socket; falls back to the SSR snapshot. */
+  /** Live status/note from the socket; falls back to the SSR snapshot until the
+   *  availability snapshot has landed. */
   liveAvailability?: UserAvailabilityStatus;
   liveNote?: string;
+  /** True once the availability snapshot arrived — see the `status` note below. */
+  availabilitySeeded: boolean;
   canManageAvailability: boolean;
   onAvailabilityChanged: () => void;
   onAvailabilityError: (message: string | null) => void;
@@ -596,11 +604,14 @@ function UserRow({
   const editable = canManageUsers(actorRole) && canModifyUser(actor, target);
   const manageAccount = canModifyUserAccount(actor, target);
   const canDelete = canDeleteMember(actor, target);
-  // Live socket value wins; the SSR snapshot is the fallback for the first
-  // paint (and for a member the sparse presence map omits, i.e. the default
-  // "available, no note").
-  const status: UserAvailabilityStatus = liveAvailability ?? user.availabilityStatus;
-  const note = liveNote ?? user.availabilityMessage ?? "";
+  // Live socket value wins. The SSR snapshot is the fallback ONLY until the
+  // availability snapshot lands: after that, an absent entry means the member
+  // is at the default "available, no note" (the map is sparse by design, and a
+  // member returning to that default has their entry deleted). Preferring the
+  // frozen SSR value there kept a stale dot on screen until a reload.
+  const status: UserAvailabilityStatus =
+    liveAvailability ?? (availabilitySeeded ? "available" : user.availabilityStatus);
+  const note = liveNote ?? (availabilitySeeded ? "" : (user.availabilityMessage ?? ""));
   const options = useMemo(() => {
     const set = new Set<Role>(assignableRoles({ role: actorRole, isSuperAdmin: actorIsSuperAdmin }));
     set.add(user.role);

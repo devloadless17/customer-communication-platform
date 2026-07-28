@@ -3256,11 +3256,20 @@ async function ingestContactNumberChange(
  * not a business event). Fail-soft throughout — any provider/DB/creds error
  * leaves the id-as-name fallback untouched. No-op for phone channels (they get
  * the name from the webhook) or providers without `fetchContactProfile`.
+ *
+ * `channelConnectionId` is the account that RECEIVED the batch. It is not
+ * optional in practice: a PSID/IGSID is scoped to the Page or IG account it was
+ * issued for, so the profile has to be fetched with that account's token. And
+ * since the account-unresolved guard, omitting it doesn't fall back to the
+ * default — it THROWS, straight into the `catch { return }` below, so a
+ * workspace with two Pages silently kept every social contact named by its raw
+ * opaque id with no avatar, forever.
  */
 export async function enrichSocialContactNames(
   workspaceId: string,
   channel: Channel,
   externalContactIds: string[],
+  channelConnectionId?: string | null,
   opts?: { forceAvatar?: boolean },
 ): Promise<void> {
   if (isPhoneChannel(channel)) return;
@@ -3278,7 +3287,7 @@ export async function enrichSocialContactNames(
 
   let config;
   try {
-    config = await binding.getSendConfig(workspaceId);
+    config = await binding.getSendConfig(workspaceId, channelConnectionId ?? undefined);
   } catch {
     return; // not connected / creds missing — skip, keep the id fallback
   }

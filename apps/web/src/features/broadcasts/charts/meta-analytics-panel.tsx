@@ -114,12 +114,14 @@ export function MetaAnalyticsPanel({
               ? "This campaign's template isn't synced from Meta yet."
               : body.error === "broadcast_has_no_template"
                 ? "Only template campaigns have Meta analytics."
-                : // Meta's own sentence when we have it — "Couldn't fetch"
-                  // with no reason is a dead end the operator can't act on
-                  // (and can't even report usefully).
-                  body.detail
-                  ? `Meta refused the fetch: ${body.detail}`
-                  : "Couldn't fetch from Meta.",
+                : body.error === "whatsapp_not_configured"
+                  ? `This account's WhatsApp connection is missing something — check Settings → WhatsApp. (${body.detail ?? "no detail"})`
+                  : // Meta's own sentence when we have it — "Couldn't fetch"
+                    // with no reason is a dead end the operator can't act on
+                    // (and can't even report usefully).
+                    body.detail
+                    ? `Meta refused the fetch: ${body.detail}`
+                    : `Couldn't fetch from Meta (HTTP ${res.status}).`,
         );
         return;
       }

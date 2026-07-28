@@ -116,32 +116,42 @@ describe("recording/transcript artifact webhooks", () => {
     });
   });
 
-  it("parses call_transcription_available into a transcript_available event", () => {
-    const events = callEvents(
-      callsEnvelope({
-        id: "wacid.TR1",
-        from: "14085551234",
-        timestamp: "1728932177",
-        event: "call_transcription_available",
-        call_transcript: {
-          document: {
-            id: "555000111",
-            sha256: "abc=",
-            mime_type: "application/json",
-            url: "https://lookaside.example/short-lived",
+  // BOTH event names: the call-transcription doc says
+  // `call_transcription_available`, but the wire delivers
+  // `call_transcript_available` (observed live 2026-07-28 — the documented
+  // name never arrived and the transcript was silently dropped). Accepting
+  // only the doc name is the regression this pins against.
+  for (const eventName of [
+    "call_transcription_available",
+    "call_transcript_available",
+  ]) {
+    it(`parses ${eventName} into a transcript_available event`, () => {
+      const events = callEvents(
+        callsEnvelope({
+          id: "wacid.TR1",
+          from: "14085551234",
+          timestamp: "1728932177",
+          event: eventName,
+          call_transcript: {
+            document: {
+              id: "555000111",
+              sha256: "abc=",
+              mime_type: "application/json",
+              url: "https://lookaside.example/short-lived",
+            },
           },
-        },
-      }),
-    );
-    expect(events).toHaveLength(1);
-    const evt = events[0]!;
-    expect(evt.phase).toBe("transcript_available");
-    expect(evt.transcriptMedia).toEqual({
-      mediaId: "555000111",
-      mimeType: "application/json",
-      sha256: "abc=",
+        }),
+      );
+      expect(events).toHaveLength(1);
+      const evt = events[0]!;
+      expect(evt.phase).toBe("transcript_available");
+      expect(evt.transcriptMedia).toEqual({
+        mediaId: "555000111",
+        mimeType: "application/json",
+        sha256: "abc=",
+      });
     });
-  });
+  }
 });
 
 describe("business-initiated connect SDP fallback", () => {

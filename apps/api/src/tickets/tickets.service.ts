@@ -15,7 +15,6 @@ import type {
 } from "@ccp/shared/tickets/types";
 import {
   assertCanViewConversation,
-  conversationRelationWhere,
   isRestrictedViewer,
   type ConversationViewer,
 } from "@/lib/conversations/visibility";
@@ -39,6 +38,7 @@ import {
   getTicketCounts,
   listTicketEvents,
   listTickets,
+  ticketVisibilityWhere,
 } from "@/lib/tickets/queries";
 
 import { ConversationsService } from "../conversations/conversations.service";
@@ -82,11 +82,13 @@ export class TicketsService {
    */
   private restriction(viewer?: ConversationViewer) {
     if (!viewer || !isRestrictedViewer(viewer)) return null;
-    // Via the canonical builder (lib/conversations/visibility.ts) — a
-    // hand-written fragment here is the copy-drift this file's own comment
-    // warns about. The null-sentinel + AND-array composition stay unchanged.
-    const relation = conversationRelationWhere(viewer);
-    return relation.conversation ? relation : null;
+    // Via the canonical TICKET builder (lib/tickets/queries.ts), which wraps
+    // the conversation rule from lib/conversations/visibility.ts and adds the
+    // unbound-escalation case. Sharing it with `listTickets` is the point: a
+    // hand-written fragment here is exactly the copy-drift that let the board
+    // and this guard disagree about escalated-in tickets. The null-sentinel +
+    // AND-array composition stay unchanged.
+    return ticketVisibilityWhere(viewer.userId);
   }
 
   private async assertVisible(viewer: ConversationViewer | undefined, ticketId: string) {

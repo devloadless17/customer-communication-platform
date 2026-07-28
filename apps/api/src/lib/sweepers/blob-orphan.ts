@@ -13,9 +13,10 @@ import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
  *   2. A crash between the `blobStorage.upload()` return and the DB row write
  *      for the message — the object is in R2 with no Message row pointing to it.
  *
- * Strategy: page through provider files, cross-check each batch against
- * Message.mediaKey + TeamChannelMessage.mediaKey, delete files older than a
- * grace window whose keys appear in neither table.
+ * Strategy: page through provider files, cross-check each batch against every
+ * column that persists an object key (Message.mediaKey / .mediaThumbnailKey,
+ * TeamChannelMessage.mediaKey, Call.recordingKey / .transcriptKey), delete
+ * files older than a grace window whose keys appear in none of them.
  *
  * URL-only blobs are EXCLUDED. Avatars store only `User.avatarUrl` (no
  * `mediaKey`), so a naive "delete unless in a mediaKey column" scan would
@@ -184,6 +185,14 @@ export function stopBlobOrphanSweeper(): void {
   }
 }
 
+/** Exported for the spec — same convention as `sweepMessageFlagCountsOnce`.
+ *  This sweeper's failure mode is PERMANENT DELETION of referenced customer
+ *  data, so the cross-check needs to be assertable directly rather than only
+ *  through the weekly timer. */
+export async function sweepBlobOrphansOnce(): Promise<void> {
+  return sweepOnce();
+}
+
 async function sweepOnce(): Promise<void> {
   if (!blobStorage.listKeys) return;
 
@@ -223,24 +232,50 @@ async function sweepOnce(): Promise<void> {
       // check Message.mediaThumbnailKey — video poster frames are stored on a
       // separate key there, not in `mediaKey`, so without this a referenced
       // poster thumbnail would be classified an orphan and deleted.
-      const [msgHits, thumbHits, chatHits] = await Promise.all([
-        db.message.findMany({
-          where: { mediaKey: { in: eligibleKeyList } },
-          select: { mediaKey: true },
-        }),
-        db.message.findMany({
-          where: { mediaThumbnailKey: { in: eligibleKeyList } },
-          select: { mediaThumbnailKey: true },
-        }),
-        db.teamChannelMessage.findMany({
-          where: { mediaKey: { in: eligibleKeyList } },
-          select: { mediaKey: true },
-        }),
-      ]);
+      const [msgHits, thumbHits, chatHits, recordingHits, transcriptHits] =
+        await Promise.all([
+          db.message.findMany({
+            where: { mediaKey: { in: eligibleKeyList } },
+            select: { mediaKey: true },
+          }),
+          db.message.findMany({
+            where: { mediaThumbnailKey: { in: eligibleKeyList } },
+            select: { mediaThumbnailKey: true },
+          }),
+          db.teamChannelMessage.findMany({
+            where: { mediaKey: { in: eligibleKeyList } },
+            select: { mediaKey: true },
+          }),
+          // CALL ARTIFACTS. `call-recordings/{ws}/{callId}.ogg` and
+          // `call-transcripts/{ws}/{callId}.json` are referenced ONLY by
+          // Call.recordingKey / Call.transcriptKey. Without these two queries
+          // every one of them was classified an orphan 24h after the call and
+          // permanently deleted while the Call row still advertised it — and
+          // unlike a leaked blob that is UNRECOVERABLE: Meta deletes its own
+          // copy 7 days after the webhook, so R2 holds the only one. That is
+          // the fourth instance of the exact failure the comment block above
+          // already documents three times.
+          //
+          // Cross-checked rather than prefix-excluded BECAUSE the columns
+          // exist: exclusion would protect live artifacts but leak every
+          // genuinely orphaned one forever (a workspace delete drops the Call
+          // rows and nothing else collects these keys). Same reasoning as the
+          // `mediaThumbnailKey` check above.
+          db.call.findMany({
+            where: { recordingKey: { in: eligibleKeyList } },
+            select: { recordingKey: true },
+          }),
+          db.call.findMany({
+            where: { transcriptKey: { in: eligibleKeyList } },
+            select: { transcriptKey: true },
+          }),
+        ]);
       const referenced = new Set<string>([
         ...msgHits.map((m) => m.mediaKey!).filter(Boolean),
         ...thumbHits.map((m) => m.mediaThumbnailKey!).filter(Boolean),
         ...chatHits.map((m) => m.mediaKey!).filter(Boolean),
+        ...recordingHits.map((c) => c.recordingKey!).filter(Boolean),
+        ...transcriptHits.map((c) => c.transcriptKey!).filter(Boolean),
       ]);
       for (const k of eligible) {
         if (!referenced.has(k.key)) orphanKeys.push(k.key);

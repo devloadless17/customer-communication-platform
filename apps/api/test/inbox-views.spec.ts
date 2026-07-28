@@ -21,8 +21,7 @@
  */
 import { existsSync } from "node:fs";
 
-import { PrismaClient } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { createTestPrismaClient } from "./_prisma";
 import { BadRequestException, ForbiddenException, NotFoundException } from "@nestjs/common";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -45,9 +44,7 @@ import type { DbService } from "@/db/db.service";
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 
-const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
-});
+const prisma = createTestPrismaClient();
 const service = new InboxViewsService(prisma as unknown as DbService);
 
 const S = `iv${Date.now().toString().slice(-8)}`;

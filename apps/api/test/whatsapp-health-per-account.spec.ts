@@ -22,7 +22,7 @@
 import { existsSync } from "node:fs";
 
 import { PrismaClient } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
@@ -40,9 +40,7 @@ import { sweepWhatsappHealthOnce } from "@/lib/sweepers/whatsapp-health-refresh"
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 
-const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
-});
+const prisma = createTestPrismaClient();
 setSharedDb(prisma as unknown as PrismaClient);
 
 const S = `hp${Date.now().toString().slice(-8)}`;

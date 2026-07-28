@@ -7,6 +7,7 @@ import {
   CalendarClock,
   CheckCircle2,
   Clock,
+  Download,
   ExternalLink,
   Loader2,
   Octagon,
@@ -19,6 +20,7 @@ import { LocalTime } from "@/components/local-time";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { toast } from "@/lib/toast";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { BROWSER_API_BASE } from "@/lib/api/browser-base";
 import { getClientSocket } from "@/lib/socket-client";
 import { cn, formatPhone } from "@ccp/shared/utils";
 import { BroadcastStatusBadge } from "../broadcast-status-badge";
@@ -316,6 +318,33 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
   // finishes — delivery and read receipts keep arriving for hours after the last
   // send, so the final numbers are not known at completion time.
   const [report, setReport] = useState<BroadcastReportDto | null>(null);
+
+  // Bucket sizes for the recipient tabs, straight off the funnel this page
+  // already fetched — no extra queries. Each entry mirrors the server's
+  // outcome clause exactly (delivered = reached = delivered+read; pending =
+  // the not-yet-final states pending+sent+held), so a tab's count and its
+  // filtered list can never disagree.
+  const outcomeCounts: Record<RecipientOutcomeFilter, number> | null = report
+    ? {
+        all: data.totalCount,
+        delivered: report.funnel.reached,
+        read: report.funnel.read,
+        replied: report.funnel.replied,
+        clicked: report.funnel.clicked,
+        never_received: report.funnel.neverReceived,
+        pending: report.funnel.pending + report.funnel.sent + report.funnel.held,
+      }
+    : null;
+
+  // "Export what I'm looking at" — the export endpoint speaks the same
+  // outcome/errorCode vocabulary as the table, so the file matches the view.
+  const exportParams = new URLSearchParams({
+    ...(statusFilter !== "all" ? { outcome: statusFilter } : {}),
+    ...(errorCodeFilter ? { errorCode: errorCodeFilter } : {}),
+  }).toString();
+  const exportHref = `${BROWSER_API_BASE}/api/broadcasts/${data.id}/export${
+    exportParams ? `?${exportParams}` : ""
+  }`;
   // Bumped after a Meta analytics fetch so the delivery curve refetches in step
   // with the report rather than holding a snapshot from before it.
   const [reportRefreshKey, setReportRefreshKey] = useState(0);
@@ -794,24 +823,35 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
           {/* Outcome tabs — the funnel's numbers as PEOPLE. Always shown (a
               20-recipient campaign still wants "who replied"); every tab is a
               server-side filter, so a 100k campaign drills down through the
-              same bounded pages as a small one. */}
+              same bounded pages as a small one. Counts come from the report's
+              funnel — already on this page, zero extra queries — so at 10k
+              replies the operator sees the size of a bucket BEFORE opening it
+              and exports the full list instead of scrolling it. */}
           <div className="flex flex-wrap items-center gap-1.5">
             <div className="inline-flex w-fit flex-wrap rounded-lg border border-border bg-background p-0.5 text-xs">
-              {RECIPIENT_OUTCOME_TABS.map((tab) => (
-                <button
-                  key={tab.value}
-                  type="button"
-                  onClick={() => selectFilter(tab.value)}
-                  className={cn(
-                    "rounded-md px-2.5 py-1 font-medium transition-colors",
-                    statusFilter === tab.value && !errorCodeFilter
-                      ? "bg-primary/10 text-primary"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {tab.label}
-                </button>
-              ))}
+              {RECIPIENT_OUTCOME_TABS.map((tab) => {
+                const count = outcomeCounts?.[tab.value];
+                return (
+                  <button
+                    key={tab.value}
+                    type="button"
+                    onClick={() => selectFilter(tab.value)}
+                    className={cn(
+                      "rounded-md px-2.5 py-1 font-medium transition-colors",
+                      statusFilter === tab.value && !errorCodeFilter
+                        ? "bg-primary/10 text-primary"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {tab.label}
+                    {count !== undefined && count > 0 && (
+                      <span className="ml-1 tabular-nums opacity-60">
+                        {count.toLocaleString()}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
             {errorCodeFilter && (
               <button
@@ -824,6 +864,17 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                 <span aria-hidden>×</span>
               </button>
             )}
+            {/* Same filter vocabulary server-side, so "export what I'm looking
+                at" is exact — the 10k-replies answer is this file, not 50
+                clicks of Load more. */}
+            <a
+              href={exportHref}
+              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              download
+            >
+              <Download className="size-3" />
+              Export CSV
+            </a>
           </div>
         </header>
         <div className="max-h-120 overflow-auto">

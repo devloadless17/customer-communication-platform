@@ -87,11 +87,21 @@ export function usePresence(
 ): {
   onlineUserIds: Set<string>;
   availabilityByUserId: Record<string, TeammateAvailability>;
+  availabilitySeeded: boolean;
 } {
   const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(() => new Set());
   const [availabilityByUserId, setAvailabilityByUserId] = useState<
     Record<string, TeammateAvailability>
   >({});
+  // Flips true once the first `user:availability:snapshot` lands. Until then the
+  // map is EMPTY-BECAUSE-UNSEEDED; afterwards it is empty-because-default, and
+  // only then may a consumer read an absent entry as "available + no note".
+  // Consumers that first-paint from a server-rendered seed (inbox sub-sidebar,
+  // members settings) need that distinction: without it, a teammate returning
+  // to plain "available" — which DELETES their entry to keep the map sparse —
+  // silently fell back to the frozen SSR status and kept rendering the stale
+  // dot (a grey "offline" dot for someone who just came back) until a reload.
+  const [availabilitySeeded, setAvailabilitySeeded] = useState(false);
 
   useEffect(() => {
     const socket = getClientSocket();
@@ -120,6 +130,7 @@ export function usePresence(
       typeof socket.on<"user:availability:snapshot">
     >[1] = (payload) => {
       if (payload.workspaceId !== workspaceId) return;
+      setAvailabilitySeeded(true);
       // Replace wholesale — the snapshot is the authoritative full picture.
       // Diff first so a snapshot identical to current state (common on
       // reconnect) doesn't trigger a wide re-render.
@@ -201,5 +212,5 @@ export function usePresence(
     };
   }, [workspaceId]);
 
-  return { onlineUserIds, availabilityByUserId };
+  return { onlineUserIds, availabilityByUserId, availabilitySeeded };
 }

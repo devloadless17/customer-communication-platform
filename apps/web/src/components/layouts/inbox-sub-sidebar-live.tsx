@@ -41,7 +41,7 @@ export function InboxSubSidebarLive({
   // Drives the green/grey presence dots next to each teammate, and keeps this
   // user visible as online to others while they sit in the inbox (the
   // sub-sidebar is always mounted on /inbox, so the join persists).
-  const { onlineUserIds, availabilityByUserId } = usePresence(
+  const { onlineUserIds, availabilityByUserId, availabilitySeeded } = usePresence(
     currentUser.workspaceId,
     currentUser.id,
   );
@@ -56,6 +56,7 @@ export function InboxSubSidebarLive({
       canManageSharedViews={canManageSharedViews}
       onlineUserIds={onlineUserIds}
       availabilityByUserId={availabilityByUserId}
+      availabilitySeeded={availabilitySeeded}
       filter={filter}
       onFilterChange={setFilter}
     />
