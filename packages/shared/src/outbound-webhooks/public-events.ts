@@ -455,7 +455,7 @@ export const PUBLIC_EVENT_GROUPS: Array<{
         type: "ticket.changed",
         label: "On Ticket changed",
         description:
-          "A ticket was opened, assigned, moved, solved, closed, reopened, or missed its SLA. `action` is the TRANSITION (`created` | `assigned` | `status_changed` | `priority_changed` | `reopened` | `solved` | `closed` | `sla_breached`, plus `updated` for edits that moved no lifecycle) — so a \"work finished\" automation keys on `action === \"solved\"` without firing again when someone later edits the note. `sla_breached` carries `breached_leg` and fires exactly once per leg.",
+          "A ticket was opened, assigned, moved, solved, closed, reopened, or missed its SLA. `action` is the TRANSITION (`created` | `assigned` | `status_changed` | `priority_changed` | `reopened` | `solved` | `closed` | `sla_breached` | `escalated`, plus `updated` for edits that moved no lifecycle) — so a \"work finished\" automation keys on `action === \"solved\"` without firing again when someone later edits the note. `sla_breached` carries `breached_leg` and fires exactly once per leg. `escalated` fires on the source ticket when it is referred to another workspace in the organization.",
         samplePayload: {
           action: "solved",
           conversation_id: "cmpconv_01",

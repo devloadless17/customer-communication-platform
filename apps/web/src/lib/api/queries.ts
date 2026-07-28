@@ -237,6 +237,14 @@ export async function getTicket(
   return api<{ ticket: TicketView; events: TicketEventView[] }>(`/api/tickets/${id}`);
 }
 
+/** Sibling workspaces a ticket can be escalated to (id + name only). */
+export async function listEscalationTargets(): Promise<Array<{ id: string; name: string }>> {
+  const { workspaces } = await api<{ workspaces: Array<{ id: string; name: string }> }>(
+    "/api/tickets/escalation-targets",
+  );
+  return workspaces;
+}
+
 /** Ticketing configuration for the settings page, in one round-trip. */
 export async function getTicketSettings(): Promise<{
   settings: TicketSettingsView;
@@ -751,6 +759,8 @@ export interface BroadcastListItem {
 
 export interface BroadcastDetail extends BroadcastListItem {
   templateId: string | null;
+  /** The template's catalog message text (null for freeform / deleted). */
+  templateBody: string | null;
   bodyText: string | null;
   /** Retryable failures only (excludes cancel-finalized recipients). */
   genuineFailedCount: number;
@@ -768,6 +778,13 @@ export interface BroadcastDetail extends BroadcastListItem {
     externalId: string | null;
     errorMessage: string | null;
     sentAt: string | null;
+    deliveryState: string;
+    deliveredAt: string | null;
+    readAt: string | null;
+    repliedAt: string | null;
+    clickedAt: string | null;
+    clickedOptionId: string | null;
+    errorCode: string | null;
   }>;
 }
 

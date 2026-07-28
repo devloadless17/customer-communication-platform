@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { AlertTriangle, Clock, Loader2, Ticket as TicketIcon } from "lucide-react";
+import { AlertTriangle, ArrowUpRight, Clock, Loader2, Ticket as TicketIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -408,7 +408,18 @@ function Card({
       >
         {ticket.subject ?? `${ticket.contactName}'s request`}
       </Link>
-      <p className="mt-0.5 truncate text-2xs text-muted-foreground">{ticket.contactName}</p>
+      <p className="mt-0.5 truncate text-2xs text-muted-foreground">
+        {ticket.contactName}
+        {/* One glance tells the triager this card involves another workspace. */}
+        {ticket.escalation ? (
+          <span className="ml-1.5 inline-flex items-center gap-0.5 rounded bg-primary/10 px-1 py-px text-3xs font-medium text-primary">
+            <ArrowUpRight aria-hidden className="size-2.5" />
+            {ticket.escalation.role === "target"
+              ? `From ${ticket.escalation.otherWorkspaceName}`
+              : `To ${ticket.escalation.otherWorkspaceName}`}
+          </span>
+        ) : null}
+      </p>
 
       {ticket.tags.length > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1">

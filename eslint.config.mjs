@@ -66,6 +66,13 @@ export default tseslint.config(
       // The provider / adapter / event-bus seams use `any` deliberately in a
       // handful of spots; flagging every one as an error isn't actionable here.
       "@typescript-eslint/no-explicit-any": "off",
+      // Grouped case labels annotated by a comment ("the try-again-later
+      // cousins: …") are a deliberate documentation style in the error-code
+      // ladders (meta-send-error.ts). Without allowEmptyCase, a comment
+      // between two EMPTY case labels is flagged as a fallthrough — but an
+      // empty case cannot fall through anything; only a case with statements
+      // and no break is the real bug this rule exists for.
+      "no-fallthrough": ["error", { allowEmptyCase: true }],
     },
   },
 

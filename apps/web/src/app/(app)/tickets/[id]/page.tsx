@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import {
   getTicket,
   listAssignmentPolicies,
+  listEscalationTargets,
   listTags,
   listTeamMembers,
 } from "@/lib/api/queries";
@@ -28,13 +29,15 @@ export default async function TicketDetailPage({
   const { id } = await params;
   const [detail, session] = await Promise.all([getTicket(id).catch(() => null), getSession()]);
   if (!detail) notFound();
-  const [users, tags, teams] = await Promise.all([
+  const [users, tags, teams, escalationTargets] = await Promise.all([
     listTeamMembers(),
     listTags(),
     // Teams (AssignmentPolicy) drive the handoff picker. Degrades to [] — a
     // teams read failing must not 500 a ticket the agent navigated to; the
     // picker simply says there are none, and the failure is logged.
     soft("assignment policies", [], () => listAssignmentPolicies()),
+    // Sibling workspaces drive the escalation picker — same degradation.
+    soft("escalation targets", [], () => listEscalationTargets()),
   ]);
   const { ticket, events } = detail;
   // Delete is destructive and reserved for the people who supervise the queue —
@@ -48,6 +51,7 @@ export default async function TicketDetailPage({
       users={users}
       tags={tags}
       teams={teams}
+      escalationTargets={escalationTargets}
       canDelete={canDelete}
     />
   );

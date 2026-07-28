@@ -152,3 +152,23 @@ export const AddTicketNoteSchema = z.object({
   body: z.string().trim().min(1).max(5000),
 });
 export type AddTicketNoteInput = z.infer<typeof AddTicketNoteSchema>;
+
+/**
+ * Escalate a ticket to a sibling workspace in the organization. The cause is
+ * REQUIRED — it becomes the twin ticket's description and is the whole point
+ * of the referral: the receiving workspace must understand the issue without
+ * access to the source thread.
+ */
+export const EscalateTicketSchema = z.object({
+  targetWorkspaceId: z.string().min(1),
+  cause: z.string().trim().min(1).max(5000),
+  subject: z.string().trim().max(200).optional(),
+});
+export type EscalateTicketInput = z.infer<typeof EscalateTicketSchema>;
+
+/** A comment shared across the escalation pair — BOTH workspaces see it,
+ *  unlike an internal note. */
+export const AddEscalationCommentSchema = z.object({
+  body: z.string().trim().min(1).max(5000),
+});
+export type AddEscalationCommentInput = z.infer<typeof AddEscalationCommentSchema>;

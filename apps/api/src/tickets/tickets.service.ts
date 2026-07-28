@@ -27,6 +27,12 @@ import {
   type TicketActor,
   type TicketOutcome,
 } from "@/lib/tickets/mutations";
+import {
+  addEscalationComment,
+  bindEscalatedTicketConversation,
+  escalateTicket,
+  getEscalationSnapshot,
+} from "@/lib/tickets/escalations";
 import type { Role } from "@ccp/shared/types";
 import {
   getTicket,
@@ -35,10 +41,12 @@ import {
   listTickets,
 } from "@/lib/tickets/queries";
 
+import { ConversationsService } from "../conversations/conversations.service";
 import { DbService } from "../db/db.service";
 import type {
   CreateTicketFieldInput,
   CreateTicketInput,
+  EscalateTicketInput,
   ListTicketsQuery,
   TicketSettingsInput,
   UpdateTicketFieldInput,
@@ -57,7 +65,10 @@ import type {
  */
 @Injectable()
 export class TicketsService {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly conversations: ConversationsService,
+  ) {}
 
   /**
    * Agent conversation-visibility, applied to tickets.
@@ -273,6 +284,164 @@ export class TicketsService {
       throw new BadRequestException({ error: "empty_note" });
     }
     throw new NotFoundException({ error: outcome.reason });
+  }
+
+  // ---- Cross-workspace escalation ----
+
+  /**
+   * The escalation target picker: every OTHER workspace in the caller's org,
+   * id + name ONLY. Deliberately not the workspace switcher list — that
+   * returns memberships (with roles), and an agent refers a ticket to a
+   * workspace they may have no seat in. A sibling workspace's NAME within one
+   * organization is not sensitive.
+   */
+  async listEscalationTargets(workspaceId: string): Promise<{ id: string; name: string }[]> {
+    const ws = await this.db.workspace.findUniqueOrThrow({
+      where: { id: workspaceId },
+      select: { organizationId: true },
+    });
+    return this.db.workspace.findMany({
+      where: { organizationId: ws.organizationId, id: { not: workspaceId } },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, name: true },
+    });
+  }
+
+  /**
+   * Refer a ticket to a sibling workspace in the organization. Any agent can
+   * escalate — same tier as raising a ticket; the visibility boundary applies
+   * to the SOURCE ticket like every other write.
+   */
+  async escalate(
+    workspaceId: string,
+    actor: TicketActor,
+    id: string,
+    body: EscalateTicketInput,
+    viewer?: ConversationViewer,
+  ): Promise<{ ticket: Ticket }> {
+    await this.assertVisible(viewer, id);
+    const outcome = await escalateTicket(this.db, {
+      workspaceId,
+      ticketId: id,
+      actor,
+      targetWorkspaceId: body.targetWorkspaceId,
+      cause: body.cause,
+      ...(body.subject !== undefined ? { subject: body.subject } : {}),
+    });
+    if (outcome.ok) return { ticket: outcome.sourceTicket };
+    switch (outcome.reason) {
+      case "already_escalated":
+        // 409: the state, not the input, is what refused this — a concurrent
+        // escalate may have just landed, so a re-read shows the existing link.
+        throw new ConflictException({ error: "already_escalated" });
+      case "cannot_escalate_escalated_ticket":
+        throw new BadRequestException({
+          error: "cannot_escalate_escalated_ticket",
+          detail:
+            "This ticket IS an escalation — answer it here or on its source; chains are not allowed.",
+        });
+      case "ticket_terminal":
+        throw new BadRequestException({ error: "ticket_terminal" });
+      case "no_contact":
+        throw new BadRequestException({ error: "no_contact" });
+      default:
+        // ticket_not_found and target_workspace_not_found both 404 — the second
+        // deliberately does not confirm what exists outside the caller's org.
+        throw new NotFoundException({ error: outcome.reason });
+    }
+  }
+
+  /** Post a comment BOTH sides of the escalation pair see. */
+  async addEscalationComment(
+    workspaceId: string,
+    actor: TicketActor,
+    id: string,
+    body: string,
+    viewer?: ConversationViewer,
+  ): Promise<{ ok: true }> {
+    await this.assertVisible(viewer, id);
+    const outcome = await addEscalationComment(this.db, {
+      workspaceId,
+      ticketId: id,
+      actor,
+      body,
+    });
+    if (outcome.ok) return { ok: true };
+    switch (outcome.reason) {
+      case "empty_comment":
+        throw new BadRequestException({ error: "empty_comment" });
+      case "not_escalated":
+        throw new BadRequestException({ error: "not_escalated" });
+      case "escalation_severed":
+        throw new BadRequestException({
+          error: "escalation_severed",
+          detail: "The linked ticket was deleted — there is nobody on the other end.",
+        });
+      default:
+        throw new NotFoundException({ error: outcome.reason });
+    }
+  }
+
+  /**
+   * Start this workspace's OWN conversation with the escalated customer, from
+   * the snapshot's phone, and bind it to the ticket. Goes through the canonical
+   * `startConversation` path (find-or-create contact with stage seeding +
+   * soft-delete revive, reopen-not-fragment) — from then on the ticket is a
+   * completely normal ticket.
+   */
+  async messageEscalatedCustomer(
+    workspaceId: string,
+    actor: TicketActor,
+    id: string,
+    input: { channelConnectionId?: string },
+    viewer?: ConversationViewer,
+  ): Promise<{ ticket: Ticket; conversationId: string }> {
+    await this.assertVisible(viewer, id);
+    const snapshot = await getEscalationSnapshot(this.db, workspaceId, id);
+    if (!snapshot) {
+      // Distinguish "no such ticket" from "not an escalated-in ticket".
+      const exists = await this.db.ticket.findFirst({
+        where: { id, workspaceId },
+        select: { id: true },
+      });
+      if (!exists) throw new NotFoundException({ error: "ticket_not_found" });
+      throw new BadRequestException({ error: "not_escalated_in" });
+    }
+    if (!snapshot.phoneNumber) {
+      throw new BadRequestException({
+        error: "no_phone_in_snapshot",
+        detail:
+          "The customer's identity on the source channel has no phone number, so this workspace cannot start a chat. Answer through the shared comments instead.",
+      });
+    }
+    const started = await this.conversations.startConversation(workspaceId, actor.userId ?? null, {
+      phone: snapshot.phoneNumber,
+      ...(snapshot.name ? { name: snapshot.name } : {}),
+      ...(input.channelConnectionId ? { channelConnectionId: input.channelConnectionId } : {}),
+    });
+    const outcome = await bindEscalatedTicketConversation(this.db, {
+      workspaceId,
+      ticketId: id,
+      actor,
+      conversationId: started.conversationId,
+    });
+    if (outcome.ok) return { ticket: outcome.ticket, conversationId: started.conversationId };
+    if (outcome.reason === "already_bound") {
+      // A double-click raced us — the conversation exists and the ticket is
+      // bound; hand back the current state instead of an error.
+      const ticket = await getTicket(this.db, workspaceId, id);
+      if (ticket?.conversationId) {
+        return { ticket, conversationId: ticket.conversationId };
+      }
+      throw new ConflictException({ error: "already_bound" });
+    }
+    if (outcome.reason === "conversation_not_found") {
+      throw new NotFoundException({ error: "conversation_not_found" });
+    }
+    if (outcome.reason === "not_escalated_in") {
+      throw new BadRequestException({ error: "not_escalated_in" });
+    }
+    throw new NotFoundException({ error: "ticket_not_found" });
   }
 
   /** Map the domain's typed outcome onto HTTP. The domain never throws. */

@@ -1,8 +1,10 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 
 import type {
+  ContactSnapshot,
   Ticket,
   TicketCounts,
+  TicketEscalationInfo,
   TicketEvent,
   TicketPriority,
   TicketSource,
@@ -65,6 +67,26 @@ export const TICKET_SELECT = {
   assignedUser: { select: { name: true } },
   resolvedBy: { select: { name: true } },
   tags: { select: { id: true, name: true, color: true } },
+  // The escalation pair, from whichever side this ticket is. The only
+  // cross-workspace data a read ever surfaces: a sibling workspace's NAME and
+  // the twin's number/status — deliberate, minimal, and exactly the feature.
+  escalationOut: {
+    select: {
+      id: true,
+      sourceTicketId: true,
+      targetTicket: { select: { number: true, status: true } },
+      targetWorkspace: { select: { name: true } },
+    },
+  },
+  escalationIn: {
+    select: {
+      id: true,
+      sourceTicketId: true,
+      contactSnapshot: true,
+      sourceTicket: { select: { number: true, status: true } },
+      sourceWorkspace: { select: { name: true } },
+    },
+  },
 } satisfies Prisma.TicketSelect;
 
 export type TicketRow = Prisma.TicketGetPayload<{ select: typeof TICKET_SELECT }>;
@@ -87,13 +109,58 @@ function asCustomFields(v: unknown): Record<string, string> {
   return out;
 }
 
+/** JSONB → ContactSnapshot, tolerant of anything a legacy row might hold. */
+export function asContactSnapshot(v: unknown): ContactSnapshot {
+  const o = v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  return {
+    name: typeof o.name === "string" ? o.name : null,
+    phoneNumber: typeof o.phoneNumber === "string" ? o.phoneNumber : null,
+    email: typeof o.email === "string" ? o.email : null,
+    identityChannel: typeof o.identityChannel === "string" ? o.identityChannel : "whatsapp",
+    customFields: asCustomFields(o.customFields),
+  };
+}
+
+function mapEscalation(t: TicketRow): TicketEscalationInfo | undefined {
+  if (t.escalationOut) {
+    const e = t.escalationOut;
+    return {
+      id: e.id,
+      role: "source",
+      otherWorkspaceName: e.targetWorkspace.name,
+      otherTicketNumber: e.targetTicket.number,
+      otherTicketStatus: e.targetTicket.status,
+      // The target FK is Cascade — from the source side the row existing means
+      // the twin exists.
+      severed: false,
+    };
+  }
+  if (t.escalationIn) {
+    const e = t.escalationIn;
+    return {
+      id: e.id,
+      role: "target",
+      otherWorkspaceName: e.sourceWorkspace.name,
+      otherTicketNumber: e.sourceTicket?.number ?? null,
+      otherTicketStatus: e.sourceTicket?.status ?? null,
+      severed: e.sourceTicketId === null,
+      contactSnapshot: asContactSnapshot(e.contactSnapshot),
+    };
+  }
+  return undefined;
+}
+
 export function mapTicket(t: TicketRow): Ticket {
   return {
     id: t.id,
     number: t.number,
     conversationId: t.conversationId,
     contactId: t.contactId,
-    contactName: t.contact.name,
+    // An escalated-in ticket has no Contact row until "Message customer" binds
+    // one — the board and list keep rendering a name from the snapshot.
+    contactName:
+      t.contact?.name ??
+      (t.escalationIn ? (asContactSnapshot(t.escalationIn.contactSnapshot).name ?? "Unknown") : "Unknown"),
     channel: t.channel,
     subject: t.subject,
     description: t.description,
@@ -124,6 +191,7 @@ export function mapTicket(t: TicketRow): Ticket {
     source: asSource(t.source),
     customFields: asCustomFields(t.customFields),
     version: t.version,
+    escalation: mapEscalation(t),
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
   };

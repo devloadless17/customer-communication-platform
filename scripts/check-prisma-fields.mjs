@@ -112,6 +112,10 @@ const TENANTLESS_ALLOWLIST = new Set([
   "BroadcastRecipient", "OutboundWebhookDelivery",
   "TeamChannelMember", "TeamChannelMention", "TeamChannelReaction",
   "TeamChannelPin", "TeamChannelReadReceipt",
+  // Cross-workspace bridge: deliberately spans TWO workspaces (source+target
+  // columns, no single workspaceId); reached only through a workspace-scoped
+  // query on one of its two tickets (see its TENANCY EXCEPTION note)
+  "TicketEscalation",
 ]);
 {
   const missing = [];

@@ -63,14 +63,22 @@ export const TICKET_PRIORITIES: readonly TicketPriority[] = [
 /**
  * Who or what created / changed a ticket. A plain string union, not a DB enum,
  * for the same reason as MessageFlagSource: provenance metadata, not behaviour.
- *  - `auto`     — opened by an inbound message on a thread with no active ticket
- *  - `human`    — an agent
- *  - `workflow` — a workflow step
- *  - `api`      — an external /v1 integration
+ *  - `auto`       — opened by an inbound message on a thread with no active ticket
+ *  - `human`      — an agent
+ *  - `workflow`   — a workflow step
+ *  - `api`        — an external /v1 integration
+ *  - `escalation` — created in THIS workspace by another workspace escalating a
+ *                   ticket here (the target side of a TicketEscalation pair)
  */
-export type TicketSource = "auto" | "human" | "workflow" | "api";
+export type TicketSource = "auto" | "human" | "workflow" | "api" | "escalation";
 
-export const TICKET_SOURCES: readonly TicketSource[] = ["auto", "human", "workflow", "api"] as const;
+export const TICKET_SOURCES: readonly TicketSource[] = [
+  "auto",
+  "human",
+  "workflow",
+  "api",
+  "escalation",
+] as const;
 
 export type TicketEventKind =
   | "created"
@@ -90,7 +98,17 @@ export type TicketEventKind =
   | "field_changed"
   | "sla_breached"
   | "reopened"
-  | "merged";
+  | "merged"
+  /** This ticket was escalated to another workspace (source side). */
+  | "escalated"
+  /** This ticket WAS the escalation — its birth event on the target side. */
+  | "escalation_received"
+  /** A comment shared across the escalation pair — BOTH workspaces see it. */
+  | "escalation_note"
+  /** The twin ticket's status changed in the other workspace. */
+  | "escalation_status"
+  /** The twin ticket was deleted — the link is gone. */
+  | "escalation_severed";
 
 /** A tag as it renders on a ticket. Shared vocabulary with contact tags. */
 export interface TicketTag {
@@ -135,8 +153,14 @@ export interface Ticket {
   id: string;
   /** Human-facing sequential id — what people quote to each other ("#1042"). */
   number: number;
-  conversationId: string;
-  contactId: string;
+  /**
+   * Null ONLY on an escalated-in ticket (source `escalation`) before the target
+   * workspace binds its own conversation via "Message customer". Every other
+   * ticket is born bound to a thread.
+   */
+  conversationId: string | null;
+  contactId: string | null;
+  /** Falls back to the escalation snapshot's name when `contactId` is null. */
   contactName: string;
   channel: string;
   subject: string | null;
@@ -172,10 +196,45 @@ export interface Ticket {
   customFields: Record<string, string>;
   /** Optimistic-concurrency token; send it back on a write to detect a stale edit. */
   version: number;
+  /** Present when this ticket is one side of a cross-workspace escalation pair. */
+  escalation?: TicketEscalationInfo;
   /** ISO. */
   createdAt: string;
   /** ISO. */
   updatedAt: string;
+}
+
+/**
+ * The customer's profile as it was AT ESCALATION time — a deliberate snapshot,
+ * not a live join. The source workspace's directory stays private, and later
+ * edits or deletes there never mutate what the target workspace was handed.
+ */
+export interface ContactSnapshot {
+  name: string | null;
+  phoneNumber: string | null;
+  email: string | null;
+  identityChannel: string;
+  /** Values keyed by the SOURCE workspace's ContactFieldDefinition labels. */
+  customFields: Record<string, string>;
+}
+
+/**
+ * One side's view of a cross-workspace escalation pair. The two tickets stay
+ * workspace-scoped; this is the only cross-workspace data either side sees —
+ * a sibling workspace's NAME plus the twin's number and status.
+ */
+export interface TicketEscalationInfo {
+  id: string;
+  /** Which side of the pair THIS ticket is. */
+  role: "source" | "target";
+  otherWorkspaceName: string;
+  /** Null when severed (the twin was deleted). */
+  otherTicketNumber: number | null;
+  otherTicketStatus: TicketStatus | null;
+  /** True when the twin ticket no longer exists. */
+  severed: boolean;
+  /** Only on the TARGET side — the customer profile handed over at escalation. */
+  contactSnapshot?: ContactSnapshot;
 }
 
 /** One timeline row on the ticket detail page. */

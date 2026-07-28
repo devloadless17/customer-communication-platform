@@ -700,8 +700,10 @@ export interface MessageFlagChangedEvent {
 export interface TicketChangedEvent {
   workspaceId: string;
   ticketId: string;
-  conversationId: string;
-  contactId: string;
+  /** Null on an escalated-in ticket until the target workspace binds a
+   *  conversation of its own ("Message customer"). */
+  conversationId: string | null;
+  contactId: string | null;
   /**
    * The TRANSITION, never merely the post-state — the same rule that
    * `message.flag_changed` learned the hard way. `updated` means metadata moved
@@ -723,7 +725,14 @@ export interface TicketChangedEvent {
     | "updated"
     /** Permanently deleted. `ticket` carries the pre-delete snapshot so
      *  subscribers know which card to drop; messages survive, events cascade. */
-    | "deleted";
+    | "deleted"
+    /** Escalated to another workspace in the org (fired on the SOURCE side;
+     *  the target side sees an ordinary `created`). */
+    | "escalated"
+    /** The TWIN ticket in the other workspace changed (shared comment, status
+     *  move, sever) — this side's timeline gained a mirrored row. The ticket's
+     *  own lifecycle did NOT move. */
+    | "escalation_update";
   /** The ticket AFTER the change (for `deleted`, the pre-delete snapshot). */
   ticket: Ticket;
   /** The status it moved FROM. Null when `action` is `created`. */

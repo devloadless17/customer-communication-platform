@@ -258,6 +258,25 @@ export default function ApiDocsPage() {
         <Endpoint method="GET" path="/api/external/v1/contacts/:id/channels">
           List a contact's channels (today: one WhatsApp row per contact).
         </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/contacts/:id/block">
+          Block the contact at the provider (WhatsApp Block Users API): they can
+          no longer message you, and every send to them is rejected until
+          unblocked. The provider is called first and the contact&apos;s{" "}
+          <code>blockedAt</code> only flips on success. WhatsApp constraints
+          surface as typed 400s: <code>reengagement_required</code> (they
+          haven&apos;t messaged you in the last 24 hours — Meta refuses the
+          block), <code>blocklist_full</code> (the number&apos;s 64,000-entry
+          cap), <code>blocking_not_supported</code> (non-WhatsApp channel).
+          Blocked contacts are excluded from broadcast audiences automatically.
+          Scope <code>write:contacts</code>; full parity with the inbox&apos;s
+          Block action.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/contacts/:id/unblock">
+          Lift the provider block (no 24-hour constraint). The contact can
+          message you again and sends resume; <code>blockedAt</code> returns to{" "}
+          <code>null</code> on the contact payload and the{" "}
+          <code>contact.updated</code> webhook.
+        </Endpoint>
         <Endpoint
           method="POST"
           path="/api/external/v1/contacts/:id/tags"
@@ -516,7 +535,27 @@ export default function ApiDocsPage() {
           <code>?from=</code>/<code>?to=</code> (ISO), <code>?cursor=</code>.
           Report on <code>connected</code>, not <code>status</code> — a call can
           complete without anyone picking up, and an agent can hang up a call
-          that did connect.
+          that did connect. Inbound calls placed from a call button or a{" "}
+          <code>wa.me/call</code> deep link carry your opaque tag back as{" "}
+          <code>ctaPayload</code> / <code>deeplinkPayload</code>, so a campaign
+          can be credited for the calls it produced. <code>hasRecording</code> /{" "}
+          <code>hasTranscript</code> flip true once each opted-in artifact has
+          been stored, and <code>transcriptLanguage</code> carries the
+          auto-detected spoken language (ISO 639, e.g. <code>ar</code>).
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/calls/:callId/recording">
+          Stream a call&apos;s stored recording (OGG/OPUS audio). 404 until{" "}
+          <code>hasRecording</code> is true — recordings land about a minute
+          after the call ends, and only for calls the number&apos;s recording
+          policy opted in (both parties hear WhatsApp&apos;s consent
+          announcement first).
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/calls/:callId/transcript">
+          The call&apos;s transcript as JSON: speaker-attributed segments
+          (Business / Customer) with word-level timings and confidences, plus{" "}
+          <code>transcript.language</code> — the spoken language WhatsApp
+          auto-detected (Arabic supported). 404 until <code>hasTranscript</code>{" "}
+          is true on the call.
         </Endpoint>
         <Endpoint
           method="GET"
@@ -711,10 +750,31 @@ export default function ApiDocsPage() {
           <strong>disables</strong> the template on the third instance) — this is
           for one paused by Template Pacing, which never unpauses by itself.
         </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/templates/:id/link-tracking"
+          body={{ enabled: false }}
+        >
+          Toggle Meta&apos;s button-click tracking on one template
+          (<code>cta_url_link_tracking_opted_out</code>). With{" "}
+          <code>enabled: false</code>, future sends record no clicks — the
+          template list&apos;s <code>linkTrackingOptedOut</code> says which
+          templates are opted out, so an empty <code>clicked</code> series can
+          be told apart from a campaign nobody clicked. Reversible; scope{" "}
+          <code>admin:settings</code>.
+        </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/templates/:id/analytics">
           Per-template daily trend. <code>?start=</code> / <code>?end=</code>{" "}
           ISO; defaults to the last 30 days, and Meta&apos;s lookback ceiling is
-          90. Returns <code>days[]</code> plus a <code>summary</code>.
+          90. Returns <code>days[]</code> plus a <code>summary</code>. Both
+          carry <code>clickedButtons</code> — Meta&apos;s per-button click
+          entries (<code>type</code>: <code>url_button</code> /{" "}
+          <code>unique_url_button</code> / <code>quick_reply_button</code>,{" "}
+          <code>buttonContent</code>, <code>count</code>) — while the scalar{" "}
+          <code>clicked</code> is the headline link-click figure (unique
+          URL-button clicks when Meta reports them). The same block appears as{" "}
+          <code>metaAnalytics.clickedButtons</code> on{" "}
+          <code>/broadcasts/:id/report</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/whatsapp/insights/status">
           Whether Meta&apos;s template analytics are switched on. Enabling is a{" "}
@@ -732,7 +792,15 @@ export default function ApiDocsPage() {
           throughput are per-number; the budget is portfolio-shared).{" "}
           <code>utilityRestrictionType</code>, when set, means Meta is enforcing
           template-categorization rules on the WABA — utility sends over its cap
-          are rejected until <code>utilityRestrictedUntil</code>.
+          are rejected until <code>utilityRestrictedUntil</code>.{" "}
+          <code>bizMessagingRestrictionType</code> /{" "}
+          <code>customerMessagingRestrictionType</code>, when set, mean Meta has
+          blocked that direction of messaging over policy or spam violations
+          (its 1&ndash;30-day enforcement ladder): business-initiated covers
+          template/broadcast sends, customer-initiated covers replies. Each
+          lifts at its <code>…RestrictedUntil</code>; a null expiry with the
+          type set is an indefinite lock or account ban, cleared only by a
+          successful appeal in Meta Business Support Home.
         </Endpoint>
         <Endpoint method="POST" path="/api/external/v1/whatsapp/health/refresh">
           Re-poll Meta for a number&apos;s tier / quality / throughput now
@@ -959,9 +1027,24 @@ export default function ApiDocsPage() {
           }}
           headers={{ "Idempotency-Key": "<uuid>" }}
         >
-          Tappable options — <code>kind: &quot;buttons&quot;</code> or{" "}
-          <code>kind: &quot;list&quot;</code> (up to 10). Option <code>id</code>s
-          and <code>title</code>s must each be unique. On Messenger &amp;
+          Tappable options — <code>kind: &quot;buttons&quot;</code> (up to 3,
+          ids ≤256 chars) or <code>kind: &quot;list&quot;</code> (up to 10 rows,
+          ids ≤200 chars — Meta&apos;s caps differ by kind). Option{" "}
+          <code>id</code>s and <code>title</code>s must each be unique. Both
+          kinds take an optional <code>headerText</code> and{" "}
+          <code>footerText</code> (≤60 chars each). On WhatsApp,{" "}
+          <code>kind: &quot;location_request&quot;</code> sends the body with a
+          native <strong>Send location</strong> button (no <code>options</code>{" "}
+          — WhatsApp renders it); the customer&apos;s pick arrives as a normal
+          inbound location message on the thread. Also WhatsApp-only,{" "}
+          <code>kind: &quot;cta_url&quot;</code> renders one URL-opening button
+          instead of a raw link in the body — pass{" "}
+          <code>{`ctaUrl: { displayText (≤20), url, headerText? (≤60), footerText? (≤60) }`}</code>{" "}
+          and no <code>options</code>. And <code>kind: &quot;carousel&quot;</code>{" "}
+          sends 2–10 scrollable media cards — pass{" "}
+          <code>{`carouselCards: [{ headerMedia: { kind: "image"|"video", link }, body? (≤160), ctaUrl? | quickReplies? (1–3) }]`}</code>
+          ; every card must use the same button type and count, and quick-reply
+          ids must be unique across the whole carousel. On Messenger &amp;
           Instagram you can also add <code>contactShare</code> consent chips (
           <code>&quot;phone&quot;</code> / <code>&quot;email&quot;</code>) that
           let the customer share those details in one tap from their Meta
@@ -1157,6 +1240,55 @@ export default function ApiDocsPage() {
           because a note changes nothing about the ticket — it must not bump{" "}
           <code>version</code> (which would 409 a colleague&apos;s open editor) or move the
           SLA clock. Scope <code>write:tickets</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/tickets/escalation-targets">
+          The <strong>sibling workspaces</strong> of your organization a ticket can be
+          escalated to — <code>{"{ workspaces: [{ id, name }] }"}</code>, id + name only,
+          never the current workspace. Scope <code>read:tickets</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/tickets/:id/escalate"
+          body={{
+            targetWorkspaceId: "ws_…",
+            cause: "Customer was double-charged on invoice #88; needs a refund approval we can't give here.",
+          }}
+        >
+          <strong>Escalate a ticket to a sibling workspace</strong> in your organization. A
+          TWIN ticket is created over there (its own number, board card, assignee and SLA)
+          carrying a frozen <em>snapshot</em> of the customer&apos;s profile — the
+          conversation history stays private. <code>cause</code> is required: it becomes
+          the twin&apos;s description and is everything the receiving workspace sees.
+          Optional <code>subject</code> overrides the twin&apos;s title. One escalation per
+          ticket lifetime (<code>409 already_escalated</code>); an escalation target cannot
+          be escalated onward (<code>400 cannot_escalate_escalated_ticket</code>). Fires{" "}
+          <code>ticket.changed</code> with <code>action: &quot;escalated&quot;</code> on the
+          source. Scope <code>write:tickets</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/tickets/:id/escalation-comments"
+          body={{ body: "Refund approved — tell them it lands in 3–5 business days." }}
+        >
+          A comment <strong>both workspaces of the escalation pair see</strong> — unlike{" "}
+          <code>/notes</code>, which stays private. Works from either side&apos;s ticket id.
+          Like a note, it is not a ticket update: no <code>version</code> bump, no SLA
+          movement. <code>400 escalation_severed</code> once the linked ticket was deleted.
+          Scope <code>write:tickets</code>.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/tickets/:id/escalation/message-customer"
+          body={{ channelConnectionId: "optional — which of your accounts to start from" }}
+        >
+          On an escalated-<em>in</em> ticket: <strong>start this workspace&apos;s own
+          conversation</strong> with the customer from the snapshot&apos;s phone
+          (find-or-create contact, reopen-not-fragment) and bind it to the ticket — from
+          then on it behaves like any other ticket (replies attach, first response stamps).
+          Returns <code>{"{ ticket, conversationId }"}</code>.{" "}
+          <code>400 no_phone_in_snapshot</code> when the customer&apos;s source-channel
+          identity has no phone — answer through shared comments instead. Scope{" "}
+          <code>write:tickets</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/tickets-settings">
           <code>ticketReopenWindowHours</code>,{" "}

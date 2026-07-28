@@ -1,9 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, ArrowLeft, Clock, Loader2, MessageSquare, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  ArrowUpRight,
+  Clock,
+  Loader2,
+  MessageSquare,
+  Trash2,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -75,7 +83,18 @@ const EVENT_LABELS: Record<string, string> = {
   merged: "merged it",
   team_changed: "handed it to another team",
   note: "left a note",
+  escalated: "escalated it to another workspace",
+  escalation_received: "sent this escalation",
+  escalation_note: "shared a comment",
+  escalation_status: "changed their status",
+  escalation_severed: "deleted the linked ticket",
 };
+
+/** A string field off an event's before/after JSON, or null. */
+function eventStr(v: Record<string, unknown> | null | undefined, key: string): string | null {
+  const val = v?.[key];
+  return typeof val === "string" && val ? val : null;
+}
 
 export function TicketDetailClient({
   ticket: seed,
@@ -83,6 +102,7 @@ export function TicketDetailClient({
   users,
   tags,
   teams,
+  escalationTargets,
   canDelete,
 }: {
   ticket: Ticket;
@@ -91,6 +111,8 @@ export function TicketDetailClient({
   tags: Tag[];
   /** Teams (AssignmentPolicy) this ticket can be handed to. */
   teams: Array<{ id: string; name: string; isDefault: boolean }>;
+  /** Sibling workspaces this ticket can be escalated to. */
+  escalationTargets: Array<{ id: string; name: string }>;
   /** Whether the viewer (admin/manager) may permanently delete this ticket. */
   canDelete: boolean;
 }) {
@@ -109,6 +131,11 @@ export function TicketDetailClient({
   const [handoffTeamId, setHandoffTeamId] = useState<string>("");
   const [handoffReason, setHandoffReason] = useState("");
   const [note, setNote] = useState("");
+  // The escalation form (workspace + why) mirrors the team-handoff form: the
+  // cause is required — it is everything the receiving workspace gets.
+  const [escTargetId, setEscTargetId] = useState<string>("");
+  const [escCause, setEscCause] = useState("");
+  const [escComment, setEscComment] = useState("");
   const { confirm, confirmDialog } = useConfirm();
 
   async function removeTicket() {
@@ -135,6 +162,19 @@ export function TicketDetailClient({
     }
   }
 
+  // Stable (the id never changes for a mounted detail page), so the socket
+  // effect can call it without re-subscribing every render.
+  const reload = useCallback(
+    async (opts: { eventsOnly?: boolean } = {}) => {
+      const res = await apiFetch(`/api/tickets/${seed.id}`);
+      if (!res.ok) return;
+      const body = (await res.json()) as { ticket: Ticket; events: TicketEvent[] };
+      if (!opts.eventsOnly) setTicket(body.ticket);
+      setEvents(body.events);
+    },
+    [seed.id],
+  );
+
   // Filtered to THIS ticket: `ticket:changed` is workspace-scoped, so an
   // unfiltered handler would re-render the page on every ticket in the org.
   useEffect(() => {
@@ -148,13 +188,22 @@ export function TicketDetailClient({
         router.replace("/tickets");
         return;
       }
+      if (payload.action === "escalated" || payload.action === "escalation_update") {
+        // The other workspace commented / moved their status / severed the
+        // link, or this side just escalated: the ticket's own `version` did
+        // NOT move, but its escalation info and timeline did — take the frame
+        // and refetch just the events.
+        setTicket(payload.ticket);
+        void reload({ eventsOnly: true });
+        return;
+      }
       setTicket((prev) => (prev.version === payload.ticket.version ? prev : payload.ticket));
     };
     socket.on("ticket:changed", onTicket);
     return () => {
       socket.off("ticket:changed", onTicket);
     };
-  }, [seed.id, router]);
+  }, [seed.id, router, reload]);
 
   const patch = async (body: Record<string, unknown>) => {
     setBusy(true);
@@ -204,12 +253,72 @@ export function TicketDetailClient({
     }
   };
 
-  const reload = async (opts: { eventsOnly?: boolean } = {}) => {
-    const res = await apiFetch(`/api/tickets/${ticket.id}`);
-    if (!res.ok) return;
-    const body = (await res.json()) as { ticket: Ticket; events: TicketEvent[] };
-    if (!opts.eventsOnly) setTicket(body.ticket);
-    setEvents(body.events);
+  /** Refer this ticket to a sibling workspace. The cause is required — it is
+   *  everything the receiving side gets. */
+  const escalate = async (targetWorkspaceId: string, cause: string) => {
+    setBusy(true);
+    try {
+      const res = await apiFetch(`/api/tickets/${ticket.id}/escalate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ targetWorkspaceId, cause }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+        throw new Error(d.detail || d.error || "Couldn't escalate this ticket");
+      }
+      const data = (await res.json()) as { ticket: Ticket };
+      setTicket(data.ticket);
+      await reload({ eventsOnly: true });
+      toast.success("Escalated — the other workspace now has it on their board");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't escalate this ticket");
+      await reload();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** A comment BOTH workspaces see — same non-update posture as a note. */
+  const addEscalationComment = async (body: string) => {
+    setBusy(true);
+    try {
+      const res = await apiFetch(`/api/tickets/${ticket.id}/escalation-comments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+        throw new Error(d.detail || d.error || "Couldn't share the comment");
+      }
+      await reload({ eventsOnly: true });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't share the comment");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Start OUR chat with the escalated customer and jump into it. */
+  const messageCustomer = async () => {
+    setBusy(true);
+    try {
+      const res = await apiFetch(`/api/tickets/${ticket.id}/escalation/message-customer`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+        throw new Error(d.detail || d.error || "Couldn't start a chat with this customer");
+      }
+      const data = (await res.json()) as { conversationId: string };
+      router.push(`/inbox?c=${data.conversationId}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't start a chat with this customer");
+      setBusy(false);
+    }
   };
 
   const breached = ticket.sla.firstResponseBreached || ticket.sla.resolutionBreached;
@@ -274,11 +383,17 @@ export function TicketDetailClient({
 
         <p className="text-2xs text-muted-foreground">
           {ticket.contactName} · opened <LocalTime iso={ticket.createdAt} format="listTime" />
-          {" · "}
-          <Link href={`/inbox?c=${ticket.conversationId}`} className="hover:underline">
-            <MessageSquare aria-hidden className="mr-0.5 inline size-3" />
-            Open the conversation
-          </Link>
+          {/* An escalated-in ticket has no thread here until "Message customer"
+              binds one — there is nothing to open yet. */}
+          {ticket.conversationId ? (
+            <>
+              {" · "}
+              <Link href={`/inbox?c=${ticket.conversationId}`} className="hover:underline">
+                <MessageSquare aria-hidden className="mr-0.5 inline size-3" />
+                Open the conversation
+              </Link>
+            </>
+          ) : null}
         </p>
 
         {/* The cause. What a team receiving the handoff reads first — kept right
@@ -441,6 +556,172 @@ export function TicketDetailClient({
         )}
       </section>
 
+      {/* Cross-workspace escalation. One escalation per ticket lifetime; the
+          pair shares comments and status changes through mirrored timeline
+          rows — everything else stays inside each workspace. */}
+      {ticket.escalation ? (
+        <section className="rounded-xl border bg-card p-4">
+          <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold">
+            <ArrowUpRight aria-hidden className="size-4" />
+            {ticket.escalation.role === "source"
+              ? `Escalated to ${ticket.escalation.otherWorkspaceName}`
+              : `Escalated from ${ticket.escalation.otherWorkspaceName}`}
+          </h2>
+          <p className="mb-3 text-2xs text-muted-foreground">
+            {ticket.escalation.severed ? (
+              "The linked ticket was deleted — the history below is all that remains."
+            ) : (
+              <>
+                Their ticket #{ticket.escalation.otherTicketNumber} ·{" "}
+                {ticket.escalation.otherTicketStatus
+                  ? STATUS_LABELS[ticket.escalation.otherTicketStatus]
+                  : "unknown"}
+                {ticket.escalation.role === "source"
+                  ? " — you'll see their comments and status changes in the history below. Relay the answer to the customer, then solve this ticket yourself."
+                  : " — answer with a shared comment, or start your own chat with the customer."}
+              </>
+            )}
+          </p>
+
+          {/* The customer as the source workspace handed them over — a snapshot,
+              not a live profile; edits over there don't change this. */}
+          {ticket.escalation.role === "target" && ticket.escalation.contactSnapshot ? (
+            <div className="mb-3 rounded-lg border bg-muted/30 p-3">
+              <p className="mb-1.5 text-3xs font-medium uppercase tracking-wider text-muted-foreground">
+                Customer snapshot (at escalation)
+              </p>
+              <dl className="grid gap-x-4 gap-y-1 text-2xs sm:grid-cols-2">
+                {ticket.escalation.contactSnapshot.name && (
+                  <SnapshotRow label="Name" value={ticket.escalation.contactSnapshot.name} />
+                )}
+                {ticket.escalation.contactSnapshot.phoneNumber && (
+                  <SnapshotRow label="Phone" value={ticket.escalation.contactSnapshot.phoneNumber} />
+                )}
+                {ticket.escalation.contactSnapshot.email && (
+                  <SnapshotRow label="Email" value={ticket.escalation.contactSnapshot.email} />
+                )}
+                <SnapshotRow
+                  label="Channel"
+                  value={ticket.escalation.contactSnapshot.identityChannel}
+                />
+                {Object.entries(ticket.escalation.contactSnapshot.customFields).map(([k, v]) => (
+                  <SnapshotRow key={k} label={k} value={v} />
+                ))}
+              </dl>
+              {!ticket.conversationId && ticket.escalation.contactSnapshot.phoneNumber ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => void messageCustomer()}
+                  className="mt-2.5 h-8 gap-1.5 text-xs"
+                >
+                  <MessageSquare aria-hidden className="size-3.5" />
+                  Message the customer
+                </Button>
+              ) : null}
+              {!ticket.conversationId && !ticket.escalation.contactSnapshot.phoneNumber ? (
+                <p className="mt-2 text-2xs text-muted-foreground">
+                  No phone number on this channel identity — answer through the shared
+                  comments and the source workspace will relay it.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {!ticket.escalation.severed && (
+            <div className="flex flex-col gap-2">
+              <textarea
+                value={escComment}
+                disabled={busy}
+                onChange={(e) => setEscComment(e.target.value)}
+                rows={2}
+                maxLength={5000}
+                placeholder={
+                  ticket.escalation.role === "source"
+                    ? "Add context for the other workspace…"
+                    : "e.g. Refund approved — tell them it lands in 3–5 business days."
+                }
+                className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+                aria-label="Shared escalation comment"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={busy || escComment.trim().length === 0}
+                  onClick={() => {
+                    const body = escComment.trim();
+                    setEscComment("");
+                    void addEscalationComment(body);
+                  }}
+                  className="h-8 cursor-pointer rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                >
+                  Share comment
+                </button>
+                <span className="text-3xs text-muted-foreground">
+                  Visible to {ticket.escalation.otherWorkspaceName} — unlike an internal note.
+                </span>
+              </div>
+            </div>
+          )}
+        </section>
+      ) : escalationTargets.length > 0 ? (
+        <section className="rounded-xl border bg-card p-4">
+          <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold">
+            <ArrowUpRight aria-hidden className="size-4" />
+            Escalate to another workspace
+          </h2>
+          <p className="mb-3 text-2xs text-muted-foreground">
+            When nobody here can answer, refer this to another workspace in your
+            organization. They get the customer's profile and your reason — never this
+            inbox's messages — and can answer back here or contact the customer from
+            their own channels.
+          </p>
+          <div className="flex flex-col gap-2">
+            <select
+              value={escTargetId}
+              disabled={busy}
+              onChange={(e) => setEscTargetId(e.target.value)}
+              className="h-8 w-full rounded-md border bg-background px-2 text-xs"
+              aria-label="Workspace to escalate this ticket to"
+            >
+              <option value="">Choose a workspace…</option>
+              {escalationTargets.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </select>
+            <textarea
+              value={escCause}
+              disabled={busy}
+              onChange={(e) => setEscCause(e.target.value)}
+              rows={3}
+              maxLength={5000}
+              placeholder="Describe the issue for them — this is everything they'll see. e.g. Customer 123 was double-charged on invoice #88; needs a refund approval we can't give here."
+              className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+              aria-label="Reason for the escalation"
+            />
+            <div>
+              <button
+                type="button"
+                disabled={busy || !escTargetId || escCause.trim().length === 0}
+                onClick={() => {
+                  const target = escTargetId;
+                  const cause = escCause.trim();
+                  setEscTargetId("");
+                  setEscCause("");
+                  void escalate(target, cause);
+                }}
+                className="h-8 cursor-pointer rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
+              >
+                Escalate
+              </button>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
       <section className="rounded-xl border bg-card p-4">
         <h2 className="mb-2 text-sm font-semibold">Tags</h2>
         <div className="flex flex-wrap gap-1.5">
@@ -540,9 +821,57 @@ export function TicketDetailClient({
                     </strong>
                   </>
                 ) : null}
+                {/* Escalation rows carry snapshotted workspace names so they
+                    keep reading correctly after a rename or a severed link. */}
+                {e.kind === "escalated" && eventStr(e.after, "targetWorkspaceName") ? (
+                  <>
+                    {" "}
+                    to <strong className="font-medium">{eventStr(e.after, "targetWorkspaceName")}</strong>
+                    {typeof e.after?.targetTicketNumber === "number" ? (
+                      <> (their #{e.after.targetTicketNumber})</>
+                    ) : null}
+                  </>
+                ) : null}
+                {e.kind === "escalation_received" && eventStr(e.after, "sourceWorkspaceName") ? (
+                  <>
+                    {" "}
+                    from <strong className="font-medium">{eventStr(e.after, "sourceWorkspaceName")}</strong>
+                  </>
+                ) : null}
+                {e.kind === "escalation_status" ? (
+                  <>
+                    {" "}
+                    in <strong className="font-medium">{eventStr(e.after, "fromWorkspaceName") ?? "the other workspace"}</strong>
+                    {eventStr(e.after, "status") ? (
+                      <> to {STATUS_LABELS[e.after?.status as TicketStatus] ?? String(e.after?.status)}</>
+                    ) : null}
+                  </>
+                ) : null}
+                {e.kind === "escalation_severed" && typeof e.after?.deletedTicketNumber === "number" ? (
+                  <> (their #{e.after.deletedTicketNumber})</>
+                ) : null}
               </span>
-              {e.body ? (
+              {/* "They solved it" is only half the answer — surface the outcome
+                  the other side recorded. */}
+              {e.kind === "escalation_status" && eventStr(e.after, "resolutionNote") ? (
                 <p className="mt-0.5 basis-full whitespace-pre-wrap rounded-md border-l-2 border-primary/30 bg-muted/40 px-2 py-1 text-2xs text-foreground">
+                  {eventStr(e.after, "resolutionNote")}
+                </p>
+              ) : null}
+              {e.body ? (
+                <p
+                  className={cn(
+                    "mt-0.5 basis-full whitespace-pre-wrap rounded-md border-l-2 px-2 py-1 text-2xs text-foreground",
+                    e.kind === "escalation_note"
+                      ? "border-primary bg-primary/5"
+                      : "border-primary/30 bg-muted/40",
+                  )}
+                >
+                  {e.kind === "escalation_note" && eventStr(e.after, "fromWorkspaceName") ? (
+                    <span className="mb-0.5 block text-3xs font-medium uppercase tracking-wider text-muted-foreground">
+                      Shared · from {eventStr(e.after, "fromWorkspaceName")}
+                    </span>
+                  ) : null}
                   {e.body}
                 </p>
               ) : null}
@@ -558,6 +887,15 @@ export function TicketDetailClient({
         </p>
       )}
       {confirmDialog}
+    </div>
+  );
+}
+
+function SnapshotRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex min-w-0 items-baseline gap-1.5">
+      <dt className="shrink-0 font-medium capitalize text-muted-foreground">{label}</dt>
+      <dd className="truncate">{value}</dd>
     </div>
   );
 }

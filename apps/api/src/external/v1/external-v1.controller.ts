@@ -23,6 +23,9 @@ import { diskStorage } from "multer";
 import { tmpdir } from "node:os";
 import type { Response } from "express";
 
+import { CallsService } from "@/calls/calls.service";
+import { streamBlob } from "@/media/stream-blob";
+
 import { TRANSFER_MAX_UPLOAD_BYTES } from "@ccp/shared/contacts/transfer-columns";
 
 import { ApiKeyGuard } from "../../auth/api-key.guard";
@@ -34,6 +37,8 @@ import { hasScope } from "@ccp/shared/api-keys/scopes";
 import { RateLimit } from "../../common/rate-limit.interceptor";
 import { zBody, zQuery } from "../../common/zod-validation.pipe";
 import { MAX_CHAIN_DEPTH, parseChainDepth } from "@/lib/workflows/events";
+import { setContactBlocked } from "@/lib/messaging/block-contact";
+import { mapBlockContactError } from "../../common/block-contact-http";
 import { ContactTransferService } from "@/contacts/transfer.service";
 import {
   CreateExportSchema,
@@ -113,17 +118,21 @@ import {
 } from "@/workspace-settings/whatsapp/whatsapp.schemas";
 import { TicketsService } from "@/tickets/tickets.service";
 import {
+  AddEscalationCommentSchema,
   CreateTicketFieldSchema,
   AddTicketNoteSchema,
   CreateTicketSchema,
+  EscalateTicketSchema,
   ListTicketsQuerySchema,
   TicketSettingsSchema,
   UpdateTicketFieldSchema,
   UpdateTicketSchema,
   UpsertSlaPolicySchema,
+  type AddEscalationCommentInput,
   type CreateTicketFieldInput,
   type AddTicketNoteInput,
   type CreateTicketInput,
+  type EscalateTicketInput,
   type ListTicketsQuery,
   type TicketSettingsInput,
   type UpdateTicketFieldInput,
@@ -159,7 +168,9 @@ import {
 } from "@/lib/analytics/template-analytics";
 import { getBroadcastTimeseries } from "@/lib/broadcast-timeseries";
 import {
+  ExternalSetLinkTrackingSchema,
   ExternalTemplateAnalyticsQuerySchema,
+  type ExternalSetLinkTrackingInput,
   ExternalTemplateListQuerySchema,
   type ExternalTemplateAnalyticsQueryInput,
   type ExternalTemplateListQueryInput,
@@ -257,6 +268,8 @@ import {
  *   POST   /v1/contacts/:id/stage             — set lifecycle stage (fires lifecycle workflow + stage pill + webhook)
  *   DELETE /v1/contacts/:id                   — soft delete (removes from directory; conversation history preserved)
  *   GET    /v1/contacts/:id/channels          — list channels (siloed-per-channel → one row)
+ *   POST   /v1/contacts/:id/block             — block at the provider (WhatsApp Block Users API)
+ *   POST   /v1/contacts/:id/unblock           — lift the provider block
  *   POST   /v1/contacts/:id/tags              — add tag(s) to one contact
  *   DELETE /v1/contacts/:id/tags/:tagId       — remove a tag from one contact
  *   POST   /v1/contacts/tags/add              — bulk add tag(s) across many contacts
@@ -321,6 +334,7 @@ export class ExternalV1Controller {
     private readonly customers: CustomersService,
     private readonly conversations: ConversationsService,
     private readonly workflows: WorkflowsService,
+    private readonly calls: CallsService,
   ) {}
 
   /**
@@ -672,6 +686,55 @@ export class ExternalV1Controller {
     this.guardChainDepth(xCcpDepth);
     await this.api.deleteContact(auth.workspaceId, auth.apiKeyId, id);
     return { ok: true };
+  }
+
+  /**
+   * Block / unblock this contact at the provider (WhatsApp Block Users API) —
+   * `/v1` mirror of the internal inbox action. The provider is called first
+   * and `blockedAt` only flips on success. Typed 400s surface Meta's
+   * constraints: `reengagement_required` (no inbound in the last 24h),
+   * `blocklist_full` (64,000-entry cap), `blocking_not_supported` (non-
+   * WhatsApp channel). Rate-limited like other per-contact writes.
+   */
+  @Post("contacts/:id/block")
+  @RequireScope("write:contacts")
+  @HttpCode(200)
+  @RateLimit({ perMinute: 20 })
+  async blockContact(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    return this.setContactBlockedV1(auth, id, true);
+  }
+
+  @Post("contacts/:id/unblock")
+  @RequireScope("write:contacts")
+  @HttpCode(200)
+  @RateLimit({ perMinute: 20 })
+  async unblockContact(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    return this.setContactBlockedV1(auth, id, false);
+  }
+
+  private async setContactBlockedV1(auth: ApiKeyContext, id: string, blocked: boolean) {
+    try {
+      const contact = await setContactBlocked({
+        workspaceId: auth.workspaceId,
+        contactId: id,
+        blocked,
+        userId: null,
+        apiKeyId: auth.apiKeyId,
+      });
+      return { contact };
+    } catch (err) {
+      throw mapBlockContactError(err);
+    }
   }
 
   // ---- Contacts: per-row channels + tag ops --------------------------
@@ -1047,6 +1110,14 @@ export class ExternalV1Controller {
     return { counts };
   }
 
+  /** Sibling workspaces a ticket can be escalated to (id + name only).
+   *  Static segment — declared before `tickets/:id` so it isn't captured. */
+  @Get("tickets/escalation-targets")
+  @RequireScope("read:tickets")
+  async ticketEscalationTargets(@CurrentApiKey() auth: ApiKeyContext) {
+    return { workspaces: await this.tickets.listEscalationTargets(auth.workspaceId) };
+  }
+
   @Get("tickets/:id")
   @RequireScope("read:tickets")
   async getTicket(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
@@ -1113,6 +1184,65 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     return this.tickets.addNote(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body.body);
+  }
+
+  // ── Cross-workspace escalation ──────────────────────────────────────────
+  // Parity with the in-app escalation flow (locked rule). The API key is
+  // scoped to the SOURCE workspace; the twin ticket is created in the sibling
+  // workspace exactly as the UI would.
+
+  /** Refer a ticket to a sibling workspace in the organization. */
+  @Post("tickets/:id/escalate")
+  @RequireScope("write:tickets")
+  async escalateTicketV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(EscalateTicketSchema)) body: EscalateTicketInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    return this.tickets.escalate(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body);
+  }
+
+  /** A comment BOTH workspaces of the escalation pair see (unlike /notes). */
+  @Post("tickets/:id/escalation-comments")
+  @RequireScope("write:tickets")
+  async addEscalationCommentV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(AddEscalationCommentSchema)) body: AddEscalationCommentInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    return this.tickets.addEscalationComment(
+      auth.workspaceId,
+      { apiKeyId: auth.apiKeyId },
+      id,
+      body.body,
+    );
+  }
+
+  /**
+   * Start this workspace's own chat with the escalated customer (from the
+   * snapshot's phone) and bind the conversation to the ticket.
+   */
+  @Post("tickets/:id/escalation/message-customer")
+  @RequireScope("write:tickets")
+  async messageEscalatedCustomerV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body() body: { channelConnectionId?: unknown } | undefined,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    const channelConnectionId =
+      body && typeof body.channelConnectionId === "string" ? body.channelConnectionId : undefined;
+    return this.tickets.messageEscalatedCustomer(
+      auth.workspaceId,
+      { apiKeyId: auth.apiKeyId },
+      id,
+      { ...(channelConnectionId ? { channelConnectionId } : {}) },
+    );
   }
 
   // Ticketing configuration. Read is deliberately under `read:tickets` (a BI
@@ -1852,6 +1982,22 @@ export class ExternalV1Controller {
     return { ok: true };
   }
 
+  /**
+   * Toggle button-click tracking on one template (Meta's
+   * `cta_url_link_tracking_opted_out`). `admin:settings` like the internal
+   * twin's `templates:manage` gate — it changes what analytics Meta records
+   * for every future send of the template, workspace-wide.
+   */
+  @Post("templates/:id/link-tracking")
+  @RequireScope("admin:settings")
+  async setTemplateLinkTracking(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(ExternalSetLinkTrackingSchema)) body: ExternalSetLinkTrackingInput,
+  ) {
+    return this.whatsapp.setTemplateLinkTracking(auth.workspaceId, id, body.enabled);
+  }
+
   @Get("templates/:id/analytics")
   @RequireScope("read:broadcasts")
   async templateAnalytics(
@@ -2020,6 +2166,40 @@ export class ExternalV1Controller {
     @Query(zQuery(ExternalListCallsQuerySchema)) query: ExternalListCallsQueryInput,
   ) {
     return this.api.listCalls(auth.workspaceId, query);
+  }
+
+  /**
+   * Stream a call's stored recording (audio/ogg). 404s until the recording
+   * has been ingested (`hasRecording: true` on the call row) — recordings
+   * land about a minute after the call ends.
+   */
+  @Get("calls/:callId/recording")
+  @RequireScope("read:calls")
+  async streamCallRecording(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("callId") callId: string,
+    @Headers("range") range: string | undefined,
+    @Res() res: Response,
+  ) {
+    const ref = await this.calls.getRecordingRefForTeam(auth.workspaceId, callId);
+    await streamBlob(res, ref.key, range, { downloadFilename: ref.filename });
+  }
+
+  /**
+   * The transcript JSON document (speaker-attributed segments with word
+   * timings; `transcript.language` is the auto-detected spoken language).
+   * 404s until `hasTranscript` is true on the call row.
+   */
+  @Get("calls/:callId/transcript")
+  @RequireScope("read:calls")
+  async streamCallTranscript(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("callId") callId: string,
+    @Headers("range") range: string | undefined,
+    @Res() res: Response,
+  ) {
+    const ref = await this.calls.getTranscriptRefForTeam(auth.workspaceId, callId);
+    await streamBlob(res, ref.key, range);
   }
 
   /**

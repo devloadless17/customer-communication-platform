@@ -7,16 +7,20 @@ import { zBody, zQuery } from "../common/zod-validation.pipe";
 import { RequireRole } from "../auth/role.guard";
 import { RoleGuard } from "../auth/role.guard";
 import {
+  AddEscalationCommentSchema,
   CreateTicketFieldSchema,
   CreateTicketSchema,
+  EscalateTicketSchema,
   ListTicketsQuerySchema,
   TicketSettingsSchema,
   UpdateTicketFieldSchema,
   AddTicketNoteSchema,
   UpdateTicketSchema,
   UpsertSlaPolicySchema,
+  type AddEscalationCommentInput,
   type CreateTicketFieldInput,
   type CreateTicketInput,
+  type EscalateTicketInput,
   type ListTicketsQuery,
   type TicketSettingsInput,
   type UpdateTicketFieldInput,
@@ -39,6 +43,10 @@ import { TicketsService } from "./tickets.service";
  *   GET    /api/tickets/counts       — header badges
  *   GET    /api/tickets/:id          — one ticket + its timeline
  *   POST   /api/tickets              — open one manually
+ *   POST   /api/tickets/:id/notes    — internal note (this workspace only)
+ *   POST   /api/tickets/:id/escalate — refer to a sibling workspace
+ *   POST   /api/tickets/:id/escalation-comments — comment BOTH workspaces see
+ *   POST   /api/tickets/:id/escalation/message-customer — start own chat + bind
  *   PATCH  /api/tickets/:id          — status / priority / assignee / tags / fields
  */
 @Controller("api/tickets")
@@ -59,6 +67,12 @@ export class TicketsController {
   async counts(@CurrentSession() session: ApiSession) {
     const counts = await this.tickets.counts(session.workspaceId, session.userId, session);
     return { counts };
+  }
+
+  /** Sibling workspaces a ticket can be escalated to. Static — before `:id`. */
+  @Get("escalation-targets")
+  async escalationTargets(@CurrentSession() session: ApiSession) {
+    return { workspaces: await this.tickets.listEscalationTargets(session.workspaceId) };
   }
 
   @Get(":id")
@@ -91,6 +105,61 @@ export class TicketsController {
       { userId: session.userId },
       id,
       body.body,
+      session,
+    );
+  }
+
+  /**
+   * Escalate to a sibling workspace in the organization: creates the twin
+   * ticket over there (with the contact snapshot) and links the pair. Session
+   * tier — escalating is everyday work, same as raising a ticket.
+   */
+  @Post(":id/escalate")
+  async escalate(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body(zBody(EscalateTicketSchema)) body: EscalateTicketInput,
+  ) {
+    return this.tickets.escalate(session.workspaceId, { userId: session.userId }, id, body, session);
+  }
+
+  /**
+   * A comment BOTH workspaces of the escalation pair see — distinct from
+   * `/notes`, which stays private to this workspace. Like a note, it is not a
+   * ticket update: no `version` bump, no SLA movement.
+   */
+  @Post(":id/escalation-comments")
+  async addEscalationComment(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body(zBody(AddEscalationCommentSchema)) body: AddEscalationCommentInput,
+  ) {
+    return this.tickets.addEscalationComment(
+      session.workspaceId,
+      { userId: session.userId },
+      id,
+      body.body,
+      session,
+    );
+  }
+
+  /**
+   * Start THIS workspace's own chat with the escalated customer from the
+   * snapshot's phone and bind the conversation to the ticket.
+   */
+  @Post(":id/escalation/message-customer")
+  async messageEscalatedCustomer(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body() body: { channelConnectionId?: unknown } | undefined,
+  ) {
+    const channelConnectionId =
+      body && typeof body.channelConnectionId === "string" ? body.channelConnectionId : undefined;
+    return this.tickets.messageEscalatedCustomer(
+      session.workspaceId,
+      { userId: session.userId },
+      id,
+      { ...(channelConnectionId ? { channelConnectionId } : {}) },
       session,
     );
   }

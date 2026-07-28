@@ -161,7 +161,8 @@ export interface ServerToClientEvents {
   "ticket:changed": (payload: {
     workspaceId: string;
     ticketId: string;
-    conversationId: string;
+    /** Null on an escalated-in ticket until the target binds a conversation. */
+    conversationId: string | null;
     action:
       | "created"
       | "assigned"
@@ -175,7 +176,12 @@ export interface ServerToClientEvents {
       | "sla_breached"
       | "updated"
       /** Permanently deleted — the board drops the card, the detail view exits. */
-      | "deleted";
+      | "deleted"
+      /** Escalated to another workspace — the source ticket gained the link. */
+      | "escalated"
+      /** The twin in the other workspace changed — the open detail view should
+       *  refetch its timeline; the ticket's own lifecycle did not move. */
+      | "escalation_update";
     ticket: Ticket;
     previousStatus: TicketStatus | null;
     breachedLeg?: "first_response" | "resolution";

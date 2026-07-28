@@ -35,9 +35,14 @@ Organization → Workspaces → Channels → Accounts
   contacts, channels, inbox, tickets — nothing crosses). A **team** is SOFT separation
   INSIDE one workspace (`AssignmentPolicy` — Sales vs Support sharing the same customers
   and tickets). If two groups need to hand work to each other they are teams in one
-  workspace, not two workspaces. This is why tickets are workspace-scoped and never
+  workspace, not two workspaces. Tickets are workspace-scoped and never
   cross-workspace: a `Ticket` binds a `conversationId` the other workspace cannot read,
-  and `number` is unique per workspace.
+  and `number` is unique per workspace. The ONE sanctioned bridge is the **ticket
+  escalation referral** (`TicketEscalation`): escalating creates a TWIN ticket in a
+  sibling workspace of the same org, carrying a frozen contact **snapshot** — never a
+  live join — and everything the pair shares travels as MIRRORED `TicketEvent` rows,
+  one per side, each workspace-scoped to its own ticket. No read path crosses the
+  boundary; the tickets themselves still never do.
 - **User** — belongs to ONE organization (`orgRole`: owner / admin / member) and joins many of
   its workspaces via `WorkspaceMember`, holding a **separate role per workspace**
   (admin / manager / agent). Platform operators are `User.isSuperAdmin` — a flag orthogonal to
@@ -137,7 +142,7 @@ Real entities (`prisma/schema.prisma`; ERD in [docs/schema-erd.md](docs/schema-e
 `Team → User → ChannelConnection`; `Contact → Conversation → Message`; plus `ContactStage`, `ContactFieldDefinition`, `Tag`, `InboxView` (saved inbox filters — shared or personal; the criteria are one validated JSON document turned into SQL in exactly one place, `lib/inbox-views/where.ts`), `AudienceGroup`, `Broadcast`/`BroadcastRecipient`, `WhatsappPortfolio` (the business portfolio a WhatsApp number belongs to — since 2025-10-07 the 24h messaging cap is PORTFOLIO-scoped, shared by every number in it), `TemplateAnalyticsDaily` (Meta's own per-template daily rollup — the only source of currency cost + unique link clicks), `InternalNote`, `Workflow`/`WorkflowRun`/`WorkflowContactState`, `TeamApiKey`, `OutboundWebhook`/`OutboundWebhookDelivery`, `OutboundEvent` (outbox), `ConversationEvent` (audit timeline), `ContactTransferJob` (contact import/export runs), `Ticket`/`TicketEvent`/`TicketSlaPolicy`/`TicketFieldDefinition`/`TicketNumberCounter` (the work items on a conversation — many per thread; see [docs/ticketing.md](docs/ticketing.md)), the team-chat models (a deliberately separate message graph — channels **and** 1:1 DMs share `TeamChannel` via a `kind` discriminator; see [docs/team-chat.md](docs/team-chat.md)), `Call`/`CallPermissionRequest`, `OutboundSendAttempt` (send-idempotency ledger).
 
 **Non-negotiable data invariants:**
-- **`workspaceId` on every table**, and in the `where` of every query — sourced from `req.session.workspaceId` (resolved server-side from the membership-validated `ccp.ws` cookie / `Session.activeWorkspaceId`) or `req.apiKey.workspaceId`, **never** from client input. There is no Prisma middleware / RLS; tenant isolation is manual and load-bearing. **Explicit exceptions** (each carries a `TENANCY EXCEPTION` note in the schema, and the checker's tenancy gate allowlists them): auth/root tables, plus seven parent-scoped children (`BroadcastRecipient`, `OutboundWebhookDelivery`, the five `TeamChannel*` satellites) that must ONLY be reached through a workspaceId-scoped query on their parent — never by a bare child id from request input.
+- **`workspaceId` on every table**, and in the `where` of every query — sourced from `req.session.workspaceId` (resolved server-side from the membership-validated `ccp.ws` cookie / `Session.activeWorkspaceId`) or `req.apiKey.workspaceId`, **never** from client input. There is no Prisma middleware / RLS; tenant isolation is manual and load-bearing. **Explicit exceptions** (each carries a `TENANCY EXCEPTION` note in the schema, and the checker's tenancy gate allowlists them): auth/root tables, seven parent-scoped children (`BroadcastRecipient`, `OutboundWebhookDelivery`, the five `TeamChannel*` satellites) that must ONLY be reached through a workspaceId-scoped query on their parent — never by a bare child id from request input — and `TicketEscalation`, the one deliberately cross-workspace row (the escalation bridge; reached only through a workspace-scoped query on one of its two tickets).
 - **One conversation per contact**: `@@unique([workspaceId, contactId])` on `Conversation`. Closed threads reopen; they never fragment.
 - **Dedup**: `@@unique([workspaceId, channel, externalId])` on `Message` and on `Call`. Meta delivers at-least-once — always `upsert` / `findUnique`-gate, never a bare `create` on inbound.
 - **`Contact` is channel-scoped** (`identityChannel`, phone *or* `externalContactId`), carries a `version` CAS token and a soft-delete tombstone.

@@ -38,10 +38,13 @@ type Db = Pick<
   // Handing a ticket to a team has to verify the team is this workspace's and
   // not archived — see assertWorkspaceTeam.
   | "assignmentPolicy"
+  // Status changes and deletes MIRROR onto the escalation twin (escalations.ts
+  // owns the pair; this file only writes the mirror rows).
+  | "ticketEscalation"
   | "$transaction"
 >;
 
-type TxClient = Parameters<Parameters<Db["$transaction"]>[0]>[0];
+export type TxClient = Parameters<Parameters<Db["$transaction"]>[0]>[0];
 
 /** Who is making the change. See FlagActor — same contract. */
 export interface TicketActor {
@@ -68,7 +71,12 @@ export type TicketAction =
   | "updated"
   /** The ticket was permanently deleted. The board removes the card; the
    *  detail view redirects. Messages survive (SetNull), events cascade. */
-  | "deleted";
+  | "deleted"
+  /** Escalated to another workspace (fired on the SOURCE side). */
+  | "escalated"
+  /** The TWIN in the other workspace changed — this side gained a mirrored
+   *  timeline row; its own lifecycle did NOT move. */
+  | "escalation_update";
 
 export type TicketOutcome =
   | { ok: true; ticket: Ticket; openTicketCount: number; action: TicketAction }
@@ -629,7 +637,14 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       return { conflict: true as const };
     }
 
+    let tagDiff: { added: TagSnapshot[]; removed: TagSnapshot[] } | null = null;
     if (args.tagIds !== undefined) {
+      // Read the pre-set tags WITH names so the timeline can say which tag
+      // moved (snapshotted — history keeps reading after a rename).
+      const current = await tx.ticket.findUniqueOrThrow({
+        where: { id: existing.id },
+        select: { tags: { select: { id: true, name: true, color: true } } },
+      });
       // Scope to this workspace's tags — `set` by id doesn't filter, so a
       // foreign id would attach another workspace's tag. Empty stays empty
       // (clears all tags), which is the intended meaning of `tagIds: []`.
@@ -638,17 +653,33 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
         where: { id: existing.id },
         data: { tags: { set: safeTagIds.map((id) => ({ id })) } },
       });
+      const nextIds = new Set(safeTagIds);
+      const currentIds = new Set(current.tags.map((t) => t.id));
+      const addedIds = safeTagIds.filter((id) => !currentIds.has(id));
+      tagDiff = {
+        added: addedIds.length
+          ? await tx.tag.findMany({
+              where: { id: { in: addedIds }, workspaceId: args.workspaceId },
+              select: { id: true, name: true, color: true },
+            })
+          : [],
+        removed: current.tags.filter((t) => !nextIds.has(t.id)),
+      };
     }
 
     const wasActive = isTicketActive(existing.status);
     const nowActive = isTicketActive(finalStatus);
     const delta = wasActive === nowActive ? 0 : nowActive ? 1 : -1;
-    const openTicketCount = await bumpOpenTicketCount(tx, existing.conversationId, delta);
+    // An escalated-in ticket has no conversation until "Message customer"
+    // binds one — there is no counter or pointer to maintain until then.
+    const openTicketCount = existing.conversationId
+      ? await bumpOpenTicketCount(tx, existing.conversationId, delta)
+      : 0;
 
     // The conversation's active pointer follows the lifecycle: a ticket that
     // left the active set stops receiving messages, and one that came back
     // takes the pointer again.
-    if (statusMoves) {
+    if (statusMoves && existing.conversationId) {
       if (nowActive) {
         await tx.conversation.update({
           where: { id: existing.conversationId },
@@ -665,23 +696,57 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
 
     const ticket = await readTicket(tx, existing.id);
     const action = deriveAction(existing.status, statusMoves ? finalStatus : null, args);
-    await writeTicketEvent(
-      tx,
-      args.workspaceId,
-      existing.id,
-      ticketEventKindFor(action, args),
-      args.actor,
-      // Snapshot the team on both sides so the timeline reads "Support → Sales"
-      // even after a team is renamed or archived.
-      { status: existing.status, priority: existing.priority, teamId: existing.assignedTeamId },
-      { status: ticket.status, priority: ticket.priority, teamId: ticket.assignedTeamId },
-      // The "why" on a handoff. A handoff with no reason is the most common way
-      // this workflow fails — the receiving team re-reads the whole thread to
-      // work out what was wanted.
-      args.handoffReason ?? null,
-    );
+
+    // Tag edits earn their own timeline verbs — the generic `field_changed`
+    // used to swallow them, leaving "something changed" where the reader needs
+    // "the VIP tag was removed". Snapshotted name/color, same rule as the
+    // conversation audit's tag rows.
+    const tagEvents = tagDiff ? tagDiff.added.length + tagDiff.removed.length : 0;
+    if (tagDiff) {
+      for (const tag of tagDiff.added) {
+        await writeTicketEvent(tx, args.workspaceId, existing.id, "tag_added", args.actor, null, {
+          tagId: tag.id,
+          name: tag.name,
+          color: tag.color,
+        });
+      }
+      for (const tag of tagDiff.removed) {
+        await writeTicketEvent(tx, args.workspaceId, existing.id, "tag_removed", args.actor, null, {
+          tagId: tag.id,
+          name: tag.name,
+          color: tag.color,
+        });
+      }
+    }
+    // Skip the generic row only when tags were the ONLY change AND the diff
+    // actually produced rows — otherwise the write would leave no trace at all.
+    const tagsOnly =
+      tagEvents > 0 &&
+      action === "updated" &&
+      args.subject === undefined &&
+      args.description === undefined &&
+      args.customFields === undefined &&
+      args.resolutionCode === undefined &&
+      args.resolutionNote === undefined;
+    if (!tagsOnly) {
+      await writeTicketEvent(
+        tx,
+        args.workspaceId,
+        existing.id,
+        ticketEventKindFor(action, args),
+        args.actor,
+        // Snapshot the team on both sides so the timeline reads "Support → Sales"
+        // even after a team is renamed or archived.
+        { status: existing.status, priority: existing.priority, teamId: existing.assignedTeamId },
+        { status: ticket.status, priority: ticket.priority, teamId: ticket.assignedTeamId },
+        // The "why" on a handoff. A handoff with no reason is the most common way
+        // this workflow fails — the receiving team re-reads the whole thread to
+        // work out what was wanted.
+        args.handoffReason ?? null,
+      );
+    }
     const pill = conversationPillFor(existing.status, statusMoves ? finalStatus : null);
-    if (pill) {
+    if (pill && existing.conversationId) {
       await writeConversationPill(tx, args.workspaceId, existing.conversationId, pill, args.actor, ticket);
     }
     await publishTicketEvent(tx, {
@@ -691,6 +756,14 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       action,
       previousStatus: existing.status,
     });
+    // A lifecycle move mirrors onto the escalation twin ("they solved it"), so
+    // the other workspace's timeline and board learn without any cross-
+    // workspace read. The mirrored row + frame are each scoped to the TWIN's
+    // own workspace. Non-status edits deliberately do not mirror — the shared
+    // comment thread is the channel for words.
+    if (statusMoves) {
+      await mirrorStatusToTwin(tx, existing.id, ticket, args.actor);
+    }
     return { conflict: false as const, ticket, openTicketCount, action };
   });
 
@@ -704,7 +777,9 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
   // path they all share. Dynamic import: conversations/mutations already
   // imports this module (fillActiveTicketAssignee), so a static back-import
   // would be a cycle.
-  if (result.action === "solved" && result.openTicketCount === 0) {
+  // (`conversationId` null = an unbound escalated-in ticket — no thread to close.)
+  const closableConversationId = result.ticket.conversationId;
+  if (result.action === "solved" && result.openTicketCount === 0 && closableConversationId) {
     void (async () => {
       const ws = await sharedDb.workspace.findUnique({
         where: { id: args.workspaceId },
@@ -717,7 +792,7 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
         db: sharedDb,
         publish,
         workspaceId: args.workspaceId,
-        conversationId: result.ticket.conversationId,
+        conversationId: closableConversationId,
         status: "closed",
         changedByUserId: args.actor.userId ?? null,
       });
@@ -859,10 +934,13 @@ export async function markSlaBreached(
     if (written.count === 0) return null;
 
     const ticket = await readTicket(tx, args.ticketId);
-    const conversation = await tx.conversation.findUnique({
-      where: { id: ticket.conversationId },
-      select: { openTicketCount: true },
-    });
+    // An escalated-in ticket can carry SLA due dates with no conversation yet.
+    const conversation = ticket.conversationId
+      ? await tx.conversation.findUnique({
+          where: { id: ticket.conversationId },
+          select: { openTicketCount: true },
+        })
+      : null;
     await writeTicketEvent(tx, args.workspaceId, args.ticketId, "sla_breached", {}, null, {
       leg: args.leg,
     });
@@ -904,7 +982,7 @@ export async function markSlaBreached(
  * never read the same value. `upsert` seeds the counter on a workspace's first
  * ever ticket without a separate provisioning step.
  */
-async function allocateNumber(tx: TxClient, workspaceId: string): Promise<number> {
+export async function allocateNumber(tx: TxClient, workspaceId: string): Promise<number> {
   const row = await tx.ticketNumberCounter.upsert({
     where: { workspaceId },
     create: { workspaceId, next: 2 },
@@ -953,9 +1031,18 @@ export async function deleteTicket(
     // drift sweeper exists for this counter.
     const snapshot = await readTicket(tx, existing.id);
 
-    const openTicketCount = isTicketActive(snapshot.status)
-      ? await bumpOpenTicketCount(tx, existing.conversationId, -1)
-      : await bumpOpenTicketCount(tx, existing.conversationId, 0);
+    const openTicketCount = existing.conversationId
+      ? await bumpOpenTicketCount(
+          tx,
+          existing.conversationId,
+          isTicketActive(snapshot.status) ? -1 : 0,
+        )
+      : 0;
+
+    // Sever the escalation link BEFORE the delete: the twin's timeline must
+    // record that its counterpart is gone (the row itself cascades or SetNulls
+    // with the delete, so this is the last moment the pair is readable).
+    await severTwinLink(tx, existing.id, snapshot, args.actor);
 
     // Cascade removes TicketEvents; SetNull unlinks Messages and clears the
     // conversation's activeTicketId. One delete, all side effects handled by FKs.
@@ -973,7 +1060,7 @@ export async function deleteTicket(
   return { ok: true };
 }
 
-async function readTicket(tx: TxClient, id: string): Promise<Ticket> {
+export async function readTicket(tx: TxClient, id: string): Promise<Ticket> {
   const row = await tx.ticket.findUniqueOrThrow({ where: { id }, select: TICKET_SELECT });
   return mapTicket(row);
 }
@@ -1012,7 +1099,7 @@ async function loadSchedule(tx: TxClient, workspaceId: string) {
 /** The policy AND the schedule in one place — a `businessHoursOnly` policy is
  *  useless without the workspace's hours, and loading them apart invited a
  *  caller to forget the second one. */
-async function loadSlaContext(tx: TxClient, workspaceId: string, priority: TicketPriority) {
+export async function loadSlaContext(tx: TxClient, workspaceId: string, priority: TicketPriority) {
   const policy = await loadPolicyForPriority(tx, workspaceId, priority);
   const schedule = policy?.businessHoursOnly ? await loadSchedule(tx, workspaceId) : null;
   return { policy, schedule };
@@ -1026,7 +1113,7 @@ async function loadSlaContext(tx: TxClient, workspaceId: string, priority: Ticke
  * to the inbox badge. The clamp mirrors `bumpOpenFlagCount` — a counter driven
  * negative by drift would make the `> 0` filter start hiding threads.
  */
-async function bumpOpenTicketCount(
+export async function bumpOpenTicketCount(
   tx: TxClient,
   conversationId: string,
   delta: number,
@@ -1115,7 +1202,7 @@ function conversationPillFor(
   return null;
 }
 
-async function writeTicketEvent(
+export async function writeTicketEvent(
   tx: TxClient,
   workspaceId: string,
   ticketId: string,
@@ -1219,7 +1306,7 @@ async function writeConversationPill(
   });
 }
 
-async function publishTicketEvent(
+export async function publishTicketEvent(
   tx: TxClient,
   params: {
     args: EventGates & { workspaceId: string; actor: TicketActor };
@@ -1247,6 +1334,110 @@ async function publishTicketEvent(
       ? { skipOutboundWebhook: args.skipOutboundWebhook }
       : {}),
   });
+}
+
+interface TagSnapshot {
+  id: string;
+  name: string;
+  color: string;
+}
+
+/**
+ * The escalation twin of a ticket, from either side. Null when the ticket is
+ * not part of a pair, or when the pair is severed. The names are read here so
+ * the mirrored rows can snapshot "who said it" without a join at render time.
+ */
+async function findEscalationTwin(
+  tx: TxClient,
+  ticketId: string,
+): Promise<{ twinId: string; twinWorkspaceId: string; fromWorkspaceName: string } | null> {
+  const escalation = await tx.ticketEscalation.findFirst({
+    where: { OR: [{ sourceTicketId: ticketId }, { targetTicketId: ticketId }] },
+    select: {
+      sourceTicketId: true,
+      targetTicketId: true,
+      sourceWorkspaceId: true,
+      targetWorkspaceId: true,
+      sourceWorkspace: { select: { name: true } },
+      targetWorkspace: { select: { name: true } },
+    },
+  });
+  if (!escalation) return null;
+  const isSource = escalation.sourceTicketId === ticketId;
+  const twinId = isSource ? escalation.targetTicketId : escalation.sourceTicketId;
+  if (!twinId) return null; // severed — the origin was deleted
+  return {
+    twinId,
+    twinWorkspaceId: isSource ? escalation.targetWorkspaceId : escalation.sourceWorkspaceId,
+    fromWorkspaceName: isSource
+      ? escalation.sourceWorkspace.name
+      : escalation.targetWorkspace.name,
+  };
+}
+
+/**
+ * Publish `ticket.changed { action: "escalation_update" }` about a twin whose
+ * timeline just gained a mirrored row. The frame is scoped to the TWIN's own
+ * workspace room by the existing fanout rule — no cross-workspace emit exists.
+ * `silent`: the twin's own state did not move; a mirrored notification must
+ * never chain-trigger workflows or echo a partner webhook as if it had (§9).
+ */
+async function publishTwinUpdate(tx: TxClient, twinWorkspaceId: string, twinId: string, actor: TicketActor): Promise<void> {
+  const twin = await readTicket(tx, twinId);
+  const openTicketCount = twin.conversationId
+    ? await bumpOpenTicketCount(tx, twin.conversationId, 0)
+    : 0;
+  await publishInTx(tx, {
+    type: "ticket.changed",
+    workspaceId: twinWorkspaceId,
+    ticketId: twin.id,
+    conversationId: twin.conversationId,
+    contactId: twin.contactId,
+    action: "escalation_update",
+    ticket: twin,
+    previousStatus: twin.status,
+    openTicketCount,
+    changedByUserId: actor.userId ?? null,
+    changedByApiKeyId: actor.apiKeyId ?? null,
+    silent: true,
+    skipOutboundWebhook: true,
+  });
+}
+
+/** Mirror a lifecycle move onto the escalation twin's timeline. */
+async function mirrorStatusToTwin(
+  tx: TxClient,
+  ticketId: string,
+  ticket: Ticket,
+  actor: TicketActor,
+): Promise<void> {
+  const twin = await findEscalationTwin(tx, ticketId);
+  if (!twin) return;
+  await writeTicketEvent(tx, twin.twinWorkspaceId, twin.twinId, "escalation_status", actor, null, {
+    status: ticket.status,
+    fromWorkspaceName: twin.fromWorkspaceName,
+    // "They solved it" is only half the answer — carry the outcome so the
+    // source agent can relay it without asking.
+    resolutionCode: ticket.resolutionCode,
+    resolutionNote: ticket.resolutionNote,
+  });
+  await publishTwinUpdate(tx, twin.twinWorkspaceId, twin.twinId, actor);
+}
+
+/** Record on the twin that its counterpart is being deleted. */
+async function severTwinLink(
+  tx: TxClient,
+  ticketId: string,
+  snapshot: Ticket,
+  actor: TicketActor,
+): Promise<void> {
+  const twin = await findEscalationTwin(tx, ticketId);
+  if (!twin) return;
+  await writeTicketEvent(tx, twin.twinWorkspaceId, twin.twinId, "escalation_severed", actor, null, {
+    deletedTicketNumber: snapshot.number,
+    fromWorkspaceName: twin.fromWorkspaceName,
+  });
+  await publishTwinUpdate(tx, twin.twinWorkspaceId, twin.twinId, actor);
 }
 
 /** An assignee must be a live member of THIS workspace — otherwise a crafted id
@@ -1308,7 +1499,7 @@ async function workspaceScopedTagIds(
   return rows.map((t) => t.id);
 }
 
-async function withUniqueRetry<T>(fn: () => Promise<T>): Promise<T> {
+export async function withUniqueRetry<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (err) {

@@ -323,6 +323,12 @@ enum ConversationEventKind {
   // Rendered as an inline timeline pill, same as status/assignment.
   ai_paused
   ai_resumed
+  // The workspace blocked / unblocked this contact at the provider (WhatsApp
+  // Block Users API). Rendered as inline timeline pills (activity-entry.tsx)
+  // so the thread explains WHY the reply box is locked. `after` carries
+  // { contactId } only — the actor rides the standard userId/apiKeyId columns.
+  contact_blocked
+  contact_unblocked
   // Voice-call lifecycle audit rows. Written by the audit subscriber on every
   // terminal call state for the DB-only audit trail — they are NOT rendered as
   // timeline pills (activity-entry.tsx has no call_* case; the visible inline
@@ -536,8 +542,9 @@ model Organization {
   statusUpdatedAt   DateTime?
   statusUpdatedById String?
 
-  workspaces Workspace[]
-  users      User[]
+  workspaces        Workspace[]
+  users             User[]
+  ticketEscalations TicketEscalation[]
 }
 
 // A Workspace is the data-ISOLATION boundary (formerly `Workspace`): every one of
@@ -675,6 +682,8 @@ model Workspace {
   ticketSlaPolicies       TicketSlaPolicy[]
   ticketFieldDefinitions  TicketFieldDefinition[]
   ticketNumberCounter     TicketNumberCounter?
+  ticketEscalationsOut    TicketEscalation[]       @relation("TicketEscalationsOut")
+  ticketEscalationsIn     TicketEscalation[]       @relation("TicketEscalationsIn")
   audienceGroups          AudienceGroup[]
   workflows               Workflow[]
   workflowRuns            WorkflowRun[]
@@ -874,6 +883,24 @@ model ChannelConnection {
   // before an operator fires a utility campaign into a rate-limited WABA.
   utilityRestrictionType  String?
   utilityRestrictedUntil  DateTime?
+
+  // Policy/spam MESSAGING enforcement (`account_update` → ACCOUNT_RESTRICTION /
+  // DISABLED_UPDATE — the policy-enforcement guide's escalation ladder: 1/3-day
+  // blocks on business-initiated template sends, 5/7/30-day blocks on ALL
+  // messages, then an indefinite account lock or disable). Each direction gates
+  // a different surface — business-initiated = broadcasts/templates/proactive,
+  // customer-initiated = even replies inside the service window — so each is
+  // its own (type, until) pair. The TYPE is the presence marker: an indefinite
+  // lock/ban carries NO expiry, so a set type with a null `until` means "until
+  // Meta reverses it on appeal". `WABA_BAN_*` values mirror
+  // `ban_info.waba_ban_state` (REINSTATE clears both pairs). Surfaced as
+  // ADVISORY warnings only (composer + health banner) — Meta is the
+  // enforcement authority, and a stale local copy must never block a send
+  // Meta would accept. WABA-scoped like the enforcement fields above.
+  bizMessagingRestrictionType      String?
+  bizMessagingRestrictedUntil      DateTime?
+  customerMessagingRestrictionType String?
+  customerMessagingRestrictedUntil DateTime?
 
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
@@ -1097,6 +1124,7 @@ model User {
   assignedTickets         Ticket[]                 @relation("AssignedTickets")
   resolvedTickets         Ticket[]                 @relation("ResolvedTickets")
   ticketEvents            TicketEvent[]
+  ticketEscalations       TicketEscalation[]
   assignedConvos          Conversation[]           @relation("AssignedConversations")
   createdInvites          Invite[]                 @relation("InvitedBy")
   createdBroadcasts       Broadcast[]              @relation("CreatedBroadcasts")
@@ -1384,6 +1412,16 @@ model Contact {
    * "stop_keyword" | "meta_preferences" | "agent" | "api"
    */
   marketingOptOutSource String?
+  // ── Provider-level block (WhatsApp Block Users API) ──────────────────────
+  // Set when the workspace blocked this contact on the business number: Meta
+  // stops their inbounds entirely and rejects every outbound to them, so the
+  // send internals refuse up front and broadcasts skip them. Distinct from
+  // `marketingOptOutAt` (the CUSTOMER's choice, marketing-only) — a block is
+  // the BUSINESS's choice and stops everything. Cleared by unblocking. The
+  // actor is recorded on the ConversationEvent (contact_blocked), not here.
+  // Meta constraint worth knowing at the schema: blocking requires the person
+  // to have messaged within the last 24h; unblocking has no such window.
+  blockedAt             DateTime?
   // Optimistic concurrency token. Every Contact write CAS-bumps this from
   // the value it just read; concurrent writers on the same row race to the
   // bump and exactly one wins, the other gets P2025 → 409 Conflict. Without
@@ -2321,6 +2359,12 @@ model MessageTemplate {
   // Both facts change what the UI may offer, so the marker is stored rather than
   // inferred. Null for a template authored in the composer or in Manager.
   libraryTemplateName String?
+  // Per-template button-click tracking opt-out (Meta's
+  // `cta_url_link_tracking_opted_out`). True = clicks are NOT tracked, so the
+  // insights UI explains an empty click series instead of looking broken.
+  // Null = Meta hasn't reported the flag for this row yet (distinct from
+  // false); synced with the leave-alone rule, toggled via the provider.
+  linkTrackingOptedOut Boolean?
   // Per-body-parameter value types (`["TEXT","AMOUNT","DATE"]`), positionally
   // aligned with the body's `{{n}}`. ONLY library templates have these, and they
   // are only readable from the library catalogue — the template node doesn't
@@ -2817,10 +2861,19 @@ model TemplateAnalyticsDaily {
   delivered          Int      @default(0)
   /// Nullable, NOT zero-defaulted: Meta only returns read/click for the last 7
   /// days, so "we don't know" and "nobody read it" must stay distinguishable.
-  /// The upsert COALESCE-merges these so re-fetching an aged campaign can never
-  /// overwrite a captured number with a later null.
+  /// After that window Meta RESETS the counts to zero (not absent), so the
+  /// upsert merges these with GREATEST — a re-fetch of an aged campaign can
+  /// never overwrite a captured number with a later null OR zero.
   read               Int?
+  /// URL-button ("link") clicks — unique accounts when Meta reports them,
+  /// total clicks otherwise. Quick-reply presses are excluded (they arrive as
+  /// inbound replies and are already counted in the per-recipient funnel).
   clicked            Int?
+  /// Meta's per-button click entries, verbatim but normalized:
+  /// `[{ type, buttonContent, count }]` with type one of `url_button`,
+  /// `unique_url_button`, `quick_reply_button`. Null when Meta reported no
+  /// click data (no buttons, or outside the 7-day window).
+  clickedButtons     Json?
   /// Withheld by Meta when the WABA is billed through a Solution Partner.
   costAmountSpent    Decimal? @db.Decimal(14, 6)
   costPerDelivered   Decimal? @db.Decimal(14, 6)
@@ -3086,6 +3139,22 @@ enum TicketEventKind {
   sla_breached
   reopened
   merged
+  // ---- Cross-workspace escalation (see TicketEscalation) ----
+  // The source ticket was escalated to another workspace. `body` carries the
+  // cause the escalating agent wrote; `after` snapshots the target workspace's
+  // name and the twin ticket's number.
+  escalated
+  // The target ticket's birth event — replaces `created` on an escalated-in
+  // ticket so the timeline opens with WHERE it came from, not just that it exists.
+  escalation_received
+  // A comment shared across the pair. Written MIRRORED — one row per side, each
+  // scoped to its own ticket — so both workspaces read it without any
+  // cross-workspace query. Distinct from `note`, which the other side never sees.
+  escalation_note
+  // The twin ticket's status changed in the other workspace ("they solved it").
+  escalation_status
+  // The twin ticket was deleted; the link is gone and stays readable as history.
+  escalation_severed
 }
 
 model Ticket {
@@ -3097,12 +3166,16 @@ model Ticket {
   // (a rolled-back create burns a number), collisions are not.
   number      Int
 
-  conversationId String
+  // Nullable ONLY for an escalated-in ticket (source "escalation"): the target
+  // workspace receives the work with a contact SNAPSHOT (TicketEscalation) and
+  // no thread of its own until "Message customer" binds one. Every other create
+  // path requires both — enforced in lib/tickets, not the schema.
+  conversationId String?
   // Denormalized from the conversation. The board lists tickets ACROSS
   // conversations and filters by channel, so both would otherwise be a join
   // on the hottest ticket read. Conversation.channel is immutable for the
   // thread's lifetime, so this can't drift.
-  contactId      String
+  contactId      String?
   channel        Channel
 
   // Free text, agent- or automation-authored. Null means "not titled yet" and
@@ -3181,7 +3254,8 @@ model Ticket {
   lastSolvedAt   DateTime?
 
   // ---- Provenance ----
-  // "auto" (opened by an inbound message), "human", "workflow", "api".
+  // "auto" (opened by an inbound message), "human", "workflow", "api",
+  // "escalation" (created here by another workspace escalating a ticket in).
   source            String  @default("auto")
   createdById       String?
   createdByApiKeyId String?
@@ -3197,8 +3271,8 @@ model Ticket {
   updatedAt DateTime @updatedAt
 
   workspace    Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  conversation Conversation     @relation("ConversationTickets", fields: [conversationId], references: [id], onDelete: Cascade)
-  contact      Contact          @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  conversation Conversation?    @relation("ConversationTickets", fields: [conversationId], references: [id], onDelete: Cascade)
+  contact      Contact?         @relation(fields: [contactId], references: [id], onDelete: Cascade)
   assignedUser User?            @relation("AssignedTickets", fields: [assignedUserId], references: [id], onDelete: SetNull)
   assignedTeam AssignmentPolicy? @relation("TeamTickets", fields: [assignedTeamId], references: [id], onDelete: SetNull)
   resolvedBy   User?            @relation("ResolvedTickets", fields: [resolvedById], references: [id], onDelete: SetNull)
@@ -3210,6 +3284,11 @@ model Ticket {
   messages     Message[]
   // Back-reference for Conversation.activeTicketId.
   activeOn     Conversation[]   @relation("ConversationActiveTicket")
+  // The escalation pair, from either side. At most one each — a ticket is
+  // escalated once in its lifetime, and an escalation TARGET is never
+  // escalated onward (chains banned; see TicketEscalation).
+  escalationOut TicketEscalation? @relation("TicketEscalationOut")
+  escalationIn  TicketEscalation? @relation("TicketEscalationIn")
   // The SLA breach sweeper scans ACROSS workspaces for tickets whose clock has
   // run out and that aren't already flagged. That is a tiny fraction of rows,
   // so it is served by two PARTIAL indexes Prisma cannot express (raw SQL in
@@ -3348,6 +3427,61 @@ model TicketNumberCounter {
   next        Int    @default(1)
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+// The cross-workspace escalation bridge: agent X in workspace A can't answer,
+// so their ticket is REFERRED to a sibling workspace in the same organization.
+// The escalation creates a twin ticket over there (own number, own board card,
+// own assignee, that workspace's own SLA) carrying a contact SNAPSHOT — never a
+// live join into A's directory — and this row links the pair. Everything the
+// two sides share travels as MIRRORED TicketEvent rows (one per side, each
+// workspace-scoped to its own ticket), so no read path ever crosses the
+// boundary. Tickets themselves still never cross workspaces.
+//
+// TENANCY EXCEPTION: this is deliberately the only row in the schema that
+// spans two workspaces, so it carries no single workspaceId. It must ONLY be
+// reached through a workspace-scoped query on one of its two tickets (or its
+// source/target workspace columns) — never by a bare id from request input.
+// Allowlisted in scripts/check-prisma-fields.mjs.
+model TicketEscalation {
+  id             String @id @default(cuid())
+  organizationId String
+
+  sourceWorkspaceId String
+  // Nullable + SetNull: the target must keep the snapshot and its provenance
+  // when the source ticket is deleted. Null = "severed" (the origin is gone).
+  // @unique = one escalation per source ticket, for its lifetime — a second
+  // question is a second ticket. Deleting the twin frees the slot (row cascades).
+  sourceTicketId    String? @unique
+
+  targetWorkspaceId String
+  // Cascade: the escalation dies with its target ticket. deleteTicket writes
+  // the `escalation_severed` mirror on the source BEFORE the delete commits.
+  targetTicketId    String @unique
+
+  // The customer's profile AT ESCALATION — name, phoneNumber, email,
+  // identityChannel, customFields (shape: ContactSnapshot in @ccp/shared).
+  // A snapshot, not a live join: the source directory stays private, and later
+  // edits/deletes there must not mutate what the target was handed.
+  contactSnapshot Json
+
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceWorkspace Workspace    @relation("TicketEscalationsOut", fields: [sourceWorkspaceId], references: [id], onDelete: Cascade)
+  targetWorkspace Workspace    @relation("TicketEscalationsIn", fields: [targetWorkspaceId], references: [id], onDelete: Cascade)
+  sourceTicket    Ticket?      @relation("TicketEscalationOut", fields: [sourceTicketId], references: [id], onDelete: SetNull)
+  targetTicket    Ticket       @relation("TicketEscalationIn", fields: [targetTicketId], references: [id], onDelete: Cascade)
+  createdBy       User?        @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  // FK indexes for the SetNull/Cascade relations (the ticket FKs are covered
+  // by their @unique). Workspace columns double as "everything escalated
+  // in/out of this workspace" for a future reporting read.
+  @@index([organizationId])
+  @@index([sourceWorkspaceId])
+  @@index([targetWorkspaceId])
+  @@index([createdById])
 }
 
 // ---------------------------------------------------------------------------
@@ -4315,6 +4449,41 @@ model Call {
   // for missed / rejected with no answer). One call = at most one answering
   // agent (Meta enforces this at the call-object level).
   answeredByUserId String?
+
+  // Origin attribution for user-initiated calls, echoed by the provider's
+  // connect/terminate webhooks: the opaque `payload` from a call BUTTON we
+  // sent (`cta_payload`) or the `biz_payload` from a wa.me/call deep link
+  // (`deeplink_payload`). Null for outbound calls and calls placed from the
+  // plain call icon. This is what ties an inbound call back to the campaign
+  // or surface that produced it.
+  ctaPayload      String?
+  deeplinkPayload String?
+
+  // Call recording (opt-in per call via the workspace's recording policy).
+  // The provider's `call_recording_available` webhook lands ~1min after the
+  // call ends with a media id whose file expires after 7 DAYS — so the bytes
+  // are downloaded to R2 immediately (recordingKey) and the media id is kept
+  // (recordingMediaId) so the recording sweeper can re-attempt a transient
+  // download failure inside that window. mediaId set + key null = pending.
+  recordingMediaId  String?
+  recordingKey      String?
+  recordingMimeType String?
+
+  // Call transcription (opt-in per call, independent of recording). Same
+  // 7-day provider retention + download-to-R2 lifecycle as the recording
+  // columns above; the artifact is a JSON document (segments + word timings).
+  // transcriptLanguage is the AUTO-DETECTED spoken language (ISO 639, e.g.
+  // "ar") from the transcript body — denormalized for list display/filtering.
+  transcriptMediaId  String?
+  transcriptKey      String?
+  transcriptLanguage String?
+
+  // WHY a failed call failed, from the terminate webhook's errors[] — the only
+  // place Meta says (troubleshooting doc: 138019-138023, e.g. "Media receive
+  // timeout", "Relay connection failed"). Mirrors Message.statusErrorCode/
+  // Title; full error_data stays in rawPayload. Null for non-failed calls.
+  errorCode  Int?
+  errorTitle String?
 
   ringingAt       DateTime
   answeredAt      DateTime?

@@ -687,6 +687,40 @@ describe("ticket tag workspace scoping", () => {
     // Foreign id dropped → the set resolves to empty, clearing tags.
     expect(afterUpdate.tags).toHaveLength(0);
   });
+
+  it("writes real tag_added / tag_removed timeline rows instead of a generic field_changed", async () => {
+    const tagA = await prisma.tag.create({
+      data: { workspaceId, name: `diff-a-${S}`, color: "sky" },
+    });
+    const tagB = await prisma.tag.create({
+      data: { workspaceId, name: `diff-b-${S}`, color: "rose" },
+    });
+    const conversationId = await makeConversation();
+    const created = await createTicket(db, {
+      workspaceId,
+      conversationId,
+      actor: { userId },
+      tagIds: [tagA.id],
+    });
+    const ticketId = created.ok ? created.ticket.id : "";
+
+    // Swap A for B in one tags-only write.
+    await updateTicket(db, { workspaceId, ticketId, actor: { userId }, tagIds: [tagB.id] });
+
+    const events = await prisma.ticketEvent.findMany({
+      where: { ticketId },
+      orderBy: { createdAt: "asc" },
+      select: { kind: true, after: true },
+    });
+    const added = events.filter((e) => e.kind === "tag_added");
+    const removed = events.filter((e) => e.kind === "tag_removed");
+    expect(added.map((e) => (e.after as { name?: string }).name)).toContain(`diff-b-${S}`);
+    expect(removed.map((e) => (e.after as { name?: string }).name)).toContain(`diff-a-${S}`);
+    // Name + color are SNAPSHOTTED so history reads after a tag rename/delete.
+    expect((added[0].after as { color?: string }).color).toBe("rose");
+    // A tags-only write earns no generic row — the per-tag rows ARE the record.
+    expect(events.filter((e) => e.kind === "field_changed")).toHaveLength(0);
+  });
 });
 
 describe("handing a ticket to a TEAM", () => {
